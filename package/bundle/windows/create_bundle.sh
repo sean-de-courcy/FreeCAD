@@ -3,7 +3,7 @@
 set -e
 set -x
 
-conda_env="$(pwd)/../.pixi/envs/default/"
+conda_env="$(pwd | sed 's#\\#/#g')/../../../.pixi/envs/default"
 
 # FreeCAD-CH: the package's name and executables come from fork.json. The executables are
 # renamed here only (build trees keep FreeCAD.exe), so that official FreeCAD's FreeCAD.exe
@@ -48,6 +48,19 @@ cp -a ${conda_env}/Library/doc/{ThirdPartyLibraries.html,LICENSE.html} ${copy_di
 find ${copy_dir} -name \*.a -delete
 find ${copy_dir} -name \*.lib -delete
 find ${copy_dir} -name \*arm\*.exe -delete # arm binaries that fail to extract unless using latest 7zip
+
+rm -rf ${copy_dir}/bin/Lib/site-packages/conda
+rm -rf ${copy_dir}/bin/Lib/site-packages/pandas/tests
+rm -rf ${copy_dir}/bin/Lib/site-packages/pre_commit
+rm -rf ${copy_dir}/bin/Lib/site-packages/pycparser
+rm -rf ${copy_dir}/bin/Lib/site-packages/pyright*
+rm -rf ${copy_dir}/bin/libclang-*.dll
+rm -rf ${copy_dir}/lib/cmake
+rm -rf ${copy_dir}/lib/objects-Release
+rm -rf ${copy_dir}/lib/qt6/bin
+rm -rf ${copy_dir}/share/cmake
+rm -rf ${copy_dir}/share/cmake-*
+rm -rf ${copy_dir}/share/man
 
 # Apply Patches
 mv ${copy_dir}/bin/Lib/ssl.py .ssl-orig.py
