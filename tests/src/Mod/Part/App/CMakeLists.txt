@@ -20,6 +20,7 @@ add_executable(Part_tests_run
         FilletFallback.cpp
         FuzzyBoolean.cpp
         Geometry.cpp
+        ModelRefine.cpp
         PartFeature.cpp
         PartFeatures.cpp
         PartTestHelpers.cpp
