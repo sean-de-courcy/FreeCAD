@@ -21,6 +21,9 @@
  ***************************************************************************/
 
 
+// vtkDataSetAttributesFieldList.h (VTK 9.7) uses std::vector without including <vector>
+#include <vector>
+
 #include <vtkPointData.h>
 
 
