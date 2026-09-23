@@ -830,8 +830,9 @@ void Hole::updateHoleCutParams()
                     // set normed values if not overwritten or if previously there
                     // were no normed values available and thus HoleCutCustomValues is checked and
                     // read-only
-                    if (!HoleCutCustomValues.getValue()
-                        || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly())) {
+                    if (!isRestoring()
+                        && (!HoleCutCustomValues.getValue()
+                            || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()))) {
                         HoleCutDiameter.setValue(dimen.diameter);
                         HoleCutDepth.setValue(dimen.depth);
                         HoleCutDiameter.setReadOnly(true);
@@ -870,8 +871,9 @@ void Hole::updateHoleCutParams()
                     // set normed values if not overwritten or if previously there
                     // were no normed values available and thus HoleCutCustomValues is checked and
                     // read-only
-                    if (!HoleCutCustomValues.getValue()
-                        || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly())) {
+                    if (!isRestoring()
+                        && (!HoleCutCustomValues.getValue()
+                            || (HoleCutCustomValues.getValue() && HoleCutCustomValues.isReadOnly()))) {
                         HoleCutDiameter.setValue(dimen.diameter);
                         HoleCutDiameter.setReadOnly(true);
                         HoleCutDepth.setReadOnly(true);
