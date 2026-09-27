@@ -169,6 +169,7 @@ jobs:
         pixi run configure-${{ env.config }}
 
     - name: CMake Build
+      id: build
       if: "!inputs.skipBuild"
       run: |
         pixi run build-${{ env.config }}
@@ -266,9 +267,11 @@ jobs:
         reportFile: ${{env.reportdir}}${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
 
+    # Save the cache whenever the build succeeded, even if tests failed afterwards;
+    # otherwise a run with a failing test leaves the next run a cold build (2-3 h).
     - name: Save Compiler Cache
       id: cache-save
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && steps.build.outcome == 'success'"
       uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
         path: ${{ env.CCACHE_DIR }}
