@@ -83,7 +83,9 @@ jobs:
       max-parallel: 6
       fail-fast: false
       matrix:
-        os: [windows-2022, ubuntu-latest, macos-latest]
+        # FreeCAD-CH ships Windows x64 and macOS arm64 only. The macOS image is pinned
+        # (macos-latest was macos-26 in September 2026); build_release.yml uses the same one.
+        os: [windows-2022, macos-26]
 
     steps:
     - name: Harden the runner (Audit all outbound calls)
@@ -172,8 +174,10 @@ jobs:
       run: |
         pixi run ccache -s
 
+    # On Windows this is the only FreeCAD test step (C++ and install tests are skipped there),
+    # so it always runs; FreeCAD's LibPack Windows build, which ran it upstream, isn't carried.
     - name: FreeCAD CLI tests on build dir
-      if: inputs.testOnBuildDir && !inputs.skipBuild
+      if: (inputs.testOnBuildDir || runner.os == 'Windows') && !inputs.skipBuild
       timeout-minutes: 10
       uses: ./.github/workflows/actions/runPythonTests
       with:
