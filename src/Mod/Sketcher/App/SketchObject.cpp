@@ -28,8 +28,10 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
+#include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/geometry/geometries/register/point.hpp>
