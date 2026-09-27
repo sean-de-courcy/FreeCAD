@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <utility>
 
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <gp_Ax2.hxx>
@@ -1194,11 +1195,14 @@ TEST_F(WireJoinerTest, setOpenWiresOnly)
     auto wjSquareOpenOnly {WireJoiner()};
     auto wjCirclesOpenOnly {WireJoiner()};
 
-    // Empty TopoShapes that will contain the shapes returned by getOpenWires()
-    auto wireSquare {TopoShape(tag++)};
-    auto wireCircles {TopoShape(tag++)};
-    auto wireSquareOpenOnly {TopoShape(tag++)};
-    auto wireCirclesOpenOnly {TopoShape(tag++)};
+    // Empty TopoShapes that will contain the shapes returned by getOpenWires(). The wires compared
+    // with each other share a Tag, because V2 names include the Tag of the shape they belong to
+    const long tagSquare {tag++};
+    const long tagCircles {tag++};
+    auto wireSquare {TopoShape(tagSquare)};
+    auto wireCircles {TopoShape(tagCircles)};
+    auto wireSquareOpenOnly {TopoShape(tagSquare)};
+    auto wireCirclesOpenOnly {TopoShape(tagCircles)};
 
     // Act
 
@@ -1244,11 +1248,15 @@ TEST_F(WireJoinerTest, setOpenWiresOnly)
     EXPECT_EQ(wireCircles.getSubTopoShapes(TopAbs_EDGE).size(), 2);
     EXPECT_EQ(wireCirclesOpenOnly.getSubTopoShapes(TopAbs_EDGE).size(), 2);
 
-    // The open wires found with and without setOpenWiresOnly() should have the same element names
-    for (const char* type : {"Edge", "Vertex"}) {
+    // The open wires found with and without setOpenWiresOnly() should have the same element names.
+    // Only the edges are required to have a mapped name: V2 names a vertex without history only
+    // from its faces, so the vertices of these wires stay unmapped
+    for (const auto& [type, mapped] : {std::pair {"Edge", true}, std::pair {"Vertex", false}}) {
         for (int i = 1; i <= wireSquare.countSubShapes(type); ++i) {
             auto name {Data::IndexedName::fromConst(type, i)};
-            EXPECT_TRUE(wireSquare.getMappedName(name));
+            if (mapped) {
+                EXPECT_TRUE(wireSquare.getMappedName(name));
+            }
             EXPECT_EQ(
                 wireSquareOpenOnly.getMappedName(name).toString(),
                 wireSquare.getMappedName(name).toString()
@@ -1256,7 +1264,9 @@ TEST_F(WireJoinerTest, setOpenWiresOnly)
         }
         for (int i = 1; i <= wireCircles.countSubShapes(type); ++i) {
             auto name {Data::IndexedName::fromConst(type, i)};
-            EXPECT_TRUE(wireCircles.getMappedName(name));
+            if (mapped) {
+                EXPECT_TRUE(wireCircles.getMappedName(name));
+            }
             EXPECT_EQ(
                 wireCirclesOpenOnly.getMappedName(name).toString(),
                 wireCircles.getMappedName(name).toString()
