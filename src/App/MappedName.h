@@ -1155,11 +1155,11 @@ public:
     static std::string makeEncodedSection(
         const std::vector<std::string>& referenceIDs = {},
         const std::vector<MappedName>& linkedNames = {},
-        const std::string& iterationTag = 0,
+        const std::string& iterationTag = "0",
         const char* opCode = "MKR",
-        const std::string& index = 0,
+        const std::string& index = "0",
         const char& elementType = 'E',
-        const std::string& duplicateCount = 0,
+        const std::string& duplicateCount = "0",
         const std::vector<std::string>& mapperFlags = {},
         const  std::vector<MappedName>& connectedElements = {}
     );
@@ -1167,11 +1167,11 @@ public:
     static std::string makeEncodedSection(
         const std::vector<std::string>& referenceIDs = {},
         const std::vector<std::string>& linkedNames = {},
-        const std::string& iterationTag = 0,
+        const std::string& iterationTag = "0",
         const char* opCode = "MKR",
-        const std::string& index = 0,
+        const std::string& index = "0",
         const char& elementType = 'E',
-        const std::string& duplicateCount = 0,
+        const std::string& duplicateCount = "0",
         const std::vector<std::string>& mapperFlags = {},
         const std::vector<std::string>& connectedElements = {}
     );
