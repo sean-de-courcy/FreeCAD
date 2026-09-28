@@ -60,6 +60,8 @@ on:
         value: ${{ jobs.Prepare.outputs.changedCppFiles }}
       changedCppLines:
         value: ${{ jobs.Prepare.outputs.changedCppLines }}
+      docsOnly:
+        value: ${{ jobs.Prepare.outputs.docsOnly }}
 
 permissions:
   contents: read
@@ -85,6 +87,7 @@ jobs:
       changedPythonLines: ${{ steps.Output.outputs.changedPythonLines }}
       changedCppFiles: ${{ steps.Output.outputs.changedCppFiles }}
       changedCppLines: ${{ steps.Output.outputs.changedCppLines }}
+      docsOnly: ${{ steps.DocsOnly.outputs.docsOnly }}
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -154,6 +157,22 @@ jobs:
         run: |
           commitCnt=$(jq -re '.ahead_by' ${{ env.logdir }}compare.json)
           echo "Changeset is composed of $commitCnt commit(s)" | tee -a ${{env.reportdir}}${{ env.reportfilename }}
+      # FreeCAD-CH (ops#31): a changeset of Markdown files only skips the build and tests,
+      # which don't use them. The compare API lists at most 300 files; a list that long
+      # counts as not docs-only. Runs by hand always build.
+      - name: Check for a docs-only changeset
+        id: DocsOnly
+        if: (env.isPR == 'true' || env.isPush == 'true') && !inputs.skipBuild
+        run: |
+          files=$(jq -r '.files[]?.filename' ${{ env.logdir }}compare.json)
+          count=$(jq '.files | length' ${{ env.logdir }}compare.json)
+          if [ -n "$files" ] && [ "$count" -lt 300 ] && ! grep -q -v -E '\.md$' <<< "$files"
+          then
+            echo "docsOnly=true" >> $GITHUB_OUTPUT
+            echo "Only Markdown files changed: the build and tests are skipped" | tee -a ${{env.reportdir}}${{ env.reportfilename }}
+          else
+            echo "docsOnly=false" >> $GITHUB_OUTPUT
+          fi
       - name: Get files modified in changeset #TODO check what happens with deleted file in the subsequent process
         if: env.isPR == 'true' && !inputs.skipBuild
         env:

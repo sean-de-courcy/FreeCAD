@@ -52,8 +52,11 @@ jobs:
     with:
       artifactBasename: Prepare-${{ github.run_id }}
 
+  # Skipped for a changeset of Markdown files only. A skipped job counts as passed for
+  # required checks, so this keeps working if integration gets them.
   Pixi:
     needs: [Prepare]
+    if: needs.Prepare.outputs.docsOnly != 'true'
     uses: ./.github/workflows/sub_buildPixi.yml
     with:
       artifactBasename: Pixi-${{ github.run_id }}
