@@ -1661,6 +1661,40 @@ void ElementMap::traceElement(const MappedName& name, long masterTag, TraceCallb
     }
 }
 
+ElementMapPtr ElementMap::copy() const
+{
+    auto res = std::make_shared<ElementMap>();
+    res->historyAlgorithm = historyAlgorithm;
+    res->hasher = hasher;
+    res->mappedNames = mappedNames;
+    res->childElementSize = childElementSize;
+    std::map<const MappedChildElements*, MappedChildElements*> copiedChildren;
+    for (const auto& [type, elements] : indexedNames) {
+        auto& copied = res->indexedNames[type];
+        for (const MappedNameRef& ref : elements.names) {
+            // MappedNameRef's copy takes only the first name: copy the element's other names too
+            copied.names.push_back(ref);
+            MappedNameRef* last = &copied.names.back();
+            for (const MappedNameRef* next = ref.next.get(); next; next = next->next.get()) {
+                last->next = std::make_unique<MappedNameRef>(*next);
+                last = last->next.get();
+            }
+        }
+        copied.children = elements.children;
+        for (const auto& [index, child] : elements.children) {
+            copiedChildren[&child] = &copied.children[index];
+        }
+    }
+    res->childElements = childElements;
+    for (auto& info : res->childElements) {
+        auto it = copiedChildren.find(info.childMap);
+        if (it != copiedChildren.end()) {
+            info.childMap = it->second;
+        }
+    }
+    return res;
+}
+
 void ElementMap::retagElementMap(long newTag) {
     if (historyAlgorithm != App::HistoryAlgorithm::V2 || newTag == 0) {
         return;

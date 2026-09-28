@@ -322,6 +322,14 @@ public:
         historyAlgorithm = algorithm;
     }
 
+    /**
+     * @brief Copy the map: every name of every element, with its string IDs.
+     *
+     * Child element maps (V1) are shared with this map, not copied. Shapes that are copies of
+     * each other share one map, so a shape copies the map before changing its names in place.
+     */
+    ElementMapPtr copy() const;
+
     /// Retag method, only used with V2 element maps.
     void retagElementMap(long newTag);
 

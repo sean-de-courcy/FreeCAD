@@ -7549,7 +7549,14 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         copyElementMap(tmp, postfix);
     }
     else if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
-        ensureElementMap()->retagElementMap(tag);
+        auto map = ensureElementMap();
+        // Copies of a shape share its map, and the retag renames in place: retag a copy of the
+        // map unless this shape is its only holder (`map` itself is the second reference)
+        if (map.use_count() > 2) {
+            map = map->copy();
+            resetElementMap(map);
+        }
+        map->retagElementMap(tag);
     }
 }
 

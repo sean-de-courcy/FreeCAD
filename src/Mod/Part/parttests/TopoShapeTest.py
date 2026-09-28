@@ -1190,6 +1190,23 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # the untagged name still decodes as untagged
         self.assertEqual(App.getDecodedMappedName(untaggedName)[-1]["iterationTag"], "0")
 
+    def testRetagKeepsTheSourceShapesNames(self):
+        """Retagging a shape made from another changes only the new shape's names: Part.Shape()
+        copies share the element map of the shape they are made from (ops#34)."""
+        # Arrange
+        face = makeSquareFace()
+        face.Tag = 7
+        untaggedNames = dict(face.ElementReverseMap)
+        self.assertEqual(untaggedNames["Face1"], squareFaceName(face, 0))
+        # Act: two shapes are made from the same face, with tags 21 and 22
+        tagged = [Part.Shape(face, tag=tag) for tag in (21, 22)]
+        # Assert
+        for shape, tag in zip(tagged, (21, 22)):
+            self.assertEqual(shape.ElementReverseMap["Face1"], squareFaceName(face, tag))
+        # the face they were made from keeps every name, the face's untagged one included
+        self.assertEqual(dict(face.ElementReverseMap), untaggedNames)
+        self.assertEqual(face.ElementMap[untaggedNames["Face1"]], "Face1")
+
     def testFeaturePythonShapeTagged(self):
         """A Python feature's new elements carry the feature's tag, on every recompute and in
         every feature that makes the same shape (ops#16)."""

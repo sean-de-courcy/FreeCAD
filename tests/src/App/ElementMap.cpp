@@ -911,4 +911,59 @@ TEST_F(ElementMapTest, retagElementMapV2)
     EXPECT_EQ(decoded.back().iterationTag, "0");
 }
 
+TEST_F(ElementMapTest, copyV2)
+{
+    // Arrange
+    //   pattern: a face with two names (the second with a string ID) and an edge with one; the
+    //   face's first name is new and untagged (last section's tag 0).
+    Data::IndexedName edge1("Edge", 1);
+    Data::IndexedName face1("Face", 1);
+    auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    auto faceNameWithTag = [&](int tag) {
+        return Data::MappedName(Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {edgeName},
+            tag,
+            "RTG",
+            0,
+            'F',
+            0,
+            {Data::MAPPER_FLAG_GENERATED},
+            std::vector<Data::MappedName> {}
+        ));
+    };
+    Data::MappedName otherFaceName("OTHER");
+    Data::ElementIDRefs sids {_hasher->getID("SID")};
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setElementName(edge1, edgeName, 0);
+    map->setElementName(face1, faceNameWithTag(0), 0);
+    map->setElementName(face1, otherFaceName, 0, &sids, false);
+
+    // Act
+    auto copy = map->copy();
+    copy->retagElementMap(21);
+
+    // Assert
+    //   the copy has every name and string ID; its untagged name has the copy's tag
+    EXPECT_EQ(copy->getHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    EXPECT_EQ(copy->hasher, _hasher);
+    EXPECT_EQ(copy->size(), 3);
+    auto copyNames = copy->findAll(face1);
+    ASSERT_EQ(copyNames.size(), 2);
+    EXPECT_EQ(copyNames[0].first, faceNameWithTag(21));
+    EXPECT_EQ(copyNames[1].first, otherFaceName);
+    EXPECT_EQ(copyNames[1].second, sids);
+    EXPECT_EQ(copy->find(faceNameWithTag(21)), face1);
+    EXPECT_EQ(copy->find(otherFaceName), face1);
+    EXPECT_EQ(copy->find(edgeName), edge1);
+    //   the map it was copied from is unchanged
+    auto names = map->findAll(face1);
+    ASSERT_EQ(names.size(), 2);
+    EXPECT_EQ(names[0].first, faceNameWithTag(0));
+    EXPECT_EQ(names[1].first, otherFaceName);
+    EXPECT_EQ(map->find(faceNameWithTag(0)), face1);
+    EXPECT_EQ(map->find(faceNameWithTag(21)), Data::IndexedName());
+}
+
 // NOLINTEND(readability-magic-numbers)
