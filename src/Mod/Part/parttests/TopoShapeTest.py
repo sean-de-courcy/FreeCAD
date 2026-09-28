@@ -247,6 +247,36 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Assert Shape
         self.assertBounds(compound2, App.BoundBox(0, 0, 0, 2, 2, 2))
 
+    def testPartCompoundOfUnmappedShapesNames(self):
+        """In V2, each element of a Part::Compound of two boxes (no element maps) is named as
+        an unmapped element of its box: '<box element>;_;<box ID>;MKR;0;<type>;0;IDX,SRC;_'.
+        The second box's elements follow the first box's (ops#24)."""
+        doc = App.newDocument("CompoundOfBoxes")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            box1 = doc.addObject("Part::Box", "Box1")
+            box2 = doc.addObject("Part::Box", "Box2")
+            box2.Placement.Base = App.Vector(2, 0, 0)
+            compound = doc.addObject("Part::Compound", "Compound")
+            compound.Links = [box1, box2]
+            doc.recompute()
+            shape = compound.Shape
+            reverse_map = shape.ElementReverseMap
+            for kind, count in (("Face", 6), ("Edge", 12), ("Vertex", 8)):
+                for offset, box in ((0, box1), (count, box2)):
+                    for index in range(1, count + 1):
+                        with self.subTest(element=f"{kind}{offset + index}"):
+                            expected = App.makeEncodedSection(
+                                referenceIDs=[f"{kind}{index}"],
+                                iterationTag=str(box.ID),
+                                opCode="MKR",
+                                elementType=kind[0],
+                                mapperFlags=["IDX", "SRC"],
+                            )
+                            self.assertEqual(reverse_map.get(f"{kind}{offset + index}"), expected)
+        finally:
+            App.closeDocument(doc.Name)
+
     def testPartCommon(self):
         # Arrange
         self.doc.addObject("Part::MultiCommon", "Common")
