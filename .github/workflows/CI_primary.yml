@@ -21,12 +21,11 @@
 # *                                                                         *
 # ***************************************************************************
 
-# This is the primary CI workflow for FreeCAD.
-# It runs the always-required jobs (Prepare, Ubuntu, Lint) on every PR
-# event except label additions. Label-gated jobs (macOS and Windows
-# builds) are in CI_approved.yml with a separate concurrency group so
-# that adding a label does not cancel an in-progress Linux build or
-# lint run.
+# This is the CI workflow for FreeCAD-CH, the Crawlspace Habitats fork.
+# It runs on pushes to `integration`, on PRs into `integration` and by hand.
+# FreeCAD's label-gated CI_approved.yml and its Linux build are not carried:
+# the fork builds and tests on the two platforms it ships, Windows and
+# macOS arm64, with the same pixi environment as the release builds.
 
 name: FreeCAD CI primary
 
@@ -34,11 +33,11 @@ on:
   workflow_dispatch: ~
   push:
     branches:
-      - main
-      - releases/**
+      - integration
   pull_request:
     types: [opened, synchronize, reopened]
-  merge_group: ~
+    branches:
+      - integration
 
 permissions:
   contents: read
@@ -53,16 +52,14 @@ jobs:
     with:
       artifactBasename: Prepare-${{ github.run_id }}
 
-  Ubuntu:
+  Pixi:
     needs: [Prepare]
-    if: "!startsWith(github.head_ref, 'refs/heads/backport-')"
-    uses: ./.github/workflows/sub_buildUbuntu.yml
+    uses: ./.github/workflows/sub_buildPixi.yml
     with:
-      artifactBasename: Ubuntu-${{ github.run_id }}
+      artifactBasename: Pixi-${{ github.run_id }}
 
   Lint:
     needs: [Prepare]
-    if: "!startsWith(github.head_ref, 'refs/heads/backport-')"
     uses: ./.github/workflows/sub_lint.yml
     with:
       artifactBasename: Lint-${{ github.run_id }}
@@ -74,7 +71,7 @@ jobs:
   WrapUp:
     needs: [
         Prepare,
-        Ubuntu,
+        Pixi,
         Lint
       ]
     if: always()

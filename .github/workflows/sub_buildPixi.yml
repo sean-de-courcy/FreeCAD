@@ -83,7 +83,9 @@ jobs:
       max-parallel: 6
       fail-fast: false
       matrix:
-        os: [windows-2022, ubuntu-latest, macos-latest]
+        # FreeCAD-CH ships Windows x64 and macOS arm64 only. The macOS image is pinned
+        # (macos-latest was macos-26 in September 2026); build_release.yml uses the same one.
+        os: [windows-2022, macos-26]
 
     steps:
     - name: Harden the runner (Audit all outbound calls)
@@ -100,8 +102,12 @@ jobs:
       run: |
         if [[ $OPERATING_SYSTEM == 'Windows' ]]; then
           echo 'CCACHE_COMPILERCHECK=%compiler%' >> "$GITHUB_ENV"
+          # github.workspace has backslashes on Windows, which bash drops from unquoted
+          # paths. wsdir is the workspace with forward slashes, for steps run in bash.
+          echo "wsdir=$(cygpath -m "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
         else
           echo 'CCACHE_COMPILERCHECK=%compiler% -dumpfullversion -dumpversion' >> "$GITHUB_ENV"
+          echo "wsdir=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         fi
 
     - name: Checkout
@@ -163,6 +169,7 @@ jobs:
         pixi run configure-${{ env.config }}
 
     - name: CMake Build
+      id: build
       if: "!inputs.skipBuild"
       run: |
         pixi run build-${{ env.config }}
@@ -172,15 +179,17 @@ jobs:
       run: |
         pixi run ccache -s
 
+    # On Windows this is the only FreeCAD test step (C++ and install tests are skipped there),
+    # so it always runs; FreeCAD's LibPack Windows build, which ran it upstream, isn't carried.
     - name: FreeCAD CLI tests on build dir
-      if: inputs.testOnBuildDir && !inputs.skipBuild
-      timeout-minutes: 10
+      if: (inputs.testOnBuildDir || runner.os == 'Windows') && !inputs.skipBuild
+      timeout-minutes: 30
       uses: ./.github/workflows/actions/runPythonTests
       with:
         testDescription: "CLI tests on build dir"
-        testCommand: ${{ env.builddir }}/bin/FreeCADCmd -t 0
-        logFile: ${{ env.logdir }}TestCLIBuild.log
-        reportFile: ${{env.reportdir}}${{ env.reportfilename }}
+        testCommand: ${{ env.wsdir }}/build/release/bin/FreeCADCmd -t 0
+        logFile: ${{ env.wsdir }}/logs/TestCLIBuild.log
+        reportFile: ${{ env.wsdir }}/report/${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
 
     - name: FreeCAD GUI tests on build dir
@@ -258,9 +267,11 @@ jobs:
         reportFile: ${{env.reportdir}}${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
 
+    # Save the cache whenever the build succeeded, even if tests failed afterwards;
+    # otherwise a run with a failing test leaves the next run a cold build (2-3 h).
     - name: Save Compiler Cache
       id: cache-save
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && steps.build.outcome == 'success'"
       uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
         path: ${{ env.CCACHE_DIR }}

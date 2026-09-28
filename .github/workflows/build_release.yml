@@ -1,10 +1,14 @@
+# FreeCAD-CH: builds Windows x64 and macOS arm64 packages into a DRAFT GitHub release.
+# Run by hand only (Actions > Build Release > Run workflow). Nothing is published: the
+# draft is visible only to the repository's maintainers, who hand the builds on.
 name: Build Release
 on:
-  release:
-    types: [published]
-  schedule:
-   - cron: "0 0 * * 3"
   workflow_dispatch:
+    inputs:
+      build_tag:
+        description: "Release tag, e.g. fork-0.1.0. Empty: weekly-<date> on the default branch, <branch>-<date> elsewhere."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -16,10 +20,8 @@ concurrency:
 jobs:
   upload_src:
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'FreeCAD' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-      actions: write
     outputs:
       build_tag: ${{ steps.get_tag.outputs.build_tag }}
     steps:
@@ -36,14 +38,19 @@ jobs:
           fetch-tags: true
           submodules: 'recursive'
 
-      - name: Get tag and create release if weekly
+      - name: Get tag and create the draft release
         id: get_tag
         shell: bash -l {0}
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.build_tag }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            export BUILD_TAG="${{ github.event.release.tag_name }}"
+          if [ -n "${INPUT_TAG}" ]; then
+            if ! [[ "${INPUT_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+              echo "Invalid build_tag '${INPUT_TAG}'" >&2
+              exit 1
+            fi
+            export BUILD_TAG="${INPUT_TAG}"
           else
             BRANCH="${{ github.ref_name }}"
             DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
@@ -54,38 +61,16 @@ jobs:
               SAFE_BRANCH=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9._-]/-/g')
               export BUILD_TAG=${SAFE_BRANCH}-$(date "+%Y.%m.%d")
             fi
-            gh release create ${BUILD_TAG} --target "${{ github.sha }}" \
-                                           --title "Development Build ${BUILD_TAG}" \
-                                           -F .github/workflows/weekly-build-notes.md \
-                                           --prerelease || \
-            gh release view ${BUILD_TAG} > /dev/null  # fail if it doesn't exist
           fi
+          # Always a draft: CI never publishes. gh also finds drafts by tag name, so a
+          # re-run for the same tag reuses the draft (the uploads use --clobber).
+          gh release create ${BUILD_TAG} --target "${{ github.sha }}" \
+                                         --title "FreeCAD-CH build ${BUILD_TAG}" \
+                                         -F .github/workflows/build-notes.md \
+                                         --draft || \
+          gh release view ${BUILD_TAG} > /dev/null  # fail if it doesn't exist
           echo "BUILD_TAG=${BUILD_TAG}" >> "$GITHUB_ENV"
           echo "build_tag=${BUILD_TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger notes updater workflow (only for weekly)
-        if: startsWith(steps.get_tag.outputs.build_tag, 'weekly-')
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
-        env:
-          WEEKLY_TAG: ${{ steps.get_tag.outputs.build_tag }}
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo  = context.repo.repo;
-
-            // Reusable/dispatchable updater workflow file in .github/workflows/
-            const workflow_id = 'weekly-compare-link.yml';
-
-            // Use the default branch so the workflow file is available
-            const ref = (context.payload?.repository?.default_branch) || 'main';
-            const current_tag = process.env.WEEKLY_TAG || '';
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner, repo, workflow_id, ref,
-              inputs: { current_tag }
-            });
-
-            core.info(`Dispatched ${workflow_id} on ${ref} with current_tag='${current_tag}'.`)
 
       - name: Upload Source
         id: upload_source
@@ -114,11 +99,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - { target: linux-64, os: ubuntu-22.04 }
-          - { target: linux-arm64, os: ubuntu-22.04-arm }
-          - { target: osx-64, os: macos-15-intel, deploy_target: "10.13" }
-          - { target: osx-arm64, os: macos-latest, deploy_target: "11.0" }
-          - { target: osx-arm64, os: macos-latest, deploy_target: "15.0" }
+          # FreeCAD-CH ships these two only. The macOS image is pinned to what macos-latest
+          # was in September 2026; sub_buildPixi.yml uses the same one.
+          - { target: osx-arm64, os: macos-26, deploy_target: "15.0" }
           - { target: win-64, os: windows-2022 }
       fail-fast: false
 
@@ -129,15 +112,6 @@ jobs:
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
-
-      # prevent running out of disk space on Ubuntu runners.
-      - name: Maximize build space
-        if: runner.os == 'Linux'
-        uses: AdityaGarg8/remove-unwanted-software@90e01b21170618765a73370fcc3abbd1684a7793 # v5
-        with:
-          verbose: 'true'
-          remove-android: 'true'      # (frees ~9 GB)
-          remove-cached-tools: 'true' # (frees ~8.3 GB)
 
       - name: Set platform environment variables
         shell: bash -l {0}
@@ -290,38 +264,3 @@ jobs:
       #   run: |
       #     security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
       #     rm ~/Library/MobileDevice/Provisioning\ Profiles/build_pp.mobileprovision
-
-  # Experimental Windows binaries built against the latest LibPack (OCCT 8, Qt 6, Python from the
-  # LibPack) for both Intel (x64) and ARM64. These are uploaded to the same release as the primary
-  # conda-based build, distinguished by an "experimental" file name. This path is non-blocking (the
-  # reusable workflow's Build job uses continue-on-error), so a failure here never fails the release.
-  windows_experimental:
-    needs: upload_src
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: windows-2022
-            cmakeArchitecture: ""
-            makeInstaller: "true"
-            libpackDownloadUrl: https://github.com/FreeCAD/FreeCAD-LibPack/releases/download/3.5.3/LibPack-26.3.0-v3.5.3-x64-Release.7z
-            libpackName: LibPack-26.3.0-v3.5.3-x64-Release
-          - arch: arm64
-            runner: windows-11-arm
-            cmakeArchitecture: ARM64
-            makeInstaller: "false"
-            libpackDownloadUrl: https://github.com/FreeCAD/FreeCAD-LibPack/releases/download/3.5.3/LibPack-26.3.0-v3.5.3-ARM64-Release.7z
-            libpackName: LibPack-26.3.0-v3.5.3-ARM64-Release
-    uses: ./.github/workflows/sub_releaseWindowsLibpack.yml
-    with:
-      build_tag: ${{ needs.upload_src.outputs.build_tag }}
-      arch: ${{ matrix.arch }}
-      runner: ${{ matrix.runner }}
-      cmakeArchitecture: ${{ matrix.cmakeArchitecture }}
-      libpackDownloadUrl: ${{ matrix.libpackDownloadUrl }}
-      libpackName: ${{ matrix.libpackName }}
-      makeInstaller: ${{ matrix.makeInstaller }}
-    secrets: inherit
