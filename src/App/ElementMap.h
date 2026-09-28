@@ -307,16 +307,19 @@ public:
      */
     void traceElement(const MappedName& name, long masterTag, TraceCallback cb) const;
 
-    const App::HistoryAlgorithm& getHistoryAlgorithm() const {
-        if (historyAlgorithmRef == nullptr) {
-            return App::getDefaultHistoryAlgorithm();
-        } else {
-            return *historyAlgorithmRef;
-        }
+    /**
+     * @brief The history algorithm this map names elements by.
+     *
+     * It is the algorithm of the shape (ComplexGeoData) that last took the map or changed its
+     * own algorithm while holding it. A map no shape has taken yet uses V2, the default of
+     * ComplexGeoData.
+     */
+    App::HistoryAlgorithm getHistoryAlgorithm() const {
+        return historyAlgorithm;
     }
 
-    void syncHistoryAlgorithm(const App::HistoryAlgorithm* geoDataHistoryAlgorithmRef) {
-        historyAlgorithmRef = geoDataHistoryAlgorithmRef;
+    void setHistoryAlgorithm(App::HistoryAlgorithm algorithm) {
+        historyAlgorithm = algorithm;
     }
 
     /// Retag method, only used with V2 element maps.
@@ -416,7 +419,9 @@ private:
 
     std::map<MappedName, IndexedName, std::less<>> mappedNames;
 
-    const App::HistoryAlgorithm* historyAlgorithmRef = nullptr;
+    // Held by value: maps are shared between shapes, so a pointer to one shape's field is
+    // left null or dangling when that shape dies
+    App::HistoryAlgorithm historyAlgorithm = App::HistoryAlgorithm::V2;
 
 
     struct ChildMapInfo

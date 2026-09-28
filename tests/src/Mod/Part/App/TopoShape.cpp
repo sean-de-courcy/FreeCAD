@@ -5,6 +5,11 @@
 #include <Mod/Part/App/TopoShape.h>
 #include "src/App/InitApplication.h"
 
+#include <App/ElementMap.h>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <cstring>
+#include <new>
+
 
 class TopoShapeTest: public ::testing::Test
 {
@@ -158,3 +163,133 @@ TEST_F(TopoShapeTest, TestGetSubshape)
 }
 
 // clang-format on
+
+// The element map works by the algorithm of the shape that holds it, however many copies of
+// the shape come and go (ops#17). The tests name a box's faces; the names are made up. What
+// shows the algorithm: V1 renames a second element given an existing name ("D1", the first
+// duplicate), V2 does it another way.
+
+namespace
+{
+const Data::IndexedName face1("Face", 1);
+const Data::IndexedName face2("Face", 2);
+}  // namespace
+
+TEST_F(TopoShapeTest, duplicateNameV1)
+{
+    // Arrange
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    shape.setElementName(face1, Data::MappedName("A"), shape.Tag);
+
+    // Act
+    shape.setElementName(face2, Data::MappedName("A"), shape.Tag);
+
+    // Assert
+    EXPECT_EQ(shape.getMappedName(face1).toString(), "A");
+    EXPECT_EQ(shape.getMappedName(face2).toString(), "A;D1");
+}
+
+TEST_F(TopoShapeTest, mapKeepsV1WhenACopyDies)
+{
+    // Arrange
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    shape.setElementName(face1, Data::MappedName("A"), shape.Tag);
+
+    // Act
+    //   a copy shares the map, and dies
+    {
+        Part::TopoShape copy(shape);
+    }
+    shape.setElementName(face2, Data::MappedName("A"), shape.Tag);
+
+    // Assert
+    EXPECT_EQ(shape.getMappedName(face2).toString(), "A;D1");
+}
+
+TEST_F(TopoShapeTest, mapKeepsV1WhenASubShapeDies)
+{
+    // Arrange
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    shape.setElementName(face1, Data::MappedName("A"), shape.Tag);
+
+    // Act
+    //   a sub-shape gets its names through the shape's map, and dies
+    EXPECT_TRUE(shape.getSubTopoShape(TopAbs_FACE, 1).getMappedName(face1));
+    shape.setElementName(face2, Data::MappedName("A"), shape.Tag);
+
+    // Assert
+    EXPECT_EQ(shape.getMappedName(face2).toString(), "A;D1");
+}
+
+TEST_F(TopoShapeTest, mapKeepsV1WhenAnotherShapeLetsItGo)
+{
+    // Arrange
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    shape.setElementName(face1, Data::MappedName("A"), shape.Tag);
+    //   another shape, in storage the test controls
+    alignas(Part::TopoShape) unsigned char storage[sizeof(Part::TopoShape)];
+    auto* other = new (storage) Part::TopoShape(App::HistoryAlgorithm::V2);
+
+    // Act
+    //   the other shape takes the map, lets it go again and dies; its storage is reused
+    *other = shape;
+    *other = Part::TopoShape(App::HistoryAlgorithm::V2);
+    other->~TopoShape();
+    std::memset(storage, 0xFF, sizeof(storage));
+    shape.setElementName(face2, Data::MappedName("A"), shape.Tag);
+
+    // Assert
+    EXPECT_EQ(shape.getMappedName(face2).toString(), "A;D1");
+}
+
+TEST_F(TopoShapeTest, setElementMapUsesTheShapesAlgorithm)
+{
+    // Arrange: the shape's element map is made from a list with a duplicate name
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    std::vector<Data::MappedElement> names {
+        {Data::MappedName("A"), face1},
+        {Data::MappedName("A"), face2},
+    };
+
+    // Act
+    shape.setElementMap(names);
+
+    // Assert
+    EXPECT_EQ(shape.getMappedName(face1).toString(), "A");
+    EXPECT_EQ(shape.getMappedName(face2).toString(), "A;D1");
+}
+
+TEST_F(TopoShapeTest, retagAfterCopyDiesV2)
+{
+    // Arrange
+    //   pattern: code builds a face without a tag from a wire (tag 7); an object (tag 21) takes
+    //   it. The face is new (last section's tag 0, not yet tagged); its edge keeps the wire's name.
+    Part::TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 0L);
+    Data::IndexedName edge1("Edge", 1);
+    auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    auto faceName = Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        std::vector<Data::MappedName> {edgeName},
+        0,
+        "RTG",
+        0,
+        'F',
+        0,
+        {Data::MAPPER_FLAG_GENERATED},
+        std::vector<Data::MappedName> {}
+    );
+    shape.setElementName(edge1, edgeName, 0);
+    shape.setElementName(face1, Data::MappedName(faceName), 0);
+
+    // Act
+    //   a copy shares the map, and dies before the retag
+    { Part::TopoShape copy(shape); }
+    shape.reTagElementMap(21, nullptr);
+
+    // Assert
+    EXPECT_EQ(faceName, "_;Edge1^;_^;7^;RTG^;0^;E^;0^;IDX^,SRC^;_;0;RTG;0;F;0;GEN;_");
+    EXPECT_EQ(shape.getMappedName(face1).toString(),
+              "_;Edge1^;_^;7^;RTG^;0^;E^;0^;IDX^,SRC^;_;21;RTG;0;F;0;GEN;_");
+    //   the edge is the wire's, not new: it keeps its name
+    EXPECT_EQ(shape.getMappedName(edge1), edgeName);
+}

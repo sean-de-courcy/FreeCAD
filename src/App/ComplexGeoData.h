@@ -637,8 +637,12 @@ public:
         return selectedHistoryAlgorithm;
     };
 
+    /// Set the history algorithm; the element map, if there is one, follows it
     void setHistoryAlgorithm(const App::HistoryAlgorithm& newAlgorithm) {
         selectedHistoryAlgorithm = newAlgorithm;
+        if (_elementMap) {
+            _elementMap->setHistoryAlgorithm(newAlgorithm);
+        }
     };
 
 protected:
