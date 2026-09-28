@@ -10,7 +10,6 @@ gtest  App_tests_run/ElementMapTest.hasChildElementMapTest
 gtest  App_tests_run/ElementMapTest.hashChildMapsTest
 gtest  App_tests_run/ElementMapTest.mimicOperationAgainstSelf
 gtest  App_tests_run/ElementMapTest.mimicSimpleUnion
-gtest  App_tests_run/MappedName.compare
 gtest  Part_tests_run/FeatureMirroringTest.testXMirror
 gtest  Part_tests_run/FeatureMirroringTest.testYMirrorWithExistingElementMap
 gtest  Part_tests_run/FeaturePartCommonTest.testMapping
@@ -118,7 +117,6 @@ cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeChildShapes
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCleaned
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCommon
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCompSolid
-cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCopy
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCopyWithoutElementMap
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCut
 cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeElementMap
@@ -171,3 +169,6 @@ cli  PartDesignTests.TestTopologicalNamingProblem.TestTopologicalNamingProblem.t
 
 reason: after the previous feature is deleted, the fillet's base is Fillet, not Box; may be a real relinking gap (Task 2, ops#7)
 cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge
+
+reason: throwaway: a stale entry that should be reported as not failing
+cli  parttests.TopoShapeTest.TopoShapeTest.testDoesNotExist
