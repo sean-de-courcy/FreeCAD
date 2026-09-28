@@ -65,7 +65,6 @@ jobs:
       CCACHE_CONFIGPATH: ${{ github.workspace }}/ccache/config
       CCACHE_DIR: ${{ github.workspace }}/ccache
       CCACHE_MAXSIZE: 1G
-      CCACHE_NODIRECT: true
       CCACHE_NOHASHDIR: true
       CCACHE_NOINODECACHE: true
       CCACHE_SLOPPINESS: "include_file_ctime,include_file_mtime,pch_defines,time_macros"
