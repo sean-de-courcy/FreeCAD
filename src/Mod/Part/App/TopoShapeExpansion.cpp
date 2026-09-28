@@ -2824,6 +2824,17 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 incomingShapeIndexedName
                             );
 
+                            // An input without an element map (e.g. a Part::Plane) still
+                            // gives its partner a name, as in the Modified/Generated stage.
+                            if (!incomingShapeMapName) {
+                                incomingShapeMapName = Data::MappedName::makeUnmappedName(
+                                    {incomingShapeIndexedName.toString()},
+                                    incomingShape.Tag,
+                                    op,
+                                    (*incomingShapeIndexedName.getType())
+                                );
+                            }
+
                             if (incomingShapeMapName) {
                                 Data::MappedName newName = Data::MappedName(
                                     Data::MappedName::makeEncodedSection(

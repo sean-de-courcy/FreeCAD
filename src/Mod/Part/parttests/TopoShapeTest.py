@@ -523,6 +523,55 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Assert elementMap
         self.assertEqual(extrude.ElementMapSize, 26)
 
+    def testPartExtrusionOfUnmappedFace(self):
+        """Every element of a Part::Extrusion of a face without an element map (a Part::Plane)
+        is named. In V2 the top face, a moved copy of the base face, is named as its
+        projection (PRJ), like a Pad's top face (ops#28)."""
+        for algorithm in ("V1", "V2"):
+            with self.subTest(algorithm=algorithm):
+                doc = App.newDocument("ExtrusionOfPlane")
+                try:
+                    doc.HistoryAlgorithm = algorithm
+                    plane = doc.addObject("Part::Plane", "Plane")
+                    plane.Length = plane.Width = 10
+                    extrusion = doc.addObject("Part::Extrusion", "Extrusion")
+                    extrusion.Base = plane
+                    extrusion.Dir = App.Vector(0, 0, 1)
+                    extrusion.LengthFwd = 10
+                    doc.recompute()
+                    shape = extrusion.Shape
+                    self.assertAttrCount(shape, [("Faces", 6), ("Edges", 12), ("Vertexes", 8)])
+                    self.assertAllElementsMapped(shape)
+                    if algorithm != "V2":
+                        continue
+                    top = [
+                        f"Face{index}"
+                        for index, face in enumerate(shape.Faces, 1)
+                        if isinstance(face.Surface, Part.Plane)
+                        and face.normalAt(0, 0).isEqual(App.Vector(0, 0, 1), 1e-7)
+                        and abs(face.CenterOfMass.z - 10) < 1e-7
+                    ]
+                    self.assertEqual(len(top), 1)
+                    # The plane's face has no name of its own, so the linked name is the
+                    # unmapped name of the extrusion's input face.
+                    base = App.makeEncodedSection(
+                        referenceIDs=["Face1"],
+                        iterationTag=str(extrusion.ID),
+                        opCode="XTR",
+                        elementType="F",
+                        mapperFlags=["IDX", "SRC"],
+                    )
+                    expected = App.makeEncodedSection(
+                        linkedNames=[base],
+                        iterationTag=str(extrusion.ID),
+                        opCode="XTR",
+                        elementType="F",
+                        mapperFlags=["PRJ"],
+                    )
+                    self.assertEqual(shape.ElementReverseMap[top[0]], expected)
+                finally:
+                    App.closeDocument(doc.Name)
+
     def testTopoShapeRevolve(self):
         # Arrange
         face = self.doc.Box1.Shape.Faces[0]
