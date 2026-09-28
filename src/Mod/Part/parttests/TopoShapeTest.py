@@ -72,6 +72,38 @@ class TopoShapeAssertions:
             raise AssertionError(msg)
 
 
+def makeSquareFace():
+    """A face that Python code makes from a square wire (tag 11, no element map).
+
+    V2 names: the edges and vertices keep the wire's unmapped names
+    ('Edge1;_;11;MKR;0;E;0;IDX,SRC;_'), and the face is new, with the untagged name
+    '_;<its edge names>;0;FAC;0;F;0;LOW,NDU;_'. Tag 0 means "not yet tagged": the object or
+    shape that takes the face gives it its own tag.
+    """
+    wire = Part.makePolygon(
+        [
+            App.Vector(0, 0, 0),
+            App.Vector(10, 0, 0),
+            App.Vector(10, 10, 0),
+            App.Vector(0, 10, 0),
+            App.Vector(0, 0, 0),
+        ]
+    )
+    wire.Tag = 11
+    return Part.makeFace([wire], "Part::FaceMakerBullseye")
+
+
+def squareFaceName(face, tag):
+    """The square face's name with the given tag, from the names of its edges."""
+    return App.makeEncodedSection(
+        linkedNames=[face.ElementReverseMap[f"Edge{index}"] for index in range(1, 5)],
+        iterationTag=str(tag),
+        opCode="FAC",
+        elementType="F",
+        mapperFlags=["LOW", "NDU"],
+    )
+
+
 class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
     def setUp(self):
         """Create a document and some TopoShapes of various types"""
@@ -916,3 +948,28 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.assertTrue(solid.isNull())
         solid.add(box)
         self.assertFalse(solid.isNull())
+
+    def testRetagKeepsOtherShapesNames(self):
+        """Retagging one shape's untagged names changes no other shape's names (ops#16)."""
+        # Arrange
+        untagged = makeSquareFace()
+        untaggedName = untagged.ElementReverseMap["Face1"]
+        self.assertEqual(untaggedName, squareFaceName(untagged, 0))
+        # Act: two faces of the same geometry get tags 21 and 22. Part.Shape(shape, tag=...)
+        # retags a shape that has another tag.
+        tagged = []
+        for tag in (21, 22):
+            face = makeSquareFace()
+            face.Tag = 7
+            tagged.append(Part.Shape(face, tag=tag))
+        # Assert
+        for shape, tag in zip(tagged, (21, 22)):
+            self.assertEqual(shape.Tag, tag)
+            self.assertEqual(shape.ElementReverseMap["Face1"], squareFaceName(untagged, tag))
+            for index in range(1, 5):
+                self.assertEqual(
+                    shape.ElementReverseMap[f"Edge{index}"],
+                    untagged.ElementReverseMap[f"Edge{index}"],
+                )
+        # the untagged name still decodes as untagged
+        self.assertEqual(App.getDecodedMappedName(untaggedName)[-1]["iterationTag"], "0")

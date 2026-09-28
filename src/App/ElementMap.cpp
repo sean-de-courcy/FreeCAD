@@ -1652,13 +1652,13 @@ void ElementMap::retagElementMap(long newTag) {
 
     for (auto& indexedNameEntry : indexedNames) {
         for (MappedNameRef& foundNameRef : indexedNameEntry.second.names) {
-            DecodedMappedName& decodedName = foundNameRef.name.getDecodedMappedName();
+            const DecodedMappedName& cachedName = foundNameRef.name.getDecodedMappedName();
 
-            if (decodedName.size()) {
-                DecodedMappedSection& backSection = decodedName.back();
-
-                if (backSection.iterationTag == "0") {
-                    backSection.iterationTag = std::to_string(newTag);
+            if (cachedName.size()) {
+                if (cachedName.back().iterationTag == "0") {
+                    // Retag a copy: the decoding is shared by every name with this string
+                    DecodedMappedName decodedName = cachedName;
+                    decodedName.back().iterationTag = std::to_string(newTag);
 
                     auto it = mappedNames.find(foundNameRef.name);
                     foundNameRef.name = MappedName::makeEncodedName(decodedName);

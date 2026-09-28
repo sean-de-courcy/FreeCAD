@@ -816,4 +816,66 @@ TEST_F(ElementMapTest, addChildElementsWithoutMapV2)
     }
 }
 
+TEST_F(ElementMapTest, retagElementMapV2)
+{
+    // Arrange
+    //   pattern: two objects (tags 21 and 22) get the same shape, built without a tag, as when
+    //   Python code builds a face from a wire (tag 7) and several objects take it. The face is new
+    //   (last section's tag 0, not yet tagged); its edge keeps the wire's name. Retagging gives
+    //   the untagged last section the object's tag and leaves every other name as it is.
+    const App::HistoryAlgorithm v2 {App::HistoryAlgorithm::V2};
+    Data::IndexedName edge1("Edge", 1);
+    Data::IndexedName face1("Face", 1);
+    auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    auto faceNameWithTag = [&](int tag) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {edgeName},
+            tag,
+            "RTG",
+            0,
+            'F',
+            0,
+            {Data::MAPPER_FLAG_GENERATED},
+            std::vector<Data::MappedName> {}
+        );
+    };
+    const std::string untagged = faceNameWithTag(0);
+    auto makeMap = [&]() {
+        auto map = std::make_shared<Data::ElementMap>();
+        map->syncHistoryAlgorithm(&v2);
+        map->hasher = _hasher;
+        map->setElementName(edge1, edgeName, 0);
+        map->setElementName(face1, Data::MappedName(untagged), 0);
+        return map;
+    };
+    auto first = makeMap();
+    auto second = makeMap();
+
+    // Act
+    first->retagElementMap(21);
+    second->retagElementMap(22);
+    //   a tagged section is not retagged again
+    first->retagElementMap(23);
+
+    // Assert
+    EXPECT_EQ(edgeName.toString(), "Edge1;_;7;RTG;0;E;0;IDX,SRC;_");
+    EXPECT_EQ(untagged, "_;Edge1^;_^;7^;RTG^;0^;E^;0^;IDX^,SRC^;_;0;RTG;0;F;0;GEN;_");
+    const std::string tagged21 = "_;Edge1^;_^;7^;RTG^;0^;E^;0^;IDX^,SRC^;_;21;RTG;0;F;0;GEN;_";
+    const std::string tagged22 = "_;Edge1^;_^;7^;RTG^;0^;E^;0^;IDX^,SRC^;_;22;RTG;0;F;0;GEN;_";
+    EXPECT_EQ(first->find(face1).toString(), tagged21);
+    EXPECT_EQ(first->find(Data::MappedName(tagged21)), face1);
+    EXPECT_EQ(first->find(Data::MappedName(untagged)), Data::IndexedName());
+    //   the second object's face gets its own tag, not the first object's
+    EXPECT_EQ(second->find(face1).toString(), tagged22);
+    EXPECT_EQ(second->find(Data::MappedName(tagged22)), face1);
+    //   the edge is the wire's, not new: it keeps its name
+    EXPECT_EQ(first->find(edge1), edgeName);
+    EXPECT_EQ(second->find(edge1), edgeName);
+    //   the untagged string still decodes as untagged: retagging changes no shared decoding
+    const auto& decoded = Data::MappedName::getDecodedMappedName(untagged);
+    ASSERT_EQ(decoded.size(), 1);
+    EXPECT_EQ(decoded.back().iterationTag, "0");
+}
+
 // NOLINTEND(readability-magic-numbers)
