@@ -111,6 +111,22 @@ jobs:
               echo "DRYRUN: executing : curl -X DELETE -H \"Accept: application/vnd.github+json\" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id"
             fi
           done
+      # FreeCAD-CH (ops#31): setup-pixi caches the Windows environment as
+      # pixi-<platform>-<pixi.lock hash>, 2 GB each, written by integration only. Keep the
+      # newest per platform; older ones (an old pixi.lock) go once unused for an hour.
+      - name: Extract and delete obsolete pixi environment cache IDs
+        run: |
+          PXID=$(jq ".actions_caches | map(select(.key | startswith(\"pixi-\"))) | group_by(.key | .[:rindex(\"-\")]) | .[] | sort_by(.created_at) | .[:-1][] | select((.last_accessed_at | if contains(\".\") then .[:rindex(\".\")]+\"Z\" else . end | fromdateiso8601) < (now | floor - 3600)) | .id" ${{ env.logdir }}caches.json)
+          for id in $PXID
+          do
+            echo "Trying to delete obsolete pixi environment cache ID : $id"
+            if [ ${{ env.dryrun }} == "false" ]
+            then
+              curl -X DELETE -H "Accept: application/vnd.github+json" -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id
+            else
+              echo "DRYRUN: executing : curl -X DELETE -H \"Accept: application/vnd.github+json\" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id"
+            fi
+          done
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

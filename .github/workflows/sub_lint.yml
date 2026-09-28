@@ -147,10 +147,13 @@ jobs:
 
     # Python linting steps
 
+      # No cache: the Linux environment is 1.5 GB, one copy per PR ref, and restoring it
+      # saves under a minute (ops#31). The Actions cache is kept for the ccache.
       - name: Set up pixi for stub smoke checks
         if: always()
         uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
         with:
+          cache: false
           locked: true
 
       - name: Install Python stub smoke-check dependencies

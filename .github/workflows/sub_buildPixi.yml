@@ -65,7 +65,6 @@ jobs:
       CCACHE_CONFIGPATH: ${{ github.workspace }}/ccache/config
       CCACHE_DIR: ${{ github.workspace }}/ccache
       CCACHE_MAXSIZE: 1G
-      CCACHE_NODIRECT: true
       CCACHE_NOHASHDIR: true
       CCACHE_NOINODECACHE: true
       CCACHE_SLOPPINESS: "include_file_ctime,include_file_mtime,pch_defines,time_macros"
@@ -138,11 +137,15 @@ jobs:
         mkdir -p ${{ env.reportdir }}
         echo "reportFile=${{ env.reportfilename }}" >> $GITHUB_OUTPUT
 
+    # Windows restores its pixi environment from the Actions cache (2 GB, keyed to
+    # pixi.lock): 1 min instead of 3.5-4 min, sometimes 10 min (ops#31). Only
+    # integration writes it, once per pixi.lock. macOS installs in about 1 min.
     - if: "!inputs.skipBuild"
       uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
       with:
         pixi-version: v0.81.0
-        cache: false
+        cache: ${{ runner.os == 'Windows' }}
+        cache-write: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/integration' }}
         locked: true
 
     - name: Restore Compiler Cache
@@ -275,11 +278,15 @@ jobs:
         reportFile: ${{env.reportdir}}${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
 
-    # Save the cache whenever the build succeeded, even if tests failed afterwards;
-    # otherwise a run with a failing test leaves the next run a cold build (2-3 h).
+    # Only runs on integration (pushes, or by hand) save the cache: PR runs restore
+    # integration's newest entry through the FC-<cacheKey>- prefix, and entries saved
+    # for a PR ref are useless once it merges (the repository's Actions cache holds
+    # 10 GB). CI_cleanup.yml keeps integration's two newest entries per platform.
+    # Save whenever the build succeeded, even if tests failed afterwards; otherwise a
+    # run with a failing test leaves the next run a cold build (2-3 h).
     - name: Save Compiler Cache
       id: cache-save
-      if: "!cancelled() && steps.build.outcome == 'success'"
+      if: "!cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/integration'"
       uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
         path: ${{ env.CCACHE_DIR }}
