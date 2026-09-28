@@ -35,6 +35,7 @@ names it.
 | `fix/23-elementmapversion-guards` | fix | ops#23 | - | `integration` `cebac682fc` (needs `infra/known-failures`) | `e1459baf2d` (fork PR 5), 2026-09-28 | a new base's naming tests no longer use `ElementMapVersion` |
 | `infra/fork-md` | infra | ops#4 | - | `integration` `e1459baf2d` | adds this file | never |
 | `fix/16-retag-decode-cache` | fix | ops#16 | - | `integration` `53d927998a` | fork PR 10, open | a new base's `ElementMap::retagElementMap` leaves the decode cache alone and its V2 `setPyObject` tags Python features' new elements |
+| `fix/17-map-history-algorithm` | fix | ops#17 | - | `fix/16-retag-decode-cache` `d5673ef901` (stacked on fork PR 10) | fork PR 11, open | a new base's `Data::ElementMap` holds its history algorithm by value, not a pointer to a shape's field |
 
 ## Fork-only commits in carried topics
 
