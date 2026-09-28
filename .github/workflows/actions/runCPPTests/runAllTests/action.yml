@@ -52,9 +52,10 @@ runs:
       - name: Run the C++ tests and check them against the known-failure list
         shell: ${{ inputs.shellCmd }}
         env:
-          BUILD_DIR: ${{ inputs.builddir }}
-          REPORT_DIR: ${{ inputs.reportdir }}
-          REPORT_FILE: ${{ inputs.reportFile }}
-          PLATFORM: ${{ inputs.platform }}
+          KF_BUILD_DIR: ${{ inputs.builddir }}
+          KF_REPORT_DIR: ${{ inputs.reportdir }}
+          KF_REPORT_FILE: ${{ inputs.reportFile }}
+          KF_PLATFORM: ${{ inputs.platform }}
         run: |
-          python .github/scripts/known_failures.py gtest --platform "$PLATFORM"             --build-dir "$BUILD_DIR" --out-dir "$REPORT_DIR/gtest" --report "$REPORT_FILE"
+          python .github/scripts/known_failures.py gtest --platform "$KF_PLATFORM" \
+            --build-dir "$KF_BUILD_DIR" --out-dir "$KF_REPORT_DIR/gtest" --report "$KF_REPORT_FILE"

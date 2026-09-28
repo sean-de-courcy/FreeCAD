@@ -112,11 +112,11 @@ runs:
       if: always() && inputs.knownFailuresPlatform != ''
       shell: ${{ inputs.shellCmd }}
       env:
-        LOG_FILE: ${{ inputs.logFile }}
-        REPORT_FILE: ${{ inputs.reportFile }}
-        PLATFORM: ${{ inputs.knownFailuresPlatform }}
-        EXIT_CODE: ${{ steps.runTests.outputs.exitCode }}
-        WHAT: ${{ inputs.testDescription }}
+        KF_LOG_FILE: ${{ inputs.logFile }}
+        KF_REPORT_FILE: ${{ inputs.reportFile }}
+        KF_PLATFORM: ${{ inputs.knownFailuresPlatform }}
+        KF_EXIT_CODE: ${{ steps.runTests.outputs.exitCode }}
+        KF_WHAT: ${{ inputs.testDescription }}
       run: |
-        python .github/scripts/known_failures.py cli --platform "$PLATFORM" --log "$LOG_FILE" \
-          --report "$REPORT_FILE" --what "$WHAT" ${EXIT_CODE:+--exit-code "$EXIT_CODE"}
+        python .github/scripts/known_failures.py cli --platform "$KF_PLATFORM" --log "$KF_LOG_FILE" \
+          --report "$KF_REPORT_FILE" --what "$KF_WHAT" ${KF_EXIT_CODE:+--exit-code "$KF_EXIT_CODE"}

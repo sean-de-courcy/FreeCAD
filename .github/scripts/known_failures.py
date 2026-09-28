@@ -393,11 +393,11 @@ def parse_cli(args):
             pending = None
             continue
         m = RAN_RE.match(line)
-        if m:
+        if m and ran is None:  # the first run in the log; later output is not ours
             ran = int(m.group(1))
             continue
         m = SUMMARY_RE.match(line)
-        if m and ran is not None:
+        if m and ran is not None and summary is None:
             summary = line
     if ran is None or summary is None:
         results.incomplete.append(
