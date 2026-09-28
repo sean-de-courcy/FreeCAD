@@ -275,11 +275,15 @@ jobs:
         reportFile: ${{env.reportdir}}${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
 
-    # Save the cache whenever the build succeeded, even if tests failed afterwards;
-    # otherwise a run with a failing test leaves the next run a cold build (2-3 h).
+    # Only runs on integration (pushes, or by hand) save the cache: PR runs restore
+    # integration's newest entry through the FC-<cacheKey>- prefix, and entries saved
+    # for a PR ref are useless once it merges (the repository's Actions cache holds
+    # 10 GB). CI_cleanup.yml keeps integration's two newest entries per platform.
+    # Save whenever the build succeeded, even if tests failed afterwards; otherwise a
+    # run with a failing test leaves the next run a cold build (2-3 h).
     - name: Save Compiler Cache
       id: cache-save
-      if: "!cancelled() && steps.build.outcome == 'success'"
+      if: "!cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/integration'"
       uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
         path: ${{ env.CCACHE_DIR }}
