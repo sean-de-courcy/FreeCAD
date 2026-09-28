@@ -153,11 +153,11 @@ App::DocumentObjectExecReturn* MultiCommon::execute()
 
         // to achieve common of all shapes, we need to do it one shape at a time
         for (const auto& tool : shapes) {
-            res = res.makeElementBoolean(OpCodes::Common, {res, tool});
+            res = makeTopoShape(false).makeElementBoolean(OpCodes::Common, {res, tool});
         }
     }
     else {
-        res = TopoShape(0);
+        res = makeTopoShape(false);
         res.makeElementBoolean(OpCodes::Common, shapes);
     }
 

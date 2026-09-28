@@ -665,7 +665,9 @@ void ExtrusionHelper::makeElementDraft(
                 false,
                 offsetWire
             );
-            list_of_sections.push_back(TopoShape(offsetWire, sourceWire.Tag));
+            list_of_sections.push_back(
+                TopoShape(offsetWire, sourceWire.Tag, {}, sourceWire.getHistoryAlgorithm())
+            );
         }
 
         // next. Add source wire as middle section. Order is important.
@@ -683,7 +685,9 @@ void ExtrusionHelper::makeElementDraft(
                 false,
                 offsetWire
             );
-            list_of_sections.push_back(TopoShape(offsetWire, sourceWire.Tag));
+            list_of_sections.push_back(
+                TopoShape(offsetWire, sourceWire.Tag, {}, sourceWire.getHistoryAlgorithm())
+            );
         }
 
         try {
@@ -701,7 +705,8 @@ void ExtrusionHelper::makeElementDraft(
             }
 
             mkGenerator.Build();
-            drafts.push_back(TopoShape(0, hasher).makeElementShape(mkGenerator, list_of_sections));
+            drafts.push_back(TopoShape(0, hasher, sourceWire.getHistoryAlgorithm())
+                                 .makeElementShape(mkGenerator, list_of_sections));
         }
         catch (Standard_Failure&) {
             throw;
