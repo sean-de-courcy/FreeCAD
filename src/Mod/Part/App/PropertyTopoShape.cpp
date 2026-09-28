@@ -107,6 +107,11 @@ void PropertyPartShape::setValue(const TopoDS_Shape& sh, bool resetElementMap)
         _Shape.Tag = obj->getID();
     }
     _Shape.setShape(sh, resetElementMap);
+    if (obj && obj->isAttachedToDocument()) {
+        // A shape set without a TopoShape (primitives) takes the document's algorithm, so that
+        // the features that use it name their results with it (ops#30).
+        _Shape.setHistoryAlgorithm(obj->getSelectedHistoryAlgorithm());
+    }
     hasSetValue();
     _Ver.clear();
 }

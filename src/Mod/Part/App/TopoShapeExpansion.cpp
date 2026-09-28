@@ -193,11 +193,14 @@ void TopoShape::flushElementMap() const
             const_cast<TopoShape*>(this)->resetElementMap(this->_cache->cachedElementMap);
         }
         else if (this->_parentCache) {
+            // The parent's algorithm is this shape's, copied when it was taken from the parent
+            // (TopoShapeCache::Ancestry::_getTopoShape). The cache's own copy is set only with
+            // an element map, so for a parent without one it says V2 even in V1 (ops#30).
             TopoShape parent(
                 this->Tag,
                 this->Hasher,
                 this->_parentCache->shape,
-                this->_parentCache->selectedHistoryAlgorithm
+                getHistoryAlgorithm()
             );
             parent._cache = _parentCache;
             parent.flushElementMap();
