@@ -179,10 +179,14 @@ jobs:
       run: |
         pixi run ccache -s
 
-    # On Windows this is the only FreeCAD test step (C++ and install tests are skipped there),
-    # so it always runs; FreeCAD's LibPack Windows build, which ran it upstream, isn't carried.
+    # The test steps below run whenever the build succeeded, even after an earlier test step
+    # failed, and compare their failures with the known-failure list (tests/known-failures,
+    # .github/scripts/known_failures.py): a step fails only on an unlisted failure.
+
+    # On Windows the CLI tests run on the build dir (the install tests are skipped there);
+    # FreeCAD's LibPack Windows build, which ran them upstream, isn't carried.
     - name: FreeCAD CLI tests on build dir
-      if: (inputs.testOnBuildDir || runner.os == 'Windows') && !inputs.skipBuild
+      if: (inputs.testOnBuildDir || runner.os == 'Windows') && !cancelled() && steps.build.outcome == 'success'
       timeout-minutes: 30
       uses: ./.github/workflows/actions/runPythonTests
       with:
@@ -191,6 +195,7 @@ jobs:
         logFile: ${{ env.wsdir }}/logs/TestCLIBuild.log
         reportFile: ${{ env.wsdir }}/report/${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
+        knownFailuresPlatform: ${{ runner.os }}
 
     - name: FreeCAD GUI tests on build dir
       if: runner.os == 'Linux' && inputs.testOnBuildDir && !inputs.skipBuild
@@ -225,26 +230,28 @@ jobs:
         path: /tmp/FreeCADTesting/CoinNodeSnapshots
 
     - name: src/Tools tests
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && steps.build.outcome == 'success'"
       run: pixi run python -m unittest discover -s src/Tools/tests -p "test_*.py"
 
+    # Windows too (upstream skips it there); the runner puts the module DLLs on PATH itself.
     - name: C++ tests
-      timeout-minutes: 10
-      if: runner.os != 'Windows' && !inputs.skipBuild
+      timeout-minutes: 20
+      if: "!cancelled() && steps.build.outcome == 'success'"
       uses: ./.github/workflows/actions/runCPPTests/runAllTests
       with:
-        reportdir: ${{ env.reportdir }}
-        builddir: ${{ env.builddir }}
-        reportFile: ${{ env.reportdir }}${{ env.reportfilename }}
+        reportdir: ${{ env.wsdir }}/logs/
+        builddir: ${{ env.wsdir }}/build/release
+        reportFile: ${{ env.wsdir }}/report/${{ env.reportfilename }}
+        platform: ${{ runner.os }}
         shellCmd: ${{ env.shellCmd }}
 
     - name: CMake Install
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && steps.build.outcome == 'success'"
       run: |
         pixi run install-${{ env.config }}
 
     - name: FreeCAD CLI tests on install
-      if: runner.os != 'Windows' && !inputs.skipBuild
+      if: runner.os != 'Windows' && !cancelled() && steps.build.outcome == 'success'
       timeout-minutes: 10
       uses: ./.github/workflows/actions/runPythonTests
       with:
@@ -253,6 +260,7 @@ jobs:
         logFile: ${{ env.logdir }}TestCLIInstall.log
         reportFile: ${{env.reportdir}}${{ env.reportfilename }}
         shellCmd: ${{ env.shellCmd }}
+        knownFailuresPlatform: ${{ runner.os }}
 
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild
@@ -278,7 +286,7 @@ jobs:
         key: FC-${{ env.cacheKey }}-${{ github.ref }}-${{ github.run_id }}
 
     - name: Upload logs
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && !inputs.skipBuild"
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ inputs.artifactBasename }}-${{ matrix.os }}-Logs
@@ -287,7 +295,7 @@ jobs:
           /var/crash/*FreeCAD*
 
     - name: Upload report
-      if: "!inputs.skipBuild"
+      if: "!cancelled() && !inputs.skipBuild"
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: ${{ env.reportfilename }}
