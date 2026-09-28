@@ -207,6 +207,11 @@ void PropertyPartShape::setPyObject(PyObject* value)
                     shape.getHistoryAlgorithm()
                 );
                 res.mapSubElement(shape);
+                // V2's mapSubElement() copies the names as they are. Give the owner's tag to
+                // the elements the Python code made (tag 0), as V1's tag postfix does.
+                if (res.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                    res.reTagElementMap(owner->getID(), res.Hasher);
+                }
                 shape = res;
             }
             else {

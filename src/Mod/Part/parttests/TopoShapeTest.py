@@ -104,6 +104,16 @@ def squareFaceName(face, tag):
     )
 
 
+class SquareFaceFeature:
+    """Proxy of a Part::FeaturePython whose shape is makeSquareFace()."""
+
+    def __init__(self, obj):
+        obj.Proxy = self
+
+    def execute(self, obj):
+        obj.Shape = makeSquareFace()
+
+
 class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
     def setUp(self):
         """Create a document and some TopoShapes of various types"""
@@ -973,3 +983,33 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                 )
         # the untagged name still decodes as untagged
         self.assertEqual(App.getDecodedMappedName(untaggedName)[-1]["iterationTag"], "0")
+
+    def testFeaturePythonShapeTagged(self):
+        """A Python feature's new elements carry the feature's tag, on every recompute and in
+        every feature that makes the same shape (ops#16)."""
+        # Arrange
+        features = []
+        for name in ("SquareFace1", "SquareFace2"):
+            feature = self.doc.addObject("Part::FeaturePython", name)
+            SquareFaceFeature(feature)
+            features.append(feature)
+        untagged = makeSquareFace()
+        for recompute in (1, 2):
+            # Act
+            for feature in features:
+                feature.touch()
+            self.doc.recompute()
+            # Assert
+            for feature in features:
+                with self.subTest(recompute=recompute, feature=feature.Name):
+                    shape = feature.Shape
+                    self.assertEqual(shape.Tag, feature.ID)
+                    self.assertEqual(
+                        shape.ElementReverseMap["Face1"], squareFaceName(untagged, feature.ID)
+                    )
+                    # the edges are the wire's, not new: they keep its names
+                    for index in range(1, 5):
+                        self.assertEqual(
+                            shape.ElementReverseMap[f"Edge{index}"],
+                            untagged.ElementReverseMap[f"Edge{index}"],
+                        )
