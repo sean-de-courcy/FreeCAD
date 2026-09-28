@@ -41,6 +41,13 @@ inputs:
     description: "Shell command to use for action steps (e.g. 'pixi run bash -l {0}')"
     default: "bash -l {0}"
     required: false
+  knownFailuresPlatform:
+    description: >-
+      FreeCAD-CH: when set (runner.os works: Windows, macOS), failing tests don't fail the run
+      step; a check step compares them with the known-failure list (tests/known-failures) and
+      fails only on unlisted failures or an incomplete run.
+    default: ""
+    required: false
 
 runs:
   using: "composite"
@@ -49,26 +56,38 @@ runs:
       id: runTests
       shell: ${{ inputs.shellCmd }}
       run: |
-        set -o pipefail
+        set +e
         mkdir -p "$(dirname "${{ inputs.logFile }}")"
         {
           ${{ inputs.testCommand }}
         } 2>&1 | sed -Ee "/[[:blank:]]*\\([[:digit:]]{1,3} %\\)[[:blank:]]*/d" | tee -a "${{ inputs.logFile }}"
+        status=${PIPESTATUS[0]}
+        echo "exitCode=$status" >> "$GITHUB_OUTPUT"
+        if [ -z "${{ inputs.knownFailuresPlatform }}" ]; then exit $status; fi
     - name: Write report
       shell: ${{ inputs.shellCmd }}
       if: always()
       run: |
         mkdir -p "$(dirname "${{ inputs.logFile }}")"
         touch "${{ inputs.logFile }}"
-        sed -ne "/^\(FAILED\|ERROR\):/,/^[[:blank:]]*$/bF; /^Traceback/,/^[^[:blank:]]/{/^Traceback/bT; /^[^[:blank:]]/G; bT}; b; :T w ${{ inputs.logFile }}_tracebacks" -e "b; :F w ${{ inputs.logFile }}_failedtests" ${{ inputs.logFile }}
+        sed -ne "/^\(FAIL\|ERROR\): /,/^[[:blank:]]*$/bF; /^Traceback/,/^[^[:blank:]]/{/^Traceback/bT; /^[^[:blank:]]/G; bT}; b; :T w ${{ inputs.logFile }}_tracebacks" -e "b; :F w ${{ inputs.logFile }}_failedtests" ${{ inputs.logFile }}
         icon=""
         if [ $( cat ${{ inputs.logFile }}_tracebacks | wc -l ) -gt 0 ]
         then
           icon=" :fire:"
         fi
-        if [ ${{ steps.runTests.outcome }} == 'success' ]
+        if [ ${{ steps.runTests.outcome }} == 'success' ] && [ "${{ steps.runTests.outputs.exitCode }}" == 0 ]
         then
           echo "<details><summary>:heavy_check_mark: ${{ inputs.testDescription }} succeeded$icon</summary>" >> ${{ inputs.reportFile }}
+        elif [ -n "${{ inputs.knownFailuresPlatform }}" ]
+        then
+          echo "<details><summary>:information_source: ${{ inputs.testDescription }}: failing tests (compared with the known-failure list below)$icon</summary>" >> ${{ inputs.reportFile }}
+          echo "" >> ${{ inputs.reportFile }}
+          echo "Failed tests" >> ${{ inputs.reportFile }}
+          echo "" >> ${{ inputs.reportFile }}
+          echo '```' >> ${{ inputs.reportFile }}
+          cat ${{ inputs.logFile }}_failedtests >> ${{ inputs.reportFile }}
+          echo '```' >> ${{ inputs.reportFile }}
         else
           echo "<details><summary>:fire: ${{ inputs.testDescription }} failed$icon</summary>" >> ${{ inputs.reportFile }}
           echo "" >> ${{ inputs.reportFile }}
@@ -89,3 +108,15 @@ runs:
         fi
         echo "</details>">> ${{ inputs.reportFile }}
         echo "" >> ${{ inputs.reportFile }}
+    - name: Check against the known-failure list
+      if: always() && inputs.knownFailuresPlatform != ''
+      shell: ${{ inputs.shellCmd }}
+      env:
+        KF_LOG_FILE: ${{ inputs.logFile }}
+        KF_REPORT_FILE: ${{ inputs.reportFile }}
+        KF_PLATFORM: ${{ inputs.knownFailuresPlatform }}
+        KF_EXIT_CODE: ${{ steps.runTests.outputs.exitCode }}
+        KF_WHAT: ${{ inputs.testDescription }}
+      run: |
+        python .github/scripts/known_failures.py cli --platform "$KF_PLATFORM" --log "$KF_LOG_FILE" \
+          --report "$KF_REPORT_FILE" --what "$KF_WHAT" ${KF_EXIT_CODE:+--exit-code "$KF_EXIT_CODE"}
