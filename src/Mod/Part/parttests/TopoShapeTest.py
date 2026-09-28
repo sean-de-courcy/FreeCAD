@@ -1062,3 +1062,56 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                             shape.ElementReverseMap[f"Edge{index}"],
                             untagged.ElementReverseMap[f"Edge{index}"],
                         )
+
+    def testV1SketchExtrusionFaceNames(self):
+        """In a V1 document, every face of an extrusion of a rectangle sketch has a V1 face name
+        (element type F), and the two end faces are named from the sketch's face (FAC). The end
+        faces were misnamed while element maps ran V2 rules in V1 documents (ops#17)."""
+        import re
+        import Sketcher
+
+        # Arrange
+        doc = App.newDocument("V1SketchExtrusion")
+        try:
+            doc.HistoryAlgorithm = "V1"
+            sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+            corners = [
+                App.Vector(0, 0, 0),
+                App.Vector(10, 0, 0),
+                App.Vector(10, 6, 0),
+                App.Vector(0, 6, 0),
+            ]
+            for index in range(4):
+                sketch.addGeometry(Part.LineSegment(corners[index], corners[(index + 1) % 4]))
+            for index in range(4):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", index, 2, (index + 1) % 4, 1))
+            extrusion = doc.addObject("Part::Extrusion", "Extrusion")
+            extrusion.Base = sketch
+            extrusion.Dir = App.Vector(0, 0, 4)
+            extrusion.Solid = True
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            shape = extrusion.Shape
+            table = shape.Hasher.Table
+
+            def decoded(name):
+                # V1 names hash long parts: spell out each "#<hex id>" from the hasher's table
+                return re.sub(
+                    r"#([0-9a-f]+)",
+                    lambda m: "{" + decoded(table.get(int(m.group(1), 16), m.group(0)[1:])) + "}",
+                    name,
+                )
+
+            self.assertEqual(len(shape.Faces), 6)
+            for index, face in enumerate(shape.Faces, 1):
+                name = decoded(shape.ElementReverseMap[f"Face{index}"])
+                with self.subTest(face=index, name=name):
+                    self.assertTrue(name.endswith(",F"))
+                    # the end faces are the planes z = 0 and z = 4
+                    if abs(face.CenterOfMass.z) < 1e-7 or abs(face.CenterOfMass.z - 4) < 1e-7:
+                        self.assertIn(";FAC;", name)
+        finally:
+            App.closeDocument(doc.Name)

@@ -16,13 +16,12 @@ public:
     LessComplexPart(long tag,
                     const std::string& nameStr,
                     App::StringHasherRef hasher,
-                    const App::HistoryAlgorithm* algorithm = nullptr)
+                    App::HistoryAlgorithm algorithm = App::HistoryAlgorithm::V2)
         : elementMapPtr(std::make_shared<Data::ElementMap>())
         , Tag(tag)
         , name(nameStr)
     {
-        // nullptr means the default algorithm (V2)
-        elementMapPtr->syncHistoryAlgorithm(algorithm);
+        elementMapPtr->setHistoryAlgorithm(algorithm);
         // object also have Vertexes etc and the face count varies; but that is not important
         // here since we are not testing a real model
         // the "MappedName" is left blank for now
@@ -371,10 +370,10 @@ TEST_F(ElementMapTest, mimicSimpleUnionV1)
     std::ostringstream finalSs;
     const char* docName = "Unnamed";
 
-    LessComplexPart cube(1L, "Box", _hasher, &_v1);
-    LessComplexPart cylinder(2L, "Cylinder", _hasher, &_v1);
+    LessComplexPart cube(1L, "Box", _hasher, _v1);
+    LessComplexPart cylinder(2L, "Cylinder", _hasher, _v1);
     // Union (Fusion) operation via the Part Workbench
-    LessComplexPart unionPart(3L, "Fusion", _hasher, &_v1);
+    LessComplexPart unionPart(3L, "Fusion", _hasher, _v1);
 
     // we are only going to simulate one face for testing purpose
     Data::IndexedName uface3("Face", 3);
@@ -442,7 +441,7 @@ TEST_F(ElementMapTest, mimicOperationAgainstSelfV1)
     // Arrange
     //   pattern: new doc, create Cube, Mystery Op with self as target
     std::ostringstream ss;
-    LessComplexPart finalPart(99L, "MysteryOp", _hasher, &_v1);
+    LessComplexPart finalPart(99L, "MysteryOp", _hasher, _v1);
     // we are only going to simulate one face for testing purpose
     Data::IndexedName uface3("Face", 3);
     auto PartOp = "MYS";
@@ -496,10 +495,10 @@ TEST_F(ElementMapTest, hasChildElementMapTestV1)
     Data::ElementMap::MappedChildElements child
         = {Data::IndexedName("face", 1), 2, 7, 4L, Data::ElementMapPtr(), QByteArray(""), _sid};
     std::vector<Data::ElementMap::MappedChildElements> children = {child};
-    LessComplexPart cubeFull(3L, "FullBox", _hasher, &_v1);
+    LessComplexPart cubeFull(3L, "FullBox", _hasher, _v1);
     cubeFull.elementMapPtr->addChildElements(cubeFull.Tag, children);
     //
-    LessComplexPart cubeWithoutChildren(2L, "EmptyBox", _hasher, &_v1);
+    LessComplexPart cubeWithoutChildren(2L, "EmptyBox", _hasher, _v1);
 
     // Act
     bool resultFull = cubeFull.elementMapPtr->hasChildElementMap();
@@ -513,7 +512,7 @@ TEST_F(ElementMapTest, hasChildElementMapTestV1)
 TEST_F(ElementMapTest, hashChildMapsTestV1)
 {
     // Arrange
-    LessComplexPart cube(1L, "Box", _hasher, &_v1);
+    LessComplexPart cube(1L, "Box", _hasher, _v1);
     auto childOneName = Data::IndexedName("Ping", 1);
     Data::ElementMap::MappedChildElements childOne = {
         childOneName,
@@ -540,7 +539,7 @@ TEST_F(ElementMapTest, hashChildMapsTestV1)
 TEST_F(ElementMapTest, addAndGetChildElementsTestV1)
 {
     // Arrange
-    LessComplexPart cube(1L, "Box", _hasher, &_v1);
+    LessComplexPart cube(1L, "Box", _hasher, _v1);
     Data::ElementMap::MappedChildElements childOne = {
         Data::IndexedName("Ping", 1),
         2,
@@ -843,7 +842,7 @@ TEST_F(ElementMapTest, retagElementMapV2)
     const std::string untagged = faceNameWithTag(0);
     auto makeMap = [&]() {
         auto map = std::make_shared<Data::ElementMap>();
-        map->syncHistoryAlgorithm(&v2);
+        map->setHistoryAlgorithm(v2);
         map->hasher = _hasher;
         map->setElementName(edge1, edgeName, 0);
         map->setElementName(face1, Data::MappedName(untagged), 0);

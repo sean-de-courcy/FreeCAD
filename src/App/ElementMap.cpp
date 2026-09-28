@@ -1643,10 +1643,7 @@ void ElementMap::traceElement(const MappedName& name, long masterTag, TraceCallb
 }
 
 void ElementMap::retagElementMap(long newTag) {
-    if (historyAlgorithmRef == nullptr
-        || *historyAlgorithmRef != App::HistoryAlgorithm::V2
-        || newTag == 0)
-    {
+    if (historyAlgorithm != App::HistoryAlgorithm::V2 || newTag == 0) {
         return;
     }
 
