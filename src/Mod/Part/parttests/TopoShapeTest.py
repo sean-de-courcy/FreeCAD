@@ -40,6 +40,26 @@ class TopoShapeAssertions:
                     msg = f"Key {key} not found in map:  {map}"
                 raise AssertionError(msg)
 
+    def assertAllElementsMapped(self, shape, msg=None):
+        """Every face, edge and vertex of the shape has a mapped name. How many names an
+        element has is an implementation detail of the naming algorithm, so tests don't
+        count them."""
+        reverse_map = shape.ElementReverseMap
+        unmapped = [
+            f"{kind}{index}"
+            for kind, elements in (
+                ("Face", shape.Faces),
+                ("Edge", shape.Edges),
+                ("Vertex", shape.Vertexes),
+            )
+            for index in range(1, len(elements) + 1)
+            if f"{kind}{index}" not in reverse_map
+        ]
+        if unmapped:
+            if msg == None:
+                msg = f"Elements without a mapped name: {unmapped}"
+            raise AssertionError(msg)
+
     def assertBounds(self, shape, bounds, msg=None, precision=App.Base.Precision.confusion() * 100):
         shape_bounds = shape.BoundBox
         shape_bounds_max = App.BoundBox(shape_bounds)
@@ -143,7 +163,6 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         attr_value_list = [
             ["Area", 16.0],
             ["ElementMapSize", 0],
-            # ['ElementMapVersion', 4 ], # Todo: Not until TNP on.
             ["Length", 40.0],  # Sum of all edges of each face, so some redundancy.
             ["Mass", 4.0],
             # ['MemSize', 13824],  # Platform variations in this size.
@@ -178,17 +197,11 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.doc.recompute()
         compound2 = self.doc.Compound.Shape
         # Assert elementMap
-        # This flag indicates that ElementMaps are supported under the current C++ build:
-        # 52 is 2 cubes of 26 each: 6 Faces, 12 Edges, 8 Vertexes
         # Todo: This should contain something as soon as the Python interface
         #  for Part.Compound TNP exists
-        # self.assertEqual(len(compound1.ElementMap), 52,
-        #                  "ElementMap is Incorrect:  {0}".format(compound1.ElementMap))
-        self.assertEqual(
-            compound2.ElementMapSize,
-            52,
-            "ElementMap is Incorrect:  {0}".format(compound2.ElementMap),
-        )
+        # self.assertAllElementsMapped(compound1)
+        # 2 cubes of 26 elements each: 6 Faces, 12 Edges, 8 Vertexes
+        self.assertAllElementsMapped(compound2)
         # Assert Shape
         self.assertBounds(compound2, App.BoundBox(0, 0, 0, 2, 2, 2))
 
@@ -287,13 +300,16 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.doc.recompute()
         fuse1 = self.doc.Fuse.Shape
         # Assert elementMap
-        self.assertEqual(fuse1.ElementMapSize, 69)
+        self.assertAllElementsMapped(fuse1)
         self.doc.Fuse.Refine = True
         self.doc.recompute()
-        self.assertEqual(fuse1.ElementMapSize, 69)
-        # Shape is an extruded L, with 8 Faces, 12 Vertexes, 18 Edges
+        fuse2 = self.doc.Fuse.Shape
+        self.assertAllElementsMapped(fuse2)
+        # Refined, the shape is an extruded L, with 8 Faces, 12 Vertexes, 18 Edges
+        self.assertAttrCount(fuse2, [["Faces", 8], ["Edges", 18], ["Vertexes", 12]])
         # Assert Shape
         self.assertBounds(fuse1, App.BoundBox(0, 0, 0, 2, 2, 2))
+        self.assertBounds(fuse2, App.BoundBox(0, 0, 0, 2, 2, 2))
 
     def testAppPartMakeCompound(self):
         # This doesn't do element maps.
@@ -301,7 +317,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         compound1 = Part.makeCompound([self.doc.Box1.Shape, self.doc.Box2.Shape])
         # Assert elementMap
-        self.assertEqual(compound1.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound1)
         # Assert Shape
         self.assertBounds(compound1, App.BoundBox(0, 0, 0, 2, 2, 2))
 
@@ -408,8 +424,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         new_toposhape = Part.Shape(compound)
         new_empty_toposhape = Part.Shape()
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
-        self.assertEqual(new_toposhape.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
+        self.assertAllElementsMapped(new_toposhape)
 
     def testTopoShapeCopy(self):
         # Arrange
@@ -423,8 +439,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         compound_copy = compound.copy()
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
-        self.assertEqual(compound_copy.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
+        self.assertAllElementsMapped(compound_copy)
 
     def testTopoShapeCleaned(self):
         # Arrange
@@ -438,8 +454,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         compound_cleaned = compound.cleaned()
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
-        self.assertEqual(compound_cleaned.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
+        self.assertAllElementsMapped(compound_cleaned)
 
     def testTopoShapeCopyWithoutElementMap(self):
         # Arrange
@@ -453,7 +469,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         compound_plain = compound.copy(noElementMap=True)
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
         self.assertEqual(compound_plain.ElementMapSize, 0)
 
     def testTopoShapeMakeFaceWithoutElementMap(self):
@@ -480,8 +496,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             [(App.activeDocument().Box2.Shape, App.activeDocument().Box1.Shape)]
         )
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
-        self.assertEqual(compound_replaced.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
+        self.assertAllElementsMapped(compound_replaced)
 
     def testTopoShapeRemoveShape(self):
         # Arrange
@@ -495,8 +511,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         compound_removed = compound.removeShape([App.ActiveDocument.Box2.Shape])
         # Assert elementMap
-        self.assertEqual(compound.ElementMapSize, 52)
-        self.assertEqual(compound_removed.ElementMapSize, 52)
+        self.assertAllElementsMapped(compound)
+        self.assertAllElementsMapped(compound_removed)
 
     def testTopoShapeExtrude(self):
         # Arrange
@@ -521,7 +537,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         fused = self.doc.Box1.Shape.fuse(self.doc.Box2.Shape)
         self.doc.recompute()
         # Assert elementMap
-        self.assertEqual(fused.ElementMapSize, 58)
+        self.assertAllElementsMapped(fused)
 
     def testTopoShapeFuseWithoutElementMap(self):
         # Act
@@ -535,7 +551,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         fused = self.doc.Box1.Shape.multiFuse([self.doc.Box2.Shape])
         self.doc.recompute()
         # Assert elementMap
-        self.assertEqual(fused.ElementMapSize, 58)
+        self.assertAllElementsMapped(fused)
 
     def testTopoShapeMultiFuseWithoutElementMap(self):
         # Act
@@ -549,7 +565,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         common = self.doc.Box1.Shape.common(self.doc.Box2.Shape)
         self.doc.recompute()
         # Assert elementMap
-        self.assertEqual(common.ElementMapSize, 26)
+        self.assertAllElementsMapped(common)
+        self.assertAttrCount(common, [["Faces", 6], ["Edges", 12], ["Vertexes", 8]])
 
     def testTopoShapeSection(self):
         # Act
@@ -586,7 +603,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.doc.recompute()
         # Assert elementMap
         self.assertEqual(len(fuse), 2)
-        self.assertEqual(fuse[0].ElementMapSize, 60)
+        self.assertAllElementsMapped(fuse[0])
 
     def testTopoShapeChildShapes(self):
         # Act
@@ -721,7 +738,9 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         removed = fused.removeSplitter()
         self.doc.recompute()
         # Assert elementMap
-        self.assertEqual(removed.ElementMapSize, 38)
+        self.assertAllElementsMapped(removed)
+        # An extruded L: 8 Faces, 18 Edges, 12 Vertexes
+        self.assertAttrCount(removed, [["Faces", 8], ["Edges", 18], ["Vertexes", 12]])
 
     def testTopoShapeCompSolid(self):
         # Act
@@ -749,9 +768,8 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
     #     # Act
     #     evolved = box_toposhape.Faces[0].makeEvolved(self.doc.Box1.Shape.Wires[1])  # 2,3,4,5 bad
     #     # Assert elementMap
-    #     if box_toposhape.Faces[0].ElementMapVersion != "":  # Should be '5' as of Dec 2025.
-    #         self.assertEqual(box_toposhape.Faces[0].ElementMapSize, 9)  # 1 Face, 4 Edges, 4 Vertexes
-    #         self.assertEqual(evolved.ElementMapSize, 0)  # Todo: This can't be correct.
+    #     self.assertEqual(box_toposhape.Faces[0].ElementMapSize, 9)  # 1 Face, 4 Edges, 4 Vertexes
+    #     self.assertEqual(evolved.ElementMapSize, 0)  # Todo: This can't be correct.
 
     def testTopoShapePart(self):
         # Arrange
@@ -793,9 +811,13 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         self.doc.recompute()
         fuse1 = self.doc.Fuse.Shape
-        history1 = fuse1.getElementHistory(fuse1.ElementReverseMap["Vertex1"])
+        names = fuse1.ElementReverseMap["Vertex1"]
+        name = names if isinstance(names, str) else names[0]
+        history1 = fuse1.getElementHistory(name)
         # Assert
-        self.assertEqual(len(history1), 3)  # Just the Fuse operation
+        # (source shape tag, source name, intermediate names)
+        self.assertIsNotNone(history1, f"No history for {name}")
+        self.assertEqual(len(history1), 3)
 
     # Todo:  Still broken, still can't find parms that consistently work to test this.
     #           However, the results with an empty elementMap are consistent with making the
@@ -866,57 +888,13 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.doc.recompute()
         cut1 = self.doc.Cut.Shape
         # Assert elementMap
-        refkeys = [
-            "Vertex3",
-            "Vertex4",
-            "Vertex8",
-            "Vertex10",
-            "Vertex7",
-            "Vertex9",
-            "Vertex13",
-            "Vertex14",
-            "Vertex18",
-            "Vertex20",
-            "Vertex17",
-            "Vertex19",
-            "Edge3",
-            "Edge15",
-            "Edge9",
-            "Edge12",
-            "Edge13",
-            "Edge11",
-            "Edge8",
-            "Edge17",
-            "Edge18",
-            "Edge19",
-            "Edge30",
-            "Edge24",
-            "Edge27",
-            "Edge28",
-            "Edge29",
-            "Edge25",
-            "Edge26",
-            "Edge23",
-            "Face7",
-            "Face4",
-            "Face8",
-            "Face14",
-            "Face13",
-            "Face11",
-            "Face12",
-            "Face10",
-            "Edge22",
-            "Vertex12",
-            "Edge20",
-            "Vertex11",
-            "Edge21",
-            "Edge16",
-            "Face9",
-            "Vertex15",
-            "Vertex16",
-        ]
-        self.assertKeysInMap(cut1.ElementReverseMap, refkeys)
-        self.assertEqual(len(cut1.ElementReverseMap.keys()), len(refkeys))
+        self.assertAllElementsMapped(cut1)
+        # Assert Volume: each box loses the quarter of the cylinder inside it
+        quarterCylinder = self.doc.Cylinder1.Shape.Volume / 4
+        self.assertAlmostEqual(
+            cut1.Volume,
+            self.doc.Box1.Shape.Volume + self.doc.Box2.Shape.Volume - 2 * quarterCylinder,
+        )
 
     def testCreateCompound(self):
         box = Part.makeBox(1, 1, 1)

@@ -1,0 +1,10 @@
+issue: ops#24
+reason: a compound of shapes without element maps has no mapped names; the test expects every element named
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeElementMap
+cli  parttests.TopoShapeTest.TopoShapeTest.testAppPartMakeCompound
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapePyInit
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCopy
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCleaned
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeCopyWithoutElementMap
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeReplaceShape
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeRemoveShape

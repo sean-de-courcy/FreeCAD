@@ -51,6 +51,69 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         vertexes = [name for name in map.keys() if name.startswith("Vertex")]
         return (len(faces), len(edges), len(vertexes))
 
+    def assertAllElementsMapped(self, shape):
+        """Every face, edge and vertex of the shape has a mapped name. How many names an
+        element has is an implementation detail of the naming algorithm, so tests don't
+        count them."""
+        reverseMap = shape.ElementReverseMap
+        unmapped = [
+            f"{kind}{index}"
+            for kind, elements in (
+                ("Face", shape.Faces),
+                ("Edge", shape.Edges),
+                ("Vertex", shape.Vertexes),
+            )
+            for index in range(1, len(elements) + 1)
+            if f"{kind}{index}" not in reverseMap
+        ]
+        self.assertEqual(unmapped, [], "Elements without a mapped name")
+
+    def sketchSection(self, sketch, referenceIDs, elementType):
+        """A sketch element's V2 name, decoded: one section with the sketch's ID as its tag.
+        Reference IDs are sorted, since a vertex lists its geometry points in no set order."""
+        return {
+            "referenceIDs": sorted(referenceIDs),
+            "linkedNames": [],
+            "iterationTag": str(sketch.ID),
+            "opCode": "SKT",
+            "index": "0",
+            "elementType": elementType,
+            "duplicateCount": "0",
+            "mapperFlags": ["SRC"],
+            "connectedElements": [],
+        }
+
+    def decodedNames(self, shape, prefix):
+        """The decoded mapped names of the shape's elements whose indexed name starts with
+        prefix, with each section's reference IDs sorted."""
+        decoded = []
+        for indexedName, mappedName in shape.ElementReverseMap.items():
+            if not indexedName.startswith(prefix):
+                continue
+            self.assertIsInstance(mappedName, str, f"{indexedName} has more than one name")
+            sections = App.getDecodedMappedName(mappedName)
+            for section in sections:
+                section["referenceIDs"] = sorted(section["referenceIDs"])
+            decoded.append(sections)
+        return decoded
+
+    def assertRectangleSketchNames(self, sketch):
+        """Check the V2 names of a sketch made by CreateRectangleSketch alone, from the
+        naming format. A section's fields are, in order: reference IDs, linked names,
+        iteration tag, op code, index, element type, duplicate count, mapper flags,
+        connected names; '_' is an empty field.
+        Edge: 'g<id>;_;<sketch ID>;SKT;0;E;0;SRC;_'.
+        Vertex: one name listing both line ends that meet there, 'g<a>v2,g<b>v1;_;<sketch ID>;SKT;0;V;0;SRC;_'."""
+        ids = [sketch.getGeometryId(index) for index in range(4)]
+        # Line i ends (point 2) where line i+1 starts (point 1).
+        expectedEdges = [[self.sketchSection(sketch, [f"g{i}"], "E")] for i in ids]
+        expectedVertexes = [
+            [self.sketchSection(sketch, [f"g{ids[k]}v2", f"g{ids[(k + 1) % 4]}v1"], "V")]
+            for k in range(4)
+        ]
+        self.assertCountEqual(self.decodedNames(sketch.Shape, "Edge"), expectedEdges)
+        self.assertCountEqual(self.decodedNames(sketch.Shape, "Vertex"), expectedVertexes)
+
     def testPadsOnBaseObject(self):
         """Simple TNP test case
         By creating three Pads dependent on each other in succession, and then moving the
@@ -130,11 +193,13 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         edges = [name for name in reverseMap.keys() if name.startswith("Edge")]
         vertexes = [name for name in reverseMap.keys() if name.startswith("Vertex")]
         # Assert
-        self.assertEqual(sketch.Shape.ElementMapSize, 12)
+        # One name per element: a corner's name lists both line ends that meet there.
+        self.assertEqual(sketch.Shape.ElementMapSize, 8)
         self.assertEqual(len(reverseMap), 8)
         self.assertEqual(len(reverseFaces), 0)
         self.assertEqual(len(edges), 4)
         self.assertEqual(len(vertexes), 4)
+        self.assertRectangleSketchNames(sketch)
 
     def testPartDesignBasicFusion(self):
         """Test that a basic fusion creates an element map, and refine retains it"""
@@ -182,11 +247,28 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         edges = [name for name in reverseMap.keys() if name.startswith("Edge")]
         vertexes = [name for name in reverseMap.keys() if name.startswith("Vertex")]
         # Assert
-        self.assertEqual(pad.Shape.ElementMapSize, 30)  # 4 duplicated Vertexes in here
         self.assertEqual(len(reverseMap), 26)
         self.assertEqual(len(faces), 6)
         self.assertEqual(len(edges), 12)
         self.assertEqual(len(vertexes), 8)
+        # A side face is generated (GEN) by the pad from the sketch edge it stands on:
+        # one section '_;<edge name>;<pad ID>;XTR;0;F;0;GEN;_'.
+        for index, edge in enumerate(padSketch.Shape.Edges, 1):
+            midpoint = Part.Vertex(edge.valueAt((edge.FirstParameter + edge.LastParameter) / 2))
+            sides = [
+                f"Face{faceIndex}"
+                for faceIndex, face in enumerate(pad.Shape.Faces, 1)
+                if abs(face.normalAt(0, 0).z) < 1e-7 and face.distToShape(midpoint)[0] < 1e-7
+            ]
+            self.assertEqual(len(sides), 1)
+            expected = App.makeEncodedSection(
+                linkedNames=[padSketch.Shape.ElementReverseMap[f"Edge{index}"]],
+                iterationTag=str(pad.ID),
+                opCode="XTR",
+                elementType="F",
+                mapperFlags=["GEN"],
+            )
+            self.assertEqual(reverseMap[sides[0]], expected)
 
     def testPartDesignElementMapBox(self):
         # Arrange
@@ -500,7 +582,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertEqual(body.Shape.childShapes()[0].ElementMapSize, 50)
+        self.assertAllElementsMapped(body.Shape)
 
     def testPartDesignElementPadSketch(self):
         # Arrange
@@ -515,10 +597,9 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertEqual(body.Shape.childShapes()[0].ElementMapSize, 30)  # The pad
-        self.assertEqual(body.Shape.ElementMapSize, 26)
-        self.assertEqual(sketch.Shape.ElementMapSize, 12)
-        self.assertEqual(pad.Shape.ElementMapSize, 30)  # pad has the 26 plus the 4 original
+        self.assertAllElementsMapped(body.Shape)
+        self.assertAllElementsMapped(pad.Shape)
+        self.assertRectangleSketchNames(sketch)
         self.assertNotEqual(
             pad.Shape.ElementReverseMap["Vertex1"], "Vertex1"
         )  # NewName, not OldName
@@ -756,9 +837,10 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertGreaterEqual(body.Shape.childShapes()[0].ElementMapSize, 26)
-        revMap = body.Shape.childShapes()[0].ElementReverseMap
-        self.assertEqual(self.countFacesEdgesVertexes(revMap), (14, 28, 16))
+        self.assertEqual(
+            (len(helix.Shape.Faces), len(helix.Shape.Edges), len(helix.Shape.Vertexes)),
+            (14, 28, 16),
+        )
         Radius = 0  # Rectangle is on the axis, but wouldn't matter regardless here
         Area = Part.Face(sketch.Shape).Area
         # General helix formula; not actually used here since devolves to just the
@@ -772,7 +854,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertAlmostEqual(Area, 1)
         self.assertAlmostEqual(helixLength, helix.Height.Value)
         self.assertAlmostEqual(helix.Shape.Volume, Volume, 2)
-        self.assertEqual(body.Shape.ElementMapSize, 58)
+        self.assertAllElementsMapped(helix.Shape)
+        self.assertAllElementsMapped(body.Shape)
 
     def testPartDesignElementMapPocket(self):
         # Arrange
@@ -796,10 +879,9 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertEqual(body.Shape.childShapes()[0].ElementMapSize, 51)
-        self.assertEqual(body.Shape.ElementMapSize, 51)
-        self.assertEqual(sketch.Shape.ElementMapSize, 12)
-        self.assertEqual(pocket.Shape.ElementMapSize, 51)
+        self.assertAllElementsMapped(body.Shape)
+        self.assertAllElementsMapped(pocket.Shape)
+        self.assertRectangleSketchNames(sketch)
         self.assertNotEqual(
             pocket.Shape.ElementReverseMap["Vertex1"], "Vertex1"
         )  # NewName, not OldName
@@ -2342,9 +2424,21 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         App.Gui.Selection.addSelection("", extrude.Name, "Face2")
         # Assert
         self.assertEqual(len(App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames), 1)
+        # ";<mapped name>.Face2". Face2 is a side face, generated by the extrusion from an edge
+        # of the plane, so its last section is '...;<extrude ID>;XTR;<index>;F;0;GEN;...'.
+        subname = App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames[0]
+        mappedName, _, indexedName = subname.rpartition(".")
+        self.assertEqual(indexedName, "Face2")
+        self.assertTrue(mappedName.startswith(";"), subname)
+        section = App.getDecodedMappedName(mappedName[1:])[-1]
         self.assertEqual(
-            App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames[0][-8:],
-            ",F.Face2",
+            (
+                section["iterationTag"],
+                section["opCode"],
+                section["elementType"],
+                section["mapperFlags"],
+            ),
+            (str(extrude.ID), "XTR", "F", ["GEN"]),
         )
 
     def testGetElementFunctionality(self):

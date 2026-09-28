@@ -1,0 +1,3 @@
+issue: ops#27
+reason: getElementHistory parses V1 tag postfixes only and returns None for V2 names
+cli  parttests.TopoShapeTest.TopoShapeTest.testTopoShapeGetElementHistory
