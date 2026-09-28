@@ -48,46 +48,48 @@ int MappedName::compare(const MappedName& other) const
 {
     ZoneScoped;
 
-    const char* thisArray = data.constData();
-    const char* otherArray = other.data.constData();
+    // Compare data followed by postfix as one byte string on each side, so that where a name
+    // is split between data and postfix doesn't change the result (operator== ignores the
+    // split too). Walk both sides in runs that end at the next data/postfix boundary of
+    // either side.
+    const QByteArray* const thisParts[] = {&data, &postfix};
+    const QByteArray* const otherParts[] = {&other.data, &other.postfix};
+    constexpr int partCount = 2;
+    int thisPart = 0;
+    int otherPart = 0;
+    qsizetype thisPos = 0;
+    qsizetype otherPos = 0;
 
-    int thisArraySize = data.size();
-    int otherArraySize = other.data.size();
-    int minimumArraySize = std::min(thisArraySize, otherArraySize);
-    int comparisonValue = std::memcmp(thisArray, otherArray, minimumArraySize);
+    while (true) {
+        while (thisPart < partCount && thisPos == thisParts[thisPart]->size()) {
+            ++thisPart;
+            thisPos = 0;
+        }
+        while (otherPart < partCount && otherPos == otherParts[otherPart]->size()) {
+            ++otherPart;
+            otherPos = 0;
+        }
+        if (thisPart == partCount || otherPart == partCount) {
+            break;
+        }
 
-    if (comparisonValue != 0) {
-        return comparisonValue;
+        qsizetype count = std::min(thisParts[thisPart]->size() - thisPos,
+                                   otherParts[otherPart]->size() - otherPos);
+        int comparisonValue = std::memcmp(thisParts[thisPart]->constData() + thisPos,
+                                          otherParts[otherPart]->constData() + otherPos,
+                                          static_cast<size_t>(count));
+        if (comparisonValue != 0) {
+            return comparisonValue < 0 ? -1 : 1;
+        }
+        thisPos += count;
+        otherPos += count;
     }
 
-    thisArray += minimumArraySize;
-    thisArraySize -= minimumArraySize;
-
-    if (!thisArraySize) {
-        thisArray = postfix.constData();
-        thisArraySize = postfix.size();
+    // One side ran out; the shorter name is less.
+    if (thisPart == partCount && otherPart == partCount) {
+        return 0;
     }
-
-    otherArray += minimumArraySize;
-    otherArraySize -= minimumArraySize;
-
-    if (!otherArraySize) {
-        otherArray = other.postfix.constData();
-        otherArraySize = other.postfix.size();
-    }
-
-    minimumArraySize = std::min(thisArraySize, otherArraySize);
-    comparisonValue = std::memcmp(thisArray, otherArray, minimumArraySize);
-
-    if (comparisonValue != 0) {
-        return comparisonValue;
-    } else if (thisArraySize < otherArraySize) {
-        return -1;
-    } else if (thisArraySize > otherArraySize) {
-        return 1;
-    }
-
-    return 0;
+    return thisPart == partCount ? -1 : 1;
 }
 
 void MappedName::append(const MappedName& other, int startPosition, int size)

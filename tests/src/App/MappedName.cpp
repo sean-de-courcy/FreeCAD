@@ -5,6 +5,7 @@
 #include "App/ComplexGeoData.h"
 #include "App/MappedName.h"
 
+#include <map>
 #include <string>
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -651,6 +652,45 @@ TEST(MappedName, compare)
     EXPECT_EQ(mappedName1 < mappedName4, true);
     EXPECT_EQ(mappedName1 < mappedName5, false);
     EXPECT_EQ(mappedName1 < mappedName6, true);
+}
+
+TEST(MappedName, compareIgnoresPostfixSplit)
+{
+    // Arrange: the same 15 bytes "TESTPOSTFIXTEST", split between data and postfix in three
+    // ways, and names that differ from them only past both splits.
+    Data::MappedName split4(Data::MappedName("TEST"), "POSTFIXTEST");
+    Data::MappedName split8(Data::MappedName("TESTPOST"), "FIXTEST");
+    Data::MappedName whole("TESTPOSTFIXTEST");
+    Data::MappedName greater(Data::MappedName("TEST"), "POSTFIXTESU");
+    Data::MappedName less(Data::MappedName("TESTPOSTFIXTES"), "S");
+    Data::MappedName longer(Data::MappedName("TESTPOST"), "FIXTESTX");
+
+    // Act & Assert: equal bytes compare equal in both directions, like operator==
+    EXPECT_EQ(split4, split8);
+    EXPECT_EQ(split4.compare(split8), 0);
+    EXPECT_EQ(split8.compare(split4), 0);
+    EXPECT_EQ(split4.compare(whole), 0);
+    EXPECT_EQ(whole.compare(split4), 0);
+    EXPECT_EQ(split8.compare(whole), 0);
+    EXPECT_EQ(whole.compare(split8), 0);
+
+    // the first differing byte decides, wherever it is
+    EXPECT_EQ(split8.compare(greater), -1);
+    EXPECT_EQ(greater.compare(split8), 1);
+    EXPECT_EQ(split8.compare(less), 1);
+    EXPECT_EQ(less.compare(split8), -1);
+
+    // a proper prefix is less
+    EXPECT_EQ(split4.compare(longer), -1);
+    EXPECT_EQ(longer.compare(split4), 1);
+
+    // bytes compare as unsigned
+    EXPECT_EQ(Data::MappedName("A\x80").compare(Data::MappedName("A\x7f")), 1);
+
+    // an ordered container finds a name stored with another split
+    std::map<Data::MappedName, int> names {{split8, 1}};
+    EXPECT_EQ(names.count(split4), 1);
+    EXPECT_EQ(names.count(whole), 1);
 }
 
 TEST(MappedName, subscriptOperator)

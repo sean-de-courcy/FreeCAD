@@ -5,12 +5,6 @@
 issue: ops#23
 
 reason: the test expects V1 element names; the base produces V2 names
-gtest  App_tests_run/ElementMapTest.addAndGetChildElementsTest
-gtest  App_tests_run/ElementMapTest.hasChildElementMapTest
-gtest  App_tests_run/ElementMapTest.hashChildMapsTest
-gtest  App_tests_run/ElementMapTest.mimicOperationAgainstSelf
-gtest  App_tests_run/ElementMapTest.mimicSimpleUnion
-gtest  App_tests_run/MappedName.compare
 gtest  Part_tests_run/FeatureMirroringTest.testXMirror
 gtest  Part_tests_run/FeatureMirroringTest.testYMirrorWithExistingElementMap
 gtest  Part_tests_run/FeaturePartCommonTest.testMapping
