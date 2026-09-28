@@ -99,7 +99,6 @@ class AppExport DecodedMappedSection {
  */
 
 using DecodedMappedName = std::vector<DecodedMappedSection>;
-static std::unordered_map<std::string, DecodedMappedName> decodedMappedNameCache;
 
 class AppExport MappedName
 {
@@ -1097,10 +1096,11 @@ public:
         return qHash(data, qHash(postfix));
     }
 
-    // we use a static here for caching reasons.
-    static DecodedMappedName& getDecodedMappedName(const std::string& mappedNameString);
+    // Decodings are cached for the whole process, and every caller that decodes the same string
+    // gets the same entry: copy it before changing it.
+    static const DecodedMappedName& getDecodedMappedName(const std::string& mappedNameString);
 
-    DecodedMappedName& getDecodedMappedName();
+    const DecodedMappedName& getDecodedMappedName() const;
 
     const size_t& getDuplicateIndex() const {
         return duplicateIndex;

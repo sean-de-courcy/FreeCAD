@@ -35,6 +35,7 @@ names it.
 | `fix/23-elementmapversion-guards` | fix | ops#23 | - | `integration` `cebac682fc` (needs `infra/known-failures`) | `e1459baf2d` (fork PR 5), 2026-09-28 | a new base's naming tests no longer use `ElementMapVersion` |
 | `infra/fork-md` | infra | ops#4 | - | `integration` `e1459baf2d` | adds this file | never |
 | `fix/28-extrusion-top-face-name` | fix | ops#28 | - | `integration` `e1459baf2d` | (fork PR 8) | the base's V2 fallback names partners of unmapped inputs |
+| `fix/16-retag-decode-cache` | fix | ops#16 | - | `integration` `53d927998a` | fork PR 10, open | a new base's `ElementMap::retagElementMap` leaves the decode cache alone and its V2 `setPyObject` tags Python features' new elements |
 
 ## Fork-only commits in carried topics
 

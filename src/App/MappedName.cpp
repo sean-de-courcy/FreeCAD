@@ -23,6 +23,7 @@
  ****************************************************************************/
 
 #include <cstring>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "MappedName.h"
@@ -40,6 +41,12 @@
 
 
 FC_LOG_LEVEL_INIT("MappedName", true, 2);  // NOLINT
+
+namespace
+{
+// Decoded V2 names by name string, for MappedName::getDecodedMappedName()
+std::unordered_map<std::string, Data::DecodedMappedName> decodedMappedNameCache;  // NOLINT
+}  // namespace
 
 namespace Data
 {
@@ -166,7 +173,7 @@ void MappedName::compact() const
     }
 }
 
-DecodedMappedName& MappedName::getDecodedMappedName(const std::string& mappedNameString) {
+const DecodedMappedName& MappedName::getDecodedMappedName(const std::string& mappedNameString) {
     ZoneScoped;
 
     auto it = decodedMappedNameCache.find(mappedNameString);
@@ -283,7 +290,7 @@ DecodedMappedName& MappedName::getDecodedMappedName(const std::string& mappedNam
     }
 }
 
-DecodedMappedName& MappedName::getDecodedMappedName() {
+const DecodedMappedName& MappedName::getDecodedMappedName() const {
     ZoneScoped;
 
     return MappedName::getDecodedMappedName(toString());
