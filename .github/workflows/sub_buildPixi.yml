@@ -137,11 +137,15 @@ jobs:
         mkdir -p ${{ env.reportdir }}
         echo "reportFile=${{ env.reportfilename }}" >> $GITHUB_OUTPUT
 
+    # Windows restores its pixi environment from the Actions cache (2 GB, keyed to
+    # pixi.lock): 1 min instead of 3.5-4 min, sometimes 10 min (ops#31). Only
+    # integration writes it, once per pixi.lock. macOS installs in about 1 min.
     - if: "!inputs.skipBuild"
       uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
       with:
         pixi-version: v0.81.0
-        cache: false
+        cache: ${{ runner.os == 'Windows' }}
+        cache-write: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/integration' }}
         locked: true
 
     - name: Restore Compiler Cache
