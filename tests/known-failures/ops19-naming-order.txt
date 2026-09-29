@@ -1,8 +1,14 @@
 issue: ops#19
 # The name dump of designed models (PartDesignTests/TestNamingDump.py), before the fix
-# (fix/19-naming-order removes these entries). Found on Windows, 2026-09-29.
+# (fix/19-naming-order removes these entries). Found on Windows, 2026-09-29; the macos entries in
+# fork PR 25's CI run.
 
 reason: seeding the naming code's hash containers (FREECAD_NAMING_HASH_SEED) changes V2 names
 cli  PartDesignTests.TestNamingDump.TestNamingSeeded.testPipeShellV2   # S4: the end sections' edges' index
 cli  PartDesignTests.TestNamingDump.TestNamingSeeded.testSketchV2      # S7: a sketch vertex's Reference ID order
 cli  PartDesignTests.TestNamingDump.TestNamingSeeded.testSliceV2       # S3/S4: the slice's edges' and vertices' index
+
+reason: V2 names differ between Windows (the golden files) and macOS: libc++ orders the hash containers differently
+cli  PartDesignTests.TestNamingDump.TestNamingGolden.testPipeShellV2   macos   # S4: the section edges' index
+cli  PartDesignTests.TestNamingDump.TestNamingGolden.testSketchV2      macos   # S7: a sketch vertex's Reference ID order
+cli  PartDesignTests.TestNamingDump.TestNamingGolden.testSliceV2       macos   # S3/S4: the slice's edges' index
