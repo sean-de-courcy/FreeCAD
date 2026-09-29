@@ -1207,6 +1207,58 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.assertEqual(dict(face.ElementReverseMap), untaggedNames)
         self.assertEqual(face.ElementMap[untaggedNames["Face1"]], "Face1")
 
+    def testRetagTagsEveryNameOfAnElement(self):
+        """Retagging gives the tag to every untagged name of an element, not only its first.
+        Fusing two touching extrusions of Python-made faces names the elements where they meet
+        from both, so those elements have two new, untagged names (ops#38)."""
+
+        def untaggedNamesByElement(shape):
+            names = {}
+            for element, elementNames in shape.ElementReverseMap.items():
+                if isinstance(elementNames, str):
+                    elementNames = [elementNames]
+                untagged = [
+                    name
+                    for name in elementNames
+                    if App.getDecodedMappedName(name)[-1]["iterationTag"] == "0"
+                ]
+                if untagged:
+                    names[element] = untagged
+            return names
+
+        # Arrange
+        height = App.Vector(0, 0, 10)
+        left = makeSquareFace().extrude(height)
+        right = makeSquareFace().translated(App.Vector(10, 0, 0)).extrude(height)
+        fused = left.fuse(right)
+        fused.Tag = 7
+        untagged = untaggedNamesByElement(fused)
+        twiceNamed = {element: names for element, names in untagged.items() if len(names) > 1}
+        self.assertTrue(twiceNamed, "no element has two untagged names")
+        # Act: two shapes are made from the fused one, with tags 21 and 22
+        tagged = [Part.Shape(fused, tag=tag) for tag in (21, 22)]
+        # Assert
+        for shape, tag in zip(tagged, (21, 22)):
+            with self.subTest(tag=tag):
+                self.assertEqual(untaggedNamesByElement(shape), {})
+                for element, names in twiceNamed.items():
+                    newNames = shape.ElementReverseMap[element]
+                    self.assertEqual(len(newNames), len(names))
+                    for name in newNames:
+                        self.assertEqual(
+                            App.getDecodedMappedName(name)[-1]["iterationTag"], str(tag)
+                        )
+                        self.assertEqual(shape.ElementMap[name], element)
+        # the two shapes share none of these names
+        for element in twiceNamed:
+            self.assertTrue(
+                set(tagged[0].ElementReverseMap[element]).isdisjoint(
+                    tagged[1].ElementReverseMap[element]
+                )
+            )
+        # the fused shape keeps its untagged names
+        self.assertEqual(untaggedNamesByElement(fused), untagged)
+
     def testFeaturePythonShapeTagged(self):
         """A Python feature's new elements carry the feature's tag, on every recompute and in
         every feature that makes the same shape (ops#16)."""

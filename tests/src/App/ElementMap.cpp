@@ -966,4 +966,57 @@ TEST_F(ElementMapTest, copyV2)
     EXPECT_EQ(map->find(faceNameWithTag(21)), Data::IndexedName());
 }
 
+TEST_F(ElementMapTest, retagElementMapLaterNamesV2)
+{
+    // Arrange
+    //   pattern: a face with two new, untagged names (last section's tag 0), one from each of two
+    //   edges, as when an element is named from two sources. The second name is kept in the first
+    //   name's chain (setElementName with overwrite false), not in the element's own entry.
+    Data::IndexedName edge1("Edge", 1);
+    Data::IndexedName edge2("Edge", 2);
+    Data::IndexedName face1("Face", 1);
+    auto edge1Name = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    auto edge2Name = Data::MappedName::makeUnmappedName({"Edge2"}, 8, "RTG", 'E');
+    auto faceNameWithTag = [&](const Data::MappedName& edgeName, int tag) {
+        return Data::MappedName(Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {edgeName},
+            tag,
+            "RTG",
+            0,
+            'F',
+            0,
+            {Data::MAPPER_FLAG_GENERATED},
+            std::vector<Data::MappedName> {}
+        ));
+    };
+    auto map = std::make_shared<Data::ElementMap>();
+    map->setHistoryAlgorithm(App::HistoryAlgorithm::V2);
+    map->hasher = _hasher;
+    map->setElementName(edge1, edge1Name, 0);
+    map->setElementName(edge2, edge2Name, 0);
+    map->setElementName(face1, faceNameWithTag(edge1Name, 0), 0);
+    map->setElementName(face1, faceNameWithTag(edge2Name, 0), 0, nullptr, false);
+    ASSERT_EQ(map->findAll(face1).size(), 2);
+
+    // Act
+    map->retagElementMap(21);
+
+    // Assert
+    //   both names carry the tag, and each finds the face
+    auto names = map->findAll(face1);
+    ASSERT_EQ(names.size(), 2);
+    EXPECT_EQ(names[0].first, faceNameWithTag(edge1Name, 21));
+    EXPECT_EQ(names[1].first, faceNameWithTag(edge2Name, 21));
+    EXPECT_EQ(map->find(faceNameWithTag(edge1Name, 21)), face1);
+    EXPECT_EQ(map->find(faceNameWithTag(edge2Name, 21)), face1);
+    //   the untagged names are gone
+    EXPECT_EQ(map->find(faceNameWithTag(edge1Name, 0)), Data::IndexedName());
+    EXPECT_EQ(map->find(faceNameWithTag(edge2Name, 0)), Data::IndexedName());
+    EXPECT_EQ(map->size(), 4);
+    //   the edges keep their names
+    EXPECT_EQ(map->find(edge1), edge1Name);
+    EXPECT_EQ(map->find(edge2), edge2Name);
+}
+
 // NOLINTEND(readability-magic-numbers)
