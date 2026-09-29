@@ -105,6 +105,7 @@
 #include "TopoShapeOpCode.h"
 #include "TopoShapeCache.h"
 #include "TopoShapeMapper.h"
+#include "NamingHash.h"
 #include "FaceMaker.h"
 #include "Geometry.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
@@ -1494,7 +1495,9 @@ public:
     };
 
 private:
-    Data::IndexedNameHasher hasher {};
+    // Seeded under FREECAD_NAMING_HASH_SEED (NamingHash.h): the maps keyed by NamingMapKey and its
+    // vectors are iterated where names are written (ops#19).
+    NamingHasher<Data::IndexedNameHasher> hasher {};
 };
 
 class NamingMap
@@ -4663,9 +4666,10 @@ struct MapperPrism: MapperMaker
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> vertexMap;
     ShapeMapper::ShapeMap edgeMap;
 
-    // members for V2 algorithm mapper
+    // members for V2 algorithm mapper; the iterated maps are seeded (NamingHash.h, ops#19)
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> projectedElements;
-    std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> generatedElements;
+    std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
+        generatedElements;
 
     MapperPrism(
         BRepFeat_MakePrism& maker,
@@ -4756,7 +4760,8 @@ struct MapperPrism: MapperMaker
             }
         }
         else if (historyAlgorithm == App::HistoryAlgorithm::V2) {
-            std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> sourceElementRemap;
+            std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
+                sourceElementRemap;
             std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> lowerSourceToFaceMap;
             std::unordered_set<TopoDS_Shape, ShapeHasher, ShapeHasher> allMappedElements;
             std::array<TopAbs_ShapeEnum, 3> mapTypes = {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX};
