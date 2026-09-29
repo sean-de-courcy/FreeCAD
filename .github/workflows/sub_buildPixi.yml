@@ -64,7 +64,8 @@ jobs:
       CCACHE_COMPRESSLEVEL: 5
       CCACHE_CONFIGPATH: ${{ github.workspace }}/ccache/config
       CCACHE_DIR: ${{ github.workspace }}/ccache
-      CCACHE_MAXSIZE: 1G
+      # Windows' objects outgrow 1 GB and ccache evicts them mid-build; macOS stays near 0.7 GB (ops#37).
+      CCACHE_MAXSIZE: ${{ startsWith(matrix.os, 'windows') && '1500M' || '1G' }}
       CCACHE_NOHASHDIR: true
       CCACHE_NOINODECACHE: true
       CCACHE_SLOPPINESS: "include_file_ctime,include_file_mtime,pch_defines,time_macros"
