@@ -22,9 +22,13 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cctype>
+#include <cstring>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
@@ -1454,55 +1458,22 @@ struct NamingMapKey
 
     TopoDS_Shape newElementShape;
     Data::IndexedName newElementName;
-
-    bool operator==(const NamingMapKey& other) const
-    {
-        return other.newElementName == newElementName;
-    };
-
-    bool operator==(const TopoDS_Shape& otherElementShape) const
-    {
-        return newElementShape.IsSame(otherElementShape);
-    };
 };
 
-struct NamingMapKeyHasher
-{
-public:
-    std::size_t operator()(const NamingMapKey& value) const
-    {
-        return hasher(value.newElementName);
-    };
-
-    std::size_t operator()(const std::vector<NamingMapKey>& vector) const
-    {
-        std::size_t vectorHash = 0;
-        std::size_t singleValueHash = 0;
-
-        for (const NamingMapKey& value : vector) {
-            singleValueHash = operator()(value);
-
-            if (vectorHash == 0) {
-                vectorHash = singleValueHash;
-            }
-            else {
-                // This is the hash combine equation used by boost.
-                vectorHash ^= singleValueHash + 0x9e3779b9 + (vectorHash << 6) + (vectorHash >> 2);
-            }
-        }
-
-        return vectorHash;
-    };
-
-private:
-    // Seeded under FREECAD_NAMING_HASH_SEED (NamingHash.h): the maps keyed by NamingMapKey and its
-    // vectors are iterated where names are written (ops#19).
-    NamingHasher<Data::IndexedNameHasher> hasher {};
-};
-
+/** The elements of a result, each with the source elements it was modified or generated from,
+ * grouped by those sources.
+ *
+ * Names are written while iterating the groups, so their order is defined (ops#19): the members
+ * of a group in the result's order (type: face, edge, vertex; then index), the groups in the
+ * order of their first member. The hash maps here only look up; their hashes are seeded under
+ * FREECAD_NAMING_HASH_SEED (NamingHash.h), which must leave the names unchanged.
+ */
 class NamingMap
 {
 public:
+    /// The members (result elements) of a group, and their shared sources.
+    using Group = std::pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>;
+
     NamingMap() = default;
 
     void add(
@@ -1515,8 +1486,15 @@ public:
     )
     {
         isBuilt = false;
+        groups.clear();
 
-        auto res = map.try_emplace({newShape, newShapeIndexName});
+        auto res = entryIndex.try_emplace(newShapeIndexName, entries.size());
+        if (res.second) {
+            entries.emplace_back(
+                NamingMapKey {newShape, newShapeIndexName},
+                std::vector<NamingMapValue> {}
+            );
+        }
 
         NamingMapValue newValue;
 
@@ -1526,60 +1504,112 @@ public:
         newValue.incomingElementShape = mapElementShape;
         newValue.incomingParentShape = incomingShape;
 
-        res.first->second.push_back(newValue);
-
-        if (multiKeyMap.size()) {
-            multiKeyMap.clear();
-        }
+        entries[res.first->second].second.push_back(newValue);
     };
 
     void build()
     {
-        if (multiKeyMap.size()) {
-            multiKeyMap.clear();
-        }
+        groups.clear();
 
-        for (std::pair<const NamingMapKey, std::vector<NamingMapValue>>& mapEntryOuter : map) {
-            std::vector<NamingMapKey> key = {};
+        std::vector<std::size_t> order(entries.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [this](std::size_t left, std::size_t right) {
+            return resultOrderLess(
+                entries[left].first.newElementName,
+                entries[right].first.newElementName
+            );
+        });
 
-            for (std::pair<const NamingMapKey, std::vector<NamingMapValue>>& mapEntryInner : map) {
-                if (mapEntryOuter.second == mapEntryInner.second) {
-                    key.push_back(mapEntryInner.first);
-                }
+        // Members with the same sources (IsSame, in the same order) form a group. The map only
+        // finds the groups whose sources hash alike.
+        std::unordered_map<std::size_t, std::vector<std::size_t>> groupsBySourcesHash;
+
+        for (std::size_t entryIdx : order) {
+            const auto& [key, sources] = entries[entryIdx];
+            auto& candidates = groupsBySourcesHash[sourcesHash(sources)];
+            auto match = std::find_if(candidates.begin(), candidates.end(), [&](std::size_t groupIdx) {
+                return groups[groupIdx].second == sources;
+            });
+
+            if (match == candidates.end()) {
+                candidates.push_back(groups.size());
+                groups.emplace_back(std::vector<NamingMapKey> {key}, sources);
             }
-
-            if (key.size()) {
-                multiKeyMap[key] = mapEntryOuter.second;
+            else {
+                groups[*match].first.push_back(key);
             }
         }
 
         isBuilt = true;
     };
 
-    const std::unordered_map<NamingMapKey, std::vector<NamingMapValue>, NamingMapKeyHasher>& getDirectMap()
-    {
-        return map;
-    };
-
-    const std::unordered_map<std::vector<NamingMapKey>, std::vector<NamingMapValue>, NamingMapKeyHasher>& getMultiMap()
+    const std::vector<Group>& getGroups()
     {
         if (!isBuilt) {
             build();
         }
 
-        return multiKeyMap;
+        return groups;
     };
 
 private:
-    std::unordered_map<NamingMapKey, std::vector<NamingMapValue>, NamingMapKeyHasher> map {};
-    std::unordered_map<std::vector<NamingMapKey>, std::vector<NamingMapValue>, NamingMapKeyHasher>
-        multiKeyMap {};
+    /// Faces, then edges, then vertices (then any other type, by name); within a type, by index.
+    static bool resultOrderLess(const Data::IndexedName& left, const Data::IndexedName& right)
+    {
+        auto rank = [](const Data::IndexedName& name) {
+            static constexpr std::array<const char*, 3> types {"Face", "Edge", "Vertex"};
+            for (std::size_t i = 0; i < types.size(); i++) {
+                if (std::strcmp(name.getType(), types[i]) == 0) {
+                    return i;
+                }
+            }
+            return types.size();
+        };
+
+        const std::size_t leftRank = rank(left);
+        const std::size_t rightRank = rank(right);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
+        }
+        const int typeOrder = std::strcmp(left.getType(), right.getType());
+        if (typeOrder != 0) {
+            return typeOrder < 0;
+        }
+        return left.getIndex() < right.getIndex();
+    }
+
+    std::size_t sourcesHash(const std::vector<NamingMapValue>& sources) const
+    {
+        std::size_t hash = sources.size();
+        for (const NamingMapValue& source : sources) {
+            // The hash combine used by boost. std::hash<TopoDS_Shape> agrees with IsSame.
+            hash ^= shapeHasher(source.incomingElementShape) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        return namingHash(hash);
+    }
+
+    /// Result elements with their sources, in the order they were first added.
+    std::vector<std::pair<NamingMapKey, std::vector<NamingMapValue>>> entries {};
+    std::unordered_map<Data::IndexedName, std::size_t, NamingHasher<Data::IndexedNameHasher>>
+        entryIndex {};
+    std::vector<Group> groups {};
 
     std::hash<TopoDS_Shape> shapeHasher;
 
     bool isBuilt = false;
 };
 
+
+namespace
+{
+/// A list field that holds a set of names: sorted by bytes, without duplicates (ops#19).
+template<class Name>
+void sortNameSet(std::vector<Name>& names)
+{
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+}
+}  // namespace
 
 const std::string& modPostfix()
 {
@@ -2268,6 +2298,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         }
     }
     else if (selectedHistoryVersion == App::HistoryAlgorithm::V2) {
+        // The order rule (ops#19): a loop that writes names iterates in a defined order (the
+        // inputs' order, the result's index order, or byte order of names). Hash containers only
+        // look up, count or group. A list field that holds a set of names (Linked Names,
+        // Connected Names) is sorted by bytes and has no duplicates.
         constexpr int MAXIMUM_REMAPPED_INCOMING_NAMES = 3;
 
         std::hash<TopoDS_Shape> shapeHasher;
@@ -2508,8 +2542,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::unordered_map<const Data::MappedName*, unsigned int> allModifiedConnectedElementNames;
         unsigned int emptyModifiedConnectedElementsIndex = 0;
 
-        // std::unordered_map<std::vector<NamingMapKey>, std::vector<NamingMapValue>, NamingMapKeyHasher>
-        for (const auto& modifiedShapeEntry : modifiedNamingMap.getMultiMap()) {
+        // NamingMap::Group: pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>
+        for (const auto& modifiedShapeEntry : modifiedNamingMap.getGroups()) {
             if (modifiedShapeEntry.second.size() != 1) {
                 continue;
             }
@@ -2605,6 +2639,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     if (filteredConnectedElements.empty()) {
                         index = emptyModifiedConnectedElementsIndex++;
                     }
+                    else {
+                        sortNameSet(filteredConnectedElements);
+                    }
 
                     // Since indexed names can have multiple MappedNames assigned to them,
                     // we want to make sure we include as many as three of them in the new
@@ -2651,13 +2688,14 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // of the key, and the second is the `DecodedMappedSection` associated with the key.
         std::unordered_map<TopoDS_Shape, Data::DecodedMappedSection, ShapeHasher, ShapeHasher>
             namedGeneratedShapes;
-        std::unordered_map<std::vector<NamingMapKey>, Data::DecodedMappedSection, Part::NamingMapKeyHasher>
+        // In the order of the generated groups.
+        std::vector<std::pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>>
             delayedGeneratedMap;
 
         generatedNamingMap.build();
 
-        // std::unordered_map<std::vector<NamingMapKey>, std::vector<NamingMapValue>, NamingMapKeyHasher>
-        for (const auto& generatedShapeEntry : generatedNamingMap.getMultiMap()) {
+        // NamingMap::Group: pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>
+        for (const auto& generatedShapeEntry : generatedNamingMap.getGroups()) {
             std::vector<Data::MappedName> linkedNames;
 
             for (const NamingMapValue& generatedInfo : generatedShapeEntry.second) {
@@ -2665,6 +2703,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     linkedNames.push_back(generatedInfo.incomingElementMappedNames.front().first);
                 }
             }
+
+            sortNameSet(linkedNames);
 
             if (linkedNames.size()) {
                 Data::DecodedMappedSection newNameSection;
@@ -2712,7 +2752,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     );
                 }
                 else if (generatedShapes > 1) {
-                    delayedGeneratedMap[generatedShapeEntry.first] = newNameSection;
+                    delayedGeneratedMap.emplace_back(generatedShapeEntry.first, newNameSection);
                 }
             }
         }
@@ -2724,7 +2764,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // (ops#46). Only looked up, never iterated.
         std::map<char, unsigned int> emptyConnectedElementsIndex;
 
-        // pair<const std::vector<NamingMapKey>, Data::DecodedMappedSection>
+        // pair<std::vector<NamingMapKey>, Data::DecodedMappedSection>
         for (const auto& delayedGeneratedEntry : delayedGeneratedMap) {
             for (const Part::NamingMapKey& elementKey : delayedGeneratedEntry.first) {
                 const Data::IndexedName& elementIndexName = elementKey.newElementName;
@@ -2778,6 +2818,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     }
                 }
 
+                sortNameSet(finalConnectedElementsList);
                 connectedElementKey.second = finalConnectedElementsList;
             }
 
@@ -2909,6 +2950,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         }
                     }
 
+                    sortNameSet(linkedUpperNames);
+
                     if (linkedUpperNames.size()) {
                         Data::MappedName newName = Data::MappedName(
                             Data::MappedName::makeEncodedSection(
@@ -2973,6 +3016,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 }
                             }
                         }
+
+                        sortNameSet(linkedLowerNames);
 
                         if (linkedLowerNames.size()) {
                             Data::MappedName newName = Data::MappedName(
@@ -4666,7 +4711,8 @@ struct MapperPrism: MapperMaker
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> vertexMap;
     ShapeMapper::ShapeMap edgeMap;
 
-    // members for V2 algorithm mapper; the iterated maps are seeded (NamingHash.h, ops#19)
+    // members for V2 algorithm mapper. The claims are made in source order (ops#19); the maps only
+    // look up, and generatedElements' hashes are seeded (NamingHash.h) to keep it that way.
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> projectedElements;
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
         generatedElements;
@@ -4760,8 +4806,14 @@ struct MapperPrism: MapperMaker
             }
         }
         else if (historyAlgorithm == App::HistoryAlgorithm::V2) {
-            std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
-                sourceElementRemap;
+            // Source edges and vertices with their shapes in the result, in source order: type
+            // (face, edge, vertex), input, index in the input. Which source claims which result
+            // element below depends on this order.
+            std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> sourceElementRemap;
+            std::unordered_map<TopoDS_Shape, std::size_t, NamingHasher<ShapeHasher>, ShapeHasher>
+                sourceElementRemapIndex;
+            // generatedElements' entries in the order they were claimed
+            std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> generatedElementsInOrder;
             std::unordered_map<TopoDS_Shape, TopoDS_Shape, ShapeHasher, ShapeHasher> lowerSourceToFaceMap;
             std::unordered_set<TopoDS_Shape, ShapeHasher, ShapeHasher> allMappedElements;
             std::array<TopAbs_ShapeEnum, 3> mapTypes = {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX};
@@ -4811,7 +4863,20 @@ struct MapperPrism: MapperMaker
 
                                 if (currentExtrusionShape.IsSame(sourceShape)) {
                                     allMappedElements.insert(sourceShape);
-                                    sourceElementRemap[sourceShape] = currentExtrusionShape;
+                                    auto remapIterator = sourceElementRemapIndex.try_emplace(
+                                        sourceShape,
+                                        sourceElementRemap.size()
+                                    );
+                                    if (remapIterator.second) {
+                                        sourceElementRemap.emplace_back(
+                                            sourceShape,
+                                            currentExtrusionShape
+                                        );
+                                    }
+                                    else {
+                                        sourceElementRemap[remapIterator.first->second].second
+                                            = currentExtrusionShape;
+                                    }
                                     break;
                                 }
                             }
@@ -4844,6 +4909,7 @@ struct MapperPrism: MapperMaker
 
                         if (allMappedElements.count(ancestor) == 0) {
                             generatedElements[sourceShapeEntry.first] = ancestor;
+                            generatedElementsInOrder.emplace_back(sourceShapeEntry.first, ancestor);
                             allMappedElements.insert(ancestor);
 
                             break;
@@ -4852,7 +4918,7 @@ struct MapperPrism: MapperMaker
                 }
             }
 
-            for (const auto& generatedElementEntry : generatedElements) {
+            for (const auto& generatedElementEntry : generatedElementsInOrder) {
                 TopTools_IndexedMapOfShape projectedElementMap;
                 TopExp::MapShapes(
                     generatedElementEntry.second,

@@ -107,7 +107,8 @@ MappedName unmappedName(
 /**
  * A V2 name of one section that links other names, as an operation writes it for an element it
  * made from them, e.g. a generated face: "_;<linked names>;<tag>;<op>;<index>;<type>;0;<flag>;_"
- * @param linkedNames The names it links, in order
+ * @param linkedNames The names it links, in any order: the name holds them as a set, sorted by
+ * bytes and each once (ops#19)
  * @param tag The tag of the operation's result
  * @param op The operation's op code
  * @param type 'V', 'E' or 'F'
@@ -125,7 +126,7 @@ MappedName linkingName(
 
 /**
  * The V2 name an operation gives an element that has no history of its own: UPP, linking the
- * names of the faces it bounds, each once, in the order the shape lists them
+ * names of the faces it bounds (sorted by bytes, each once)
  * @param shape The result of the operation
  * @param element "Edge3", "Vertex2", ...
  * @param tag The tag of the result
@@ -153,7 +154,7 @@ testing::AssertionResult upperNamed(
 
 /**
  * The V2 name an operation gives a face that has no history of its own and no named upper
- * elements: LOW, linking the names of its outer wire's edges, each once, in the wire's order
+ * elements: LOW, linking the names of its outer wire's edges (sorted by bytes, each once)
  */
 MappedName lowerName(const TopoShape& shape, const std::string& face, long tag, const char* op);
 
@@ -166,7 +167,7 @@ MappedName lowerName(const TopoShape& shape, const std::string& face, long tag, 
  *   (the result's tag and the op) appended;
  * - a face on a face of each of two inputs: no history of its own, so LOW (lowerName());
  * - else where elements of the type above (faces for an edge, edges for a vertex) of two inputs
- *   meet: generated (GEN) from their unmapped names with the op, in the inputs' order.
+ *   meet: generated (GEN) from their unmapped names with the op (sorted by bytes).
  * @param result The boolean's result, whose tag its own sections carry
  * @param inputs The inputs, in order: tag and shape
  * @param op The boolean's op code

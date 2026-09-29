@@ -29,7 +29,9 @@ for pointer keys, between runs, or when OCCT's own result order varies (parallel
 Each model is built in a V1 and in a V2 document. A dump lists every element of the model's
 features with its names, one line per element and name, sorted. An element is keyed by its type,
 centroid and mass (length or area; a vertex by its point), not by its index, and the object IDs
-(tags) in its names are replaced with object names. Three checks use it:
+(tags) in its names are replaced with object names. A V2 name's Linked and Connected Names are sets,
+sorted by bytes with the tags in them (ops#19): the dump checks that, and sorts them again after
+masking, since a new document's object IDs start at a random offset. Three checks use it:
 
 - TestNamingGolden: the dump equals the golden file in NamingGolden/, which was generated on
   Windows. The same files are compared on every platform.
@@ -398,16 +400,35 @@ class Masker:
         encoded = []
         for section in sections:
             section = dict(section)
-            section["linkedNames"] = [self.v2(n, mask) for n in section["linkedNames"]]
-            section["connectedElements"] = [self.v2(n, mask) for n in section["connectedElements"]]
+            for field in ("linkedNames", "connectedElements"):
+                names = [self.v2(n, mask) for n in section[field]]
+                # sorted by bytes with the tags; with the tags masked, sorted again
+                section[field] = sorted(names) if mask else names
             if mask:
                 section["iterationTag"] = self.tag(section["iterationTag"])
             encoded.append(App.makeEncodedSection(**section))
         return "|".join(encoded)  # Data::NAME_SECTION_DELIMINATOR
 
+    @classmethod
+    def unsortedList(cls, name):
+        """A Linked or Connected Names list in the name that isn't sorted by bytes and unique."""
+        for section in App.getDecodedMappedName(name) or []:
+            for field in ("linkedNames", "connectedElements"):
+                names = list(section[field])
+                if names != sorted(set(names)):
+                    return names
+                for linked in names:
+                    found = cls.unsortedList(linked)
+                    if found:
+                        return found
+        return None
+
     def maskV2(self, name):
         if self.v2(name, mask=False) != name:
             raise MaskError(f"decoding and encoding changes the name {name!r}")
+        unsorted = self.unsortedList(name)
+        if unsorted:
+            raise MaskError(f"a list in {name!r} isn't sorted by bytes (ops#19): {unsorted!r}")
         return self.v2(name)
 
     def maskV1(self, name, table):

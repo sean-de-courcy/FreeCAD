@@ -248,9 +248,15 @@ MappedName linkingName(
     int index
 )
 {
+    std::vector<MappedName> sortedLinkedNames = linkedNames;
+    std::sort(sortedLinkedNames.begin(), sortedLinkedNames.end());
+    sortedLinkedNames.erase(
+        std::unique(sortedLinkedNames.begin(), sortedLinkedNames.end()),
+        sortedLinkedNames.end()
+    );
     return MappedName(MappedName::makeEncodedSection(
         std::vector<std::string> {},
-        linkedNames,
+        sortedLinkedNames,
         static_cast<int>(tag),
         op,
         index,

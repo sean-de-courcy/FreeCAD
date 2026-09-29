@@ -2076,32 +2076,31 @@ TEST_F(TopoShapeExpansionTest, makeElementPipeShell)
         ));
     }
     //   OCCT reports the edges of the first and last sections as generated from the spine's ends;
-    //   the four edges generated from the same vertex are told apart by the index, 0 to 3
+    //   the four edges generated from the same vertex are told apart by the index, 0 to 3 in the
+    //   result's edge order (ops#19)
     for (auto [spineVertex, z] : {std::pair {"Vertex1", 0.0}, std::pair {"Vertex2", -8.0}}) {
-        std::set<std::string> names;
-        std::set<std::string> expected;
+        int rank = 0;
         auto edges = static_cast<int>(topoShape.countSubElements("Edge"));
         for (int index = 1; index <= edges; ++index) {
             auto edge = "Edge" + std::to_string(index);
             auto center = topoShape.getSubTopoShape(edge.c_str()).getBoundBox().GetCenter();
             if (std::abs(center.z - z) < 1e-7) {
-                names.insert(topoShape.getMappedName(IndexedName(edge.c_str())).toString());
+                EXPECT_TRUE(elementHasNames(
+                    topoShape,
+                    edge.c_str(),
+                    {linkingName(
+                        {unmappedName(spineVertex, 2, "PSH")},
+                        1,
+                        "PSH",
+                        'E',
+                        MAPPER_FLAG_GENERATED,
+                        rank
+                    )}
+                ));
+                ++rank;
             }
         }
-        for (int index = 0; index < 4; ++index) {
-            expected.insert(
-                linkingName(
-                    {unmappedName(spineVertex, 2, "PSH")},
-                    1,
-                    "PSH",
-                    'E',
-                    MAPPER_FLAG_GENERATED,
-                    index
-                )
-                    .toString()
-            );
-        }
-        EXPECT_EQ(names, expected);
+        EXPECT_EQ(rank, 4);
     }
     //   the vertices have no history: each is named after the faces it bounds (UPP)
     EXPECT_TRUE(upperNamed(topoShape, "Vertex", 1, "PSH"));
