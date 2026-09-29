@@ -354,6 +354,13 @@ void Part::FaceMaker::postBuild()
             else {
                 linkedNameEntry.second = false;
             }
+
+            // A set of names: sorted by bytes, without duplicates (ops#19)
+            std::sort(linkedNameEntry.first.begin(), linkedNameEntry.first.end());
+            linkedNameEntry.first.erase(
+                std::unique(linkedNameEntry.first.begin(), linkedNameEntry.first.end()),
+                linkedNameEntry.first.end()
+            );
         }
 
         std::vector<std::string> mapperFlags {Data::MAPPER_FLAG_LOWER};

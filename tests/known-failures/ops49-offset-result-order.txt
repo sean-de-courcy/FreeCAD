@@ -2,7 +2,6 @@ issue: ops#49
 # Found by ops#19's name dump (PartDesignTests/TestNamingDump.py), Windows, 2026-09-29.
 
 reason: OCCT's Offset and Thickness results list their sub-shapes in an order that varies between runs
+# (the index-free dumps pass since ops#19 sorts the UPP Linked Names; the indexes still vary)
 cli  PartDesignTests.TestNamingDump.TestNamingRepeated.testOffsetThicknessV1
 cli  PartDesignTests.TestNamingDump.TestNamingRepeated.testOffsetThicknessV2
-cli  PartDesignTests.TestNamingDump.TestNamingGolden.testOffsetThicknessV2
-cli  PartDesignTests.TestNamingDump.TestNamingSeeded.testOffsetThicknessV2

@@ -1600,6 +1600,17 @@ private:
 };
 
 
+namespace
+{
+/// A list field that holds a set of names: sorted by bytes, without duplicates (ops#19).
+template<class Name>
+void sortNameSet(std::vector<Name>& names)
+{
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+}
+}  // namespace
+
 const std::string& modPostfix()
 {
     static std::string postfix(Data::POSTFIX_MOD);
@@ -2289,7 +2300,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
     else if (selectedHistoryVersion == App::HistoryAlgorithm::V2) {
         // The order rule (ops#19): a loop that writes names iterates in a defined order (the
         // inputs' order, the result's index order, or byte order of names). Hash containers only
-        // look up, count or group.
+        // look up, count or group. A list field that holds a set of names (Linked Names,
+        // Connected Names) is sorted by bytes and has no duplicates.
         constexpr int MAXIMUM_REMAPPED_INCOMING_NAMES = 3;
 
         std::hash<TopoDS_Shape> shapeHasher;
@@ -2627,6 +2639,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     if (filteredConnectedElements.empty()) {
                         index = emptyModifiedConnectedElementsIndex++;
                     }
+                    else {
+                        sortNameSet(filteredConnectedElements);
+                    }
 
                     // Since indexed names can have multiple MappedNames assigned to them,
                     // we want to make sure we include as many as three of them in the new
@@ -2688,6 +2703,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     linkedNames.push_back(generatedInfo.incomingElementMappedNames.front().first);
                 }
             }
+
+            sortNameSet(linkedNames);
 
             if (linkedNames.size()) {
                 Data::DecodedMappedSection newNameSection;
@@ -2801,6 +2818,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     }
                 }
 
+                sortNameSet(finalConnectedElementsList);
                 connectedElementKey.second = finalConnectedElementsList;
             }
 
@@ -2932,6 +2950,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         }
                     }
 
+                    sortNameSet(linkedUpperNames);
+
                     if (linkedUpperNames.size()) {
                         Data::MappedName newName = Data::MappedName(
                             Data::MappedName::makeEncodedSection(
@@ -2996,6 +3016,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                 }
                             }
                         }
+
+                        sortNameSet(linkedLowerNames);
 
                         if (linkedLowerNames.size()) {
                             Data::MappedName newName = Data::MappedName(
