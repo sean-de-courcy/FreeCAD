@@ -3668,6 +3668,28 @@ public:
         }
     }
 
+    /// Resolves the shadows of \a link's registered references, as
+    /// PropertyLinkBase::updateAllElementReferences() does, without notifying. Returns whether
+    /// a sub-element changed.
+    static bool updateElementReferences(PropertyXLink* link)
+    {
+        bool changed = false;
+        std::vector<DocumentObject*> features(link->_ElementRefs.begin(),
+                                              link->_ElementRefs.end());
+        for (auto feature : features) {
+            changed = updateLinkReference(link,
+                                          feature,
+                                          false,
+                                          false,
+                                          link->_pcLink,
+                                          link->_SubList,
+                                          link->_mapped,
+                                          link->_ShadowSubList)
+                || changed;
+        }
+        return changed;
+    }
+
     void remove(PropertyXLink* l)
     {
         auto it = links.find(l);
@@ -3904,7 +3926,10 @@ void PropertyXLink::detach()
     if (docInfo && _pcLink) {
         aboutToSetValue();
         resetLink();
-        updateElementReference(nullptr);
+        // Keep the shadows: the sub-elements haven't changed, only the target document is
+        // closed. Save writes them, and restoreLink() resolves them once it is open again. The
+        // registrations go, as they hold the target's objects, which are about to be deleted.
+        unregisterElementReference();
         hasSetValue();
     }
 }
@@ -3988,11 +4013,18 @@ void PropertyXLink::restoreLink(App::DocumentObject* lValue)
     }
 
     _pcLink = lValue;
-    updateElementReference(nullptr);
+    // Keep the shadows restored from the file or kept by detach(): they find the elements again
+    // if the target has changed since. A sub without a shadow gets one from its index.
+    _ShadowSubList.resize(_SubList.size());
+    unregisterElementReference();
+    onContainerRestored();
+    // Without a refresh after opening documents to follow (a document was saved to the target's
+    // path), resolve the shadows now.
+    bool moved = !App::GetApplication().isRestoring() && DocInfo::updateElementReferences(this);
     hasSetValue();
     setFlag(LinkRestoring, false);
 
-    if (!touched && owner->isTouched() && docInfo && docInfo->pcDoc
+    if (!moved && !touched && owner->isTouched() && docInfo && docInfo->pcDoc
         && stamp == docInfo->pcDoc->LastModifiedDate.getValue()) {
         owner->purgeTouched();
     }
