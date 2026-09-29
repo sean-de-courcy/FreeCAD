@@ -1387,14 +1387,33 @@ void ElementMap::addChildElements(long masterTag, const std::vector<MappedChildE
                                       child.postfix.constData(),
                                       child.tag);
                     setElementName(idx, name, masterTag, &sids);
-                } else if (selectedHistoryVersion == App::HistoryAlgorithm::V2 && child.elementMap) {
-                    std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>> names = child.elementMap->findAll(childIdx);
+                } else if (selectedHistoryVersion == App::HistoryAlgorithm::V2) {
+                    std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>> names;
+                    if (child.elementMap) {
+                        names = child.elementMap->findAll(childIdx);
+                    }
 
+                    bool named = false;
                     for (const auto& name : names) {
                         if (!name.first)
                             continue;
 
                         setElementName(idx, name.first, masterTag);
+                        named = true;
+                    }
+
+                    // A child element without a mapped name (e.g. from a shape without an
+                    // element map) gets an unmapped name, as TopoShape::mapSubElement() gives
+                    // the elements of a single shape. The child's postfix holds the op code;
+                    // tag 0 means the child has the master's tag.
+                    if (!named) {
+                        setElementName(idx,
+                                       MappedName::makeUnmappedName(
+                                           {childIdx.toString()},
+                                           static_cast<int>(child.tag ? child.tag : masterTag),
+                                           child.postfix.constData(),
+                                           childIdx.getType()[0]),
+                                       masterTag);
                     }
                 }
             }

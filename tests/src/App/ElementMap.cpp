@@ -787,31 +787,65 @@ TEST_F(ElementMapTest, addChildElementsWithoutMapV2)
 {
     // Arrange
     //   pattern: a compound (tag 3) of two boxes without element maps (tags 4 and 5), as in a
-    //   Part::Compound of two Part::Box. Each child element should get an unmapped name,
+    //   Part::Compound of two Part::Box (ops#24). Each child element gets an unmapped name,
     //   <child indexed name>;_;<child tag>;<op>;0;F;0;IDX,SRC;_, as mapSubElement() gives the
-    //   elements of a single shape without a map. The op code is left open. Known failure: ops#24.
+    //   elements of a single shape without a map. The op code is the child's postfix, MKR when
+    //   there is none.
     auto compound = std::make_shared<Data::ElementMap>();
     compound->hasher = _hasher;
     std::vector<Data::ElementMap::MappedChildElements> children = {
         {Data::IndexedName("Face", 1), 6, 0, 4L, Data::ElementMapPtr(), QByteArray(), _sid},
-        {Data::IndexedName("Face", 1), 6, 6, 5L, Data::ElementMapPtr(), QByteArray(), _sid},
+        {Data::IndexedName("Face", 1), 6, 6, 5L, Data::ElementMapPtr(), QByteArray("CMP"), _sid},
     };
 
     // Act
     compound->addChildElements(3L, children);
 
     // Assert
-    const std::string tail = ";0;F;0;IDX,SRC;_";
-    for (int i = 1; i <= 12; ++i) {
+    EXPECT_EQ(compound->size(), 12);
+    for (int i = 1; i <= 6; ++i) {
         SCOPED_TRACE(i);
-        const int childIndex = i <= 6 ? i : i - 6;
-        const long childTag = i <= 6 ? 4L : 5L;
-        const std::string name = compound->find(Data::IndexedName("Face", i)).toString();
-        const std::string head =
-            "Face" + std::to_string(childIndex) + ";_;" + std::to_string(childTag) + ";";
-        EXPECT_EQ(name.substr(0, head.size()), head);
-        EXPECT_TRUE(name.size() >= tail.size() && name.substr(name.size() - tail.size()) == tail)
-            << name;
+        Data::IndexedName first("Face", i);
+        Data::IndexedName second("Face", i + 6);
+        const std::string firstName = faceName(i, 4L, 0);
+        const std::string secondName =
+            "Face" + std::to_string(i) + ";_;5;CMP;0;F;0;IDX,SRC;_";
+        EXPECT_EQ(compound->find(first).toString(), firstName);
+        EXPECT_EQ(compound->find(Data::MappedName(firstName)), first);
+        EXPECT_EQ(compound->find(second).toString(), secondName);
+        EXPECT_EQ(compound->find(Data::MappedName(secondName)), second);
+    }
+}
+
+TEST_F(ElementMapTest, addChildElementsPartlyMappedV2)
+{
+    // Arrange
+    //   pattern: a shape (tag 3) takes a copy of a shape with the same tag, as copyElementMap()
+    //   does (child tag 0 = the master's tag), whose map names only Face1 and Face2 of its 6 faces
+    //   (tag 9, from an earlier operation). Face1-2 keep their names; Face3-6 get unmapped names
+    //   with the master's tag, as mapSubElement() names an element without a name (ops#24).
+    auto part = std::make_shared<Data::ElementMap>();
+    part->hasher = _hasher;
+    for (int i = 1; i <= 2; ++i) {
+        part->setElementName(Data::IndexedName("Face", i), Data::MappedName(faceName(i, 9L, 0)), 9L);
+    }
+    auto copy = std::make_shared<Data::ElementMap>();
+    copy->hasher = _hasher;
+    std::vector<Data::ElementMap::MappedChildElements> children = {
+        {Data::IndexedName("Face", 1), 6, 0, 0L, part, QByteArray(), _sid},
+    };
+
+    // Act
+    copy->addChildElements(3L, children);
+
+    // Assert
+    EXPECT_EQ(copy->size(), 6);
+    for (int i = 1; i <= 6; ++i) {
+        SCOPED_TRACE(i);
+        Data::IndexedName face("Face", i);
+        const std::string expected = i <= 2 ? faceName(i, 9L, 0) : faceName(i, 3L, 0);
+        EXPECT_EQ(copy->find(face).toString(), expected);
+        EXPECT_EQ(copy->findAll(face).size(), 1);
     }
 }
 
