@@ -36,6 +36,7 @@
 #include <App/MappedElement.h>
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
+#include "NamingHash.h"
 #include <App/ElementNamingUtils.h>
 #include <unordered_set>
 
@@ -317,7 +318,11 @@ void Part::FaceMaker::postBuild()
     }
     else if (MyHistoryAlgorithm == App::HistoryAlgorithm::V2) {
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> allLinkedNames;
-        std::unordered_map<Data::IndexedName, std::pair<std::vector<Data::MappedName>, bool>, Data::IndexedNameHasher>
+        // Iterated where names are written: seeded (NamingHash.h, ops#19)
+        std::unordered_map<
+            Data::IndexedName,
+            std::pair<std::vector<Data::MappedName>, bool>,
+            Part::NamingHasher<Data::IndexedNameHasher>>
             linkedNameMap;
 
         for (size_t faceIndex = 0; faceIndex < faces.size(); faceIndex++) {

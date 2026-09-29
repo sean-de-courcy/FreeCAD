@@ -59,6 +59,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDraft.py
     PartDesignTests/TestThickness.py
     PartDesignTests/TestTopologicalNamingProblem.py
+    PartDesignTests/TestNamingDump.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
 )
@@ -73,6 +74,36 @@ endif(BUILD_GUI)
 set(PartDesign_TestFixtures
     PartDesignTests/Fixtures/InvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/InternalInvoluteGear_v0-20.FCStd
+)
+
+# Golden files of TestNamingDump (regenerate with FREECAD_NAMING_GOLDEN_UPDATE)
+set(PartDesign_NamingGolden
+    PartDesignTests/NamingGolden/CompoundCopies.V1.txt
+    PartDesignTests/NamingGolden/CompoundCopies.V2.txt
+    PartDesignTests/NamingGolden/CutSplit.V1.txt
+    PartDesignTests/NamingGolden/CutSplit.V2.txt
+    PartDesignTests/NamingGolden/FilletChamfer.V1.txt
+    PartDesignTests/NamingGolden/FilletChamfer.V2.txt
+    PartDesignTests/NamingGolden/FuseCommon.V1.txt
+    PartDesignTests/NamingGolden/FuseCommon.V2.txt
+    PartDesignTests/NamingGolden/LinearPattern.V1.txt
+    PartDesignTests/NamingGolden/LinearPattern.V2.txt
+    PartDesignTests/NamingGolden/LoftRevolve.V1.txt
+    PartDesignTests/NamingGolden/LoftRevolve.V2.txt
+    PartDesignTests/NamingGolden/OffsetThickness.V1.txt
+    PartDesignTests/NamingGolden/OffsetThickness.V2.txt
+    PartDesignTests/NamingGolden/PadCollinear.V1.txt
+    PartDesignTests/NamingGolden/PadCollinear.V2.txt
+    PartDesignTests/NamingGolden/PadPocket.V1.txt
+    PartDesignTests/NamingGolden/PadPocket.V2.txt
+    PartDesignTests/NamingGolden/PipeShell.V1.txt
+    PartDesignTests/NamingGolden/PipeShell.V2.txt
+    PartDesignTests/NamingGolden/Refine.V1.txt
+    PartDesignTests/NamingGolden/Refine.V2.txt
+    PartDesignTests/NamingGolden/Sketch.V1.txt
+    PartDesignTests/NamingGolden/Sketch.V2.txt
+    PartDesignTests/NamingGolden/Slice.V1.txt
+    PartDesignTests/NamingGolden/Slice.V2.txt
 )
 
 set(PartDesign_GearScripts
@@ -105,6 +136,7 @@ add_custom_target(PartDesignScripts ALL SOURCES
     ${PartDesign_OtherScripts}
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
+    ${PartDesign_NamingGolden}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -116,6 +148,7 @@ fc_target_copy_resource(PartDesignScripts
     ${PartDesign_OtherScripts}
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
+    ${PartDesign_NamingGolden}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -146,6 +179,13 @@ INSTALL(
         ${PartDesign_TestFixtures}
     DESTINATION
         Mod/PartDesign/PartDesignTests/Fixtures
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_NamingGolden}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/NamingGolden
        )
 
 INSTALL(

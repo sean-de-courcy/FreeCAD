@@ -1,0 +1,28 @@
+# PipeShell V1
+[Sweep Part::Sweep] faces=6 edges=12 vertexes=8 names=26
+Edge c=(0.0000,0.0000,10.0000) m=20.0000 : Vertex1;:G;SWP;:H{Profile}:L,E
+Edge c=(0.0000,1.0000,0.0000) m=2.0000 : Vertex1;:G4;SWP;:H{Spine}:L,E
+Edge c=(0.0000,1.0000,20.0000) m=2.0000 : Vertex2;:G4;SWP;:H{Spine}:L,E
+Edge c=(0.0000,2.0000,10.0000) m=20.0000 : Vertex4;:G;SWP;:H{Profile}:L,E
+Edge c=(2.0000,0.0000,0.0000) m=4.0000 : Vertex1;:G;SWP;:H{Spine}:L,E
+Edge c=(2.0000,0.0000,20.0000) m=4.0000 : Vertex2;:G;SWP;:H{Spine}:L,E
+Edge c=(2.0000,2.0000,0.0000) m=4.0000 : Vertex1;:G3;SWP;:H{Spine}:L,E
+Edge c=(2.0000,2.0000,20.0000) m=4.0000 : Vertex2;:G3;SWP;:H{Spine}:L,E
+Edge c=(4.0000,0.0000,10.0000) m=20.0000 : Vertex2;:G;SWP;:H{Profile}:L,E
+Edge c=(4.0000,1.0000,0.0000) m=2.0000 : Vertex1;:G2;SWP;:H{Spine}:L,E
+Edge c=(4.0000,1.0000,20.0000) m=2.0000 : Vertex2;:G2;SWP;:H{Spine}:L,E
+Edge c=(4.0000,2.0000,10.0000) m=20.0000 : Vertex3;:G;SWP;:H{Profile}:L,E
+Face c=(0.0000,1.0000,10.0000) m=40.0000 : Edge4;:G<(Edge1;K-4;:H{Spine}:L,E)>;SWP;:H{Profile}:L,F
+Face c=(2.0000,0.0000,10.0000) m=80.0000 : Edge1;:G<(Edge1;K-1;:H{Spine}:L,E)>;SWP;:H{Profile}:L,F
+Face c=(2.0000,1.0000,0.0000) m=8.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:1;:L<(Vertex1;:G3;SWP;:H{Spine}:L,E|Vertex1;:G4;SWP;:H{Spine}:L,E|Vertex1;:G;SWP;:H{Spine}:L,E)>;SWP;:H{Spine}:L,F
+Face c=(2.0000,1.0000,20.0000) m=8.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:2;:L<(Vertex2;:G3;SWP;:H{Spine}:L,E|Vertex2;:G4;SWP;:H{Spine}:L,E|Vertex2;:G;SWP;:H{Spine}:L,E)>;SWP;:H{Spine}:L,F
+Face c=(2.0000,2.0000,10.0000) m=80.0000 : Edge3;:G<(Edge1;K-3;:H{Spine}:L,E)>;SWP;:H{Profile}:L,F
+Face c=(4.0000,1.0000,10.0000) m=40.0000 : Edge2;:G<(Edge1;K-2;:H{Spine}:L,E)>;SWP;:H{Profile}:L,F
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : <Vertex;:G4;SWP;:H{Spine}:L,E>:1;:U2;SWP;:H{Spine}:L,V
+Vertex c=(0.0000,0.0000,20.0000) m=0.0000 : <Vertex;:G;SWP;:H{Profile}:L,E>:1;:U2;SWP;:H{Profile}:L,V
+Vertex c=(0.0000,2.0000,0.0000) m=0.0000 : <Vertex;:G3;SWP;:H{Spine}:L,E>:1;:U2;SWP;:H{Spine}:L,V
+Vertex c=(0.0000,2.0000,20.0000) m=0.0000 : <Vertex;:G3;SWP;:H{Spine}:L,E>:2;:U2;SWP;:H{Spine}:L,V
+Vertex c=(4.0000,0.0000,0.0000) m=0.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:1;:U;SWP;:H{Spine}:L,V
+Vertex c=(4.0000,0.0000,20.0000) m=0.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:2;:U;SWP;:H{Spine}:L,V
+Vertex c=(4.0000,2.0000,0.0000) m=0.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:1;:U2;SWP;:H{Spine}:L,V
+Vertex c=(4.0000,2.0000,20.0000) m=0.0000 : <Vertex;:G2;SWP;:H{Spine}:L,E>:2;:U2;SWP;:H{Spine}:L,V

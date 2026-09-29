@@ -1,0 +1,32 @@
+# PadCollinear V1
+[Pad PartDesign::Pad] faces=6 edges=12 vertexes=8 names=30
+Edge c=(0.0000,0.0000,2.5000) m=5.0000 : <<g1v1;SKT;:H:L,V>;:H{Profile},V>:2;:G;XTR;:H{Profile}:L,E
+Edge c=(0.0000,10.0000,2.5000) m=5.0000 : <<g4v2;SKT;:H:L,V>;:H{Profile},V>;:G;XTR;:H{Profile}:L,E
+Edge c=(0.0000,5.0000,0.0000) m=10.0000 : <g;SKT;:H:L,E>:5;:H{Profile},E
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:5;:U;XTR;:H{Profile}:L,E
+Edge c=(10.0000,0.0000,0.0000) m=20.0000 : <<g;SKT;:H:L,E>:;:H{Profile},E>:1;:M<(<g;SKT;:H:L,E>:2;:H{Profile},E)>;RFI;:H{Profile}:L,E
+Edge c=(10.0000,0.0000,5.0000) m=20.0000 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:;:U;XTR;:H{Profile}:L,E>:1;:M<(<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:2;:U;XTR;:H{Profile}:L,E)>;RFI;:H{Profile}:L,E
+Edge c=(10.0000,10.0000,0.0000) m=20.0000 : <g;SKT;:H:L,E>:4;:H{Profile},E
+Edge c=(10.0000,10.0000,5.0000) m=20.0000 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:4;:U;XTR;:H{Profile}:L,E
+Edge c=(20.0000,0.0000,2.5000) m=5.0000 : <<g2v2;SKT;:H:L,V>;:H{Profile},V>:6;:G;XTR;:H{Profile}:L,E
+Edge c=(20.0000,10.0000,2.5000) m=5.0000 : <<g3v2;SKT;:H:L,V>;:H{Profile},V>:8;:G;XTR;:H{Profile}:L,E
+Edge c=(20.0000,5.0000,0.0000) m=10.0000 : <g;SKT;:H:L,E>:3;:H{Profile},E
+Edge c=(20.0000,5.0000,5.0000) m=10.0000 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:3;:U;XTR;:H{Profile}:L,E
+Face c=(0.0000,5.0000,2.5000) m=50.0000 : <<g;SKT;:H:L,E>:;:H{Profile},E>:5;:G;XTR;:H{Profile}:L,F
+Face c=(10.0000,0.0000,2.5000) m=100.0000 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:G;XTR;:H{Profile}:L,F>:1;:M<(<<g;SKT;:H:L,E>:;:H{Profile},E>:2;:G;XTR;:H{Profile}:L,F)>;RFI;:H{Profile}:L,F
+Face c=(10.0000,10.0000,2.5000) m=100.0000 : <<g;SKT;:H:L,E>:;:H{Profile},E>:4;:G;XTR;:H{Profile}:L,F
+Face c=(10.0000,5.0000,0.0000) m=200.0000 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;FAC;:H{Profile}:L,F>:1;:M;RFI;:H{Profile}:L,F
+Face c=(10.0000,5.0000,5.0000) m=200.0000 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;FAC;:H{Profile}:L,F>:;:G0;XTR;:H{Profile}:L,F>:1;:M;RFI;:H{Profile}:L,F
+Face c=(20.0000,5.0000,2.5000) m=50.0000 : <<g;SKT;:H:L,E>:;:H{Profile},E>:3;:G;XTR;:H{Profile}:L,F
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : <g1v1;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : <g5v2;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : <<<g1v1;SKT;:H:L,V>;:H{Profile},V>:;:G;XTR;:H{Profile}:L,E>:2;:U;XTR;:H{Profile}:L,V
+Vertex c=(0.0000,10.0000,0.0000) m=0.0000 : <g4v2;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(0.0000,10.0000,0.0000) m=0.0000 : <g5v1;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : <<<g4v2;SKT;:H:L,V>;:H{Profile},V>;:G;XTR;:H{Profile}:L,E>:10;:U;XTR;:H{Profile}:L,V
+Vertex c=(20.0000,0.0000,0.0000) m=0.0000 : <g2v2;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(20.0000,0.0000,0.0000) m=0.0000 : <g3v1;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(20.0000,0.0000,5.0000) m=0.0000 : <<<g2v2;SKT;:H:L,V>;:H{Profile},V>:;:G;XTR;:H{Profile}:L,E>:6;:U;XTR;:H{Profile}:L,V
+Vertex c=(20.0000,10.0000,0.0000) m=0.0000 : <g3v2;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(20.0000,10.0000,0.0000) m=0.0000 : <g4v1;SKT;:H:L,V>;:H{Profile},V
+Vertex c=(20.0000,10.0000,5.0000) m=0.0000 : <<<g3v2;SKT;:H:L,V>;:H{Profile},V>:;:G;XTR;:H{Profile}:L,E>:8;:U;XTR;:H{Profile}:L,V

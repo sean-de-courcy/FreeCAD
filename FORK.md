@@ -51,7 +51,8 @@ names it.
 | `infra/ccache-macos-size` | infra | ops#48 | - | `integration` `1027f33402` | `6a7697fba9` (fork PR 22), 2026-09-29 | never |
 | `fix/46-generated-group-type` | fix | ops#46 | - | `integration` `1027f33402` | `ac1596508c` (fork PR 23), 2026-09-29 | a new base gives each member of a V2 generated group its own type |
 | `fix/47-bspline-face-names` | fix | ops#47 | - | `fix/46-generated-group-type` `1da0597359` (stacked on fork PR 23) | `012c1bec8e` (fork PR 24), 2026-09-29 | a new base's `makeElementBSplineFace` names its V2 face as generated from the input edges and passes `keepBezier` through when splitting a closed edge |
-| `fix/40-xlink-shadows` | fix | ops#40 | - | `integration` `63238ba44b` | (fork PR 21) | a new base's `PropertyXLink::restoreLink` and `detach` keep the saved shadows |
+| `fix/40-xlink-shadows` | fix | ops#40 | - | `integration` `63238ba44b` | `530de69c35` (fork PR 21), 2026-09-29 | a new base's `PropertyXLink::restoreLink` and `detach` keep the saved shadows |
+| `fix/19-name-dump` | fix | ops#19 | - | `integration` `012c1bec8e` | (fork PR 25) | never (fork tests and the seed wrapper) |
 
 ## Fork-only commits in carried topics
 

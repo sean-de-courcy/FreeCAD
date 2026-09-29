@@ -55,6 +55,7 @@
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
 #include <Base/Profiler.h>
+#include <Mod/Part/App/NamingHash.h>
 #include <Mod/Part/App/PartPyCXX.h>
 #include <Mod/Part/App/GeometryMigrationExtension.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -381,7 +382,9 @@ void SketchObject::buildShape()
     ZoneScoped;
     // We use the following instead to map element names
 
-    std::unordered_map<gp_Pnt, std::vector<std::string>> vertexHistoryMap;
+    // Iterated where vertex names are written: seeded (Part/App/NamingHash.h, ops#19)
+    std::unordered_map<gp_Pnt, std::vector<std::string>, Part::NamingHasher<std::hash<gp_Pnt>>>
+        vertexHistoryMap;
     std::vector<Part::TopoShape> shapes;
     std::vector<Part::TopoShape> vertices;
     int geoId = 0;
