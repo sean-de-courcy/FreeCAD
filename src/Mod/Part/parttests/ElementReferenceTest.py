@@ -179,8 +179,13 @@ class ElementReferenceTest(unittest.TestCase):
         App.closeDocument(docA.Name)
         with zipfile.ZipFile(self._path("ElementRefA")) as archive:
             xml = archive.read("Document.xml").decode("utf-8")
-        xlink = re.search(r'<XLink file="ElementRefB\.FCStd"[^>]*>', xml)
-        self.assertIsNotNone(xlink)
+        # The file is saved relative to A's canonical directory. Where the temporary directory
+        # is reached through a symlink (macOS: /var -> /private/var), that is a ../ path to B,
+        # not the bare file name.
+        xlink = re.search(r'<XLink file="([^"]*ElementRefB\.FCStd)"[^>]*>', xml)
+        self.assertIsNotNone(xlink, "\n".join(re.findall(r"<XLink [^>]*>", xml)))
+        savedPath = os.path.join(os.path.realpath(self.dir), xlink.group(1))
+        self.assertTrue(os.path.samefile(savedPath, self._path("ElementRefB")), xlink.group(0))
         self.assertIn(' shadow="', xlink.group(0))
         docB = App.openDocument(self._path("ElementRefB"))
         self._moveFaces(docB)
