@@ -303,15 +303,24 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
 
 void PropertyLinkBase::updateAllElementReferences(bool reverse)
 {
-    for (auto& reference : _ElementRefMap) {
-        for (auto& prop : reference.second) {
-            if (prop != nullptr) {
+    // Updating a reference can register or unregister references, which
+    // changes _ElementRefMap. So iterate over a snapshot, and skip the
+    // properties that have left the map since it was taken.
+    std::vector<std::pair<DocumentObject*, std::vector<PropertyLinkBase*>>> references;
+    references.reserve(_ElementRefMap.size());
+    for (const auto& [feature, props] : _ElementRefMap) {
+        references.emplace_back(feature,
+                                std::vector<PropertyLinkBase*>(props.begin(), props.end()));
+    }
+    for (const auto& [feature, props] : references) {
+        for (auto prop : props) {
+            auto it = _ElementRefMap.find(feature);
+            if (it == _ElementRefMap.end() || it->second.count(prop) == 0) {
                 continue;
             }
-
             if (prop->getContainer()) {
                 try {
-                    prop->updateElementReference(reference.first, reverse, true);
+                    prop->updateElementReference(feature, reverse, true);
                 }
                 catch (Base::Exception& e) {
                     e.reportException();
