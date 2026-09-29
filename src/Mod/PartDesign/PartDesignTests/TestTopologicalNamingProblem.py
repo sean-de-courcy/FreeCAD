@@ -1280,12 +1280,12 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         del constraintList
         doc.recompute()
         # Assert
-        self.assertEqual(body.Shape.BoundBox.XMin, 0)
-        self.assertEqual(body.Shape.BoundBox.YMin, 0)
-        self.assertEqual(body.Shape.BoundBox.ZMin, 0)
-        self.assertEqual(body.Shape.BoundBox.XMax, 31.37)
-        self.assertEqual(body.Shape.BoundBox.YMax, 25.2)
-        self.assertEqual(body.Shape.BoundBox.ZMax, 20)
+        self.assertAlmostEqual(body.Shape.BoundBox.XMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.YMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.ZMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.XMax, 31.37)
+        self.assertAlmostEqual(body.Shape.BoundBox.YMax, 25.2)
+        self.assertAlmostEqual(body.Shape.BoundBox.ZMax, 20)
 
     def testApplyFillet(self):
         # Arrange
@@ -1364,12 +1364,12 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         area2 = pad.Shape.Area
 
         # Assert
-        self.assertEqual(body.Shape.BoundBox.XMin, 0)
-        self.assertEqual(body.Shape.BoundBox.YMin, 0)
-        self.assertEqual(body.Shape.BoundBox.ZMin, 0)
-        self.assertEqual(body.Shape.BoundBox.XMax, 31.37)
+        self.assertAlmostEqual(body.Shape.BoundBox.XMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.YMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.ZMin, 0)
+        self.assertAlmostEqual(body.Shape.BoundBox.XMax, 31.37)
         self.assertAlmostEqual(body.Shape.BoundBox.YMax, 25.2)
-        self.assertEqual(body.Shape.BoundBox.ZMax, 20)
+        self.assertAlmostEqual(body.Shape.BoundBox.ZMax, 20)
         self.assertNotEqual(area1, area2)
 
     def testShapeBinder(self):
@@ -1542,12 +1542,12 @@ class TestTopologicalNamingProblem(unittest.TestCase):
 
         doc.recompute()
         # Assert
-        self.assertEqual(self.Body.Shape.BoundBox.XMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.YMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.ZMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.XMax, 35)
-        self.assertEqual(self.Body.Shape.BoundBox.YMax, 25)
-        self.assertEqual(self.Body.Shape.BoundBox.ZMax, 10)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.XMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.YMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.ZMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.XMax, 35)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.YMax, 25)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.ZMax, 10)
 
     def testSubShapeBinder(self):
         doc = self.Doc
@@ -1715,12 +1715,12 @@ class TestTopologicalNamingProblem(unittest.TestCase):
 
         doc.recompute()
         # Assert
-        self.assertEqual(self.Body.Shape.BoundBox.XMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.YMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.ZMin, 0)
-        self.assertEqual(self.Body.Shape.BoundBox.XMax, 35)
-        self.assertEqual(self.Body.Shape.BoundBox.YMax, 25)
-        self.assertEqual(self.Body.Shape.BoundBox.ZMax, 10)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.XMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.YMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.ZMin, 0)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.XMax, 35)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.YMax, 25)
+        self.assertAlmostEqual(self.Body.Shape.BoundBox.ZMax, 10)
 
     def testPartDesignTNPChamfer(self):
         """Test Chamfer"""
