@@ -48,7 +48,8 @@ names it.
 | `fix/18-update-all-references` | fix | ops#18 | - | `fix/38-retag-later-names` `3bc926af25` (stacked on fork PR 16) | `0075d4a0db` (fork PR 18), 2026-09-29 | a new base's `PropertyLinkBase::updateAllElementReferences` runs (no inverted null check) |
 | `fix/43-applyfillet-float-asserts` | fix | ops#43 | - | `integration` `0075d4a0db` | `63238ba44b` (fork PR 19), 2026-09-29 | a new base's `TestTopologicalNamingProblem` compares bounding boxes within tolerance |
 | `fix/23-part-sketcher-gtests` | fix | ops#23 | - | `integration` `0075d4a0db` | `1027f33402` (fork PR 20), 2026-09-29 | a new base has V2 expectations in the Part and Sketcher naming gtests |
-| `infra/ccache-macos-size` | infra | ops#48 | - | `integration` `1027f33402` | (fork PR 22) | never |
+| `infra/ccache-macos-size` | infra | ops#48 | - | `integration` `1027f33402` | `6a7697fba9` (fork PR 22), 2026-09-29 | never |
+| `fix/46-generated-group-type` | fix | ops#46 | - | `integration` `1027f33402` | (fork PR 23) | a new base gives each member of a V2 generated group its own type |
 
 ## Fork-only commits in carried topics
 

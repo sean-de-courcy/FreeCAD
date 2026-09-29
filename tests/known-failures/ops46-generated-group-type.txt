@@ -1,3 +1,0 @@
-issue: ops#46
-reason: V2: elements generated together from one source all take the first one's element type
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSlice
