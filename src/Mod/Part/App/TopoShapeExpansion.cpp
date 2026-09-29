@@ -109,6 +109,8 @@
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 
+#include <App/Application.h>
+#include <App/Document.h>
 #include <App/ElementMap.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/BoundBox.h>
@@ -193,11 +195,14 @@ void TopoShape::flushElementMap() const
             const_cast<TopoShape*>(this)->resetElementMap(this->_cache->cachedElementMap);
         }
         else if (this->_parentCache) {
+            // The parent's algorithm is this shape's, copied when it was taken from the parent
+            // (TopoShapeCache::Ancestry::_getTopoShape). The cache's own copy is set only with
+            // an element map, so for a parent without one it says V2 even in V1 (ops#30).
             TopoShape parent(
                 this->Tag,
                 this->Hasher,
                 this->_parentCache->shape,
-                this->_parentCache->selectedHistoryAlgorithm
+                getHistoryAlgorithm()
             );
             parent._cache = _parentCache;
             parent.flushElementMap();
@@ -2288,6 +2293,18 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     break;
                 }
             }
+            // A document feature should build its result with its own tag
+            // (Part::Feature::makeTopoShape). If one doesn't, its own sections carry an
+            // input's tag (ops#32): log it, so such a site shows up.
+            if (masterTag != 0 && FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
+                const auto documents = App::GetApplication().getDocuments();
+                if (std::ranges::any_of(documents, [](const App::Document* document) {
+                        return document->testStatus(App::Document::Recomputing);
+                    })) {
+                    FC_LOG("V2 result without a tag during a recompute, op " << op
+                           << ": its sections take the input tag " << masterTag);
+                }
+            }
         }
 
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedProjectedLinkedNames;
@@ -3835,7 +3852,11 @@ TopoShape& TopoShape::makeElementOffset2D(
 
             // Copying shape to fix strange orientation behavior, OCC7.0.0. See bug #2699
             //  http://www.freecad.org/tracker/view.php?id=2699
-            offsetShape = shape.makeElementShape(mkOffset, op).makeElementCopy();
+            // Built on this shape's tag and algorithm, not the input's: the offset's own sections
+            // carry the caller's tag (ops#32).
+            offsetShape = TopoShape(Tag, Hasher, getHistoryAlgorithm())
+                              .makeElementShape(mkOffset, shape, op)
+                              .makeElementCopy();
         }
         else {
             offsetShape = TopoShape(Tag, Hasher, getHistoryAlgorithm())

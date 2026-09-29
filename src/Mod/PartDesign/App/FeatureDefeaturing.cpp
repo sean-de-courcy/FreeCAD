@@ -68,7 +68,7 @@ App::DocumentObjectExecReturn* Defeaturing::execute()
     this->positionByBaseFeature();
 
     try {
-        Part::TopoShape res(0);
+        Part::TopoShape res = makeTopoShape(false);
         res.makeElementDefeaturing(baseShape, faces);
         if (res.isNull()) {
             return new App::DocumentObjectExecReturn(

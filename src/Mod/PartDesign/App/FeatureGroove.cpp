@@ -79,7 +79,7 @@ App::DocumentObjectExecReturn* Groove::execute()
 
 TopoShape Groove::makeShape(const TopoShape& base, const TopoShape& revolve) const
 {
-    TopoShape result;
+    TopoShape result = makeTopoShape(false);
     return result
         .makeElementBoolean(getBooleanMaker(), {base, revolve}, nullptr, FuzzyTolerance.getValue());
 }

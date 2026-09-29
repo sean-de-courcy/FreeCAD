@@ -3087,6 +3087,121 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertTrue(self.Sketch002.AttachmentSupport[0][1][0] == "Face11")
         self.assertGreaterEqual(self.Body.Shape.Volume, 20126)
 
+    def makeOwnResultFeatures(self, doc):
+        """A Revolution, a Groove and a Defeaturing, each in its own body on a box. Returns
+        each feature with the op codes of the sections its own operations add."""
+        features = []
+        for featureType in ("PartDesign::Revolution", "PartDesign::Groove"):
+            body = doc.addObject("PartDesign::Body", "Body")
+            box = doc.addObject("PartDesign::AdditiveBox", "Box")
+            body.addObject(box)
+            box.Length = box.Width = box.Height = 10
+            feature = doc.addObject(featureType, featureType[12:])
+            feature.Profile = (box, ["Face6"])
+            feature.ReferenceAxis = (body.Origin.OriginFeatures[1], [""])  # the Y axis
+            feature.Angle = 90
+            body.addObject(feature)
+            opCodes = ["RVL", "FUS" if featureType == "PartDesign::Revolution" else "CUT"]
+            features.append((feature, opCodes))
+        body = doc.addObject("PartDesign::Body", "Body")
+        box = doc.addObject("PartDesign::AdditiveBox", "Box")
+        body.addObject(box)
+        box.Length = box.Width = box.Height = 10
+        fillet = doc.addObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (box, ["Edge1"])
+        fillet.Radius = 2
+        body.addObject(fillet)
+        doc.recompute()
+        rounds = [
+            f"Face{index}"
+            for index, face in enumerate(fillet.Shape.Faces, 1)
+            if not isinstance(face.Surface, Part.Plane)
+        ]
+        self.assertEqual(len(rounds), 1)
+        defeaturing = doc.addObject("PartDesign::Defeaturing", "Defeaturing")
+        defeaturing.Base = (fillet, rounds)
+        body.addObject(defeaturing)
+        features.append((defeaturing, ["DEF"]))
+        return features
+
+    def testV2OwnSectionsCarryOwnID(self):
+        """In V2, the sections a Revolution's, a Groove's or a Defeaturing's own operations add
+        carry the feature's ID, not the base's or the sketch's (ops#32)."""
+
+        def sections(mappedName):
+            for section in App.getDecodedMappedName(mappedName):
+                yield section
+                for linkedName in section["linkedNames"]:
+                    yield from sections(linkedName)
+
+        # Arrange
+        doc = App.newDocument("PartDesignOwnSectionsV2")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            features = self.makeOwnResultFeatures(doc)
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            for feature, opCodes in features:
+                with self.subTest(feature=feature.TypeId):
+                    self.assertTrue(feature.isValid())
+                    tags = {opCode: set() for opCode in opCodes}
+                    for name in feature.Shape.ElementMap:
+                        for section in sections(name):
+                            # an input element referenced by index (IDX) keeps its tag
+                            if section["opCode"] in tags and "IDX" not in section["mapperFlags"]:
+                                tags[section["opCode"]].add(section["iterationTag"])
+                    self.assertTrue(tags[opCodes[0]], f"no {opCodes[0]} section")
+                    for opCode, opTags in tags.items():
+                        if opTags:
+                            self.assertEqual(opTags, {str(feature.ID)}, opCode)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testV1OwnResultNamesAreV1(self):
+        """In a V1 document, a Revolution, a Groove and a Defeaturing name their results in V1
+        grammar only (ops#30)."""
+        import re
+
+        # Arrange
+        doc = App.newDocument("PartDesignOwnSectionsV1")
+        try:
+            doc.HistoryAlgorithm = "V1"
+            features = self.makeOwnResultFeatures(doc)
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            for feature, _ in features:
+                with self.subTest(feature=feature.TypeId):
+                    self.assertTrue(feature.isValid())
+                    shape = feature.Shape
+                    self.assertGreater(shape.ElementMapSize, 0)
+                    table = shape.Hasher.Table if shape.Hasher else {}
+
+                    def decoded(name):
+                        # spell out each hashed part "#<hex id>" from the hasher's table
+                        return re.sub(
+                            r"#([0-9a-f]+)",
+                            lambda m: "{"
+                            + decoded(table.get(int(m.group(1), 16), m.group(0)[1:]))
+                            + "}",
+                            name,
+                        )
+
+                    # a V2 section ends in ";_" (no connected names)
+                    v2Names = [
+                        name
+                        for name in map(decoded, shape.ElementMap)
+                        if re.search(r";_(;|}|$)", name)
+                    ]
+                    self.assertEqual(v2Names, [])
+        finally:
+            App.closeDocument(doc.Name)
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:

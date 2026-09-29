@@ -114,6 +114,133 @@ class SquareFaceFeature:
         obj.Shape = makeSquareFace()
 
 
+def makeFeatureInputs(doc):
+    """Input objects for the features of makeFeature, by name."""
+    box = doc.addObject("Part::Box", "Box")
+    box.Length = box.Width = box.Height = 10
+    shifted = doc.addObject("Part::Box", "Shifted")
+    shifted.Length = shifted.Width = shifted.Height = 10
+    shifted.Placement.Base = App.Vector(5, 5, 5)
+    plane = doc.addObject("Part::Plane", "Plane")
+    plane.Length = plane.Width = 10
+    bottom = doc.addObject("Part::Circle", "Bottom")
+    bottom.Radius = 5
+    top = doc.addObject("Part::Circle", "Top")
+    top.Radius = 3
+    top.Placement.Base = App.Vector(0, 0, 10)
+    spine = doc.addObject("Part::Line", "Spine")
+    spine.X2, spine.Y2, spine.Z2 = 0, 0, 10
+    near = doc.addObject("Part::Line", "Near")
+    near.X2 = 10
+    far = doc.addObject("Part::Line", "Far")
+    far.X1, far.Y1 = 0, 10
+    far.X2, far.Y2, far.Z2 = 10, 10, 5
+    prism = doc.addObject("Part::Extrusion", "Prism")
+    prism.Base = plane
+    prism.DirMode = "Custom"
+    prism.Dir = App.Vector(0, 0, 1)
+    prism.LengthFwd = 5
+    prism.Solid = True
+    return {
+        "box": box,
+        "shifted": shifted,
+        "plane": plane,
+        "bottom": bottom,
+        "top": top,
+        "spine": spine,
+        "near": near,
+        "far": far,
+        "prism": prism,
+    }
+
+
+# Part features and the op code of the sections their own operation adds. None: it adds none in
+# these models (a mirror keeps its input's names), or, for the tapered extrusion, it had the right
+# tag already.
+FEATURE_OP_CODES = {
+    "Part::Offset": "OFS",
+    "Part::Offset2D": "OFF",
+    "Part::Thickness": "THK",
+    "Part::RuledSurface": "RSF",
+    "Part::Loft": "LFT",
+    "Part::Sweep": "SWP",
+    "Part::Revolution": "RVL",
+    "Part::Fillet": "FLT",
+    "Part::Mirroring": None,
+    "Part::MultiCommon": "CMN",
+    "Part::Compound": None,
+    "Part::Extrusion": None,
+}
+
+
+def makeFeature(doc, inputs, featureType, name):
+    """A feature of the given type on the inputs of makeFeatureInputs."""
+    feature = doc.addObject(featureType, name)
+    if featureType == "Part::Offset":
+        feature.Source = inputs["box"]
+        feature.Value = 1
+    elif featureType == "Part::Offset2D":
+        feature.Source = inputs["plane"]
+        feature.Value = 1
+    elif featureType == "Part::Thickness":
+        feature.Faces = (inputs["box"], ["Face6"])
+        feature.Value = 1
+    elif featureType == "Part::RuledSurface":
+        feature.Curve1 = (inputs["near"], ["Edge1"])
+        feature.Curve2 = (inputs["far"], ["Edge1"])
+    elif featureType == "Part::Loft":
+        feature.Sections = [inputs["bottom"], inputs["top"]]
+    elif featureType == "Part::Sweep":
+        feature.Sections = [inputs["bottom"]]
+        feature.Spine = (inputs["spine"], ["Edge1"])
+    elif featureType == "Part::Revolution":
+        feature.Source = inputs["plane"]
+        feature.Axis = App.Vector(0, 1, 0)
+        feature.Angle = 90
+    elif featureType == "Part::Fillet":
+        feature.Base = inputs["box"]
+        feature.Edges = [(1, 1.0, 1.0)]
+    elif featureType == "Part::Mirroring":
+        feature.Source = inputs["prism"]
+        feature.Normal = App.Vector(1, 0, 0)
+    elif featureType == "Part::MultiCommon":
+        feature.Shapes = [inputs["box"], inputs["shifted"]]
+    elif featureType == "Part::Compound":
+        feature.Links = [inputs["box"], inputs["plane"]]
+    elif featureType == "Part::Extrusion":
+        # tapered, so it lofts through ExtrusionHelper::makeElementDraft
+        feature.Base = inputs["plane"]
+        feature.DirMode = "Custom"
+        feature.Dir = App.Vector(0, 0, 1)
+        feature.LengthFwd = 5
+        feature.Solid = True
+        feature.TaperAngle = 10
+    return feature
+
+
+def decodedSections(mappedName):
+    """Every section of a V2 name, with the sections of the names it links to."""
+    for section in App.getDecodedMappedName(mappedName):
+        yield section
+        for linkedName in section["linkedNames"]:
+            yield from decodedSections(linkedName)
+
+
+def isOwnSection(section, opCode):
+    """Whether a decoded section is one the operation with the op code added. An unchanged
+    input element referenced by its index (IDX) keeps the input's tag, whatever the op."""
+    return section["opCode"] == opCode and "IDX" not in section["mapperFlags"]
+
+
+def ownSectionNames(shape, opCode):
+    """The shape's mapped names that have a section the operation with the op code added."""
+    return {
+        name
+        for name in shape.ElementMap
+        if any(isOwnSection(section, opCode) for section in decodedSections(name))
+    }
+
+
 class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
     def setUp(self):
         """Create a document and some TopoShapes of various types"""
@@ -1143,5 +1270,95 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                     # the end faces are the planes z = 0 and z = 4
                     if abs(face.CenterOfMass.z) < 1e-7 or abs(face.CenterOfMass.z - 4) < 1e-7:
                         self.assertIn(";FAC;", name)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testV2FeatureSectionsCarryOwnID(self):
+        """In V2, the sections a Part feature's own operation adds carry the feature's ID,
+        not an input's, so two identical features on the same inputs name their new
+        elements differently. Names copied from the inputs keep the inputs' tags (ops#32)."""
+        # Arrange
+        doc = App.newDocument("V2FeatureSections")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            inputs = makeFeatureInputs(doc)
+            features = {
+                featureType: [
+                    makeFeature(doc, inputs, featureType, f"{featureType[6:]}{index}")
+                    for index in (1, 2)
+                ]
+                for featureType, opCode in FEATURE_OP_CODES.items()
+                if opCode
+            }
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            for featureType, (first, second) in features.items():
+                opCode = FEATURE_OP_CODES[featureType]
+                with self.subTest(feature=featureType):
+                    self.assertFalse(first.Shape.isNull())
+                    ownNames = []
+                    for feature in (first, second):
+                        names = ownSectionNames(feature.Shape, opCode)
+                        self.assertTrue(names, f"{feature.Name} has no {opCode} section")
+                        tags = {
+                            section["iterationTag"]
+                            for name in names
+                            for section in decodedSections(name)
+                            if isOwnSection(section, opCode)
+                        }
+                        self.assertEqual(tags, {str(feature.ID)})
+                        ownNames.append(names)
+                    self.assertEqual(len(ownNames[0]), len(ownNames[1]))
+                    self.assertTrue(ownNames[0].isdisjoint(ownNames[1]))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testV1FeatureNamesAreV1(self):
+        """In a V1 document, Part features name their results in V1 grammar only. They
+        built their results with the V2 default of TopoShape (ops#30)."""
+        import re
+
+        # Arrange
+        doc = App.newDocument("V1FeatureNames")
+        try:
+            doc.HistoryAlgorithm = "V1"
+            inputs = makeFeatureInputs(doc)
+            features = [
+                makeFeature(doc, inputs, featureType, featureType[6:])
+                for featureType in FEATURE_OP_CODES
+            ]
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            for feature in features:
+                with self.subTest(feature=feature.TypeId):
+                    shape = feature.Shape
+                    self.assertFalse(shape.isNull())
+                    self.assertGreater(shape.ElementMapSize, 0)
+                    table = shape.Hasher.Table if shape.Hasher else {}
+
+                    def decoded(name):
+                        # spell out each hashed part "#<hex id>" from the hasher's table
+                        return re.sub(
+                            r"#([0-9a-f]+)",
+                            lambda m: "{"
+                            + decoded(table.get(int(m.group(1), 16), m.group(0)[1:]))
+                            + "}",
+                            name,
+                        )
+
+                    # a V2 section ends in ";_" (no connected names), e.g.
+                    # 'Edge1;_;<tag>;MKR;0;E;0;IDX,SRC;_'
+                    v2Names = [
+                        name
+                        for name in map(decoded, shape.ElementMap)
+                        if re.search(r";_(;|}|$)", name)
+                    ]
+                    self.assertEqual(v2Names, [])
         finally:
             App.closeDocument(doc.Name)

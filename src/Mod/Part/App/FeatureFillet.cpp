@@ -118,7 +118,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
             return new App::DocumentObjectExecReturn("Resulting shape is null");
         }
 
-        TopoShape res(0);
+        TopoShape res = makeTopoShape(false);
         this->Shape.setValue(res.makeElementShape(mkFillet, baseTopoShape, Part::OpCodes::Fillet));
         return Part::FilletBase::execute();
     }

@@ -114,9 +114,9 @@ TopoShape Revolution::makeShape(const TopoShape& base, const TopoShape& revolve)
     // Changing the order may impact geometry order and the results of refine operation,
     // hence we need to support both ways to ensure compatibility.
     if (FuseOrder.getValue() == FeatureFirst) {
-        return revolve.makeElementFuse(base);
+        return makeTopoShape(false).makeElementFuse({revolve, base});
     }
-    return base.makeElementFuse(revolve);
+    return makeTopoShape(false).makeElementFuse({base, revolve});
 }
 
 bool Revolution::suggestReversedAngle(double angle) const

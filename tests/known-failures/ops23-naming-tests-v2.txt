@@ -26,11 +26,9 @@ gtest  Part_tests_run/TopoShapeExpansionTest.makeElementFuse
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementGTransformWithMap
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementMirror
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementOffset2D
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementOffsetFace
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementPipeShell
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementPrism
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementRevolve
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementRuledSurfaceWiresV1
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSlice
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSlices
 gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSolid

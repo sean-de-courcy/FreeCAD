@@ -344,7 +344,7 @@ App::DocumentObjectExecReturn* Mirroring::execute()
             throw Standard_Failure("Cannot mirror empty shape");
         }
 
-        auto mirrored = TopoShape(0).makeElementMirror(shape, ax2);
+        auto mirrored = makeTopoShape(false).makeElementMirror(shape, ax2);
 
         this->Shape.setValue(mirrored);
         copyMaterial(link);

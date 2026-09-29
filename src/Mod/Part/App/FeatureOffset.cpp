@@ -98,7 +98,7 @@ App::DocumentObjectExecReturn* Offset::execute()
         return new App::DocumentObjectExecReturn("Invalid source link");
     }
     auto join = static_cast<JoinType>(Join.getValue());
-    this->Shape.setValue(TopoShape(0).makeElementOffset(
+    this->Shape.setValue(makeTopoShape(false).makeElementOffset(
         shape,
         offset,
         tol,
@@ -170,7 +170,7 @@ App::DocumentObjectExecReturn* Offset2D::execute()
     auto fill = Fill.getValue() ? FillType::fill : FillType::noFill;
     bool inter = Intersection.getValue();
     this->Shape.setValue(
-        TopoShape(0).makeElementOffset2D(shape, offset, join, fill, openresult, inter)
+        makeTopoShape(false).makeElementOffset2D(shape, offset, join, fill, openresult, inter)
     );
     return App::DocumentObject::StdReturn;
 }
