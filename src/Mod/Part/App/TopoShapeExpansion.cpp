@@ -2669,6 +2669,15 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     newNameSection.linkedNames.push_back(linkedName.toString());
                 }
 
+                // Filled for the whole group before the member loop, so that no member (an
+                // already named first one included) decides the others' fields (R8). The type
+                // is each member's own (ops#46).
+                newNameSection.iterationTag = std::to_string(masterTag);
+                newNameSection.opCode = op;
+                newNameSection.index = "0";
+                newNameSection.duplicateCount = "0";
+                newNameSection.mapperFlags = {Data::MAPPER_FLAG_GENERATED};
+
                 for (size_t i = 0; i < generatedShapes; i++) {
                     const Data::IndexedName& generatedElementName
                         = generatedShapeEntry.first[i].newElementName;
@@ -2679,14 +2688,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         continue;
                     }
 
-                    if (i == 0) {
-                        newNameSection.iterationTag = std::to_string(masterTag);
-                        newNameSection.opCode = op;
-                        newNameSection.index = "0";
-                        newNameSection.elementType = (*generatedElementName.getType());
-                        newNameSection.duplicateCount = "0";
-                        newNameSection.mapperFlags = {Data::MAPPER_FLAG_GENERATED};
-                    }
+                    newNameSection.elementType = (*generatedElementName.getType());
 
                     // we put all generated elements in here, even if it was just mapped above.
                     // we do this so we can look up those values later.
@@ -2696,6 +2698,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 // if the source shapes create more than one resultant shapes, then wait to map
                 // it so we can collect the proper `ConnectedElements`.
                 if (generatedShapes == 1) {
+                    newNameSection.elementType
+                        = (*generatedShapeEntry.first[0].newElementName.getType());
                     ensureElementMap()->setElementName(
                         generatedShapeEntry.first[0].newElementName,
                         Data::MappedName(Data::MappedName::makeEncodedSection(newNameSection)),
@@ -2711,7 +2715,9 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::unordered_map<TopoDS_Shape, std::vector<std::string>, ShapeHasher, ShapeHasher>
             generatedConnectedElementMap;
         std::unordered_multiset<std::string> allGeneratedConnectedElementNames;
-        unsigned int emptyConnectedElementsIndex = 0;
+        // Counted per element type: the type tells a group's members of different types apart
+        // (ops#46). Only looked up, never iterated.
+        std::map<char, unsigned int> emptyConnectedElementsIndex;
 
         // pair<const std::vector<NamingMapKey>, Data::DecodedMappedSection>
         for (const auto& delayedGeneratedEntry : delayedGeneratedMap) {
@@ -2781,12 +2787,15 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                     connectedElements = it->second;
                 }
 
+                elementMappedSection.elementType = (*elementIndexName.getType());
+
                 if (connectedElements.size()) {
                     elementMappedSection.connectedElements = connectedElements;
                 }
                 else {
-                    elementMappedSection.index = std::to_string(emptyConnectedElementsIndex);
-                    emptyConnectedElementsIndex++;
+                    elementMappedSection.index = std::to_string(
+                        emptyConnectedElementsIndex[elementMappedSection.elementType]++
+                    );
                 }
 
                 ensureElementMap()->setElementName(
@@ -2798,7 +2807,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
             generatedConnectedElementMap.clear();
             allGeneratedConnectedElementNames.clear();
-            emptyConnectedElementsIndex = 0;
+            emptyConnectedElementsIndex.clear();
         }
 
         std::unordered_multiset<std::vector<Data::MappedName>, Data::MappedNameHasher> usedUpperNames;

@@ -2411,12 +2411,13 @@ TEST_F(TopoShapeExpansionTest, makeElementSlice)
     //   the cube has neither a tag nor names, so it can't be linked: the wire is named after the
     //   slicing plane only, a face made for the slice with the slice's number as its tag (1) and
     //   named without an op, and the result takes that tag. Its 4 edges and 4 vertices are all
-    //   generated from that face; they are told apart by the index. Each name has its element's
-    //   type (ops#46: the vertices get the edges' type)
+    //   generated from that face. Each name has its element's type (ops#46), and within a type
+    //   they are told apart by the index, 0 to 3. Which element gets which index is ops#19's
     auto planeName = unmappedName("Face1", 1);
     EXPECT_TRUE(allElementsNamed(result));
     EXPECT_TRUE(namesHaveTheirElementsType(result));
     std::set<std::string> names;
+    std::map<char, std::set<std::string>> indexesByType;
     for (const auto& entry : result.getElementMap()) {
         auto section = lastSection(entry.name);
         EXPECT_EQ(section.linkedNames, std::vector<std::string> {planeName.toString()});
@@ -2424,8 +2425,12 @@ TEST_F(TopoShapeExpansionTest, makeElementSlice)
         EXPECT_EQ(section.opCode, "SLC");
         EXPECT_EQ(section.mapperFlags, std::vector<std::string> {MAPPER_FLAG_GENERATED});
         names.insert(entry.name.toString());
+        indexesByType[section.elementType].insert(section.index);
     }
     EXPECT_EQ(names.size(), 8);
+    std::set<std::string> fourIndexes {"0", "1", "2", "3"};
+    std::map<char, std::set<std::string>> expectedIndexes {{'E', fourIndexes}, {'V', fourIndexes}};
+    EXPECT_EQ(indexesByType, expectedIndexes);
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementSlices)
