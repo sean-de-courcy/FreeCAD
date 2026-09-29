@@ -293,3 +293,46 @@ TEST_F(TopoShapeTest, retagAfterCopyDiesV2)
     //   the edge is the wire's, not new: it keeps its name
     EXPECT_EQ(shape.getMappedName(edge1), edgeName);
 }
+
+TEST_F(TopoShapeTest, retagLeavesTheCopiesNamesV2)
+{
+    // Arrange
+    //   pattern: code builds a face without a tag from a wire (tag 7), and two objects (tags 21
+    //   and 22) take copies of it. The copies share the face's element map (ops#34).
+    Part::TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 0L);
+    Data::IndexedName edge1("Edge", 1);
+    auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    auto faceNameWithTag = [&](long tag) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {edgeName},
+            tag,
+            "RTG",
+            0,
+            'F',
+            0,
+            {Data::MAPPER_FLAG_GENERATED},
+            std::vector<Data::MappedName> {}
+        );
+    };
+    shape.setElementName(edge1, edgeName, 0);
+    shape.setElementName(face1, Data::MappedName(faceNameWithTag(0)), 0);
+    Part::TopoShape first(shape);
+    Part::TopoShape second(shape);
+
+    // Act
+    first.reTagElementMap(21, nullptr);
+    second.reTagElementMap(22, nullptr);
+
+    // Assert
+    //   each copy has its own tag, and the shape they were copied from is still untagged
+    EXPECT_EQ(first.getMappedName(face1).toString(), faceNameWithTag(21));
+    EXPECT_EQ(first.getIndexedName(Data::MappedName(faceNameWithTag(21))), face1);
+    EXPECT_EQ(second.getMappedName(face1).toString(), faceNameWithTag(22));
+    EXPECT_EQ(shape.getMappedName(face1).toString(), faceNameWithTag(0));
+    EXPECT_EQ(shape.getIndexedName(Data::MappedName(faceNameWithTag(0))), face1);
+    //   the edge is the wire's, not new: it keeps its name everywhere
+    EXPECT_EQ(first.getMappedName(edge1), edgeName);
+    EXPECT_EQ(second.getMappedName(edge1), edgeName);
+    EXPECT_EQ(shape.getMappedName(edge1), edgeName);
+}

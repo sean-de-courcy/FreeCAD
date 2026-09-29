@@ -4,8 +4,10 @@
 
 #include <boost/core/ignore_unused.hpp>
 #include "Mod/Part/App/FeaturePartCommon.h"
+#include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include "PartTestHelpers.h"
 #include "App/MappedElement.h"
 #include <Base/Interpreter.h>
@@ -237,4 +239,72 @@ TEST_F(FeaturePartTest, getComplexElementTypes)
     EXPECT_STREQ(types[0], "Face");
     EXPECT_STREQ(types[1], "Edge");
     EXPECT_STREQ(types[2], "Vertex");
+}
+
+TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
+{
+    // Arrange
+    //   pattern: an object holds a shape whose face is new and untagged (last section's tag 0),
+    //   built from a wire (tag 7). setValue() keeps the names of a shape that has a tag, so C++
+    //   code can store such a shape. Link arrays and their elements take copies of the object's
+    //   shape, which share its element map, and retag them (ops#34).
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    Data::IndexedName edge1("Edge", 1);
+    Data::IndexedName face1("Face", 1);
+    auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');
+    //   the second of two equal names gets duplicate count 1
+    auto faceNameWithTag = [&](long tag, int duplicate = 0) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {edgeName},
+            tag,
+            "RTG",
+            0,
+            'F',
+            duplicate,
+            {Data::MAPPER_FLAG_GENERATED},
+            std::vector<Data::MappedName> {}
+        );
+    };
+    TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    shape.setElementName(edge1, edgeName, 0);
+    shape.setElementName(face1, Data::MappedName(faceNameWithTag(0)), 0);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(shape);
+    ASSERT_EQ(source->Shape.getShape().getMappedName(face1).toString(), faceNameWithTag(0));
+    auto link = _doc->addObject<App::Link>("Link");
+    link->setLink(-1, source);
+    auto array = _doc->addObject<App::Link>("Array");
+    array->setLink(-1, source);
+    array->ElementCount.setValue(2);
+    auto hiddenArray = _doc->addObject<App::Link>("HiddenArray");
+    hiddenArray->setLink(-1, source);
+    hiddenArray->ShowElement.setValue(false);
+    hiddenArray->ElementCount.setValue(2);
+    _doc->recompute();
+
+    // Act
+    auto linkShape = Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform);
+    auto arrayShape = Feature::getTopoShape(array, ShapeOption::ResolveLink | ShapeOption::Transform);
+    auto hiddenArrayShape =
+        Feature::getTopoShape(hiddenArray, ShapeOption::ResolveLink | ShapeOption::Transform);
+
+    // Assert
+    //   the source's names are its own: no link's tag reaches them
+    const TopoShape& sourceShape = source->Shape.getShape();
+    EXPECT_EQ(sourceShape.getMappedName(face1).toString(), faceNameWithTag(0));
+    EXPECT_EQ(sourceShape.getMappedName(edge1), edgeName);
+    //   a plain link returns the source's shape as it is (through getSubObject(), no retag)
+    EXPECT_FALSE(linkShape.isNull());
+    //   an array's elements have their own tags (the box has 6 faces: the second element's
+    //   first face is Face7)
+    auto elements = array->ElementList.getValues();
+    ASSERT_EQ(elements.size(), 2);
+    Data::IndexedName face7("Face", 7);
+    EXPECT_EQ(arrayShape.getMappedName(face1).toString(), faceNameWithTag(elements[0]->getID()));
+    EXPECT_EQ(arrayShape.getMappedName(face7).toString(), faceNameWithTag(elements[1]->getID()));
+    //   an array that hides its elements gives both copies its own tag
+    EXPECT_EQ(hiddenArrayShape.getMappedName(face1).toString(), faceNameWithTag(hiddenArray->getID()));
+    EXPECT_EQ(hiddenArrayShape.getMappedName(face7).toString(),
+              faceNameWithTag(hiddenArray->getID(), 1));
 }
