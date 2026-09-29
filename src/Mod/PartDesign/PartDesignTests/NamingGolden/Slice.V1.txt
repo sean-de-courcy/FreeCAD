@@ -1,0 +1,19 @@
+# Slice V1
+[Slices Part::Feature] faces=0 edges=4 vertexes=4 names=8
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : Face1;:G5;SLC;:H#1:L,E;SLC;:H#1:L,E
+Edge c=(10.0000,5.0000,5.0000) m=10.0000 : Face1;:G6;SLC;:H#1:L,E;SLC;:H#1:L,E
+Edge c=(5.0000,0.0000,5.0000) m=10.0000 : Face1;:G7;SLC;:H#1:L,E;SLC;:H#1:L,E
+Edge c=(5.0000,10.0000,5.0000) m=10.0000 : Face1;:G8;SLC;:H#1:L,E;SLC;:H#1:L,E
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : Face1;:G;SLC;:H#1:L,V;SLC;:H#1:L,V
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : Face1;:G2;SLC;:H#1:L,V;SLC;:H#1:L,V
+Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : Face1;:G3;SLC;:H#1:L,V;SLC;:H#1:L,V
+Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : Face1;:G4;SLC;:H#1:L,V;SLC;:H#1:L,V
+[Section Part::Section] faces=0 edges=4 vertexes=4 names=8
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : Face1;:G(Face1;K-5;:H{Plane}:L,F);SEC;:H{Box}:L,E
+Edge c=(10.0000,5.0000,5.0000) m=10.0000 : Face2;:G(Face1;K-6;:H{Plane}:L,F);SEC;:H{Box}:L,E
+Edge c=(5.0000,0.0000,5.0000) m=10.0000 : Face3;:G(Face1;K-7;:H{Plane}:L,F);SEC;:H{Box}:L,E
+Edge c=(5.0000,10.0000,5.0000) m=10.0000 : Face4;:G(Face1;K-8;:H{Plane}:L,F);SEC;:H{Box}:L,E
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : Edge1;:G(Face1;K-1;:H{Plane}:L,F);SEC;:H{Box}:L,V
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : Edge3;:G(Face1;K-2;:H{Plane}:L,F);SEC;:H{Box}:L,V
+Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : Edge5;:G(Face1;K-3;:H{Plane}:L,F);SEC;:H{Box}:L,V
+Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : Edge7;:G(Face1;K-4;:H{Plane}:L,F);SEC;:H{Box}:L,V

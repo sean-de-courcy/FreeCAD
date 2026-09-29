@@ -1,0 +1,19 @@
+# Slice V2
+[Slices Part::Feature] faces=0 edges=4 vertexes=4 names=8
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;2;E;0;GEN;_
+Edge c=(10.0000,5.0000,5.0000) m=10.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;0;E;0;GEN;_
+Edge c=(5.0000,0.0000,5.0000) m=10.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;3;E;0;GEN;_
+Edge c=(5.0000,10.0000,5.0000) m=10.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;1;E;0;GEN;_
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;0;V;0;GEN;_
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;1;V;0;GEN;_
+Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;2;V;0;GEN;_
+Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : _;Face1^;_^;#1^;MKR^;0^;F^;0^;IDX^,SRC^;_;#1;SLC;3;V;0;GEN;_
+[Section Part::Section] faces=0 edges=4 vertexes=4 names=8
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : _;Face1^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
+Edge c=(10.0000,5.0000,5.0000) m=10.0000 : _;Face2^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
+Edge c=(5.0000,0.0000,5.0000) m=10.0000 : _;Face3^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
+Edge c=(5.0000,10.0000,5.0000) m=10.0000 : _;Face4^;_^;{Box}^;SEC^;0^;F^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;E;0;GEN;_
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : _;Edge1^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : _;Edge3^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
+Vertex c=(10.0000,0.0000,5.0000) m=0.0000 : _;Edge5^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_
+Vertex c=(10.0000,10.0000,5.0000) m=0.0000 : _;Edge7^;_^;{Box}^;SEC^;0^;E^;0^;IDX^,SRC^;_,Face1^;_^;{Plane}^;SEC^;0^;F^;0^;IDX^,SRC^;_;{Section};SEC;0;V;0;GEN;_

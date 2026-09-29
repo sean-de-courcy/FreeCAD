@@ -1,0 +1,36 @@
+# Refine V2
+[Pad2 PartDesign::Pad] faces=6 edges=12 vertexes=8 names=34
+Edge c=(0.0000,0.0000,2.5000) m=5.0000 : _;g1v1^,g4v2^;_^;{First}^;SKT^;0^;V^;0^;SRC^;_;{Pad};XTR;0;E;0;GEN;_
+Edge c=(0.0000,10.0000,2.5000) m=5.0000 : _;g3v2^,g4v1^;_^;{First}^;SKT^;0^;V^;0^;SRC^;_;{Pad};XTR;0;E;0;GEN;_
+Edge c=(0.0000,5.0000,0.0000) m=10.0000 : g4;_;{First};SKT;0;E;0;SRC;_
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : _;g4^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;E;0;PRJ;_
+Edge c=(10.0000,0.0000,0.0000) m=20.0000 : g1;_;{First};SKT;0;E;0;SRC;_
+Edge c=(10.0000,0.0000,0.0000) m=20.0000 : g1;_;{Second};SKT;0;E;0;SRC;_
+Edge c=(10.0000,0.0000,5.0000) m=20.0000 : _;g1^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;E;0;PRJ;_
+Edge c=(10.0000,0.0000,5.0000) m=20.0000 : _;g1^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;E;0;PRJ;_
+Edge c=(10.0000,10.0000,0.0000) m=20.0000 : g3;_;{First};SKT;0;E;0;SRC;_
+Edge c=(10.0000,10.0000,0.0000) m=20.0000 : g3;_;{Second};SKT;0;E;0;SRC;_
+Edge c=(10.0000,10.0000,5.0000) m=20.0000 : _;g3^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;E;0;PRJ;_
+Edge c=(10.0000,10.0000,5.0000) m=20.0000 : _;g3^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;E;0;PRJ;_
+Edge c=(20.0000,0.0000,2.5000) m=5.0000 : _;g1v2^,g2v1^;_^;{Second}^;SKT^;0^;V^;0^;SRC^;_;{Pad2};XTR;0;E;0;GEN;_
+Edge c=(20.0000,10.0000,2.5000) m=5.0000 : _;g2v2^,g3v1^;_^;{Second}^;SKT^;0^;V^;0^;SRC^;_;{Pad2};XTR;0;E;0;GEN;_
+Edge c=(20.0000,5.0000,0.0000) m=10.0000 : g2;_;{Second};SKT;0;E;0;SRC;_
+Edge c=(20.0000,5.0000,5.0000) m=10.0000 : _;g2^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;E;0;PRJ;_
+Face c=(0.0000,5.0000,2.5000) m=50.0000 : _;g4^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;F;0;GEN;_
+Face c=(10.0000,0.0000,2.5000) m=100.0000 : _;g1^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;F;0;GEN;_
+Face c=(10.0000,0.0000,2.5000) m=100.0000 : _;g1^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;F;0;GEN;_
+Face c=(10.0000,10.0000,2.5000) m=100.0000 : _;g3^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{Pad};XTR;0;F;0;GEN;_
+Face c=(10.0000,10.0000,2.5000) m=100.0000 : _;g3^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;F;0;GEN;_
+Face c=(10.0000,5.0000,0.0000) m=200.0000 : _;g1^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_,g2^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_,g3^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_,g4^;_^;{First}^;SKT^;0^;E^;0^;SRC^;_;{First};FAC;0;F;0;LOW,NDU;_
+Face c=(10.0000,5.0000,0.0000) m=200.0000 : _;g1^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_,g2^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_,g3^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_,g4^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Second};FAC;0;F;0;LOW,NDU;_
+Face c=(10.0000,5.0000,5.0000) m=200.0000 : _;_^;g1^^;_^^;{First}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g2^^;_^^;{First}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g3^^;_^^;{First}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g4^^;_^^;{First}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^;{First}^;FAC^;0^;F^;0^;LOW^,NDU^;_;{Pad};XTR;0;F;0;PRJ;_
+Face c=(10.0000,5.0000,5.0000) m=200.0000 : _;_^;g1^^;_^^;{Second}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g2^^;_^^;{Second}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g3^^;_^^;{Second}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^,g4^^;_^^;{Second}^^;SKT^^;0^^;E^^;0^^;SRC^^;_^;{Second}^;FAC^;0^;F^;0^;LOW^,NDU^;_;{Pad2};XTR;0;F;0;PRJ;_
+Face c=(20.0000,5.0000,2.5000) m=50.0000 : _;g2^;_^;{Second}^;SKT^;0^;E^;0^;SRC^;_;{Pad2};XTR;0;F;0;GEN;_
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : g1v1,g4v2;_;{First};SKT;0;V;0;SRC;_
+Vertex c=(0.0000,0.0000,5.0000) m=0.0000 : _;g1v1^,g4v2^;_^;{First}^;SKT^;0^;V^;0^;SRC^;_;{Pad};XTR;0;V;0;PRJ;_
+Vertex c=(0.0000,10.0000,0.0000) m=0.0000 : g3v2,g4v1;_;{First};SKT;0;V;0;SRC;_
+Vertex c=(0.0000,10.0000,5.0000) m=0.0000 : _;g3v2^,g4v1^;_^;{First}^;SKT^;0^;V^;0^;SRC^;_;{Pad};XTR;0;V;0;PRJ;_
+Vertex c=(20.0000,0.0000,0.0000) m=0.0000 : g1v2,g2v1;_;{Second};SKT;0;V;0;SRC;_
+Vertex c=(20.0000,0.0000,5.0000) m=0.0000 : _;g1v2^,g2v1^;_^;{Second}^;SKT^;0^;V^;0^;SRC^;_;{Pad2};XTR;0;V;0;PRJ;_
+Vertex c=(20.0000,10.0000,0.0000) m=0.0000 : g2v2,g3v1;_;{Second};SKT;0;V;0;SRC;_
+Vertex c=(20.0000,10.0000,5.0000) m=0.0000 : _;g2v2^,g3v1^;_^;{Second}^;SKT^;0^;V^;0^;SRC^;_;{Pad2};XTR;0;V;0;PRJ;_

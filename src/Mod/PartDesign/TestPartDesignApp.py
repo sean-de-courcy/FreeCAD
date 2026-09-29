@@ -63,3 +63,5 @@ from PartDesignTests.TestSuppressed import TestSuppressed
 
 # Topological naming problem
 from PartDesignTests.TestTopologicalNamingProblem import TestTopologicalNamingProblem
+from PartDesignTests.TestNamingDump import TestNamingGolden, TestNamingSeeded
+from PartDesignTests.TestNamingDump import TestNamingRepeated
