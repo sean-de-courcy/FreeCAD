@@ -4,46 +4,6 @@
 
 issue: ops#23
 
-reason: the test expects V1 element names; the base produces V2 names
-gtest  Part_tests_run/FeatureMirroringTest.testXMirror
-gtest  Part_tests_run/FeatureMirroringTest.testYMirrorWithExistingElementMap
-gtest  Part_tests_run/FeaturePartCommonTest.testMapping
-gtest  Part_tests_run/FeaturePartFuseTest.testRefine
-gtest  Part_tests_run/FeaturePartMakeElementRefineTest.makeElementRefineBoxes
-gtest  Part_tests_run/FeaturePartTest.testGetElementName
-gtest  Part_tests_run/PropertyTopoShapeTest.testPropertyPartShapeTopoShape
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementBSplineFace
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementBooleanCommon
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementChamfer
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementCompoundTwoCubes
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementCompoundTwoShapesGeneratesMap
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementCut
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementDraft
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementDraftTopoShapes
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementFilledFace
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementFillet
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementFuse
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementGTransformWithMap
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementMirror
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementOffset2D
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementPipeShell
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementPrism
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementRevolve
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSlice
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSlices
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementSolid
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementTransformWithMap
-gtest  Part_tests_run/TopoShapeExpansionTest.removeElementShape
-gtest  Part_tests_run/TopoShapeExpansionTest.replaceElementShape
-gtest  Part_tests_run/TopoShapeExpansionTest.setElementComboName
-gtest  Part_tests_run/TopoShapeExpansionTest.setElementComboNameCompound
-gtest  Part_tests_run/TopoShapeExpansionTest.setElementComboNameSimple
-gtest  Part_tests_run/TopoShapeMakeShapeTests.sewing
-gtest  Part_tests_run/TopoShapeMakeShapeTests.thruSections
-gtest  Part_tests_run/TopoShapeMakeShapeWithElementMapTests.findSourceSubShapesInElementMap
-gtest  Part_tests_run/TopoShapeMakeShapeWithElementMapTests.mapCompoundCount
-gtest  Sketcher_tests_run/SketchObjectTest.testGetElementName
-
 reason: element map sizes or counts differ from the V1 values the test expects
 cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testHorizontalSketchAxisLinearPattern
 cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testNormalSketchAxisLinearPattern

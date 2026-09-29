@@ -3,6 +3,16 @@
 #include <regex>
 #include "PartTestHelpers.h"
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp_Face.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <Precision.hxx>
+#include <gp_Pnt2d.hxx>
+
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
 namespace PartTestHelpers
@@ -212,6 +222,447 @@ testing::AssertionResult allElementsMatch(const TopoShape& shape, const std::vec
                                            << " elements: " << mappedElementVectorToString(elements);
     }
     return elementsMatch(shape, names);
+}
+
+MappedName unmappedName(const std::string& element, long tag, const char* op, int duplicate)
+{
+    return MappedName(MappedName::makeEncodedSection(
+        std::vector<std::string> {element},
+        std::vector<MappedName> {},
+        static_cast<int>(tag),
+        op,
+        0,
+        element[0],
+        duplicate,
+        {MAPPER_FLAG_INDEX, MAPPER_FLAG_SOURCE},
+        std::vector<MappedName> {}
+    ));
+}
+
+MappedName linkingName(
+    const std::vector<MappedName>& linkedNames,
+    long tag,
+    const char* op,
+    char type,
+    const char* flag,
+    int index
+)
+{
+    return MappedName(MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        linkedNames,
+        static_cast<int>(tag),
+        op,
+        index,
+        type,
+        0,
+        {flag},
+        std::vector<MappedName> {}
+    ));
+}
+
+MappedName upperName(
+    const TopoShape& shape,
+    const std::string& element,
+    long tag,
+    const char* op,
+    int index
+)
+{
+    std::vector<MappedName> faceNames;
+    auto subShape = shape.getSubShape(element.c_str());
+    for (int face : shape.findAncestors(subShape, TopAbs_FACE)) {
+        auto name = shape.getMappedName(IndexedName::fromConst("Face", face));
+        if (std::ranges::find(faceNames, name) == faceNames.end()) {
+            faceNames.push_back(name);
+        }
+    }
+    return linkingName(faceNames, tag, op, element[0], MAPPER_FLAG_UPPER, index);
+}
+
+testing::AssertionResult upperNamed(
+    const TopoShape& shape,
+    const char* type,
+    long tag,
+    const char* op
+)
+{
+    std::map<std::vector<std::string>, int> used;
+    for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
+        auto element = std::string(type) + std::to_string(index);
+        auto linkedNames = lastSection(upperName(shape, element, tag, op)).linkedNames;
+        auto result = elementHasNames(
+            shape,
+            element.c_str(),
+            {upperName(shape, element, tag, op, used[linkedNames]++)}
+        );
+        if (!result) {
+            return result;
+        }
+    }
+    return testing::AssertionSuccess();
+}
+
+bool liesOn(const TopoDS_Shape& shape, const TopoDS_Shape& on)
+{
+    auto isOn = [&](const TopoDS_Shape& part) {
+        BRepExtrema_DistShapeShape distance(part, on);
+        return distance.IsDone() && distance.Value() < Base::Precision::Confusion();
+    };
+    if (shape.ShapeType() == TopAbs_VERTEX) {
+        return isOn(shape);
+    }
+    // its vertices, and for an edge its middle, for a face a point inside it
+    for (TopExp_Explorer explorer(shape, TopAbs_VERTEX); explorer.More(); explorer.Next()) {
+        if (!isOn(explorer.Current())) {
+            return false;
+        }
+    }
+    gp_Pnt inside;
+    if (shape.ShapeType() == TopAbs_EDGE) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(shape));
+        inside = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+    }
+    else {
+        BRepGProp_Face face(TopoDS::Face(shape));
+        double u1, u2, v1, v2;  // NOLINT
+        face.Bounds(u1, u2, v1, v2);
+        BRepClass_FaceClassifier classifier;
+        // a point inside the face: the first point of a coarse grid that the face contains
+        bool found = false;
+        for (int i = 1; i < 8 && !found; ++i) {
+            for (int j = 1; j < 8 && !found; ++j) {
+                double u = u1 + (u2 - u1) * i / 8;
+                double v = v1 + (v2 - v1) * j / 8;
+                classifier.Perform(TopoDS::Face(shape), gp_Pnt2d(u, v), Precision::Confusion());
+                if (classifier.State() == TopAbs_IN) {
+                    gp_Vec normal;
+                    face.Normal(u, v, inside, normal);
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return isOn(BRepBuilderAPI_MakeVertex(inside).Vertex());
+}
+
+namespace
+{
+const char* typeAbove(const std::string& type)
+{
+    return type == "Vertex" ? "Edge" : "Face";
+}
+}  // namespace
+
+MappedName lowerName(const TopoShape& shape, const std::string& face, long tag, const char* op)
+{
+    std::vector<MappedName> edgeNames;
+    auto outerWire = BRepTools::OuterWire(TopoDS::Face(shape.getSubShape(face.c_str())));
+    for (TopExp_Explorer explorer(outerWire, TopAbs_EDGE); explorer.More(); explorer.Next()) {
+        auto edge = shape.findShape(explorer.Current());
+        auto name = shape.getMappedName(IndexedName::fromConst("Edge", edge));
+        if (name && std::ranges::find(edgeNames, name) == edgeNames.end()) {
+            edgeNames.push_back(name);
+        }
+    }
+    return linkingName(edgeNames, tag, op, 'F', MAPPER_FLAG_LOWER);
+}
+
+namespace
+{
+// the input elements of this type that the shape lies on, without the one it is
+std::vector<std::pair<long, std::string>> inputElementsUnder(
+    const TopoDS_Shape& shape,
+    const std::string& type,
+    const std::vector<std::pair<long, TopoShape>>& inputs
+)
+{
+    std::vector<std::pair<long, std::string>> under;
+    for (const auto& [tag, input] : inputs) {
+        auto count = static_cast<int>(input.countSubElements(type.c_str()));
+        for (int index = 1; index <= count; ++index) {
+            auto inputElement = type + std::to_string(index);
+            auto inputShape = input.getSubShape(inputElement.c_str());
+            if (!shape.IsSame(inputShape) && liesOn(shape, inputShape)) {
+                under.emplace_back(tag, inputElement);
+            }
+        }
+    }
+    return under;
+}
+
+testing::AssertionResult isPieceOf(
+    const MappedName& name,
+    const MappedName& source,
+    long tag,
+    const char* op,
+    char type
+)
+{
+    auto text = name.toString();
+    auto prefix = source.toString() + NAME_SECTION_DELIMINATOR;
+    auto section = lastSection(name);
+    bool oneMoreSection = text.starts_with(prefix)
+        && text.find(NAME_SECTION_DELIMINATOR, prefix.size()) == std::string::npos;
+    if (oneMoreSection && section.iterationTag == std::to_string(tag) && section.opCode == op
+        && section.elementType == type
+        && section.mapperFlags == std::vector<std::string> {MAPPER_FLAG_MODIFIED}) {
+        return testing::AssertionSuccess();
+    }
+    return testing::AssertionFailure() << text << " is not a piece of " << source.toString();
+}
+}  // namespace
+
+testing::AssertionResult namedAsBoolean(
+    const TopoShape& result,
+    const std::vector<std::pair<long, TopoShape>>& inputs,
+    const char* op
+)
+{
+    for (const std::string type : {"Face", "Edge", "Vertex"}) {
+        auto count = static_cast<int>(result.countSubElements(type.c_str()));
+        for (int index = 1; index <= count; ++index) {
+            auto element = type + std::to_string(index);
+            auto shape = result.getSubShape(element.c_str());
+            auto has = [&](const MappedName& expected) {
+                return elementHasNames(result, element.c_str(), {expected});
+            };
+            testing::AssertionResult check = testing::AssertionFailure();
+            auto same = std::ranges::find_if(inputs, [&](const auto& input) {
+                return input.second.findShape(shape) > 0;
+            });
+            auto under = inputElementsUnder(shape, type, inputs);
+            if (same != inputs.end()) {
+                // the same element as an input's
+                auto found = same->second.findShape(shape);
+                check = has(unmappedName(type + std::to_string(found), same->first));
+            }
+            else if (under.size() == 1) {
+                // trimmed or rebuilt: the only element on that input element, or one of its pieces
+                const auto& [tag, inputElement] = under.front();
+                auto source = unmappedName(inputElement, tag, op);
+                auto input = std::ranges::find(inputs, tag, &std::pair<long, TopoShape>::first);
+                auto inputShape = input->second.getSubShape(inputElement.c_str());
+                int pieces = 0;
+                for (int other = 1; other <= count; ++other) {
+                    auto otherShape = result.getSubShape((type + std::to_string(other)).c_str());
+                    pieces += liesOn(otherShape, inputShape) ? 1 : 0;
+                }
+                auto names = result.getElementMappedNames(IndexedName(element.c_str()));
+                if (pieces == 1) {
+                    check = has(source);
+                }
+                else if (names.size() == 1) {
+                    check = isPieceOf(names.front().first, source, result.Tag, op, type[0]);
+                }
+                else {
+                    check << element << " has " << names.size() << " names";
+                }
+            }
+            else if (under.size() == 2 && type == "Face") {
+                // a piece of a face of each of two inputs: no history of its own
+                check = has(lowerName(result, element, result.Tag, op));
+            }
+            else if (under.empty() && type != "Face") {
+                // made where elements of the type above of two inputs meet
+                const char* above = typeAbove(type);
+                std::vector<MappedName> meeting;
+                for (const auto& [tag, inputElement] : inputElementsUnder(shape, above, inputs)) {
+                    meeting.push_back(unmappedName(inputElement, tag, op));
+                }
+                if (meeting.size() == 2) {
+                    check = has(
+                        linkingName(meeting, result.Tag, op, type[0], MAPPER_FLAG_GENERATED)
+                    );
+                }
+                else {
+                    check << element << " lies on " << meeting.size() << " " << above
+                          << "s of the inputs";
+                }
+            }
+            else {
+                check << element << " lies on " << under.size() << " " << type << "s of the inputs";
+            }
+            if (!check) {
+                return check;
+            }
+        }
+    }
+    return testing::AssertionSuccess();
+}
+
+testing::AssertionResult namesHaveTheirElementsType(const TopoShape& shape)
+{
+    for (const auto& entry : shape.getElementMap()) {
+        if (lastSection(entry.name).elementType != entry.index.getType()[0]) {
+            return testing::AssertionFailure()
+                << entry.index.toString() << " = " << entry.name.toString();
+        }
+    }
+    return testing::AssertionSuccess();
+}
+
+testing::AssertionResult allElementsNamed(const TopoShape& shape)
+{
+    std::vector<std::string> unnamed;
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        auto count = static_cast<int>(shape.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            IndexedName element(type, index);
+            if (!shape.getMappedName(element)) {
+                unnamed.push_back(element.toString());
+            }
+        }
+    }
+    if (unnamed.empty()) {
+        return testing::AssertionSuccess();
+    }
+    auto failure = testing::AssertionFailure() << unnamed.size() << " unnamed:";
+    for (const auto& element : unnamed) {
+        failure << " " << element;
+    }
+    return failure;
+}
+
+namespace
+{
+std::vector<std::string> sortedNames(const TopoShape& shape, const IndexedName& element)
+{
+    std::vector<std::string> names;
+    for (const auto& name : shape.getElementMappedNames(element)) {
+        names.push_back(name.first.toString());
+    }
+    std::ranges::sort(names);
+    return names;
+}
+
+std::string joined(const std::vector<std::string>& names)
+{
+    std::string result = "{";
+    for (const auto& name : names) {
+        result += "\n  \"" + name + "\"";
+    }
+    return result + "}";
+}
+}  // namespace
+
+testing::AssertionResult elementHasNames(
+    const TopoShape& shape,
+    const char* element,
+    const std::vector<MappedName>& names
+)
+{
+    std::vector<std::string> expected;
+    for (const auto& name : names) {
+        expected.push_back(name.toString());
+    }
+    std::ranges::sort(expected);
+    auto actual = sortedNames(shape, IndexedName(element));
+    if (actual == expected) {
+        return testing::AssertionSuccess();
+    }
+    return testing::AssertionFailure()
+        << element << " has " << joined(actual) << "\nexpected " << joined(expected);
+}
+
+testing::AssertionResult sameNamesPerElement(const TopoShape& shape, const TopoShape& other)
+{
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        auto count = shape.countSubElements(type);
+        if (count != other.countSubElements(type)) {
+            return testing::AssertionFailure()
+                << type << " count " << count << " != " << other.countSubElements(type);
+        }
+        for (int index = 1; index <= static_cast<int>(count); ++index) {
+            IndexedName element(type, index);
+            auto names = sortedNames(shape, element);
+            auto otherNames = sortedNames(other, element);
+            if (names != otherNames) {
+                return testing::AssertionFailure() << element.toString() << " has " << joined(names)
+                                                   << "\nthe other has " << joined(otherNames);
+            }
+        }
+    }
+    return testing::AssertionSuccess();
+}
+
+std::string elementWhere(
+    const TopoShape& shape,
+    const char* type,
+    const std::function<bool(const Base::Vector3d&)>& isAt
+)
+{
+    std::string found;
+    auto count = static_cast<int>(shape.countSubElements(type));
+    for (int index = 1; index <= count; ++index) {
+        auto name = std::string(type) + std::to_string(index);
+        auto element = shape.getSubShape(name.c_str());
+        gp_Pnt point;
+        if (element.ShapeType() == TopAbs_VERTEX) {
+            point = BRep_Tool::Pnt(TopoDS::Vertex(element));
+        }
+        else {
+            GProp_GProps props;
+            if (element.ShapeType() == TopAbs_EDGE) {
+                BRepGProp::LinearProperties(element, props);
+            }
+            else {
+                BRepGProp::SurfaceProperties(element, props);
+            }
+            point = props.CentreOfMass();
+        }
+        if (isAt(Base::Vector3d(point.X(), point.Y(), point.Z()))) {
+            if (!found.empty()) {
+                return {};
+            }
+            found = name;
+        }
+    }
+    return found;
+}
+
+std::string elementAt(const TopoShape& shape, const char* type, const Base::Vector3d& center)
+{
+    return elementWhere(shape, type, [&](const Base::Vector3d& point) {
+        return Base::Distance(point, center) < Base::Precision::Confusion();
+    });
+}
+
+DecodedMappedSection lastSection(const MappedName& name)
+{
+    const auto& sections = MappedName::getDecodedMappedName(name.toString());
+    return sections.empty() ? DecodedMappedSection {} : sections.back();
+}
+
+testing::AssertionResult unmappedNamesNameTheirElements(
+    const TopoShape& shape,
+    const std::map<long, TopoShape>& sources
+)
+{
+    for (const auto& entry : shape.getElementMap()) {
+        const auto& sections = MappedName::getDecodedMappedName(entry.name.toString());
+        if (sections.size() != 1 || !sections.front().hasMapperFlag(MAPPER_FLAG_INDEX)) {
+            continue;
+        }
+        const auto& section = sections.front();
+        auto source = sources.find(std::stol(section.iterationTag));
+        if (source == sources.end() || section.referenceIDs.size() != 1) {
+            return testing::AssertionFailure()
+                << entry.index.toString() << " = " << entry.name.toString() << ": no such source";
+        }
+        const auto& sourceElement = section.referenceIDs.front();
+        auto sourceShape = source->second.getSubShape(sourceElement.c_str(), true);
+        auto element = shape.getSubShape(entry.index.toString().c_str(), true);
+        if (sourceShape.IsNull() || !element.IsSame(sourceShape)) {
+            return testing::AssertionFailure()
+                << entry.index.toString() << " = " << entry.name.toString()
+                << ", but it is not the source's " << sourceElement;
+        }
+    }
+    return testing::AssertionSuccess();
 }
 
 std::pair<TopoDS_Shape, TopoDS_Shape> CreateTwoCubes()

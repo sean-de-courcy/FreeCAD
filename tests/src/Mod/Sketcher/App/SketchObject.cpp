@@ -4,7 +4,9 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
+#include <App/MappedName.h>
 #include <App/ObjectIdentifier.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -817,9 +819,10 @@ TEST_F(SketchObjectTest, testReverseAngleConstraintToSupplementaryExpressionFunc
     EXPECT_EQ(std::string("atan(0.03)"), getObject()->getConstraintExpression(id));
 }
 
-TEST_F(SketchObjectTest, testGetElementName)
+TEST_F(SketchObjectTest, testGetElementNameV1)
 {
     // Arrange
+    getObject()->getDocument()->HistoryAlgorithm.setValue("V1");
     Base::Vector3d p1(0.0, 0.0, 0.0), p2(1.0, 0.0, 0.0);
     std::unique_ptr<Part::Geometry> geoline(new Part::GeomLineSegment());
     static_cast<Part::GeomLineSegment*>(geoline.get())->setPoints(p1, p2);
@@ -856,4 +859,63 @@ TEST_F(SketchObjectTest, testGetElementName)
     EXPECT_STREQ(reverse_normal_name.oldName.c_str(), "Vertex2");
     EXPECT_STREQ(reverse_export_name.newName.c_str(), (";" + tagName + "v1;SKT.Vertex1").c_str());
     EXPECT_STREQ(reverse_export_name.oldName.c_str(), "Vertex1");
+}
+
+TEST_F(SketchObjectTest, testGetElementNameV2)
+{
+    // Arrange
+    ASSERT_EQ(getObject()->getDocument()->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    Base::Vector3d p1(0.0, 0.0, 0.0), p2(1.0, 0.0, 0.0);
+    std::unique_ptr<Part::Geometry> geoline(new Part::GeomLineSegment());
+    static_cast<Part::GeomLineSegment*>(geoline.get())->setPoints(p1, p2);
+    auto id = getObject()->addGeometry(geoline.get());
+    long geometryId;
+    getObject()->getGeometryId(id, geometryId);
+    std::string edgeReference = "g" + std::to_string(geometryId);
+    getObject()->recomputeFeature();
+    //   V2 sketch names: the geometry's reference ID (plus v<n> for a vertex), the sketch's
+    //   object ID as the tag, op SKT, flag SRC
+    auto sketchName = [&](const std::string& reference, char type) {
+        return Data::MappedName(Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {reference},
+            std::vector<Data::MappedName> {},
+            static_cast<int>(getObject()->getID()),
+            "SKT",
+            0,
+            type,
+            0,
+            {Data::MAPPER_FLAG_SOURCE},
+            std::vector<Data::MappedName> {}
+        ));
+    };
+    auto edgeName = sketchName(edgeReference, 'E');
+    auto vertex1Name = sketchName(edgeReference + "v1", 'V');
+    auto vertex2Name = sketchName(edgeReference + "v2", 'V');
+
+    // Act
+    auto forward_normal_name = getObject()->getElementName(
+        (Data::ELEMENT_MAP_PREFIX + edgeName.toString()).c_str(),
+        App::GeoFeature::ElementNameType::Normal
+    );
+    auto reverse_normal_name
+        = getObject()->getElementName("Vertex2", App::GeoFeature::ElementNameType::Normal);
+    auto reverse_export_name
+        = getObject()->getElementName("Vertex1", App::GeoFeature::ElementNameType::Export);
+    const auto& shape = getObject()->Shape.getShape();
+
+    // Assert
+    EXPECT_EQ(
+        edgeName.toString(),
+        edgeReference + ";_;" + std::to_string(getObject()->getID()) + ";SKT;0;E;0;SRC;_"
+    );
+    EXPECT_EQ(shape.getElementMapSize(), 3);
+    EXPECT_EQ(shape.getMappedName(Data::IndexedName::fromConst("Edge", 1)), edgeName);
+    EXPECT_EQ(shape.getMappedName(Data::IndexedName::fromConst("Vertex", 1)), vertex1Name);
+    EXPECT_EQ(shape.getMappedName(Data::IndexedName::fromConst("Vertex", 2)), vertex2Name);
+    EXPECT_EQ(forward_normal_name.newName, ";" + edgeName.toString() + ".Edge1");
+    EXPECT_EQ(forward_normal_name.oldName, "Edge1");
+    EXPECT_EQ(reverse_normal_name.newName, ";" + vertex2Name.toString() + ".Vertex2");
+    EXPECT_EQ(reverse_normal_name.oldName, "Vertex2");
+    EXPECT_EQ(reverse_export_name.newName, ";" + vertex1Name.toString() + ".Vertex1");
+    EXPECT_EQ(reverse_export_name.oldName, "Vertex1");
 }

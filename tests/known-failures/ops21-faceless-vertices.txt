@@ -1,0 +1,3 @@
+issue: ops#21
+reason: V2: vertices without history in a result without faces get no name of their own
+gtest  Part_tests_run/TopoShapeExpansionTest.makeElementOffset2DVertices

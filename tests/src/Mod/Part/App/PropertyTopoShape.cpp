@@ -118,7 +118,10 @@ TEST_F(PropertyTopoShapeTest, testPropertyPartShapeTopoShape)
     EXPECT_TRUE(topoShapeOut.isSame(topoShapeIn));
     EXPECT_TRUE(topoDsShapeOut.IsSame(topoDsShapeIn));
     EXPECT_EQ(getVolume(topoDsShapeOut), 3);
-    EXPECT_EQ(topoShapeOut.getElementMapSize(), 26);
+    //   the property keeps the shape's names: every element of the common is named, and has the
+    //   same names as before
+    EXPECT_TRUE(allElementsNamed(topoShapeIn));
+    EXPECT_TRUE(sameNamesPerElement(topoShapeOut, topoShapeIn));
 }
 
 TEST_F(PropertyTopoShapeTest, testPropertyPartShapeTopoDSShape)

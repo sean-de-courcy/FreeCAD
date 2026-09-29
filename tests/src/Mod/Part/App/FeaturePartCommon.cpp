@@ -197,6 +197,10 @@ TEST_F(FeaturePartCommonTest, testHistory)
 
 TEST_F(FeaturePartCommonTest, testMapping)
 {
+    using PartTestHelpers::allElementsNamed;
+    using PartTestHelpers::elementAt;
+    using PartTestHelpers::elementHasNames;
+    using PartTestHelpers::unmappedName;
 
     // Arrange
     _common->Base.setValue(_boxes[0]);
@@ -204,6 +208,45 @@ TEST_F(FeaturePartCommonTest, testMapping)
     // Act
     _common->execute();
     const Part::TopoShape& ts1 = _common->Shape.getShape();
+    auto box0 = _boxes[0]->getID();
+    auto box1 = _boxes[1]->getID();
     // Assert
-    EXPECT_EQ(ts1.getElementMap().size(), 26);
+    //   the common is the box 0 < x < 1, 1 < y < 2, 0 < z < 3: 8 vertices, 12 edges, 6 faces
+    EXPECT_EQ(ts1.countSubElements("Vertex"), 8);
+    EXPECT_EQ(ts1.countSubElements("Edge"), 12);
+    EXPECT_EQ(ts1.countSubElements("Face"), 6);
+    EXPECT_TRUE(allElementsNamed(ts1));
+    //   neither box has names. Every face of the common is a box face that OCCT modified (trimmed,
+    //   or rebuilt because its edges lie on the other box's faces), and keeps that face's unmapped
+    //   name under the box's tag with op CMN. A face on both boxes' faces gets both names.
+    //   Box faces: Face1 x min, Face2 x max, Face3 y min, Face4 y max, Face5 z min, Face6 z max
+    auto face = [&](double x, double y, double z) {
+        return elementAt(ts1, "Face", Base::Vector3d(x, y, z));
+    };
+    EXPECT_TRUE(elementHasNames(
+        ts1,
+        face(0, 1.5, 1.5).c_str(),
+        {unmappedName("Face1", box0, "CMN"), unmappedName("Face1", box1, "CMN")}
+    ));
+    EXPECT_TRUE(elementHasNames(
+        ts1,
+        face(1, 1.5, 1.5).c_str(),
+        {unmappedName("Face2", box0, "CMN"), unmappedName("Face2", box1, "CMN")}
+    ));
+    EXPECT_TRUE(
+        elementHasNames(ts1, face(0.5, 1, 1.5).c_str(), {unmappedName("Face3", box1, "CMN")})
+    );
+    EXPECT_TRUE(
+        elementHasNames(ts1, face(0.5, 2, 1.5).c_str(), {unmappedName("Face4", box0, "CMN")})
+    );
+    EXPECT_TRUE(elementHasNames(
+        ts1,
+        face(0.5, 1.5, 0).c_str(),
+        {unmappedName("Face5", box0, "CMN"), unmappedName("Face5", box1, "CMN")}
+    ));
+    EXPECT_TRUE(elementHasNames(
+        ts1,
+        face(0.5, 1.5, 3).c_str(),
+        {unmappedName("Face6", box0, "CMN"), unmappedName("Face6", box1, "CMN")}
+    ));
 }

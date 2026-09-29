@@ -252,8 +252,10 @@ TEST_F(FeaturePartFuseTest, testRefine)
     // 28 Edges
     // 16 Vertices
     // -----------
-    // 58 Elements
-    EXPECT_EQ(_fuse->Shape.getShape().getElementMapSize(), 58);
+    // 58 Elements, each named
+    EXPECT_EQ(ts.countSubElements("Edge"), 28);
+    EXPECT_EQ(ts.countSubElements("Vertex"), 16);
+    EXPECT_TRUE(PartTestHelpers::allElementsNamed(_fuse->Shape.getShape()));
     // Act
     _fuse->Refine.setValue(true);
     _fuse->execute();
@@ -265,8 +267,11 @@ TEST_F(FeaturePartFuseTest, testRefine)
     // 12 Edges
     // 8 Vertices
     // -----------
-    // 58 Elements
-    EXPECT_EQ(_fuse->Shape.getShape().getElementMapSize(), 26);
+    // 26 Elements, each named. The refined faces keep the names of the faces they merge, so
+    // there are more names than elements.
+    EXPECT_EQ(ts.countSubElements("Edge"), 12);
+    EXPECT_EQ(ts.countSubElements("Vertex"), 8);
+    EXPECT_TRUE(PartTestHelpers::allElementsNamed(_fuse->Shape.getShape()));
 }
 
 // See FeaturePartCommon.cpp for a history test.  It would be exactly the same and redundant here.
