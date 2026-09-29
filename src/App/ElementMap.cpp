@@ -1701,26 +1701,29 @@ void ElementMap::retagElementMap(long newTag) {
     }
 
     for (auto& indexedNameEntry : indexedNames) {
-        for (MappedNameRef& foundNameRef : indexedNameEntry.second.names) {
-            const DecodedMappedName& cachedName = foundNameRef.name.getDecodedMappedName();
+        for (MappedNameRef& head : indexedNameEntry.second.names) {
+            // An element's second and later names are in its first name's chain
+            for (MappedNameRef* foundNameRef = &head; foundNameRef;
+                 foundNameRef = foundNameRef->next.get()) {
+                const DecodedMappedName& cachedName = foundNameRef->name.getDecodedMappedName();
+                if (cachedName.empty() || cachedName.back().iterationTag != "0") {
+                    continue;
+                }
 
-            if (cachedName.size()) {
-                if (cachedName.back().iterationTag == "0") {
-                    // Retag a copy: the decoding is shared by every name with this string
-                    DecodedMappedName decodedName = cachedName;
-                    decodedName.back().iterationTag = std::to_string(newTag);
+                // Retag a copy: the decoding is shared by every name with this string
+                DecodedMappedName decodedName = cachedName;
+                decodedName.back().iterationTag = std::to_string(newTag);
 
-                    auto it = mappedNames.find(foundNameRef.name);
-                    foundNameRef.name = MappedName::makeEncodedName(decodedName);
-                    
-                    if (it != mappedNames.end()) {
-                        auto extractedNode = mappedNames.extract(it);
+                auto it = mappedNames.find(foundNameRef->name);
+                foundNameRef->name = MappedName::makeEncodedName(decodedName);
 
-                        if (extractedNode.key()) {
-                            extractedNode.key() = foundNameRef.name;
+                if (it != mappedNames.end()) {
+                    auto extractedNode = mappedNames.extract(it);
 
-                            mappedNames.insert(std::move(extractedNode));
-                        }
+                    if (extractedNode.key()) {
+                        extractedNode.key() = foundNameRef->name;
+
+                        mappedNames.insert(std::move(extractedNode));
                     }
                 }
             }
