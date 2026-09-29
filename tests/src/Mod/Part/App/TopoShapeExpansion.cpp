@@ -2975,23 +2975,95 @@ TEST_F(TopoShapeExpansionTest, makeElementBSplineFace)
     );
     EXPECT_NEAR(getArea(result.getShape()), 14.677052, 1e-6);
     // Assert elementMap is correct
-    //   the curves (tags 2 and 3) have no names. The face's edges on them should be named after
-    //   them, under their tags, and the face should have a face's name of its own. V2 gives every
-    //   edge tag 0, and the face its first edge's name with duplicate count 1 (ops#47).
+    //   the curves (tags 2 and 3) have no names. The face is generated from both; each of its
+    //   edges and vertices on a curve is that curve's element, modified: the corner the curves
+    //   share is both curves' Vertex1, so it has both names. The other two edges (the one between
+    //   the curves' far ends, and a degenerated one at the shared corner) bound only the face: UPP.
+    //   Before ops#47, V2 gave every edge tag 0, and the face its first edge's name.
     EXPECT_TRUE(allElementsNamed(result));
     EXPECT_TRUE(namesHaveTheirElementsType(result));
-    for (const auto& [tag, curve] :
-         {std::pair {2L, TopoShape(edge.Edge())}, std::pair {3L, TopoShape(edge1.Edge())}}) {
-        std::string onCurve;
-        for (int index = 1; index <= static_cast<int>(result.countSubElements("Edge")); ++index) {
-            auto element = "Edge" + std::to_string(index);
-            if (liesOn(result.getSubShape(element.c_str()), curve.getShape())) {
-                onCurve = element;
-            }
+    EXPECT_TRUE(elementHasNames(
+        result,
+        "Face1",
+        {linkingName(
+            {unmappedName("Edge1", 2, "BSF"), unmappedName("Edge1", 3, "BSF")},
+            1,
+            "BSF",
+            'F',
+            MAPPER_FLAG_GENERATED
+        )}
+    ));
+    int upperIndex = 0;
+    for (int index = 1; index <= static_cast<int>(result.countSubElements("Edge")); ++index) {
+        auto element = "Edge" + std::to_string(index);
+        auto shape = result.getSubShape(element.c_str());
+        if (BRep_Tool::Degenerated(TopoDS::Edge(shape))) {
+            EXPECT_TRUE(liesOn(shape, BRepBuilderAPI_MakeVertex(gp_Pnt(-4, 0, 2)).Vertex()));
+            EXPECT_TRUE(elementHasNames(
+                result,
+                element.c_str(),
+                {upperName(result, element, 1, "BSF", upperIndex++)}
+            ));
         }
-        auto name = result.getMappedName(IndexedName(onCurve.c_str()));
-        EXPECT_EQ(lastSection(name).iterationTag, std::to_string(tag))
-            << onCurve << " = " << name.toString();
+        else if (liesOn(shape, edge.Edge())) {
+            EXPECT_TRUE(
+                elementHasNames(result, element.c_str(), {unmappedName("Edge1", 2, "BSF")})
+            );
+        }
+        else if (liesOn(shape, edge1.Edge())) {
+            EXPECT_TRUE(
+                elementHasNames(result, element.c_str(), {unmappedName("Edge1", 3, "BSF")})
+            );
+        }
+        else {
+            EXPECT_TRUE(elementHasNames(
+                result,
+                element.c_str(),
+                {upperName(result, element, 1, "BSF", upperIndex++)}
+            ));
+        }
+    }
+    EXPECT_EQ(upperIndex, 2);
+    auto end1 = elementAt(result, "Vertex", Base::Vector3d(-10, 0, 2));
+    auto end2 = elementAt(result, "Vertex", Base::Vector3d(-9, 0, 2));
+    auto shared = elementAt(result, "Vertex", Base::Vector3d(-4, 0, 2));
+    EXPECT_TRUE(elementHasNames(result, end1.c_str(), {unmappedName("Vertex2", 2, "BSF")}));
+    EXPECT_TRUE(elementHasNames(result, end2.c_str(), {unmappedName("Vertex2", 3, "BSF")}));
+    EXPECT_TRUE(elementHasNames(
+        result,
+        shared.c_str(),
+        {unmappedName("Vertex1", 2, "BSF"), unmappedName("Vertex1", 3, "BSF")}
+    ));
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementBSplineFaceClosedEdgeWithOp)
+{
+    // Arrange: a single closed edge is split into 4, and the face is filled between them
+    auto circle = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 2));
+    TopoShape topoShape {1L};
+    TopoShape topoShape2 {circle.Edge(), 2L};
+    // Act
+    TopoShape& result
+        = topoShape.makeElementBSplineFace(topoShape2, FillingStyle::stretch, false, "SEW");
+    // Assert shape is correct
+    EXPECT_EQ(result.countSubElements("Face"), 1);
+    EXPECT_EQ(result.countSubElements("Edge"), 4);
+    // Assert elementMap is correct
+    //   the face's own section has the op passed (before ops#47 it was dropped in this case), and
+    //   links the four pieces of the circle; each edge is a piece of the circle, so its name has
+    //   the circle's unmapped name.
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(namesHaveTheirElementsType(result));
+    auto face = lastSection(result.getMappedName(IndexedName("Face1")));
+    EXPECT_EQ(face.opCode, "SEW");
+    EXPECT_EQ(face.iterationTag, "1");
+    EXPECT_EQ(face.mapperFlags, (std::vector<std::string> {MAPPER_FLAG_GENERATED}));
+    EXPECT_EQ(face.linkedNames.size(), 4U);
+    auto circleName = unmappedName("Edge1", 2, "SPT").toString();
+    for (int index = 1; index <= 4; ++index) {
+        auto element = "Edge" + std::to_string(index);
+        auto name = result.getMappedName(IndexedName(element.c_str())).toString();
+        EXPECT_EQ(name.rfind(circleName, 0), 0) << element << " = " << name;
     }
 }
 

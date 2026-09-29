@@ -1,3 +1,0 @@
-issue: ops#47
-reason: V2: makeElementBSplineFace names the face with its first edge's name (type E) and the edges with tag 0
-gtest  Part_tests_run/TopoShapeExpansionTest.makeElementBSplineFace

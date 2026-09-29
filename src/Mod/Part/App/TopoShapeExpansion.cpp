@@ -45,6 +45,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFill.hxx>
 #include <BRepFill_Generator.hxx>
 #include <BRepTools.hxx>
@@ -61,6 +62,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
@@ -6326,6 +6328,40 @@ std::vector<Data::IndexedName> TopoShape::getHigherElements(const char* element,
     return res;
 }
 
+namespace
+{
+// Whether an element of a B-spline face (a vertex or an edge) lies on an input element: a vertex
+// by distance, an edge by its vertices and its middle point. Degenerated edges lie on nothing.
+bool bsplineFaceElementLiesOn(const TopoDS_Shape& element, const TopoDS_Shape& on)
+{
+    double tolerance = Precision::Confusion();
+    if (on.ShapeType() == TopAbs_EDGE) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(on)));
+    }
+    else if (on.ShapeType() == TopAbs_VERTEX) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(on)));
+    }
+    auto isOn = [&](const TopoDS_Shape& shape) {
+        BRepExtrema_DistShapeShape distance(shape, on);
+        return distance.IsDone() && distance.Value() <= tolerance;
+    };
+    if (element.ShapeType() == TopAbs_VERTEX) {
+        return isOn(element);
+    }
+    if (element.ShapeType() != TopAbs_EDGE || BRep_Tool::Degenerated(TopoDS::Edge(element))) {
+        return false;
+    }
+    for (TopExp_Explorer xp(element, TopAbs_VERTEX); xp.More(); xp.Next()) {
+        if (!isOn(xp.Current())) {
+            return false;
+        }
+    }
+    BRepAdaptor_Curve curve(TopoDS::Edge(element));
+    gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+    return isOn(BRepBuilderAPI_MakeVertex(middle).Vertex());
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementBSplineFace(
     const TopoShape& shape,
     FillingStyle style,
@@ -6413,7 +6449,7 @@ TopoShape& TopoShape::makeElementBSplineFace(
 
         TopoShape s {getHistoryAlgorithm()};
         s.makeShapeWithElementMap(comp, mapper, edges, Part::OpCodes::Split);
-        return makeElementBSplineFace(s, style, op);
+        return makeElementBSplineFace(s, style, keepBezier, op);
     }
 
     if (edges.size() < 2 || edges.size() > 4) {
@@ -6546,6 +6582,38 @@ TopoShape& TopoShape::makeElementBSplineFace(
     }
     if (aFace.isNull()) {
         FC_THROWM(Base::CADKernelError, "Resulting Face is null");
+    }
+
+    if (getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+        // V2 (ops#47): the face is generated from the input edges, and each of its edges and
+        // vertices that lies on an input edge or vertex is that element, modified. The face's
+        // edges are new shapes, so they are matched by geometry, in the face's index order.
+        ShapeMapper mapper;
+        for (const auto& faceEdge : aFace.getSubTopoShapes(TopAbs_EDGE)) {
+            for (const auto& edge : edges) {
+                if (bsplineFaceElementLiesOn(faceEdge.getShape(), edge.getShape())) {
+                    mapper.populate(MappingStatus::Modified, edge, {faceEdge});
+                }
+            }
+        }
+        for (const auto& faceVertex : aFace.getSubTopoShapes(TopAbs_VERTEX)) {
+            for (const auto& edge : edges) {
+                for (const auto& vertex : edge.getSubTopoShapes(TopAbs_VERTEX)) {
+                    if (bsplineFaceElementLiesOn(faceVertex.getShape(), vertex.getShape())) {
+                        mapper.populate(MappingStatus::Modified, vertex, {faceVertex});
+                    }
+                }
+            }
+        }
+        for (const auto& edge : edges) {
+            mapper.populate(MappingStatus::Generated, edge, {aFace});
+        }
+        return makeShapeWithElementMap(
+            aFace.getShape(),
+            mapper,
+            input,
+            op ? op : Part::OpCodes::BSplineFace
+        );
     }
 
     // TODO:  Is this correct?  makeElementBSplineFace is new (there is no corresponding non element
