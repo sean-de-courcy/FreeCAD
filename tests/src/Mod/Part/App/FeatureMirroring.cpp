@@ -42,20 +42,23 @@ TEST_F(FeatureMirroringTest, testXMirror)
     // Mirrored it around X from 0,0,0 -> 1,2,3  to  0,0,-3 -> 1,2,0
     EXPECT_TRUE(boxesMatch(bb, Base::BoundBox3d(0, 0, -3, 1, 2, 0)));
     // Assert correct element Map
-    EXPECT_TRUE(allElementsMatch(
-        _mirror->Shape.getShape(),
-        {
-            "Edge10;:M;MIR;:H70c:7,E",  "Edge11;:M;MIR;:H70c:7,E",  "Edge12;:M;MIR;:H70c:7,E",
-            "Edge1;:M;MIR;:H70c:7,E",   "Edge2;:M;MIR;:H70c:7,E",   "Edge3;:M;MIR;:H70c:7,E",
-            "Edge4;:M;MIR;:H70c:7,E",   "Edge5;:M;MIR;:H70c:7,E",   "Edge6;:M;MIR;:H70c:7,E",
-            "Edge7;:M;MIR;:H70c:7,E",   "Edge8;:M;MIR;:H70c:7,E",   "Edge9;:M;MIR;:H70c:7,E",
-            "Face1;:M;MIR;:H70c:7,F",   "Face2;:M;MIR;:H70c:7,F",   "Face3;:M;MIR;:H70c:7,F",
-            "Face4;:M;MIR;:H70c:7,F",   "Face5;:M;MIR;:H70c:7,F",   "Face6;:M;MIR;:H70c:7,F",
-            "Vertex1;:M;MIR;:H70c:7,V", "Vertex2;:M;MIR;:H70c:7,V", "Vertex3;:M;MIR;:H70c:7,V",
-            "Vertex4;:M;MIR;:H70c:7,V", "Vertex5;:M;MIR;:H70c:7,V", "Vertex6;:M;MIR;:H70c:7,V",
-            "Vertex7;:M;MIR;:H70c:7,V", "Vertex8;:M;MIR;:H70c:7,V",
+    //   the box has no names: each mirrored element gets its source element's unmapped name
+    //   under the box's tag, op MIR. Mirroring adds no section of its own.
+    const auto& shape = _mirror->Shape.getShape();
+    auto boxTag = _boxes[0]->getID();
+    EXPECT_EQ(
+        unmappedName("Edge3", boxTag, "MIR").toString(),
+        "Edge3;_;" + std::to_string(boxTag) + ";MIR;0;E;0;IDX,SRC;_"
+    );
+    EXPECT_EQ(shape.getElementMapSize(), 26);
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        for (int index = 1; index <= static_cast<int>(shape.countSubElements(type)); ++index) {
+            auto element = std::string(type) + std::to_string(index);
+            EXPECT_TRUE(
+                elementHasNames(shape, element.c_str(), {unmappedName(element, boxTag, "MIR")})
+            );
         }
-    ));
+    }
 }
 
 TEST_F(FeatureMirroringTest, testYMirrorWithExistingElementMap)
@@ -78,69 +81,10 @@ TEST_F(FeatureMirroringTest, testYMirrorWithExistingElementMap)
     // Mirrored it around X from 0,0,0 -> 1,2,3  to  0,0,-3 -> 1,2,0
     EXPECT_TRUE(boxesMatch(bb, Base::BoundBox3d(0, 0, -3, 1, 3, 0)));
     // Assert correct element Map
-    EXPECT_TRUE(elementsMatch(
-        _mirror->Shape.getShape(),
-        {
-            "Edge10;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge10;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge11;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge11;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge12;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge12;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge1;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge1;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge2;:M2(Edge2;:H11c4,E);FUS;:H11c3:18,E;:M;MIR;:H11ca:7,E",
-            "Edge2;:M2;FUS;:H11c4:8,E;:M;MIR;:H11ca:7,E",
-            "Edge2;:M;FUS;:H11c3:7,E;:M;MIR;:H11ca:7,E",
-            "Edge3;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge3;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge4;:M2(Edge4;:H11c4,E);FUS;:H11c3:18,E;:M;MIR;:H11ca:7,E",
-            "Edge4;:M2;FUS;:H11c4:8,E;:M;MIR;:H11ca:7,E",
-            "Edge4;:M;FUS;:H11c3:7,E;:M;MIR;:H11ca:7,E",
-            "Edge5;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge5;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge6;:M2(Edge6;:H11c4,E);FUS;:H11c3:18,E;:M;MIR;:H11ca:7,E",
-            "Edge6;:M2;FUS;:H11c4:8,E;:M;MIR;:H11ca:7,E",
-            "Edge6;:M;FUS;:H11c3:7,E;:M;MIR;:H11ca:7,E",
-            "Edge7;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge7;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Edge8;:M2(Edge8;:H11c4,E);FUS;:H11c3:18,E;:M;MIR;:H11ca:7,E",
-            "Edge8;:M2;FUS;:H11c4:8,E;:M;MIR;:H11ca:7,E",
-            "Edge8;:M;FUS;:H11c3:7,E;:M;MIR;:H11ca:7,E",
-            "Edge9;:H11c3,E;:M;MIR;:H11ca:7,E",
-            "Edge9;:H11c4,E;:M;MIR;:H11ca:7,E",
-            "Face1;:M2(Face1;:H11c4,F);FUS;:H11c3:18,F;:M;MIR;:H11ca:7,F",
-            "Face1;:M2;FUS;:H11c4:8,F;:M;MIR;:H11ca:7,F",
-            "Face1;:M;FUS;:H11c3:7,F;:M;MIR;:H11ca:7,F",
-            "Face2;:M2(Face2;:H11c4,F);FUS;:H11c3:18,F;:M;MIR;:H11ca:7,F",
-            "Face2;:M2;FUS;:H11c4:8,F;:M;MIR;:H11ca:7,F",
-            "Face2;:M;FUS;:H11c3:7,F;:M;MIR;:H11ca:7,F",
-            "Face3;:H11c3,F;:M;MIR;:H11ca:7,F",
-            "Face4;:H11c4,F;:M;MIR;:H11ca:7,F",
-            "Face5;:M2(Face5;:H11c4,F);FUS;:H11c3:18,F;:M;MIR;:H11ca:7,F",
-            "Face5;:M2;FUS;:H11c4:8,F;:M;MIR;:H11ca:7,F",
-            "Face5;:M;FUS;:H11c3:7,F;:M;MIR;:H11ca:7,F",
-            "Face6;:M2(Face6;:H11c4,F);FUS;:H11c3:18,F;:M;MIR;:H11ca:7,F",
-            "Face6;:M2;FUS;:H11c4:8,F;:M;MIR;:H11ca:7,F",
-            "Face6;:M;FUS;:H11c3:7,F;:M;MIR;:H11ca:7,F",
-            "Vertex1;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex1;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex2;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex2;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex3;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex3;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex4;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex4;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex5;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex5;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex6;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex6;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex7;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex7;:H11c4,V;:M;MIR;:H11ca:7,V",
-            "Vertex8;:H11c3,V;:M;MIR;:H11ca:7,V",
-            "Vertex8;:H11c4,V;:M;MIR;:H11ca:7,V",
-        }
-    ));
+    //   a mirror keeps its source's names as they are: every element has the fused shape's names
+    //   for the same element, and nothing else
+    EXPECT_TRUE(allElementsNamed(_fuse->Shape.getShape()));
+    EXPECT_TRUE(sameNamesPerElement(_mirror->Shape.getShape(), _fuse->Shape.getShape()));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

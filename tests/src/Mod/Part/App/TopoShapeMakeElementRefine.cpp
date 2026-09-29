@@ -48,9 +48,10 @@ TEST_F(FeaturePartMakeElementRefineTest, makeElementRefineBoxes)
     EXPECT_EQ(ts.countSubElements("Edge"), 20);       // Two boxes touching loose 4 edges
     EXPECT_EQ(refined.countSubElements("Face"), 6);   // After refining it is one box
     EXPECT_EQ(refined.countSubElements("Edge"), 12);  // 12 edges in a box
-    // Make sure that the number of elements in the elementMaps is correct.
-    EXPECT_EQ(ts.getElementMapSize(), 42);
-    EXPECT_EQ(refined.getElementMapSize(), 26);
+    // Make sure that every element is named. A refined face keeps the names of the faces it
+    // merges, so there are more names than elements.
+    EXPECT_TRUE(PartTestHelpers::allElementsNamed(ts));
+    EXPECT_TRUE(PartTestHelpers::allElementsNamed(refined));
     // TODO: Refine doesn't work on compounds, so we're going to need a binary operation or the
     // like, and those don't exist yet.  Once they do, this test can be expanded
 }

@@ -1,0 +1,3 @@
+issue: ops#45
+reason: a compound of shapes that share sub-shapes: child ranges put names on the wrong elements
+gtest  Part_tests_run/TopoShapeExpansionTest.makeElementCompoundTwoCubes

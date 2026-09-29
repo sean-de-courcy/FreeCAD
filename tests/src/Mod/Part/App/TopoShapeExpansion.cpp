@@ -130,13 +130,16 @@ TEST_F(TopoShapeExpansionTest, makeElementCompoundEmptyShapesReturnsEmptyCompoun
     EXPECT_EQ(0, topoShape.getShape().TShape()->NbChildren());
 }
 
-TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoShapesGeneratesMap)
+TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoShapesGeneratesMapV1)
 {
     // Arrange
     auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
     auto edge2 = BRepBuilderAPI_MakeEdge(gp_Pnt(1.0, 0.0, 0.0), gp_Pnt(2.0, 0.0, 0.0)).Edge();
-    TopoShape topoShape {1L};
-    std::vector<TopoShape> shapes {TopoShape(edge1, 2L), TopoShape(edge2, 3L)};
+    TopoShape topoShape {App::HistoryAlgorithm::V1, 1L};
+    std::vector<TopoShape> shapes {
+        TopoShape(App::HistoryAlgorithm::V1, edge1, 2L),
+        TopoShape(App::HistoryAlgorithm::V1, edge2, 3L)
+    };
     // Act
     topoShape.makeElementCompound(shapes);
     auto elements = elementMap((topoShape));
@@ -155,20 +158,42 @@ TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoShapesGeneratesMap)
     EXPECT_EQ(elements[IndexedName("Vertex", 4)], MappedName("Vertex2;:H3,V"));
 }
 
+TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoShapesGeneratesMapV2)
+{
+    // Arrange
+    auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
+    auto edge2 = BRepBuilderAPI_MakeEdge(gp_Pnt(1.0, 0.0, 0.0), gp_Pnt(2.0, 0.0, 0.0)).Edge();
+    TopoShape topoShape {1L};
+    std::vector<TopoShape> shapes {TopoShape(edge1, 2L), TopoShape(edge2, 3L)};
+    // Act
+    topoShape.makeElementCompound(shapes);
+    Base::BoundBox3d bb = topoShape.getBoundBox();
+    // Assert shape is correct
+    EXPECT_FLOAT_EQ(getLength(topoShape.getShape()), 2);
+    EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0, 0, 0, 2, 0, 0)));
+    // Assert map is correct
+    //   V2 keeps no child maps: the children's elements are named in the compound's own map. The
+    //   edges have no names, so each element gets its unmapped name in its edge, under that
+    //   edge's tag; the compound passes no op (MKR)
+    EXPECT_TRUE(topoShape.getMappedChildElements().empty());
+    EXPECT_EQ(topoShape.getElementMapSize(), 6);
+    EXPECT_TRUE(elementHasNames(topoShape, "Edge1", {unmappedName("Edge1", 2)}));
+    EXPECT_TRUE(elementHasNames(topoShape, "Edge2", {unmappedName("Edge1", 3)}));
+    EXPECT_TRUE(elementHasNames(topoShape, "Vertex1", {unmappedName("Vertex1", 2)}));
+    EXPECT_TRUE(elementHasNames(topoShape, "Vertex2", {unmappedName("Vertex2", 2)}));
+    EXPECT_TRUE(elementHasNames(topoShape, "Vertex3", {unmappedName("Vertex1", 3)}));
+    EXPECT_TRUE(elementHasNames(topoShape, "Vertex4", {unmappedName("Vertex2", 3)}));
+    EXPECT_EQ(unmappedName("Vertex2", 3).toString(), "Vertex2;_;3;MKR;0;V;0;IDX,SRC;_");
+}
+
 TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoCubes)
 {
     auto [cube1TS, cube2TS] = CreateTwoTopoShapeCubes();
     // Act
     TopoShape topoShape {3L};
     topoShape.makeElementCompound({cube1TS, cube2TS});
-    auto elementMap = cube1TS.getElementMap();
     Base::BoundBox3d bb = topoShape.getBoundBox();
     // Assert shape is correct
-    EXPECT_EQ(
-        22,
-        topoShape.getMappedChildElements().size()
-    );  // Changed with PR#12471. Probably will change again after importing
-        // other TopoNaming logics
     EXPECT_FLOAT_EQ(getVolume(topoShape.getShape()), 2);
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0, 0, 0, 2, 1, 1)));
     // Assert map is correct
@@ -177,31 +202,22 @@ TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoCubes)
     // 12 Edges
     // 6 Faces
     // ----------
-    // 26 subshapes each
-    EXPECT_TRUE(allElementsMatch(
-        topoShape,
-        {
-            "Vertex1;:H1,V;:H7:6,V", "Vertex2;:H1,V;:H7:6,V", "Vertex3;:H1,V;:H7:6,V",
-            "Vertex4;:H1,V;:H7:6,V", "Vertex1;:H2,V;:H7:6,V", "Vertex2;:H2,V;:H7:6,V",
-            "Vertex3;:H2,V;:H7:6,V", "Vertex4;:H2,V;:H7:6,V", "Face1;:H8,F;:He:6,F",
-            "Face1;:H9,F;:He:6,F",   "Face1;:Ha,F;:He:6,F",   "Face1;:Hb,F;:He:6,F",
-            "Face1;:Hc,F;:He:6,F",   "Face1;:Hd,F;:He:6,F",   "Edge1;:H8,E;:He:6,E",
-            "Edge2;:H8,E;:He:6,E",   "Edge3;:H8,E;:He:6,E",   "Edge4;:H8,E;:He:6,E",
-            "Edge1;:H9,E;:He:6,E",   "Edge2;:H9,E;:He:6,E",   "Edge3;:H9,E;:He:6,E",
-            "Edge4;:H9,E;:He:6,E",   "Edge1;:Ha,E;:He:6,E",   "Edge2;:Ha,E;:He:6,E",
-            "Edge3;:Ha,E;:He:6,E",   "Edge4;:Ha,E;:He:6,E",   "Vertex1;:H8,V;:He:6,V",
-            "Vertex2;:H8,V;:He:6,V", "Vertex3;:H8,V;:He:6,V", "Vertex4;:H8,V;:He:6,V",
-            "Vertex1;:H9,V;:He:6,V", "Vertex2;:H9,V;:He:6,V", "Vertex3;:H9,V;:He:6,V",
-            "Vertex4;:H9,V;:He:6,V", "Edge1;:H1,E;:H7:6,E",   "Edge2;:H1,E;:H7:6,E",
-            "Edge3;:H1,E;:H7:6,E",   "Edge4;:H1,E;:H7:6,E",   "Edge1;:H2,E;:H7:6,E",
-            "Edge2;:H2,E;:H7:6,E",   "Edge3;:H2,E;:H7:6,E",   "Edge4;:H2,E;:H7:6,E",
-            "Edge1;:H3,E;:H7:6,E",   "Edge2;:H3,E;:H7:6,E",   "Edge3;:H3,E;:H7:6,E",
-            "Edge4;:H3,E;:H7:6,E",   "Face1;:H1,F;:H7:6,F",   "Face1;:H2,F;:H7:6,F",
-            "Face1;:H3,F;:H7:6,F",   "Face1;:H4,F;:H7:6,F",   "Face1;:H5,F;:H7:6,F",
-            "Face1;:H6,F;:H7:6,F",
-        }
-    ));  // Changed with PR#12471. Probably will change again after importing
-         // other TopoNaming logics
+    // 26 subshapes each, all named. V2 keeps no child maps.
+    EXPECT_TRUE(topoShape.getMappedChildElements().empty());
+    EXPECT_EQ(topoShape.countSubElements("Vertex"), 16);
+    EXPECT_EQ(topoShape.countSubElements("Edge"), 24);
+    EXPECT_EQ(topoShape.countSubElements("Face"), 12);
+    EXPECT_TRUE(allElementsNamed(topoShape));
+    // Each cube is a compound of its six faces, tags 1 to 6 and 8 to 13, which have no names, so
+    // every element is named after an element of one of these faces: the unmapped name of that
+    // face's element, under the face's tag. That element must be the one named: the faces share
+    // their edges and vertices, so a face's Edge2 is not the Edge2 after the previous faces' edges.
+    std::map<long, TopoShape> faces;
+    for (int index = 1; index <= 6; ++index) {
+        faces[index] = TopoShape(cube1TS.getSubShape(TopAbs_FACE, index));
+        faces[index + 7] = TopoShape(cube2TS.getSubShape(TopAbs_FACE, index));
+    }
+    EXPECT_TRUE(unmappedNamesNameTheirElements(topoShape, faces));
 }
 
 TEST_F(TopoShapeExpansionTest, MapperMakerModified)
@@ -775,11 +791,11 @@ TEST_F(TopoShapeExpansionTest, setElementComboNameNothing)
 }
 
 
-TEST_F(TopoShapeExpansionTest, setElementComboNameSimple)
+TEST_F(TopoShapeExpansionTest, setElementComboNameSimpleV1)
 {
     // Arrange
     auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
-    TopoShape topoShape {edge1, 1L};
+    TopoShape topoShape {App::HistoryAlgorithm::V1, edge1, 1L};
     topoShape.setElementMap({});  // Initialize the map to avoid a segfault.
     // Also, maybe the end of TopoShape::mapSubElementTypeForShape should enforce that elementMap()
     // isn't nullptr to eliminate the segfault.
@@ -792,10 +808,10 @@ TEST_F(TopoShapeExpansionTest, setElementComboNameSimple)
 }
 
 
-TEST_F(TopoShapeExpansionTest, setElementComboName)
+TEST_F(TopoShapeExpansionTest, setElementComboNameV1)
 {
     // Arrange
-    TopoShape topoShape {2L};
+    TopoShape topoShape {App::HistoryAlgorithm::V1, 2L};
     topoShape.setElementMap({});
     Data::MappedName edgeName = topoShape.getMappedName(Data::IndexedName::fromConst("Edge", 1), true);
     Data::MappedName faceName = topoShape.getMappedName(Data::IndexedName::fromConst("Face", 7), true);
@@ -813,13 +829,13 @@ TEST_F(TopoShapeExpansionTest, setElementComboName)
     // The detailed forms of names are covered in encodeElementName tests
 }
 
-TEST_F(TopoShapeExpansionTest, setElementComboNameCompound)
+TEST_F(TopoShapeExpansionTest, setElementComboNameCompoundV1)
 {
     // Arrange
     auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
     auto wire1 = BRepBuilderAPI_MakeWire({edge1}).Wire();
     auto wire2 = BRepBuilderAPI_MakeWire({edge1}).Wire();
-    TopoShape topoShape {2L};
+    TopoShape topoShape {App::HistoryAlgorithm::V1, 2L};
     topoShape.makeElementCompound({wire1, wire2});  // Quality of shape doesn't matter
     Data::MappedName edgeName = topoShape.getMappedName(Data::IndexedName::fromConst("Edge", 1), true);
     Data::MappedName faceName = topoShape.getMappedName(Data::IndexedName::fromConst("Face", 7), true);
@@ -839,6 +855,34 @@ TEST_F(TopoShapeExpansionTest, setElementComboNameCompound)
     );  // Changed with PR#12471. Probably will change again
         // after importing other TopoNaming logics
     // The detailed forms of names are covered in encodeElementName tests
+}
+
+TEST_F(TopoShapeExpansionTest, setElementComboNameCompoundV2)
+{
+    // Arrange
+    auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
+    auto wire1 = BRepBuilderAPI_MakeWire({edge1}).Wire();
+    auto wire2 = BRepBuilderAPI_MakeWire({edge1}).Wire();
+    TopoShape topoShape {2L};
+    topoShape.makeElementCompound({wire1, wire2});  // Quality of shape doesn't matter
+    Data::MappedName edgeName = topoShape.getMappedName(Data::IndexedName::fromConst("Edge", 1), true);
+    Data::MappedName faceName = topoShape.getMappedName(Data::IndexedName::fromConst("Face", 7), true);
+    Data::MappedName faceName2 = topoShape.getMappedName(Data::IndexedName::fromConst("Face", 8), true);
+    const char* op = "Copy";
+    // Act
+    Data::MappedName result = topoShape.setElementComboName(
+        Data::IndexedName::fromConst("Edge", 1),
+        {edgeName, faceName, faceName2},
+        OpCodes::Common,
+        op
+    );
+    // Assert
+    //   the wires' edge has no name and no tag: in the compound it gets its unmapped name under
+    //   the compound's tag. V2 has no combo names (encodeElementName does nothing), so the element
+    //   keeps the first name as it is.
+    EXPECT_EQ(edgeName, unmappedName("Edge1", 2));
+    EXPECT_EQ(result, edgeName);
+    EXPECT_EQ(topoShape.getMappedName(Data::IndexedName::fromConst("Edge", 1)), edgeName);
 }
 
 TEST_F(TopoShapeExpansionTest, splitWires)
@@ -1436,8 +1480,13 @@ TEST_F(TopoShapeExpansionTest, makeElementBooleanCommon)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 0.25);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 26);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_EQ(elements[IndexedName("Face", 1)], MappedName("Face3;:M;CMN;:H1:7,F"));
+    //   the common is the box 0.5 < x < 1, 0 < y < 0.5, 0 < z < 1. Its face at y = 0 is cube1's
+    //   Face3 (y min), trimmed: it keeps that face's unmapped name, with op CMN
+    EXPECT_TRUE(elementHasNames(
+        result,
+        elementAt(result, "Face", Base::Vector3d(0.75, 0, 0.5)).c_str(),
+        {unmappedName("Face3", 1, "CMN")}
+    ));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementBooleanCommonWithCompoundToolV1)
@@ -1633,7 +1682,42 @@ TEST_F(TopoShapeExpansionTest, makeElementDraft)
     EXPECT_NEAR(getVolume(result.getShape()), 4.3333333333, 1e-06);  // Truncated pyramid
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 26);  // Cubes have 6 Faces, 12 Edges, 8 Vertexes
-    EXPECT_EQ(elements[IndexedName("Edge", 1)], MappedName("Face1;:G;DFT;:H1:7,F;:U;DFT;:H1:7,E"));
+    //   the cube has no names. Each drafted side face is generated from the cube face it replaces
+    //   (whose unmapped name carries the op); the bottom and top faces are modified and keep
+    //   their unmapped names. Box faces: Face1 x min, Face2 x max, Face3 y min, Face4 y max,
+    //   Face5 z min, Face6 z max.
+    auto face = [&](const std::function<bool(const Base::Vector3d&)>& isAt) {
+        return elementWhere(result, "Face", isAt);
+    };
+    auto near = [](double value, double target) {
+        return std::abs(value - target) < Base::Precision::Confusion();
+    };
+    std::map<std::string, std::string> sides {
+        {"Face1", face([&](auto c) { return c.x < 0.4 && near(c.y, 0.5); })},
+        {"Face2", face([&](auto c) { return c.x > 0.6 && near(c.y, 0.5); })},
+        {"Face3", face([&](auto c) { return c.y < 0.4 && near(c.x, 0.5); })},
+        {"Face4", face([&](auto c) { return c.y > 0.6 && near(c.x, 0.5); })},
+    };
+    for (const auto& [cubeFace, draftedFace] : sides) {
+        EXPECT_TRUE(elementHasNames(
+            result,
+            draftedFace.c_str(),
+            {linkingName({unmappedName(cubeFace, 1, "DFT")}, 1, "DFT", 'F', MAPPER_FLAG_GENERATED)}
+        ));
+    }
+    EXPECT_TRUE(elementHasNames(
+        result,
+        elementAt(result, "Face", Base::Vector3d(0.5, 0.5, 0)).c_str(),
+        {unmappedName("Face5", 1, "DFT")}
+    ));
+    EXPECT_TRUE(elementHasNames(
+        result,
+        elementAt(result, "Face", Base::Vector3d(0.5, 0.5, 1)).c_str(),
+        {unmappedName("Face6", 1, "DFT")}
+    ));
+    //   the edges and vertices have no history: each is named after the faces it bounds (UPP)
+    EXPECT_TRUE(upperNamed(result, "Edge", 1, "DFT"));
+    EXPECT_TRUE(upperNamed(result, "Vertex", 1, "DFT"));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementDraftTopoShapes)
@@ -1665,15 +1749,46 @@ TEST_F(TopoShapeExpansionTest, makeElementDraftTopoShapes)
         angle,
         plane
     );  // Correct usage
-    auto elements = elementMap((result));
     // Assert
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_EQ(elements.size(), 26);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_EQ(elements[IndexedName("Face", 1)], MappedName("Face1;:H8,F;:G;DFT;:He:7,F"));
     EXPECT_NEAR(getVolume(result.getShape()), 4.3333333333, 1e-06);  // Truncated pyramid
-    EXPECT_EQ(result2.getElementMap().size(), 26);
-    EXPECT_EQ(result3.getElementMap().size(), 26);
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(allElementsNamed(result2));
+    EXPECT_TRUE(allElementsNamed(result3));
+    //   the cube (x from 1 to 2) has names. Each drafted side face is generated from the cube
+    //   face it replaces, linking that face's name, with the result's tag (cube1TS's, 7); the
+    //   bottom and top faces keep their names as they are
+    EXPECT_EQ(result.Tag, 7);
+    auto near = [](double value, double target) {
+        return std::abs(value - target) < Base::Precision::Confusion();
+    };
+    std::map<int, std::function<bool(const Base::Vector3d&)>> sides {
+        {1, [&](auto c) { return c.x < 1.4 && near(c.y, 0.5); }},
+        {2, [&](auto c) { return c.x > 1.6 && near(c.y, 0.5); }},
+        {3, [&](auto c) { return c.y < 0.4 && near(c.x, 1.5); }},
+        {4, [&](auto c) { return c.y > 0.6 && near(c.x, 1.5); }},
+    };
+    for (const auto& [cubeFace, isAt] : sides) {
+        auto cubeFaceName = cube2TS.getMappedName(IndexedName::fromConst("Face", cubeFace));
+        EXPECT_TRUE(elementHasNames(
+            result,
+            elementWhere(result, "Face", isAt).c_str(),
+            {linkingName({cubeFaceName}, 7, "DFT", 'F', MAPPER_FLAG_GENERATED)}
+        ));
+    }
+    EXPECT_TRUE(elementHasNames(
+        result,
+        elementAt(result, "Face", Base::Vector3d(1.5, 0.5, 0)).c_str(),
+        {cube2TS.getMappedName(IndexedName::fromConst("Face", 5))}
+    ));
+    EXPECT_TRUE(elementHasNames(
+        result,
+        elementAt(result, "Face", Base::Vector3d(1.5, 0.5, 1)).c_str(),
+        {cube2TS.getMappedName(IndexedName::fromConst("Face", 6))}
+    ));
+    //   the edges and vertices have no history: each is named after the faces it bounds (UPP)
+    EXPECT_TRUE(upperNamed(result, "Edge", 7, "DFT"));
+    EXPECT_TRUE(upperNamed(result, "Vertex", 7, "DFT"));
 }
 
 TEST_F(TopoShapeExpansionTest, linearizeEdge)
@@ -1926,8 +2041,70 @@ TEST_F(TopoShapeExpansionTest, makeElementPipeShell)
     // Assert that we're creating a correct element map
     EXPECT_TRUE(topoShape.getMappedChildElements().empty());
     EXPECT_EQ(elements.size(), 24);
-    EXPECT_EQ(elements.count(IndexedName("Edge", 1)), 1);
-    EXPECT_EQ(elements[IndexedName("Edge", 1)], MappedName("Vertex1;:G;PSH;:H2:7,E"));
+    //   the result has no tag, so its sections take the first input tag, the profile's (1). The
+    //   inputs have no names: they are linked by their elements' unmapped names, with op PSH.
+    //   Each side face is generated from a profile edge and the spine (tag 2)
+    for (int index = 1; index <= 4; ++index) {
+        auto profileEdge = "Edge" + std::to_string(index);
+        auto center = face1ts.getSubTopoShape(profileEdge.c_str()).getBoundBox().GetCenter();
+        EXPECT_TRUE(elementHasNames(
+            topoShape,
+            elementAt(topoShape, "Face", Base::Vector3d(center.x, center.y, -4)).c_str(),
+            {linkingName(
+                {unmappedName(profileEdge, 1, "PSH"), unmappedName("Edge1", 2, "PSH")},
+                1,
+                "PSH",
+                'F',
+                MAPPER_FLAG_GENERATED
+            )}
+        ));
+    }
+    //   each edge along the spine is generated from a profile vertex
+    for (int index = 1; index <= 4; ++index) {
+        auto profileVertex = "Vertex" + std::to_string(index);
+        auto point = face1ts.getSubTopoShape(profileVertex.c_str()).getBoundBox().GetCenter();
+        EXPECT_TRUE(elementHasNames(
+            topoShape,
+            elementAt(topoShape, "Edge", Base::Vector3d(point.x, point.y, -4)).c_str(),
+            {linkingName(
+                {unmappedName(profileVertex, 1, "PSH")},
+                1,
+                "PSH",
+                'E',
+                MAPPER_FLAG_GENERATED
+            )}
+        ));
+    }
+    //   OCCT reports the edges of the first and last sections as generated from the spine's ends;
+    //   the four edges generated from the same vertex are told apart by the index, 0 to 3
+    for (auto [spineVertex, z] : {std::pair {"Vertex1", 0.0}, std::pair {"Vertex2", -8.0}}) {
+        std::set<std::string> names;
+        std::set<std::string> expected;
+        auto edges = static_cast<int>(topoShape.countSubElements("Edge"));
+        for (int index = 1; index <= edges; ++index) {
+            auto edge = "Edge" + std::to_string(index);
+            auto center = topoShape.getSubTopoShape(edge.c_str()).getBoundBox().GetCenter();
+            if (std::abs(center.z - z) < 1e-7) {
+                names.insert(topoShape.getMappedName(IndexedName(edge.c_str())).toString());
+            }
+        }
+        for (int index = 0; index < 4; ++index) {
+            expected.insert(
+                linkingName(
+                    {unmappedName(spineVertex, 2, "PSH")},
+                    1,
+                    "PSH",
+                    'E',
+                    MAPPER_FLAG_GENERATED,
+                    index
+                )
+                    .toString()
+            );
+        }
+        EXPECT_EQ(names, expected);
+    }
+    //   the vertices have no history: each is named after the faces it bounds (UPP)
+    EXPECT_TRUE(upperNamed(topoShape, "Vertex", 1, "PSH"));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementThickSolid)
@@ -2075,77 +2252,27 @@ TEST_F(TopoShapeExpansionTest, makeElementFuse)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 1.75);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 66);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_TRUE(allElementsMatch(
+    //   neither cube has names. Every element of the fuse is one of theirs, kept (MKR), trimmed
+    //   (FUS) or split: the cubes' tops and bottoms, and the edges crossing into the other cube,
+    //   are split into pieces, which add a MOD section. The squares where the cubes' tops and
+    //   bottoms overlap lie on a face of each cube and have no history of their own: they are
+    //   named after their edges (LOW). The rest is made where elements of the two cubes meet:
+    //   the edges at x = 0.5 and y = 0.5 (GEN from a face of each cube) and the vertices at
+    //   their ends (GEN from an edge of each cube)
+    EXPECT_EQ(result.countSubElements("Vertex"), 20);
+    EXPECT_EQ(result.countSubElements("Edge"), 32);
+    EXPECT_EQ(result.countSubElements("Face"), 14);
+    EXPECT_TRUE(namedAsBoolean(result, {{1, TopoShape(cube1)}, {2, TopoShape(cube2)}}, "FUS"));
+    EXPECT_TRUE(elementHasNames(
         result,
-        {
-            "Edge1",
-            "Edge10;:G(Edge2;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge10;:H2,E",
-            "Edge10;:M2;FUS;:H1:8,E",
-            "Edge10;:M;FUS;:H1:7,E",
-            "Edge11",
-            "Edge11;:M2;FUS;:H2:8,E",
-            "Edge11;:M;FUS;:H2:7,E",
-            "Edge12",
-            "Edge12;:M2;FUS;:H2:8,E",
-            "Edge12;:M;FUS;:H2:7,E",
-            "Edge1;:H2,E",
-            "Edge2",
-            "Edge2;:M2;FUS;:H2:8,E",
-            "Edge2;:M;FUS;:H2:7,E",
-            "Edge3",
-            "Edge4",
-            "Edge4;:M2;FUS;:H2:8,E",
-            "Edge4;:M;FUS;:H2:7,E",
-            "Edge5;:H2,E",
-            "Edge6;:G(Edge12;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge6;:H2,E",
-            "Edge6;:M2;FUS;:H1:8,E",
-            "Edge6;:M;FUS;:H1:7,E",
-            "Edge7",
-            "Edge7;:H2,E",
-            "Edge8;:G(Edge11;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge8;:H2,E",
-            "Edge8;:M2;FUS;:H1:8,E",
-            "Edge8;:M;FUS;:H1:7,E",
-            "Edge9;:G(Edge4;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge9;:H2,E",
-            "Edge9;:M2;FUS;:H1:8,E",
-            "Edge9;:M;FUS;:H1:7,E",
-            "Face1",
-            "Face1;:M;FUS;:H2:7,F",
-            "Face2;:G(Face4;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face2;:H2,F",
-            "Face2;:M;FUS;:H1:7,F",
-            "Face3;:G(Face1;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face3;:H2,F",
-            "Face3;:M;FUS;:H1:7,F",
-            "Face4",
-            "Face4;:M;FUS;:H2:7,F",
-            "Face5;:M2(Face5;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face5;:M;FUS;:H1:7,F",
-            "Face5;:M;FUS;:H2:7,F",
-            "Face6;:M2(Face6;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face6;:M;FUS;:H1:7,F",
-            "Face6;:M;FUS;:H2:7,F",
-            "Vertex1",
-            "Vertex1;:H2,V",
-            "Vertex2",
-            "Vertex2;:H2,V",
-            "Vertex3",
-            "Vertex3;:M;FUS;:H2:7,V",
-            "Vertex4",
-            "Vertex4;:M;FUS;:H2:7,V",
-            "Vertex5;:H2,V",
-            "Vertex5;:M;FUS;:H1:7,V",
-            "Vertex6;:H2,V",
-            "Vertex6;:M;FUS;:H1:7,V",
-            "Vertex7",
-            "Vertex7;:H2,V",
-            "Vertex8",
-            "Vertex8;:H2,V",
-        }
+        elementAt(result, "Edge", Base::Vector3d(0.5, 0, 0.5)).c_str(),
+        {linkingName(
+            {unmappedName("Face3", 1, "FUS"), unmappedName("Face1", 2, "FUS")},
+            1,
+            "FUS",
+            'E',
+            MAPPER_FLAG_GENERATED
+        )}
     ));
 }
 
@@ -2167,51 +2294,65 @@ TEST_F(TopoShapeExpansionTest, makeElementCut)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 0.75);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 38);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_TRUE(allElementsMatch(
+    //   cube1 without the corner 0.5 < x < 1, 0 < y < 0.5 that cube2 takes. Neither cube has
+    //   names: every element is one of theirs, kept (MKR), trimmed (CUT), or made where two of
+    //   their elements meet: the edges at x = 0.5 and y = 0.5 (GEN from a face of each cube) and
+    //   the vertices at their ends (GEN from an edge of each cube)
+    EXPECT_EQ(result.countSubElements("Vertex"), 12);
+    EXPECT_EQ(result.countSubElements("Edge"), 18);
+    EXPECT_EQ(result.countSubElements("Face"), 8);
+    EXPECT_TRUE(namedAsBoolean(result, {{1, TopoShape(cube1)}, {2, TopoShape(cube2)}}, "CUT"));
+    EXPECT_TRUE(elementHasNames(
         result,
-        {
-            "Edge1",
-            "Edge10;:G(Edge2;K-1;:H2:4,E);CUT;:H1:1a,V",
-            "Edge10;:M;CUT;:H1:7,E",
-            "Edge11",
-            "Edge11;:M;CUT;:H2:7,E",
-            "Edge12",
-            "Edge12;:M;CUT;:H2:7,E",
-            "Edge2",
-            "Edge2;:M;CUT;:H2:7,E",
-            "Edge3",
-            "Edge3;:M;CUT;:H2:7,E",
-            "Edge4",
-            "Edge4;:M;CUT;:H2:7,E",
-            "Edge6;:G(Edge12;K-1;:H2:4,E);CUT;:H1:1b,V",
-            "Edge6;:M;CUT;:H1:7,E",
-            "Edge7",
-            "Edge8;:G(Edge11;K-1;:H2:4,E);CUT;:H1:1b,V",
-            "Edge8;:M;CUT;:H1:7,E",
-            "Edge9;:G(Edge4;K-1;:H2:4,E);CUT;:H1:1a,V",
-            "Edge9;:M;CUT;:H1:7,E",
-            "Face1",
-            "Face1;:M;CUT;:H2:7,F",
-            "Face2;:G(Face4;K-1;:H2:4,F);CUT;:H1:1a,E",
-            "Face2;:M;CUT;:H1:7,F",
-            "Face3;:G(Face1;K-1;:H2:4,F);CUT;:H1:1a,E",
-            "Face3;:M;CUT;:H1:7,F",
-            "Face4",
-            "Face4;:M;CUT;:H2:7,F",
-            "Face5;:M;CUT;:H1:7,F",
-            "Face6;:M;CUT;:H1:7,F",
-            "Vertex1",
-            "Vertex2",
-            "Vertex3",
-            "Vertex3;:M;CUT;:H2:7,V",
-            "Vertex4",
-            "Vertex4;:M;CUT;:H2:7,V",
-            "Vertex7",
-            "Vertex8",
-        }
+        elementAt(result, "Edge", Base::Vector3d(0.5, 0, 0.5)).c_str(),
+        {linkingName(
+            {unmappedName("Face3", 1, "CUT"), unmappedName("Face1", 2, "CUT")},
+            1,
+            "CUT",
+            'E',
+            MAPPER_FLAG_GENERATED
+        )}
     ));
 }
+
+namespace
+{
+// The V2 names of a box without names whose every edge was rounded or chamfered (tag 1): each box
+// face, trimmed, keeps its unmapped name with the op; the face along each box edge and the face at
+// each box corner are generated from that edge or vertex; the edges and vertices have no history
+// and are named after the faces they bound (UPP). Each face is found near what it replaces.
+void expectDressedBoxNames(const TopoShape& result, const TopoShape& box, const char* op)
+{
+    auto faceNear = [&](const Base::Vector3d& point) {
+        return elementWhere(result, "Face", [&](const Base::Vector3d& center) {
+            return Base::Distance(center, point) < 0.1;  // twice the rounding or chamfer size
+        });
+    };
+    auto centerOf = [&](const std::string& element) {
+        return box.getSubTopoShape(element.c_str()).getBoundBox().GetCenter();
+    };
+    for (int index = 1; index <= 6; ++index) {
+        auto face = "Face" + std::to_string(index);
+        EXPECT_TRUE(elementHasNames(
+            result,
+            elementAt(result, "Face", centerOf(face)).c_str(),
+            {unmappedName(face, 1, op)}
+        ));
+    }
+    for (const auto& [type, count] : {std::pair {"Edge", 12}, std::pair {"Vertex", 8}}) {
+        for (int index = 1; index <= count; ++index) {
+            auto element = type + std::to_string(index);
+            EXPECT_TRUE(elementHasNames(
+                result,
+                faceNear(centerOf(element)).c_str(),
+                {linkingName({unmappedName(element, 1, op)}, 1, op, 'F', MAPPER_FLAG_GENERATED)}
+            ));
+        }
+    }
+    EXPECT_TRUE(upperNamed(result, "Edge", 1, op));
+    EXPECT_TRUE(upperNamed(result, "Vertex", 1, op));
+}
+}  // namespace
 
 TEST_F(TopoShapeExpansionTest, makeElementChamfer)
 {
@@ -2228,109 +2369,9 @@ TEST_F(TopoShapeExpansionTest, makeElementChamfer)
     EXPECT_NEAR(getArea(cube1TS.getShape()), 5.640996, 1e-6);
     // Assert that we're creating a correct element map
     EXPECT_TRUE(cube1TS.getMappedChildElements().empty());
-    EXPECT_TRUE(allElementsMatch(
-        cube1TS,
-        {
-            "Edge10;:G;CHF;:H1:7,F",
-            "Edge10;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge10;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge10;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge10;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge11;:G;CHF;:H1:7,F",
-            "Edge11;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge11;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge11;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge11;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge12;:G;CHF;:H1:7,F",
-            "Edge12;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge12;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge12;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge12;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge1;:G;CHF;:H1:7,F",
-            "Edge1;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge1;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge1;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge1;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge1;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge1;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge1;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge1;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge2;:G;CHF;:H1:7,F",
-            "Edge2;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge2;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge2;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge2;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge2;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge2;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge2;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge3;:G;CHF;:H1:7,F",
-            "Edge3;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge3;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge3;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge3;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge3;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge3;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge3;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge4;:G;CHF;:H1:7,F",
-            "Edge4;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge4;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge4;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge4;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge4;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge4;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge5;:G;CHF;:H1:7,F",
-            "Edge5;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge5;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge5;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge5;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge5;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge5;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge5;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge5;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge6;:G;CHF;:H1:7,F",
-            "Edge6;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge6;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge6;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge6;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge6;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge6;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge6;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge7;:G;CHF;:H1:7,F",
-            "Edge7;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge7;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge7;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge7;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge7;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge7;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge7;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge8;:G;CHF;:H1:7,F",
-            "Edge8;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge8;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U2;CHF;:H1:8,V",
-            "Edge8;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E;:U;CHF;:H1:7,V",
-            "Edge8;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge8;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge8;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Edge9;:G;CHF;:H1:7,F",
-            "Edge9;:G;CHF;:H1:7,F;:U2;CHF;:H1:8,E",
-            "Edge9;:G;CHF;:H1:7,F;:U3;CHF;:H1:8,E",
-            "Edge9;:G;CHF;:H1:7,F;:U4;CHF;:H1:8,E",
-            "Edge9;:G;CHF;:H1:7,F;:U;CHF;:H1:7,E",
-            "Face1;:M;CHF;:H1:7,F",
-            "Face2;:M;CHF;:H1:7,F",
-            "Face3;:M;CHF;:H1:7,F",
-            "Face4;:M;CHF;:H1:7,F",
-            "Face5;:M;CHF;:H1:7,F",
-            "Face6;:M;CHF;:H1:7,F",
-            "Vertex1;:G;CHF;:H1:7,F",
-            "Vertex2;:G;CHF;:H1:7,F",
-            "Vertex3;:G;CHF;:H1:7,F",
-            "Vertex4;:G;CHF;:H1:7,F",
-            "Vertex5;:G;CHF;:H1:7,F",
-            "Vertex6;:G;CHF;:H1:7,F",
-            "Vertex7;:G;CHF;:H1:7,F",
-            "Vertex8;:G;CHF;:H1:7,F",
-        }
-    ));
+    EXPECT_EQ(cube1TS.countSubElements("Face"), 26);
+    EXPECT_TRUE(allElementsNamed(cube1TS));
+    expectDressedBoxNames(cube1TS, TopoShape(cube1), "CHF");
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementFillet)
@@ -2347,117 +2388,9 @@ TEST_F(TopoShapeExpansionTest, makeElementFillet)
     EXPECT_NEAR(getArea(cube1TS.getShape()), 5.739646, 1e-6);
     // Assert that we're creating a correct element map
     EXPECT_TRUE(cube1TS.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        cube1TS,
-        {
-            "Edge10;:G;FLT;:H1:7,F",
-            "Edge10;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge10;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge10;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge10;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge11;:G;FLT;:H1:7,F",
-            "Edge11;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge11;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge11;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge11;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge12;:G;FLT;:H1:7,F",
-            "Edge12;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge12;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge12;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge12;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge1;:G;FLT;:H1:7,F",
-            "Edge1;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge1;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge1;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge1;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge1;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge1;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge1;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge1;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge2;:G;FLT;:H1:7,F",
-            "Edge2;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge2;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge2;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge2;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge2;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge2;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge2;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge3;:G;FLT;:H1:7,F",
-            "Edge3;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge3;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge3;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge3;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge3;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge3;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge3;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge4;:G;FLT;:H1:7,F",
-            "Edge4;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge4;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge4;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge4;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge4;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge4;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge5;:G;FLT;:H1:7,F",
-            "Edge5;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge5;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge5;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge5;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge5;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge5;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge5;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge5;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge6;:G;FLT;:H1:7,F",
-            "Edge6;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge6;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge6;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge6;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge6;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge6;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge6;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge7;:G;FLT;:H1:7,F",
-            "Edge7;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge7;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge7;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge7;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge7;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge7;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge7;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge8;:G;FLT;:H1:7,F",
-            "Edge8;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge8;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U2;FLT;:H1:8,V",
-            "Edge8;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E;:U;FLT;:H1:7,V",
-            "Edge8;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge8;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge8;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Edge9;:G;FLT;:H1:7,F",
-            "Edge9;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Edge9;:G;FLT;:H1:7,F;:U3;FLT;:H1:8,E",
-            "Edge9;:G;FLT;:H1:7,F;:U4;FLT;:H1:8,E",
-            "Edge9;:G;FLT;:H1:7,F;:U;FLT;:H1:7,E",
-            "Face1;:M;FLT;:H1:7,F",
-            "Face2;:M;FLT;:H1:7,F",
-            "Face3;:M;FLT;:H1:7,F",
-            "Face4;:M;FLT;:H1:7,F",
-            "Face5;:M;FLT;:H1:7,F",
-            "Face6;:M;FLT;:H1:7,F",
-            "Vertex1;:G;FLT;:H1:7,F",
-            "Vertex1;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex2;:G;FLT;:H1:7,F",
-            "Vertex2;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex3;:G;FLT;:H1:7,F",
-            "Vertex3;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex4;:G;FLT;:H1:7,F",
-            "Vertex4;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex5;:G;FLT;:H1:7,F",
-            "Vertex5;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex6;:G;FLT;:H1:7,F",
-            "Vertex6;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex7;:G;FLT;:H1:7,F",
-            "Vertex7;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-            "Vertex8;:G;FLT;:H1:7,F",
-            "Vertex8;:G;FLT;:H1:7,F;:U2;FLT;:H1:8,E",
-        }
-    ));
+    EXPECT_EQ(cube1TS.countSubElements("Face"), 26);
+    EXPECT_TRUE(allElementsNamed(cube1TS));
+    expectDressedBoxNames(cube1TS, TopoShape(cube1), "FLT");
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementSlice)
@@ -2475,19 +2408,24 @@ TEST_F(TopoShapeExpansionTest, makeElementSlice)
     EXPECT_EQ(TopAbs_ShapeEnum::TopAbs_WIRE, result.getShape().ShapeType());
     // Assert that we're creating a correct element map
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Face1;:G2;SLC;:H1:8,V;SLC;:H1:4,V",
-            "Face1;:G3;SLC;:H1:8,V;SLC;:H1:4,V",
-            "Face1;:G4;SLC;:H1:8,V;SLC;:H1:4,V",
-            "Face1;:G5;SLC;:H1:8,E;SLC;:H1:4,E",
-            "Face1;:G6;SLC;:H1:8,E;SLC;:H1:4,E",
-            "Face1;:G7;SLC;:H1:8,E;SLC;:H1:4,E",
-            "Face1;:G8;SLC;:H1:8,E;SLC;:H1:4,E",
-            "Face1;:G;SLC;:H1:7,V;SLC;:H1:4,V",
-        }
-    ));
+    //   the cube has neither a tag nor names, so it can't be linked: the wire is named after the
+    //   slicing plane only, a face made for the slice with the slice's number as its tag (1) and
+    //   named without an op, and the result takes that tag. Its 4 edges and 4 vertices are all
+    //   generated from that face; they are told apart by the index. Each name has its element's
+    //   type (ops#46: the vertices get the edges' type)
+    auto planeName = unmappedName("Face1", 1);
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(namesHaveTheirElementsType(result));
+    std::set<std::string> names;
+    for (const auto& entry : result.getElementMap()) {
+        auto section = lastSection(entry.name);
+        EXPECT_EQ(section.linkedNames, std::vector<std::string> {planeName.toString()});
+        EXPECT_EQ(section.iterationTag, "1");
+        EXPECT_EQ(section.opCode, "SLC");
+        EXPECT_EQ(section.mapperFlags, std::vector<std::string> {MAPPER_FLAG_GENERATED});
+        names.insert(entry.name.toString());
+    }
+    EXPECT_EQ(names.size(), 8);
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementSlices)
@@ -2511,35 +2449,39 @@ TEST_F(TopoShapeExpansionTest, makeElementSlices)
     EXPECT_EQ(TopAbs_ShapeEnum::TopAbs_WIRE, subTopoShapes[2].getShape().ShapeType());
     // Assert that we're creating a correct element map
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge10;:G(Face1;K-2;:H1:4,F);SLC;:H1:1a,V;SLC;:H1:4,V",
-            "Edge10;:G(Face1;K-2;:H2:4,F);SLC_2;:H1:1c,V;SLC_2;:H1:6,V",
-            "Edge10;:G(Face1;K-2;:H3:4,F);SLC_3;:H1:1c,V;SLC_3;:H1:6,V",
-            "Edge11;:G(Face1;K-3;:H1:4,F);SLC;:H1:1a,V;SLC;:H1:4,V",
-            "Edge11;:G(Face1;K-3;:H2:4,F);SLC_2;:H1:1c,V;SLC_2;:H1:6,V",
-            "Edge11;:G(Face1;K-3;:H3:4,F);SLC_3;:H1:1c,V;SLC_3;:H1:6,V",
-            "Edge12;:G(Face1;K-4;:H1:4,F);SLC;:H1:1a,V;SLC;:H1:4,V",
-            "Edge12;:G(Face1;K-4;:H2:4,F);SLC_2;:H1:1c,V;SLC_2;:H1:6,V",
-            "Edge12;:G(Face1;K-4;:H3:4,F);SLC_3;:H1:1c,V;SLC_3;:H1:6,V",
-            "Edge9;:G(Face1;K-1;:H1:4,F);SLC;:H1:1a,V;SLC;:H1:4,V",
-            "Edge9;:G(Face1;K-1;:H2:4,F);SLC_2;:H1:1c,V;SLC_2;:H1:6,V",
-            "Edge9;:G(Face1;K-1;:H3:4,F);SLC_3;:H1:1c,V;SLC_3;:H1:6,V",
-            "Face1;:G5(Face3;K-1;:H1:4,F);SLC;:H1:1b,E;SLC;:H1:4,E",
-            "Face1;:G6(Face4;K-1;:H1:4,F);SLC;:H1:1b,E;SLC;:H1:4,E",
-            "Face1;:G7(Face5;K-1;:H1:4,F);SLC;:H1:1b,E;SLC;:H1:4,E",
-            "Face1;:G8(Face6;K-1;:H1:4,F);SLC;:H1:1b,E;SLC;:H1:4,E",
-            "Face3;:G(Face1;K-5;:H2:4,F);SLC_2;:H1:1c,E;SLC_2;:H1:6,E",
-            "Face3;:G(Face1;K-5;:H3:4,F);SLC_3;:H1:1c,E;SLC_3;:H1:6,E",
-            "Face4;:G(Face1;K-6;:H2:4,F);SLC_2;:H1:1c,E;SLC_2;:H1:6,E",
-            "Face4;:G(Face1;K-6;:H3:4,F);SLC_3;:H1:1c,E;SLC_3;:H1:6,E",
-            "Face5;:G(Face1;K-7;:H2:4,F);SLC_2;:H1:1c,E;SLC_2;:H1:6,E",
-            "Face5;:G(Face1;K-7;:H3:4,F);SLC_3;:H1:1c,E;SLC_3;:H1:6,E",
-            "Face6;:G(Face1;K-8;:H2:4,F);SLC_2;:H1:1c,E;SLC_2;:H1:6,E",
-            "Face6;:G(Face1;K-8;:H3:4,F);SLC_3;:H1:1c,E;SLC_3;:H1:6,E",
+    //   each slice i (x = 0.25, 0.5, 0.75) is a wire where a face made for the slice, with the
+    //   slice's number as its tag and named without an op, cuts the cube (tag 1). Each edge is
+    //   generated from the cube face it lies on and that face, each vertex from the cube edge it
+    //   lies on and that face. The op is SLC for the first slice and SLC_<i> for the others; the
+    //   result has no tag and takes the first input's (1)
+    EXPECT_TRUE(allElementsNamed(result));
+    TopoShape cube {cube1};
+    auto expected = [&](const std::string& element) {
+        auto shape = result.getSubShape(element.c_str());
+        const char* above = element.starts_with("Vertex") ? "Edge" : "Face";
+        auto slice = static_cast<int>(std::lround(result.getSubTopoShape(element.c_str())
+                                                      .getBoundBox()
+                                                      .GetCenter()
+                                                      .x
+                                                  / 0.25));
+        std::string op = slice == 1 ? "SLC" : "SLC_" + std::to_string(slice);
+        std::vector<MappedName> linked;
+        for (int index = 1; index <= static_cast<int>(cube.countSubElements(above)); ++index) {
+            auto cubeElement = above + std::to_string(index);
+            if (liesOn(shape, cube.getSubShape(cubeElement.c_str()))) {
+                linked.push_back(unmappedName(cubeElement, 1, op.c_str()));
+            }
         }
-    ));
+        EXPECT_EQ(linked.size(), 1) << element;
+        linked.push_back(unmappedName("Face1", slice));
+        return linkingName(linked, 1, op.c_str(), element[0], MAPPER_FLAG_GENERATED);
+    };
+    for (const char* type : {"Vertex", "Edge"}) {
+        for (int index = 1; index <= static_cast<int>(result.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            EXPECT_TRUE(elementHasNames(result, element.c_str(), {expected(element)}));
+        }
+    }
     EXPECT_FALSE(subTopoShapes[0].getElementMap().empty());  // Changed with PR#12471. Probably will
                                                              // change again after importing other
                                                              // TopoNaming logics
@@ -2563,18 +2505,20 @@ TEST_F(TopoShapeExpansionTest, makeElementMirror)
     EXPECT_EQ(TopAbs_ShapeEnum::TopAbs_SOLID, result.getShape().ShapeType());
     // Assert that we're creating a correct element map
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {"Edge10;:M;MIR;:H1:7,E",  "Edge11;:M;MIR;:H1:7,E",  "Edge12;:M;MIR;:H1:7,E",
-         "Edge1;:M;MIR;:H1:7,E",   "Edge2;:M;MIR;:H1:7,E",   "Edge3;:M;MIR;:H1:7,E",
-         "Edge4;:M;MIR;:H1:7,E",   "Edge5;:M;MIR;:H1:7,E",   "Edge6;:M;MIR;:H1:7,E",
-         "Edge7;:M;MIR;:H1:7,E",   "Edge8;:M;MIR;:H1:7,E",   "Edge9;:M;MIR;:H1:7,E",
-         "Face1;:M;MIR;:H1:7,F",   "Face2;:M;MIR;:H1:7,F",   "Face3;:M;MIR;:H1:7,F",
-         "Face4;:M;MIR;:H1:7,F",   "Face5;:M;MIR;:H1:7,F",   "Face6;:M;MIR;:H1:7,F",
-         "Vertex1;:M;MIR;:H1:7,V", "Vertex2;:M;MIR;:H1:7,V", "Vertex3;:M;MIR;:H1:7,V",
-         "Vertex4;:M;MIR;:H1:7,V", "Vertex5;:M;MIR;:H1:7,V", "Vertex6;:M;MIR;:H1:7,V",
-         "Vertex7;:M;MIR;:H1:7,V", "Vertex8;:M;MIR;:H1:7,V"}
-    ));
+    //   the cube has no names: each element of the mirror image keeps the unmapped name of the
+    //   cube element it mirrors (the one at x -> -x), with op MIR. Mirroring adds no section.
+    TopoShape cube {cube1};
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        for (int index = 1; index <= static_cast<int>(cube.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            auto center = cube.getSubTopoShape(element.c_str()).getBoundBox().GetCenter();
+            EXPECT_TRUE(elementHasNames(
+                result,
+                elementAt(result, type, Base::Vector3d(-center.x, center.y, center.z)).c_str(),
+                {unmappedName(element, 1, "MIR")}
+            ));
+        }
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementTransformWithoutMap)
@@ -2614,78 +2558,12 @@ TEST_F(TopoShapeExpansionTest, makeElementTransformWithMap)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 1.75);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 66);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_TRUE(allElementsMatch(
-        result,
-        {
-            "Edge1",
-            "Edge10;:G(Edge2;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge10;:H2,E",
-            "Edge10;:M2;FUS;:H1:8,E",
-            "Edge10;:M;FUS;:H1:7,E",
-            "Edge11",
-            "Edge11;:M2;FUS;:H2:8,E",
-            "Edge11;:M;FUS;:H2:7,E",
-            "Edge12",
-            "Edge12;:M2;FUS;:H2:8,E",
-            "Edge12;:M;FUS;:H2:7,E",
-            "Edge1;:H2,E",
-            "Edge2",
-            "Edge2;:M2;FUS;:H2:8,E",
-            "Edge2;:M;FUS;:H2:7,E",
-            "Edge3",
-            "Edge4",
-            "Edge4;:M2;FUS;:H2:8,E",
-            "Edge4;:M;FUS;:H2:7,E",
-            "Edge5;:H2,E",
-            "Edge6;:G(Edge12;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge6;:H2,E",
-            "Edge6;:M2;FUS;:H1:8,E",
-            "Edge6;:M;FUS;:H1:7,E",
-            "Edge7",
-            "Edge7;:H2,E",
-            "Edge8;:G(Edge11;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge8;:H2,E",
-            "Edge8;:M2;FUS;:H1:8,E",
-            "Edge8;:M;FUS;:H1:7,E",
-            "Edge9;:G(Edge4;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge9;:H2,E",
-            "Edge9;:M2;FUS;:H1:8,E",
-            "Edge9;:M;FUS;:H1:7,E",
-            "Face1",
-            "Face1;:M;FUS;:H2:7,F",
-            "Face2;:G(Face4;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face2;:H2,F",
-            "Face2;:M;FUS;:H1:7,F",
-            "Face3;:G(Face1;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face3;:H2,F",
-            "Face3;:M;FUS;:H1:7,F",
-            "Face4",
-            "Face4;:M;FUS;:H2:7,F",
-            "Face5;:M2(Face5;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face5;:M;FUS;:H1:7,F",
-            "Face5;:M;FUS;:H2:7,F",
-            "Face6;:M2(Face6;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face6;:M;FUS;:H1:7,F",
-            "Face6;:M;FUS;:H2:7,F",
-            "Vertex1",
-            "Vertex1;:H2,V",
-            "Vertex2",
-            "Vertex2;:H2,V",
-            "Vertex3",
-            "Vertex3;:M;FUS;:H2:7,V",
-            "Vertex4",
-            "Vertex4;:M;FUS;:H2:7,V",
-            "Vertex5;:H2,V",
-            "Vertex5;:M;FUS;:H1:7,V",
-            "Vertex6;:H2,V",
-            "Vertex6;:M;FUS;:H1:7,V",
-            "Vertex7",
-            "Vertex7;:H2,V",
-            "Vertex8",
-            "Vertex8;:H2,V",
-        }
-    ));
+    //   moving the fused cubes adds no section: every element keeps the fused shape's names
+    //   (makeElementFuse checks those)
+    TopoShape fused {1L};
+    fused.makeElementFuse({TopoShape(cube1, 1L), TopoShape(cube2, 2L)});
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(sameNamesPerElement(result, fused));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementGTransformWithoutMap)
@@ -2725,78 +2603,12 @@ TEST_F(TopoShapeExpansionTest, makeElementGTransformWithMap)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 1.75);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 66);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_TRUE(allElementsMatch(
-        result,
-        {
-            "Edge1",
-            "Edge10;:G(Edge2;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge10;:H2,E",
-            "Edge10;:M2;FUS;:H1:8,E",
-            "Edge10;:M;FUS;:H1:7,E",
-            "Edge11",
-            "Edge11;:M2;FUS;:H2:8,E",
-            "Edge11;:M;FUS;:H2:7,E",
-            "Edge12",
-            "Edge12;:M2;FUS;:H2:8,E",
-            "Edge12;:M;FUS;:H2:7,E",
-            "Edge1;:H2,E",
-            "Edge2",
-            "Edge2;:M2;FUS;:H2:8,E",
-            "Edge2;:M;FUS;:H2:7,E",
-            "Edge3",
-            "Edge4",
-            "Edge4;:M2;FUS;:H2:8,E",
-            "Edge4;:M;FUS;:H2:7,E",
-            "Edge5;:H2,E",
-            "Edge6;:G(Edge12;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge6;:H2,E",
-            "Edge6;:M2;FUS;:H1:8,E",
-            "Edge6;:M;FUS;:H1:7,E",
-            "Edge7",
-            "Edge7;:H2,E",
-            "Edge8;:G(Edge11;K-1;:H2:4,E);FUS;:H1:1b,V",
-            "Edge8;:H2,E",
-            "Edge8;:M2;FUS;:H1:8,E",
-            "Edge8;:M;FUS;:H1:7,E",
-            "Edge9;:G(Edge4;K-1;:H2:4,E);FUS;:H1:1a,V",
-            "Edge9;:H2,E",
-            "Edge9;:M2;FUS;:H1:8,E",
-            "Edge9;:M;FUS;:H1:7,E",
-            "Face1",
-            "Face1;:M;FUS;:H2:7,F",
-            "Face2;:G(Face4;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face2;:H2,F",
-            "Face2;:M;FUS;:H1:7,F",
-            "Face3;:G(Face1;K-1;:H2:4,F);FUS;:H1:1a,E",
-            "Face3;:H2,F",
-            "Face3;:M;FUS;:H1:7,F",
-            "Face4",
-            "Face4;:M;FUS;:H2:7,F",
-            "Face5;:M2(Face5;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face5;:M;FUS;:H1:7,F",
-            "Face5;:M;FUS;:H2:7,F",
-            "Face6;:M2(Face6;K2;:H2:3,F);FUS;:H1:1a,F",
-            "Face6;:M;FUS;:H1:7,F",
-            "Face6;:M;FUS;:H2:7,F",
-            "Vertex1",
-            "Vertex1;:H2,V",
-            "Vertex2",
-            "Vertex2;:H2,V",
-            "Vertex3",
-            "Vertex3;:M;FUS;:H2:7,V",
-            "Vertex4",
-            "Vertex4;:M;FUS;:H2:7,V",
-            "Vertex5;:H2,V",
-            "Vertex5;:M;FUS;:H1:7,V",
-            "Vertex6;:H2,V",
-            "Vertex6;:M;FUS;:H1:7,V",
-            "Vertex7",
-            "Vertex7;:H2,V",
-            "Vertex8",
-            "Vertex8;:H2,V",
-        }
-    ));
+    //   moving the fused cubes adds no section: every element keeps the fused shape's names
+    //   (makeElementFuse checks those)
+    TopoShape fused {1L};
+    fused.makeElementFuse({TopoShape(cube1, 1L), TopoShape(cube2, 2L)});
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(sameNamesPerElement(result, fused));
 }
 
 // Not testing _makeElementTransform as it is a thin wrapper that calls the same places as the four
@@ -2825,25 +2637,25 @@ TEST_F(TopoShapeExpansionTest, makeElementSolid)
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 2);
     // Assert elementMap is correct
     EXPECT_EQ(elements.size(), 52);
-    EXPECT_EQ(elements.count(IndexedName("Face", 1)), 1);
-    EXPECT_TRUE(allElementsMatch(
-        result,
-        {
-            "Edge10;:C1;:H:4,E",  "Edge10;:H,E",  "Edge11;:C1;:H:4,E",  "Edge11;:H,E",
-            "Edge12;:C1;:H:4,E",  "Edge12;:H,E",  "Edge1;:C1;:H:4,E",   "Edge1;:H,E",
-            "Edge2;:C1;:H:4,E",   "Edge2;:H,E",   "Edge3;:C1;:H:4,E",   "Edge3;:H,E",
-            "Edge4;:C1;:H:4,E",   "Edge4;:H,E",   "Edge5;:C1;:H:4,E",   "Edge5;:H,E",
-            "Edge6;:C1;:H:4,E",   "Edge6;:H,E",   "Edge7;:C1;:H:4,E",   "Edge7;:H,E",
-            "Edge8;:C1;:H:4,E",   "Edge8;:H,E",   "Edge9;:C1;:H:4,E",   "Edge9;:H,E",
-            "Face1;:C1;:H:4,F",   "Face1;:H,F",   "Face2;:C1;:H:4,F",   "Face2;:H,F",
-            "Face3;:C1;:H:4,F",   "Face3;:H,F",   "Face4;:C1;:H:4,F",   "Face4;:H,F",
-            "Face5;:C1;:H:4,F",   "Face5;:H,F",   "Face6;:C1;:H:4,F",   "Face6;:H,F",
-            "Vertex1;:C1;:H:4,V", "Vertex1;:H,V", "Vertex2;:C1;:H:4,V", "Vertex2;:H,V",
-            "Vertex3;:C1;:H:4,V", "Vertex3;:H,V", "Vertex4;:C1;:H:4,V", "Vertex4;:H,V",
-            "Vertex5;:C1;:H:4,V", "Vertex5;:H,V", "Vertex6;:C1;:H:4,V", "Vertex6;:H,V",
-            "Vertex7;:C1;:H:4,V", "Vertex7;:H,V", "Vertex8;:C1;:H:4,V", "Vertex8;:H,V",
+    //   the shells have no tags and no names: in the compound, each element of a shell gets its
+    //   unmapped name in that shell under the compound's tag (1). The second shell's names are
+    //   the first one's, so they get duplicate count 1. The solid keeps them.
+    EXPECT_EQ(unmappedName("Edge3", 1, "MKR", 1).toString(), "Edge3;_;1;MKR;0;E;1;IDX,SRC;_");
+    for (const auto& [shell, duplicate] : {std::pair {shell1, 0}, std::pair {shell2, 1}}) {
+        TopoShape shellShape {shell};
+        for (const char* type : {"Vertex", "Edge", "Face"}) {
+            auto count = static_cast<int>(shellShape.countSubElements(type));
+            for (int index = 1; index <= count; ++index) {
+                auto element = type + std::to_string(index);
+                auto found = result.findShape(shellShape.getSubShape(element.c_str()));
+                EXPECT_TRUE(elementHasNames(
+                    result,
+                    (type + std::to_string(found)).c_str(),
+                    {unmappedName(element, 1, "MKR", duplicate)}
+                ));
+            }
         }
-    ));
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementRevolve)
@@ -2865,31 +2677,89 @@ TEST_F(TopoShapeExpansionTest, makeElementRevolve)
     );
     EXPECT_NEAR(getVolume(result.getShape()), 0.50885141, 1e-6);
     // Assert elementMap is correct
-    EXPECT_TRUE(elementsMatch(
+    //   the face (the cube's x = 0 face, tag 2) has names, which the result links; the result
+    //   has the face's tag. The face itself is kept as the start face. Its edge on the axis
+    //   (z = 0) is kept and sweeps nothing; the others sweep a face each (GEN), and its vertices
+    //   off the axis sweep an edge each (GEN).
+    const auto& face = subTopoFaces[0];
+    auto nameOf = [&](const std::string& element) {
+        return face.getMappedName(IndexedName(element.c_str()));
+    };
+    auto rotated = [&](const Base::Vector3d& point) {
+        gp_Trsf rotation;
+        rotation.SetRotation(axis, angle);
+        gp_Pnt moved = gp_Pnt(point.x, point.y, point.z).Transformed(rotation);
+        return Base::Vector3d(moved.X(), moved.Y(), moved.Z());
+    };
+    auto centerOf = [&](const TopoShape& shape, const std::string& element) {
+        return shape.getSubTopoShape(element.c_str()).getBoundBox().GetCenter();
+    };
+    EXPECT_EQ(result.countSubElements("Face"), 5);
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(namesHaveTheirElementsType(result));
+    EXPECT_TRUE(elementHasNames(
         result,
-        {
-            "Edge1;:G;RVL;:H2:7,F",
-            "Edge1;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E",
-            "Edge1;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E;:L(Edge2;:G;RVL;:H2:7,F;:U;RVL;:H2:"
-            "7,E|Edge3;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E|Edge4;:H2,E);RVL;:H2:5c,F",
-            "Edge1;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E;:U;RVL;:H2:7,V",
-            "Edge1;:H2,E",
-            "Edge2;:G;RVL;:H2:7,F",
-            "Edge2;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E",
-            "Edge2;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E;:U;RVL;:H2:7,V",
-            "Edge2;:H2,E",
-            "Edge3;:G;RVL;:H2:7,F",
-            "Edge3;:G;RVL;:H2:7,F;:U;RVL;:H2:7,E",
-            "Edge3;:H2,E",
-            "Edge4;:H2,E",
-            "Face1;:H2,F",
-            "Vertex1;:G;RVL;:H2:7,E",
-            "Vertex1;:H2,V",
-            "Vertex2;:H2,V",
-            "Vertex3;:G;RVL;:H2:7,E",
-            "Vertex3;:H2,V",
-            "Vertex4;:H2,V",
+        ("Face" + std::to_string(result.findShape(face.getShape()))).c_str(),
+        {nameOf("Face1")}
+    ));
+    std::string axisEdge;
+    for (int index = 1; index <= 4; ++index) {
+        auto edge = "Edge" + std::to_string(index);
+        auto center = centerOf(face, edge);
+        if (std::abs(center.z) < 1e-7) {
+            axisEdge = edge;
+            continue;
         }
+        //   the swept face contains the edge and its rotated copy: its center is off both
+        std::string sweptFace;
+        for (int faceIndex = 1; faceIndex <= 5; ++faceIndex) {
+            auto candidate = "Face" + std::to_string(faceIndex);
+            if (liesOn(face.getSubShape(edge.c_str()), result.getSubShape(candidate.c_str()))
+                && result.getMappedName(IndexedName(candidate.c_str())) != nameOf("Face1")) {
+                sweptFace = candidate;
+            }
+        }
+        EXPECT_TRUE(elementHasNames(
+            result,
+            sweptFace.c_str(),
+            {linkingName({nameOf(edge)}, 2, "RVL", 'F', MAPPER_FLAG_GENERATED)}
+        ));
+    }
+    EXPECT_EQ(axisEdge, "Edge4");
+    for (int index = 1; index <= 4; ++index) {
+        auto vertex = "Vertex" + std::to_string(index);
+        auto point = centerOf(face, vertex);
+        if (std::abs(point.z) < 1e-7) {
+            continue;
+        }
+        auto arcEnd = rotated(point);
+        std::string arc;
+        auto end = BRepBuilderAPI_MakeVertex(gp_Pnt(arcEnd.x, arcEnd.y, arcEnd.z)).Vertex();
+        auto edges = static_cast<int>(result.countSubElements("Edge"));
+        for (int edgeIndex = 1; edgeIndex <= edges; ++edgeIndex) {
+            auto candidate = "Edge" + std::to_string(edgeIndex);
+            auto shape = result.getSubShape(candidate.c_str());
+            if (liesOn(face.getSubShape(vertex.c_str()), shape) && liesOn(end, shape)
+                && !liesOn(shape, face.getShape())) {
+                arc = candidate;
+            }
+        }
+        EXPECT_TRUE(elementHasNames(
+            result,
+            arc.c_str(),
+            {linkingName({nameOf(vertex)}, 2, "RVL", 'E', MAPPER_FLAG_GENERATED)}
+        ));
+    }
+    //   the end face has no history of its own, so it is named after its edges (LOW). The
+    //   fallback names faces before edges in one pass, so the only edge of it named by then is
+    //   the kept axis edge.
+    auto endFace = elementWhere(result, "Face", [&](const Base::Vector3d& center) {
+        return Base::Distance(center, rotated(centerOf(face, "Face1"))) < 1e-7;
+    });
+    EXPECT_TRUE(elementHasNames(
+        result,
+        endFace.c_str(),
+        {linkingName({nameOf(axisEdge)}, 2, "RVL", 'F', MAPPER_FLAG_LOWER)}
     ));
 }
 
@@ -2908,36 +2778,34 @@ TEST_F(TopoShapeExpansionTest, makeElementPrism)
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0.0, 0.0, 0.0, 0.75, 1.0, 1.0)));
     EXPECT_FLOAT_EQ(getVolume(result.getShape()), 0.75);
     // Assert elementMap is correct
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge1;:G;XTR;:H2:7,F",
-            "Edge1;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E",
-            "Edge1;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E;:U2;XTR;:H2:8,V",
-            "Edge1;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E;:U;XTR;:H2:7,V",
-            "Edge1;:H2,E",
-            "Edge2;:G;XTR;:H2:7,F",
-            "Edge2;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E",
-            "Edge2;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E;:U;XTR;:H2:7,V",
-            "Edge2;:H2,E",
-            "Edge3;:G;XTR;:H2:7,F",
-            "Edge3;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E",
-            "Edge3;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E;:U2;XTR;:H2:8,V",
-            "Edge3;:H2,E",
-            "Edge4;:G;XTR;:H2:7,F",
-            "Edge4;:G;XTR;:H2:7,F;:U;XTR;:H2:7,E",
-            "Edge4;:H2,E",
-            "Face1;:H2,F",
-            "Vertex1;:G;XTR;:H2:7,E",
-            "Vertex1;:H2,V",
-            "Vertex2;:G;XTR;:H2:7,E",
-            "Vertex2;:H2,V",
-            "Vertex3;:G;XTR;:H2:7,E",
-            "Vertex3;:H2,V",
-            "Vertex4;:G;XTR;:H2:7,E",
-            "Vertex4;:H2,V",
+    //   the face (the cube's x = 0 face, tag 2) has names, which the prism links under its own
+    //   tag (1): the face and its edges and vertices are kept as the start; the face's copy at
+    //   x = 0.75 and its edges and vertices are projected from them (PRJ); each edge of the face
+    //   sweeps a side face and each vertex an edge (GEN)
+    const auto& face = subTopoFaces[0];
+    EXPECT_TRUE(allElementsNamed(result));
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        for (int index = 1; index <= static_cast<int>(face.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            auto name = face.getMappedName(IndexedName(element.c_str()));
+            auto center = face.getSubTopoShape(element.c_str()).getBoundBox().GetCenter();
+            auto kept = type + std::to_string(result.findShape(face.getSubShape(element.c_str())));
+            EXPECT_TRUE(elementHasNames(result, kept.c_str(), {name}));
+            EXPECT_TRUE(elementHasNames(
+                result,
+                elementAt(result, type, center + Base::Vector3d(0.75, 0, 0)).c_str(),
+                {linkingName({name}, 1, "XTR", type[0], MAPPER_FLAG_PROJECTION)}
+            ));
+            if (std::string(type) != "Face") {
+                const char* swept = std::string(type) == "Vertex" ? "Edge" : "Face";
+                EXPECT_TRUE(elementHasNames(
+                    result,
+                    elementAt(result, swept, center + Base::Vector3d(0.375, 0, 0)).c_str(),
+                    {linkingName({name}, 1, "XTR", swept[0], MAPPER_FLAG_GENERATED)}
+                ));
+            }
         }
-    ));
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementPrismUntil)
@@ -2983,24 +2851,32 @@ TEST_F(TopoShapeExpansionTest, makeElementFilledFace)
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(0.0, -0.6, -0.6, 0, 1.6, 1.6)));
     EXPECT_FLOAT_EQ(getArea(result.getShape()), 1);
     // Assert elementMap is correct
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge1;:G;FFC;:H2:7,E",
-            "Edge1;:G;FFC;:H2:7,E;:L(Edge2;:G;FFC;:H2:7,E|Edge3;:G;FFC;:"
-            "H2:7,E|Edge4;:G;FFC;:H2:7,E);FFC;:H2:47,F",
-            "Edge2;:G;FFC;:H2:7,E",
-            "Edge3;:G;FFC;:H2:7,E",
-            "Edge4;:G;FFC;:H2:7,E",
-            // TODO: Prove that this difference is not a problem.
-            //  The next elements vary according to platform / OCCT version
-            //  and thus can't be absolutely tested.
-            //                                     "Vertex1;:G;FFC;:H2:7,V",
-            //                                     "Vertex2;:G;FFC;:H2:7,V",
-            //                                     "Vertex3;:G;FFC;:H2:7,V",
-            //                                     "Vertex4;:G;FFC;:H2:7,V",
+    //   the wire (the cube's Face1's, tag 2) has no names. The face's boundary edges and vertices
+    //   are generated from the wire's edges and vertices they lie on; the face itself has no
+    //   history and is named after its edges (LOW). The result has cube1's tag (1).
+    TopoShape wire {wires[0]};
+    EXPECT_TRUE(allElementsNamed(result));
+    for (const char* type : {"Vertex", "Edge"}) {
+        for (int index = 1; index <= static_cast<int>(result.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            std::vector<MappedName> sources;
+            auto inputs = static_cast<int>(wire.countSubElements(type));
+            for (int inputIndex = 1; inputIndex <= inputs; ++inputIndex) {
+                auto inputElement = type + std::to_string(inputIndex);
+                auto shape = result.getSubShape(element.c_str());
+                if (liesOn(shape, wire.getSubShape(inputElement.c_str()))) {
+                    sources.push_back(unmappedName(inputElement, 2, "FFC"));
+                }
+            }
+            EXPECT_EQ(sources.size(), 1) << element;
+            EXPECT_TRUE(elementHasNames(
+                result,
+                element.c_str(),
+                {linkingName(sources, 1, "FFC", type[0], MAPPER_FLAG_GENERATED)}
+            ));
         }
-    ));
+    }
+    EXPECT_TRUE(elementHasNames(result, "Face1", {lowerName(result, "Face1", 1, "FFC")}));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementFilledFaceFromLooseEdges)
@@ -3094,20 +2970,24 @@ TEST_F(TopoShapeExpansionTest, makeElementBSplineFace)
     );
     EXPECT_NEAR(getArea(result.getShape()), 14.677052, 1e-6);
     // Assert elementMap is correct
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge1",
-            "Edge1;BSF",
-            "Edge1;D1",
-            "Edge1;D2",
-            "Edge1;D3",
-            "Vertex1",
-            "Vertex1;D1",
-            "Vertex2",
-            "Vertex2;D1",
+    //   the curves (tags 2 and 3) have no names. The face's edges on them should be named after
+    //   them, under their tags, and the face should have a face's name of its own. V2 gives every
+    //   edge tag 0, and the face its first edge's name with duplicate count 1 (ops#47).
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(namesHaveTheirElementsType(result));
+    for (const auto& [tag, curve] :
+         {std::pair {2L, TopoShape(edge.Edge())}, std::pair {3L, TopoShape(edge1.Edge())}}) {
+        std::string onCurve;
+        for (int index = 1; index <= static_cast<int>(result.countSubElements("Edge")); ++index) {
+            auto element = "Edge" + std::to_string(index);
+            if (liesOn(result.getSubShape(element.c_str()), curve.getShape())) {
+                onCurve = element;
+            }
         }
-    ));
+        auto name = result.getMappedName(IndexedName(onCurve.c_str()));
+        EXPECT_EQ(lastSection(name).iterationTag, std::to_string(tag))
+            << onCurve << " = " << name.toString();
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, replaceElementShape)
@@ -3132,16 +3012,24 @@ TEST_F(TopoShapeExpansionTest, replaceElementShape)
     EXPECT_EQ(result.countSubElements("Wire"), 6);
     // Assert that we're creating a correct element map
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge1;:H1,E",   "Edge1;:H2,E",   "Edge1;:H3,E",   "Edge2;:H1,E",   "Edge2;:H2,E",
-            "Edge2;:H3,E",   "Edge3;:H1,E",   "Edge3;:H2,E",   "Edge3;:H3,E",   "Edge4;:H1,E",
-            "Edge4;:H2,E",   "Edge4;:H3,E",   "Face1;:H2,F",   "Face1;:H3,F",   "Face1;:H4,F",
-            "Face1;:H5,F",   "Face1;:H6,F",   "Vertex1;:H1,V", "Vertex1;:H2,V", "Vertex2;:H1,V",
-            "Vertex2;:H2,V", "Vertex3;:H1,V", "Vertex3;:H2,V", "Vertex4;:H1,V", "Vertex4;:H2,V",
+    //   no history: the elements that are the shell's keep the shell's names; the triangle has no
+    //   tag and no names, so its edges and vertices, and the face rebuilt on it, have none
+    const TopoShape& before = cube1;  // made a shell in place
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        for (int index = 1; index <= static_cast<int>(result.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            auto found = before.findShape(result.getSubShape(element.c_str()));
+            std::vector<MappedName> names;
+            if (found > 0) {
+                auto element = IndexedName::fromConst(type, found);
+                for (const auto& name : before.getElementMappedNames(element)) {
+                    names.push_back(name.first);
+                }
+                EXPECT_FALSE(names.empty()) << element;
+            }
+            EXPECT_TRUE(elementHasNames(result, element.c_str(), names));
         }
-    ));
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, removeElementShape)
@@ -3159,20 +3047,21 @@ TEST_F(TopoShapeExpansionTest, removeElementShape)
     EXPECT_EQ(result.countSubShapes("Face"), 5);
     // Assert that we're creating a correct element map
     EXPECT_TRUE(result.getMappedChildElements().empty());
-    EXPECT_TRUE(elementsMatch(
-        result,
-        {
-            "Edge1;:H1,E;:H7,E",   "Edge1;:H2,E;:H7,E",   "Edge1;:H3,E;:H7,E",
-            "Edge2;:H1,E;:H7,E",   "Edge2;:H2,E;:H7,E",   "Edge2;:H3,E;:H7,E",
-            "Edge3;:H1,E;:H7,E",   "Edge3;:H2,E;:H7,E",   "Edge3;:H3,E;:H7,E",
-            "Edge4;:H1,E;:H7,E",   "Edge4;:H2,E;:H7,E",   "Edge4;:H3,E;:H7,E",
-            "Face1;:H2,F;:H7,F",   "Face1;:H3,F;:H7,F",   "Face1;:H4,F;:H7,F",
-            "Face1;:H5,F;:H7,F",   "Face1;:H6,F;:H7,F",   "Vertex1;:H1,V;:H7,V",
-            "Vertex1;:H2,V;:H7,V", "Vertex2;:H1,V;:H7,V", "Vertex2;:H2,V;:H7,V",
-            "Vertex3;:H1,V;:H7,V", "Vertex3;:H2,V;:H7,V", "Vertex4;:H1,V;:H7,V",
-            "Vertex4;:H2,V;:H7,V",
+    //   every element left is one of the cube's, and keeps the cube's names for it
+    EXPECT_TRUE(allElementsNamed(result));
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        for (int index = 1; index <= static_cast<int>(result.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            auto found = cube1.findShape(result.getSubShape(element.c_str()));
+            ASSERT_GT(found, 0) << element;
+            std::vector<MappedName> names;
+            auto cubeElement = IndexedName::fromConst(type, found);
+            for (const auto& name : cube1.getElementMappedNames(cubeElement)) {
+                names.push_back(name.first);
+            }
+            EXPECT_TRUE(elementHasNames(result, element.c_str(), names));
         }
-    ));
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementEvolve)
@@ -3482,27 +3371,46 @@ TEST_F(TopoShapeExpansionTest, makeElementOffset2D)
     // Assert shape is correct
     EXPECT_TRUE(PartTestHelpers::boxesMatch(bb, Base::BoundBox3d(-0.25, -0.25, 0.0, 3.25, 2.25, 0.0)));
     // Assert elementMap is correct
-    //    EXPECT_EQ(elements.size(), 10);
-    //    EXPECT_EQ(elements.count(IndexedName("Edge", 1)), 1);
-    //    EXPECT_EQ(
-    //        elements[IndexedName("Edge", 1)],
-    //        MappedName("Edge1;:G;OFF;:H1:7,E;OFF;:H1:4,E"));
-    EXPECT_TRUE(elementsMatch(
-        result,
+    //   OCCT gives two open pieces here: the offsets of the rectangle's Edge1 (y = 0) and Edge2
+    //   (x = 3), and the arcs around its Vertex1 (0, 0) and Vertex3 (3, 2). The rectangle has no
+    //   names: each offset line is generated from the edge it offsets, each arc from the vertex
+    //   it goes around, with the result's tag (1) and op OFF
+    EXPECT_EQ(result.countSubElements("Edge"), 4);
+    auto generated = [](const char* element) {
+        return linkingName({unmappedName(element, 1, "OFF")}, 1, "OFF", 'E', MAPPER_FLAG_GENERATED);
+    };
+    auto edgeAt = [&](double x, double y) {
+        return elementAt(result, "Edge", Base::Vector3d(x, y, 0));
+    };
+    auto arcAround = [&](double x, double y) {
+        return elementWhere(result, "Edge", [&](const Base::Vector3d& center) {
+            return Base::Distance(center, Base::Vector3d(x, y, 0)) < 0.25;
+        });
+    };
+    EXPECT_TRUE(elementHasNames(result, edgeAt(1.5, -0.25).c_str(), {generated("Edge1")}));
+    EXPECT_TRUE(elementHasNames(result, edgeAt(3.25, 1).c_str(), {generated("Edge2")}));
+    EXPECT_TRUE(elementHasNames(result, arcAround(0, 0).c_str(), {generated("Vertex1")}));
+    EXPECT_TRUE(elementHasNames(result, arcAround(3, 2).c_str(), {generated("Vertex3")}));
+}
 
-        {
-            "Edge1;:G;OFF;:H1:7,E;:U2;OFF;:H1:8,V;OFF;:H1:4,V",
-            "Edge1;:G;OFF;:H1:7,E;:U;OFF;:H1:7,V;OFF;:H1:4,V",
-            "Edge1;:G;OFF;:H1:7,E;OFF;:H1:4,E",
-            "Edge2;:G;OFF;:H1:7,E;:U2;OFF;:H1:8,V;OFF;:H1:4,V",
-            "Edge2;:G;OFF;:H1:7,E;:U;OFF;:H1:7,V;OFF;:H1:4,V",
-            "Edge2;:G;OFF;:H1:7,E;OFF;:H1:4,E",
-            "Vertex1;:G;OFF;:H1:7,E;:U2;OFF;:H1:8,V;OFF;:H1:4,V",
-            "Vertex1;:G;OFF;:H1:7,E;OFF;:H1:4,E",
-            "Vertex3;:G;OFF;:H1:7,E;:U;OFF;:H1:7,V;OFF;:H1:4,V",
-            "Vertex3;:G;OFF;:H1:7,E;OFF;:H1:4,E",
-        }
-    ));
+TEST_F(TopoShapeExpansionTest, makeElementOffset2DVertices)
+{
+    // Arrange
+    const float Len = 3, Wid = 2, Rad = 1;
+    auto [face1, wire1, wire2] = CreateFaceWithRoundHole(Len, Wid, Rad);
+    // Act
+    TopoShape result {wire1, 1L};
+    result.makeElementOffset2D(result, 0.25);
+    // Assert
+    //   the offset's vertices are all new, and have no history of their own. A result without
+    //   faces has no fallback for them (ops#21), and the compound of the two pieces names them by
+    //   their own index instead (Vertex5;_;1;MKR;..;IDX,SRC), as if they were elements of an
+    //   input. They should be named after what they bound.
+    EXPECT_TRUE(allElementsNamed(result));
+    for (int index = 1; index <= static_cast<int>(result.countSubElements("Vertex")); ++index) {
+        auto name = result.getMappedName(IndexedName::fromConst("Vertex", index));
+        EXPECT_FALSE(lastSection(name).hasMapperFlag(MAPPER_FLAG_INDEX)) << name.toString();
+    }
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

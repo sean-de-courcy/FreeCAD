@@ -101,19 +101,49 @@ TEST_F(TopoShapeMakeShapeTests, thruSections)
     EXPECT_EQ(elements.size(), 24);
     EXPECT_EQ(elements.count(IndexedName("Vertex", 1)), 1);
     EXPECT_EQ(getVolume(result.getShape()), 4);
-    EXPECT_TRUE(allElementsMatch(
-        topoShape,
-        {
-            "Edge1;:G(Edge1;K-1;:H2:4,E);TRU;:H1:1a,F",     "Edge1;:H1,E",   "Edge1;:H2,E",
-            "Edge2;:G(Edge2;K-1;:H2:4,E);TRU;:H1:1a,F",     "Edge2;:H1,E",   "Edge2;:H2,E",
-            "Edge3;:G(Edge3;K-1;:H2:4,E);TRU;:H1:1a,F",     "Edge3;:H1,E",   "Edge3;:H2,E",
-            "Edge4;:G(Edge4;K-1;:H2:4,E);TRU;:H1:1a,F",     "Edge4;:H1,E",   "Edge4;:H2,E",
-            "Vertex1;:G(Vertex1;K-1;:H2:4,V);TRU;:H1:1c,E", "Vertex1;:H1,V", "Vertex1;:H2,V",
-            "Vertex2;:G(Vertex2;K-1;:H2:4,V);TRU;:H1:1c,E", "Vertex2;:H1,V", "Vertex2;:H2,V",
-            "Vertex3;:G(Vertex3;K-1;:H2:4,V);TRU;:H1:1c,E", "Vertex3;:H1,V", "Vertex3;:H2,V",
-            "Vertex4;:G(Vertex4;K-1;:H2:4,V);TRU;:H1:1c,E", "Vertex4;:H1,V", "Vertex4;:H2,V",
+    //   the wires (tags 1 and 2) have no names, and the result has no tag, so its sections take
+    //   the first input's (1). The wires' edges and vertices are kept; each side face is
+    //   generated from an edge of each wire, and each edge between the wires from a vertex of
+    //   each (op TRU)
+    TopoShape wireOne {wire1};
+    TopoShape wireTwo {wire2};
+    for (const char* type : {"Vertex", "Edge"}) {
+        const char* made = std::string(type) == "Vertex" ? "Edge" : "Face";
+        for (int index = 1; index <= static_cast<int>(wireOne.countSubElements(type)); ++index) {
+            auto element = type + std::to_string(index);
+            auto one = wireOne.getSubShape(element.c_str());
+            auto two = wireTwo.getSubShape(element.c_str());
+            EXPECT_TRUE(elementHasNames(
+                result,
+                (type + std::to_string(result.findShape(one))).c_str(),
+                {unmappedName(element, 1)}
+            ));
+            EXPECT_TRUE(elementHasNames(
+                result,
+                (type + std::to_string(result.findShape(two))).c_str(),
+                {unmappedName(element, 2)}
+            ));
+            std::string between;
+            for (int other = 1; other <= static_cast<int>(result.countSubElements(made)); ++other) {
+                auto candidate = made + std::to_string(other);
+                auto shape = result.getSubShape(candidate.c_str());
+                if (liesOn(one, shape) && liesOn(two, shape) && !shape.IsSame(one)) {
+                    between = candidate;
+                }
+            }
+            EXPECT_TRUE(elementHasNames(
+                result,
+                between.c_str(),
+                {linkingName(
+                    {unmappedName(element, 1, "TRU"), unmappedName(element, 2, "TRU")},
+                    1,
+                    "TRU",
+                    made[0],
+                    MAPPER_FLAG_GENERATED
+                )}
+            ));
         }
-    ));
+    }
 }
 
 TEST_F(TopoShapeMakeShapeTests, sewing)
@@ -144,29 +174,7 @@ TEST_F(TopoShapeMakeShapeTests, sewing)
     EXPECT_EQ(elements.size(), 18);  // Now a single cube
     EXPECT_EQ(elements.count(IndexedName("Vertex", 1)), 1);
     EXPECT_EQ(getArea(result.getShape()), 12);
-    // TODO:  This element map is suspiciously devoid of anything OpCodes::Sewing (SEW).  Is that
-    // right?
-    EXPECT_TRUE(allElementsMatch(
-        topoShape,
-        {
-            "Face1;:H1,F",
-            "Face1;:H2,F",
-            "Edge1;:H2,E",
-            "Edge2;:H2,E",
-            "Edge3;:H2,E",
-            "Edge4;:H2,E",
-            "Edge1;:H1,E",
-            "Edge2;:H1,E",
-            "Edge3;:H1,E",
-            "Edge4;:H1,E",
-            "Vertex1;:H2,V",
-            "Vertex2;:H2,V",
-            "Vertex3;:H2,V",
-            "Vertex4;:H2,V",
-            "Vertex1;:H1,V",
-            "Vertex2;:H1,V",
-            "Vertex3;:H1,V",
-            "Vertex4;:H1,V",
-        }
-    ));
+    //   the faces overlap but share no edge, so nothing is sewn: every element is one of the
+    //   faces', kept, and has its unmapped name under that face's tag, without the op
+    EXPECT_TRUE(namedAsBoolean(result, {{1, TopoShape(face1)}, {2, TopoShape(face2)}}, "SEW"));
 }

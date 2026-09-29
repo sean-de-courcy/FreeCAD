@@ -56,7 +56,13 @@ TEST_F(FeaturePartTest, testGetElementName)
     EXPECT_STREQ(namePairExport.oldName.c_str(), "test");
     EXPECT_STREQ(namePairSelf.newName.c_str(), "");
     EXPECT_STREQ(namePairSelf.oldName.c_str(), "");
-    EXPECT_EQ(ts.getElementMap().size(), 26);
+    //   the common is a box: every one of its 26 elements is named (which names:
+    //   FeaturePartCommonTest.testMapping)
+    EXPECT_EQ(
+        ts.countSubElements("Vertex") + ts.countSubElements("Edge") + ts.countSubElements("Face"),
+        26
+    );
+    EXPECT_TRUE(allElementsNamed(ts));
     // TBD
 }
 

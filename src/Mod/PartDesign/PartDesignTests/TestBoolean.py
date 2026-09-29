@@ -354,10 +354,13 @@ class TestBoolean(unittest.TestCase):
         App.Gui.updateGui()
         # Assert
         self.assertEqual(len(App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames), 7)
-        self.assertEqual(
-            App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames[0][-8:],
-            ",F.Face2",
-        )
+        # The selection names the face by its mapped name, ";<name>.Face2", and the name's last
+        # section is a face's (V2)
+        subElementName = App.Gui.Selection.getSelectionEx("", 0)[0].SubElementNames[0]
+        mappedName, _, indexedName = subElementName.rpartition(".")
+        self.assertEqual(indexedName, "Face2")
+        self.assertTrue(mappedName.startswith(";"))
+        self.assertEqual(App.getDecodedMappedName(mappedName[1:])[-1]["elementType"], "F")
         # Ideally we would be able to check and see the selection color set, but there is currently no way to
         # see this either from python of c++ without either tapping into the coin GL renderer or writing a new
         # test renderer.  Prototypes of code moving in this direction would be:

@@ -151,11 +151,8 @@ TEST_F(TopoShapeMakeShapeWithElementMapTests, mapCompoundCount)
     EXPECT_STREQ(sources[0].shapeName().c_str(), "Compound");
     EXPECT_STREQ(sources[1].shapeName().c_str(), "Compound");
     EXPECT_STREQ(compound.shapeName().c_str(), "Compound");
-    EXPECT_EQ(
-        22,
-        compound.getMappedChildElements().size()
-    );  // Changed with PR#12471. Probably will change
-        // again after importing other TopoNaming logics
+    // V2 keeps no child maps: the children's names are copied into the compound's map
+    EXPECT_TRUE(compound.getMappedChildElements().empty());
 }
 
 TEST_F(TopoShapeMakeShapeWithElementMapTests, emptySourceShapes)
@@ -265,9 +262,9 @@ void testFindSubShapesForSourceWithTypeAndIndex(
     QT_WARNING_DISABLE_MSVC(4834)  // Discarding a [[nodiscard]], which we are about to do...
     // We check that the IndexedName is one of the keys...
     EXPECT_NO_THROW(elementStdMap.at(indexedName));
-    // ... that the element name is in the MappedName...
+    // ... that the element name is in the MappedName, and the name has the element's type
     EXPECT_NE(mappedName.find(shapeName.c_str()), -1);
-    EXPECT_EQ(mappedName.toString().back(), shapeTypePrefix);
+    EXPECT_EQ(PartTestHelpers::lastSection(mappedName).elementType, shapeTypePrefix);
     QT_WARNING_POP
 }
 
