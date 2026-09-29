@@ -69,6 +69,15 @@ void PropertyPartShape::setValue(const TopoShape& sh)
     _Shape = sh;
     auto obj = freecad_cast<App::DocumentObject*>(getContainer());
     if (obj) {
+        if (obj->isAttachedToDocument()
+            && _Shape.getHistoryAlgorithm() != obj->getSelectedHistoryAlgorithm()
+            && !_Shape.getElementMapSize()) {
+            // A shape without names takes the document's algorithm, so that it is named in it,
+            // as a shape set without a TopoShape does (ops#30); e.g. a helix's result in a V1
+            // document (ops#35). Its empty map may be the given shape's: drop it first.
+            _Shape.resetElementMap();
+            _Shape.setHistoryAlgorithm(obj->getSelectedHistoryAlgorithm());
+        }
         const App::HistoryAlgorithm& historyAlgorithm = _Shape.getHistoryAlgorithm();
 
         if (_Shape.getElementMap().size() != sh.getElementMap().size()) {
@@ -82,6 +91,15 @@ void PropertyPartShape::setValue(const TopoShape& sh)
             auto hasher = _Shape.Hasher ? _Shape.Hasher : obj->getDocument()->getStringHasher();
 
             _Shape.reTagElementMap(tag, hasher, nullptr);
+        }
+        else if (_Shape.Tag && tag != _Shape.Tag && historyAlgorithm == App::HistoryAlgorithm::V2
+                 && !_Shape.getElementMapSize()) {
+            // Another object's shape without an element map (e.g. a Body's tip that is a
+            // primitive): name its elements under that object's tag, as mapSubElement() names a
+            // single shape's, and as the V1 retag above does (ops#35)
+            TopoShape res(tag, _Shape.Hasher, _Shape.getShape(), historyAlgorithm);
+            res.mapSubElement(_Shape);
+            _Shape = res;
         }
         else {
             if (!_Shape.Tag && historyAlgorithm == App::HistoryAlgorithm::V2) {

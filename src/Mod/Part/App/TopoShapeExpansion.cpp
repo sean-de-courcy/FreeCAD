@@ -7538,17 +7538,25 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
     }
 
     const App::HistoryAlgorithm& selectedHistoryAlgorithm = getHistoryAlgorithm();
+
+    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V1) {
+        // Copy before retagging, as upstream does: copyElementMap() names the elements as
+        // children of the copy's tag, so a shape without an element map got empty tags (ops#35)
+        TopoShape tmp(*this);
+        initCache(1);
+        Hasher = hasher;
+        Tag = tag;
+
+        resetElementMap();
+        copyElementMap(tmp, postfix);
+        return;
+    }
+
     initCache(1);
     Hasher = hasher;
     Tag = tag;
 
-    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V1) {
-        TopoShape tmp(*this);
-
-        resetElementMap();
-        copyElementMap(tmp, postfix);
-    }
-    else if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
+    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
         auto map = ensureElementMap();
         // Copies of a shape share its map, and the retag renames in place: retag a copy of the
         // map unless this shape is its only holder (`map` itself is the second reference)

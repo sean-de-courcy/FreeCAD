@@ -3202,6 +3202,61 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def assertBodyNamesMaplessTip(self, algorithm, expectedName):
+        """A Body whose tip has no element map names each element of its shape
+        expectedName(element, tip) (ops#35)."""
+        # Arrange
+        doc = App.newDocument(f"BodyMaplessTip{algorithm}")
+        try:
+            doc.HistoryAlgorithm = algorithm
+            body = doc.addObject("PartDesign::Body", "Body")
+            box = doc.addObject("PartDesign::AdditiveBox", "Box")
+            body.addObject(box)
+            box.Length = box.Width = box.Height = 10
+
+            # Act
+            doc.recompute()
+
+            # Assert
+            # the premise: the tip names nothing (use another map-less tip if this changes)
+            self.assertEqual(box.Shape.ElementMapSize, 0)
+            shape = body.Shape
+            reverseMap = shape.ElementReverseMap
+            for kind, elements in (
+                ("Face", shape.Faces),
+                ("Edge", shape.Edges),
+                ("Vertex", shape.Vertexes),
+            ):
+                for index in range(1, len(elements) + 1):
+                    element = f"{kind}{index}"
+                    with self.subTest(element=element):
+                        self.assertEqual(reverseMap.get(element), expectedName(element, box))
+            self.assertEqual(shape.ElementMapSize, 26)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testV1BodyNamesMaplessTip(self):
+        """In V1, a Body names each element of a tip without an element map as a child of the
+        tip: '<element>;:H<tip ID, hex>,<type>', as FreeCAD 1.1.3 does (ops#35)."""
+        self.assertBodyNamesMaplessTip(
+            "V1", lambda element, tip: f"{element};:H{tip.ID:x},{element[0]}"
+        )
+
+    def testV2BodyNamesMaplessTip(self):
+        """In V2, a Body names each element of a tip without an element map as mapSubElement
+        names an element of a single shape: '<element>;_;<tip ID>;MKR;0;<type>;0;IDX,SRC;_'
+        (ops#35)."""
+        self.assertBodyNamesMaplessTip(
+            "V2",
+            lambda element, tip: App.makeEncodedSection(
+                referenceIDs=[element],
+                iterationTag=str(tip.ID),
+                opCode="MKR",
+                elementType=element[0],
+                mapperFlags=["IDX", "SRC"],
+            ),
+        )
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:

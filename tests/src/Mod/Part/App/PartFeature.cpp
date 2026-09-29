@@ -308,3 +308,64 @@ TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
     EXPECT_EQ(hiddenArrayShape.getMappedName(face7).toString(),
               faceNameWithTag(hiddenArray->getID(), 1));
 }
+
+TEST_F(FeaturePartTest, setValueNamesAnotherObjectsShapeWithoutMapV2)
+{
+    // Arrange
+    //   pattern: an object takes another object's shape (tag 7) that has no element map, as a
+    //   Body takes its tip's (ops#35)
+    TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    ASSERT_EQ(shape.getElementMapSize(), 0);
+    auto feature = _doc->addObject<Part::Feature>("Feature");
+
+    // Act
+    feature->Shape.setValue(shape);
+
+    // Assert
+    //   every element has the name mapSubElement() gives an element of a shape without a map:
+    //   '<element>;_;7;MKR;0;<type>;0;IDX,SRC;_'
+    const TopoShape& result = feature->Shape.getShape();
+    EXPECT_EQ(result.Tag, feature->getID());
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(result.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            Data::IndexedName element(type, index);
+            EXPECT_EQ(result.getMappedName(element),
+                      Data::MappedName::makeUnmappedName({element.toString()}, 7, "MKR", type[0]));
+        }
+    }
+    EXPECT_EQ(result.getElementMapSize(), 26);
+    //   the shape it was given still has no names
+    EXPECT_EQ(shape.getElementMapSize(), 0);
+}
+
+TEST_F(FeaturePartTest, setValueNamesAShapeWithoutMapInTheDocumentsAlgorithmV1)
+{
+    // Arrange
+    //   pattern: in a V1 document, an object takes another object's shape (tag 7) that has no
+    //   element map and the V2 algorithm, as a Body takes a helix's result (ops#35)
+    _doc->HistoryAlgorithm.setValue("V1");
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V1);
+    TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    auto feature = _doc->addObject<Part::Feature>("Feature");
+
+    // Act
+    feature->Shape.setValue(shape);
+
+    // Assert
+    //   the result is V1, and every element has a V1 name under the other object's tag:
+    //   '<element>;:H7,<type>'
+    const TopoShape& result = feature->Shape.getShape();
+    EXPECT_EQ(result.getHistoryAlgorithm(), App::HistoryAlgorithm::V1);
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(result.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            Data::IndexedName element(type, index);
+            EXPECT_EQ(result.getMappedName(element).toString(),
+                      element.toString() + ";:H7," + type[0]);
+        }
+    }
+    EXPECT_EQ(result.getElementMapSize(), 26);
+    //   the shape it was given keeps its algorithm
+    EXPECT_EQ(shape.getHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+}

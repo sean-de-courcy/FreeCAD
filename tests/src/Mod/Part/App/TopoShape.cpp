@@ -336,3 +336,28 @@ TEST_F(TopoShapeTest, retagLeavesTheCopiesNamesV2)
     EXPECT_EQ(second.getMappedName(edge1), edgeName);
     EXPECT_EQ(shape.getMappedName(edge1), edgeName);
 }
+
+TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapUnderItsOldTagV1)
+{
+    // Arrange
+    //   pattern: an object (tag 21) takes another object's shape (tag 7) that has no element map,
+    //   as a Body takes its tip's. V1 names its elements as children of the old tag (ops#35).
+    Part::TopoShape shape(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    ASSERT_EQ(shape.getElementMapSize(), 0);
+
+    // Act
+    shape.reTagElementMap(21, nullptr);
+
+    // Assert
+    //   every element is named '<element>;:H<old tag, hex>,<type>', as FreeCAD 1.1.3 names it
+    EXPECT_EQ(shape.Tag, 21);
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(shape.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            Data::IndexedName element(type, index);
+            EXPECT_EQ(shape.getMappedName(element).toString(),
+                      element.toString() + ";:H7," + type[0]);
+        }
+    }
+    EXPECT_EQ(shape.getElementMapSize(), 26);
+}
