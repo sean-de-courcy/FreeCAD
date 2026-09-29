@@ -382,7 +382,8 @@ void SketchObject::buildShape()
     ZoneScoped;
     // We use the following instead to map element names
 
-    // Iterated where vertex names are written: seeded (Part/App/NamingHash.h, ops#19)
+    // Iterated where vertex names are written, whose Reference IDs are then sorted (ops#19);
+    // seeded (Part/App/NamingHash.h) to check that the order doesn't reach the names
     std::unordered_map<gp_Pnt, std::vector<std::string>, Part::NamingHasher<std::hash<gp_Pnt>>>
         vertexHistoryMap;
     std::vector<Part::TopoShape> shapes;
@@ -535,6 +536,10 @@ void SketchObject::buildShape()
                 );
             }
         }
+
+        // A set of names: sorted by bytes, since the map's order is not defined (ops#19)
+        std::sort(referenceIDs.begin(), referenceIDs.end());
+        referenceIDs.erase(std::unique(referenceIDs.begin(), referenceIDs.end()), referenceIDs.end());
 
         if (referenceIDs.size()) {
             result.setElementName(

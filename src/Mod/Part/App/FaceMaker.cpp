@@ -36,7 +36,6 @@
 #include <App/MappedElement.h>
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
-#include "NamingHash.h"
 #include <App/ElementNamingUtils.h>
 #include <unordered_set>
 
@@ -318,15 +317,10 @@ void Part::FaceMaker::postBuild()
     }
     else if (MyHistoryAlgorithm == App::HistoryAlgorithm::V2) {
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> allLinkedNames;
-        // Iterated where names are written: seeded (NamingHash.h, ops#19)
-        std::unordered_map<
-            Data::IndexedName,
-            std::pair<std::vector<Data::MappedName>, bool>,
-            Part::NamingHasher<Data::IndexedNameHasher>>
-            linkedNameMap;
+        // Per face, in face index order, so that names are written in that order (ops#19)
+        std::vector<std::pair<std::vector<Data::MappedName>, bool>> linkedNameMap(faces.size());
 
         for (size_t faceIndex = 0; faceIndex < faces.size(); faceIndex++) {
-            Data::IndexedName faceIndexName = Data::IndexedName::fromConst("Face", faceIndex + 1);
             const TopoShape& face = faces[faceIndex];
             TopoShape wire = face.splitWires();
             wire.mapSubElement(face);
@@ -338,8 +332,8 @@ void Part::FaceMaker::postBuild()
                 );
 
                 if (edgeMappedName) {
-                    linkedNameMap[faceIndexName].first.push_back(edgeMappedName);
-                    linkedNameMap[faceIndexName].second = true;
+                    linkedNameMap[faceIndex].first.push_back(edgeMappedName);
+                    linkedNameMap[faceIndex].second = true;
                     allLinkedNames.insert(edgeMappedName);
                 }
             }
@@ -348,25 +342,27 @@ void Part::FaceMaker::postBuild()
         for (auto& linkedNameEntry : linkedNameMap) {
             std::vector<Data::MappedName> fixedNameVector;
 
-            for (const Data::MappedName& mappedName : linkedNameEntry.second.first) {
+            for (const Data::MappedName& mappedName : linkedNameEntry.first) {
                 if (allLinkedNames.count(mappedName) == 1) {
                     fixedNameVector.push_back(mappedName);
                 }
             }
 
             if (fixedNameVector.size()) {
-                linkedNameEntry.second.first = fixedNameVector;
+                linkedNameEntry.first = fixedNameVector;
             }
             else {
-                linkedNameEntry.second.second = false;
+                linkedNameEntry.second = false;
             }
         }
 
         std::vector<std::string> mapperFlags {Data::MAPPER_FLAG_LOWER};
 
-        for (const auto& linkedNameEntry : linkedNameMap) {
-            if (linkedNameEntry.second.first.size()) {
-                if (linkedNameEntry.second.second) {
+        for (size_t faceIndex = 0; faceIndex < linkedNameMap.size(); faceIndex++) {
+            const auto& linkedNameEntry = linkedNameMap[faceIndex];
+
+            if (linkedNameEntry.first.size()) {
+                if (linkedNameEntry.second) {
                     if (mapperFlags.size() == 1) {
                         mapperFlags.push_back(Data::MAPPER_FLAG_NON_DUPLICATE);  // no duplicate.
                     }
@@ -376,11 +372,11 @@ void Part::FaceMaker::postBuild()
                 }
 
                 this->myTopoShape.setElementName(
-                    linkedNameEntry.first,
+                    Data::IndexedName::fromConst("Face", static_cast<int>(faceIndex + 1)),
                     Data::MappedName(
                         Data::MappedName::makeEncodedSection(
                             {},
-                            linkedNameEntry.second.first,
+                            linkedNameEntry.first,
                             this->myTopoShape.Tag,
                             op,
                             0,
