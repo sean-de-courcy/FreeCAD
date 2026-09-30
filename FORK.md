@@ -76,3 +76,4 @@ names it.
 | Commit | Topic | What | Drop or revisit when |
 |---|---|---|---|
 | `9e1049b3b7` | `carry/wirejoiner` | Tests: adapt `WireJoinerTest.setOpenWiresOnly` to V2 naming: the compared wires get the same tag (V2 split pieces carry the result's tag). It also limited the "has a mapped name" check to edges (V2 left the result's vertices unnamed); `fix/21-faceless-vertices` restored the vertex check (ops#21). | Dropped with the topic. |
+| `17f67653f2` | `carry/constraint-names` | Test: `TestAutoScaleNamesGui` (in `TestSketcherGui`; the upstream PR has none) sets a sketch's only dimension through the datum dialog and checks that the auto-scale keeps every constraint's name (ops#11). | When the topic is dropped, keep the test (it moves to its own topic) unless upstream adds one. |
