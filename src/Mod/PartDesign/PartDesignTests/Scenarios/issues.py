@@ -166,8 +166,8 @@ class Issue26889FilletThenPocket(Scenario):
 class Issue14643DeleteChamfer(Scenario):
     """Upstream issue 14643: a cube 0..10 each way (a pad); chamfer A, size 1, on the vertical edge
     at x = 10, y = 0; chamfer B, size 0.5, on A's back top edge (y = 10, z = 10), which A leaves as
-    it was. A is deleted as the GUI does it: B should move to the pad's edge. (The issue's other
-    case, B on an edge A trims, waits for `notes/scenarios.md` section 16's question.)"""
+    it was. A is deleted as the GUI does it: B should move to the pad's edge. The issue's other
+    case, B on an edge A trims, is Issue14643DeleteChamferTrimmed."""
 
     area = "issues"
     MULTI = True
@@ -190,13 +190,28 @@ class Issue14643DeleteChamfer(Scenario):
         chamferA.Size = 1
         doc.recompute()
         chamferB = body.newObject("PartDesign::Chamfer", "ChamferB")
-        chamferB.Base = (chamferA, self.names(chamferA, self.backTopEdge()))
+        chamferB.Base = (chamferA, self.names(chamferA, self.edgeB()))
         chamferB.Size = 0.5
-        self.ref("chamfer_edge", chamferB, "Base", self.backTopEdge, Chamfered(0.5))
+        self.ref("chamfer_edge", chamferB, "Base", self.edgeB, Chamfered(0.5))
+
+    def edgeB(self):
+        return self.backTopEdge()
 
     def edit(self, doc):
         self.bodyObject.removeObject(doc.ChamferA)
         doc.removeObject("ChamferA")
+
+
+class Issue14643DeleteChamferTrimmed(Issue14643DeleteChamfer):
+    """Upstream issue 14643, the other case: chamfer B is on A's front top edge (y = 0, z = 10),
+    which A trims to x 0..9. When A is deleted, B should follow the pad's full edge, x 0..10 (the
+    user's decision, ops#5 and ops#7, 2026-09-30), as the issue's reporter expected."""
+
+    def frontTopEdge(self):
+        return edge("line", direction=X, through=(0, 0, 10))
+
+    def edgeB(self):
+        return self.frontTopEdge()
 
 
 class Issue20096PocketPassesPad(Scenario):
