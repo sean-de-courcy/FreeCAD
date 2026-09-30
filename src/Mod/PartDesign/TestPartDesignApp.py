@@ -65,3 +65,4 @@ from PartDesignTests.TestSuppressed import TestSuppressed
 from PartDesignTests.TestTopologicalNamingProblem import TestTopologicalNamingProblem
 from PartDesignTests.TestNamingDump import TestNamingGolden, TestNamingSeeded
 from PartDesignTests.TestNamingDump import TestNamingRepeated
+from PartDesignTests.TestNamingScenarios import *  # one class per scenario (FreeCAD-CH, ops#5)

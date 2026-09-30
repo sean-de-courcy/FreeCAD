@@ -44,6 +44,11 @@ public:
     bool getAllowCompoundDefault() const;
     void setAllowCompoundDefault(bool v);
 
+    /// FreeCAD-CH: a dress-up's Base and a Profile keep every piece of a split element
+    /// (read when the feature is created; off by default, ops#5)
+    bool getNamingMultiMatch() const;
+    void setNamingMultiMatch(bool v);
+
 private:
     void setup();
 };

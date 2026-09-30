@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+
+# ***************************************************************************
+# *                                                                         *
+# *   This file is part of FreeCAD.                                         *
+# *                                                                         *
+# *   FreeCAD is free software: you can redistribute it and/or modify it    *
+# *   under the terms of the GNU Lesser General Public License as           *
+# *   published by the Free Software Foundation, either version 2.1 of the  *
+# *   License, or (at your option) any later version.                       *
+# *                                                                         *
+# *   FreeCAD is distributed in the hope that it will be useful, but        *
+# *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
+# *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
+# *   Lesser General Public License for more details.                       *
+# *                                                                         *
+# *   You should have received a copy of the GNU Lesser General Public      *
+# *   License along with FreeCAD. If not, see                               *
+# *   <https://www.gnu.org/licenses/>.                                      *
+# *                                                                         *
+# ***************************************************************************
+
+"""Model helpers for the naming dump and the naming scenarios."""
+
+import FreeCAD as App
+import Part
+
+V = App.Vector
+
+
+def body(doc):
+    return doc.addObject("PartDesign::Body", "Body")
+
+
+def originFeature(body, role):
+    for feature in body.Origin.OriginFeatures:
+        if feature.Role == role:
+            return feature
+    raise ValueError(role)
+
+
+def sketch(doc, name, geometry, body=None, z=0.0, placement=None):
+    """A sketch of the geometry, unconstrained, placed at height z (or at `placement`)."""
+    sketch = doc.addObject("Sketcher::SketchObject", name)
+    if body is not None:
+        body.addObject(sketch)
+    sketch.Placement = placement or App.Placement(V(0, 0, z), App.Rotation())
+    sketch.addGeometry(geometry, False)
+    return sketch
+
+
+def polyline(points):
+    """Line segments through the points, open."""
+    return [Part.LineSegment(V(*p, 0), V(*q, 0)) for p, q in zip(points, points[1:])]
+
+
+def polygon(points):
+    """Line segments through the points, closed."""
+    return polyline(list(points) + [points[0]])
+
+
+def rectangle(x0, y0, x1, y1):
+    return polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
+
+def circle(x, y, r):
+    return Part.Circle(V(x, y, 0), V(0, 0, 1), r)
+
+
+def closedWire(points):
+    """A closed polygon through the 3D points."""
+    return Part.makePolygon([V(*p) for p in points + [points[0]]])
+
+
+def feature(doc, name, shape):
+    feature = doc.addObject("Part::Feature", name)
+    feature.Shape = shape
+    return feature
+
+
+def box(doc, name, size, at=(0, 0, 0)):
+    box = doc.addObject("Part::Box", name)
+    box.Length, box.Width, box.Height = size
+    box.Placement.Base = V(*at)
+    return box
+
+
+def edgesWhere(shape, test):
+    """1-based indexes of the edges whose centre passes `test`, in index order."""
+    return [i + 1 for i, edge in enumerate(shape.Edges) if test(edge.CenterOfMass)]
+
+
+# ---------------------------------------------------------------------------------------------
+# PartDesign features and sketch edits, as the scenarios use them
+# ---------------------------------------------------------------------------------------------
+
+
+def pad(body, profile, length, name="Pad"):
+    pad = body.newObject("PartDesign::Pad", name)
+    pad.Profile = profile
+    pad.Length = length
+    return pad
+
+
+def pocketThroughAll(body, profile, name="Pocket"):
+    pocket = body.newObject("PartDesign::Pocket", name)
+    pocket.Profile = profile
+    pocket.Type = "ThroughAll"
+    return pocket
+
+
+def setLines(sketch, lines):
+    """Moves the end points of line geometries {index: ((x0, y0), (x1, y1))}. The lines keep their
+    geometry IDs, as when a user drags or re-dimensions them."""
+    geometry = sketch.Geometry
+    for index, (start, end) in lines.items():
+        geometry[index].StartPoint = V(*start, 0)
+        geometry[index].EndPoint = V(*end, 0)
+    sketch.Geometry = geometry
+
+
+def rotationFromAxes(x, y):
+    """The rotation whose local X and Y axes are the given global directions."""
+    x, y = V(*x), V(*y)
+    z = x.cross(y)
+    matrix = App.Matrix(x.x, y.x, z.x, 0, x.y, y.y, z.y, 0, x.z, y.z, z.z, 0, 0, 0, 0, 1)
+    return App.Rotation(matrix)

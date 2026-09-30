@@ -72,6 +72,7 @@
 #include "FeatureSketchBased.h"
 #include "DatumLine.h"
 #include "DatumPlane.h"
+#include "PartDesignParameter.h"
 #include "Mod/Part/App/Geometry.h"
 
 
@@ -93,6 +94,10 @@ const char* ProfileBased::StartTypesEnums[] = {"Profile plane", "Offset", "Refer
 ProfileBased::ProfileBased()
 {
     ADD_PROPERTY_TYPE(Profile, (nullptr), "SketchBased", App::Prop_None, "Reference to sketch");
+    if (PartDesignParameter::instance()->getNamingMultiMatch()) {
+        Profile.useMultipleMatchedNames(true);
+        Profile.allowDuplicateLinks(false);
+    }
     ADD_PROPERTY_TYPE(Midplane, (0), "SketchBased", App::Prop_None, "Extrude symmetric to sketch face");
     ADD_PROPERTY_TYPE(Reversed, (0), "SketchBased", App::Prop_None, "Reverse extrusion direction");
     ADD_PROPERTY_TYPE(

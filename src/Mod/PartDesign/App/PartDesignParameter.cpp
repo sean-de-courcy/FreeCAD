@@ -31,6 +31,7 @@ void PartDesignParameter::setup()
 {
     // NOLINTBEGIN
     addParameter("AllowCompoundDefault", Bool {true});
+    addParameter("NamingMultiMatch", Bool {false});
     // NOLINTEND
 }
 
@@ -50,3 +51,4 @@ PartDesignParameter* PartDesignParameter::instance()
 }
 
 FC_PARAM_GETSET_IMP(PartDesignParameter, AllowCompoundDefault, bool)
+FC_PARAM_GETSET_IMP(PartDesignParameter, NamingMultiMatch, bool)
