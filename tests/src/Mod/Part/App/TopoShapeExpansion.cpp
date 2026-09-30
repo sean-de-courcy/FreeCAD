@@ -3478,15 +3478,69 @@ TEST_F(TopoShapeExpansionTest, makeElementOffset2DVertices)
     TopoShape result {wire1, 1L};
     result.makeElementOffset2D(result, 0.25);
     // Assert
-    //   the offset's vertices are all new, and have no history of their own. A result without
-    //   faces has no fallback for them (ops#21), and the compound of the two pieces names them by
-    //   their own index instead (Vertex5;_;1;MKR;..;IDX,SRC), as if they were elements of an
-    //   input. They should be named after what they bound.
+    //   the offset's vertices are all new, and have no history of their own. The result has no
+    //   faces, so each is named UPP from the edges it bounds, as V1 does (ops#21). Before, the
+    //   compound of the two pieces named them by their own index (Vertex5;_;1;MKR;..;IDX,SRC), as
+    //   if they were elements of an input
     EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(upperNamed(result, "Vertex", 1, "OFF"));
     for (int index = 1; index <= static_cast<int>(result.countSubElements("Vertex")); ++index) {
         auto name = result.getMappedName(IndexedName::fromConst("Vertex", index));
         EXPECT_FALSE(lastSection(name).hasMapperFlag(MAPPER_FLAG_INDEX)) << name.toString();
     }
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementOffset2DOneWireVertices)
+{
+    // Arrange
+    //   a 3 x 2 rectangle wire (tag 1, no names), offset into a result with tag 2. Offset
+    //   outwards with arc joins and no open result, it gives one closed wire of 8 edges: 4 lines
+    //   and 4 arcs, with 8 new vertices
+    TopoShape rectangle {
+        BRepBuilderAPI_MakePolygon(
+            gp_Pnt(0.0, 0.0, 0.0),
+            gp_Pnt(3.0, 0.0, 0.0),
+            gp_Pnt(3.0, 2.0, 0.0),
+            gp_Pnt(0.0, 2.0, 0.0),
+            true
+        )
+            .Wire(),
+        1L
+    };
+    // Act
+    TopoShape result {2L};
+    result.makeElementOffset2D(
+        rectangle,
+        0.25,
+        JoinType::arc,
+        FillType::noFill,
+        OpenResult::noOpenResult
+    );
+    // Assert
+    //   a result without faces: each vertex is named UPP from the two edges it joins (ops#21),
+    //   e.g. the one at (3, -0.25) from the offset of the bottom side and the arc around (3, 0)
+    EXPECT_EQ(result.countSubElements("Edge"), 8);
+    EXPECT_EQ(result.countSubElements("Vertex"), 8);
+    EXPECT_TRUE(allElementsNamed(result));
+    EXPECT_TRUE(upperNamed(result, "Vertex", 2, "OFF"));
+    auto bottom = elementAt(result, "Edge", Base::Vector3d(1.5, -0.25, 0.0));
+    auto corner = elementWhere(result, "Edge", [](const Base::Vector3d& center) {
+        return Base::Distance(center, Base::Vector3d(3.0, 0.0, 0.0)) < 0.25;
+    });
+    auto vertex = elementAt(result, "Vertex", Base::Vector3d(3.0, -0.25, 0.0));
+    ASSERT_FALSE(bottom.empty() || corner.empty() || vertex.empty());
+    EXPECT_TRUE(elementHasNames(
+        result,
+        vertex.c_str(),
+        {linkingName(
+            {result.getMappedName(IndexedName(bottom.c_str())),
+             result.getMappedName(IndexedName(corner.c_str()))},
+            2,
+            "OFF",
+            'V',
+            MAPPER_FLAG_UPPER
+        )}
+    ));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

@@ -275,15 +275,21 @@ MappedName upperName(
     int index
 )
 {
-    std::vector<MappedName> faceNames;
+    std::vector<MappedName> upperNames;
     auto subShape = shape.getSubShape(element.c_str());
-    for (int face : shape.findAncestors(subShape, TopAbs_FACE)) {
-        auto name = shape.getMappedName(IndexedName::fromConst("Face", face));
-        if (std::ranges::find(faceNames, name) == faceNames.end()) {
-            faceNames.push_back(name);
+    auto linkNames = [&](TopAbs_ShapeEnum upperType, const char* upperTypeName) {
+        for (int upper : shape.findAncestors(subShape, upperType)) {
+            auto name = shape.getMappedName(IndexedName::fromConst(upperTypeName, upper));
+            if (name && std::ranges::find(upperNames, name) == upperNames.end()) {
+                upperNames.push_back(name);
+            }
         }
+    };
+    linkNames(TopAbs_FACE, "Face");
+    if (upperNames.empty() && subShape.ShapeType() == TopAbs_VERTEX) {
+        linkNames(TopAbs_EDGE, "Edge");
     }
-    return linkingName(faceNames, tag, op, element[0], MAPPER_FLAG_UPPER, index);
+    return linkingName(upperNames, tag, op, element[0], MAPPER_FLAG_UPPER, index);
 }
 
 testing::AssertionResult upperNamed(

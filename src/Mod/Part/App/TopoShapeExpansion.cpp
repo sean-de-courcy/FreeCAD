@@ -2322,6 +2322,10 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             {"Edge", TopAbs_VERTEX},
             {"Face", TopAbs_EDGE}
         };
+        // Used by the last fallback only, when no ancestor of the upperMapTypes type is named
+        const std::map<std::string, TopAbs_ShapeEnum> secondUpperMapTypes {
+            {"Vertex", TopAbs_EDGE}
+        };
 
         long masterTag = Tag;
 
@@ -2933,21 +2937,34 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 }
 
                 if (!wasMapped && upperMapTypeEntry != upperMapTypes.end()) {
-                    std::vector<int> ancestors = findAncestors(mainElement, upperMapTypeEntry->second);
                     std::vector<Data::MappedName> linkedUpperNames;
+                    auto linkAncestorNames = [&](TopAbs_ShapeEnum ancestorType) {
+                        for (const auto& ancestorIndex : findAncestors(mainElement, ancestorType)) {
+                            Data::IndexedName ancestorIndexName = Data::IndexedName::fromConst(
+                                shapeName(ancestorType).c_str(),
+                                ancestorIndex
+                            );
+                            Data::MappedName ancestorMappedName = getMappedName(ancestorIndexName);
 
-                    for (const auto& ancestorIndex : ancestors) {
-                        Data::IndexedName ancestorIndexName = Data::IndexedName::fromConst(
-                            shapeName(upperMapTypeEntry->second).c_str(),
-                            ancestorIndex
-                        );
-                        Data::MappedName ancestorMappedName = getMappedName(ancestorIndexName);
-
-                        if (ancestorMappedName
-                            && std::find(linkedUpperNames.begin(), linkedUpperNames.end(), ancestorMappedName)
-                                == linkedUpperNames.end()) {
-                            linkedUpperNames.push_back(ancestorMappedName);
+                            if (ancestorMappedName
+                                && std::find(
+                                       linkedUpperNames.begin(),
+                                       linkedUpperNames.end(),
+                                       ancestorMappedName
+                                   ) == linkedUpperNames.end()) {
+                                linkedUpperNames.push_back(ancestorMappedName);
+                            }
                         }
+                    };
+
+                    linkAncestorNames(upperMapTypeEntry->second);
+
+                    // A vertex without a named face (a result without faces, or a free edge's
+                    // end) is named from its edges, as V1 does (ops#21).
+                    auto secondUpperMapTypeEntry = secondUpperMapTypes.find(stringSubshapeType);
+                    if (linkedUpperNames.empty()
+                        && secondUpperMapTypeEntry != secondUpperMapTypes.end()) {
+                        linkAncestorNames(secondUpperMapTypeEntry->second);
                     }
 
                     sortNameSet(linkedUpperNames);
