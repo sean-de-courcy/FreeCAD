@@ -1,0 +1,7 @@
+# The document's element map version string is computed once and not refreshed when
+# HistoryAlgorithm changes (R3). Remove the entry in the PR that makes its test pass.
+
+issue: ops#62
+
+reason: a document switched from V2 to V1 keeps V2's version string
+cli  PartDesignTests.TestNamingRList.TestNamingRList.testElementMapVersionFollowsHistoryAlgorithm

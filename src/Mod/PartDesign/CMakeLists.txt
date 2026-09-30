@@ -60,6 +60,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestThickness.py
     PartDesignTests/TestTopologicalNamingProblem.py
     PartDesignTests/TestNamingDump.py
+    PartDesignTests/TestNamingRList.py
     PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
@@ -88,8 +89,10 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/external.py
     PartDesignTests/Scenarios/harness.py
     PartDesignTests/Scenarios/internal.py
+    PartDesignTests/Scenarios/issues.py
     PartDesignTests/Scenarios/models.py
     PartDesignTests/Scenarios/patterns.py
+    PartDesignTests/Scenarios/rlist.py
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/splits.py
     PartDesignTests/Scenarios/uptoface.py

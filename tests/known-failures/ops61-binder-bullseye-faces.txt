@@ -1,0 +1,8 @@
+# A new SubShapeBinder with MakeFace makes its faces with the Bullseye face maker: the naming
+# PR commented out upstream's _Version >= 3 gate to FaceMakerBuildFace (R10). Overlapping wires
+# give overlapping faces. Remove the entry in the PR that makes its test pass.
+
+issue: ops#61
+
+reason: two overlapping circles give two full, overlapping disks instead of three regions
+cli  PartDesignTests.TestNamingRList.TestNamingRList.testBinderFacesOfOverlappingCircles

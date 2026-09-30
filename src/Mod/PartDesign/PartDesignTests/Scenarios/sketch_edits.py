@@ -103,8 +103,9 @@ class SketchRedraw(SketchEdit):
 
 
 class SketchReaddLine(SketchEdit):
-    """The right side's line is deleted and drawn again in the same place: one new geometry
-    ID."""
+    """The right side's line is deleted and drawn again in the same place. The sketcher's
+    geometry history gives it its old geometry ID back (SketchObject::generateId matches the end
+    points of deleted geometry), so this checks a delete and re-add, not a new ID."""
 
     def edit(self, doc):
         doc.Profile.delGeometry(1)

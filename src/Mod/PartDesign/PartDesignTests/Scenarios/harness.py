@@ -584,28 +584,34 @@ class Extruded(Outcome):
 
 
 class ExternalCoincides(Outcome):
-    """A sketch's external geometry: each external line lies on an expected edge, end to end,
-    and each expected edge has one (the first two ExternalGeo entries are the sketch's axes)."""
+    """A sketch's external geometry: each external edge (a line, circle or arc) lies on an
+    expected edge, end to end, and each expected edge has one (the first two ExternalGeo entries
+    are the sketch's axes)."""
 
     def compare(self, scenario, consumer, target, expectation):
         edges = [target.Shape.getElement(n) for n in expectedNames(expectation, target.Shape)]
         placement = consumer.getGlobalPlacement()
-        lines = [
-            (placement.multVec(g.StartPoint), placement.multVec(g.EndPoint))
-            for g in list(consumer.ExternalGeo)[2:]
-        ]
-        if len(lines) != len(edges):
-            return False, f"{len(lines)} external lines for {len(edges)} edges"
+        external = []
+        for g in list(consumer.ExternalGeo)[2:]:
+            shape = g.toShape()
+            shape.Placement = placement.multiply(shape.Placement)
+            external.append(shape)
+        if len(external) != len(edges):
+            return False, f"{len(external)} external edges for {len(edges)} edges"
         tol = tolerance(target.Shape)
         for edge in edges:
-            ends = (edge.Vertexes[0].Point, edge.Vertexes[-1].Point)
-            if not any(
-                ((a - ends[0]).Length < tol and (b - ends[1]).Length < tol)
-                or ((a - ends[1]).Length < tol and (b - ends[0]).Length < tol)
-                for a, b in lines
-            ):
-                return False, f"no external line from {ends[0]} to {ends[1]}: {lines}"
+            if not any(_sameEdge(e, edge, tol) for e in external):
+                return False, f"no external edge on {edge.Curve} of length {edge.Length:.4f}"
         return True, ""
+
+
+def _sameEdge(a, b, tol):
+    """Two edges of the same length, each point of one on the other."""
+    if abs(a.Length - b.Length) > tol:
+        return False
+    return all(Part.Vertex(p).distToShape(b)[0] < tol for p in a.discretize(9)) and all(
+        Part.Vertex(p).distToShape(a)[0] < tol for p in b.discretize(9)
+    )
 
 
 def _sameFace(a, b, tol):
@@ -770,6 +776,7 @@ class Scenario:
             after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
             for name, result in after.items():
                 result.record["names_before"] = before[name].record["names"]
+                result.record["subs_before"] = before[name].record["subs"]
                 emit(result)
             return after
         finally:
