@@ -57,6 +57,7 @@ names it.
 | `infra/ccache-windows-2g` | infra | ops#51 | - | `integration` `ea53409351` | `168dddb8a9` (fork PR 27), 2026-09-30 | never |
 | `fix/39-copied-input-tags` | fix | ops#39 | - | `integration` `ea53409351` | `c4be03798e` (fork PR 28), 2026-09-30 | a new base's PartDesign Boolean, Transformed and Pipe build V2 results with their own ID, and `Part::Mirroring` keeps the names of a placed source |
 | `feat/scenarios` | feat | ops#5 | - | `integration` `168dddb8a9` | (fork PR 29) | never (fork tests); the `NamingMultiMatch` switch when the Phase 4 checkpoint decides the multi-match flags |
+| `fix/5-score-lines` | fix | ops#5 | - | `integration` `11d4740c80` | (fork PR 30) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 

@@ -700,8 +700,13 @@ class Scenario:
 
 
 def emit(result):
+    """Prints the SCORE line with one write to the process's stdout: through the console, the
+    buffered line gets cut by the test runner's unbuffered output in CI logs."""
     line = result.message()
-    App.Console.PrintMessage(line + "\n")
+    try:
+        os.write(1, (line + "\n").encode("utf-8"))
+    except OSError:
+        App.Console.PrintMessage(line + "\n")
     path = os.environ.get("FREECAD_SCENARIO_SCORE_FILE")
     if path:
         with open(path, "a", encoding="utf-8") as fh:
