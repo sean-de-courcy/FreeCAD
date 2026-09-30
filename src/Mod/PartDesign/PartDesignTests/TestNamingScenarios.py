@@ -28,6 +28,12 @@ Each scenario is built once per configuration, on its first test. See Scenarios/
 Configurations: V2 for every scenario, V2multi (the multi-match flags on) for the scenarios whose
 consumers the flags touch. FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi runs the listed ones for every
 scenario instead (the scorecard's local run). Every verdict is printed as a `SCORE` line.
+
+Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
+one test per seed and configuration, V2 and V2multi. It passes when every reference is as expected
+after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS ("1-500",
+"3,7") and FREECAD_SCENARIO_STEPS change them, and FREECAD_SCENARIO_REPLAY=<seed>:<steps> runs one
+seed.
 """
 
 import os
@@ -37,7 +43,7 @@ import unittest
 from PartDesignTests.Scenarios import harness
 from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, crossdoc, external, internal, issues, rlist
-from PartDesignTests.Scenarios import splits, uptoface
+from PartDesignTests.Scenarios import randomized, splits, uptoface
 
 AREAS = (
     sketch_edits,
@@ -108,6 +114,63 @@ def _makeTests():
 
 
 globals().update(_makeTests())
+
+
+def randomRuns():
+    """([seeds], steps) from the environment."""
+    replay = os.environ.get("FREECAD_SCENARIO_REPLAY")
+    if replay:
+        seed, _, steps = replay.partition(":")
+        return [int(seed)], int(steps or 8)
+    seeds = []
+    for part in os.environ.get("FREECAD_SCENARIO_SEEDS", "1-4").split(","):
+        first, _, last = part.strip().partition("-")
+        seeds += range(int(first), int(last or first) + 1)
+    return seeds, int(os.environ.get("FREECAD_SCENARIO_STEPS", "8"))
+
+
+class RandomSequences(unittest.TestCase):
+    """Randomized edit sequences: a seed's model and edits are planned once (in V2, each state
+    checked by a fresh build) and replayed in each configuration."""
+
+    _plans = {}  # {seed: Plan or the traceback of a failed plan}
+
+    def check(self, seed, steps, config):
+        plans = type(self)._plans
+        if seed not in plans:
+            try:
+                plans[seed] = randomized.makePlan(seed, steps)
+            except Exception:
+                plans[seed] = traceback.format_exc()
+        plan = plans[seed]
+        if isinstance(plan, str):
+            raise harness.ScenarioError(f"seed {seed}: no plan:\n{plan}")
+        results = randomized.RandomSequence(config, plan).run()
+        bad = [r for r in results if not r.passing]
+        if bad:
+            self.fail(
+                f"{len(bad)} references not as expected (replay with "
+                f"FREECAD_SCENARIO_REPLAY={seed}:{steps}):\n{randomized.replayText(plan)}\n"
+                + "\n".join(r.message() for r in bad[:5])
+            )
+
+
+def _makeRandomTests():
+    seeds, steps = randomRuns()
+    listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
+    configs = [c.strip() for c in listed.split(",") if c.strip()] if listed else ["V2", "V2multi"]
+    for seed in seeds:
+        for config in configs:
+
+            def test(self, seed=seed, config=config):
+                self.check(seed, steps, config)
+
+            test.__name__ = f"test_seed{seed:04d}_{config}"
+            test.__doc__ = f"Random sequence, seed {seed}, {steps} steps ({config})"
+            setattr(RandomSequences, test.__name__, test)
+
+
+_makeRandomTests()
 __all__ = [name for name, value in globals().items()
            if isinstance(value, type) and issubclass(value, ScenarioTestCase)
-           and value is not ScenarioTestCase]
+           and value is not ScenarioTestCase] + ["RandomSequences"]

@@ -23,7 +23,7 @@
 """Dress-ups after upstream edits: a draft, a fillet and a chamfer keep their edges and faces
 when the features before them change, are inserted or are reordered."""
 
-from .harness import Chamfered, Drafted, Filleted, Scenario, X, Y, Z, edge, face
+from .harness import Broken, Chamfered, Drafted, Filleted, Scenario, X, Y, Z, edge, face
 from . import models as m
 
 
@@ -165,3 +165,74 @@ class FilletDeleteBasePad(FilletDeleteBase):
     def block(self, doc, body):
         profile = m.sketch(doc, "Profile", m.rectangle(0, 0, self.size, self.size), body)
         return m.pad(body, profile, self.size)
+
+
+class FilletCornerCut(Scenario):
+    """A pad of a rectangle 0..20 x 0..10, 10 high; a fillet, radius 1, on its vertical edge at
+    x = 20, y = 0. The sketch's corner there is then cut off by 1, as a user chamfers a sketch
+    corner: the front and right lines end short and a new line joins them. The filleted edge is
+    gone, so the fillet should break, with the two new corner edges, at (19, 0) and (20, 1), as
+    the candidates. Found by the randomized sequences (seed 4)."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("fillet_edge",)
+    cut = False
+
+    def cornerEdge(self):
+        if self.cut:
+            return Broken(
+                edge("line", direction=Z, through=(19, 0, 0)),
+                edge("line", direction=Z, through=(20, 1, 0)),
+            )
+        return edge("line", direction=Z, through=(20, 0, 0))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 1
+        self.ref("fillet_edge", fillet, "Base", self.cornerEdge, Filleted(1))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(m.polyline([(19, 0), (20, 1)]), False)
+        self.cut = True
+
+
+class FilletNotchBeside(Scenario):
+    """As FilletCornerCut, a fillet, radius 1, on the vertical edge at x = 20, y = 0. A notch
+    (x 8..12, 2 deep) is cut into the back side, and after a recompute another into the front
+    side, as in SketchNotch: the front line ends at x = 8, and the rest of the side, x 12..20,
+    is a new line. The corner at (20, 0) is where it was, so the fillet should stay on it.
+    The corner's vertex joined the front line's end and the right line's start (g1v2, g2v1); it
+    is now g12v2, g2v1, and the notch's first corner, at (8, 0), is g1v2, g9v1. With the front
+    notch only (new lines g5-g8) every mode is correct. Found by the randomized sequences (seeds
+    12 and 29): with the multi-match flags on, the fillet takes both edges."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("fillet_edge",)
+
+    def cornerEdge(self):
+        return edge("line", direction=Z, through=(20, 0, 0))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 1
+        self.ref("fillet_edge", fillet, "Base", self.cornerEdge, Filleted(1))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {2: ((20, 10), (12, 10))})
+        doc.Profile.addGeometry(m.polyline([(12, 10), (12, 8), (8, 8), (8, 10), (0, 10)]), False)
+        doc.recompute()
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)

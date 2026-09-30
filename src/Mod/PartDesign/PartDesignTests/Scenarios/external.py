@@ -27,7 +27,7 @@ as candidates (the naming design's section 8: the consumer needs exactly one edg
 import FreeCAD as App
 import Part
 
-from .harness import Broken, ExternalCoincides, Scenario, X, Y, edge, pieces
+from .harness import BROKEN, Broken, ExternalCoincides, Scenario, X, Y, edge, pieces
 from . import models as m
 
 
@@ -118,3 +118,38 @@ class ExternalLineToArc(ExternalEdit):
         arc = Part.Arc(App.Vector(0, 0, 0), App.Vector(10, -3, 0), App.Vector(20, 0, 0))
         doc.Profile.addGeometry(arc, False)
         self.arc = True
+
+
+class ExternalEdgeRemoved(Scenario):
+    """A block 0..20 x 0..10 x 10 (a pad) with a hole, radius 2 at (6, 5), pocketed through it;
+    a boss (x 13..17, y 3..7, 3 high) padded on the top; a sketch at z = 0 with the boss
+    feature's edge of the hole's bottom (the circle at z = 0) as external geometry. The hole is
+    deleted, as the GUI does it: the boss now builds on the pad, the circle is gone, and the
+    sketch should report it (ops#72: it stays valid and drops the link). Found by the randomized
+    sequences (seed 38)."""
+
+    area = "external geometry"
+    REFS = ("hole_bottom",)
+    gone = False
+
+    def holeBottom(self):
+        return BROKEN if self.gone else edge("circle", center=(6, 5, 0), radius=2)
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        hole = m.sketch(doc, "HoleSketch", [m.circle(6, 5, 2)], body, z=10)
+        m.pocketThroughAll(body, hole, "Hole")
+        boss = m.sketch(doc, "BossSketch", m.rectangle(13, 3, 17, 7), body, z=10)
+        boss = m.pad(body, boss, 3, name="Boss")
+        doc.recompute()
+        sketch = m.sketch(doc, "OnBottom", [], body, z=0)
+        sketch.addExternal(boss.Name, self.names(boss, self.holeBottom())[0])
+        self.ref("hole_bottom", sketch, "ExternalGeometry", self.holeBottom, ExternalCoincides())
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Hole)
+        doc.removeObject("Hole")
+        self.gone = True
