@@ -33,7 +33,6 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <ShapeFix_Shape.hxx>
-#include <ShapeFix_ShapeTolerance.hxx>
 
 #include <Base/Exception.h>
 #include <Base/Reader.h>
@@ -124,14 +123,18 @@ App::DocumentObjectExecReturn* Fillet::execute()
 
         TopTools_ListOfShape aLarg;
         aLarg.Append(baseShape.getShape());
-        if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)) {
-            ShapeFix_ShapeTolerance aSFT;
-            aSFT.LimitTolerance(
-                shape.getShape(),
-                Precision::Confusion(),
-                Precision::Confusion(),
-                TopAbs_SHAPE
-            );
+        // BRepAlgo::IsValid rejects some valid fillets, so repair only a result that the full
+        // check rejects too. Limiting every tolerance to Precision::Confusion() used to be the
+        // repair: it opened the gaps a fillet closes with larger tolerances, turning valid fillets
+        // into invalid solids, and edited sub-shapes shared with the base shape in place (ops#12).
+        // The repair works on a copy and keeps the result only if it is valid.
+        if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)
+            && !shape.isValid()) {
+            TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+            repaired.makeElementCopy(shape);
+            if (repaired.fix()) {
+                shape = repaired;
+            }
         }
 
         // store shape before refinement

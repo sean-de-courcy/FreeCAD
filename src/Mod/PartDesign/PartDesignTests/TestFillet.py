@@ -120,6 +120,141 @@ class TestFillet(unittest.TestCase):
         if followup.Base[0]:
             self.assertNotEqual(followup.Base[0].Name, box.Name)
 
+    # Fillets that OCCT makes with tolerances above Precision::Confusion(): the result must be a
+    # valid solid with the volume the geometry gives, and the base feature's shape must stay
+    # valid with no tolerance lowered (ops#12: limiting every tolerance to Precision::Confusion()
+    # turned valid fillets into invalid solids, and lowered tolerances of sub-shapes shared with
+    # the base shape). OCCT itself may raise the tolerance of a shared vertex.
+
+    # Area between a square corner and the quarter circle of radius r inscribed in it
+    @staticmethod
+    def _fillet_section(r):
+        return (1 - pi / 4) * r**2
+
+    # Distance of that section's centroid from either side of the corner
+    @staticmethod
+    def _fillet_section_centroid(r):
+        return r * (10 - 3 * pi) / (12 - 3 * pi)
+
+    def _add_box(self, body, length, width, height, position=(0, 0, 0)):
+        box = self.Doc.addObject("PartDesign::AdditiveBox", "Box")
+        body.addObject(box)
+        box.Length = length
+        box.Width = width
+        box.Height = height
+        box.Placement.Base = FreeCAD.Vector(*position)
+        box.Refine = True
+        self.Doc.recompute()
+        return box
+
+    def _edge_between(self, shape, a, b):
+        a, b = FreeCAD.Vector(*a), FreeCAD.Vector(*b)
+        for index, edge in enumerate(shape.Edges):
+            ends = [vertex.Point for vertex in edge.Vertexes]
+            if len(ends) == 2 and (
+                (ends[0].isEqual(a, 1e-6) and ends[1].isEqual(b, 1e-6))
+                or (ends[0].isEqual(b, 1e-6) and ends[1].isEqual(a, 1e-6))
+            ):
+                return "Edge" + str(index + 1)
+        self.fail("No edge from {} to {}".format(a, b))
+
+    def _add_fillet(self, body, base, edges, radius):
+        fillet = self.Doc.addObject("PartDesign::Fillet", "Fillet")
+        body.addObject(fillet)
+        fillet.Base = (base, edges)
+        fillet.Radius = radius
+        self.Doc.recompute()
+        return fillet
+
+    @staticmethod
+    def _tolerances(shape):
+        return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
+
+    def _assertValidFillet(self, fillet, volume):
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, volume, places=3)
+
+    def _assertBaseKept(self, base, tolerances):
+        self.assertTrue(base.Shape.isValid())
+        for after, before in zip(self._tolerances(base.Shape), tolerances, strict=True):
+            self.assertGreaterEqual(after, before)
+
+    def testFilletEndingAgainstFace(self):
+        # A step: the lower block's front top edge ends against the riser at x = 20
+        for radius in (1.0, 3.0, 6.0):
+            with self.subTest(radius=radius):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._add_box(body, 40, 20, 10)
+                step = self._add_box(body, 20, 20, 20)
+                tolerances = self._tolerances(step.Shape)
+                edge = self._edge_between(step.Shape, (20, 0, 10), (40, 0, 10))
+                fillet = self._add_fillet(body, step, [edge], radius)
+                self._assertValidFillet(fillet, 12000 - self._fillet_section(radius) * 20)
+                self._assertBaseKept(step, tolerances)
+
+    def testSuccessiveFilletsMeetingAtVertex(self):
+        # Box 20 x 20 x 10. The first fillet rounds the front top edge (radius r1). The second
+        # (radius r2 <= r1) rounds the right top edge, which is tangent to the first fillet's arc
+        # on the right face, which is tangent to the front right edge: the fillet follows all
+        # three. Along the arc the removed section turns about the first fillet's axis at the
+        # distance r1 - centroid (Pappus).
+        for r1, r2 in ((2.0, 2.0), (3.0, 2.0)):
+            with self.subTest(r1=r1, r2=r2):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                box = self._add_box(body, 20, 20, 10)
+                front = self._edge_between(box.Shape, (0, 0, 10), (20, 0, 10))
+                first = self._add_fillet(body, box, [front], r1)
+                volume1 = 4000 - self._fillet_section(r1) * 20
+                self._assertValidFillet(first, volume1)
+                tolerances = self._tolerances(first.Shape)
+                edge = self._edge_between(first.Shape, (20, r1, 10), (20, 20, 10))
+                second = self._add_fillet(body, first, [edge], r2)
+                path = (20 - r1) + (10 - r1)
+                arc = pi / 2 * (r1 - self._fillet_section_centroid(r2))
+                self._assertValidFillet(second, volume1 - self._fillet_section(r2) * (path + arc))
+                self._assertBaseKept(first, tolerances)
+
+    def testFilletAroundRoundedCorners(self):
+        # The shape of the report: a block 2a x 2a x h with its vertical corners filleted
+        # (radius R), then a small fillet (radius r) on one bottom edge. The bottom edges and the
+        # corner arcs are tangent, so the fillet runs around the whole bottom; along each arc
+        # the section turns about the corner's axis (Pappus).
+        a, h, R, r = 50.8, 22.225, 11.3125, 1.5875
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = self._add_box(body, 2 * a, 2 * a, h, (-a, -a, 0))
+        corners = [
+            self._edge_between(box.Shape, (x, y, 0), (x, y, h)) for x in (-a, a) for y in (-a, a)
+        ]
+        rounded = self._add_fillet(body, box, corners, R)
+        volume1 = (4 * a * a - 4 * self._fillet_section(R)) * h
+        self._assertValidFillet(rounded, volume1)
+        tolerances = self._tolerances(rounded.Shape)
+        edge = self._edge_between(rounded.Shape, (-a + R, -a, 0), (a - R, -a, 0))
+        bottom = self._add_fillet(body, rounded, [edge], r)
+        path = 4 * (2 * a - 2 * R) + 4 * pi / 2 * (R - self._fillet_section_centroid(r))
+        self._assertValidFillet(bottom, volume1 - self._fillet_section(r) * path)
+        self._assertBaseKept(rounded, tolerances)
+
+    def testFilletConsumingWholeFaceFails(self):
+        # Known OCCT limitation (checked on OCCT 8.0.1): two fillets whose radius is half the
+        # width of the face between them leave nothing of it, and OCCT fails. The feature must
+        # report the error rather than produce a shape. If this starts to pass, OCCT has changed.
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = self._add_box(body, 30, 4, 20)
+        edges = [
+            self._edge_between(box.Shape, (0, 0, 20), (30, 0, 20)),
+            self._edge_between(box.Shape, (0, 4, 20), (30, 4, 20)),
+        ]
+        fillet = self._add_fillet(body, box, edges, 1.9)
+        self._assertValidFillet(fillet, 30 * 4 * 20 - 2 * self._fillet_section(1.9) * 30)
+        fillet.Radius = 2.0
+        self.Doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertTrue(box.Shape.isValid())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")
