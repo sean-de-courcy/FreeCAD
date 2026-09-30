@@ -58,9 +58,10 @@ names it.
 | `fix/39-copied-input-tags` | fix | ops#39 | - | `integration` `ea53409351` | `c4be03798e` (fork PR 28), 2026-09-30 | a new base's PartDesign Boolean, Transformed and Pipe build V2 results with their own ID, and `Part::Mirroring` keeps the names of a placed source |
 | `feat/scenarios` | feat | ops#5 | - | `integration` `168dddb8a9` | `11d4740c80` (fork PR 29), 2026-09-30 | never (fork tests); the `NamingMultiMatch` switch when the Phase 4 checkpoint decides the multi-match flags |
 | `fix/5-score-lines` | fix | ops#5 | - | `integration` `11d4740c80` | (fork PR 30) | never (fork tests) |
+| `fix/21-faceless-vertices` | fix | ops#21 | - | `integration` `826ad36e22` | (fork PR 32) | a new base's V2 `makeShapeWithElementMap` names a vertex without history and without a named face from its edges |
 
 ## Fork-only commits in carried topics
 
 | Commit | Topic | What | Drop or revisit when |
 |---|---|---|---|
-| `9e1049b3b7` | `carry/wirejoiner` | Tests: adapt `WireJoinerTest.setOpenWiresOnly` to V2 naming. The "has a mapped name" check covers edges only (V2 leaves the result's vertices unnamed, ops#21), and the compared wires get the same tag (V2 split pieces carry the result's tag). | ops#21 is fixed: restore the vertex check. Dropped with the topic. |
+| `9e1049b3b7` | `carry/wirejoiner` | Tests: adapt `WireJoinerTest.setOpenWiresOnly` to V2 naming: the compared wires get the same tag (V2 split pieces carry the result's tag). It also limited the "has a mapped name" check to edges (V2 left the result's vertices unnamed); `fix/21-faceless-vertices` restored the vertex check (ops#21). | Dropped with the topic. |
