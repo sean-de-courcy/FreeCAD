@@ -48,8 +48,14 @@ and replayed in every configuration.
 A step whose edit leaves references with nothing to point to is judged twice: first the references
 expected broken (their consumers must fail, principle 1), then, after the repair (the broken
 consumers deleted, last first, as a user would), every reference left. Such an edit is only drawn
-when the repair leaves a valid model. A sequence stops after a step with an unexpected verdict other
-than partial: after a break, the features built on the broken one fail too, and that is not news.
+when the repair leaves a valid model. An expected break whose consumer stays valid because a
+feature it builds on is invalid counts as reported: the consumer recomputes on that feature's stale
+shape, and the model shows the error one feature up.
+
+A sequence stops after a step with any unexpected verdict, partial included: from there the live
+model may differ from the spec (a fillet on one piece of an edge instead of both), and later
+verdicts would judge the spec's model, not the live one. A live edit that can't find the element it
+needs is scored wrong for the same reason (the model has diverged).
 
 Environment (TestNamingScenarios): FREECAD_SCENARIO_SEEDS ("1-4", "7,9"),
 FREECAD_SCENARIO_STEPS (8), FREECAD_SCENARIO_REPLAY=<seed>:<steps> (one seed).
@@ -1005,21 +1011,48 @@ class RandomSequence(Scenario):
         super().__init__(config)
         self.plan = plan
 
+    def diverged(self, name, step, why):
+        """The plan's fresh build found the element, so the live model has diverged from the
+        spec: something upstream resolved to the wrong element."""
+        result = Result(type(self).__name__, name, self.config, step)
+        result.verdict = "wrong"
+        result.record.update(area=self.area, config=self.config, platform=sys.platform,
+                             step=step, consumer=name, target=None, subs=[], expect="diverged",
+                             stored="diverged", outcome=None,
+                             detail=f"the live model isn't the spec's: {why}", verdict="wrong")
+        return result
+
+    def reportedUpstream(self, spec, name, result):
+        """An expected break whose consumer stays valid because a solid feature it builds on is
+        invalid: the consumer then recomputes on that feature's stale shape, where the element
+        still is. The model reports the break, one feature up, so it counts as broken."""
+        if not str(result.record.get("expect")).startswith("BROKEN") or result.verdict != "wrong":
+            return
+        owner = self.doc.getObject(spec.refs()[name][0])
+        if owner is None or not owner.isValid():
+            return
+        feature = owner.BaseFeature if hasattr(owner, "BaseFeature") else None
+        if feature is None and spec.refs()[name][3] in spec.chain():
+            feature = self.doc.getObject(spec.refs()[name][3])
+        while feature is not None:
+            if not feature.isValid():
+                result.verdict = "broken"
+                result.record.update(
+                    verdict="broken",
+                    outcome="broken",
+                    detail=f"{feature.Name}, which {owner.Name} builds on, is invalid",
+                )
+                return
+            feature = getattr(feature, "BaseFeature", None)
+
     def judgeAll(self, spec, step, text, names=None):
         results = []
         for name in names if names is not None else list(spec.refs()):
             try:
                 result = self.judge(makeRef(spec, name), step)
+                self.reportedUpstream(spec, name, result)
             except ScenarioError as e:
-                # the plan's fresh build found the element, so the live model has diverged
-                # from the spec: something upstream resolved to the wrong element
-                result = Result(type(self).__name__, name, self.config, step)
-                result.verdict = "wrong"
-                result.record.update(area=self.area, config=self.config, platform=sys.platform,
-                                     step=step, consumer=name, target=None, subs=[],
-                                     expect="diverged", stored="diverged", outcome=None,
-                                     detail=f"the target's shape isn't the spec's: {e}",
-                                     verdict="wrong")
+                result = self.diverged(name, step, e)
             result.scenario = f"Random{self.plan.seed:04d}"
             result.ref = f"{name}@{step}"
             result.record.update(scenario=result.scenario, ref=result.ref, seed=self.plan.seed,
@@ -1044,7 +1077,16 @@ class RandomSequence(Scenario):
                 raise ScenarioError("references aren't correct after the build:\n" + "\n".join(bad))
             results += first
             for k, step in enumerate(self.plan.steps, 1):
-                step.edit.apply(self.doc, body, step.before, step.after)
+                try:
+                    step.edit.apply(self.doc, body, step.before, step.after)
+                except ScenarioError as e:  # an element the edit needs isn't there
+                    result = self.diverged(f"edit{k}", str(k), e)
+                    result.scenario, result.ref = f"Random{self.plan.seed:04d}", f"edit@{k}"
+                    result.record.update(scenario=result.scenario, ref=result.ref,
+                                         seed=self.plan.seed, edit=step.edit.text)
+                    emit(result)
+                    results.append(result)
+                    break
                 self.doc.recompute()
                 if step.repaired is None:
                     judged = self.judgeAll(step.after, str(k), step.edit.text)
@@ -1060,8 +1102,8 @@ class RandomSequence(Scenario):
                         f.name for f in broken)
                     judged += self.judgeAll(step.repaired, f"{k}r", text)
                 results += judged
-                if any(not r.passing and r.verdict != "partial" for r in judged):
-                    break
+                if any(not r.passing for r in judged):
+                    break  # the live model may differ from the spec from here on
             return results
         finally:
             self.cleanup()

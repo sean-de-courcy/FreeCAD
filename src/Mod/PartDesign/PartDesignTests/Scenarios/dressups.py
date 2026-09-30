@@ -236,3 +236,38 @@ class FilletNotchBeside(Scenario):
         doc.recompute()
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
+class FilletNotchAfterChamfer(Scenario):
+    """A pad of a rectangle 0..20 x 0..10, 10 high; a chamfer, size 0.75, on the front bottom edge;
+    a fillet, radius 0.5, on the chamfer's vertical edge at x = 20, y = 0, which the chamfer
+    shortened at its foot. A notch (x 8..12, 2 deep) is then cut into the front side, as in
+    SketchNotch: the front line ends at x = 8, and the rest of the side is a new line. The corner
+    at (20, 0) is where it was, so the fillet should stay on it. Found by the randomized sequences
+    (seeds 151, 153 and 200): V2 moves the fillet to another vertical edge; with the fillet on the
+    pad itself (FilletNotchBeside with one notch) V2 is correct."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("fillet_edge",)
+
+    def cornerEdge(self):
+        return edge("line", direction=Z, through=(20, 0, 0))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, self.names(pad, edge("line", direction=X, through=(0, 0, 0))))
+        chamfer.Size = 0.75
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (chamfer, self.names(chamfer, self.cornerEdge()))
+        fillet.Radius = 0.5
+        self.ref("fillet_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
