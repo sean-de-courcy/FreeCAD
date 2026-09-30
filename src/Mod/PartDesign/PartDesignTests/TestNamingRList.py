@@ -105,3 +105,28 @@ class TestNamingRList(unittest.TestCase):
         faces = binder.Shape.Faces
         self.assertAlmostEqual(sum(f.Area for f in faces), union, places=6)
         self.assertEqual(len(faces), 3)
+
+    def testOldBinderKeepsBullseyeFaces(self):
+        """R10, the other side of the gate: a binder from an older document (_Version below 3)
+        keeps the Bullseye face maker, so its faces don't change on reopen. Two overlapping
+        circles give two full disks."""
+        # Arrange
+        doc = self.newDocument("V2")
+        circles = [models.circle(0, 0, 5), models.circle(6, 0, 5)]
+        sketch = models.sketch(doc, "Circles", circles)
+        binder = doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.setPropertyStatus("_Version", "-ReadOnly")
+        binder._Version = 2
+        binder.Support = [(sketch, ("",))]
+        binder.MakeFace = True
+        disk = Part.Face(Part.Wire(circles[0].toShape())).Area
+
+        # Act
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(binder.isValid(), binder.State)
+        faces = binder.Shape.Faces
+        self.assertEqual(len(faces), 2)
+        for face in faces:
+            self.assertAlmostEqual(face.Area, disk, places=6)
