@@ -59,6 +59,7 @@ names it.
 | `feat/scenarios` | feat | ops#5 | - | `integration` `168dddb8a9` | `11d4740c80` (fork PR 29), 2026-09-30 | never (fork tests); the `NamingMultiMatch` switch when the Phase 4 checkpoint decides the multi-match flags |
 | `fix/5-score-lines` | fix | ops#5 | - | `integration` `11d4740c80` | (fork PR 30) | never (fork tests) |
 | `fix/52-masker-tag-collision` | fix | ops#52 | - | `integration` `826ad36e22` | (fork PR 31) | never (fork tests) |
+| `feat/scenarios-2` | feat | ops#5 | - | `fix/52-masker-tag-collision` `c617fd1538` (stacked on fork PR 31) | (fork PR 33) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 

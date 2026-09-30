@@ -248,13 +248,26 @@ def face(surface=None, normal=None, through=None, contains=None, where=None):
     return Predicate("Face", ", ".join(words), tests)
 
 
-def edge(curve=None, direction=None, through=None, contains=None, where=None):
+def edge(curve=None, direction=None, through=None, contains=None, where=None, center=None,
+         radius=None):
     """An edge: its curve type ('line', 'circle'), its direction (lines, either sense), a point
-    of its infinite line, a point on the edge itself, or any test."""
+    of its infinite line, a point on the edge itself, a circle's centre and radius, or any
+    test."""
     tests, words = [], []
     if curve:
         tests.append(lambda e, tol: type(e.Curve).__name__.lower() == curve)
         words.append(curve)
+    if center is not None:
+        c = _vector(center)
+        tests.append(
+            lambda e, tol: isinstance(e.Curve, Part.Circle) and (e.Curve.Center - c).Length < tol
+        )
+        words.append(f"center={tuple(c)}")
+    if radius is not None:
+        tests.append(
+            lambda e, tol: isinstance(e.Curve, Part.Circle) and abs(e.Curve.Radius - radius) < tol
+        )
+        words.append(f"radius={radius}")
     if direction is not None:
         d = _vector(direction)
         tests.append(
