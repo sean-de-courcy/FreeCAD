@@ -1,0 +1,9 @@
+# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5) whose reference breaks where the
+# scenario expects it to hold. Task 2 (ops#7) fixes them; remove an entry in the PR that makes its
+# test pass.
+
+issue: ops#7
+
+reason: a sketch on a piece of a split face breaks when the tool leaves the base and the pieces merge again (V2; correct in V1)
+cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2
+cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2

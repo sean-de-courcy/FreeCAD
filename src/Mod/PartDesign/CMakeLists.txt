@@ -81,9 +81,11 @@ set(PartDesign_TestFixtures
 set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/__init__.py
     PartDesignTests/Scenarios/attachment.py
+    PartDesignTests/Scenarios/booleans.py
     PartDesignTests/Scenarios/dressups.py
     PartDesignTests/Scenarios/harness.py
     PartDesignTests/Scenarios/models.py
+    PartDesignTests/Scenarios/patterns.py
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/uptoface.py
 )

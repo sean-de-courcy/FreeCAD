@@ -35,9 +35,10 @@ import traceback
 import unittest
 
 from PartDesignTests.Scenarios import harness
-from PartDesignTests.Scenarios import attachment, dressups, sketch_edits, uptoface
+from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
+from PartDesignTests.Scenarios import uptoface
 
-AREAS = (sketch_edits, dressups, attachment, uptoface)
+AREAS = (sketch_edits, dressups, attachment, uptoface, patterns, booleans)
 
 
 def configsFor(scenario):
