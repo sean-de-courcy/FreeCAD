@@ -55,6 +55,7 @@ names it.
 | `fix/19-name-dump` | fix | ops#19 | - | `integration` `012c1bec8e` | `cc4dae6627` (fork PR 25), 2026-09-29 | never (fork tests and the seed wrapper) |
 | `fix/19-naming-order` | fix | ops#19 | - | `fix/19-name-dump` `a2e376f6f9` (stacked on fork PR 25) | `ea53409351` (fork PR 26), 2026-09-29 | a new base writes V2 names in a defined order and sorts their list fields |
 | `infra/ccache-windows-2g` | infra | ops#51 | - | `integration` `ea53409351` | (fork PR 27) | never |
+| `feat/scenarios` | feat | ops#5 | - | `integration` `168dddb8a9` | (fork PR 29) | never (fork tests); the `NamingMultiMatch` switch when the Phase 4 checkpoint decides the multi-match flags |
 
 ## Fork-only commits in carried topics
 
