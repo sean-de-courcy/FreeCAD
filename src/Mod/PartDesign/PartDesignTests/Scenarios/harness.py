@@ -249,6 +249,14 @@ def face(surface=None, normal=None, through=None, contains=None, where=None):
     return Predicate("Face", ", ".join(words), tests)
 
 
+def _curve(e):
+    """The edge's curve, or None where Part can't give one ("undefined curve type")."""
+    try:
+        return e.Curve
+    except Exception:
+        return None
+
+
 def edge(curve=None, direction=None, through=None, contains=None, where=None, center=None,
          radius=None):
     """An edge: its curve type ('line', 'circle'), its direction (lines, either sense), a point
@@ -256,30 +264,31 @@ def edge(curve=None, direction=None, through=None, contains=None, where=None, ce
     test."""
     tests, words = [], []
     if curve:
-        tests.append(lambda e, tol: type(e.Curve).__name__.lower() == curve)
+        tests.append(lambda e, tol: type(_curve(e)).__name__.lower() == curve)
         words.append(curve)
     if center is not None:
         c = _vector(center)
         tests.append(
-            lambda e, tol: isinstance(e.Curve, Part.Circle) and (e.Curve.Center - c).Length < tol
+            lambda e, tol: isinstance(_curve(e), Part.Circle) and (e.Curve.Center - c).Length < tol
         )
         words.append(f"center={tuple(c)}")
     if radius is not None:
         tests.append(
-            lambda e, tol: isinstance(e.Curve, Part.Circle) and abs(e.Curve.Radius - radius) < tol
+            lambda e, tol: isinstance(_curve(e), Part.Circle) and abs(e.Curve.Radius - radius) < tol
         )
         words.append(f"radius={radius}")
     if direction is not None:
         d = _vector(direction)
         tests.append(
-            lambda e, tol: isinstance(e.Curve, Part.Line) and _parallel(e.Curve.Direction, d, False)
+            lambda e, tol: isinstance(_curve(e), Part.Line)
+            and _parallel(e.Curve.Direction, d, False)
         )
         words.append(f"direction={tuple(d)}")
     if through is not None:
         p = _vector(through)
 
         def onLine(e, tol):
-            if not isinstance(e.Curve, Part.Line):
+            if not isinstance(_curve(e), Part.Line):
                 return False
             return (p - e.Curve.Location).cross(V(e.Curve.Direction).normalize()).Length < tol
 

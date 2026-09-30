@@ -167,6 +167,30 @@ class SplitTopGroove(SplitModel):
         m.moveRectangle(doc.GrooveSketch, 12, -1, 14, 11)
 
 
+class SplitFilletNotch(SplitModel):
+    """A fillet, radius 1, on the block's front top edge; a notch (x 8..12, 2 deep) is then cut
+    into the front side of the block's sketch, as in SketchNotch: the front line ends at x = 8,
+    and four lines are added, the last one the rest of the side (x 12..20, a new geometry). The
+    edge splits into x 0..8 and x 12..20; the fillet should take both. Found by the randomized
+    sequences (seed 6): the second piece comes from a new sketch line, so the multi-match flags
+    don't find it either."""
+
+    REFS = ("fillet_edge",)
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.frontTopEdge().predicate))
+        fillet.Radius = 1
+        self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(1))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
 # Controls: the referenced element is removed, not split. The reference should break, loudly.
 
 
