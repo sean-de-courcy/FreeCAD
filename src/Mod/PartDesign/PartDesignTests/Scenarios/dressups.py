@@ -107,3 +107,61 @@ class DressUpReorder(DressUpEdit):
         body = self.bodyObject
         body.removeObject(doc.HoleA)
         body.insertObject(doc.HoleA, doc.HoleB, True)
+
+
+class FilletDeleteBase(Scenario):
+    """A block (0..10 each way); fillet A on the front top edge, radius 1; fillet B on A's back
+    bottom edge, radius 0.25, an edge A leaves as it was on the block. A is deleted, as the GUI
+    does it (the body reroutes its next feature, then the document removes it): B's Base should
+    move to the block's back bottom edge (ops#23 step 5)."""
+
+    abstract = True
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("fillet_edge",)
+    size = 10
+
+    def frontTopEdge(self):
+        return edge("line", direction=X, through=(0, 0, self.size))
+
+    def backBottomEdge(self):
+        return edge("line", direction=X, through=(0, self.size, 0))
+
+    def block(self, doc, body):
+        raise NotImplementedError
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        block = self.block(doc, body)
+        doc.recompute()
+        filletA = body.newObject("PartDesign::Fillet", "FilletA")
+        filletA.Base = (block, self.names(block, self.frontTopEdge()))
+        filletA.Radius = 1
+        doc.recompute()
+        filletB = body.newObject("PartDesign::Fillet", "FilletB")
+        filletB.Base = (filletA, self.names(filletA, self.backBottomEdge()))
+        filletB.Radius = 0.25
+        self.ref("fillet_edge", filletB, "Base", self.backBottomEdge, Filleted(0.25))
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.FilletA)
+        doc.removeObject("FilletA")
+
+
+class FilletDeleteBaseBox(FilletDeleteBase):
+    """The block is a PartDesign AdditiveBox, whose shape has no element map (TestFillet's
+    model)."""
+
+    def block(self, doc, body):
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = self.size
+        return box
+
+
+class FilletDeleteBasePad(FilletDeleteBase):
+    """The block is a pad of a square sketch, whose shape is named."""
+
+    def block(self, doc, body):
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, self.size, self.size), body)
+        return m.pad(body, profile, self.size)

@@ -1,8 +1,0 @@
-# The base's naming tests (PR #31040's head), which still expect V1 behavior.
-# Seeded 2026-09-27 from the local port baseline and CI on sean-de-courcy/FreeCAD#1.
-# Remove an entry in the PR that makes its test pass.
-
-issue: ops#23
-
-reason: after the previous feature is deleted, the fillet's base is Fillet, not Box; may be a real relinking gap (Task 2, ops#7)
-cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge

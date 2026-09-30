@@ -1,9 +1,14 @@
-# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5) whose reference breaks where the
-# scenario expects it to hold. Task 2 (ops#7) fixes them; remove an entry in the PR that makes its
-# test pass.
+# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5), and the tests they judge, whose
+# reference breaks where the scenario expects it to hold. Task 2 (ops#7) fixes them; remove an
+# entry in the PR that makes its test pass.
 
 issue: ops#7
 
 reason: a sketch on a piece of a split face breaks when the tool leaves the base and the pieces merge again (V2; correct in V1)
 cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2
 cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2
+
+reason: a dress-up's Base on a deleted feature isn't relinked to a base without an element map (an AdditiveBox): V2 matches names only, so it breaks (V2; correct in V1 and on a named base; ops#23 step 5)
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2multi
+cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge
