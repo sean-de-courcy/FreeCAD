@@ -32,7 +32,6 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <ShapeFix_Shape.hxx>
-#include <ShapeFix_ShapeTolerance.hxx>
 #include <Standard_Version.hxx>
 
 
@@ -180,14 +179,19 @@ App::DocumentObjectExecReturn* Chamfer::execute()
 
         TopTools_ListOfShape aLarg;
         aLarg.Append(TopShape.getShape());
-        if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)) {
-            ShapeFix_ShapeTolerance aSFT;
-            aSFT.LimitTolerance(
-                shape.getShape(),
-                Precision::Confusion(),
-                Precision::Confusion(),
-                TopAbs_SHAPE
-            );
+        // Repair only a result that the full check rejects too, on a copy, and fail if the repair
+        // can't make it valid or loses solids (see Fillet::execute(), ops#12)
+        if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)
+            && !shape.isValid()) {
+            TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+            repaired.makeElementCopy(shape);
+            if (!repaired.fix()
+                || repaired.countSubShapes(TopAbs_SOLID) != shape.countSubShapes(TopAbs_SOLID)) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
+                );
+            }
+            shape = repaired;
         }
 
         // store shape before refinement
