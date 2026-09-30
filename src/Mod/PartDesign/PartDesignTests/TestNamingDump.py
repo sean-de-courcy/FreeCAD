@@ -41,6 +41,10 @@ masking, since a new document's object IDs start at a random offset. Three check
 - TestNamingRepeated: the model is built 5 times in this process, and the dumps with element
   indexes must be identical.
 
+The models are built in documents whose object IDs are above a bound (`models.newDocument`), so a
+small tag that is no object's ID can't be masked as an object's name; TestNamingTagCollision
+forces that case (ops#52).
+
 Environment variables:
 - FREECAD_NAMING_GOLDEN_UPDATE=<dir>: TestNamingGolden writes the golden files into <dir> (the
   source tree's NamingGolden folder) instead of comparing.
@@ -54,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 import FreeCAD as App
 import Part
@@ -341,7 +346,7 @@ def dumpShape(shape, masker, mode, indexed=False):
 
 def dumpModel(model, mode, indexed=False):
     """Builds the model in a new document in `mode` and returns its dump as text."""
-    doc = App.newDocument(f"NamingDump{model}{mode}")
+    doc = models.newDocument(f"NamingDump{model}{mode}")
     try:
         doc.HistoryAlgorithm = mode
         features = MODELS[model](doc)
@@ -536,6 +541,45 @@ class TestNamingRepeated(unittest.TestCase):
                     f"run {run} of {REPEATS} differs from run 1 ({path1}, {path}):\n"
                     + _diff(first, again, "run1", f"run{run}")
                 )
+
+
+class TestNamingTagCollision(unittest.TestCase):
+    """A document whose object IDs start at 0 gives the Slice model's first object, Slices, the
+    ID 1: the slice's own tag, which `Masker` then writes as `{Slices}` instead of `#1` (ops#52).
+    `Document.clearDocument` restarts the IDs at 0, which forces the case."""
+
+    def testCollisionForced(self):
+        """Control: in a document starting at 0, the slice tag is masked as Slices"""
+        doc = App.newDocument("NamingDumpCollision")
+        try:
+            doc.clearDocument()
+            doc.HistoryAlgorithm = "V2"
+            slices = MODELS["Slice"](doc)[0]
+            doc.recompute()
+            self.assertEqual(slices.ID, 1)
+            text = "\n".join(dumpShape(slices.Shape, Masker(doc), "V2"))
+            self.assertIn(";{Slices};SLC;", text)
+            self.assertNotIn(";#1;SLC;", text)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testNewDocumentAvoidsCollision(self):
+        """The dump turns down a document starting at 0 and matches the golden file"""
+        create, made = App.newDocument, []
+
+        def newDocument(*args, **kwargs):
+            doc = create(*args, **kwargs)
+            if not made:
+                doc.clearDocument()
+            made.append(doc.Name)
+            return doc
+
+        with unittest.mock.patch.object(App, "newDocument", newDocument):
+            actual = dumpModel("Slice", "V2")
+        self.assertGreaterEqual(len(made), 2, "the document starting at 0 was used")
+        with open(os.path.join(GOLDEN_DIR, "Slice.V2.txt"), encoding="utf-8") as fh:
+            expected = fh.read().replace("\r\n", "\n")
+        self.assertEqual(actual, expected)
 
 
 def _addTests():
