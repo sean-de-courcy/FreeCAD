@@ -148,6 +148,8 @@ void ViewProviderPreviewExtension::extensionAttach(App::DocumentObject* document
 
     pcPreviewRoot = new SoSeparator;
     pcPreviewShape = new SoPreviewShape;
+    // PreviewColor may have been set before the nodes existed (see extensionOnChanged)
+    pcPreviewShape->color.setValue(Base::convertTo<SbColor>(PreviewColor.getValue()));
 
     attachPreview();
 
@@ -191,7 +193,8 @@ void ViewProviderPreviewExtension::showPreview(bool enable)
     }
 
     auto previewExtension = feature->getExtensionByType<Part::PreviewExtension>(true);
-    if (!previewExtension) {
+    // Nothing to show before extensionAttach() made the nodes
+    if (!previewExtension || !pcPreviewRoot) {
         return;
     }
 
@@ -212,7 +215,10 @@ void ViewProviderPreviewExtension::showPreview(bool enable)
 
 void ViewProviderPreviewExtension::extensionOnChanged(const App::Property* prop)
 {
-    if (prop == &PreviewColor) {
+    // The preview nodes exist only after extensionAttach(). A Python view provider attaches
+    // once its proxy is set, which on restore comes after the object's properties, so the
+    // color can change before that; extensionAttach() applies it then.
+    if (prop == &PreviewColor && pcPreviewShape) {
         pcPreviewShape->color.setValue(Base::convertTo<SbColor>(PreviewColor.getValue()));
     }
 
