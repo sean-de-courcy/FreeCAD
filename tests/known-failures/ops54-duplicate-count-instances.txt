@@ -1,0 +1,22 @@
+# Pattern tests whose instances are told apart only by the duplicate counter (V2). The counter
+# is the element map's tie-breaker, so the harness's assertInstancesDistinct and
+# assertDistinctNames count such names as shared (ops#23 step 4). Task 1 (ops#6) decides how
+# instances get names of their own; remove an entry in the PR that makes its test pass.
+
+issue: ops#54
+
+reason: on the unrefined result, the copies of each face of the original differ only in the duplicate counter
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testHorizontalSketchAxisLinearPattern
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testNormalSketchAxisLinearPattern
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testVerticalSketchAxisLinearPattern
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testXAxisLinearPattern
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testYAxisLinearPattern
+cli  PartDesignTests.TestLinearPattern.TestLinearPattern.testZAxisLinearPattern
+
+reason: as above, and on the refined result faces merged from different instances share names up to the counter
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testHorizontalSketchAxisPolarPattern
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testNormalSketchAxisPolarPattern
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testVerticalSketchAxisPolarPattern
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testXAxisPolarPattern
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testYAxisPolarPattern
+cli  PartDesignTests.TestPolarPattern.TestPolarPattern.testZAxisPolarPattern

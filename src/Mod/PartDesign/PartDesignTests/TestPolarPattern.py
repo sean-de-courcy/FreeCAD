@@ -25,6 +25,7 @@ import unittest
 
 import FreeCAD
 import TestSketcherApp
+from PartDesignTests.Scenarios import harness
 
 
 class TestPolarPattern(unittest.TestCase):
@@ -44,12 +45,10 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.Doc.X_Axis, [""])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(1, 0, 0))
 
     def testYAxisPolarPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -64,12 +63,10 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.Doc.Y_Axis, [""])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(0, 1, 0))
 
     def testZAxisPolarPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -84,12 +81,10 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.Doc.Z_Axis, [""])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(0, 0, 1))
 
     def testNormalSketchAxisPolarPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -107,12 +102,10 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.PadSketch, ["N_Axis"])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(0, 0, 1))
 
     def testVerticalSketchAxisPolarPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -130,12 +123,10 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.PadSketch, ["V_Axis"])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(0, 1, 0))
 
     def testHorizontalSketchAxisPolarPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -153,16 +144,27 @@ class TestPolarPattern(unittest.TestCase):
         self.PolarPattern.Axis = (self.PadSketch, ["H_Axis"])
         self.PolarPattern.Angle = 360
         self.PolarPattern.Occurrences = 4
-        self.PolarPattern.Refine = True
+        self.PolarPattern.Refine = False
         self.Body.addObject(self.PolarPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.PolarPattern.Shape.Volume, 4000)
-        # 26 original plus 3 new instances:
-        # First and second have 4 new vertexes, 8 new edges and 5 new faces
-        # Final one has  2 new vertexes, 5 new edges and original loses one face.
-        # That makes 40.
-        # self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 66)  # TODO
-        self.assertEqual(self.PolarPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(1, 0, 0))
+
+    def checkPattern(self, original, axis):
+        """The instances on the unrefined result, then the names of the refined one. Angle 360
+        and 4 occurrences put the instances 90 degrees apart about the axis through the origin,
+        one per quadrant."""
+        pattern = self.PolarPattern
+        placements = [
+            FreeCAD.Placement(FreeCAD.Vector(), FreeCAD.Rotation(axis, 90.0 * k)) for k in range(4)
+        ]
+        with self.subTest("unrefined"):
+            harness.assertEveryElementNamed(pattern.Shape)
+            harness.assertInstancesDistinct(pattern.Shape, original.Shape, placements)
+        pattern.Refine = True
+        self.Doc.recompute()
+        self.assertAlmostEqual(pattern.Shape.Volume, 4000)
+        harness.assertEveryElementNamed(pattern.Shape)
+        harness.assertDistinctNames(pattern.Shape)
 
     def tearDown(self):
         # closing doc

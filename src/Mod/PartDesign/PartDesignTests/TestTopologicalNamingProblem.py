@@ -32,6 +32,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 import TestSketcherApp
+from PartDesignTests.Scenarios import harness
 
 
 class TestTopologicalNamingProblem(unittest.TestCase):
@@ -51,22 +52,12 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         vertexes = [name for name in map.keys() if name.startswith("Vertex")]
         return (len(faces), len(edges), len(vertexes))
 
-    def assertAllElementsMapped(self, shape):
-        """Every face, edge and vertex of the shape has a mapped name. How many names an
-        element has is an implementation detail of the naming algorithm, so tests don't
-        count them."""
-        reverseMap = shape.ElementReverseMap
-        unmapped = [
-            f"{kind}{index}"
-            for kind, elements in (
-                ("Face", shape.Faces),
-                ("Edge", shape.Edges),
-                ("Vertex", shape.Vertexes),
-            )
-            for index in range(1, len(elements) + 1)
-            if f"{kind}{index}" not in reverseMap
-        ]
-        self.assertEqual(unmapped, [], "Elements without a mapped name")
+    def assertNamesDistinct(self, shape):
+        """Every element of the shape has a name, and no two share one (up to the duplicate
+        counter). How many names an element has is the naming algorithm's business, so tests
+        don't count them (ops#23)."""
+        harness.assertEveryElementNamed(shape)
+        harness.assertDistinctNames(shape)
 
     def sketchSection(self, sketch, referenceIDs, elementType):
         """A sketch element's V2 name, decoded: one section with the sketch's ID as its tag.
@@ -219,14 +210,14 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         doc.Fusion001.Shapes = [box3, cyl1]
         doc.recompute()
         # Assert
-        self.assertEqual(fuse1.Shape.ElementMapSize, 26)
-        self.assertEqual(fuse2.Shape.ElementMapSize, 44)
+        self.assertNamesDistinct(fuse1.Shape)
+        self.assertNamesDistinct(fuse2.Shape)
         # Act
         doc.Fusion.Refine = True  # activate refinement
         doc.Fusion001.Refine = True  # activate refinement
         doc.recompute()
-        self.assertEqual(fuse1.Shape.ElementMapSize, 26)
-        self.assertEqual(fuse2.Shape.ElementMapSize, 44)
+        self.assertNamesDistinct(fuse1.Shape)
+        self.assertNamesDistinct(fuse2.Shape)
 
     def testPartDesignElementMapPad(self):
         """Test that padding a sketch results in a correct element map.  Note that comprehensive
@@ -582,7 +573,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertAllElementsMapped(body.Shape)
+        harness.assertEveryElementNamed(body.Shape)
 
     def testPartDesignElementPadSketch(self):
         # Arrange
@@ -597,8 +588,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertAllElementsMapped(body.Shape)
-        self.assertAllElementsMapped(pad.Shape)
+        harness.assertEveryElementNamed(body.Shape)
+        harness.assertEveryElementNamed(pad.Shape)
         self.assertRectangleSketchNames(sketch)
         self.assertNotEqual(
             pad.Shape.ElementReverseMap["Vertex1"], "Vertex1"
@@ -609,7 +600,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         #  Pad -> Extrusion -> makes compounds and does booleans, thus the resulting newName element maps
         #  See if we can turn those off, or try them on the other types?
 
-    def _testPartDesignElementMapRevolution(self, order, vertex, face):
+    def _testPartDesignElementMapRevolution(self, order):
         # App.KeepTestDoc = True    # Uncomment this if you want to keep the test document to examine
         self.Doc.UseHasher = False
         # Arrange
@@ -646,14 +637,11 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertEqual(len(body.Shape.childShapes()), 1)
         self.assertAlmostEqual(pad.Shape.Volume, padVolume)
         self.assertAlmostEqual(revolution.Shape.Volume, volume + padVolume)
+        shape = revolution.Shape
+        self.assertEqual((len(shape.Faces), len(shape.Edges), len(shape.Vertexes)), (9, 21, 14))
         # Assert the element map is correct
-        self.assertEqual(body.Shape.childShapes()[0].ElementMapSize, 46)
-        self.assertEqual(revolution.Shape.ElementMapSize, 46)
-        self.assertEqual(
-            self.countFacesEdgesVertexes(revolution.Shape.ElementReverseMap), (9, 21, 14)
-        )
-        self.assertEqual(revolution.Shape.ElementReverseMap[vertex][1].count(";"), 3)
-        self.assertEqual(revolution.Shape.ElementReverseMap[face].count(";"), 19)
+        self.assertNamesDistinct(body.Shape.childShapes()[0])
+        self.assertNamesDistinct(revolution.Shape)
 
         ### This test has been removed because FeatureRevolution generates improper element maps when the user select the
         #   UpToFace mode. That behavior seems to be the fault of OpenCASCADE itself, and we need to rewrite that section
@@ -684,10 +672,10 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         # self.assertEqual( revolution.Shape.ElementReverseMap["Face8"].count("Face10"), 3)
 
     def testPartDesignElementMapRevolutionFuseFeatureFirst(self):
-        self._testPartDesignElementMapRevolution("FeatureFirst", "Vertex9", "Face9")
+        self._testPartDesignElementMapRevolution("FeatureFirst")
 
     def testPartDesignElementMapRevolutionWithDefaultFuseOrder(self):
-        self._testPartDesignElementMapRevolution("BaseFirst", "Vertex8", "Face8")
+        self._testPartDesignElementMapRevolution("BaseFirst")
 
     def testPartDesignBinderRevolution(self):
         doc = self.Doc
@@ -854,8 +842,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertAlmostEqual(Area, 1)
         self.assertAlmostEqual(helixLength, helix.Height.Value)
         self.assertAlmostEqual(helix.Shape.Volume, Volume, 2)
-        self.assertAllElementsMapped(helix.Shape)
-        self.assertAllElementsMapped(body.Shape)
+        harness.assertEveryElementNamed(helix.Shape)
+        harness.assertEveryElementNamed(body.Shape)
 
     def testPartDesignElementMapPocket(self):
         # Arrange
@@ -879,8 +867,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
-        self.assertAllElementsMapped(body.Shape)
-        self.assertAllElementsMapped(pocket.Shape)
+        harness.assertEveryElementNamed(body.Shape)
+        harness.assertEveryElementNamed(pocket.Shape)
         self.assertRectangleSketchNames(sketch)
         self.assertNotEqual(
             pocket.Shape.ElementReverseMap["Vertex1"], "Vertex1"
@@ -1150,17 +1138,15 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         TestSketcherApp.CreateRectangleSketch(sketch, (0, 0), (1, 1))
         body.addObject(sketch)
         self.Doc.recompute()
-        self.assertEqual(sketch.Shape.ElementMapSize, 12)
+        self.assertNamesDistinct(sketch.Shape)
         pad = self.Doc.addObject("PartDesign::Pad", "Pad")
         pad.Profile = sketch
         body.addObject(pad)
         self.Doc.recompute()
         # Assert
-        self.assertEqual(sketch.Shape.ElementMapSize, 12)
-        self.assertEqual(pad.Shape.ElementMapSize, 30)  # The sketch plus the pad in the map
-        # TODO:  differing results between main and LS3 on these values.  Does it matter?
-        # self.assertEqual(body.Shape.ElementMapSize,0)   # 8?
-        # self.assertEqual(body.Shape.ElementMapSize,30) # 26
+        self.assertNamesDistinct(sketch.Shape)
+        self.assertNamesDistinct(pad.Shape)
+        self.assertNamesDistinct(body.Shape)
 
     def testPlaneElementMap(self):
         plane = self.Doc.addObject("Part::Plane", "Plane")
@@ -2465,15 +2451,17 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         # Arrange
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
         self.create_t_sketch()
-        self.assertEqual(self.Doc.Sketch.Shape.ElementMapSize, 18)
+        self.assertNamesDistinct(self.Doc.Sketch.Shape)
+        names = harness.elementNames(self.Doc.Sketch.Shape)
         filename = tempfile.gettempdir() + os.sep + self.Doc.Name
         # Act
         self.Doc.saveAs(filename)
         App.closeDocument(self.Doc.Name)
         self.Doc = App.openDocument(filename + ".FCStd")
+        # Assert: the sketch has the names it was saved with, and a recompute keeps them
+        self.assertEqual(harness.elementNames(self.Doc.Sketch.Shape), names)
         self.Doc.recompute()
-        # Assert
-        self.assertEqual(self.Doc.Sketch.Shape.ElementMapSize, 18)
+        self.assertEqual(harness.elementNames(self.Doc.Sketch.Shape), names)
 
     def testBodySubShapeBinderElementMap(self):
         # Arrange
@@ -2489,7 +2477,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
             doc.Box001,
         ]
         doc.recompute()
-        self.assertEqual(doc.Fusion.Shape.ElementMapSize, 26)
+        self.assertNamesDistinct(doc.Fusion.Shape)
 
         doc.addObject("PartDesign::Body", "Body")
         doc.Body.Label = "Body"
@@ -2508,17 +2496,13 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         doc.recompute()
 
         # assert
-        self.assertEqual(
-            doc.Body.OutList[1].Shape.ElementMapSize, 26
-        )  # subobjects ( subshapebinder here ) should have elementmap
-        self.assertEqual(
-            doc.Body.Shape.ElementMapSize, 0
-        )  # TODO:  This is Sus, although LS3 passes.  Might be because
-        # SubShapeBinder is different in LS3.
-        self.assertEqual(
-            doc.Body001.BaseFeature.Shape.ElementMapSize, 26
-        )  # base feature lookup should have element map
-        self.assertEqual(doc.Body001.Shape.ElementMapSize, 26)  # Body Shape should have element map
+        # subobjects ( subshapebinder here ) should have elementmap
+        self.assertNamesDistinct(doc.Body.OutList[1].Shape)
+        # The binder isn't a solid feature: the body has no tip, and no shape.
+        self.assertTrue(doc.Body.Shape.isNull())
+        # base feature lookup should have element map
+        self.assertNamesDistinct(doc.Body001.BaseFeature.Shape)
+        self.assertNamesDistinct(doc.Body001.Shape)  # Body Shape should have element map
 
     def testBaseFeatureAttachmentSupport(self):
         # Arrange
@@ -2585,7 +2569,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         doc.recompute()
 
         # Assert that we have a sketch element map before proceeding
-        self.assertEqual(doc.Sketch.Shape.ElementMapSize, 12)
+        self.assertNamesDistinct(doc.Sketch.Shape)
 
         # Arrange
         doc.Body.newObject("PartDesign::Pad", "Pad")
@@ -2627,9 +2611,10 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertEqual(len(doc.Body.Shape.Vertexes), 28)
         self.assertEqual(len(doc.Body.Shape.Shells), 1)
         self.assertEqual(len(doc.Body.Shape.Solids), 1)
-        self.assertEqual(
-            doc.Sketch.AttachmentSupport[0][1][0], "Face9"
-        )  # Attachment autochanged from Face8.
+        # The attachment follows its face, Box001's face towards -Y on y = 5 (Face8 before the
+        # edit, Face9 after).
+        expected = harness.face(normal=(0, -1, 0), through=(0, 5, 0)).one(doc.BaseFeature.Shape)
+        self.assertEqual(list(doc.Sketch.AttachmentSupport[0][1]), expected)
         # potentially check the .BoundBox ( calc seems off on this, Not applying sketch position to Pad object )
 
     def create_t_sketch(self):
