@@ -25,6 +25,7 @@ import unittest
 
 import FreeCAD
 import TestSketcherApp
+from PartDesignTests.Scenarios import harness
 
 
 class TestLinearPattern(unittest.TestCase):
@@ -44,21 +45,10 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.Doc.X_Axis, [""])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # 44 + 84 + 42 = 170.  44 - 8 = 36 / 9 = 4.  84-12 = 72 / 9 = 8.  42 - 6 = 36 / 9 = 4
-        # We have the original 26 from the first shape, plus 4 more vertices, 8 more edges and
-        # 4 more faces for each additional copy.  Since they have to touch ( single shape rule ),
-        # We're adding 4 points to define each additional prism's new points, 8 edges makes sense,
-        # and 4 faces makes sense since we're defining essentially a tube, not a box for each copy.
-        # self.assertNotEqual(self.LinearPattern.Shape.ElementReverseMap["Vertex44"], "")
-        # self.assertNotEqual(self.LinearPattern.Shape.ElementReverseMap["Edge84"], "")
-        # self.assertNotEqual(self.LinearPattern.Shape.ElementReverseMap["Face42"], "")
-        #
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(1, 0, 0))
 
     def testYAxisLinearPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -73,12 +63,10 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.Doc.Y_Axis, [""])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(0, 1, 0))
 
     def testZAxisLinearPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -93,12 +81,10 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.Doc.Z_Axis, [""])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Box, FreeCAD.Vector(0, 0, 1))
 
     def testNormalSketchAxisLinearPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -116,12 +102,10 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.PadSketch, ["N_Axis"])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(0, 0, 1))
 
     def testVerticalSketchAxisLinearPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -139,12 +123,10 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.PadSketch, ["V_Axis"])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(0, 1, 0))
 
     def testHorizontalSketchAxisLinearPattern(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -162,13 +144,26 @@ class TestLinearPattern(unittest.TestCase):
         self.LinearPattern.Direction = (self.PadSketch, ["H_Axis"])
         self.LinearPattern.Length = 90.0
         self.LinearPattern.Occurrences = 10
-        self.LinearPattern.Refine = True
+        self.LinearPattern.Refine = False
         self.Body.addObject(self.LinearPattern)
         self.Doc.recompute()
-        self.assertAlmostEqual(self.LinearPattern.Shape.Volume, 1e4)
-        # self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 170)    # TODO
-        # self.assertEqual(len(self.LinearPattern.Shape.ElementReverseMap), 170)
-        self.assertEqual(self.LinearPattern.Shape.ElementMapSize, 26)
+        self.checkPattern(self.Pad, FreeCAD.Vector(1, 0, 0))
+
+    def checkPattern(self, original, direction):
+        """The instances on the unrefined result, then the names of the refined one. Length 90
+        and 10 occurrences put the instances 10 apart along the direction, touching."""
+        pattern = self.LinearPattern
+        placements = [
+            FreeCAD.Placement(direction * (10.0 * k), FreeCAD.Rotation()) for k in range(10)
+        ]
+        with self.subTest("unrefined"):
+            harness.assertEveryElementNamed(pattern.Shape)
+            harness.assertInstancesDistinct(pattern.Shape, original.Shape, placements)
+        pattern.Refine = True
+        self.Doc.recompute()
+        self.assertAlmostEqual(pattern.Shape.Volume, 1e4)
+        harness.assertEveryElementNamed(pattern.Shape)
+        harness.assertDistinctNames(pattern.Shape)
 
     def tearDown(self):
         # closing doc

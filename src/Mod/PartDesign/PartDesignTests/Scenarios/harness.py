@@ -728,6 +728,205 @@ def emit(result):
             fh.write(line + "\n")
 
 
+# ---------------------------------------------------------------------------------------------
+# Naming assertions for unit tests (ops#23): what a shape's names must satisfy, in place of
+# counting them. A failed check raises AssertionError (a test failure); a check the test set up
+# wrong raises ScenarioError.
+# ---------------------------------------------------------------------------------------------
+
+COUNTER_OPCODE = re.compile(r"_[0-9]+")
+
+
+def elementNames(shape):
+    """{index name: [mapped names]} for every face, edge and vertex of the shape; [] for an
+    element without a name."""
+    reverse = shape.ElementReverseMap
+    names = {}
+    kinds = (("Face", shape.Faces), ("Edge", shape.Edges), ("Vertex", shape.Vertexes))
+    for kind, elements in kinds:
+        for index in range(1, len(elements) + 1):
+            value = reverse.get(f"{kind}{index}")
+            if value is None:
+                names[f"{kind}{index}"] = []
+            else:
+                names[f"{kind}{index}"] = [value] if isinstance(value, str) else list(value)
+    return names
+
+
+def withoutCounter(name):
+    """The V2 name as decoded sections, without its duplicate counter: the counter is the element
+    map's tie-breaker between names that are otherwise equal (`ElementMap::setElementName`), not
+    part of what the element is (ops#54). Both of its forms are taken out, in every section (a
+    later feature keeps the counter of the name it builds on):
+    - the duplicate count field (`...;F;1;IDX,SRC;_`): set to 0;
+    - a `_<n>` written over the op code from count 2 on (`...;_2;0;F;0;...`, ops#55): the op code
+      becomes None, which matches any op code (`sameUpToCounter`).
+    A name that doesn't decode (V1) is returned as it is."""
+    sections = App.getDecodedMappedName(name)
+    if not sections:
+        return name
+    stripped = []
+    for section in sections:
+        fields = dict(section)
+        fields["duplicateCount"] = "0"
+        if COUNTER_OPCODE.fullmatch(fields["opCode"]):
+            fields["opCode"] = None
+        stripped.append(
+            tuple((k, tuple(v) if isinstance(v, list) else v) for k, v in sorted(fields.items()))
+        )
+    return tuple(stripped)
+
+
+def _withoutOpCodes(stripped):
+    if isinstance(stripped, str):
+        return stripped
+    return tuple(tuple(field for field in section if field[0] != "opCode") for section in stripped)
+
+
+def sameUpToCounter(a, b):
+    """Two names (`withoutCounter` forms) that differ at most in their duplicate counters."""
+    if isinstance(a, str) or isinstance(b, str):
+        return a == b
+    if _withoutOpCodes(a) != _withoutOpCodes(b):
+        return False
+    for sectionA, sectionB in zip(a, b):
+        opA, opB = dict(sectionA)["opCode"], dict(sectionB)["opCode"]
+        if opA is not None and opB is not None and opA != opB:
+            return False
+    return True
+
+
+def sharedNames(names):
+    """Pairs of elements with a name each that are the same up to the duplicate counter, from
+    `elementNames`: [(element, element, name, name)]."""
+    groups = {}
+    for element, own in names.items():
+        for name in own:
+            stripped = withoutCounter(name)
+            groups.setdefault(_withoutOpCodes(stripped), []).append((element, name, stripped))
+    shared, seen = [], set()
+    for group in groups.values():
+        for i, (elementA, nameA, strippedA) in enumerate(group):
+            for elementB, nameB, strippedB in group[i + 1 :]:
+                pair = tuple(sorted((elementA, elementB)))
+                if elementA == elementB or pair in seen:
+                    continue
+                if sameUpToCounter(strippedA, strippedB):
+                    seen.add(pair)
+                    shared.append((elementA, elementB, nameA, nameB))
+    return shared
+
+
+def _listed(items, limit=8):
+    lines = [f"  {item}" for item in items[:limit]]
+    if len(items) > limit:
+        lines.append(f"  ... {len(items) - limit} more")
+    return "\n".join(lines)
+
+
+def assertEveryElementNamed(shape):
+    """Every face, edge and vertex of the shape has a mapped name. How many names an element has
+    is the naming algorithm's business, so tests don't count them."""
+    unnamed = [element for element, names in elementNames(shape).items() if not names]
+    if unnamed:
+        raise AssertionError(f"{len(unnamed)} elements without a mapped name: {unnamed}")
+
+
+def assertDistinctNames(shape):
+    """No two elements share a name. Names that differ only in the duplicate counter count as
+    shared (`withoutCounter`)."""
+    shared = sharedNames(elementNames(shape))
+    if shared:
+        raise AssertionError(
+            f"{len(shared)} pairs of elements share a name up to the duplicate counter:\n"
+            + _listed([f"{a} and {b}: {na!r} / {nb!r}" for a, b, na, nb in shared])
+        )
+
+
+def _sameFace(a, b, tol):
+    if abs(a.Area - b.Area) > tol * max(1.0, a.Area):
+        return False
+    if (a.CenterOfMass - b.CenterOfMass).Length > tol:
+        return False
+    if isinstance(a.Surface, Part.Plane) != isinstance(b.Surface, Part.Plane):
+        return False
+    return not isinstance(a.Surface, Part.Plane) or _parallel(faceNormal(a), faceNormal(b), True)
+
+
+def instanceFaces(shape, original, placements):
+    """{original's face: [the result's face per instance, or None]}: each instance's copy of each
+    face of the original, found in the pattern's result by its geometry. Instance k is the
+    original moved by placements[k]; a copy that the pattern's fusion changed or removed is
+    None."""
+    tol = tolerance(shape)
+    copies = {}
+    for index, face in enumerate(original.Faces, 1):
+        row = []
+        for placement in placements:
+            moved = face.copy()
+            moved.transformShape(placement.toMatrix())
+            found = [f"Face{i}" for i, f in enumerate(shape.Faces, 1) if _sameFace(f, moved, tol)]
+            if len(found) > 1:
+                raise ScenarioError(
+                    f"Face{index} of the original has copies {found} at {placement}"
+                )
+            row.append(found[0] if found else None)
+        copies[f"Face{index}"] = row
+    for k in range(len(placements)):
+        if all(row[k] is None for row in copies.values()):
+            raise ScenarioError(f"instance {k + 1} has no face in the result: check the placements")
+    return copies
+
+
+def _sources(stripped):
+    """What a name says its element was made from: the first section's references, linked names,
+    tag and type."""
+    if isinstance(stripped, str):
+        return stripped
+    first = dict(stripped[0])
+    return (
+        first["referenceIDs"],
+        first["linkedNames"],
+        first["iterationTag"],
+        first["elementType"],
+    )
+
+
+def assertInstancesDistinct(shape, original, placements):
+    """A pattern's instances: the copies of each face of the original have names distinct from
+    each other's (up to the duplicate counter, as in `assertDistinctNames`), and each copy shares
+    the original face's sources: its own name's, or, where the original face has no name, its
+    index name with the original's tag. Check it on the unrefined result, where the instances'
+    faces are still there; `placements` come from the pattern's parameters (the first is the
+    original's)."""
+    names = elementNames(shape)
+    originalNames = elementNames(original)
+    problems = []
+    for face, row in instanceFaces(shape, original, placements).items():
+        copies = [(k + 1, copy) for k, copy in enumerate(row) if copy is not None]
+        if originalNames[face]:
+            expected = {_sources(withoutCounter(n)) for n in originalNames[face]}
+        else:
+            expected = {((face,), (), str(original.Tag), "F")}
+        for k, copy in copies:
+            got = {_sources(withoutCounter(n)) for n in names[copy]}
+            if not got & expected:
+                problems.append(
+                    f"{face}, instance {k} ({copy}): no name shares the original's sources"
+                )
+        for i, (k, copy) in enumerate(copies):
+            for m, other in copies[i + 1 :]:
+                for _, _, na, nb in sharedNames({copy: names[copy], other: names[other]}):
+                    problems.append(
+                        f"{face}, instances {k} and {m} ({copy}, {other}): {na!r} / {nb!r}"
+                    )
+    if problems:
+        raise AssertionError(
+            f"{len(problems)} problems with the pattern's instances (names that differ only in "
+            "the duplicate counter count as shared):\n" + _listed(problems)
+        )
+
+
 def scenarioClasses(modules):
     """The concrete Scenario classes defined in the modules, in definition order."""
     found = []
