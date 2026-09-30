@@ -127,14 +127,20 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // check rejects too. Limiting every tolerance to Precision::Confusion() used to be the
         // repair: it opened the gaps a fillet closes with larger tolerances, turning valid fillets
         // into invalid solids, and edited sub-shapes shared with the base shape in place (ops#12).
-        // The repair works on a copy and keeps the result only if it is valid.
+        // The repair works on a copy. A result it can't make valid, or that loses solids in the
+        // repair (ShapeFix can turn a solid into a valid open shell), fails the feature, as it did
+        // up to 0.21, instead of breaking the features after it.
         if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)
             && !shape.isValid()) {
             TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
             repaired.makeElementCopy(shape);
-            if (repaired.fix()) {
-                shape = repaired;
+            if (!repaired.fix()
+                || repaired.countSubShapes(TopAbs_SOLID) != shape.countSubShapes(TopAbs_SOLID)) {
+                return new App::DocumentObjectExecReturn(
+                    QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
+                );
             }
+            shape = repaired;
         }
 
         // store shape before refinement

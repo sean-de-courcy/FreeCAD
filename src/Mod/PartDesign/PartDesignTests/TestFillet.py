@@ -26,6 +26,7 @@ from math import pi
 import unittest
 
 import FreeCAD
+import Part
 
 
 class TestFillet(unittest.TestCase):
@@ -254,6 +255,67 @@ class TestFillet(unittest.TestCase):
         self.Doc.recompute()
         self.assertFalse(fillet.isValid())
         self.assertTrue(box.Shape.isValid())
+
+    # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
+    # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at
+    # the edge. The fillet on the back top edge keeps the fin, and its result is invalid. The
+    # feature repairs it on a copy, or fails with "Resulting shape is invalid" as up to 0.21.
+
+    def _add_cube_with_fin(self, body, closed=True, bottom_on_own_edges=False):
+        V = FreeCAD.Vector
+        cube = Part.makeBox(10, 10, 10)
+        edge = cube.getElement(self._edge_between(cube, (0, 0, 0), (10, 0, 0)))
+        p0, p1, q0, q1 = V(0, 0, 0), V(10, 0, 0), V(0, 5, 5), V(10, 5, 5)
+        sides = [edge, Part.makeLine(p1, q1), Part.makeLine(q1, q0)]
+        if closed:
+            fin = Part.Face(Part.Wire(sides + [Part.makeLine(q0, p0)]))
+        else:
+            # Three sides of the square: a boundary with a 7 mm gap, which no repair closes
+            fin = Part.Face(Part.Plane(p0, p1, q0), Part.Wire(sides))
+        bottom = next(face for face in cube.Faces if face.CenterOfMass.z < 1e-6)
+        if bottom_on_own_edges:
+            new_bottom = bottom.copy()
+        else:
+            # The same face on the same edges; a new face, so that the replacement keeps it
+            new_bottom = Part.Face(bottom.Surface, bottom.OuterWire)
+            if bottom.Orientation == "Reversed":
+                new_bottom = new_bottom.reversed()
+        shape = cube.replaceShape([(bottom, Part.Compound([new_bottom, fin]))])
+        self.assertFalse(shape.isValid())
+        faces_at_edge = 2 if bottom_on_own_edges else 3
+        self.assertEqual(len(shape.ancestorsOfType(edge, Part.Face)), faces_at_edge)
+        feature = self.Doc.addObject("Part::Feature", "CubeWithFin")
+        feature.Shape = shape
+        body.BaseFeature = feature
+        self.Doc.recompute()
+        return body.BaseFeature
+
+    def testFilletRepairsInvalidResult(self):
+        # A closed fin: the repair gives a valid solid, the filleted cube
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        base = self._add_cube_with_fin(body)
+        edge = self._edge_between(base.Shape, (0, 10, 10), (10, 10, 10))
+        fillet = self._add_fillet(body, base, [edge], 1.0)
+        self._assertValidFillet(fillet, 1000 - self._fillet_section(1.0) * 10)
+
+    def testFilletUnrepairableResultFails(self):
+        # An open fin: the repair can't close its boundary
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        base = self._add_cube_with_fin(body, closed=False)
+        edge = self._edge_between(base.Shape, (0, 10, 10), (10, 10, 10))
+        fillet = self._add_fillet(body, base, [edge], 1.0)
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
+
+    def testFilletRepairLosingSolidFails(self):
+        # A closed fin with the bottom face on edges of its own: the repair gives a valid shape
+        # with no solid, which the feature doesn't take as a repair
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        base = self._add_cube_with_fin(body, bottom_on_own_edges=True)
+        edge = self._edge_between(base.Shape, (0, 10, 10), (10, 10, 10))
+        fillet = self._add_fillet(body, base, [edge], 1.0)
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
 
     def tearDown(self):
         # closing doc
