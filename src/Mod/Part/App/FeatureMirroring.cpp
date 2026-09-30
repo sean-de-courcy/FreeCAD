@@ -22,13 +22,11 @@
  *                                                                         *
  ***************************************************************************/
 
-#include <BRepBuilderAPI_Transform.hxx>
 #include <BRep_Tool.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_Trsf.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <gp_Pln.hxx>
@@ -319,11 +317,8 @@ App::DocumentObjectExecReturn* Mirroring::execute()
             Base::Placement placement = propPlacement->getValue();
 
             if (!placement.isIdentity()) {
-                gp_Trsf trsf;
-                TopoShape::convertTogpTrsf(placement.toMatrix(), trsf);
-
-                BRepBuilderAPI_Transform mkTrf(shape.getShape(), trsf, Standard_True);
-                shape = TopoShape(mkTrf.Shape());
+                // keep the element map: the placement moves the source, it doesn't rename it
+                shape.transformShape(placement.toMatrix(), true);
             }
         }
 

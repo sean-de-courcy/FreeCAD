@@ -134,6 +134,13 @@ protected:
      * Get a solid of the given shape. If no solid is found an exception is raised.
      */
     TopoShape getSolid(const TopoShape&) const;
+    /**
+     * The shape to build a result on whose operation takes base as an input (ops#39). In V2 it
+     * is makeTopoShape(false): the sections the operation adds carry this feature's ID. In V1
+     * it has base's tag, hasher and algorithm, as upstream builds such results on a copy of
+     * base, so V1 names stay upstream's.
+     */
+    TopoShape makeResultShape(const TopoShape& base) const;
     static int countSolids(const TopoDS_Shape&, TopAbs_ShapeEnum type = TopAbs_SOLID);
     static bool relinkToMatchingSubelements(
         App::PropertyLinkSub& link,

@@ -389,7 +389,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape) {
         std::vector<TopoShape> shapes = {supportShape};
-        TopoShape shape(origShape);
         int idx = 1;
         auto transformIter = transformations.cbegin();
         transformIter++;
@@ -398,7 +397,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 return std::vector<TopoShape>();
             }
             auto opName = Data::indexSuffix(idx++);
-            shapes.emplace_back(shape.makeElementTransform(*transformIter, opName.c_str()));
+            shapes.emplace_back(makeResultShape(origShape)
+                                    .makeElementTransform(origShape, *transformIter, opName.c_str()));
         }
         return shapes;
     };
@@ -442,14 +442,14 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
-                    supportShape.makeElementFuse(shapes);
+                    supportShape = makeResultShape(supportShape).makeElementFuse(shapes);
                 }
                 if (!cutShape.isNull()) {
                     auto shapes = getTransformedCompShape(supportShape, cutShape);
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
-                    supportShape.makeElementCut(shapes);
+                    supportShape = makeResultShape(supportShape).makeElementCut(shapes);
                 }
             }
             break;
@@ -458,7 +458,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
             if (Base::Sequencer().wasCanceled()) {
                 return new App::DocumentObjectExecReturn("User aborted");
             }
-            supportShape.makeElementFuse(shapes);
+            supportShape = makeResultShape(supportShape).makeElementFuse(shapes);
             break;
         }
     }

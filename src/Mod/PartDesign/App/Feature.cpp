@@ -194,6 +194,14 @@ short Feature::mustExecute() const
     return Part::Feature::mustExecute();
 }
 
+TopoShape Feature::makeResultShape(const TopoShape& base) const
+{
+    if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V1) {
+        return TopoShape(base.Tag, base.Hasher, base.getHistoryAlgorithm());
+    }
+    return makeTopoShape(false);
+}
+
 TopoShape Feature::getSolid(const TopoShape& shape) const
 {
     if (shape.isNull()) {
