@@ -61,6 +61,7 @@ names it.
 | `fix/52-masker-tag-collision` | fix | ops#52 | - | `integration` `826ad36e22` | (fork PR 31) | never (fork tests) |
 | `feat/scenarios-2` | feat | ops#5 | - | `fix/52-masker-tag-collision` `c617fd1538` (stacked on fork PR 31) | (fork PR 33) | never (fork tests) |
 | `fix/23-map-counts` | fix | ops#23 | - | `feat/scenarios-2` `27035b42d7` (merged as fork PR 33) | (fork PR 34) | a new base's pattern and naming tests check names without counting the map |
+| `fix/23-fillet-relink` | fix | ops#23 | - | `fix/23-map-counts` `c63d279c79` (stacked on fork PR 34) | (fork PR 36) | never (fork tests); its ops#7 list entries leave when Task 2 relinks to a map-less base |
 
 ## Fork-only commits in carried topics
 
