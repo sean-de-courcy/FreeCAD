@@ -60,6 +60,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestThickness.py
     PartDesignTests/TestTopologicalNamingProblem.py
     PartDesignTests/TestNamingDump.py
+    PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
 )
@@ -74,6 +75,17 @@ endif(BUILD_GUI)
 set(PartDesign_TestFixtures
     PartDesignTests/Fixtures/InvoluteGear_v0-20.FCStd
     PartDesignTests/Fixtures/InternalInvoluteGear_v0-20.FCStd
+)
+
+# The naming scenarios (TestNamingScenarios; the model helpers are shared with TestNamingDump)
+set(PartDesign_TestScenarios
+    PartDesignTests/Scenarios/__init__.py
+    PartDesignTests/Scenarios/attachment.py
+    PartDesignTests/Scenarios/dressups.py
+    PartDesignTests/Scenarios/harness.py
+    PartDesignTests/Scenarios/models.py
+    PartDesignTests/Scenarios/sketch_edits.py
+    PartDesignTests/Scenarios/uptoface.py
 )
 
 # Golden files of TestNamingDump (regenerate with FREECAD_NAMING_GOLDEN_UPDATE)
@@ -136,6 +148,7 @@ add_custom_target(PartDesignScripts ALL SOURCES
     ${PartDesign_OtherScripts}
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
+    ${PartDesign_TestScenarios}
     ${PartDesign_NamingGolden}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
@@ -148,6 +161,7 @@ fc_target_copy_resource(PartDesignScripts
     ${PartDesign_OtherScripts}
     ${PartDesign_TestScripts}
     ${PartDesign_TestFixtures}
+    ${PartDesign_TestScenarios}
     ${PartDesign_NamingGolden}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
@@ -179,6 +193,13 @@ INSTALL(
         ${PartDesign_TestFixtures}
     DESTINATION
         Mod/PartDesign/PartDesignTests/Fixtures
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_TestScenarios}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Scenarios
        )
 
 INSTALL(
