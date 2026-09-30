@@ -70,10 +70,12 @@ names it.
 | `fix/12-pd-fillet-tolerance` | fix | ops#12 | - | `integration` `777be76005` | `158154064a` (fork PR 39), 2026-09-30 | upstream stops limiting fillet and chamfer tolerances after `BRepAlgo::IsValid`, and fails a result the repair can't make valid |
 | `fix/61-binder-facemaker` | fix | ops#61 | - | `integration` `846adf50d0` | `a36ea876c9` (fork PR 41), 2026-09-30 | a new base whose naming PR restores the `_Version >= 3` face-maker gate in `SubShapeBinder::update` |
 | `fix/13-preview-null-crash` | fix | ops#13 | - | `integration` `158154064a` | `33f83dec42` (fork PR 42), 2026-09-30 | a new base whose `ViewProviderPreviewExtension` checks its nodes before `extensionAttach()` |
-| `feat/scenarios-5` | feat | ops#5 | - | `integration` `158154064a` | (fork PR 43) | never (fork tests) |
+| `feat/scenarios-5` | feat | ops#5 | - | `integration` `158154064a` | `ac43f08826` (fork PR 43), 2026-09-30 | never (fork tests) |
+| `carry/polyline-fillet` | carry | ops#10 | `upstream PR 32430`: `f705304460` (cherry-picked unchanged as `03629c6744`) | `integration` `a36ea876c9` | (fork PR 44) | a new base contains `upstream PR 32430` |
 
 ## Fork-only commits in carried topics
 
 | Commit | Topic | What | Drop or revisit when |
 |---|---|---|---|
 | `9e1049b3b7` | `carry/wirejoiner` | Tests: adapt `WireJoinerTest.setOpenWiresOnly` to V2 naming: the compared wires get the same tag (V2 split pieces carry the result's tag). It also limited the "has a mapped name" check to edges (V2 left the result's vertices unnamed); `fix/21-faceless-vertices` restored the vertex check (ops#21). | Dropped with the topic. |
+| `5e89db8043` | `carry/polyline-fillet` | Test: `TestPolylineFilletGui` (in `TestSketcherGui`; the upstream PR has none) draws a polyline with the tool's fillet option and checks it keeps every clicked point (ops#10). | When the topic is dropped, keep the test (it moves to its own topic) unless upstream adds one. |
