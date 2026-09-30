@@ -136,13 +136,32 @@ def pocketThroughAll(body, profile, name="Pocket"):
     return pocket
 
 
+def pocket(body, profile, length, name="Pocket"):
+    pocket = body.newObject("PartDesign::Pocket", name)
+    pocket.Profile = profile
+    pocket.Length = length
+    return pocket
+
+
+def moveRectangle(sketch, x0, y0, x1, y1, first=0):
+    """Moves the rectangle drawn by `rectangle()` at geometry `first` to new corners; its lines
+    keep their geometry IDs."""
+    corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    setLines(sketch, {first + i: (corners[i], corners[(i + 1) % 4]) for i in range(4)})
+
+
 def setLines(sketch, lines):
     """Moves the end points of line geometries {index: ((x0, y0), (x1, y1))}. The lines keep their
     geometry IDs, as when a user drags or re-dimensions them."""
     geometry = sketch.Geometry
     for index, (start, end) in lines.items():
-        geometry[index].StartPoint = V(*start, 0)
-        geometry[index].EndPoint = V(*end, 0)
+        line, start, end = geometry[index], V(*start, 0), V(*end, 0)
+        if (start - line.EndPoint).Length < 1e-9:  # moving the start first would give a point
+            line.EndPoint = end
+            line.StartPoint = start
+        else:
+            line.StartPoint = start
+            line.EndPoint = end
     sketch.Geometry = geometry
 
 
