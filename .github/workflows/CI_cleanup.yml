@@ -72,7 +72,7 @@ jobs:
           mkdir -p ${{ env.logdir }}
       - name: Get existing caches for the repo
         run: |
-          curl -H "Accept: application/vnd.github+json" -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches > ${{ env.logdir }}caches.json
+          curl -H "Accept: application/vnd.github+json" -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" > ${{ env.logdir }}caches.json
       - name: Extract pull request caches
         run: |
           # Extract caches of which names starts with MARK and contains "/refs/pull/"
@@ -95,7 +95,8 @@ jobs:
       - name: Extract push caches
         run: |
           # Extract caches of which names starts with MARK and contains "/refs/heads/"
-          jq ".actions_caches | map(select(.key | startswith(\"FC-\"))) | map(select(.key | contains(\"refs/heads/\")))" ${{ env.logdir }}caches.json > ${{ env.logdir }}pushes.json
+          # FreeCAD-CH: except integration's, which the next step handles (ops#57)
+          jq ".actions_caches | map(select(.key | startswith(\"FC-\"))) | map(select(.key | contains(\"refs/heads/\"))) | map(select(.key | contains(\"-refs/heads/integration-\") | not))" ${{ env.logdir }}caches.json > ${{ env.logdir }}pushes.json
       - name: Extract and delete push obsolete cache IDs
         run: |
           # Group the caches by MARK-CONTEXT-REF, sort by ascending last access datetime, keep all but the last 2 and keep all accessed for more than 1 hour as to be deleted
@@ -104,6 +105,24 @@ jobs:
           for id in $PSID
           do
             echo "Trying to delete push obsolete cache ID : $id"
+            if [ ${{ env.dryrun }} == "false" ]
+            then
+              curl -X DELETE -H "Accept: application/vnd.github+json" -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id
+            else
+              echo "DRYRUN: executing : curl -X DELETE -H \"Accept: application/vnd.github+json\" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id"
+            fi
+          done
+      # FreeCAD-CH (ops#57, ops#58): integration's ccache entries are FC-<cacheKey>-refs/heads/integration-<run ID>.
+      # Keep the entry of the highest run ID per platform, which PR runs restore through the FC-<cacheKey>- prefix,
+      # and delete the others at once: a superseded entry is never restored again. A platform whose newest run saved
+      # nothing (its build failed) keeps its older entry. Push runs on integration cancel each other (ops#58), so a
+      # batch of merges saves one set.
+      - name: Extract and delete superseded integration cache IDs
+        run: |
+          INTID=$(jq ".actions_caches | map(select(.key | startswith(\"FC-\")) | select(.key | contains(\"-refs/heads/integration-\"))) | group_by(.key | .[:rindex(\"-\")]) | .[] | sort_by(.key | .[rindex(\"-\")+1:] | tonumber? // 0) | .[:-1][].id" ${{ env.logdir }}caches.json)
+          for id in $INTID
+          do
+            echo "Trying to delete superseded integration cache ID : $id"
             if [ ${{ env.dryrun }} == "false" ]
             then
               curl -X DELETE -H "Accept: application/vnd.github+json" -H "authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" $GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/caches/$id

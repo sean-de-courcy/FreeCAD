@@ -283,7 +283,7 @@ jobs:
     # Only runs on integration (pushes, or by hand) save the cache: PR runs restore
     # integration's newest entry through the FC-<cacheKey>- prefix, and entries saved
     # for a PR ref are useless once it merges (the repository's Actions cache holds
-    # 10 GB). CI_cleanup.yml keeps integration's two newest entries per platform.
+    # 10 GB). CI_cleanup.yml then deletes integration's superseded entries (ops#57).
     # Save whenever the build succeeded, even if tests failed afterwards; otherwise a
     # run with a failing test leaves the next run a cold build (2-3 h).
     - name: Save Compiler Cache
