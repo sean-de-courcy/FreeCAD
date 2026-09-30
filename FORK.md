@@ -75,3 +75,4 @@ names it.
 | Commit | Topic | What | Drop or revisit when |
 |---|---|---|---|
 | `9e1049b3b7` | `carry/wirejoiner` | Tests: adapt `WireJoinerTest.setOpenWiresOnly` to V2 naming: the compared wires get the same tag (V2 split pieces carry the result's tag). It also limited the "has a mapped name" check to edges (V2 left the result's vertices unnamed); `fix/21-faceless-vertices` restored the vertex check (ops#21). | Dropped with the topic. |
+| `5e89db8043` | `carry/polyline-fillet` | Test: `TestPolylineFilletGui` (in `TestSketcherGui`; the upstream PR has none) draws a polyline with the tool's fillet option and checks it keeps every clicked point (ops#10). | When the topic is dropped, keep the test (it moves to its own topic) unless upstream adds one. |
