@@ -42,8 +42,12 @@ on:
 permissions:
   contents: read
 
+# A PR's new push cancels its running CI. Push runs on integration share one group too
+# (ops#58), so a batch of merges ends with one finished push run and one ccache set, and
+# the last run tests the combined state; each PR's own run has passed already. Runs
+# started by hand are never cancelled.
 concurrency:
-  group: FC-CI-primary-${{ github.head_ref || github.run_id }}
+  group: FC-CI-primary-${{ github.head_ref || (github.event_name == 'push' && github.ref) || github.run_id }}
   cancel-in-progress: true
 
 jobs:
