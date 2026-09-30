@@ -23,7 +23,20 @@
 """Dress-ups after upstream edits: a draft, a fillet and a chamfer keep their edges and faces
 when the features before them change, are inserted or are reordered."""
 
-from .harness import Broken, Chamfered, Drafted, Filleted, Scenario, X, Y, Z, edge, face
+from .harness import (
+    Broken,
+    Chamfered,
+    Drafted,
+    Filleted,
+    Scenario,
+    X,
+    Y,
+    Z,
+    edge,
+    expectedNames,
+    face,
+    sameSolid,
+)
 from . import models as m
 
 
@@ -267,6 +280,58 @@ class FilletNotchAfterChamfer(Scenario):
         fillet.Base = (chamfer, self.names(chamfer, self.cornerEdge()))
         fillet.Radius = 0.5
         self.ref("fillet_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
+class ChamferedOn(Chamfered):
+    """A chamfer that should build on the named feature: the oracle is the Part chamfer of that
+    feature's shape, whatever the dress-up's BaseFeature says."""
+
+    def __init__(self, size, base):
+        super().__init__(size)
+        self.base = base
+
+    def compare(self, scenario, consumer, target, expectation):
+        base = scenario.doc.getObject(self.base).Shape
+        edges = [base.getElement(n) for n in expectedNames(expectation, base)]
+        return sameSolid(consumer.Shape, self.oracle(base, edges))
+
+
+class DressUpInsertThenNotch(Scenario):
+    """A pad of a rectangle 0..20 x 0..10, 10 high; a chamfer, size 1, on its back top edge; a
+    boss (x 5..9, y 3..7, 3 high) inserted after the pad, as a user does it (the tip set to the
+    pad, the sketch and the pad added, the tip set back). The chamfer's Base still names the pad,
+    and its BaseFeature is the boss, so the chamfer should build on the boss. Then a notch (x 8..12,
+    2 deep) is cut into the front side of the pad's sketch, which renumbers the pad's edges: the
+    naming refresh rewrites the chamfer's Base (Edge10 -> Edge22, the same edge), and
+    DressUp::onChanged then sets BaseFeature to Base's object, the pad. The boss drops out of the
+    model and the chamfer stays valid (ops#82). Found by the randomized sequences (seed 194).
+    V1 can't build the model: its chamfer breaks at the insert."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("chamfer_edge",)
+
+    def backTopEdge(self):
+        return edge("line", direction=X, through=(0, 10, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, self.names(pad, self.backTopEdge()))
+        chamfer.Size = 1
+        doc.recompute()
+        body.Tip = pad
+        boss = m.sketch(doc, "BossSketch", m.rectangle(5, 3, 9, 7), body, z=10)
+        m.pad(body, boss, 3, name="Boss")
+        body.Tip = chamfer
+        self.ref("chamfer_edge", chamfer, "Base", self.backTopEdge, ChamferedOn(1, "Boss"))
 
     def edit(self, doc):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
