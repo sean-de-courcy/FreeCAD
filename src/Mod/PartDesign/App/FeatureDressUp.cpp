@@ -35,6 +35,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 
 #include "FeatureDressUp.h"
+#include "PartDesignParameter.h"
 #include <Base/Console.h>
 #include <App/Document.h>
 #include <Base/Exception.h>
@@ -53,6 +54,10 @@ PROPERTY_SOURCE(PartDesign::DressUp, PartDesign::FeatureAddSub)
 DressUp::DressUp()
 {
     ADD_PROPERTY(Base, (nullptr));
+    if (PartDesignParameter::instance()->getNamingMultiMatch()) {
+        Base.useMultipleMatchedNames(true);
+        Base.allowDuplicateLinks(false);
+    }
 
     Placement.setStatus(App::Property::ReadOnly, true);
 
