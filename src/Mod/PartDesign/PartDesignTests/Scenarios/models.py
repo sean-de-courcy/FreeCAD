@@ -27,6 +27,33 @@ import Part
 
 V = App.Vector
 
+# Object IDs of the documents from newDocument() are above this bound.
+MIN_OBJECT_ID = 1000
+
+
+def newDocument(name):
+    """A new document whose objects all get IDs above MIN_OBJECT_ID.
+
+    A new document starts its object IDs at a random 0..5000 (Document.cpp). The name reports
+    (`Masker`) write a tag that is some object's ID as that object's name, so with a low start a
+    small tag that is no object's ID (a slice's number) would read as the first objects' names
+    (ops#52). A document starting below the bound is closed and created again."""
+    for _ in range(100):
+        doc = App.newDocument(name)
+        if nextObjectId(doc) > MIN_OBJECT_ID:
+            return doc
+        App.closeDocument(doc.Name)
+    raise RuntimeError(f"no new document with object IDs above {MIN_OBJECT_ID}")
+
+
+def nextObjectId(doc):
+    """The ID the document's next object gets, from a probe object added and removed again
+    (removing it doesn't give its ID back)."""
+    probe = doc.addObject("App::DocumentObjectGroup", "ObjectIdProbe")
+    nextId = probe.ID + 1
+    doc.removeObject(probe.Name)
+    return nextId
+
 
 def body(doc):
     return doc.addObject("PartDesign::Body", "Body")

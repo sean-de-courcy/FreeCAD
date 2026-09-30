@@ -51,6 +51,8 @@ import sys
 import FreeCAD as App
 import Part
 
+from . import models
+
 V = App.Vector
 X, Y, Z = V(1, 0, 0), V(0, 1, 0), V(0, 0, 1)
 
@@ -598,7 +600,7 @@ class Scenario:
         hadParam = MULTI_PARAM in group.GetBools()
         oldParam = group.GetBool(MULTI_PARAM, False)
         group.SetBool(MULTI_PARAM, self.multi)
-        doc = App.newDocument(f"Scenario{type(self).__name__}{self.config}")
+        doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}")
         try:
             if hasattr(doc, "HistoryAlgorithm"):
                 doc.HistoryAlgorithm = self.mode
