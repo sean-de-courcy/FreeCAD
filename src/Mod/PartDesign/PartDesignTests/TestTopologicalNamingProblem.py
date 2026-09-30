@@ -3122,11 +3122,76 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         defeaturing.Base = (fillet, rounds)
         body.addObject(defeaturing)
         features.append((defeaturing, ["DEF"]))
+        features += self.makeCopiedInputFeatures(doc)
+        return features
+
+    def makeCopiedInputFeatures(self, doc):
+        """A Boolean fuse, a LinearPattern, a Mirrored of the whole shape and a Pipe, each in its
+        own body on a box that has no element map, so any FUS section comes from the feature
+        itself. They built their results on a copy of their base (ops#39). Returns each feature
+        with the op codes of the sections its own operations add."""
+
+        def boxBody(name, base=App.Vector()):
+            body = doc.addObject("PartDesign::Body", name)
+            box = doc.addObject("PartDesign::AdditiveBox", name + "Box")
+            body.addObject(box)
+            box.Length = box.Width = box.Height = 10
+            box.Placement.Base = base
+            return body, box
+
+        def originFeature(body, role):
+            return next(o for o in body.Origin.OriginFeatures if o.Role == role)
+
+        features = []
+        tool, _ = boxBody("Tool", App.Vector(5, 5, 5))
+        body, _ = boxBody("BooleanBody")
+        boolean = doc.addObject("PartDesign::Boolean", "Boolean")
+        body.addObject(boolean)
+        boolean.setObjects([tool])
+        boolean.Type = "Fuse"
+        features.append((boolean, ["FUS"]))
+        # the box is the pattern's only original and its base: 3 boxes along X, 5 apart
+        body, box = boxBody("PatternBody")
+        pattern = doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        body.addObject(pattern)
+        pattern.Originals = [box]
+        pattern.Direction = (originFeature(body, "X_Axis"), [""])
+        pattern.Length = 10
+        pattern.Occurrences = 3
+        features.append((pattern, ["FUS"]))
+        # the box straddles the mirror plane, so the box and its mirror image overlap
+        body, _ = boxBody("MirroredBody", App.Vector(-3, 0, 0))
+        mirrored = doc.addObject("PartDesign::Mirrored", "Mirrored")
+        body.addObject(mirrored)
+        mirrored.TransformMode = "Whole shape"
+        mirrored.MirrorPlane = (originFeature(body, "YZ_Plane"), [""])
+        features.append((mirrored, ["FUS"]))
+        # a circle of radius 2 swept along a vertical line through the box's middle, from
+        # z = -2 to z = 15: a rod through the box's bottom and top faces
+        body, _ = boxBody("PipeBody")
+        profile = doc.addObject("Sketcher::SketchObject", "PipeProfile")
+        body.addObject(profile)
+        profile.MapMode = "Deactivated"
+        profile.addGeometry(Part.Circle(App.Vector(5, 5, 0), App.Vector(0, 0, 1), 2))
+        spine = doc.addObject("Sketcher::SketchObject", "PipeSpine")
+        body.addObject(spine)
+        spine.MapMode = "Deactivated"
+        # the sketch plane is the XZ plane through y = 5: sketch (x, y) is (x, 5, y)
+        spine.Placement = App.Placement(
+            App.Vector(0, 5, 0), App.Rotation(App.Vector(1, 0, 0), 90)
+        )
+        spine.addGeometry(Part.LineSegment(App.Vector(5, -2, 0), App.Vector(5, 15, 0)))
+        pipe = doc.addObject("PartDesign::AdditivePipe", "Pipe")
+        body.addObject(pipe)
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        features.append((pipe, ["FUS"]))
         return features
 
     def testV2OwnSectionsCarryOwnID(self):
-        """In V2, the sections a Revolution's, a Groove's or a Defeaturing's own operations add
-        carry the feature's ID, not the base's or the sketch's (ops#32)."""
+        """In V2, the sections the own operations of a Revolution, a Groove, a Defeaturing
+        (ops#32), a Boolean, a pattern, a Mirrored or a Pipe (ops#39) add carry the feature's
+        ID, not the base's or the sketch's."""
 
         def sections(mappedName):
             for section in App.getDecodedMappedName(mappedName):
@@ -3161,8 +3226,8 @@ class TestTopologicalNamingProblem(unittest.TestCase):
             App.closeDocument(doc.Name)
 
     def testV1OwnResultNamesAreV1(self):
-        """In a V1 document, a Revolution, a Groove and a Defeaturing name their results in V1
-        grammar only (ops#30)."""
+        """In a V1 document, a Revolution, a Groove, a Defeaturing (ops#30), a Boolean, a
+        pattern, a Mirrored and a Pipe (ops#39) name their results in V1 grammar only."""
         import re
 
         # Arrange

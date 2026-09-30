@@ -547,7 +547,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
             return App::DocumentObject::StdReturn;
         }
 
-        Part::TopoShape boolOp = makeTopoShape(base.Tag);
+        Part::TopoShape boolOp = makeResultShape(base);
 
         result.Tag = -getID();  // invert tag to differentiate the pre-boolean pipe
         //                        from the post-boolean pipe

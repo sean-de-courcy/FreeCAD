@@ -1431,3 +1431,49 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                     self.assertEqual(v2Names, [])
         finally:
             App.closeDocument(doc.Name)
+
+    def assertMirrorOfPlacedSourceKeepsNames(self, algorithm):
+        """A Part::Mirroring names each element of its result the same whether or not its
+        source has a Placement: moving the source moves the mirror, it doesn't rename it."""
+        # Arrange
+        doc = App.newDocument(f"MirrorPlacedSource{algorithm}")
+        try:
+            doc.HistoryAlgorithm = algorithm
+            inputs = makeFeatureInputs(doc)
+            mirror = makeFeature(doc, inputs, "Part::Mirroring", "Mirror")
+            doc.recompute()
+            before = mirror.Shape.ElementReverseMap
+            boundBefore = mirror.Shape.BoundBox
+
+            # Act
+            inputs["prism"].Placement = App.Placement(
+                App.Vector(20, 5, 0), App.Rotation(App.Vector(0, 0, 1), 30)
+            )
+            doc.recompute()
+
+            # Assert
+            shape = mirror.Shape
+            self.assertTrue(mirror.isValid())
+            # the mirror followed its source (Normal +X through the origin)
+            self.assertLess(shape.BoundBox.XMax, boundBefore.XMin)
+            after = shape.ElementReverseMap
+            for kind, elements in (
+                ("Face", shape.Faces),
+                ("Edge", shape.Edges),
+                ("Vertex", shape.Vertexes),
+            ):
+                for index in range(1, len(elements) + 1):
+                    element = f"{kind}{index}"
+                    with self.subTest(element=element):
+                        self.assertIn(element, after)
+                        self.assertEqual(after[element], before[element])
+        finally:
+            App.closeDocument(doc.Name)
+
+    def testV1MirrorOfPlacedSourceKeepsNames(self):
+        """ops#39, V1: a mirror of a source with a Placement had no element names."""
+        self.assertMirrorOfPlacedSourceKeepsNames("V1")
+
+    def testV2MirrorOfPlacedSourceKeepsNames(self):
+        """ops#39, V2: a mirror of a source with a Placement had no element names."""
+        self.assertMirrorOfPlacedSourceKeepsNames("V2")
