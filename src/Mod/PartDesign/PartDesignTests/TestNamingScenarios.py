@@ -36,7 +36,8 @@ import unittest
 
 from PartDesignTests.Scenarios import harness
 from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
-from PartDesignTests.Scenarios import ambiguous, crossdoc, external, internal, splits, uptoface
+from PartDesignTests.Scenarios import ambiguous, crossdoc, external, internal, issues, rlist
+from PartDesignTests.Scenarios import splits, uptoface
 
 AREAS = (
     sketch_edits,
@@ -50,6 +51,8 @@ AREAS = (
     internal,
     ambiguous,
     crossdoc,
+    issues,
+    rlist,
 )
 
 

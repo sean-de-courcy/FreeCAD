@@ -24,6 +24,9 @@
 the pad's profile changes. When the edge is split, the reference should break with the pieces
 as candidates (the naming design's section 8: the consumer needs exactly one edge)."""
 
+import FreeCAD as App
+import Part
+
 from .harness import Broken, ExternalCoincides, Scenario, X, Y, edge, pieces
 from . import models as m
 
@@ -95,3 +98,23 @@ class ExternalSplit(ExternalEdit):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         self.split = True
+
+
+
+class ExternalLineToArc(ExternalEdit):
+    """The front line is deleted and an arc drawn between its end points (through (10, -3)). The
+    sketcher's geometry history gives the arc the deleted line's ID, as its replacement
+    (`SketchObject::generateId`), so the external edge should follow to the arc's top edge."""
+
+    arc = False
+
+    def frontEdge(self):
+        if self.arc:
+            return edge("circle", contains=(10, -3, 10))
+        return super().frontEdge()
+
+    def edit(self, doc):
+        doc.Profile.delGeometry(0)
+        arc = Part.Arc(App.Vector(0, 0, 0), App.Vector(10, -3, 0), App.Vector(20, 0, 0))
+        doc.Profile.addGeometry(arc, False)
+        self.arc = True
