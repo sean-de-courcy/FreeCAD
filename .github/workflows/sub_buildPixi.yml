@@ -65,7 +65,8 @@ jobs:
       CCACHE_CONFIGPATH: ${{ github.workspace }}/ccache/config
       CCACHE_DIR: ${{ github.workspace }}/ccache
       # Both platforms' objects outgrew 1 GB, and ccache then evicts them mid-build (ops#37, ops#48).
-      CCACHE_MAXSIZE: 1500M
+      # Windows then filled 1.5 GB and evicted again (ops#51).
+      CCACHE_MAXSIZE: ${{ startsWith(matrix.os, 'windows') && '2000M' || '1500M' }}
       CCACHE_NOHASHDIR: true
       CCACHE_NOINODECACHE: true
       CCACHE_SLOPPINESS: "include_file_ctime,include_file_mtime,pch_defines,time_macros"
