@@ -1,6 +1,7 @@
 # Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5), and the tests they judge, whose
-# reference breaks where the scenario expects it to hold. Task 2 (ops#7) fixes them; remove an
-# entry in the PR that makes its test pass.
+# reference breaks where the scenario expects it to hold, or keeps one piece of a split element
+# where the naming design's section 8 expects all pieces or a break (wrong (partial)). Task 2
+# (ops#7) fixes them; remove an entry in the PR that makes its test pass.
 
 issue: ops#7
 
@@ -12,3 +13,13 @@ reason: a dress-up's Base on a deleted feature isn't relinked to a base without 
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2multi
 cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge
+
+reason: a dress-up or face profile on a split element keeps one piece; section 8 expects every piece (V2 with the multi-match flags off; V2multi is correct)
+cli  PartDesignTests.TestNamingScenarios.SplitFilletFuse.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SplitChamferCut.test_chamfer_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SplitDraftGroove.test_draft_face_V2
+cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2
+
+reason: a consumer that needs one element keeps one piece of a split element or one of two equal halves; section 8 expects broken with the pieces as candidates (V2)
+cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
+cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2

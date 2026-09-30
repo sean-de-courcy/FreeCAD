@@ -32,7 +32,8 @@ Each reference gets one verdict per configuration, from two checks:
    (a split), anything else is wrong.
 2. The consumer's result: an `Outcome` compares the consumer (fillet, attachment, ...) with an
    oracle built from the expected elements. A consumer that fails is broken, one whose result
-   differs is wrong.
+   differs is wrong. A broken reference counts as broken only when it is reported, i.e. its
+   consumer fails: one that stays valid without its element is wrong (principle 1).
 
 The verdict combines them (`combine`): wrong, partial, broken, equivalent (a different element
 that gives the consumer the same result) or correct. Each verdict is printed as a `SCORE` line
@@ -320,16 +321,63 @@ def pieces(predicate):
 
 
 class Broken:
-    """The element is gone, or the case is deliberately ambiguous: the reference should break."""
+    """The element is gone, or the case is deliberately ambiguous: the reference should break.
+    `candidates` (predicates or `pieces`) are the elements a solver would offer, e.g. the pieces
+    of a split edge: a reference kept on some of them is partial, on anything else wrong."""
 
     def __init__(self, *candidates):
         self.candidates = candidates
 
+    def select(self, shape):
+        return [name for c in self.candidates for name in c.select(shape)]
+
     def __repr__(self):
-        return "BROKEN"
+        return f"BROKEN{list(self.candidates)}" if self.candidates else "BROKEN"
 
 
 BROKEN = Broken()
+
+
+INTERNAL = "Internal"  # SketchObject::internalPrefix()
+
+
+class Internal:
+    """One element of a sketch's InternalShape (its regions with MakeInternals), referenced as
+    `Internal<Face|Edge|Vertex><n>`."""
+
+    def __init__(self, predicate):
+        self.predicate = predicate
+
+    def select(self, shape):
+        return [INTERNAL + name for name in self.predicate.select(shape)]
+
+    def one(self, shape):
+        return [INTERNAL + name for name in self.predicate.one(shape)]
+
+    def __repr__(self):
+        return f"internal({self.predicate})"
+
+
+def internal(predicate):
+    return Internal(predicate)
+
+
+def shapeFor(obj, expectation):
+    """The shape whose elements the expectation names: a sketch's InternalShape for
+    `internal(...)` (in the sketch's own coordinates), otherwise the object's Shape."""
+    return obj.InternalShape if isinstance(expectation, Internal) else obj.Shape
+
+
+def elementOf(obj, sub):
+    """(shape, index name) of a reference's sub-name, `Internal...` on the InternalShape."""
+    if sub.startswith(INTERNAL) and hasattr(obj, "InternalShape"):
+        return obj.InternalShape, sub[len(INTERNAL) :]
+    return obj.Shape, sub
+
+
+def subElement(obj, sub):
+    shape, name = elementOf(obj, sub)
+    return shape.getElement(name)
 
 
 def expectedNames(expectation, shape):
@@ -441,6 +489,15 @@ class Drafted(Outcome):
                 for g, ng in planes
             ):
                 return False, f"no face drafted by {self.angle} deg from {name}"
+            # the pieces of a split face share their line on the neutral plane: check that
+            # none of the face is left where it was
+            if any(
+                _parallel(n, ng, True)
+                and abs((g.Surface.Position - f.Surface.Position).dot(n)) < tol
+                and g.common(f).Area > tol
+                for g, ng in planes
+            ):
+                return False, f"{name} is still in the result, not drafted"
         for i, f in enumerate(base.Faces, 1):
             if f"Face{i}" in expected or not isinstance(f.Surface, Part.Plane):
                 continue
@@ -509,6 +566,73 @@ class ReachesFace(Outcome):
         return True, ""
 
 
+class Extruded(Outcome):
+    """A Pad whose profile is given as faces: the result is its base fused with each expected
+    face extruded by the length along the direction."""
+
+    def __init__(self, length, direction=Z):
+        self.length, self.direction = length, _vector(direction)
+
+    def compare(self, scenario, consumer, target, expectation):
+        names = expectedNames(expectation, shapeFor(target, expectation))
+        faces = [subElement(target, n) for n in names]
+        solids = [f.extrude(self.direction * self.length) for f in faces]
+        oracle = solids[0].fuse(solids[1:]) if len(solids) > 1 else solids[0]
+        if consumer.BaseFeature is not None:
+            oracle = consumer.BaseFeature.Shape.fuse(oracle)
+        return sameSolid(consumer.Shape, oracle)
+
+
+class ExternalCoincides(Outcome):
+    """A sketch's external geometry: each external line lies on an expected edge, end to end,
+    and each expected edge has one (the first two ExternalGeo entries are the sketch's axes)."""
+
+    def compare(self, scenario, consumer, target, expectation):
+        edges = [target.Shape.getElement(n) for n in expectedNames(expectation, target.Shape)]
+        placement = consumer.getGlobalPlacement()
+        lines = [
+            (placement.multVec(g.StartPoint), placement.multVec(g.EndPoint))
+            for g in list(consumer.ExternalGeo)[2:]
+        ]
+        if len(lines) != len(edges):
+            return False, f"{len(lines)} external lines for {len(edges)} edges"
+        tol = tolerance(target.Shape)
+        for edge in edges:
+            ends = (edge.Vertexes[0].Point, edge.Vertexes[-1].Point)
+            if not any(
+                ((a - ends[0]).Length < tol and (b - ends[1]).Length < tol)
+                or ((a - ends[1]).Length < tol and (b - ends[0]).Length < tol)
+                for a, b in lines
+            ):
+                return False, f"no external line from {ends[0]} to {ends[1]}: {lines}"
+        return True, ""
+
+
+def _sameFace(a, b, tol):
+    if abs(a.Area - b.Area) > tol * max(1.0, a.Area):
+        return False
+    if (a.CenterOfMass - b.CenterOfMass).Length > tol:
+        return False
+    if isinstance(a.Surface, Part.Plane) != isinstance(b.Surface, Part.Plane):
+        return False
+    return not isinstance(a.Surface, Part.Plane) or _parallel(faceNormal(a), faceNormal(b), True)
+
+
+class Bound(Outcome):
+    """A SubShapeBinder of faces: its shape has exactly the expected faces."""
+
+    def compare(self, scenario, consumer, target, expectation):
+        expected = [target.Shape.getElement(n) for n in expectedNames(expectation, target.Shape)]
+        faces = consumer.Shape.Faces
+        tol = tolerance(target.Shape)
+        if len(faces) != len(expected):
+            return False, f"{len(faces)} faces bound for {len(expected)}"
+        for f in expected:
+            if not any(_sameFace(g, f, tol) for g in faces):
+                return False, f"no bound face at {f.CenterOfMass} with area {f.Area:.4f}"
+        return True, ""
+
+
 # ---------------------------------------------------------------------------------------------
 # References and verdicts
 # ---------------------------------------------------------------------------------------------
@@ -563,7 +687,7 @@ class Result:
 
     @property
     def passing(self):
-        if isinstance(self.record.get("expect"), str) and self.record["expect"] == "BROKEN":
+        if str(self.record.get("expect")).startswith("BROKEN"):
             return self.verdict == "broken"
         return self.verdict in ("correct", "equivalent")
 
@@ -585,6 +709,7 @@ class Scenario:
         self.config = config
         self.mode, self.multi = CONFIGS[config]
         self.refs = {}
+        self.documents = []
 
     # For the scenario's author
 
@@ -596,13 +721,28 @@ class Scenario:
     @staticmethod
     def names(obj, predicate):
         """The index name of the one element of obj's shape the predicate matches."""
-        return predicate.one(obj.Shape)
+        return predicate.one(shapeFor(obj, predicate))
+
+    def newDocument(self, suffix=""):
+        """A document in the scenario's history algorithm, closed after the run. The first is
+        the scenario's own (self.doc); others hold the targets of cross-document links."""
+        doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}{suffix}")
+        if hasattr(doc, "HistoryAlgorithm"):
+            doc.HistoryAlgorithm = self.mode
+        self.documents.append(doc.Name)
+        return doc
 
     def build(self, doc):
         raise NotImplementedError
 
     def edit(self, doc):
         raise NotImplementedError
+
+    def cleanup(self):
+        """Closes the scenario's documents that are still open."""
+        for name in self.documents:
+            if name in App.listDocuments():
+                App.closeDocument(name)
 
     # Running
 
@@ -613,30 +753,27 @@ class Scenario:
         hadParam = MULTI_PARAM in group.GetBools()
         oldParam = group.GetBool(MULTI_PARAM, False)
         group.SetBool(MULTI_PARAM, self.multi)
-        doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}")
+        self.doc = self.newDocument()
         try:
-            if hasattr(doc, "HistoryAlgorithm"):
-                doc.HistoryAlgorithm = self.mode
-            self.doc = doc
-            self.build(doc)
+            self.build(self.doc)
             if set(self.refs) != set(self.REFS):
                 raise ScenarioError(
                     f"build() recorded {sorted(self.refs)}, REFS {sorted(self.REFS)}"
                 )
-            doc.recompute()
+            self.doc.recompute()
             before = {name: self.judge(ref, "build") for name, ref in self.refs.items()}
             bad = [r.message() for r in before.values() if r.verdict != "correct"]
             if bad:
                 raise ScenarioError("references aren't correct before the edit:\n" + "\n".join(bad))
-            self.edit(doc)
-            doc.recompute()
+            self.edit(self.doc)  # may close and reopen the documents (self.doc)
+            self.doc.recompute()
             after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
             for name, result in after.items():
                 result.record["names_before"] = before[name].record["names"]
                 emit(result)
             return after
         finally:
-            App.closeDocument(doc.Name)
+            self.cleanup()
             if hadParam:
                 group.SetBool(MULTI_PARAM, oldParam)
             else:
@@ -649,7 +786,7 @@ class Scenario:
         expectation = ref.expect()
         result = Result(type(self).__name__, ref.name, self.config, step)
         record = result.record
-        masker = Masker(doc)
+        masker = Masker(target.Document if target else doc)  # the names' tags are its IDs
         mode = "V2" if self.mode == "V2" and hasattr(doc, "HistoryAlgorithm") else "V1"
         record.update(
             scenario=type(self).__name__,
@@ -670,16 +807,19 @@ class Scenario:
             stored = "broken"
         else:
             try:
-                resolved = [(s, target.Shape.getElement(s)) for s in subs]
+                resolved = [(s, subElement(target, s)) for s in subs]
                 stored = None
             except Exception:
                 stored = "broken"
         record["names"] = [self._name(masker, mode, target, s) for s, _ in resolved]
         expected = []
         if isinstance(expectation, Broken):
-            stored = stored or "wrong"
+            if stored is None:
+                candidates = expectation.select(target.Shape)
+                record["candidate_subs"] = candidates
+                stored = "partial" if candidates and set(subs) <= set(candidates) else "wrong"
         elif target is not None:
-            expected = expectedNames(expectation, target.Shape)
+            expected = expectedNames(expectation, shapeFor(target, expectation))
             record["expected_subs"] = expected
             record["expected_names"] = [self._name(masker, mode, target, s) for s in expected]
             if stored is None:
@@ -694,7 +834,11 @@ class Scenario:
         # 2. The consumer's result
         outcome, detail = None, ""
         if isinstance(expectation, Broken) or target is None:
-            outcome = None if owner.isValid() else "broken"
+            if stored == "broken" and owner.isValid():
+                # nothing reports the break: the consumer carries on without its element
+                outcome, detail = "wrong", f"{owner.Name} stays valid with the broken reference"
+            else:
+                outcome = None if owner.isValid() else "broken"
         elif ref.outcome is not None:
             outcome, detail = ref.outcome.check(self, owner, target, expectation)
         elif not owner.isValid():
@@ -705,13 +849,14 @@ class Scenario:
 
     @staticmethod
     def _name(masker, mode, target, sub):
+        shape, sub = elementOf(target, sub)
         try:
-            name = target.Shape.getElementMappedName(sub)
+            name = shape.getElementMappedName(sub)
         except Exception:
             return None
         if isinstance(name, (list, tuple)):
             name = name[0] if name else None
-        return masker.mask(name, mode, target.Shape) if name else None
+        return masker.mask(name, mode, shape) if name else None
 
 
 def emit(result):
@@ -841,16 +986,6 @@ def assertDistinctNames(shape):
             f"{len(shared)} pairs of elements share a name up to the duplicate counter:\n"
             + _listed([f"{a} and {b}: {na!r} / {nb!r}" for a, b, na, nb in shared])
         )
-
-
-def _sameFace(a, b, tol):
-    if abs(a.Area - b.Area) > tol * max(1.0, a.Area):
-        return False
-    if (a.CenterOfMass - b.CenterOfMass).Length > tol:
-        return False
-    if isinstance(a.Surface, Part.Plane) != isinstance(b.Surface, Part.Plane):
-        return False
-    return not isinstance(a.Surface, Part.Plane) or _parallel(faceNormal(a), faceNormal(b), True)
 
 
 def instanceFaces(shape, original, placements):

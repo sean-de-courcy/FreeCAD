@@ -1,0 +1,10 @@
+# A Draft whose face reference is missing (`?Face3`) stays valid and drafts nothing:
+# DressUp::getFaces skips sub-names that don't start with "Face", so the break is never reported
+# (upstream code; V1 and official 1.1.3 do the same). The naming scenarios score it wrong.
+# Remove an entry in the PR that makes its test pass.
+
+issue: ops#60
+
+reason: the draft keeps ?Face3, stays valid and drafts nothing (V2 and V2multi)
+cli  PartDesignTests.TestNamingScenarios.DraftFaceRemoved.test_draft_face_V2
+cli  PartDesignTests.TestNamingScenarios.DraftFaceRemoved.test_draft_face_V2multi

@@ -36,9 +36,21 @@ import unittest
 
 from PartDesignTests.Scenarios import harness
 from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
-from PartDesignTests.Scenarios import uptoface
+from PartDesignTests.Scenarios import ambiguous, crossdoc, external, internal, splits, uptoface
 
-AREAS = (sketch_edits, dressups, attachment, uptoface, patterns, booleans)
+AREAS = (
+    sketch_edits,
+    dressups,
+    attachment,
+    uptoface,
+    patterns,
+    booleans,
+    splits,
+    external,
+    internal,
+    ambiguous,
+    crossdoc,
+)
 
 
 def configsFor(scenario):
