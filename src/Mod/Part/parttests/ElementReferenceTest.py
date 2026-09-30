@@ -10,7 +10,7 @@ import unittest
 import zipfile
 
 import FreeCAD as App
-import Part  # noqa: F401  (loads the Part feature types)
+import Part
 
 
 def _box(doc, name, x):
@@ -320,3 +320,49 @@ class ElementReferenceTest(unittest.TestCase):
         self.assertEqual(len(subs), 1)
         compound = App.getDocument("ElementRefB").getObject("Compound")
         self._assertFace(compound.Shape, subs[0], 20)
+
+    def testLinkInAnotherDocumentNamesMaplessSourceV2(self):
+        """In V2, an App::Link in another document names every element of a source without an
+        element map (a Part::Box) as mapSubElement names an element of a single shape:
+        '<element>;_;<source ID>;MKR;0;<type>;0;IDX,SRC;_'. The cross-document retag named
+        nothing; FreeCAD 1.1.3's V1 names them all (ops#41)."""
+        # Arrange
+        docB = self._newDocument("ElementRefB")
+        docB.HistoryAlgorithm = "V2"
+        box = _box(docB, "Box", 0)
+        docB.recompute()
+        docB.save()
+        docA = self._newDocument("ElementRefA")
+        docA.HistoryAlgorithm = "V2"
+        link = docA.addObject("App::Link", "Link")
+        link.LinkedObject = box
+        docA.recompute()
+        docA.save()
+
+        # Act
+        shape = Part.getShape(link)
+
+        # Assert
+        # the premise: the source names nothing (use another map-less source if this changes)
+        self.assertEqual(box.Shape.ElementMapSize, 0)
+        reverseMap = shape.ElementReverseMap
+        for kind, elements in (
+            ("Face", shape.Faces),
+            ("Edge", shape.Edges),
+            ("Vertex", shape.Vertexes),
+        ):
+            for index in range(1, len(elements) + 1):
+                element = f"{kind}{index}"
+                with self.subTest(element=element):
+                    self.assertEqual(
+                        reverseMap.get(element),
+                        App.makeEncodedSection(
+                            referenceIDs=[element],
+                            iterationTag=str(box.ID),
+                            opCode="MKR",
+                            elementType=element[0],
+                            mapperFlags=["IDX", "SRC"],
+                        ),
+                    )
+        self.assertEqual(shape.ElementMapSize, 26)
+        self.assertEqual(len(set(reverseMap.values())), 26)

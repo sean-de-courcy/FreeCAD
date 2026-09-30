@@ -9,6 +9,7 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <cstring>
 #include <new>
+#include <set>
 
 
 class TopoShapeTest: public ::testing::Test
@@ -360,4 +361,36 @@ TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapUnderItsOldTagV1)
         }
     }
     EXPECT_EQ(shape.getElementMapSize(), 26);
+}
+
+TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapV2)
+{
+    // Arrange
+    //   pattern: a Link in another document (tag 2) takes an object's shape (tag 1) that has no
+    //   element map, e.g. a Part primitive's (ops#41)
+    Part::TopoShape shape(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    ASSERT_EQ(shape.getElementMapSize(), 0);
+
+    // Act
+    shape.reTagElementMap(2, nullptr);
+
+    // Assert
+    //   every element is named as mapSubElement() names a single shape's:
+    //   '<element>;_;<old tag>;MKR;0;<type>;0;IDX,SRC;_', as a Body names a map-less tip's (ops#35)
+    EXPECT_EQ(shape.Tag, 2);
+    std::set<std::string> names;
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(shape.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            Data::IndexedName element(type, index);
+            const auto name = shape.getMappedName(element).toString();
+            EXPECT_EQ(name,
+                      Data::MappedName::makeEncodedSection(
+                          {element.toString()}, std::vector<Data::MappedName> {}, 1, "MKR", 0,
+                          type[0], 0, {"IDX", "SRC"}));
+            names.insert(name);
+        }
+    }
+    EXPECT_EQ(shape.getElementMapSize(), 26);
+    EXPECT_EQ(names.size(), 26);
 }

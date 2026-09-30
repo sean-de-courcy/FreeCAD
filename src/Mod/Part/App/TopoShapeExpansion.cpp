@@ -7717,6 +7717,18 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         return;
     }
 
+    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag && Tag != tag
+        && !getElementMapSize()) {
+        // Another object's shape without an element map (e.g. a primitive reached through a
+        // Link in another document, or a Body's tip): a V2 retag only fills untagged sections,
+        // so it would name nothing. Name the elements as mapSubElement() names a single
+        // shape's, as the V1 retag above does (ops#35, ops#41)
+        TopoShape res(tag, hasher, _Shape, selectedHistoryAlgorithm);
+        res.mapSubElement(*this);
+        *this = res;
+        return;
+    }
+
     initCache(1);
     Hasher = hasher;
     Tag = tag;
