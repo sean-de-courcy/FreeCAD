@@ -126,7 +126,8 @@ MappedName linkingName(
 
 /**
  * The V2 name an operation gives an element that has no history of its own: UPP, linking the
- * names of the faces it bounds (sorted by bytes, each once)
+ * names of the faces it bounds (sorted by bytes, each once). A vertex that bounds no named face
+ * links the names of its edges instead (ops#21)
  * @param shape The result of the operation
  * @param element "Edge3", "Vertex2", ...
  * @param tag The tag of the result
