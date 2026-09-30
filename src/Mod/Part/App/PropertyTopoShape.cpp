@@ -95,11 +95,8 @@ void PropertyPartShape::setValue(const TopoShape& sh)
         else if (_Shape.Tag && tag != _Shape.Tag && historyAlgorithm == App::HistoryAlgorithm::V2
                  && !_Shape.getElementMapSize()) {
             // Another object's shape without an element map (e.g. a Body's tip that is a
-            // primitive): name its elements under that object's tag, as mapSubElement() names a
-            // single shape's, and as the V1 retag above does (ops#35)
-            TopoShape res(tag, _Shape.Hasher, _Shape.getShape(), historyAlgorithm);
-            res.mapSubElement(_Shape);
-            _Shape = res;
+            // primitive): the retag names its elements (ops#35, ops#41)
+            _Shape.reTagElementMap(tag, _Shape.Hasher, nullptr);
         }
         else {
             if (!_Shape.Tag && historyAlgorithm == App::HistoryAlgorithm::V2) {
