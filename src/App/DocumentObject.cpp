@@ -49,6 +49,7 @@
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyLinks.h"
+#include "ReferenceReport.h"
 
 
 FC_LOG_LEVEL_INIT("App", true, true)
@@ -155,6 +156,15 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
     // check if the links are valid before making the recompute
     if (!GeoFeatureGroupExtension::areLinksValid(this)) {
         printInvalidLinks();
+    }
+
+    // In a reference solver document (ops#7), a broken element reference fails its owner,
+    // instead of letting it compute without the element.
+    if (auto doc = getDocument(); doc && doc->isReferenceSolverOn()) {
+        std::string why;
+        if (ReferenceReport::describeBroken(this, why)) {
+            return new DocumentObjectExecReturn(why, this);
+        }
     }
 
     // set/unset the execution bit

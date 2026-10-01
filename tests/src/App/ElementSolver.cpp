@@ -3,7 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <App/ElementNamingUtils.h>
+#include <App/ElementFingerprint.h>
 #include <App/ElementSolver.h>
+#include <App/ElementSolverBatch.h>
+#include <App/PropertyLinks.h>
+#include <App/ReferenceReport.h>
 #include <App/MappedName.h>
 #include <Base/Exception.h>
 
@@ -808,4 +812,532 @@ TEST(GroupEquivalent, independentOfInputOrder)
         std::shuffle(shuffled.begin(), shuffled.end(), random);
         EXPECT_EQ(byName(shuffled), expected) << "round " << round;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// solveOwner: tiers 0 and 1 and forced matching for one owner (Task 2 PR 3)
+
+namespace
+{
+
+using Data::SolveInput;
+using Data::SolveOutcome;
+using Data::SolveStatus;
+
+SolveInput::Element element(const std::string& index, std::vector<std::string> names)
+{
+    return SolveInput::Element {index, std::move(names)};
+}
+
+SolveInput::Entry missing(
+    const std::string& oldName,
+    const std::string& type = "Face",
+    std::vector<std::string> nameMatches = {}
+)
+{
+    SolveInput::Entry entry;
+    entry.oldName = oldName;
+    entry.type = type;
+    entry.nameMatches = std::move(nameMatches);
+    return entry;
+}
+
+SolveInput::Entry exact(const std::string& index, const std::string& type = "Face")
+{
+    SolveInput::Entry entry;
+    entry.type = type;
+    entry.exact = true;
+    entry.exactElement = index;
+    return entry;
+}
+
+// One line per outcome, for comparisons.
+std::string describe(const SolveOutcome& outcome)
+{
+    std::string text = outcome.status == SolveStatus::Exact ? "exact"
+        : outcome.status == SolveStatus::Resolved           ? "resolved"
+                                                            : "broken";
+    text += " " + outcome.element + " " + std::to_string(outcome.tier) + " [";
+    for (const auto& candidate : outcome.candidates) {
+        text += candidate + " ";
+    }
+    return text + "] " + outcome.evidence;
+}
+
+// The design's outer-wire example: the old top face, the new one (a fifth edge), a side face
+// and an unrelated face.
+struct OuterWire
+{
+    std::string oldTop = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    std::string newTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(5)}
+    );
+    std::string side = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    std::string unrelated = generated({sketchEdge(9, 6)}, 7, "Extrude", 'F', 1);
+};
+
+}  // namespace
+
+TEST(SolveOwner, uniqueOverlapSurvivorResolves)
+{
+    OuterWire names;
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face1", {names.side}),
+        element("Face2", {names.newTop}),
+        element("Face3", {names.unrelated}),
+    };
+    input.entries = {missing(names.oldTop)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    ASSERT_EQ(outcomes.size(), 1U);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+    EXPECT_EQ(outcomes[0].name, names.newTop);
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_EQ(outcomes[0].evidence, "overlap 0.80, sources overlap");
+}
+
+TEST(SolveOwner, twoEqualSurvivorsBreak)
+{
+    OuterWire names;
+    const auto otherTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(6)}
+    );
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face2", {names.newTop}),
+        element("Face10", {otherTop}),
+        element("Face1", {names.side}),
+    };
+    input.entries = {missing(names.oldTop)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].tier, -1);
+    //   in index order, with their names
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face10"}));
+    EXPECT_EQ(outcomes[0].candidateNames, (std::vector<std::string> {names.newTop, otherTop}));
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
+}
+
+TEST(SolveOwner, piecesBreakAtOnceUnderOne)
+{
+    // A face split in two by a slot; the name match also offers another face.
+    const auto old = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    const auto other = generated({sketchEdge(2)}, 7, "Extrude", 'F', 1);
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face1", {other}),
+        element("Face2", {piece(old, 9, "CUT", 0, 'F')}),
+        element("Face3", {piece(old, 9, "CUT", 1, 'F')}),
+    };
+    input.entries = {missing(old, "Face", {other})};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    //   pieces first, then the other candidates
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face3", "Face1"}));
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
+
+    //   Expand and Equivalent are read as One until PRs 5 and 7
+    input.entries[0].policy = Data::SolvePolicy::Expand;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), describe(outcomes[0]));
+}
+
+TEST(SolveOwner, tierZeroElementsLeaveTheOtherPools)
+{
+    OuterWire names;
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face1", {names.newTop}),
+        element("Face2", {names.unrelated}),
+    };
+    //   another reference of the owner resolved exactly to Face1
+    input.entries = {exact("Face1"), missing(names.oldTop)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Exact);
+    EXPECT_EQ(outcomes[0].element, "Face1");
+    EXPECT_EQ(outcomes[0].name, names.newTop);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken);
+    EXPECT_TRUE(outcomes[1].candidates.empty());
+    EXPECT_EQ(outcomes[1].evidence, "no candidate");
+
+    //   unless tier 1 shows a merge: a name of Face1 has the old name in its ancestry
+    const auto merged = generated({names.oldTop}, 9, "FUS", 'F');
+    input.pool["Face"][0].names.push_back(merged);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Exact);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[1].element, "Face1");
+    EXPECT_NE(outcomes[1].evidence.find("in ancestry"), std::string::npos);
+}
+
+TEST(SolveOwner, duplicateOldNamesSolveOnce)
+{
+    OuterWire names;
+    SolveInput input;
+    input.pool["Face"] = {element("Face2", {names.newTop}), element("Face1", {names.side})};
+    //   two references with the same old name don't compete for the element
+    input.entries = {missing(names.oldTop), missing(names.oldTop)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+    EXPECT_EQ(describe(outcomes[0]), describe(outcomes[1]));
+}
+
+TEST(SolveOwner, unionOfSourcesOnlyAddsCandidates)
+{
+    OuterWire names;
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face1", {names.side}),
+        element("Face2", {names.newTop}),
+    };
+    input.pool["Edge"] = {element("Edge1", {sketchEdge(1)})};
+    //   the name match finds the side face too, and a name of another type, which is dropped
+    input.entries = {missing(names.oldTop, "Face", {names.side, sketchEdge(1)})};
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face1", "Face2"}));
+
+    input.source = Data::Tier1Source::Overlap;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+
+    //   the name match alone offers the side face, which doesn't agree on the top section
+    input.source = Data::Tier1Source::Names;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face1"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+}
+
+TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
+{
+    // ChamferEdgeRemoved: the chamfered top edge of sketch line 1 is cut away. The only element
+    // left that shares an ancestor with it is the cut's floor edge, whose name holds the
+    // sketch's face, which holds line 1: overlap 1/2, the only survivor, forced. Nothing but
+    // that one sketch edge relates them, and the top sections disagree: broken, not resolved.
+    const std::vector<std::string> lines {
+        sketchEdge(1),
+        sketchEdge(2),
+        sketchEdge(3),
+        sketchEdge(4),
+    };
+    const auto topEdge = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto slotFace = generated({sketchEdge(3, 8)}, 9, "XTR", 'F');
+    const auto floorEdge = section({}, {lowFace(lines), slotFace}, 9, "CUT", 0, 'E', {"GEN"});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge7", {floorEdge})};
+    input.entries = {missing(topEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge7"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+
+    //   the same survivor with an agreeing top section resolves (SketchNotch's top face)
+    const auto otherTop = section({}, {sketchEdge(1), sketchEdge(5)}, 7, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"] = {element("Edge7", {otherTop})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge7");
+}
+
+TEST(SolveOwner, patternSiblingNeverResolves)
+{
+    // A pattern of two: the referenced instance's top face is gone and the other instance's copy
+    // is the only survivor. The copy's name is the old name with another duplicate count, so it
+    // shares the old name's linked edges (overlap 0.80) and its top section: forced and
+    // evidenced, but another element.
+    const std::vector<std::string> edges {
+        sketchEdge(1),
+        sketchEdge(2),
+        sketchEdge(3),
+        sketchEdge(4),
+    };
+    auto top = [&](const char* opCode, const char* count) {
+        return Data::MappedName::makeEncodedSection({}, edges, "5", opCode, "0", 'F', count, {"LOW"}, {});
+    };
+    const auto oldTop = top("FAC", "1");
+    SolveInput input;
+    input.entries = {missing(oldTop)};
+
+    //   the count field differs
+    input.pool["Face"] = {element("Face4", {top("FAC", "2")})};
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the counter written over the op code (ops#55)
+    input.pool["Face"] = {element("Face4", {top("_3", "0")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the counter in an inner section, which a later feature keeps
+    const auto later = section({}, {}, 9, "XTR", 0, 'F', {"MOD"});
+    input.entries = {missing(oldTop + "|" + later)};
+    input.pool["Face"] = {element("Face4", {top("FAC", "2") + "|" + later})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   a sibling among an element's several names (a refined face) is enough
+    input.entries = {missing(oldTop)};
+    input.pool["Face"] = {element("Face4", {top("FAC", "2"), top("FAC", "3")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   another element with the counter equal still resolves: the outer wire gains an edge
+    std::vector<std::string> fiveEdges = edges;
+    fiveEdges.push_back(sketchEdge(5));
+    const auto newTop
+        = Data::MappedName::makeEncodedSection({}, fiveEdges, "5", "FAC", "0", 'F', "1", {"LOW"}, {});
+    input.pool["Face"] = {element("Face4", {newTop})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face4");
+
+    //   and so does a different op code that isn't a counter
+    input.pool["Face"] = {element("Face4", {top("XTR", "2")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_NE(outcomes[0].evidence, "pattern sibling");
+}
+
+TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
+{
+    // The counter sits in an embedded name: a face built on instance 1's edge and the same face
+    // built on instance 2's. Both edges hold sketch line 1, so the other instance's face is the
+    // lone survivor (overlap 1/3), forced, and agrees on the top section.
+    auto instanceEdge = [](const char* count) {
+        return Data::MappedName::makeEncodedSection(
+            {},
+            std::vector<std::string> {sketchEdge(1)},
+            "7",
+            "XTR",
+            "0",
+            'E',
+            count,
+            {"PRJ"},
+            std::vector<std::string> {}
+        );
+    };
+    auto faceOn = [](const std::string& edge) {
+        return generated({edge}, 9, "FUS", 'F');
+    };
+    SolveInput input;
+    input.entries = {missing(faceOn(instanceEdge("1")))};
+
+    //   in a Linked Name
+    input.pool["Face"] = {element("Face4", {faceOn(instanceEdge("2"))})};
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   two levels down, with the counter over the op code
+    auto twice = [&](const char* opCode) {
+        auto edge = Data::MappedName::makeEncodedSection(
+            {},
+            std::vector<std::string> {sketchEdge(1)},
+            "7",
+            opCode,
+            "0",
+            'E',
+            "0",
+            {"PRJ"},
+            std::vector<std::string> {}
+        );
+        return faceOn(upper({edge}, 8, "CHF"));
+    };
+    input.entries = {missing(twice("XTR"))};
+    input.pool["Face"] = {element("Face4", {twice("_2")})};
+    EXPECT_EQ(Data::solveOwner(input)[0].evidence, "pattern sibling");
+
+    //   in a Connected Name of a later section
+    const auto base = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    auto cut = [&](const char* count) {
+        return base + "|" + section({}, {}, 9, "CUT", 0, 'F', {"MOD"}, {instanceEdge(count)});
+    };
+    input.entries = {missing(cut("1"))};
+    input.pool["Face"] = {element("Face4", {cut("2")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   an embedded name that differs in more than the counter is no sibling: it resolves
+    input.entries = {missing(faceOn(instanceEdge("1")))};
+    input.pool["Face"] = {element(
+        "Face4",
+        {faceOn(
+            Data::MappedName::makeEncodedSection(
+                {},
+                std::vector<std::string> {sketchEdge(1)},
+                "7",
+                "XTR",
+                "1",
+                'E',
+                "2",
+                {"PRJ"},
+                std::vector<std::string> {}
+            )
+        )}
+    )};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face4");
+}
+
+TEST(SolveOwner, independentOfInputOrder)
+{
+    // Arrange
+    //   an owner with an exact reference, a duplicate pair, a split face, a symmetric pair and
+    //   a type without elements
+    OuterWire names;
+    const auto split = generated({sketchEdge(7)}, 7, "Extrude", 'F', 3);
+    const auto twin = generated({sketchEdge(8)}, 7, "Extrude", 'F', 4);
+    const auto edgeOld = upper({names.side, twin}, 9, "FLT");
+    const auto edgeX = upper({names.side, twin}, 9, "CHF");
+    const auto edgeY = upper({twin, names.side}, 10, "CHF");
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face1", {names.side}),
+        element("Face2", {names.newTop, generated({names.oldTop}, 11, "FUS", 'F')}),
+        element("Face3", {piece(split, 9, "CUT", 0, 'F')}),
+        element("Face4", {piece(split, 9, "CUT", 1, 'F')}),
+        element("Face5", {names.unrelated}),
+    };
+    input.pool["Edge"] = {element("Edge1", {edgeX}), element("Edge2", {edgeY})};
+    input.entries = {
+        exact("Face5"),
+        missing(names.oldTop),
+        missing(split),
+        missing(names.oldTop),
+        missing(edgeOld, "Edge"),
+        missing(sketchEdge(42), "Vertex"),
+    };
+    const auto expected = Data::solveOwner(input);
+    std::vector<std::string> expectedText;
+    for (const auto& outcome : expected) {
+        expectedText.push_back(describe(outcome));
+    }
+    EXPECT_EQ(expected[1].status, SolveStatus::Resolved);
+    EXPECT_EQ(expected[2].status, SolveStatus::Broken);
+    EXPECT_EQ(expected[4].status, SolveStatus::Broken);
+    EXPECT_EQ(expected[5].evidence, "no candidate");
+
+    // Act and assert
+    std::mt19937 random(7);
+    for (int round = 0; round < 100; ++round) {
+        SolveInput shuffled = input;
+        std::vector<int> order(input.entries.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::shuffle(order.begin(), order.end(), random);
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            shuffled.entries[i] = input.entries[order[i]];
+        }
+        for (auto& [type, pool] : shuffled.pool) {
+            std::shuffle(pool.begin(), pool.end(), random);
+            for (auto& item : pool) {
+                std::shuffle(item.names.begin(), item.names.end(), random);
+            }
+        }
+        auto outcomes = Data::solveOwner(shuffled);
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            EXPECT_EQ(describe(outcomes[i]), expectedText[order[i]])
+                << "round " << round << ", entry " << order[i];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The report and the reverse update's fingerprint check
+
+TEST(ReferenceReport, replacePerTargetAndClear)
+{
+    App::PropertyLinkSub prop;
+    App::ReferenceReport::Entry broken;
+    broken.index = 1;
+    broken.candidates = {{"Edge7", "a"}, {"Edge12", "b"}};
+    App::ReferenceReport::Entry resolved;
+    resolved.index = 0;
+    resolved.status = App::ReferenceReport::Status::Resolved;
+    resolved.tier = 1;
+    resolved.newIndex = "Face2";
+
+    App::ReferenceReport::replace(&prop, "Doc#A", {broken});
+    App::ReferenceReport::replace(&prop, "Doc#B", {resolved});
+    auto entries = App::ReferenceReport::get(&prop);
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].newIndex, "Face2");  // sorted by index
+    ASSERT_NE(App::ReferenceReport::find(&prop, 1), nullptr);
+    EXPECT_EQ(App::ReferenceReport::find(&prop, 1)->candidates.size(), 2U);
+
+    //   an update of target A with nothing to report drops only A's entries
+    App::ReferenceReport::replace(&prop, "Doc#A", {});
+    EXPECT_EQ(App::ReferenceReport::find(&prop, 1), nullptr);
+    EXPECT_NE(App::ReferenceReport::find(&prop, 0), nullptr);
+
+    //   unregistering (as every setter does) drops the rest
+    prop.unregisterElementReference();
+    EXPECT_TRUE(App::ReferenceReport::get(&prop).empty());
+
+    //   so does destruction
+    const App::PropertyLinkBase* gone = nullptr;
+    {
+        App::PropertyLinkSub temporary;
+        gone = &temporary;
+        App::ReferenceReport::replace(&temporary, "Doc#A", {broken});
+        EXPECT_EQ(App::ReferenceReport::get(&temporary).size(), 1U);
+    }
+    EXPECT_TRUE(App::ReferenceReport::get(gone).empty());
+    EXPECT_EQ(
+        App::ReferenceReport::statusName(App::ReferenceReport::Status::Index),
+        std::string("index")
+    );
+}
+
+TEST(ReferenceReport, reverseCheckTolerances)
+{
+    auto saved = Data::ElementFingerprint::fromString("1|F|Plane|200|5,10,20|0,0,1|_");
+    ASSERT_TRUE(saved.isValid());
+    //   a re-serialized fingerprint agrees
+    auto again = Data::ElementFingerprint::fromString(saved.toString());
+    EXPECT_TRUE(App::fingerprintsAgree(saved, again, 50.0));
+    //   a centre moved by more than 1e-7 of the diagonal doesn't
+    auto moved = saved;
+    moved.center = Base::Vector3d(5, 10, 20 + 1e-4);
+    EXPECT_FALSE(App::fingerprintsAgree(saved, moved, 50.0));
+    moved.center = Base::Vector3d(5, 10, 20 + 1e-7);
+    EXPECT_TRUE(App::fingerprintsAgree(saved, moved, 50.0));
+    //   another kind, size or direction doesn't
+    auto other = saved;
+    other.kind = "Cylinder";
+    EXPECT_FALSE(App::fingerprintsAgree(saved, other, 50.0));
+    other = saved;
+    other.size = 200.001;
+    EXPECT_FALSE(App::fingerprintsAgree(saved, other, 50.0));
+    other = saved;
+    other.direction = Base::Vector3d(0, 0, -1);
+    EXPECT_FALSE(App::fingerprintsAgree(saved, other, 50.0));
+    //   nor another radius
+    auto circle = Data::ElementFingerprint::fromString("1|E|Circle|31.4159265359|0,0,0|0,0,1|5");
+    ASSERT_TRUE(circle.isValid());
+    auto bigger = circle;
+    bigger.radii = {5.001};
+    EXPECT_TRUE(App::fingerprintsAgree(circle, circle, 10.0));
+    EXPECT_FALSE(App::fingerprintsAgree(circle, bigger, 10.0));
 }

@@ -1,0 +1,7 @@
+# SubShapeBinder drops a missing sub-element from Support (SubShapeBinder::update, run from
+# onChanged(Support)), so the binder keeps a stale shape or binds nothing and stays valid.
+
+issue: ops#69
+
+reason: in a reference solver document the reference breaks (`?Face`), but the binder's update drops the `?` sub before any recompute, so DocumentObject::recompute's check has nothing to see and the binder stays valid (ops#7 PR 3 relies on ops#69's fix here)
+cli  PartDesignTests.TestNamingSolver.TestNamingSolver.testBinderWithoutItsFaceFails

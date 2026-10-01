@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -194,5 +195,108 @@ AppExport std::vector<std::vector<int>> groupEquivalent(
     const std::vector<std::string>& names,
     const std::function<bool(int, int)>& equivalent
 );
+
+/// What a reference's owner wants when its element became several candidates. Mirrors
+/// App::PropertyLinkBase::ElementPolicy, which this file doesn't include.
+enum class SolvePolicy
+{
+    One,
+    Expand,
+    Equivalent,
+};
+
+/// The candidate sources of tier 1 (the NamingSolver/Tier1Source parameter, for PR 8's
+/// comparison): ancestry overlap, findSimilarNames, or both.
+enum class Tier1Source
+{
+    Union,
+    Overlap,
+    Names,
+};
+
+/** One owner's references to one target, for solveOwner(): plain data, no document.
+ *
+ * Names are bare mapped names. Element types are those of the stored index names: `Face`,
+ * `Edge`, `Vertex`, or a sketch's `InternalEdge`.
+ */
+struct AppExport SolveInput
+{
+    struct Entry
+    {
+        /// The old mapped name; unused for an exact entry.
+        std::string oldName;
+        /// The element type of the reference.
+        std::string type;
+        SolvePolicy policy = SolvePolicy::One;
+        /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`.
+        bool exact = false;
+        std::string exactElement;
+        /// The target's findSimilarNames() result for oldName, of any type.
+        std::vector<std::string> nameMatches;
+    };
+    /// An element of the target with all its mapped names.
+    struct Element
+    {
+        std::string index;
+        std::vector<std::string> names;
+    };
+
+    std::vector<Entry> entries;
+    /// The target's named elements, by type.
+    std::map<std::string, std::vector<Element>> pool;
+    /// Tier 1's overlap gap (NameAncestry::structuralSurvivors()).
+    double gap = 0.25;
+    Tier1Source source = Tier1Source::Union;
+};
+
+enum class SolveStatus
+{
+    /// Resolved by the exact lookup (tier 0), before the solver.
+    Exact,
+    /// Resolved by the solver.
+    Resolved,
+    /// Not resolved: the reference stays missing.
+    Broken,
+};
+
+struct AppExport SolveOutcome
+{
+    SolveStatus status = SolveStatus::Broken;
+    /// Exact and Resolved: the element, e.g. `Face7`, and its mapped name (the first of its
+    /// names by bytes; empty if it has none).
+    std::string element;
+    std::string name;
+    /// 0 for Exact, 1 for Resolved; -1 for Broken.
+    int tier = -1;
+    /// Broken: the candidates the user may choose from, pieces first, each part in index order,
+    /// with their mapped names (parallel).
+    std::vector<std::string> candidates;
+    std::vector<std::string> candidateNames;
+    /// The evidence, for the log and the report: overlap and sources, or why it broke.
+    std::string evidence;
+};
+
+/** Tiers 0 and 1 and forced matching for one owner's references to one target (Task 2 PR 3).
+ *
+ * - Exact entries keep their element, and it leaves the other entries' pools unless one of its
+ *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
+ *   entries never enter the graph.
+ * - Missing entries with the same old name, type and policy are solved once and get the same
+ *   outcome.
+ * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
+ *   every pool element of the entry's type) and the name matches of that type, by \a source.
+ * - One (and, until PRs 5 and 7, Expand and Equivalent): a candidate that is a piece of the old
+ *   element breaks the entry at once, with the pieces as candidates. Otherwise the entry goes
+ *   into one MatchGraph per owner, one candidate per element, and forcedMatching() decides.
+ * - A partner one of whose names equals the old name up to the duplicate counter of any section
+ *   (a pattern sibling) never resolves the entry: broken, with its candidates ("pattern
+ *   sibling").
+ * - A partner resolves the entry only if one of its names agrees with the old name on the top
+ *   section (NameAncestry::topAgrees()) or has the old name in its ancestry; otherwise the
+ *   entry is broken, with its candidates ("no top agreement").
+ *
+ * The result depends only on the input as a set (pool order, name order, entry order).
+ */
+AppExport std::vector<SolveOutcome> solveOwner(const SolveInput& input);
 
 }  // namespace Data

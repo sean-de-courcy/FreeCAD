@@ -1077,6 +1077,12 @@ Document::Document(const char* documentName)
                       0,
                       PropertyType(Prop_Hidden),
                       "Whether broken element references go to the reference solver (V2 only).");
+    // A local test aid (ops#7), never set in CI: FREECAD_REFERENCE_SOLVER=1 turns the solver
+    // on in every document, to run whole test suites through it.
+    if (const char* solver = std::getenv("FREECAD_REFERENCE_SOLVER");
+        solver && std::string(solver) == "1") {
+        ReferenceSolver.setValue(true);
+    }
 
     // this creates and sets 'TransientDir' in onChanged()
     ADD_PROPERTY_TYPE(TransientDir,

@@ -1,0 +1,41 @@
+# Naming scenarios (PartDesignTests.TestNamingScenarios) in V2s, the reference solver's
+# configuration (ops#7, Task 2): every V2s test that fails after PR 3, by the PR expected to fix
+# it. Each later PR removes the entries it fixes; PR 8 ends with this file empty and removed.
+# Every entry is broken (the owner fails, the candidates are reported) or partial; none is wrong.
+
+issue: ops#7
+
+reason: a reference to a face that two equal halves replaced breaks with both as candidates; the attachment would get the same placement from either, so it should hold (equivalence, PR 5)
+cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_sketch_top_V2s
+cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_sketch_top_V2s
+
+reason: a dress-up or face profile on a split element breaks with the pieces as candidates; section 8 expects every piece (Expand, PR 7)
+cli  PartDesignTests.TestNamingScenarios.SplitFilletFuse.test_fillet_edge_V2s
+cli  PartDesignTests.TestNamingScenarios.SplitChamferCut.test_chamfer_edge_V2s
+cli  PartDesignTests.TestNamingScenarios.SplitDraftGroove.test_draft_face_V2s
+cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2s
+
+reason: an exact hit on the piece of a sketch line that a notch shortened; the other piece comes from a new line, which no name relates (partial; geometric continuation, PR 7, the answer to the design note's Q5)
+cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2s
+cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2s
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2s
+
+reason: correct needs the fillet to stay on the chamfered corner, whose name changed with the notch; it breaks with both corners as candidates (ops#79; the continuation of PR 7, or PR 8's Reference ID variant of tier 1)
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2s
+
+reason: the sketch corner's edge keeps its place but not its name (the notch renames its vertex); it breaks with the corner and the notch's edge as candidates (PR 8's Reference ID variant of tier 1, ops#76)
+cli  PartDesignTests.TestNamingScenarios.FilletNotchBeside.test_fillet_edge_V2s
+
+reason: a dress-up's Base on a deleted feature isn't relinked to a base without an element map (an AdditiveBox): no candidates (the relink and the IDX source, PR 6)
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2s
+
+reason: the pieces of a Part::Box's top face merge again, but the whole face's name has another op code than the pieces' prefix (MKR, not FUS or CUT), so no name relates them: broken, no candidates (an IDX source across op codes, PR 6's design)
+cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2s
+cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2s
+
+reason: two boxes' tops merge in a refined fusion: A's face name changes op code (MKR to FUS), and the merged face carries no name of B's: both break, no candidates (PR 6's IDX source for A; geometry, PR 4, for B)
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2s
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2s
+
+reason: every sketch line is redrawn (new geometry IDs), so no name relates the old edge to the new one; V2 found it by the geometric search, which solver documents don't run (tiers 2-3, PR 4)
+cli  PartDesignTests.TestNamingScenarios.SketchRedraw.test_right_top_edge_V2s

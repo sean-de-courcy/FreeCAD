@@ -1939,8 +1939,10 @@ void Feature::onBeforeChange(const App::Property* prop)
                 }
             }
         }
+        // The cache feeds only the geometric search, which a reference solver document doesn't
+        // run (ops#7).
         if (getDocument() && !getDocument()->testStatus(App::Document::Restoring)
-            && !getDocument()->isPerformingTransaction()) {
+            && !getDocument()->isPerformingTransaction() && !getDocument()->isReferenceSolverOn()) {
             std::vector<App::DocumentObject*> objs;
             std::vector<std::string> subs;
             for (auto prop : App::PropertyLinkBase::getElementReferences(this)) {

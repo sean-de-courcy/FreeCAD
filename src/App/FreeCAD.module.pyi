@@ -319,3 +319,22 @@ def isPieceOf(name: str, old: str, /) -> bool:
     type.
     """
     ...
+
+def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
+    """Return what the reference solver did with `obj`'s element references (ops#7).
+
+    One dict per reference the solver resolved beyond the exact lookup, or left broken, plus one
+    per missing reference it has no entry for, sorted by property and index. Keys: `property`,
+    `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken` or `index`),
+    `tier`, `new` (the element it resolved to), `candidates` (element names),
+    `candidate_names` (their mapped names), `evidence` and `target`.
+    """
+    ...
+
+def repairReference(obj: DocumentObject, property: str, index: int, candidate: str, /) -> None:
+    """Set reference `index` of `obj`'s link property `property` to `candidate`.
+
+    `candidate` must be one of the candidates that getReferenceReport() lists for it; raises
+    ValueError otherwise.
+    """
+    ...

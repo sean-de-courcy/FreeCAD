@@ -3,8 +3,12 @@
 #include "ElementSolver.h"
 
 #include <algorithm>
+#include <locale>
 #include <map>
 #include <numeric>
+#include <set>
+#include <sstream>
+#include <tuple>
 #include <utility>
 
 #include <Base/Exception.h>
@@ -772,6 +776,372 @@ std::vector<std::vector<int>> groupEquivalent(
         return byName(a.front(), b.front());
     });
     return groups;
+}
+
+// ---------------------------------------------------------------------------------------------
+// solveOwner
+
+namespace
+{
+
+// The number at the end of an index name (`Face12` -> 12), or -1.
+long indexNumber(const std::string& index)
+{
+    std::size_t pos = index.size();
+    while (pos > 0 && index[pos - 1] >= '0' && index[pos - 1] <= '9') {
+        --pos;
+    }
+    if (pos == index.size() || index.size() - pos > 9) {
+        return -1;
+    }
+    return std::stol(index.substr(pos));
+}
+
+bool byIndex(const SolveInput::Element& a, const SolveInput::Element& b)
+{
+    long na = indexNumber(a.index);
+    long nb = indexNumber(b.index);
+    return na != nb ? na < nb : a.index < b.index;
+}
+
+std::string formatOverlap(double value)
+{
+    std::ostringstream ss;
+    ss.imbue(std::locale::classic());
+    ss.precision(2);
+    ss << std::fixed << value;
+    return ss.str();
+}
+
+// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
+bool isCounterOpCode(const std::string& opCode)
+{
+    return opCode.size() > 1 && opCode[0] == '_'
+        && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
+               return c >= '0' && c <= '9';
+           });
+}
+
+/* True if \a a and \a b are the same name up to the duplicate counter of any section, at any
+ * depth: the sections of the embedded Linked and Connected Names are compared the same way, so a
+ * face built on instance 1's edges and one built on instance 2's are equal up to the counter.
+ * Both forms of the counter are ignored, as harness.py's withoutCounter() does: the duplicate
+ * count field, and a counter written over the op code, which then matches any op code. A section
+ * that doesn't decode must be equal as text.
+ */
+bool sameUpToCounter(std::string_view a, std::string_view b)
+{
+    if (a == b) {
+        return true;
+    }
+    auto sectionsA = NameAncestry::splitSections(a);
+    auto sectionsB = NameAncestry::splitSections(b);
+    if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < sectionsA.size(); ++i) {
+        if (sectionsA[i] == sectionsB[i]) {
+            continue;
+        }
+        // Copies: the recursion below decodes more names.
+        DecodedMappedName decodedA = MappedName::getDecodedMappedName(std::string(sectionsA[i]));
+        DecodedMappedName decodedB = MappedName::getDecodedMappedName(std::string(sectionsB[i]));
+        if (decodedA.size() != 1 || decodedB.size() != 1) {
+            return false;
+        }
+        const DecodedMappedSection& x = decodedA.front();
+        const DecodedMappedSection& y = decodedB.front();
+        bool opCodesAgree = x.opCode == y.opCode || isCounterOpCode(x.opCode)
+            || isCounterOpCode(y.opCode);
+        if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
+            || x.index != y.index || x.elementType != y.elementType
+            || x.mapperFlags != y.mapperFlags || x.linkedNames.size() != y.linkedNames.size()
+            || x.connectedElements.size() != y.connectedElements.size()) {
+            return false;
+        }
+        for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
+            if (!sameUpToCounter(x.linkedNames[j], y.linkedNames[j])) {
+                return false;
+            }
+        }
+        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+            if (!sameUpToCounter(x.connectedElements[j], y.connectedElements[j])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* True if \a name is \a oldName up to the duplicate counter (sameUpToCounter()), and not
+ * \a oldName itself: a pattern instance's copy of the old element, or another element the
+ * element map told apart only by the counter.
+ */
+bool isCounterSibling(std::string_view name, std::string_view oldName)
+{
+    return name != oldName && sameUpToCounter(name, oldName);
+}
+
+}  // namespace
+
+std::vector<SolveOutcome> solveOwner(const SolveInput& input)
+{
+    NameAncestry ancestry;
+    std::vector<SolveOutcome> outcomes(input.entries.size());
+
+    // Pools in index order, names sorted by bytes, duplicates merged; a dense element ID over
+    // all types for the graph.
+    struct Pool
+    {
+        std::vector<SolveInput::Element> elements;
+        std::vector<int> ids;
+        std::map<std::string, int> byName;  // name -> position in elements
+        std::set<std::string> exact;        // index names resolved at tier 0
+    };
+    std::map<std::string, Pool> pools;
+    std::vector<std::pair<std::string, int>> elementOfId;  // ID -> (type, position)
+    for (const auto& [type, elements] : input.pool) {
+        std::map<std::string, std::vector<std::string>> merged;
+        for (const auto& element : elements) {
+            auto& names = merged[element.index];
+            names.insert(names.end(), element.names.begin(), element.names.end());
+        }
+        Pool& pool = pools[type];
+        for (auto& [index, names] : merged) {
+            std::sort(names.begin(), names.end());
+            names.erase(std::unique(names.begin(), names.end()), names.end());
+            pool.elements.push_back({index, std::move(names)});
+        }
+        std::sort(pool.elements.begin(), pool.elements.end(), byIndex);
+        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+            pool.ids.push_back(static_cast<int>(elementOfId.size()));
+            elementOfId.emplace_back(type, static_cast<int>(k));
+            for (const auto& name : pool.elements[k].names) {
+                // A name names one element; keep the first by index if a map is inconsistent.
+                pool.byName.emplace(name, static_cast<int>(k));
+            }
+        }
+    }
+
+    auto firstName = [](const SolveInput::Element& element) {
+        return element.names.empty() ? std::string() : element.names.front();
+    };
+
+    // Tier 0.
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (!entry.exact) {
+            continue;
+        }
+        auto& outcome = outcomes[i];
+        outcome.status = SolveStatus::Exact;
+        outcome.tier = 0;
+        outcome.element = entry.exactElement;
+        pools[entry.type].exact.insert(entry.exactElement);
+        auto& pool = pools[entry.type];
+        for (const auto& element : pool.elements) {
+            if (element.index == entry.exactElement) {
+                outcome.name = firstName(element);
+            }
+        }
+    }
+
+    // Missing entries, grouped: one solve per (old name, type, policy).
+    std::map<std::tuple<std::string, std::string, int>, std::vector<int>> groups;
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (!entry.exact) {
+            groups[{entry.oldName, entry.type, static_cast<int>(entry.policy)}].push_back(
+                static_cast<int>(i)
+            );
+        }
+    }
+
+    struct GroupState
+    {
+        const std::vector<int>* members = nullptr;
+        Pool* pool = nullptr;
+        std::string oldName;
+        std::vector<int> candidates;  // positions in the pool, in index order
+        std::set<int> fromOverlap;
+        std::set<int> fromNames;
+        std::set<int> inAncestry;
+        SolveOutcome outcome;
+        bool decided = false;
+        int graphEntry = -1;
+    };
+    std::vector<GroupState> states;
+    states.reserve(groups.size());
+
+    auto listCandidates = [](GroupState& state, const std::vector<int>& positions) {
+        for (int k : positions) {
+            const auto& element = state.pool->elements[k];
+            state.outcome.candidates.push_back(element.index);
+            state.outcome.candidateNames.push_back(
+                element.names.empty() ? std::string() : element.names.front()
+            );
+        }
+    };
+
+    MatchGraph graph;
+    std::map<int, int> nodeOfId;  // element ID -> graph candidate
+
+    for (auto& [key, members] : groups) {
+        GroupState& state = states.emplace_back();
+        state.members = &members;
+        state.oldName = std::get<0>(key);
+        state.pool = &pools[std::get<1>(key)];
+        Pool& pool = *state.pool;
+        const std::string& oldName = state.oldName;
+
+        // The pool for this entry: tier-0 elements only as proven merges.
+        std::vector<std::string> flatNames;
+        std::vector<int> flatElements;
+        std::vector<char> allowed(pool.elements.size(), 0);
+        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+            const auto& element = pool.elements[k];
+            bool contains = !oldName.empty()
+                && std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
+                                return ancestry.contains(n, oldName);
+                            });
+            if (pool.exact.count(element.index) && !contains) {
+                continue;
+            }
+            allowed[k] = 1;
+            if (contains) {
+                state.inAncestry.insert(static_cast<int>(k));
+            }
+            for (const auto& name : element.names) {
+                flatNames.push_back(name);
+                flatElements.push_back(static_cast<int>(k));
+            }
+        }
+
+        if (!oldName.empty() && input.source != Tier1Source::Names) {
+            for (int i : ancestry.structuralSurvivors(oldName, flatNames, input.gap)) {
+                state.fromOverlap.insert(flatElements[i]);
+            }
+        }
+        if (input.source != Tier1Source::Overlap) {
+            for (int member : members) {
+                for (const auto& name : input.entries[member].nameMatches) {
+                    auto it = pool.byName.find(name);
+                    if (it != pool.byName.end() && allowed[it->second]) {
+                        state.fromNames.insert(it->second);
+                    }
+                }
+            }
+        }
+        std::set<int> all(state.fromOverlap);
+        all.insert(state.fromNames.begin(), state.fromNames.end());
+        state.candidates.assign(all.begin(), all.end());
+
+        // Pieces under One (Expand and Equivalent are read as One until PRs 5 and 7).
+        std::vector<int> pieces;
+        std::vector<int> others;
+        for (int k : state.candidates) {
+            const auto& names = pool.elements[k].names;
+            bool piece = std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                return NameAncestry::isPieceOf(n, oldName);
+            });
+            (piece ? pieces : others).push_back(k);
+        }
+        if (!pieces.empty()) {
+            state.decided = true;
+            state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
+            listCandidates(state, pieces);
+            listCandidates(state, others);
+            continue;
+        }
+        if (state.candidates.empty()) {
+            state.decided = true;
+            state.outcome.evidence = "no candidate";
+            continue;
+        }
+
+        state.graphEntry = graph.entryCount++;
+        for (int k : state.candidates) {
+            int id = pool.ids[k];
+            auto [it, inserted] = nodeOfId.emplace(id, 0);
+            if (inserted) {
+                it->second = graph.addCandidate({id});
+            }
+            graph.addEdge(state.graphEntry, it->second, state.inAncestry.count(k) > 0);
+        }
+    }
+
+    MatchResult matched = forcedMatching(graph);
+    std::map<int, int> idOfNode;
+    for (const auto& [id, node] : nodeOfId) {
+        idOfNode[node] = id;
+    }
+
+    for (auto& state : states) {
+        if (!state.decided) {
+            int e = state.graphEntry;
+            MatchStatus status = matched.status[e];
+            int k = status == MatchStatus::Resolved
+                ? elementOfId[idOfNode[matched.partner[e]]].second
+                : -1;
+            // A partner named as the old element up to the duplicate counter is a sibling (a
+            // pattern instance's copy of it), never the element itself: its ancestry and its top
+            // section are the old element's, so the evidence below can't tell them apart.
+            bool sibling = k >= 0
+                && std::any_of(
+                    state.pool->elements[k].names.begin(),
+                    state.pool->elements[k].names.end(),
+                    [&](const auto& n) { return isCounterSibling(n, state.oldName); }
+                );
+            // The partner must agree with the old name on the top section, or hold the old name
+            // in its ancestry: an ancestor shared with the old name alone (e.g. a sketch edge
+            // that many elements embed through a face) doesn't show it is the same element.
+            bool evidenced = k >= 0
+                && (state.inAncestry.count(k) > 0
+                    || std::any_of(
+                        state.pool->elements[k].names.begin(),
+                        state.pool->elements[k].names.end(),
+                        [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
+                    ));
+            if (status == MatchStatus::Resolved && sibling) {
+                state.outcome.evidence = "pattern sibling";
+                listCandidates(state, state.candidates);
+            }
+            else if (status == MatchStatus::Resolved && !evidenced) {
+                state.outcome.evidence = "no top agreement";
+                listCandidates(state, state.candidates);
+            }
+            else if (status == MatchStatus::Resolved) {
+                const auto& element = state.pool->elements[k];
+                double best = 0.0;
+                for (const auto& name : element.names) {
+                    best = std::max(best, ancestry.overlap(state.oldName, name));
+                }
+                std::string sources;
+                if (state.fromOverlap.count(k)) {
+                    sources = "overlap";
+                }
+                if (state.fromNames.count(k)) {
+                    sources += sources.empty() ? "names" : "+names";
+                }
+                state.outcome.status = SolveStatus::Resolved;
+                state.outcome.tier = 1;
+                state.outcome.element = element.index;
+                state.outcome.name = firstName(element);
+                state.outcome.evidence = "overlap " + formatOverlap(best) + ", sources " + sources
+                    + (state.inAncestry.count(k) ? ", in ancestry" : "");
+            }
+            else {
+                state.outcome.evidence = status == MatchStatus::TooLarge ? "too large to solve"
+                    : status == MatchStatus::NoCandidate                 ? "no candidate"
+                                                                         : "ambiguous";
+                listCandidates(state, state.candidates);
+            }
+        }
+        for (int member : *state.members) {
+            outcomes[member] = state.outcome;
+        }
+    }
+    return outcomes;
 }
 
 }  // namespace Data

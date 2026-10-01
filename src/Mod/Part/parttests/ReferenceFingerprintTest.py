@@ -75,8 +75,8 @@ class ReferenceFingerprintTest(unittest.TestCase):
         holder.addProperty("App::PropertyXLinkSub", "XSub")
         holder.addProperty("App::PropertyXLinkSubList", "XSubList")
         doc.recompute()
-        if solver:
-            doc.ReferenceSolver = True
+        # Explicitly, also when off: FREECAD_REFERENCE_SOLVER=1 turns it on in new documents.
+        doc.ReferenceSolver = solver
         holder.Sub = (box, ["Face1", "Face6"])
         holder.SubList = [(box, "Face2"), (box, "Edge1")]
         holder.XSub = (box, ["Vertex1"])

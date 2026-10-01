@@ -39,8 +39,14 @@ The verdict combines them (`combine`): wrong, partial, broken, equivalent (a dif
 that gives the consumer the same result) or correct. Each verdict is printed as a `SCORE` line
 (JSON) for the ops repo's scorecard, and appended to FREECAD_SCENARIO_SCORE_FILE if it is set.
 
-Configurations: V1, V2 and V2multi (V2 with the user parameter NamingMultiMatch on: a dress-up's
-Base and a Profile keep every piece of a split element).
+Configurations: V1, V2, V2multi (V2 with the user parameter NamingMultiMatch on: a dress-up's
+Base and a Profile keep every piece of a split element) and V2s (V2 with the document's
+ReferenceSolver on, ops#7: a reference that doesn't resolve exactly goes to the solver, and a
+broken one fails its owner). In V2s the SCORE record also has the solver's `tier` and
+`candidates` for the reference (App.getReferenceReport).
+
+A scenario edits in `edit(doc)`, or in several steps (`steps`, method names), each recomputed and
+judged: its references pass only if they pass after every step.
 """
 
 import json
@@ -59,7 +65,13 @@ X, Y, Z = V(1, 0, 0), V(0, 1, 0), V(0, 0, 1)
 
 PARAM_GROUP = "User parameter:BaseApp/Preferences/Mod/PartDesign"
 MULTI_PARAM = "NamingMultiMatch"
-CONFIGS = {"V1": ("V1", False), "V2": ("V2", False), "V2multi": ("V2", True)}
+# config: (history algorithm, multi-match flags, reference solver)
+CONFIGS = {
+    "V1": ("V1", False, False),
+    "V2": ("V2", False, False),
+    "V2multi": ("V2", True, False),
+    "V2s": ("V2", False, True),
+}
 VERDICTS = ("correct", "equivalent", "broken", "partial", "wrong")
 
 
@@ -149,6 +161,7 @@ class Masker:
                 if expanded == name:
                     break
                 name = expanded
+
         def tag(match):
             value = match.group(2)
             if value:
@@ -257,8 +270,9 @@ def _curve(e):
         return None
 
 
-def edge(curve=None, direction=None, through=None, contains=None, where=None, center=None,
-         radius=None):
+def edge(
+    curve=None, direction=None, through=None, contains=None, where=None, center=None, radius=None
+):
     """An edge: its curve type ('line', 'circle'), its direction (lines, either sense), a point
     of its infinite line, a point on the edge itself, a circle's centre and radius, or any
     test."""
@@ -720,6 +734,36 @@ class Result:
         return "SCORE " + json.dumps(self.record, sort_keys=True)
 
 
+class StepResults:
+    """A reference's Results after each step of a multi-step scenario: it passes if it passes
+    after every step; the first step where it doesn't names the failure."""
+
+    def __init__(self):
+        self.results = []
+
+    def append(self, result):
+        self.results.append(result)
+
+    def _failing(self):
+        return next((r for r in self.results if not r.passing), None)
+
+    @property
+    def passing(self):
+        return self._failing() is None
+
+    @property
+    def verdict(self):
+        result = self._failing() or self.results[-1]
+        return f"{result.verdict} after step {result.step}"
+
+    @property
+    def record(self):
+        return (self._failing() or self.results[-1]).record
+
+    def message(self):
+        return (self._failing() or self.results[-1]).message()
+
+
 class Scenario:
     """Subclasses define `build(doc)` (which calls `ref(...)`) and `edit(doc)`, and list their
     reference names in REFS. MULTI marks scenarios whose consumers the multi-match flags touch
@@ -732,7 +776,8 @@ class Scenario:
 
     def __init__(self, config):
         self.config = config
-        self.mode, self.multi = CONFIGS[config]
+        self.mode, self.multi, self.solver = CONFIGS[config]
+        self.stepName = None  # the step being run, for expectations that change between steps
         self.refs = {}
         self.documents = []
 
@@ -754,6 +799,8 @@ class Scenario:
         doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}{suffix}")
         if hasattr(doc, "HistoryAlgorithm"):
             doc.HistoryAlgorithm = self.mode
+        if hasattr(doc, "ReferenceSolver"):
+            doc.ReferenceSolver = self.solver
         self.documents.append(doc.Name)
         return doc
 
@@ -790,14 +837,31 @@ class Scenario:
             bad = [r.message() for r in before.values() if r.verdict != "correct"]
             if bad:
                 raise ScenarioError("references aren't correct before the edit:\n" + "\n".join(bad))
-            self.edit(self.doc)  # may close and reopen the documents (self.doc)
-            self.doc.recompute()
-            after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
-            for name, result in after.items():
-                result.record["names_before"] = before[name].record["names"]
-                result.record["subs_before"] = before[name].record["subs"]
-                emit(result)
-            return after
+            steps = getattr(self, "steps", None)
+            if not steps:
+                self.stepName = "edit"
+                self.edit(self.doc)  # may close and reopen the documents (self.doc)
+                self.doc.recompute()
+                after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
+                for name, result in after.items():
+                    result.record["names_before"] = before[name].record["names"]
+                    result.record["subs_before"] = before[name].record["subs"]
+                    emit(result)
+                return after
+            results = {name: StepResults() for name in self.refs}
+            previous = before
+            for step in steps:
+                self.stepName = step
+                getattr(self, step)(self.doc)  # may close and reopen the documents (self.doc)
+                self.doc.recompute()
+                judged = {name: self.judge(ref, step) for name, ref in self.refs.items()}
+                for name, result in judged.items():
+                    result.record["names_before"] = previous[name].record["names"]
+                    result.record["subs_before"] = previous[name].record["subs"]
+                    emit(result)
+                    results[name].append(result)
+                previous = judged
+            return results
         finally:
             self.cleanup()
             if hadParam:
@@ -871,7 +935,27 @@ class Scenario:
             outcome = "broken"
         result.verdict = combine(stored, outcome)
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
+        record.update(self._solverReport(owner, ref.prop))
+        if self.solver and not owner.isValid():
+            # a broken reference fails its owner, which names it (ops#7)
+            record["error"] = owner.getStatusString()
         return result
+
+    @staticmethod
+    def _solverReport(owner, prop):
+        """The reference solver's report on the property (ops#7): per reference the solver
+        didn't resolve exactly, its tier (1, "index" or "broken") and candidates. Empty where
+        the solver isn't (another configuration, or a build without it)."""
+        if not hasattr(App, "getReferenceReport"):
+            return {}
+        entries = [e for e in App.getReferenceReport(owner) if e["property"] == prop]
+        if not entries:
+            return {}
+        tiers, candidates = [], []
+        for e in entries:
+            tiers.append(e["tier"] if e["status"] == "resolved" else e["status"])
+            candidates.append(e["candidates"])
+        return {"tier": tiers, "candidates": candidates}
 
     @staticmethod
     def _name(masker, mode, target, sub):

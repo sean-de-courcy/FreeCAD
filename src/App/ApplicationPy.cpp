@@ -25,6 +25,7 @@
 
 #include <FCConfig.h>
 
+#include <algorithm>
 #include <array>
 
 #include <Base/Console.h>
@@ -36,12 +37,15 @@
 #include <Base/Sequencer.h>
 #include <App/ElementSolver.h>
 #include <App/MappedName.h>
+#include <App/ReferenceReport.h>
 
 #include "Application.h"
 #include "ApplicationPy.h"
 #include "DocumentPy.h"
 #include "DocumentObserverPython.h"
 #include "DocumentObjectPy.h"
+#include "ElementNamingUtils.h"
+#include "PropertyLinks.h"
 #include "RecoverySnapshot.h"
 #include "StringHasher.h"
 
@@ -1273,6 +1277,135 @@ PyObject* ApplicationPy::sIsPieceOf(PyObject* /*self*/, PyObject* args)
     PY_TRY
     {
         return Py::new_reference_to(Py::Boolean(Data::NameAncestry::isPieceOf(name, oldName)));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyObj {};
+    if (!PyArg_ParseTuple(args, "O!", &DocumentObjectPy::Type, &pyObj)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
+        Py::List list;
+        for (const auto& slot : ReferenceReport::slotsOf(obj)) {
+            auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
+            if (!entry && !Data::hasMissingElement(slot.sub.c_str())) {
+                continue;
+            }
+            Py::Dict dict;
+            Py::List candidates;
+            Py::List candidateNames;
+            dict.setItem("property", Py::String(slot.property));
+            dict.setItem("index", Py::Long(slot.index));
+            dict.setItem("sub", Py::String(slot.sub));
+            if (entry) {
+                for (const auto& [index, name] : entry->candidates) {
+                    candidates.append(Py::String(index));
+                    candidateNames.append(Py::String(name));
+                }
+                dict.setItem("old", Py::String(entry->oldName));
+                dict.setItem("status", Py::String(ReferenceReport::statusName(entry->status)));
+                dict.setItem("tier", Py::Long(entry->tier));
+                dict.setItem("new", Py::String(entry->newIndex));
+                dict.setItem("evidence", Py::String(entry->evidence));
+                dict.setItem("target", Py::String(entry->target));
+            }
+            else {
+                // Missing, and not solved since the report was last cleared.
+                dict.setItem("old", Py::String(slot.mappedName));
+                dict.setItem("status", Py::String("broken"));
+                dict.setItem("tier", Py::Long(-1));
+                dict.setItem("new", Py::String(""));
+                dict.setItem("evidence", Py::String(""));
+                dict.setItem("target", Py::String(""));
+            }
+            dict.setItem("candidates", candidates);
+            dict.setItem("candidate_names", candidateNames);
+            list.append(dict);
+        }
+        return Py::new_reference_to(list);
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sRepairReference(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyObj {};
+    const char* property {};
+    int index {};
+    const char* candidate {};
+    if (!PyArg_ParseTuple(args,
+                          "O!sis",
+                          &DocumentObjectPy::Type,
+                          &pyObj,
+                          &property,
+                          &index,
+                          &candidate)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
+        const ReferenceReport::Slot* found = nullptr;
+        auto slots = ReferenceReport::slotsOf(obj);
+        for (const auto& slot : slots) {
+            if (slot.property == property && slot.index == index) {
+                found = &slot;
+                break;
+            }
+        }
+        if (!found) {
+            throw Base::ValueError("No element reference " + std::string(property) + "["
+                                   + std::to_string(index) + "]");
+        }
+        auto entry = ReferenceReport::find(found->prop, found->localIndex);
+        bool listed = entry
+            && std::any_of(entry->candidates.begin(),
+                           entry->candidates.end(),
+                           [&](const auto& c) {
+                               return c.first == candidate;
+                           });
+        if (!listed) {
+            throw Base::ValueError(std::string(candidate) + " is not a candidate of "
+                                   + property + "[" + std::to_string(index) + "]");
+        }
+
+        // The sub keeps its sub-object path; its shadow is cleared, so that registering it
+        // resolves the candidate exactly. The other references keep theirs.
+        const char* element = Data::findElementName(found->sub.c_str());
+        std::string newSub = found->sub.substr(0, element - found->sub.c_str()) + candidate;
+        const int i = found->localIndex;
+        auto prop = const_cast<PropertyLinkBase*>(found->prop);
+        if (auto link = freecad_cast<PropertyLinkSub*>(prop)) {
+            auto subs = link->getSubValues();
+            auto shadows = link->getShadowSubs();
+            subs[i] = newSub;
+            shadows[i] = PropertyLinkBase::ShadowSub();
+            link->setValue(link->getValue(), std::move(subs), std::move(shadows));
+        }
+        else if (auto list = freecad_cast<PropertyLinkSubList*>(prop)) {
+            auto objs = list->getValues();
+            auto subs = list->getSubValues();
+            auto shadows = list->getShadowSubs();
+            subs[i] = newSub;
+            shadows[i] = PropertyLinkBase::ShadowSub();
+            list->setValues(std::move(objs), std::move(subs), std::move(shadows));
+        }
+        else if (auto xlink = freecad_cast<PropertyXLink*>(prop)) {
+            // A PropertyXLinkSubList's link notifies its list.
+            auto subs = xlink->getSubValues();
+            auto shadows = xlink->getShadowSubs();
+            subs[i] = newSub;
+            shadows[i] = PropertyLinkBase::ShadowSub();
+            xlink->setValue(xlink->getValue(), std::move(subs), std::move(shadows));
+        }
+        Py_Return;
     }
     PY_CATCH;
 }

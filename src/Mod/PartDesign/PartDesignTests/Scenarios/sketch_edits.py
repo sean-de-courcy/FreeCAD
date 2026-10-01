@@ -110,3 +110,38 @@ class SketchReaddLine(SketchEdit):
     def edit(self, doc):
         doc.Profile.delGeometry(1)
         doc.Profile.addGeometry(Part.LineSegment(V(20, 0, 0), V(20, 10, 0)), False)
+
+
+class SolverOuterWireGains(Scenario):
+    """The reference solver's tier 1 (ops#7): a rectangle (0..20 x 0..10) padded 10 high, a
+    sketch attached to the pad's top face and a fillet on its front top edge. The profile's right
+    back corner is cut off by a new line from (20, 7) to (17, 10): the outer wire gains an edge,
+    so the top face's name changes, and its old name's edges are all in the new one's."""
+
+    area = "sketch edits"
+    MULTI = True
+    REFS = ("top_face", "front_top_edge")
+
+    def topFace(self):
+        return face("plane", normal=Z, through=(0, 0, 10))
+
+    def frontTopEdge(self):
+        return edge("line", direction=X, through=(0, 0, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.frontTopEdge()))
+        fillet.Radius = 1
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(pad, self.names(pad, self.topFace())[0])]
+        onTop.MapMode = "FlatFace"
+        self.ref("top_face", onTop, "AttachmentSupport", self.topFace, Attached())
+        self.ref("front_top_edge", fillet, "Base", self.frontTopEdge, Filleted(1))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {1: ((20, 0), (20, 7)), 2: ((17, 10), (0, 10))})
+        doc.Profile.addGeometry(Part.LineSegment(V(20, 7, 0), V(17, 10, 0)), False)

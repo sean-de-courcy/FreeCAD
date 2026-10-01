@@ -92,6 +92,8 @@ public:
     static PyObject *sMakeEncodedSection     (PyObject *self,PyObject *args, PyObject* keywds);
     static PyObject *sGetNameAncestors       (PyObject *self,PyObject *args);
     static PyObject *sIsPieceOf              (PyObject *self,PyObject *args);
+    static PyObject *sGetReferenceReport     (PyObject *self,PyObject *args);
+    static PyObject *sRepairReference        (PyObject *self,PyObject *args);
     // clang-format on
 };
 
