@@ -90,7 +90,8 @@ names it.
 | `feat/solver-relink` | feat | ops#7 | - | `feat/solver-consumers` `e140c865e1` (fork PR 59) | `0cb280a74d` (fork PR 60), 2026-10-01 | never (fork feature) |
 | `fix/69-consumers-loud` | fix | ops#69, ops#70, ops#71 | - | `integration` `0cb280a74d` | `fa4ec55a11` (fork PR 61), 2026-10-01 | a new base's SubShapeBinder, `ProfileBased::getProfileShape`, Loft and Pipe fail on a missing sub-element and name it |
 | `fix/72-sketch-external-loud` | fix | ops#72, ops#75 | - | `integration` `0cb280a74d` | `004b400470` (fork PR 62), 2026-10-01 | a new base's sketch fails on a missing external geometry reference and keeps the link, its frozen geometry and constraints (also on opening it) |
-| `fix/55-duplicate-count` | fix | ops#55 | - | `integration` `004b400470` | (fork PR 64) | tests: V2 duplicate counts and pattern instance names (gtests); two patterns of one original whose references move between them (scenarios, listed as known failures for Task 1) |
+| `fix/55-duplicate-count` | fix | ops#55 | - | `integration` `004b400470` | `6b0289adb6` (fork PR 64), 2026-10-01 | tests: V2 duplicate counts and pattern instance names (gtests); two patterns of one original whose references move between them (scenarios, listed as known failures for Task 1) |
+| `fix/86-sketcher-partdesign-guard` | fix | ops#86 | - | `integration` `004b400470` | (fork PR 65) | tests: the Sketcher tests' PartDesign guard (`BUILD_PART_DESIGN`), and V2/ops#72 expectations for the three of them that then failed |
 
 ## Fork-only commits in carried topics
 

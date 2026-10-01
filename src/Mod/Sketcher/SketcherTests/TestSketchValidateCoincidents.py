@@ -133,7 +133,7 @@ class TestSketchValidateCoincidents(unittest.TestCase):
     def testExternalGeoDeletion(self):
         """Make sure that we don't remove External Geometry references to deleted geometry.
         See https://github.com/FreeCAD/FreeCAD/issues/16361"""
-        if "BUILD_PARTDESIGN" in FreeCAD.__cmake__:
+        if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             doc = App.ActiveDocument
             doc.addObject("PartDesign::Body", "Body")
             doc.Body.Label = "Body"
@@ -206,7 +206,9 @@ class TestSketchValidateCoincidents(unittest.TestCase):
             doc.recompute()
             # Assert
             self.assertEqual(len(doc.Sketch001.Constraints), 2)  # Still have the constraints
-            self.assertEqual(len(doc.Sketch001.ExternalGeometry), 0)
+            # The link to the deleted edge is kept, and the sketch fails (ops#72)
+            self.assertEqual(doc.Sketch001.ExternalGeometry, [(doc.Sketch, ("?Edge3",))])
+            self.assertFalse(doc.Sketch001.isValid())
             self.assertEqual(len(doc.Sketch001.Geometry), 1)
             self.assertEqual(
                 len(doc.Sketch001.ExternalGeo), 3
