@@ -276,6 +276,7 @@ SET(Properties_CPP_SRCS
     PropertyFile.cpp
     PropertyGeo.cpp
     PropertyLinks.cpp
+    ReferenceReport.cpp
     PropertyPythonObject.cpp
     PropertyStandard.cpp
     PropertyUnits.cpp
@@ -289,6 +290,7 @@ SET(Properties_HPP_SRCS
     PropertyFile.h
     PropertyGeo.h
     PropertyLinks.h
+    ReferenceReport.h
     PropertyPythonObject.h
     PropertyStandard.h
     PropertyUnits.h
@@ -321,6 +323,7 @@ SET(FreeCADApp_CPP_SRCS
     ElementFingerprint.cpp
     ElementMap.cpp
     ElementSolver.cpp
+    ElementSolverBatch.cpp
     Enumeration.cpp
     IndexedName.cpp
     MappedElement.cpp
@@ -355,6 +358,7 @@ SET(FreeCADApp_HPP_SRCS
     ElementFingerprint.h
     ElementMap.h
     ElementSolver.h
+    ElementSolverBatch.h
     Enumeration.h
     IndexedName.h
     MappedName.h

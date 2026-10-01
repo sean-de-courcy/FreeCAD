@@ -326,3 +326,47 @@ class PartDesignCommonSlide(PartDesignCommon):
 
     def edit(self, doc):
         self.move(doc.ToolBody, tx=14)
+
+
+# ---------------------------------------------------------------------------------------------
+# The reference solver (ops#7): two faces merge into one
+# ---------------------------------------------------------------------------------------------
+
+
+class SolverMergeTwo(Scenario):
+    """Part::Fuse (refined) of box A (10 x 10 x 10 at the origin) and box B (10 x 10 x 8 at
+    x = 12); a sketch on A's top and one on B's top. B grows to 10 high and moves to x = 10: it
+    touches A, the tops are coplanar, and the refined fusion merges them into one face
+    (x 0..20). Both sketches should follow onto the merged face, each from its own owner."""
+
+    area = "booleans"
+    REFS = ("a_top", "b_top")
+    merged = False
+
+    def topA(self):
+        if self.merged:
+            return face("plane", normal=Z, through=(0, 0, 10), contains=(15, 5, 10))
+        return face("plane", normal=Z, through=(0, 0, 10), contains=(5, 5, 10))
+
+    def topB(self):
+        if self.merged:
+            return face("plane", normal=Z, through=(0, 0, 10), contains=(5, 5, 10))
+        return face("plane", normal=Z, through=(0, 0, 8), contains=(17, 5, 8))
+
+    def build(self, doc):
+        m.box(doc, "A", (10, 10, 10))
+        m.box(doc, "B", (10, 10, 8), at=(12, 0, 0))
+        fusion = doc.addObject("Part::Fuse", "Fusion")
+        fusion.Base, fusion.Tool = doc.A, doc.B
+        fusion.Refine = True
+        doc.recompute()
+        for ref, predicate in (("a_top", self.topA), ("b_top", self.topB)):
+            sketch = doc.addObject("Sketcher::SketchObject", "On_" + ref)
+            sketch.AttachmentSupport = [(fusion, self.names(fusion, predicate())[0])]
+            sketch.MapMode = "FlatFace"
+            self.ref(ref, sketch, "AttachmentSupport", predicate, Attached())
+
+    def edit(self, doc):
+        doc.B.Height = 10
+        doc.B.Placement.Base = V(10, 0, 0)
+        self.merged = True

@@ -25,15 +25,16 @@ reference and configuration, `<Scenario>.test_<ref>_<config>`. A test passes whe
 verdict is correct or equivalent (or broken, where the scenario expects the element to be gone).
 Each scenario is built once per configuration, on its first test. See Scenarios/harness.py.
 
-Configurations: V2 for every scenario, V2multi (the multi-match flags on) for the scenarios whose
-consumers the flags touch. FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi runs the listed ones for every
-scenario instead (the scorecard's local run). Every verdict is printed as a `SCORE` line.
+Configurations: V2 and V2s (the reference solver on, ops#7) for every scenario, V2multi (the
+multi-match flags on) for the scenarios whose consumers the flags touch.
+FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi,V2s runs the listed ones for every scenario instead (the
+scorecard's local run). Every verdict is printed as a `SCORE` line.
 
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
-one test per seed and configuration, V2 and V2multi. It passes when every reference is as expected
-after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS ("1-500",
-"3,7") and FREECAD_SCENARIO_STEPS change them, and FREECAD_SCENARIO_REPLAY=<seed>:<steps> runs one
-seed.
+one test per seed and configuration, V2, V2multi and V2s. It passes when every reference is as
+expected after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
+("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, and FREECAD_SCENARIO_REPLAY=<seed>:<steps>
+runs one seed.
 """
 
 import os
@@ -66,7 +67,7 @@ def configsFor(scenario):
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     if listed:
         return [c.strip() for c in listed.split(",") if c.strip()]
-    return ["V2", "V2multi"] if scenario.MULTI else ["V2"]
+    return ["V2", "V2s", "V2multi"] if scenario.MULTI else ["V2", "V2s"]
 
 
 class ScenarioTestCase(unittest.TestCase):
@@ -158,7 +159,11 @@ class RandomSequences(unittest.TestCase):
 def _makeRandomTests():
     seeds, steps = randomRuns()
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
-    configs = [c.strip() for c in listed.split(",") if c.strip()] if listed else ["V2", "V2multi"]
+    configs = (
+        [c.strip() for c in listed.split(",") if c.strip()]
+        if listed
+        else ["V2", "V2multi", "V2s"]
+    )
     for seed in seeds:
         for config in configs:
 

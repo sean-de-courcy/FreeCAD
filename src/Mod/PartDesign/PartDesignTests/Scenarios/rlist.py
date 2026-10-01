@@ -24,7 +24,13 @@
 (R7). The R-list items below the reference level (R3, R5, R10) are unit tests in
 `TestNamingRList.py`."""
 
-from .harness import Chamfered, Scenario, X, edge
+import os
+import shutil
+import tempfile
+
+import FreeCAD as App
+
+from .harness import BROKEN, Chamfered, Scenario, X, edge
 from . import models as m
 
 
@@ -68,3 +74,46 @@ class R7EdgeReturns(ChamferEdgeShortened):
         m.moveRectangle(doc.SlotSketch, -1, -1, 21, 3)
         doc.recompute()
         super().edit(doc)
+
+
+class SolverEdgeReturns(ChamferEdgeShortened):
+    """The reference solver's retry (ops#7), judged after each step. Step 1: the slot becomes a
+    step along the whole front (x -1..21, y -1..3), which removes the edge: the reference is
+    broken and the chamfer fails. Step 2: the slot moves back to x 8..12, y 4..6, and the edge is
+    whole again under its old name: the reference is found again."""
+
+    steps = ("removeEdge", "restoreEdge")
+    removed = ("removeEdge",)
+
+    def frontTopEdge(self):
+        if self.step in self.removed:
+            return BROKEN
+        return super().frontTopEdge()
+
+    def removeEdge(self, doc):
+        m.moveRectangle(doc.SlotSketch, -1, -1, 21, 3)
+
+    def restoreEdge(self, doc):
+        m.moveRectangle(doc.SlotSketch, 8, 4, 12, 6)
+
+
+class SolverEdgeReturnsReopened(SolverEdgeReturns):
+    """As SolverEdgeReturns, with the document saved, closed and opened again between the steps:
+    the broken reference keeps its old name in the file and is retried after the reopen."""
+
+    steps = ("removeEdge", "reopen", "restoreEdge")
+    removed = ("removeEdge", "reopen")
+
+    def reopen(self, doc):
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        self.doc = App.openDocument(path)
+        self.documents.append(self.doc.Name)
+        for obj in self.doc.Objects:
+            obj.touch()
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)

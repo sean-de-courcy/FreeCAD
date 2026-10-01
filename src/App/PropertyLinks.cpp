@@ -38,6 +38,8 @@
 #include "Application.h"
 #include "Document.h"
 #include "ElementFingerprint.h"
+#include "ElementSolverBatch.h"
+#include "ReferenceReport.h"
 #include "DocumentObject.h"
 #include "DocumentObjectPy.h"
 #include "DocumentObserver.h"
@@ -125,6 +127,8 @@ bool PropertyLinkBase::isSame(const Property& other) const
 
 void PropertyLinkBase::unregisterElementReference()
 {
+    // The reference solver's report on this property is stale from here on (ops#7).
+    ReferenceReport::clear(this);
     for (auto obj : _ElementRefs) {
         auto it = _ElementRefMap.find(obj);
         if (it != _ElementRefMap.end()) {
@@ -260,6 +264,38 @@ static std::string propertyName(const Property* prop)
     return prop->getFullName();
 }
 
+// The reference solver (ops#7) for the properties of solver documents among a feature's
+// references, those still registered under it.
+static void solveReferences(DocumentObject* feature,
+                            std::vector<PropertyLinkBase*>& props,
+                            bool reverse)
+{
+    auto it = _ElementRefMap.find(feature);
+    if (it == _ElementRefMap.end()) {
+        return;
+    }
+    props.erase(std::remove_if(props.begin(),
+                               props.end(),
+                               [&](PropertyLinkBase* prop) {
+                                   return it->second.count(prop) == 0;
+                               }),
+                props.end());
+    if (props.empty()) {
+        return;
+    }
+    try {
+        App::solveElementReferences(feature, props, reverse, true);
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+        FC_ERR("Failed to update element references to " << feature->getFullName());
+    }
+    catch (std::exception& e) {
+        FC_ERR("Failed to update element references to " << feature->getFullName() << ": "
+                                                          << e.what());
+    }
+}
+
 const std::unordered_set<PropertyLinkBase*>&
 PropertyLinkBase::getElementReferences(DocumentObject* feature)
 {
@@ -285,8 +321,14 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
     std::vector<PropertyLinkBase*> props;
     props.reserve(it->second.size());
     props.insert(props.end(), it->second.begin(), it->second.end());
+    // Properties in reference solver documents (ops#7) are updated together, after the others.
+    std::vector<PropertyLinkBase*> solverProps;
     for (auto prop : props) {
         if (prop->getContainer()) {
+            if (prop->inSolverDocument()) {
+                solverProps.push_back(prop);
+                continue;
+            }
             try {
                 prop->updateElementReference(feature, reverse, true);
             }
@@ -300,6 +342,7 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
             }
         }
     }
+    solveReferences(feature, solverProps, reverse);
 }
 
 void PropertyLinkBase::updateAllElementReferences(bool reverse)
@@ -314,9 +357,14 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
                                 std::vector<PropertyLinkBase*>(props.begin(), props.end()));
     }
     for (const auto& [feature, props] : references) {
+        std::vector<PropertyLinkBase*> solverProps;
         for (auto prop : props) {
             auto it = _ElementRefMap.find(feature);
             if (it == _ElementRefMap.end() || it->second.count(prop) == 0) {
+                continue;
+            }
+            if (prop->getContainer() && prop->inSolverDocument()) {
+                solverProps.push_back(prop);
                 continue;
             }
             if (prop->getContainer()) {
@@ -333,6 +381,7 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
                 }
             }
         }
+        solveReferences(feature, solverProps, false);
     }
 }
 
@@ -563,7 +612,9 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     }
 
     bool missing = GeoFeature::hasMissingElement(elementName.oldName.c_str());
-    if (feature == geo && (missing || reverse)) {
+    // In a reference solver document (ops#7) this is the exact lookup only: no name match, no
+    // geometric search. The solver takes the references that miss.
+    if (feature == geo && (missing || reverse) && !inSolverDocument()) {
         bool resolvedMissing = false;
         std::string nameMatch;  // the name match's pick, to tell a geometric override (ops#20)
 
@@ -670,9 +721,12 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     };
 
     if (missing) {
-        FC_WARN(propertyName(this)
-                << " missing element reference " << ret->getFullName() << " "
-                << (elementName.newName.size() ? elementName.newName : elementName.oldName));
+        // A solver document retries missing references on every update: warn on the first miss.
+        if (!(shadow == elementName) || !inSolverDocument()) {
+            FC_WARN(propertyName(this)
+                    << " missing element reference " << ret->getFullName() << " "
+                    << (elementName.newName.size() ? elementName.newName : elementName.oldName));
+        }
         shadow.oldName.swap(elementName.oldName);
     }
     else {
@@ -1718,6 +1772,12 @@ static bool updateLinkReference(App::PropertyLinkBase* prop,
     if (owner && owner->isRestoring()) {
         return false;
     }
+    if (feature && prop->inSolverDocument()) {
+        // The reference solver (ops#7), for this property alone. It notifies itself, so the
+        // caller is told of a change only when it doesn't notify.
+        bool changed = App::solveElementReferences(feature, {prop}, reverse, notify);
+        return changed && !notify;
+    }
     bool touched = false;
     std::vector<Data::MappedElement> extraMatchedNames;
     std::ostringstream ss;
@@ -1780,6 +1840,100 @@ static bool updateLinkReference(App::PropertyLinkBase* prop,
     return true;
 }
 
+// The reference solver's pass 1 (ops#7) for one property's references: the exact lookup (in a
+// solver document, _updateElementReference() does nothing more), then an entry for each
+// reference that is missing (just now, or already) or resolved exactly. The references of
+// other targets are dropped in pass 2.
+static void collectLinkReferences(App::PropertyLinkBase* prop,
+                                  App::DocumentObject* feature,
+                                  App::SolverBatch& batch,
+                                  App::DocumentObject* link,
+                                  const std::vector<App::DocumentObject*>* links,
+                                  std::vector<std::string>& subs,
+                                  std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                                  const std::vector<std::string>& fingerprints)
+{
+    shadows.resize(subs.size());
+    auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+    if (!owner || owner->isRestoring()) {
+        return;
+    }
+    bool touched = false;
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        auto obj = links ? (i < links->size() ? (*links)[i] : nullptr) : link;
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
+        auto& shadow = shadows[i];
+        if (prop->_updateElementReference(feature,
+                                          obj,
+                                          subs[i],
+                                          shadow,
+                                          batch.reverse,
+                                          batch.notify && !touched)) {
+            touched = true;
+        }
+        App::SolverEntry entry;
+        if (Data::hasMissingElement(shadow.oldName.c_str())) {
+            entry.kind = App::SolverEntry::Kind::Missing;
+        }
+        else if (!shadow.newName.empty()) {
+            entry.kind = App::SolverEntry::Kind::Exact;
+        }
+        else {
+            continue;  // an index-only reference: nothing to solve
+        }
+        const char* element = Data::findElementName(shadow.newName.c_str());
+        if (!element) {
+            continue;
+        }
+        entry.prefix = shadow.newName.substr(0, element - shadow.newName.c_str());
+        entry.oldName = App::bareMappedName(shadow.newName);
+        const char* oldElement = Data::findElementName(shadow.oldName.c_str());
+        entry.oldIndex = oldElement ? oldElement : "";
+        if (entry.kind == App::SolverEntry::Kind::Missing) {
+            entry.oldIndex.erase(0, std::strlen(Data::MISSING_PREFIX));
+        }
+        if (entry.oldIndex.empty()) {
+            continue;
+        }
+        entry.prop = prop;
+        entry.index = static_cast<int>(i);
+        entry.obj = obj;
+        entry.owner = owner;
+        entry.sub = subs[i];
+        entry.oldFingerprint = i < fingerprints.size() ? fingerprints[i] : std::string();
+        entry.policy = prop->getElementPolicy();
+        batch.entries.push_back(std::move(entry));
+    }
+    batch.properties.emplace_back(prop, touched);
+}
+
+// Writes the solver's resolutions into subs and shadows, calling aboutToSet() first if pass 1
+// didn't change the property already. Returns true if the property changed in either pass.
+static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resolutions,
+                                 std::vector<std::string>& subs,
+                                 std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                                 const std::function<void()>& aboutToSet)
+{
+    const auto& context = resolutions.front();
+    bool changed = context.touched;
+    shadows.resize(subs.size());
+    for (const auto& resolution : resolutions) {
+        if (resolution.status != App::SolverResolution::Status::Resolved || resolution.index < 0
+            || resolution.index >= static_cast<int>(subs.size())) {
+            continue;
+        }
+        if (!changed && context.notify) {
+            aboutToSet();
+        }
+        changed = true;
+        subs[resolution.index] = resolution.sub;
+        shadows[resolution.index] = resolution.shadow;
+    }
+    return changed;
+}
+
 void PropertyLinkSub::afterRestore()
 {
     _ShadowSubList.resize(_cSubList.size());
@@ -1833,16 +1987,50 @@ bool PropertyLinkSub::updateElementFingerprints()
                                       _Fingerprints);
 }
 
-// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+// The reference solver's passes (ops#7).
 void PropertyLinkSub::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
 {
-    (void)feature;
-    (void)batch;
+    collectLinkReferences(this,
+                          feature,
+                          batch,
+                          _pcLinkSub,
+                          nullptr,
+                          _cSubList,
+                          _ShadowSubList,
+                          _Fingerprints);
 }
 
 void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& resolutions)
 {
-    (void)resolutions;
+    if (resolutions.empty()) {
+        return;
+    }
+    const auto& context = resolutions.front();
+    bool changed = writeLinkResolutions(resolutions, _cSubList, _ShadowSubList, [this]() {
+        aboutToSetValue();
+    });
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    if (changed) {
+        // As updateLinkReference() does.
+        for (int idx : _mapped) {
+            if (idx < (int)_cSubList.size() && !_ShadowSubList[idx].newName.empty()) {
+                _cSubList[idx] = _ShadowSubList[idx].newName;
+            }
+        }
+        _mapped.clear();
+        if (owner && context.feature) {
+            owner->onUpdateElementReference(this);
+        }
+    }
+    _updateElementFingerprints(context.feature,
+                               _pcLinkSub,
+                               nullptr,
+                               _cSubList,
+                               _ShadowSubList,
+                               _Fingerprints);
+    if (changed && context.notify) {
+        hasSetValue();
+    }
 }
 
 std::vector<std::string> PropertyLinkSub::getElementFingerprints() const
@@ -3022,16 +3210,57 @@ bool PropertyLinkSubList::updateElementFingerprints()
                                       _Fingerprints);
 }
 
-// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+// The reference solver's passes (ops#7).
 void PropertyLinkSubList::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
 {
-    (void)feature;
-    (void)batch;
+    collectLinkReferences(this,
+                          feature,
+                          batch,
+                          nullptr,
+                          &_lValueList,
+                          _lSubList,
+                          _ShadowSubList,
+                          _Fingerprints);
 }
 
 void PropertyLinkSubList::applyResolutions(const std::vector<SolverResolution>& resolutions)
 {
-    (void)resolutions;
+    if (resolutions.empty()) {
+        return;
+    }
+    const auto& context = resolutions.front();
+    bool changed = writeLinkResolutions(resolutions, _lSubList, _ShadowSubList, [this]() {
+        aboutToSetValue();
+    });
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    if (changed) {
+        // As updateElementReference() does.
+        std::vector<int> mapped;
+        mapped.reserve(_mapped.size());
+        for (int idx : _mapped) {
+            if (idx < (int)_lSubList.size()) {
+                if (!_ShadowSubList[idx].newName.empty()) {
+                    _lSubList[idx] = _ShadowSubList[idx].newName;
+                }
+                else {
+                    mapped.push_back(idx);
+                }
+            }
+        }
+        _mapped.swap(mapped);
+        if (owner && context.feature) {
+            owner->onUpdateElementReference(this);
+        }
+    }
+    _updateElementFingerprints(context.feature,
+                               nullptr,
+                               &_lValueList,
+                               _lSubList,
+                               _ShadowSubList,
+                               _Fingerprints);
+    if (changed && context.notify) {
+        hasSetValue();
+    }
 }
 
 std::vector<std::string> PropertyLinkSubList::getElementFingerprints() const
@@ -3050,6 +3279,11 @@ void PropertyLinkSubList::updateElementReference(DocumentObject* feature, bool r
     _ShadowSubList.resize(_lSubList.size());
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     if (owner && owner->isRestoring()) {
+        return;
+    }
+    if (feature && inSolverDocument()) {
+        // The reference solver (ops#7), for this property alone.
+        App::solveElementReferences(feature, {this}, reverse, notify);
         return;
     }
     int i = 0;
@@ -4449,6 +4683,8 @@ void PropertyXLink::afterRestore()
 
 void PropertyXLink::onContainerRestored()
 {
+    // It doesn't unregister first, so drop the solver's report here (ops#7).
+    ReferenceReport::clear(this);
     if (!_pcLink || !_pcLink->isAttachedToDocument()) {
         return;
     }
@@ -4487,16 +4723,51 @@ bool PropertyXLink::updateElementFingerprints()
                                       _Fingerprints);
 }
 
-// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+// The reference solver's passes (ops#7).
 void PropertyXLink::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
 {
-    (void)feature;
-    (void)batch;
+    collectLinkReferences(this,
+                          feature,
+                          batch,
+                          _pcLink,
+                          nullptr,
+                          _SubList,
+                          _ShadowSubList,
+                          _Fingerprints);
 }
 
 void PropertyXLink::applyResolutions(const std::vector<SolverResolution>& resolutions)
 {
-    (void)resolutions;
+    if (resolutions.empty()) {
+        return;
+    }
+    const auto& context = resolutions.front();
+    // A PropertyXLinkSubList's link forwards these to its list.
+    bool changed = writeLinkResolutions(resolutions, _SubList, _ShadowSubList, [this]() {
+        aboutToSetValue();
+    });
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    if (changed) {
+        // As updateLinkReference() does.
+        for (int idx : _mapped) {
+            if (idx < (int)_SubList.size() && !_ShadowSubList[idx].newName.empty()) {
+                _SubList[idx] = _ShadowSubList[idx].newName;
+            }
+        }
+        _mapped.clear();
+        if (owner && context.feature) {
+            owner->onUpdateElementReference(this);
+        }
+    }
+    _updateElementFingerprints(context.feature,
+                               _pcLink,
+                               nullptr,
+                               _SubList,
+                               _ShadowSubList,
+                               _Fingerprints);
+    if (changed && context.notify) {
+        hasSetValue();
+    }
 }
 
 std::vector<std::string> PropertyXLink::getElementFingerprints() const
@@ -5539,16 +5810,28 @@ bool PropertyXLinkSubList::updateElementFingerprints()
     return holdsElements;
 }
 
-// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+// The reference solver's passes (ops#7): per link, which holds the references (and is what
+// registers under the targets).
 void PropertyXLinkSubList::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
 {
-    (void)feature;
-    (void)batch;
+    for (auto& l : _Links) {
+        l.collectElementReferences(feature, batch);
+    }
 }
 
 void PropertyXLinkSubList::applyResolutions(const std::vector<SolverResolution>& resolutions)
 {
-    (void)resolutions;
+    for (auto& l : _Links) {
+        std::vector<SolverResolution> own;
+        for (const auto& resolution : resolutions) {
+            if (resolution.prop == &l) {
+                own.push_back(resolution);
+            }
+        }
+        if (!own.empty()) {
+            l.applyResolutions(own);
+        }
+    }
 }
 
 std::vector<std::string> PropertyXLinkSubList::getElementFingerprints() const
