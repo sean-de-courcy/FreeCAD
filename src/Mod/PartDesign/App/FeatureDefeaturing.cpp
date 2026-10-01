@@ -58,7 +58,13 @@ App::DocumentObjectExecReturn* Defeaturing::execute()
     }
     baseShape.setTransform(Base::Matrix4D());
 
-    auto faces = getFaces(baseShape);
+    std::vector<Part::TopoShape> faces;
+    try {
+        faces = getFaces(baseShape);  // fails on a missing face (ops#60)
+    }
+    catch (Base::Exception& e) {
+        return new App::DocumentObjectExecReturn(e.what());
+    }
     if (faces.empty()) {
         this->positionByBaseFeature();
         this->Shape.setValue(getSolid(baseShape));

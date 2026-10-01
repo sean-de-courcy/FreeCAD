@@ -117,6 +117,19 @@ App::DocumentObjectExecReturn* Draft::execute()
     // see below
     std::vector<std::string> SubVals = Base.getSubValuesStartsWith("Face");
 
+    // create an untransformed copy of the base shape
+    Part::TopoShape baseShape(TopShape);
+    baseShape.setTransform(Base::Matrix4D());
+    // getFaces fails on a missing face, which SubVals doesn't list ("?Face3"): before the copy
+    // below, which would take a draft whose faces are all missing for one with none (ops#60)
+    std::vector<TopoShape> faces;
+    try {
+        faces = getFaces(baseShape);
+    }
+    catch (Base::Exception& e) {
+        return new App::DocumentObjectExecReturn(e.what());
+    }
+
     // If no element is selected, then we use a copy of previous feature.
     if (SubVals.empty()) {
         this->positionByBaseFeature();
@@ -316,12 +329,7 @@ App::DocumentObjectExecReturn* Draft::execute()
     computeProps = {pullDirection, neutralPlane};
 
     this->positionByBaseFeature();
-    // create an untransformed copy of the base shape
-    Part::TopoShape baseShape(TopShape);
-    baseShape.setTransform(Base::Matrix4D());
     try {
-        std::vector<TopoShape> faces = getFaces(baseShape);
-
         TopoShape shape = makeTopoShape();
         shape.makeElementDraft(baseShape, faces, pullDirection, angle, neutralPlane, reversed);
 

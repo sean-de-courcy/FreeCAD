@@ -31,6 +31,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopExp_Explorer.hxx>
 
+#include <cstring>
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -38,6 +39,7 @@
 #include "PartDesignParameter.h"
 #include <Base/Console.h>
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
 
@@ -249,13 +251,41 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
     std::vector<TopoShape> ret;
     const auto& vals = Base.getSubValues();
     const auto& subs = Base.getShadowSubs();
-    size_t i = 0;
-    for (auto& val : vals) {
-        if (!boost::starts_with(val, "Face")) {
+    // The shadows are listed in the same order as the sub-names, one each. The shadow's old name
+    // is the indexed name ("Face3"), also for a sub stored as a mapped name.
+    auto indexedName = [&](std::size_t i) -> const std::string& {
+        return i < subs.size() && !subs[i].oldName.empty() ? subs[i].oldName : vals[i];
+    };
+
+    // A face that no longer exists is stored as "?Face3" (Data::MISSING_PREFIX), which the type
+    // test below doesn't take for a face. The feature must fail then, not carry on without it
+    // (ops#60). A missing element of another type is skipped, as the element itself would be.
+    std::string missing;
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        const std::string& name = indexedName(i);
+        if (!Data::hasMissingElement(name.c_str()) && !Data::hasMissingElement(vals[i].c_str())) {
             continue;
         }
-        auto& sub = subs[i++];
-        auto& ref = sub.newName.size() ? sub.newName : val;
+        std::string element = name.substr(name.rfind('.') + 1);  // npos + 1 == 0
+        if (boost::starts_with(element, Data::MISSING_PREFIX)) {
+            element.erase(0, std::strlen(Data::MISSING_PREFIX));
+        }
+        if (boost::starts_with(element, "Face")) {
+            missing += (missing.empty() ? "" : ", ") + element;
+        }
+    }
+    if (!missing.empty()) {
+        FC_THROWM(Part::NullShapeException, "Missing face reference: " << missing);
+    }
+
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        const std::string& name = indexedName(i);
+        if (!boost::starts_with(name, "Face")) {
+            continue;
+        }
+        // the shadow of this sub-name, not of the i-th face (ops#65)
+        const std::string& ref = i < subs.size() && !subs[i].newName.empty() ? subs[i].newName
+                                                                              : vals[i];
         TopoShape subshape = makeTopoShape(false);
         try {
             subshape = shape.getSubTopoShape(ref.c_str());
@@ -265,7 +295,7 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
 
         if (subshape.isNull()) {
             FC_ERR(getFullName() << ": invalid face reference '" << ref << "'");
-            throw Part::NullShapeException("Invalid Invalid face link");
+            FC_THROWM(Part::NullShapeException, "Invalid face reference: " << name);
         }
 
         if (subshape.shapeType() != TopAbs_FACE) {
