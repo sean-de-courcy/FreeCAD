@@ -771,6 +771,54 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                 finally:
                     App.closeDocument(doc.Name)
 
+    def testSplitPiecesAndAncestors(self):
+        """A slot cut across a box's top face splits it in two. In V2 both pieces are the top
+        face's incoming name followed by a MOD section, so App.isPieceOf finds them, and their
+        ancestor sets hold that name (ops#7, the solver's structural evidence)."""
+        doc = App.newDocument("SplitPieces")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            box = doc.addObject("Part::Box", "Box")
+            slot = doc.addObject("Part::Box", "Slot")
+            slot.Length = 2
+            slot.Width = 12
+            slot.Height = 6
+            slot.Placement.Base = App.Vector(4, -1, 5)
+            cut = doc.addObject("Part::Cut", "Cut")
+            cut.Base = box
+            cut.Tool = slot
+            doc.recompute()
+
+            def facesAt(shape, z):
+                return [
+                    f"Face{index}"
+                    for index, face in enumerate(shape.Faces, 1)
+                    if abs(face.CenterOfMass.z - z) < 1e-7
+                ]
+
+            boxTop = facesAt(box.Shape, 10)
+            self.assertEqual(len(boxTop), 1)
+            names = [cut.Shape.ElementReverseMap[name] for name in facesAt(cut.Shape, 10)]
+            self.assertEqual(len(names), 2)
+            # the box has no element map: the incoming name is its top face's unmapped name
+            prefix = names[0].split("|")[0]
+            self.assertTrue(prefix.startswith(boxTop[0] + ";"), prefix)
+            for name in names:
+                self.assertTrue(App.isPieceOf(name, prefix), name)
+                self.assertIn(prefix, App.getNameAncestors(name))
+            self.assertFalse(App.isPieceOf(names[0], names[1]))
+            self.assertFalse(App.isPieceOf(names[1], names[0]))
+            self.assertFalse(App.isPieceOf(prefix, names[0]))
+            # the bottom face is unchanged: not a piece of the top face
+            (bottom,) = facesAt(cut.Shape, 0)
+            self.assertFalse(App.isPieceOf(cut.Shape.ElementReverseMap[bottom], prefix))
+            # an ancestor set is sorted and holds the name itself
+            ancestors = App.getNameAncestors(names[0])
+            self.assertEqual(ancestors, sorted(ancestors))
+            self.assertIn(names[0], ancestors)
+        finally:
+            App.closeDocument(doc.Name)
+
     def testTopoShapeRevolve(self):
         # Arrange
         face = self.doc.Box1.Shape.Faces[0]
@@ -1004,9 +1052,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         # Act
         offset = box_toposhape.Faces[0].makeOffset(2.0)
         # Assert elementMap
-        self.assertEqual(
-            box_toposhape.Faces[0].ElementMapSize, 9
-        )  # 1 Face, 4 Edges, 4 Vertexes
+        self.assertEqual(box_toposhape.Faces[0].ElementMapSize, 9)  # 1 Face, 4 Edges, 4 Vertexes
         self.assertEqual(offset.ElementMapSize, 17)  # 1 Face, 8 Edges, 8 Vertexes
 
     # Todo:  makeEvolved doesn't work right, probably due to missing c++ code.
@@ -1310,7 +1356,9 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             for index in range(4):
                 sketch.addGeometry(Part.LineSegment(corners[index], corners[(index + 1) % 4]))
             for index in range(4):
-                sketch.addConstraint(Sketcher.Constraint("Coincident", index, 2, (index + 1) % 4, 1))
+                sketch.addConstraint(
+                    Sketcher.Constraint("Coincident", index, 2, (index + 1) % 4, 1)
+                )
             extrusion = doc.addObject("Part::Extrusion", "Extrusion")
             extrusion.Base = sketch
             extrusion.Dir = App.Vector(0, 0, 4)

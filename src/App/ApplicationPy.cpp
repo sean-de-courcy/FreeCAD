@@ -34,6 +34,7 @@
 #include <Base/Parameter.h>
 #include <Base/PyWrapParseTupleAndKeywords.h>
 #include <Base/Sequencer.h>
+#include <App/ElementSolver.h>
 #include <App/MappedName.h>
 
 #include "Application.h"
@@ -1240,6 +1241,40 @@ PyObject* ApplicationPy::sMakeEncodedSection(PyObject* /*self*/, PyObject* args,
     );
 
     return PyUnicode_DecodeUTF8(mappedSection.c_str(), mappedSection.size(), nullptr);
+}
+
+PyObject* ApplicationPy::sGetNameAncestors(PyObject* /*self*/, PyObject* args)
+{
+    const char* name {};
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        Data::NameAncestry ancestry;
+        Py::List list;
+        for (const auto& ancestor : ancestry.ancestorNames(name)) {
+            list.append(Py::String(ancestor));
+        }
+        return Py::new_reference_to(list);
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sIsPieceOf(PyObject* /*self*/, PyObject* args)
+{
+    const char* name {};
+    const char* oldName {};
+    if (!PyArg_ParseTuple(args, "ss", &name, &oldName)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        return Py::new_reference_to(Py::Boolean(Data::NameAncestry::isPieceOf(name, oldName)));
+    }
+    PY_CATCH;
 }
 
 // NOLINTEND(cppcoreguidelines-pro-type-*)

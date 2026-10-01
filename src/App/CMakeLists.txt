@@ -319,6 +319,7 @@ SET(FreeCADApp_CPP_SRCS
     ConsoleQtBridge.cpp
     TranslationQtBridge.cpp
     ElementMap.cpp
+    ElementSolver.cpp
     Enumeration.cpp
     IndexedName.cpp
     MappedElement.cpp
@@ -351,6 +352,7 @@ SET(FreeCADApp_HPP_SRCS
     ColorModel.h
     ComplexGeoData.h
     ElementMap.h
+    ElementSolver.h
     Enumeration.h
     IndexedName.h
     MappedName.h
