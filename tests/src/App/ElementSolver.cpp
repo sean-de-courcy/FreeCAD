@@ -1117,6 +1117,90 @@ TEST(SolveOwner, patternSiblingNeverResolves)
     EXPECT_NE(outcomes[0].evidence, "pattern sibling");
 }
 
+TEST(SolveOwner, patternSiblingThroughAnEmbeddedName)
+{
+    // The counter sits in an embedded name: a face built on instance 1's edge and the same face
+    // built on instance 2's. Both edges hold sketch line 1, so the other instance's face is the
+    // lone survivor (overlap 1/3), forced, and agrees on the top section.
+    auto instanceEdge = [](const char* count) {
+        return Data::MappedName::makeEncodedSection(
+            {},
+            std::vector<std::string> {sketchEdge(1)},
+            "7",
+            "XTR",
+            "0",
+            'E',
+            count,
+            {"PRJ"},
+            std::vector<std::string> {}
+        );
+    };
+    auto faceOn = [](const std::string& edge) {
+        return generated({edge}, 9, "FUS", 'F');
+    };
+    SolveInput input;
+    input.entries = {missing(faceOn(instanceEdge("1")))};
+
+    //   in a Linked Name
+    input.pool["Face"] = {element("Face4", {faceOn(instanceEdge("2"))})};
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   two levels down, with the counter over the op code
+    auto twice = [&](const char* opCode) {
+        auto edge = Data::MappedName::makeEncodedSection(
+            {},
+            std::vector<std::string> {sketchEdge(1)},
+            "7",
+            opCode,
+            "0",
+            'E',
+            "0",
+            {"PRJ"},
+            std::vector<std::string> {}
+        );
+        return faceOn(upper({edge}, 8, "CHF"));
+    };
+    input.entries = {missing(twice("XTR"))};
+    input.pool["Face"] = {element("Face4", {twice("_2")})};
+    EXPECT_EQ(Data::solveOwner(input)[0].evidence, "pattern sibling");
+
+    //   in a Connected Name of a later section
+    const auto base = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    auto cut = [&](const char* count) {
+        return base + "|" + section({}, {}, 9, "CUT", 0, 'F', {"MOD"}, {instanceEdge(count)});
+    };
+    input.entries = {missing(cut("1"))};
+    input.pool["Face"] = {element("Face4", {cut("2")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   an embedded name that differs in more than the counter is no sibling: it resolves
+    input.entries = {missing(faceOn(instanceEdge("1")))};
+    input.pool["Face"] = {element(
+        "Face4",
+        {faceOn(
+            Data::MappedName::makeEncodedSection(
+                {},
+                std::vector<std::string> {sketchEdge(1)},
+                "7",
+                "XTR",
+                "1",
+                'E',
+                "2",
+                {"PRJ"},
+                std::vector<std::string> {}
+            )
+        )}
+    )};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face4");
+}
+
 TEST(SolveOwner, independentOfInputOrder)
 {
     // Arrange

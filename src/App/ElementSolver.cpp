@@ -822,42 +822,64 @@ bool isCounterOpCode(const std::string& opCode)
            });
 }
 
-/* True if \a name is \a oldName up to the duplicate counter of any of its sections, and not
- * \a oldName itself: a pattern instance's copy of the old element, or another element the
- * element map told apart only by the counter. Both forms of the counter are ignored, as
- * harness.py's withoutCounter() does: the duplicate count field, and a counter written over the
- * op code, which then matches any op code. A section that doesn't decode must be equal.
+/* True if \a a and \a b are the same name up to the duplicate counter of any section, at any
+ * depth: the sections of the embedded Linked and Connected Names are compared the same way, so a
+ * face built on instance 1's edges and one built on instance 2's are equal up to the counter.
+ * Both forms of the counter are ignored, as harness.py's withoutCounter() does: the duplicate
+ * count field, and a counter written over the op code, which then matches any op code. A section
+ * that doesn't decode must be equal as text.
  */
-bool isCounterSibling(std::string_view name, std::string_view oldName)
+bool sameUpToCounter(std::string_view a, std::string_view b)
 {
-    if (name == oldName) {
+    if (a == b) {
+        return true;
+    }
+    auto sectionsA = NameAncestry::splitSections(a);
+    auto sectionsB = NameAncestry::splitSections(b);
+    if (sectionsA.empty() || sectionsA.size() != sectionsB.size()) {
         return false;
     }
-    auto sections = NameAncestry::splitSections(name);
-    auto oldSections = NameAncestry::splitSections(oldName);
-    if (sections.empty() || sections.size() != oldSections.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < sections.size(); ++i) {
-        if (sections[i] == oldSections[i]) {
+    for (std::size_t i = 0; i < sectionsA.size(); ++i) {
+        if (sectionsA[i] == sectionsB[i]) {
             continue;
         }
-        const auto& decoded = MappedName::getDecodedMappedName(std::string(sections[i]));
-        const auto& oldDecoded = MappedName::getDecodedMappedName(std::string(oldSections[i]));
-        if (decoded.size() != 1 || oldDecoded.size() != 1) {
+        // Copies: the recursion below decodes more names.
+        DecodedMappedName decodedA = MappedName::getDecodedMappedName(std::string(sectionsA[i]));
+        DecodedMappedName decodedB = MappedName::getDecodedMappedName(std::string(sectionsB[i]));
+        if (decodedA.size() != 1 || decodedB.size() != 1) {
             return false;
         }
-        DecodedMappedSection a = decoded.front();
-        const DecodedMappedSection& b = oldDecoded.front();
-        a.duplicateCount = b.duplicateCount;
-        if (isCounterOpCode(a.opCode) || isCounterOpCode(b.opCode)) {
-            a.opCode = b.opCode;
-        }
-        if (!(a == b)) {
+        const DecodedMappedSection& x = decodedA.front();
+        const DecodedMappedSection& y = decodedB.front();
+        bool opCodesAgree = x.opCode == y.opCode || isCounterOpCode(x.opCode)
+            || isCounterOpCode(y.opCode);
+        if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
+            || x.index != y.index || x.elementType != y.elementType
+            || x.mapperFlags != y.mapperFlags || x.linkedNames.size() != y.linkedNames.size()
+            || x.connectedElements.size() != y.connectedElements.size()) {
             return false;
+        }
+        for (std::size_t j = 0; j < x.linkedNames.size(); ++j) {
+            if (!sameUpToCounter(x.linkedNames[j], y.linkedNames[j])) {
+                return false;
+            }
+        }
+        for (std::size_t j = 0; j < x.connectedElements.size(); ++j) {
+            if (!sameUpToCounter(x.connectedElements[j], y.connectedElements[j])) {
+                return false;
+            }
         }
     }
     return true;
+}
+
+/* True if \a name is \a oldName up to the duplicate counter (sameUpToCounter()), and not
+ * \a oldName itself: a pattern instance's copy of the old element, or another element the
+ * element map told apart only by the counter.
+ */
+bool isCounterSibling(std::string_view name, std::string_view oldName)
+{
+    return name != oldName && sameUpToCounter(name, oldName);
 }
 
 }  // namespace
