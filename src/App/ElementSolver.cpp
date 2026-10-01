@@ -40,6 +40,15 @@ std::vector<std::string> sortedFlags(const DecodedMappedSection& section)
     return flags;
 }
 
+// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
+bool isCounterOpCode(const std::string& opCode)
+{
+    return opCode.size() > 1 && opCode[0] == '_'
+        && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
+               return c >= '0' && c <= '9';
+           });
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -235,6 +244,64 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
         }
     }
     return true;
+}
+
+namespace
+{
+
+// The decoded section if \a name is one section carrying the IDX flag, with a real op code.
+const DecodedMappedSection* indexSection(std::string_view name)
+{
+    if (name.empty() || NameAncestry::splitSections(name).size() != 1) {
+        return nullptr;
+    }
+    const auto& decoded = decodeSection(name);
+    if (!decoded.hasMapperFlag(MAPPER_FLAG_INDEX) || decoded.opCode.empty()
+        || isCounterOpCode(decoded.opCode)) {
+        return nullptr;
+    }
+    return &decoded;
+}
+
+}  // namespace
+
+bool NameAncestry::sameIndexSource(std::string_view a, std::string_view b)
+{
+    const DecodedMappedSection* x = indexSection(a);
+    const DecodedMappedSection* y = indexSection(b);  // the cache's nodes don't move
+    if (!x || !y) {
+        return false;
+    }
+    return x->referenceIDs == y->referenceIDs && x->linkedNames == y->linkedNames
+        && x->iterationTag == y->iterationTag && x->index == y->index
+        && x->elementType == y->elementType && x->duplicateCount == y->duplicateCount
+        && sortedFlags(*x) == sortedFlags(*y) && x->connectedElements == y->connectedElements;
+}
+
+std::string_view NameAncestry::indexSource(std::string_view name)
+{
+    if (indexSection(name)) {
+        return name;
+    }
+    auto sections = splitSections(name);
+    if (sections.size() < 2 || !indexSection(sections.front())
+        || !isPieceOf(name, sections.front())) {
+        return {};
+    }
+    return sections.front();
+}
+
+bool NameAncestry::isIndexPieceOf(std::string_view name, std::string_view oldName)
+{
+    if (!indexSection(oldName)) {
+        return false;
+    }
+    auto sections = splitSections(name);
+    if (sections.size() < 2 || sections.front() == oldName
+        || !sameIndexSource(sections.front(), oldName)) {
+        return false;
+    }
+    return isPieceOf(name, sections.front());
 }
 
 std::vector<int> NameAncestry::structuralSurvivors(
@@ -814,15 +881,6 @@ std::string formatOverlap(double value)
     return ss.str();
 }
 
-// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
-bool isCounterOpCode(const std::string& opCode)
-{
-    return opCode.size() > 1 && opCode[0] == '_'
-        && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
-               return c >= '0' && c <= '9';
-           });
-}
-
 /* True if \a a and \a b are the same name up to the duplicate counter of any section, at any
  * depth: the sections of the embedded Linked and Connected Names are compared the same way, so a
  * face built on instance 1's edges and one built on instance 2's are equal up to the counter.
@@ -881,6 +939,33 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
 bool isCounterSibling(std::string_view name, std::string_view oldName)
 {
     return name != oldName && sameUpToCounter(name, oldName);
+}
+
+// The element of a target without an element map that the IDX section \a section names, when it
+// carries the target's tag \a tag (Q5): the section's index name (`Edge11`), if it is of type
+// \a type; otherwise empty.
+std::string maplessElement(
+    std::string_view section,
+    const std::string& tag,
+    const std::string& type
+)
+{
+    if (tag.empty() || section.empty()) {
+        return {};
+    }
+    const auto& decoded = decodeSection(section);
+    if (decoded.iterationTag != tag || decoded.referenceIDs.size() != 1) {
+        return {};
+    }
+    const std::string& index = decoded.referenceIDs.front();
+    std::size_t end = index.size();
+    while (end > 0 && index[end - 1] >= '0' && index[end - 1] <= '9') {
+        --end;
+    }
+    if (end == index.size() || end != type.size() || index.compare(0, end, type) != 0) {
+        return {};
+    }
+    return index;
 }
 
 std::string formatDistance(double value)
@@ -1033,12 +1118,27 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     };
     std::map<std::string, Pool> pools;
     std::vector<std::pair<std::string, int>> elementOfId;  // ID -> (type, position)
+    std::map<std::string, std::map<std::string, std::vector<std::string>>> mergedByType;
     for (const auto& [type, elements] : input.pool) {
-        std::map<std::string, std::vector<std::string>> merged;
+        auto& merged = mergedByType[type];
         for (const auto& element : elements) {
             auto& names = merged[element.index];
             names.insert(names.end(), element.names.begin(), element.names.end());
         }
+    }
+    // A target without an element map: the elements its IDX names point to, without names (Q5).
+    for (const auto& entry : input.entries) {
+        if (entry.exact) {
+            continue;
+        }
+        std::string index = maplessElement(NameAncestry::indexSource(entry.oldName),
+                                           input.maplessTag,
+                                           entry.type);
+        if (!index.empty()) {
+            mergedByType[entry.type][index];
+        }
+    }
+    for (auto& [type, merged] : mergedByType) {
         Pool& pool = pools[type];
         for (auto& [index, names] : merged) {
             std::sort(names.begin(), names.end());
@@ -1099,6 +1199,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromOverlap;
         std::set<int> fromNames;
         std::set<int> inAncestry;
+        // The IDX source's elements, and whether they replaced the other candidates (tier 2
+        // agreed with one of them at least).
+        std::set<int> fromIndex;
+        bool indexed = false;
         SolveOutcome outcome;
         bool decided = false;
         int graphEntry = -1;
@@ -1205,7 +1309,52 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         std::set<int> all(state.fromOverlap);
         all.insert(state.fromNames.begin(), state.fromNames.end());
+
+        // The IDX source: the elements named by the old name's IDX section under any op code,
+        // or by its index on a map-less target (Q5); and the old IDX element's pieces under
+        // another op code, which join the candidates as pieces.
+        std::string_view indexSource = NameAncestry::indexSource(oldName);
+        if (!indexSource.empty()) {
+            std::string maplessIndex =
+                maplessElement(indexSource, input.maplessTag, std::get<1>(key));
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                if (!allowed[k]) {
+                    continue;
+                }
+                const auto& names = pool.elements[k].names;
+                if (pool.elements[k].index == maplessIndex
+                    || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                           return NameAncestry::sameIndexSource(n, indexSource);
+                       })) {
+                    state.fromIndex.insert(static_cast<int>(k));
+                }
+                else if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                             return NameAncestry::isIndexPieceOf(n, oldName);
+                         })) {
+                    all.insert(static_cast<int>(k));
+                }
+            }
+        }
         state.candidates.assign(all.begin(), all.end());
+
+        // Tiers 2 and 3 and the IDX source, for a reference with a saved fingerprint.
+        const ElementFingerprint* saved = savedFingerprint(members);
+        auto intrinsicSurvivors = [&](const std::vector<int>& positions) {
+            std::vector<int> agree;
+            for (int k : positions) {
+                if (intrinsicAgrees(*saved, fingerprintOf(pool.elements[k]), input.tolerances)) {
+                    agree.push_back(k);
+                }
+            }
+            return agree;
+        };
+        auto nearestOf = [&](const std::vector<int>& positions) {
+            std::vector<ElementFingerprint> fingerprints;
+            for (int k : positions) {
+                fingerprints.push_back(fingerprintOf(pool.elements[k]));
+            }
+            return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
+        };
 
         // Pieces. Under One (and Expand, read as One until PR 7) they break the entry at once.
         // Under Equivalent they resolve as one candidate if every piece gives the consumer the
@@ -1217,7 +1366,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         for (int k : state.candidates) {
             const auto& names = pool.elements[k].names;
             bool piece = std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                return NameAncestry::isPieceOf(n, oldName);
+                return NameAncestry::isPieceOf(n, oldName)
+                    || NameAncestry::isIndexPieceOf(n, oldName);
             });
             (piece ? pieces : others).push_back(k);
         }
@@ -1262,24 +1412,20 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             state.listed = state.candidates;
         }
 
-        // Tiers 2 and 3, for a reference with a saved fingerprint.
-        const ElementFingerprint* saved = savedFingerprint(members);
-        auto intrinsicSurvivors = [&](const std::vector<int>& positions) {
-            std::vector<int> agree;
-            for (int k : positions) {
-                if (intrinsicAgrees(*saved, fingerprintOf(pool.elements[k]), input.tolerances)) {
-                    agree.push_back(k);
-                }
+        // The IDX source decides among its elements when tier 2 agrees with one: it names the
+        // old element itself (or the whole it was a piece of), under the op code of whatever
+        // last touched it. The other survivors don't count then.
+        if (saved && pieces.empty() && !state.fromIndex.empty()) {
+            std::vector<int> agree = intrinsicSurvivors(
+                std::vector<int>(state.fromIndex.begin(), state.fromIndex.end())
+            );
+            if (!agree.empty()) {
+                state.indexed = true;
+                state.candidates = agree;
+                state.listed = agree;
             }
-            return agree;
-        };
-        auto nearestOf = [&](const std::vector<int>& positions) {
-            std::vector<ElementFingerprint> fingerprints;
-            for (int k : positions) {
-                fingerprints.push_back(fingerprintOf(pool.elements[k]));
-            }
-            return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
-        };
+        }
+
         if (saved && state.candidates.size() > 1) {
             // Geometry breaks ties among tier 1's survivors; it never replaces them.
             std::vector<int> agree = intrinsicSurvivors(state.candidates);
@@ -1387,9 +1533,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // A partner from tier 1 must agree with the old name on the top section, or hold the
             // old name in its ancestry: an ancestor shared with the old name alone (e.g. a sketch
             // edge that many elements embed through a face) doesn't show it is the same element.
-            // A partner that only geometry found passed both geometric tiers.
+            // A partner that only geometry found passed both geometric tiers. The IDX source and
+            // the old element's pieces (an IDX element's pieces under another op code don't hold
+            // the old name) are evidence of their own.
             bool evidenced = k >= 0
                 && (state.geometric || state.inAncestry.count(k) > 0
+                    || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
                     || std::any_of(
                         state.pool->elements[k].names.begin(),
                         state.pool->elements[k].names.end(),
@@ -1416,6 +1565,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (state.fromNames.count(k)) {
                     sources += sources.empty() ? "names" : "+names";
                 }
+                if (state.indexed && state.fromIndex.count(k)) {
+                    sources += sources.empty() ? "index" : "+index";
+                }
                 state.outcome.status = SolveStatus::Resolved;
                 state.outcome.tier = state.geometric ? 3 : state.geometryTier ? state.geometryTier : 1;
                 state.outcome.element = element.index;
@@ -1426,6 +1578,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else {
                     state.outcome.evidence = "overlap " + formatOverlap(best) + ", sources "
                         + sources + (state.inAncestry.count(k) ? ", in ancestry" : "")
+                        + (state.indexed ? ", tier 2 agrees" : "")
                         + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence)
                         + (state.equivalent.empty()
                                ? ""

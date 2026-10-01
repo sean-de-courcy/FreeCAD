@@ -333,6 +333,7 @@ bool solveElementReferences(DocumentObject* feature,
     double gap = Data::SolveInput().gap;
     Data::GeometryTolerances tolerances;
     double diagonal = 0.0;
+    std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
 
     for (auto& [ownerName, entries] : owners) {
@@ -362,6 +363,9 @@ bool solveElementReferences(DocumentObject* feature,
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
+                    if (data->Tag != 0 && data->getElementMapSize() == 0) {
+                        maplessTag = std::to_string(data->Tag);
+                    }
                 }
             }
             sourceRead = true;
@@ -418,6 +422,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.gap = gap;
         input.tolerances = tolerances;
         input.diagonal = diagonal;
+        input.maplessTag = maplessTag;
         input.fingerprintOf = [geo](const std::string& index) {
             Data::ElementFingerprint fingerprint;
             if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {

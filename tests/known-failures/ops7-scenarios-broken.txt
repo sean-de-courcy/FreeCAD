@@ -9,9 +9,14 @@ reason: a sketch on a piece of a split face breaks when the tool leaves the base
 cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2
 cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2
 
-reason: a dress-up's Base on a deleted feature isn't relinked to a base without an element map (an AdditiveBox): V2 matches names only, so it breaks (V2; correct in V1 and on a named base; ops#23 step 5)
+reason: a sketch on a whole face of a Part::Box breaks when the tool splits it: the pieces carry the face's name under another op code (MKR whole, FUS as the pieces' prefix), which V2's name match doesn't relate (V2; correct in V1 and V2s)
+cli  PartDesignTests.TestNamingScenarios.PartFuseDrop.test_base_top_V2
+
+reason: a dress-up's Base on a deleted feature isn't relinked to a base without an element map (an AdditiveBox): V2 matches names only, so it breaks (V2; correct on a named base and in V2s, and in V1 for an edge the deleted feature left as it was; ops#23 step 5)
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseTrimmedBox.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseTrimmedBox.test_fillet_edge_V2multi
 cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge
 
 reason: a dress-up or face profile on a split element keeps one piece; section 8 expects every piece (V2 with the multi-match flags off; V2multi is correct)
@@ -35,6 +40,6 @@ reason: a fillet on a sketch corner's vertical edge, after a chamfer on the fron
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2multi
 
-reason: two boxes' tops merge in a refined Part::Fuse: A's face name changes op code (MKR to FUS) and the merged face carries no name of B's, so both sketches break (V2; V2s is listed in ops7-solver.txt)
+reason: two boxes' tops merge in a refined Part::Fuse: the merged face carries both faces' names under another op code (MKR to FUS), which V2's name match doesn't relate, so both sketches break (V2; V2s resolves both through the IDX source)
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2

@@ -1743,6 +1743,262 @@ TEST(SolveOwner, geometryNeedsOneFingerprintForSameNamedReferences)
 }
 
 // ---------------------------------------------------------------------------------------------
+// The IDX source (Task 2 PR 6): an element of a shape without an element map, named by its index
+
+namespace
+{
+
+// `<index>;_;<tag>;<op>;0;<type>;0;IDX,SRC;_`, as a map-less shape's element is named.
+std::string indexed(const char* index, int tag, const char* opCode, char elementType = 'F')
+{
+    return section({index}, {}, tag, opCode, 0, elementType, {"IDX", "SRC"});
+}
+
+}  // namespace
+
+TEST(NameAncestry, indexSourceIgnoresTheOpCodeOnly)
+{
+    const auto whole = indexed("Face6", 4, "MKR");
+    EXPECT_TRUE(NameAncestry::sameIndexSource(whole, indexed("Face6", 4, "FUS")));
+    EXPECT_TRUE(NameAncestry::sameIndexSource(whole, whole));
+    //   flags as a set
+    EXPECT_TRUE(NameAncestry::sameIndexSource(
+        whole,
+        section({"Face6"}, {}, 4, "CUT", 0, 'F', {"SRC", "IDX"})
+    ));
+    //   another index, tag or type, or a duplicate counter, is another element
+    EXPECT_FALSE(NameAncestry::sameIndexSource(whole, indexed("Face5", 4, "FUS")));
+    EXPECT_FALSE(NameAncestry::sameIndexSource(whole, indexed("Face6", 3, "FUS")));
+    EXPECT_FALSE(NameAncestry::sameIndexSource(whole, indexed("Face6", 4, "FUS", 'E')));
+    EXPECT_FALSE(NameAncestry::sameIndexSource(
+        whole,
+        Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {"Face6"},
+            std::vector<std::string> {},
+            "4",
+            "FUS",
+            "0",
+            'F',
+            "1",
+            {"IDX", "SRC"},
+            {}
+        )
+    ));
+    //   a counter written over the op code relates to nothing else
+    EXPECT_FALSE(NameAncestry::sameIndexSource(whole, indexed("Face6", 4, "_2")));
+    //   only single IDX sections
+    EXPECT_FALSE(NameAncestry::sameIndexSource(
+        section({"Face6"}, {}, 4, "MKR", 0, 'F', {"SRC"}),
+        section({"Face6"}, {}, 4, "FUS", 0, 'F', {"SRC"})
+    ));
+    const auto split = piece(indexed("Face6", 4, "FUS"), 9, "FUS", 0, 'F');
+    EXPECT_FALSE(NameAncestry::sameIndexSource(whole, split));
+}
+
+TEST(NameAncestry, indexSourceOfANameAndOfItsPieces)
+{
+    const auto whole = indexed("Face6", 4, "FUS");
+    EXPECT_EQ(NameAncestry::indexSource(whole), whole);
+    const auto split = piece(whole, 9, "FUS", 0, 'F', {indexed("Edge2", 4, "MKR", 'E')});
+    EXPECT_EQ(NameAncestry::indexSource(split), whole);
+    EXPECT_EQ(NameAncestry::indexSource(piece(split, 11, "CUT", 1, 'F')), whole);
+    //   an element generated from an IDX element isn't it
+    EXPECT_EQ(NameAncestry::indexSource(whole + "|" + generated({}, 9, "FUS", 'F')), "");
+    EXPECT_EQ(NameAncestry::indexSource(generated({whole}, 9, "Extrude", 'F')), "");
+    EXPECT_EQ(NameAncestry::indexSource(sketchEdge(1)), "");
+    EXPECT_EQ(NameAncestry::indexSource(""), "");
+}
+
+TEST(NameAncestry, indexPiecesUnderAnotherOpCode)
+{
+    const auto old = indexed("Face6", 4, "MKR");
+    const auto split = piece(indexed("Face6", 4, "FUS"), 9, "FUS", 0, 'F');
+    EXPECT_TRUE(NameAncestry::isIndexPieceOf(split, old));
+    EXPECT_FALSE(NameAncestry::isPieceOf(split, old));
+    //   a piece under the same op code is a plain piece
+    const auto samePiece = piece(old, 9, "FUS", 0, 'F');
+    EXPECT_FALSE(NameAncestry::isIndexPieceOf(samePiece, old));
+    EXPECT_TRUE(NameAncestry::isPieceOf(samePiece, old));
+    //   another element's pieces, a non-MOD section, an old name that isn't one IDX section
+    const auto otherFace = piece(indexed("Face5", 4, "FUS"), 9, "FUS", 0, 'F');
+    EXPECT_FALSE(NameAncestry::isIndexPieceOf(otherFace, old));
+    const auto notModified = indexed("Face6", 4, "FUS") + "|" + generated({}, 9, "FUS", 'F');
+    EXPECT_FALSE(NameAncestry::isIndexPieceOf(notModified, old));
+    const auto pieceOfPiece = piece(piece(old, 9, "FUS", 0, 'F'), 11, "CUT", 0, 'F');
+    EXPECT_FALSE(NameAncestry::isIndexPieceOf(pieceOfPiece, split));
+}
+
+namespace
+{
+
+// PartFuseLift's model: the top face of a map-less box (tag 4) was split by a bar (tag 9); the
+// reference held the left piece, whose prefix is the face under FUS. The bar is lifted: the face
+// is whole again, under MKR. Face12 embeds one of the piece's bounding edges.
+struct MergeBack
+{
+    std::string edge2 = indexed("Edge2", 4, "MKR", 'E');
+    std::string old = piece(indexed("Face6", 4, "FUS"), 9, "FUS", 0, 'F', {edge2});
+    std::string whole = indexed("Face6", 4, "MKR");
+    std::string beside = generated({edge2}, 9, "FUS", 'F');
+    ElementFingerprint pieceFp
+        = fingerprint('F', "Plane", 32, Base::Vector3d(4, 10, 10), Base::Vector3d(0, 0, 1));
+    ElementFingerprint wholeFp
+        = fingerprint('F', "Plane", 400, Base::Vector3d(10, 10, 10), Base::Vector3d(0, 0, 1));
+
+    SolveInput input() const
+    {
+        SolveInput input;
+        input.diagonal = 30.0;
+        input.pool["Face"] = {element("Face6", {whole}), element("Face12", {beside})};
+        input.entries = {missing(old)};
+        return input;
+    }
+};
+
+}  // namespace
+
+TEST(SolveOwner, indexSourceAcrossOpCodes)
+{
+    MergeBack m;
+    auto input = m.input();
+    const auto otherTop
+        = fingerprint('F', "Plane", 40, Base::Vector3d(10, 30, 10), Base::Vector3d(0, 0, 1));
+    measure(input, {{"Face6", m.wholeFp}, {"Face12", otherTop}}, nullptr);
+
+    //   without a fingerprint the IDX source doesn't count: Face12 alone, without evidence
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+
+    //   tier 2 agrees with the whole face: it replaces the other survivor, at tier 1, although
+    //   its size and centre changed (tier 3 would reject it)
+    input.entries[0].fingerprint = m.pieceFp;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face6");
+    EXPECT_EQ(outcomes[0].name, m.whole);
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_EQ(outcomes[0].evidence, "overlap 0.00, sources index, tier 2 agrees");
+
+    //   tier 2 disagrees (the face turned): the IDX source doesn't count
+    const auto turned
+        = fingerprint('F', "Plane", 400, Base::Vector3d(10, 10, 10), Base::Vector3d(1, 0, 0));
+    measure(input, {{"Face6", turned}, {"Face12", otherTop}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    //   the old name the whole face itself (SolverMergeTwo's A): the merged face carries it
+    //   under FUS among its names
+    measure(input, {{"Face4", m.wholeFp}}, nullptr);
+    input.pool["Face"] = {
+        element("Face4", {indexed("Face6", 4, "FUS"), indexed("Face6", 5, "FUS")}),
+    };
+    input.entries[0].oldName = indexed("Face6", 4, "MKR");
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face4");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, indexSourceNeedsTheSameElement)
+{
+    MergeBack m;
+    auto input = m.input();
+    input.entries[0].fingerprint = m.pieceFp;
+    //   two elements of the same source (a compound of two copies): tier 3 can't choose
+    //   between them, so the reference breaks with both
+    input.pool["Face"] = {
+        element("Face6", {m.whole}),
+        element("Face16", {indexed("Face6", 4, "CUT")}),
+    };
+    measure(input, {{"Face6", m.wholeFp}, {"Face16", m.wholeFp}}, nullptr);
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face6", "Face16"}));
+
+    //   a tier-0 element of the same owner isn't offered
+    input.pool["Face"] = {element("Face6", {m.whole}), element("Face12", {m.beside})};
+    input.entries.push_back(exact("Face6"));
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Exact);
+}
+
+TEST(SolveOwner, indexSourceOnAMaplessTarget)
+{
+    // FilletDeleteBaseBox: the fillet's Base moved to the box (tag 4), which has no element map;
+    // the old name is the box's Edge11 by index.
+    const auto old = indexed("Edge11", 4, "MKR", 'E');
+    const auto line
+        = fingerprint('E', "Line", 10, Base::Vector3d(5, 10, 0), Base::Vector3d(1, 0, 0));
+    SolveInput input;
+    input.diagonal = 17.3;
+    input.pool["Edge"] = {};
+    input.entries = {missing(old, "Edge")};
+    input.entries[0].fingerprint = line;
+    input.maplessTag = "4";
+    measure(input, {{"Edge11", line}, {"Edge3", line}}, nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge11");
+    EXPECT_EQ(outcomes[0].name, "");
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_EQ(outcomes[0].evidence, "overlap 0.00, sources index, tier 2 agrees");
+
+    //   a piece of it (a trimmed edge's whole on the box)
+    input.entries[0].oldName = piece(indexed("Edge11", 4, "FUS", 'E'), 9, "FUS", 0, 'E');
+    EXPECT_EQ(Data::solveOwner(input)[0].element, "Edge11");
+    input.entries[0].oldName = old;
+
+    //   another target's tag, or a target with a map: nothing names the element
+    input.maplessTag = "5";
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "broken  -1 [] no candidate");
+    input.maplessTag.clear();
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "broken  -1 [] no candidate");
+    input.maplessTag = "4";
+
+    //   tier 2 must agree; an element that doesn't exist has no fingerprint
+    const auto across
+        = fingerprint('E', "Line", 10, Base::Vector3d(0, 5, 0), Base::Vector3d(0, 1, 0));
+    measure(input, {{"Edge11", across}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    measure(input, {}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    //   without a saved fingerprint
+    measure(input, {{"Edge11", line}}, nullptr);
+    input.entries[0].fingerprint = ElementFingerprint();
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    //   the index names an element of the entry's type only
+    input.entries[0].fingerprint = line;
+    input.entries[0].type = "Face";
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, indexPiecesAreFoundAsPieces)
+{
+    // PartFuseDrop: the whole top face (MKR) is split by the bar; the pieces carry it under FUS.
+    // No name match offers them: the IDX source does.
+    const auto old = indexed("Face6", 4, "MKR");
+    const auto left = piece(indexed("Face6", 4, "FUS"), 9, "FUS", 0, 'F');
+    const auto right = piece(indexed("Face6", 4, "FUS"), 9, "FUS", 1, 'F');
+    SolveInput input;
+    input.pool["Face"] = {element("Face3", {left}), element("Face7", {right})};
+    input.entries = {missing(old)};
+
+    EXPECT_EQ(
+        describe(Data::solveOwner(input)[0]),
+        "broken  -1 [Face3 Face7 ] split into 2 pieces"
+    );
+
+    input.entries[0].policy = Data::SolvePolicy::Equivalent;
+    input.entries[0].equivalent = [](const std::string&, const std::string&) { return true; };
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, left < right ? "Face3" : "Face7");
+    EXPECT_NE(outcomes[0].evidence.find("2 pieces equivalent for the consumer"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------------------------
 // The report and the reverse update's fingerprint check
 
 TEST(ReferenceReport, replacePerTargetAndClear)
