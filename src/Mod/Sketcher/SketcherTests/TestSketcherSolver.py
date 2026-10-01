@@ -910,7 +910,7 @@ class TestSketcherSolver(unittest.TestCase):
         self.assertVectorAlmostEqual(sketch.Geometry[circle].Center, expected)
 
     def testRemovedExternalGeometryReference(self):
-        if "BUILD_PARTDESIGN" in FreeCAD.__cmake__:
+        if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             body = self.Doc.addObject("PartDesign::Body", "Body")
             sketch = body.newObject("Sketcher::SketchObject", "Sketch")
             CreateRectangleSketch(sketch, (0, 0), (30, 30))
@@ -954,16 +954,27 @@ class TestSketcherSolver(unittest.TestCase):
             # 77 edges for basic profile
             self.assertEqual(len(hole.Shape.Edges), 77)
 
-            # Edges in the thread should disappear when we stop modeling thread
-            sketch2.addExternal("Hole", "Edge29")
+            # Edges in the thread should disappear when we stop modeling thread. The thread's
+            # edge is picked by its geometry, a B-spline (the hole without a thread has none):
+            # index names depend on the naming algorithm, and under V2 "Edge29" is the drill
+            # point's cone line, which stays (ops#86).
+            thread = next(
+                f"Edge{i}"
+                for i, edge in enumerate(hole.Shape.Edges, 1)
+                if isinstance(edge.Curve, Part.BSplineCurve)
+            )
+            sketch2.addExternal("Hole", thread)
             hole.ModelThread = 0
             hole.Refine = 1
             self.Doc.recompute()
             self.assertEqual(len(hole.Shape.Edges), 17)
-            self.assertEqual(len(sketch2.ExternalGeometry), 0)
+            # The reference is broken: the sketch keeps the link and fails (ops#72)
+            self.assertEqual(len(sketch2.ExternalGeometry), 1)
+            self.assertTrue(sketch2.ExternalGeometry[0][1][0].startswith("?"))
+            self.assertFalse(sketch2.isValid())
 
     def testSaveLoadWithExternalGeometryReference(self):
-        if "BUILD_PARTDESIGN" in FreeCAD.__cmake__:
+        if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             # Arrange
             body = self.Doc.addObject("PartDesign::Body", "Body")
             sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
@@ -1003,14 +1014,21 @@ class TestSketcherSolver(unittest.TestCase):
             sketch.addConstraint(Sketcher.Constraint("Distance", g1, d1 - 1.0))
             self.Doc.recompute()
 
-            # Assert
-            self.assertEqual(pad.Shape.ElementMapSize, 30)
-            self.assertIn("Edge12", pad.Shape.ElementReverseMap)
+            # Assert: every face, edge and vertex is named. How many names each has is the
+            # naming algorithm's business: V2 gives each of the 26 one name (ops#86).
+            shape = pad.Shape
+            for kind, elements in (
+                ("Face", shape.Faces),
+                ("Edge", shape.Edges),
+                ("Vertex", shape.Vertexes),
+            ):
+                for index in range(1, len(elements) + 1):
+                    self.assertIn(f"{kind}{index}", shape.ElementReverseMap)
             self.assertIn((pad, ("Edge12",)), sketch1.ExternalGeometry)  # Not "?Edge12"
 
     def testTNPExternalGeometryStored(self):
         # Arrange
-        if "BUILD_PARTDESIGN" in FreeCAD.__cmake__:
+        if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             import xml.etree.ElementTree as ET
 
             sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
@@ -1072,7 +1090,7 @@ class TestSketcherSolver(unittest.TestCase):
 
     def testConstructionToggleTNP(self):
         """Bug 15484"""
-        if "BUILD_PARTDESIGN" in FreeCAD.__cmake__:
+        if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             # Arrange
             import xml.etree.ElementTree as ET
 
