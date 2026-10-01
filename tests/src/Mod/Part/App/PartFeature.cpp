@@ -13,6 +13,8 @@
 #include <Base/Interpreter.h>
 #include <Base/Console.h>
 #include <App/PropertyLinks.h>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
 
 using namespace Part;
 using namespace PartTestHelpers;
@@ -565,6 +567,44 @@ TEST_F(FeaturePartTest, referenceWithOneNameMatchDoesNotWarnV2)
     // Assert
     EXPECT_EQ(ref->getSubValues(false), std::vector<std::string> {"Face3"});
     EXPECT_EQ(collector.count("guessed element reference"), 0);
+}
+
+TEST_F(FeaturePartTest, referenceResolvedByOneOfSeveralGeometricMatchesWarnsV2)
+{
+    // Arrange
+    //   pattern: a link to a named face of a box; the box is replaced by a compound of two copies
+    //   of it, with no name like the old one. The geometric search finds the old face's shape
+    //   twice and takes the first: a guess (ops#20)
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto top = faceName("g1");
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape();
+    TopoShape before(App::HistoryAlgorithm::V2, box, 7L);
+    before.setElementName(Data::IndexedName("Face", 1), top, 7L);
+    BRep_Builder builder;
+    TopoDS_Compound twice;
+    builder.MakeCompound(twice);
+    builder.Add(twice, box);
+    builder.Add(twice, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape());
+    TopoShape after(App::HistoryAlgorithm::V2, twice, 7L);
+    after.setElementName(Data::IndexedName("Face", 2), faceName("g9"), 7L);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(before);
+    auto user = _doc->addObject<Part::Feature>("User");
+    auto ref = freecad_cast<App::PropertyLinkSub*>(
+        user->addDynamicProperty("App::PropertyLinkSub", "Ref")
+    );
+    ASSERT_NE(ref, nullptr);
+    ref->setValue(source, std::vector<std::string> {"Face1"});
+    WarningCollector collector;
+
+    // Act
+    source->Shape.setValue(after);
+
+    // Assert
+    auto subs = ref->getSubValues(false);
+    ASSERT_EQ(subs.size(), 1);
+    EXPECT_TRUE(subs[0] == "Face1" || subs[0] == "Face7") << subs[0];
+    EXPECT_EQ(collector.count("2 elements match the old geometry, the first was taken"), 1);
 }
 
 TEST_F(FeaturePartTest, referenceWhoseNameMatchGeometryConfirmsDoesNotWarnV2)

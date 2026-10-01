@@ -559,6 +559,12 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                 const auto& oldName = shadow.newName.size() ? shadow.newName : shadow.oldName;
                 const auto& newName =
                     elementName.newName.size() ? elementName.newName : elementName.oldName;
+                if (names.size() > 1) {
+                    FC_WARN(propertyName(this)
+                            << " guessed element reference " << ret->getFullName() << " "
+                            << oldName << " -> " << newName << ": " << names.size()
+                            << " elements match the old geometry, the first was taken");
+                }
                 if (nameMatch.size() && nameMatch != elementName.oldName) {
                     FC_WARN(propertyName(this)
                             << " guessed element reference " << ret->getFullName() << " "
