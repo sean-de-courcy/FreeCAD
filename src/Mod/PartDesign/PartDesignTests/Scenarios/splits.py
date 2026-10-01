@@ -30,9 +30,16 @@ Each model is a block 0..20 x 0..10 x 0..10 (a pad) and a cutter, a pocket or a 
 sits where it touches nothing referenced and is then moved across the referenced element. The
 consumers reference the cutter's shape, so the split happens in the feature they link to."""
 
+import os
+import shutil
+import tempfile
+
+import FreeCAD as App
+
 from .harness import (
     BROKEN,
     Attached,
+    Broken,
     Chamfered,
     Drafted,
     Extruded,
@@ -176,6 +183,7 @@ class SplitFilletNotch(SplitModel):
     don't find it either."""
 
     REFS = ("fillet_edge",)
+    radius = 1
 
     def build(self, doc):
         body = self.block(doc)
@@ -183,8 +191,8 @@ class SplitFilletNotch(SplitModel):
         doc.recompute()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (pad, self.names(pad, self.frontTopEdge().predicate))
-        fillet.Radius = 1
-        self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(1))
+        fillet.Radius = self.radius
+        self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(self.radius))
 
     def edit(self, doc):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
@@ -222,3 +230,102 @@ class DraftFaceRemoved(SplitDraftGroove):
     def edit(self, doc):
         m.moveRectangle(doc.SlotSketch, 18, -1, 21, 11)
         self.gone = True
+
+
+# The reference solver's splits (ops#7, Task 2 PR 7): an expansion merged back, a notch's
+# continuation, and edits the continuation must not take.
+
+
+class SolverSplitThenMerge(SplitFilletFuse):
+    """SplitFilletFuse in two steps. `split`: the rib moves across the filleted edge, and the
+    fillet takes both pieces. `merge`: the rib moves back to y 3..7, the edge is whole again
+    under its old name, and the pieces merge back into it: the fillet holds one reference."""
+
+    steps = ("split", "merge")
+
+    def split(self, doc):
+        m.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+
+    def merge(self, doc):
+        m.moveRectangle(doc.RibSketch, 8, 3, 12, 7)
+
+
+class SolverSplitThenMergeReopened(SolverSplitThenMerge):
+    """As SolverSplitThenMerge, with the document saved, closed and opened again between the
+    steps: the pieces keep the name they were expanded from (`from`) in the file."""
+
+    steps = ("split", "reopen", "merge")
+
+    def reopen(self, doc):
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        self.doc = App.openDocument(path)
+        self.documents.append(self.doc.Name)
+        for obj in self.doc.Objects:
+            obj.touch()
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+class SolverNotchThenFill(SplitFilletNotch):
+    """SplitFilletNotch in two steps. `notch`: the fillet takes both pieces, the second (a new
+    line's edge) as the continuation of the first. `fill`: the notch's four lines are deleted
+    and the front line goes back to x 0..20: the edge is whole again, and the pieces merge back
+    into it."""
+
+    steps = ("notch", "fill")
+
+    def notch(self, doc):
+        self.edit(doc)
+
+    def fill(self, doc):
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
+
+
+class SideMovedIn(SplitFilletNotch):
+    """A fillet, radius 1, on the block's front top edge; the right side moves in to x = 16 (the
+    front, right and back lines moved, their geometry IDs kept). The edge is shorter, and nothing
+    lies on the rest of its old place: the fillet keeps the edge, 0..16."""
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (16, 0)), 1: ((16, 0), (16, 10)), 2: ((16, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+
+
+class NotchStepOffset(SplitFilletNotch):
+    """A fillet, radius 0.5, on the block's front top edge; the front line then ends at x = 8,
+    and a step follows as new lines, (8, 0)-(8, 1)-(20, 1), with the right side from (20, 1).
+    The edge at y = 1 is parallel to the old one but 1 mm off its line: never its continuation.
+    The fillet keeps 0..8."""
+
+    radius = 0.5
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 1), (20, 1)]), False)
+
+
+class NotchAndExtend(SplitFilletNotch):
+    """SplitFilletNotch's notch, with the right side moved out to x = 26: the rest of the side
+    (x 12..26) runs past the old edge's end (x = 20), part continuation and part new. The
+    reference breaks, with both edges as candidates: the fillet neither keeps 0..8 alone
+    (partial) nor takes 12..26."""
+
+    split = False
+
+    def frontTopEdge(self):
+        if self.split:
+            return Broken(super().frontTopEdge())
+        return super().frontTopEdge()
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (8, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (26, 0)]), False)
+        self.split = True
