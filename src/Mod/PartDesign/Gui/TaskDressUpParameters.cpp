@@ -486,6 +486,58 @@ void TaskDressUpParameters::setSelectionGate()
     }
 }
 
+namespace
+{
+// After Body::insertObject, BaseFeature is the inserted feature and Base still names the feature
+// before it (ops#82). The panel shows, highlights and selects on BaseFeature's shape, so Base
+// moves there: each reference is resolved as the dress-up resolves it (its mapped name on
+// BaseFeature's shape) and replaced by that element's index. A reference without a mapped name,
+// one that resolves to nothing, or two that resolve to the same element leave Base as it is
+// (ops#84). Returns whether Base moved.
+bool moveBaseToBaseFeature(PartDesign::DressUp* dressUp)
+{
+    App::DocumentObject* base = dressUp->Base.getValue();
+    App::DocumentObject* baseFeature = dressUp->BaseFeature.getValue();
+    if (!base || !baseFeature || base == baseFeature) {
+        return false;
+    }
+    Part::TopoShape shape = dressUp->getBaseTopoShape(/* silent = */ true);
+    const auto& shadows = dressUp->Base.getShadowSubs();
+    if (shape.isNull() || shadows.empty()) {
+        return false;
+    }
+    std::vector<std::string> subs;
+    for (const auto& shadow : shadows) {
+        if (shadow.newName.empty()) {
+            return false;
+        }
+        TopoDS_Shape element;
+        try {
+            element = shape.getSubShape(shadow.newName.c_str(), /* silent = */ true);
+        }
+        catch (...) {
+        }
+        int index = element.IsNull() ? 0 : shape.findShape(element);
+        if (index <= 0) {
+            return false;
+        }
+        std::string sub = Part::TopoShape::shapeName(element.ShapeType()) + std::to_string(index);
+        if (std::ranges::find(subs, sub) != subs.end()) {
+            return false;
+        }
+        subs.push_back(std::move(sub));
+    }
+
+    // Inside the panel's transaction, so Cancel restores Base
+    App::Document* doc = dressUp->getDocument();
+    if (doc->getBookedTransactionID() == App::NullTransaction && !doc->hasPendingTransaction()) {
+        doc->openTransaction(std::string("Edit ") + dressUp->Label.getValue());
+    }
+    dressUp->Base.setValue(baseFeature, subs);
+    return true;
+}
+}  // namespace
+
 //**************************************************************************
 //**************************************************************************
 // TaskDialog
@@ -514,6 +566,7 @@ TaskDlgDressUpParameters::TaskDlgDressUpParameters(ViewProviderDressUp* DressUpV
         pcDressUp->Base.setValue(base, newSubList);
         pcDressUp->recomputeFeature(false);
     }
+    moveBaseToBaseFeature(pcDressUp);
 }
 
 TaskDlgDressUpParameters::~TaskDlgDressUpParameters() = default;
@@ -524,9 +577,14 @@ bool TaskDlgDressUpParameters::accept()
 {
     getViewObject<ViewProviderDressUp>()->highlightReferences(false);
     std::vector<std::string> refs = parameter->getReferences();
+    // Base's own object: the references are its element names (ops#84)
+    App::DocumentObject* base = getObject<PartDesign::DressUp>()->Base.getValue();
+    if (!base) {
+        base = parameter->getBase();
+    }
     std::stringstream str;
     str << Gui::Command::getObjectCmd(getObject()) << ".Base = ("
-        << Gui::Command::getObjectCmd(parameter->getBase()) << ",[";
+        << Gui::Command::getObjectCmd(base) << ",[";
     for (const auto& ref : refs) {
         str << "\"" << ref << "\",";
     }

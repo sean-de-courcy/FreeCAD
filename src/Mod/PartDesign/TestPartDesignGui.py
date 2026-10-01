@@ -441,3 +441,122 @@ class TestDatumPlane(unittest.TestCase):
         )
 
         self.assertEqual(packed_color, color)
+
+class TestDressUpPanelAfterInsert(unittest.TestCase):
+    """ops#84: a boss inserted between a block and a chamfer on the block's back top edge. The
+    chamfer's BaseFeature is the boss and its Base still names the block, while the task panel
+    shows, highlights and selects on the boss. Opening the panel moves Base to the boss, the same
+    edge by its index on the boss's shape; OK used to write the block's index names onto the boss
+    (another edge, silently)."""
+
+    BACK_TOP = ((0, 10, 10), (20, 10, 10))
+
+    def setUp(self):
+        self.Doc = App.newDocument("PartDesignDressUpPanel")
+
+    def tearDown(self):
+        if FreeCADGui.Control.activeDialog():
+            FreeCADGui.Control.closeDialog()
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    @staticmethod
+    def edgeName(shape, a, b):
+        a, b = App.Vector(*a), App.Vector(*b)
+        for index, edge in enumerate(shape.Edges):
+            ends = [vertex.Point for vertex in edge.Vertexes]
+            if len(ends) == 2 and (
+                (ends[0].isEqual(a, 1e-6) and ends[1].isEqual(b, 1e-6))
+                or (ends[0].isEqual(b, 1e-6) and ends[1].isEqual(a, 1e-6))
+            ):
+                return "Edge" + str(index + 1)
+        return None
+
+    def addPad(self, body, name, x0, y0, x1, y1, z, length):
+        V = App.Vector
+        sketch = self.Doc.addObject("Sketcher::SketchObject", name + "Sketch")
+        body.addObject(sketch)
+        sketch.Placement = App.Placement(V(0, 0, z), App.Rotation())
+        corners = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+        sketch.addGeometry(
+            [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])], False
+        )
+        pad = body.newObject("PartDesign::Pad", name)
+        pad.Profile = sketch
+        pad.Length = length
+        self.Doc.recompute()
+        return pad
+
+    def build(self, mapless=False):
+        """The block (a pad, or an AdditiveBox, which has no element map), the chamfer and the
+        inserted boss. Returns (block, boss, chamfer)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        if mapless:
+            block = body.newObject("PartDesign::AdditiveBox", "Block")
+            block.Length, block.Width, block.Height = 20, 10, 10
+            self.Doc.recompute()
+        else:
+            block = self.addPad(body, "Block", 0, 0, 20, 10, 0, 10)
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (block, [self.edgeName(block.Shape, *self.BACK_TOP)])
+        chamfer.Size = 1
+        self.Doc.recompute()
+        body.Tip = block
+        boss = self.addPad(body, "Boss", 5, 3, 9, 7, 10, 3)
+        body.Tip = chamfer
+        self.Doc.recompute()
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.assertEqual(chamfer.Base[0], block)
+        return block, boss, chamfer
+
+    def expectedVolume(self, boss):
+        edge = boss.Shape.getElement(self.edgeName(boss.Shape, *self.BACK_TOP))
+        return boss.Shape.makeChamfer(1, [edge]).Volume
+
+    def openPanel(self, chamfer):
+        FreeCADGui.ActiveDocument.setEdit(chamfer.Name)
+        FreeCADGui.updateGui()
+        dialog = FreeCADGui.Control.activeTaskDialog()
+        self.assertIsNotNone(dialog)
+        return dialog
+
+    def testOkKeepsTheEdge(self):
+        block, boss, chamfer = self.build()
+        volume = self.expectedVolume(boss)
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
+        dialog = self.openPanel(chamfer)
+        bossEdge = self.edgeName(boss.Shape, *self.BACK_TOP)
+        self.assertEqual(chamfer.Base, (boss, [bossEdge]))
+        dialog.accept()
+        FreeCADGui.updateGui()
+        self.assertFalse(FreeCADGui.Control.activeDialog())
+        self.Doc.recompute()
+        self.assertEqual(chamfer.Base, (boss, [bossEdge]))
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
+
+    def testCancelRestoresBase(self):
+        block, boss, chamfer = self.build()
+        base, volume, undo = chamfer.Base, chamfer.Shape.Volume, self.Doc.UndoCount
+        dialog = self.openPanel(chamfer)
+        self.assertEqual(chamfer.Base[0], boss)
+        dialog.reject()
+        FreeCADGui.updateGui()
+        self.assertFalse(FreeCADGui.Control.activeDialog())
+        self.Doc.recompute()
+        self.assertEqual(chamfer.Base, base)
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.assertEqual(self.Doc.UndoCount, undo)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume, volume, places=6)
+
+    def testUnmappedBaseLeftAlone(self):
+        # The block's edge has no mapped name: no guess, Base stays on the block, and OK keeps it
+        block, boss, chamfer = self.build(mapless=True)
+        base = chamfer.Base
+        dialog = self.openPanel(chamfer)
+        self.assertEqual(chamfer.Base, base)
+        dialog.accept()
+        FreeCADGui.updateGui()
+        self.assertEqual(chamfer.Base, base)
+        self.assertEqual(chamfer.BaseFeature, boss)
