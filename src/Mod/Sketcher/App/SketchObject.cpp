@@ -322,17 +322,27 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     }
 
     // setup and diagnose the sketch
+    std::string externalError;
     try {
         rebuildExternalGeometry();
         Constraints.acceptGeometry(getCompleteGeometry());
     }
-    catch (const Base::Exception&) {
+    catch (const Base::Exception& e) {
         // 9/16/24: We used to clear the constraints here, but we no longer want to do that
         // as missing reference geometry is not considered an error while we sort out sketcher UI.
         // Base::Console().error("%s\nClear constraints to external geometry\n", e.what());
         // we cannot trust the constraints of external geometries, so remove them
         //  delConstraintsToExternal();
+        //
+        // ops#72: the constraints stay, and the sketch is solved and built on the frozen geometry
+        // so it still shows, but the recompute fails with the error (it names the missing
+        // reference), so nothing built on the sketch goes on silently with stale geometry.
+        externalError = e.what();
+        Constraints.acceptGeometry(getCompleteGeometry());
     }
+    auto withExternalError = [&externalError](std::string msg) {
+        return externalError.empty() ? msg : externalError + "\n" + msg;
+    };
 
     // This includes a regular solve including full geometry update, except when an error
     // ensues
@@ -341,30 +351,35 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     if (err == -4) {// over-constrained sketch
         std::string msg = "Over-constrained sketch\n";
         appendConflictMsg(lastConflicting, msg);
-        return new App::DocumentObjectExecReturn(msg.c_str(), this);
+        return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
     else if (err == -3) {// conflicting constraints
         std::string msg = "Sketch with conflicting constraints\n";
         appendConflictMsg(lastConflicting, msg);
-        return new App::DocumentObjectExecReturn(msg.c_str(), this);
+        return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
     else if (err == -2) {// redundant constraints
         std::string msg = "Sketch with redundant constraints\n";
         appendRedundantMsg(lastRedundant, msg);
-        return new App::DocumentObjectExecReturn(msg.c_str(), this);
+        return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
     else if (err == -5) {
         std::string msg = "Sketch with malformed constraints\n";
         appendMalformedConstraintsMsg(lastMalformedConstraints, msg);
-        return new App::DocumentObjectExecReturn(msg.c_str(), this);
+        return new App::DocumentObjectExecReturn(withExternalError(msg), this);
     }
     else if (err == -1) {// Solver failed
-        return new App::DocumentObjectExecReturn("Solving the sketch failed", this);
+        return new App::DocumentObjectExecReturn(withExternalError("Solving the sketch failed"),
+                                               this);
     }
 
     // this is not necessary for sketch representation in edit mode, unless we want to trigger an
     // update of the objects that depend on this sketch (like pads)
     buildShape();
+
+    if (!externalError.empty()) {
+        return new App::DocumentObjectExecReturn(externalError, this);
+    }
 
     return App::DocumentObject::StdReturn;
 }
@@ -1312,15 +1327,20 @@ void SketchObject::onExternalGeoChanged()
     auto itObj = objs.begin();
     auto subs = ExternalGeometry.getSubValues();
     auto itSub = subs.begin();
+    // keep the other links' shadows, so a missing one keeps its old mapped name (ops#72)
+    auto shadows = ExternalGeometry.getShadowSubs();
+    auto itShadow = shadows.begin();
     for (const auto& i : externalGeoRef) {
         if (detached.count(i) == 0U) {
             ++itObj;
             ++itSub;
+            ++itShadow;
             continue;
         }
 
         itObj = objs.erase(itObj);
         itSub = subs.erase(itSub);
+        itShadow = shadows.erase(itShadow);
         auto& refs = externalGeoRefMap[i];
         for (long id : refs) {
             auto it = externalGeoMap.find(id);
@@ -1331,7 +1351,7 @@ void SketchObject::onExternalGeoChanged()
         }
         refs.clear();
     }
-    ExternalGeometry.setValues(objs, subs);
+    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
 }
 
 void SketchObject::onExternalGeometryChanged()

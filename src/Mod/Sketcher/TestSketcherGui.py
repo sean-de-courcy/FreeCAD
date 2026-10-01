@@ -5,6 +5,7 @@ from SketcherTests.TestOnViewParameterGui import TestOnViewParameterGui
 from SketcherTests.TestPlacementUpdate import TestSketchPlacementUpdate
 from SketcherTests.TestExternalFacePreselection import TestExternalFacePreselection
 from SketcherTests.TestAutoScaleNamesGui import TestAutoScaleNamesGui
+from SketcherTests.TestSketchMissingExternalGui import TestSketchMissingExternalGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -15,5 +16,6 @@ from SketcherTests.TestAutoScaleNamesGui import TestAutoScaleNamesGui
     and TestOnViewParameterGui
     and TestExternalFacePreselection
     and TestAutoScaleNamesGui
+    and TestSketchMissingExternalGui
     else False
 )
