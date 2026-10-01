@@ -1014,11 +1014,45 @@ TEST(SolveOwner, unionOfSourcesOnlyAddsCandidates)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
     EXPECT_EQ(outcomes[0].element, "Face2");
 
+    //   the name match alone offers the side face, which doesn't agree on the top section
     input.source = Data::Tier1Source::Names;
     outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face1"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+}
+
+TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
+{
+    // ChamferEdgeRemoved: the chamfered top edge of sketch line 1 is cut away. The only element
+    // left that shares an ancestor with it is the cut's floor edge, whose name holds the
+    // sketch's face, which holds line 1: overlap 1/2, the only survivor, forced. Nothing but
+    // that one sketch edge relates them, and the top sections disagree: broken, not resolved.
+    const std::vector<std::string> lines {
+        sketchEdge(1),
+        sketchEdge(2),
+        sketchEdge(3),
+        sketchEdge(4),
+    };
+    const auto topEdge = section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto slotFace = generated({sketchEdge(3, 8)}, 9, "XTR", 'F');
+    const auto floorEdge = section({}, {lowFace(lines), slotFace}, 9, "CUT", 0, 'E', {"GEN"});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge7", {floorEdge})};
+    input.entries = {missing(topEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge7"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+
+    //   the same survivor with an agreeing top section resolves (SketchNotch's top face)
+    const auto otherTop = section({}, {sketchEdge(1), sketchEdge(5)}, 7, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"] = {element("Edge7", {otherTop})};
+    outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
-    EXPECT_EQ(outcomes[0].element, "Face1");
-    EXPECT_EQ(outcomes[0].evidence, "overlap 0.20, sources names");
+    EXPECT_EQ(outcomes[0].element, "Edge7");
 }
 
 TEST(SolveOwner, independentOfInputOrder)

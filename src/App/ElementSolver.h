@@ -288,6 +288,9 @@ struct AppExport SolveOutcome
  * - One (and, until PRs 5 and 7, Expand and Equivalent): a candidate that is a piece of the old
  *   element breaks the entry at once, with the pieces as candidates. Otherwise the entry goes
  *   into one MatchGraph per owner, one candidate per element, and forcedMatching() decides.
+ * - A partner resolves the entry only if one of its names agrees with the old name on the top
+ *   section (NameAncestry::topAgrees()) or has the old name in its ancestry; otherwise the
+ *   entry is broken, with its candidates ("no top agreement").
  *
  * The result depends only on the input as a set (pool order, name order, entry order).
  */

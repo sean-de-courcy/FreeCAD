@@ -1011,8 +1011,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         if (!state.decided) {
             int e = state.graphEntry;
             MatchStatus status = matched.status[e];
-            if (status == MatchStatus::Resolved) {
-                int k = elementOfId[idOfNode[matched.partner[e]]].second;
+            int k = status == MatchStatus::Resolved
+                ? elementOfId[idOfNode[matched.partner[e]]].second
+                : -1;
+            // The partner must agree with the old name on the top section, or hold the old name
+            // in its ancestry: an ancestor shared with the old name alone (e.g. a sketch edge
+            // that many elements embed through a face) doesn't show it is the same element.
+            bool evidenced = k >= 0
+                && (state.inAncestry.count(k) > 0
+                    || std::any_of(
+                        state.pool->elements[k].names.begin(),
+                        state.pool->elements[k].names.end(),
+                        [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
+                    ));
+            if (status == MatchStatus::Resolved && !evidenced) {
+                state.outcome.evidence = "no top agreement";
+                listCandidates(state, state.candidates);
+            }
+            else if (status == MatchStatus::Resolved) {
                 const auto& element = state.pool->elements[k];
                 double best = 0.0;
                 for (const auto& name : element.names) {
