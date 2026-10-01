@@ -61,6 +61,7 @@ class VersionControl:
         self.rev = ""
         self.date = ""
         self.url = ""
+        self.forkversion = "fork-unknown"
 
     def extractInfo(self, srcdir, bindir):
         return False
@@ -74,6 +75,7 @@ class VersionControl:
             line = line.replace("$WCREV$", self.rev)
             line = line.replace("$WCDATE$", self.date)
             line = line.replace("$WCURL$", self.url)
+            line = line.replace("$WCFORKVER$", self.forkversion)
             content.append(line)
         return content
 
@@ -261,22 +263,27 @@ class GitControl(VersionControl):
                 os.popen("git show -s --pretty=%d HEAD").read().strip(" ()\n").split(", ")
             )  # used for possible remotes
 
+    @staticmethod
+    def publicurl(url):
+        """rewrite a fetch URL to its public git:// form"""
+        # rewrite github to public url
+        match = re.match(r"git@github\.com:(\S+?)/(\S+\.git)", url) or re.match(
+            r"https://github\.com/(\S+)/(\S+\.git)", url
+        )
+        if match is not None:
+            url = "git://github.com/%s/%s" % match.groups()
+        match = re.match(r"ssh://\S+?@(\S+)", url)
+        if match is not None:
+            url = "git://%s" % match.group(1)
+        return url
+
     def geturl(self):
         urls = []
         for ref in self.branchlst:
             if "/" in ref:
                 remote, branch = ref.split("/", 1)
                 if remote in self.remotes:
-                    url = self.remotes[remote]
-                    # rewrite github to public url
-                    match = re.match(r"git@github\.com:(\S+?)/(\S+\.git)", url) or re.match(
-                        r"https://github\.com/(\S+)/(\S+\.git)", url
-                    )
-                    if match is not None:
-                        url = "git://github.com/%s/%s" % match.groups()
-                    match = re.match(r"ssh://\S+?@(\S+)", url)
-                    if match is not None:
-                        url = "git://%s" % match.group(1)
+                    url = self.publicurl(self.remotes[remote])
                     parsed_url = urlparse(url)
                     entryscore = (
                         url == "git://github.com/FreeCAD/FreeCAD.git",
@@ -404,13 +411,20 @@ class GitControl(VersionControl):
                 self.branch = "(%s)" % os.popen("git describe --all --dirty").read().strip()
         # if the branch name contained any slashes but was not a remote
         # there might be no result by now. Hence we assume origin
-        if self.url == "Unknown":
-            for i in info:
-                r = re.match("origin\\W+(\\S+)", i)
-                if r is not None:
-                    self.url = r.groups()[0]
-                    break
+        # (FreeCAD-CH: this used to loop over the characters of the date and never matched)
+        if self.url == "Unknown" and "origin" in self.remotes:
+            self.url = self.publicurl(self.remotes["origin"])
+        self.forkVersion()
         return True
+
+    def forkVersion(self):
+        """FreeCAD-CH release from the nearest fork-X.Y.Z tag: the tag itself on a release
+        commit, fork-X.Y.Z-<n>-g<hash> after one, fork-unknown without one"""
+        null_device = "nul" if os.name == "nt" else "/dev/null"
+        describe = os.popen(f'git describe --tags --match "fork-*" HEAD 2>{null_device}')
+        tag = describe.read().strip()
+        if describe.close() is None and tag:  # exit code == 0
+            self.forkversion = tag
 
     def printInfo(self):
         print("git")

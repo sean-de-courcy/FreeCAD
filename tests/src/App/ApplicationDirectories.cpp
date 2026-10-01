@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 #include <App/ApplicationDirectories.h>
+#include <Build/ForkIdentity.h>
 
 #include <random>
 #include <fstream>
@@ -955,6 +956,66 @@ TEST_F(ApplicationDirectoriesTest, appendCreateAlreadyVersionedBails)
     auto before = sub;
     appDirs->wrapAppendVersionIfPossibleCreate(base, sub);
     EXPECT_EQ(sub, before);
+}
+
+// FreeCAD-CH: the fork's settings folder is its own, even with official FreeCAD's next to it.
+// The names are the ones the entry points set (src/Main/MainGui.cpp and others), from fork.json.
+TEST_F(ApplicationDirectoriesTest, forkIdentityIsNotFreeCAD)
+{
+    EXPECT_STRNE(FCForkName, "FreeCAD");
+    // the vendor names the Qt settings, which official FreeCAD's uninstaller can delete
+    EXPECT_STRNE(FCForkVendor, "FreeCAD");
+}
+
+TEST_F(ApplicationDirectoriesTest, forkNeverUsesOfficialSettingsFolder)
+{
+    // Arrange: the base folder (%APPDATA% on Windows) holds official FreeCAD 1.1's settings
+    auto appDirs = makeAppDirsForVersion(26, 3);
+    fs::path base = tempDir() / "appdata";
+    fs::create_directories(versionedPath(base / "FreeCAD", 1, 1));
+    std::map<std::string, std::string> config {
+        {"ExeName", FCForkName},
+        {"ExeVendor", FCForkVendor},
+        {"AppDataSkipVendor", "true"}
+    };
+
+    // Act: the folder chosen on the fork's first start
+    std::vector<std::string> sub;
+    App::ApplicationDirectories::getSubDirectories(config, sub);
+    appDirs->wrapAppendVersionIfPossible(base, sub);
+
+    // Assert: <base>/FreeCAD-CH/v26-3, never <base>/FreeCAD/v1-1
+    std::vector<std::string> expected {
+        FCForkName,
+        App::ApplicationDirectories::versionStringForPath(26, 3)
+    };
+    EXPECT_EQ(sub, expected);
+}
+
+TEST_F(ApplicationDirectoriesTest, forkKeepsItsOwnOlderSettingsFolder)
+{
+    // Arrange: the fork's own settings from an older base sit next to official FreeCAD's
+    auto appDirs = makeAppDirsForVersion(26, 4);
+    fs::path base = tempDir() / "appdata";
+    fs::create_directories(versionedPath(base / "FreeCAD", 26, 4));
+    fs::create_directories(versionedPath(base / FCForkName, 26, 3));
+    std::map<std::string, std::string> config {
+        {"ExeName", FCForkName},
+        {"ExeVendor", FCForkVendor},
+        {"AppDataSkipVendor", "true"}
+    };
+
+    // Act
+    std::vector<std::string> sub;
+    App::ApplicationDirectories::getSubDirectories(config, sub);
+    appDirs->wrapAppendVersionIfPossible(base, sub);
+
+    // Assert: the fork's own v26-3 (which the migration dialog then offers to copy)
+    std::vector<std::string> expected {
+        FCForkName,
+        App::ApplicationDirectories::versionStringForPath(26, 3)
+    };
+    EXPECT_EQ(sub, expected);
 }
 
 /* NOLINTEND(

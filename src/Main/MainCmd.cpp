@@ -28,6 +28,7 @@
 # include <config.h>
 #endif  // HAVE_CONFIG_H
 
+#include <Build/ForkIdentity.h>
 #include <Build/Version.h>  // For FCCopyrightYear
 
 #include <cstdio>
@@ -47,9 +48,12 @@
 using App::Application;
 using Base::Console;
 
+// FreeCAD-CH: the first line is About's author line
 const auto sBanner = fmt::format(
+    "A build of FreeCAD for {}\n"
     "(C) 2001-{} FreeCAD contributors\n"
     "FreeCAD is free and open-source software licensed under the terms of LGPL2+ license.\n\n",
+    FCForkCompany,
     FCCopyrightYear
 );
 
@@ -68,8 +72,9 @@ int main(int argc, char** argv)
 #endif
 
     // Name and Version of the Application
-    App::Application::Config()["ExeName"] = "FreeCAD";
-    App::Application::Config()["ExeVendor"] = "FreeCAD";
+    // FreeCAD-CH: from fork.json, so the fork never uses official FreeCAD's settings folder
+    App::Application::Config()["ExeName"] = FCForkName;
+    App::Application::Config()["ExeVendor"] = FCForkVendor;
     App::Application::Config()["AppDataSkipVendor"] = "true";
 
     // set the banner (for logging and console)

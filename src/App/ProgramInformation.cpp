@@ -165,6 +165,15 @@ void ProgramInformation::getVerboseCommonInfo(
     std::stringstream& str,
     const std::map<std::string, std::string>& mConfig)
 {
+    // FreeCAD-CH: name the build first, so a pasted bug report says which one it is
+    const auto exeName = getValueOrEmpty(mConfig, "ExeName");
+    const auto forkVersion = getValueOrEmpty(mConfig, "ForkVersion");
+    const auto hash = getValueOrEmpty(mConfig, "BuildRevisionHash");
+    str << exeName << " " << forkVersion;
+    if (!hash.empty()) {
+        str << " (" << hash.substr(0, 10) << ")";
+    }
+    str << '\n';
     getSystemInformation(str);
     getVersionInformation(mConfig, str);
     getPackageInformation(str);

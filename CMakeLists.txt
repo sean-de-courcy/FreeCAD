@@ -70,6 +70,16 @@ string(JSON PACKAGE_BUILD_VERSION GET ${VERSION_JSON} "build_version")
 project(${_PROJECT_NAME})
 string(TIMESTAMP PACKAGE_COPYRIGHT_YEAR "%Y")
 
+# FreeCAD-CH: the fork's name, settings folder and packaging identity (src/Build/ForkIdentity.h).
+# version.json keeps upstream's values: its "name" is also the conda package name.
+file(READ "${CMAKE_SOURCE_DIR}/fork.json" FORK_JSON)
+string(JSON FORK_NAME GET "${FORK_JSON}" "name")
+string(JSON FORK_VENDOR GET "${FORK_JSON}" "vendor")
+string(JSON FORK_COMPANY GET "${FORK_JSON}" "company")
+string(JSON FORK_MACOS_BUNDLE_ID GET "${FORK_JSON}" "macos_bundle_id")
+string(JSON FORK_REPOSITORY_URL GET "${FORK_JSON}" "repository_url")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/fork.json")
+
 set(PACKAGE_VERSION "${PACKAGE_VERSION_MAJOR}.${PACKAGE_VERSION_MINOR}.${PACKAGE_VERSION_PATCH}")
 set(PACKAGE_STRING "${PROJECT_NAME} ${PACKAGE_VERSION}")
 

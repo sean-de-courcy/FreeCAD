@@ -678,3 +678,25 @@ class MatrixTestCase(unittest.TestCase):
 class FileSystem(unittest.TestCase):
     def testEncoding(self):
         self.assertEqual(sys.getfilesystemencoding(), "utf-8")
+
+
+class ForkIdentity(unittest.TestCase):
+    """FreeCAD-CH: the fork's name and release (fork.json, src/Build/Version.h)"""
+
+    def testExeName(self):
+        # names the user settings folder: never official FreeCAD's
+        self.assertNotEqual(FreeCAD.ConfigGet("ExeName"), "FreeCAD")
+        self.assertNotEqual(FreeCAD.ConfigGet("ExeName"), "")
+
+    def testForkVersion(self):
+        # fork-X.Y.Z on a release tag, fork-X.Y.Z-<n>-g<hash> after one, fork-unknown without
+        self.assertRegex(
+            FreeCAD.ConfigGet("ForkVersion"),
+            r"^fork-(unknown|\d+\.\d+\.\d+(-\d+-g[0-9a-f]+)?)$",
+        )
+
+    def testUpstreamVersionStaysNumeric(self):
+        # the Addon Manager and the version migration parse these as numbers
+        major, minor = FreeCAD.Version()[0:2]
+        self.assertTrue(major.isdigit(), major)
+        self.assertTrue(minor.isdigit(), minor)

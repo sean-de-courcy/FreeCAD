@@ -47,6 +47,7 @@
 #include <Base/PyObjectBase.h>
 #include <Base/Sequencer.h>
 #include <App/Application.h>
+#include <Build/ForkIdentity.h>
 
 #if defined(FC_OS_WIN32)
 
@@ -80,8 +81,9 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID /*lpReser
 PyMOD_INIT_FUNC(FreeCAD)
 {
     // Init phase ===========================================================
-    App::Application::Config()["ExeName"] = "FreeCAD";
-    App::Application::Config()["ExeVendor"] = "FreeCAD";
+    // FreeCAD-CH: from fork.json, so the fork never uses official FreeCAD's settings folder
+    App::Application::Config()["ExeName"] = FCForkName;
+    App::Application::Config()["ExeVendor"] = FCForkVendor;
     App::Application::Config()["AppDataSkipVendor"] = "true";
 
     QByteArray path;

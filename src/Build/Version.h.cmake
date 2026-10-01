@@ -11,4 +11,6 @@
 #define FCRevision      "${PACKAGE_WCREF}"      //Highest committed revision number
 #define FCRevisionDate  "${PACKAGE_WCDATE}"     //Date of highest committed revision
 #define FCRepositoryURL "${PACKAGE_WCURL}"      //Repository URL of the working copy
+// FreeCAD-CH release: "fork-X.Y.Z" on a release tag, "fork-X.Y.Z-<n>-g<hash>" after one
+#define FCForkVersion   "${PACKAGE_FORK_VERSION}"
 

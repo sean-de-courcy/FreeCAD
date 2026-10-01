@@ -32,6 +32,7 @@
 # include <config.h>
 #endif  // HAVE_CONFIG_H
 
+#include <Build/ForkIdentity.h>
 #include <Build/Version.h>  // For FCCopyrightYear
 
 #include <cstdio>
@@ -58,9 +59,12 @@
 
 void PrintInitHelp();
 
+// FreeCAD-CH: the first line is About's author line
 const auto sBanner = fmt::format(
+    "A build of FreeCAD for {}\n"
     "(C) 2001-{} FreeCAD contributors\n"
     "FreeCAD is free and open-source software licensed under the terms of LGPL2+ license.\n\n",
+    FCForkCompany,
     FCCopyrightYear
 );
 
@@ -207,10 +211,11 @@ int main(int argc, char** argv)
 #endif
 
     // Name and Version of the Application
-    App::Application::Config()["ExeName"] = "FreeCAD";
-    App::Application::Config()["ExeVendor"] = "FreeCAD";
+    // FreeCAD-CH: from fork.json, so the fork never uses official FreeCAD's settings folder
+    App::Application::Config()["ExeName"] = FCForkName;
+    App::Application::Config()["ExeVendor"] = FCForkVendor;
     App::Application::Config()["AppDataSkipVendor"] = "true";
-    App::Application::Config()["MaintainerUrl"] = "https://freecad.org";
+    App::Application::Config()["MaintainerUrl"] = FCForkRepositoryURL;
 
     // set the banner (for logging and console)
     App::Application::Config()["CopyrightInfo"] = sBanner;
@@ -226,6 +231,10 @@ int main(int argc, char** argv)
     App::Application::Config()["SplashWarningColor"] = "#CA333B";
     App::Application::Config()["SplashInfoColor"] = "#000000";
     App::Application::Config()["SplashInfoPosition"] = "6,75";
+    // FreeCAD-CH: the stock artwork already says "FreeCAD", so draw no name, and
+    // "CH fork-X.Y.Z" as the version
+    App::Application::Config()["SplashInfoExeName"] = "FreeCAD";
+    App::Application::Config()["SplashInfoVersion"] = std::string("CH ") + FCForkVersion;
     App::Application::Config()["DesktopFileName"] = "org.freecad.FreeCAD";
 
     try {
