@@ -748,6 +748,15 @@ void ProfileBased::onChanged(const App::Property* prop)
         // if attached to a sketch then mark it as read-only
         this->Placement.setStatus(App::Property::ReadOnly, Profile.getValue() != nullptr);
     }
+    else if (prop == &AllowMultiFace) {
+        // The reference solver (ops#7): a profile given as faces takes every piece of a split
+        // face (Task 2 PR 7; read as One until then). Without AllowMultiFace only the first sub
+        // is used, so pieces can't be expanded there.
+        Profile.setElementPolicy(
+            AllowMultiFace.getValue() ? App::PropertyLinkBase::ElementPolicy::Expand
+                                      : App::PropertyLinkBase::ElementPolicy::One
+        );
+    }
 
     FeatureAddSub::onChanged(prop);
 }
