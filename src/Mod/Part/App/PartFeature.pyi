@@ -47,11 +47,12 @@ class PartFeature(GeoFeature):
         ...
 
     @staticmethod
-    def doNamesMatch(name1: str, name2: str, /) -> bool:
+    def doNamesMatch(name1: str, name2: str, strict: bool = False, /) -> bool:
         """
         Returns true when `name1` and `name2` match according to FreeCAD's design intent standard.
 
-        `name1` and `name2` are `MappedName`s converted to strings.
+        `name1` and `name2` are `MappedName`s converted to strings. With `strict`, a vertex
+        section doesn't match on a single shared reference ID.
 
         Example:
             `name1` = `g1125;_;9;SKT;0;E;0;SRC;_|_;_;23;CUT;0;E;0;MOD;_`

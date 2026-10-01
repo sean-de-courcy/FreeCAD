@@ -11,6 +11,8 @@
 #include "PartTestHelpers.h"
 #include "App/MappedElement.h"
 #include <Base/Interpreter.h>
+#include <Base/Console.h>
+#include <App/PropertyLinks.h>
 
 using namespace Part;
 using namespace PartTestHelpers;
@@ -245,6 +247,353 @@ TEST_F(FeaturePartTest, getComplexElementTypes)
     EXPECT_STREQ(types[0], "Face");
     EXPECT_STREQ(types[1], "Edge");
     EXPECT_STREQ(types[2], "Vertex");
+}
+
+namespace
+{
+// A pad's vertical side edge, generated from the sketch vertex where two lines meet. The vertex's
+// name lists the two lines' vertex IDs, e.g. {"g1v2", "g2v1"}: the front line's end and the right
+// line's start (ops#79).
+Data::MappedName sideEdgeName(const std::vector<std::string>& vertexIDs)
+{
+    Data::MappedName vertex(Data::MappedName::makeEncodedSection(
+        vertexIDs,
+        std::vector<Data::MappedName> {},
+        5,
+        "SKT",
+        0,
+        'V',
+        0,
+        {Data::MAPPER_FLAG_SOURCE},
+        std::vector<Data::MappedName> {}
+    ));
+    return Data::MappedName(Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        std::vector<Data::MappedName> {vertex},
+        6,
+        "XTR",
+        0,
+        'E',
+        0,
+        {Data::MAPPER_FLAG_GENERATED},
+        std::vector<Data::MappedName> {}
+    ));
+}
+
+std::vector<std::string> indexesOf(const std::vector<Data::MappedElement>& elements)
+{
+    std::vector<std::string> indexes;
+    for (const auto& element : elements) {
+        indexes.push_back(element.index.toString());
+    }
+    return indexes;
+}
+}  // namespace
+
+TEST_F(FeaturePartTest, doNamesMatchStrictRejectsOneSharedVertexID)
+{
+    // Arrange
+    //   pattern: a rectangle's corner at (20, 0) is the vertex g1v2,g2v1. A notch in the front
+    //   line g1 moves g1's end to the notch's first corner, g1v2,g5v1, and the corner becomes
+    //   g2v1,g8v2: each shares one ID with the old corner (ops#79).
+    auto corner = sideEdgeName({"g1v2", "g2v1"});
+    auto notchCorner = sideEdgeName({"g1v2", "g5v1"});
+    auto movedCorner = sideEdgeName({"g2v1", "g8v2"});
+    auto sameCorner = sideEdgeName({"g2v1", "g1v2"});
+    auto otherCorner = sideEdgeName({"g3v2", "g4v1"});
+
+    // Act and assert
+    //   loose: one shared vertex ID is enough
+    EXPECT_TRUE(Feature::doNamesMatch(corner, notchCorner));
+    EXPECT_TRUE(Feature::doNamesMatch(corner, movedCorner));
+    //   strict: it isn't
+    EXPECT_FALSE(Feature::doNamesMatch(corner, notchCorner, false, true));
+    EXPECT_FALSE(Feature::doNamesMatch(corner, movedCorner, false, true));
+    //   both IDs shared, in either order, still match strictly
+    EXPECT_TRUE(Feature::doNamesMatch(corner, sameCorner, false, true));
+    //   no shared ID matches in neither mode
+    EXPECT_FALSE(Feature::doNamesMatch(corner, otherCorner));
+    EXPECT_FALSE(Feature::doNamesMatch(corner, otherCorner, false, true));
+}
+
+TEST_F(FeaturePartTest, matchSimilarNamesSeveralLooseMatchesAreAmbiguous)
+{
+    // Arrange
+    //   pattern: ops#79's notch: two edges share one vertex ID with the old corner's edge
+    auto corner = sideEdgeName({"g1v2", "g2v1"});
+    std::vector<Data::MappedElement> elements {
+        {sideEdgeName({"g1v2", "g5v1"}), Data::IndexedName("Edge", 2)},
+        {sideEdgeName({"g2v1", "g8v2"}), Data::IndexedName("Edge", 14)},
+        {sideEdgeName({"g3v2", "g4v1"}), Data::IndexedName("Edge", 5)},
+    };
+    bool ambiguous = false;
+
+    // Act
+    auto matches = Feature::matchSimilarNames(corner, elements, ambiguous);
+
+    // Assert
+    //   neither is taken: picking the first by bytes was the silent wrong pick
+    EXPECT_TRUE(matches.empty());
+    EXPECT_TRUE(ambiguous);
+}
+
+TEST_F(FeaturePartTest, matchSimilarNamesTakesTheOnlyLooseMatch)
+{
+    // Arrange
+    //   pattern: a corner whose front line was deleted and redrawn: only the right line's ID
+    //   survives, in one vertex
+    auto corner = sideEdgeName({"g1v2", "g2v1"});
+    std::vector<Data::MappedElement> elements {
+        {sideEdgeName({"g2v1", "g8v2"}), Data::IndexedName("Edge", 14)},
+        {sideEdgeName({"g3v2", "g4v1"}), Data::IndexedName("Edge", 5)},
+    };
+    bool ambiguous = true;
+
+    // Act
+    auto matches = Feature::matchSimilarNames(corner, elements, ambiguous);
+
+    // Assert
+    EXPECT_EQ(indexesOf(matches), std::vector<std::string> {"Edge14"});
+    EXPECT_FALSE(ambiguous);
+}
+
+TEST_F(FeaturePartTest, matchSimilarNamesStrictMatchesHideLooseOnes)
+{
+    // Arrange
+    //   pattern: the corner's vertex is still there (both IDs, listed in the other order), next
+    //   to an edge that shares one ID with it
+    auto corner = sideEdgeName({"g1v2", "g2v1"});
+    std::vector<Data::MappedElement> elements {
+        {sideEdgeName({"g1v2", "g5v1"}), Data::IndexedName("Edge", 2)},
+        {sideEdgeName({"g2v1", "g1v2"}), Data::IndexedName("Edge", 9)},
+    };
+    bool ambiguous = true;
+
+    // Act
+    auto matches = Feature::matchSimilarNames(corner, elements, ambiguous);
+
+    // Assert
+    EXPECT_EQ(indexesOf(matches), std::vector<std::string> {"Edge9"});
+    EXPECT_FALSE(ambiguous);
+}
+
+namespace
+{
+// Collects the warnings sent to the console while it is attached.
+class WarningCollector final: public Base::ILogger
+{
+public:
+    WarningCollector()
+    {
+        Base::Console().attachObserver(this);
+    }
+    ~WarningCollector() override
+    {
+        Base::Console().detachObserver(this);
+    }
+    WarningCollector(const WarningCollector&) = delete;
+    WarningCollector(WarningCollector&&) = delete;
+    WarningCollector& operator=(const WarningCollector&) = delete;
+    WarningCollector& operator=(WarningCollector&&) = delete;
+
+    void sendLog(
+        const std::string& /*notifiername*/,
+        const std::string& msg,
+        Base::LogStyle level,
+        Base::IntendedRecipient /*recipient*/,
+        Base::ContentType /*content*/
+    ) override
+    {
+        if (level == Base::LogStyle::Warning) {
+            warnings.push_back(msg);
+        }
+    }
+    const char* name() override
+    {
+        return "WarningCollector";
+    }
+
+    size_t count(const std::string& text) const
+    {
+        size_t found = 0;
+        for (const auto& msg : warnings) {
+            if (msg.find(text) != std::string::npos) {
+                ++found;
+            }
+        }
+        return found;
+    }
+
+    std::vector<std::string> warnings;
+};
+
+// A sketch face's name, and a piece of it: the name followed by a MOD section (ops#7).
+Data::MappedName faceName(const std::string& geometryID)
+{
+    return Data::MappedName(Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {geometryID},
+        std::vector<Data::MappedName> {},
+        5,
+        "SKT",
+        0,
+        'F',
+        0,
+        {Data::MAPPER_FLAG_SOURCE},
+        std::vector<Data::MappedName> {}
+    ));
+}
+
+Data::MappedName pieceName(const Data::MappedName& face, int index)
+{
+    return Data::MappedName(
+        face.toString() + Data::NAME_SECTION_DELIMINATOR
+        + Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            std::vector<Data::MappedName> {},
+            6,
+            "CUT",
+            index,
+            'F',
+            0,
+            {Data::MAPPER_FLAG_MODIFIED},
+            std::vector<Data::MappedName> {}
+        )
+    );
+}
+}  // namespace
+
+TEST_F(FeaturePartTest, referenceResolvedByOneOfSeveralNameMatchesWarnsV2)
+{
+    // Arrange
+    //   pattern: a link to a named face of a box; the box is replaced by a moved one where two
+    //   faces are pieces of that face, as when a cut splits it. Both names match strictly, the
+    //   old face's shape is gone, so the reference takes the first piece: a guess (ops#20).
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto top = faceName("g1");
+    TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    before.setElementName(Data::IndexedName("Face", 1), top, 7L);
+    TopoShape after(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeBox(gp_Pnt(10.0, 0.0, 0.0), 1.0, 2.0, 3.0).Shape(),
+        7L
+    );
+    after.setElementName(Data::IndexedName("Face", 2), pieceName(top, 1), 7L);
+    after.setElementName(Data::IndexedName("Face", 3), pieceName(top, 2), 7L);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(before);
+    auto user = _doc->addObject<Part::Feature>("User");
+    auto ref = freecad_cast<App::PropertyLinkSub*>(
+        user->addDynamicProperty("App::PropertyLinkSub", "Ref")
+    );
+    ASSERT_NE(ref, nullptr);
+    ref->setValue(source, std::vector<std::string> {"Face1"});
+    ASSERT_EQ(ref->getSubValues(false), std::vector<std::string> {"Face1"});
+    WarningCollector collector;
+
+    // Act
+    source->Shape.setValue(after);
+
+    // Assert
+    auto subs = ref->getSubValues(false);
+    ASSERT_EQ(subs.size(), 1);
+    EXPECT_TRUE(subs[0] == "Face2" || subs[0] == "Face3") << subs[0];
+    EXPECT_EQ(collector.count("guessed element reference"), 1);
+    EXPECT_EQ(collector.count("2 names match, the first was taken"), 1);
+    EXPECT_EQ(collector.count("overrode the name match"), 0);
+}
+
+TEST_F(FeaturePartTest, referenceResolvedByGeometryOverAnotherNameMatchWarnsV2)
+{
+    // Arrange
+    //   pattern: as above, but the box stays where it is: the old face is still Face1 under
+    //   another name, and Face2's name matches the old one. The geometric search finds the old
+    //   face's shape at Face1 and overrides the name match: a guess (ops#20).
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto top = faceName("g1");
+    TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    before.setElementName(Data::IndexedName("Face", 1), top, 7L);
+    TopoShape after(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    after.setElementName(Data::IndexedName("Face", 1), faceName("g9"), 7L);
+    after.setElementName(Data::IndexedName("Face", 2), pieceName(top, 1), 7L);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(before);
+    auto user = _doc->addObject<Part::Feature>("User");
+    auto ref = freecad_cast<App::PropertyLinkSub*>(
+        user->addDynamicProperty("App::PropertyLinkSub", "Ref")
+    );
+    ASSERT_NE(ref, nullptr);
+    ref->setValue(source, std::vector<std::string> {"Face1"});
+    WarningCollector collector;
+
+    // Act
+    source->Shape.setValue(after);
+
+    // Assert
+    EXPECT_EQ(ref->getSubValues(false), std::vector<std::string> {"Face1"});
+    EXPECT_EQ(collector.count("overrode the name match"), 1);
+    EXPECT_EQ(collector.count("names match, the first was taken"), 0);
+}
+
+TEST_F(FeaturePartTest, referenceWithOneNameMatchDoesNotWarnV2)
+{
+    // Arrange
+    //   control: the moved box has one piece of the old face, so the name match is the only
+    //   candidate and nothing overrides it
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto top = faceName("g1");
+    TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    before.setElementName(Data::IndexedName("Face", 1), top, 7L);
+    TopoShape after(
+        App::HistoryAlgorithm::V2,
+        BRepPrimAPI_MakeBox(gp_Pnt(10.0, 0.0, 0.0), 1.0, 2.0, 3.0).Shape(),
+        7L
+    );
+    after.setElementName(Data::IndexedName("Face", 3), pieceName(top, 1), 7L);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(before);
+    auto user = _doc->addObject<Part::Feature>("User");
+    auto ref = freecad_cast<App::PropertyLinkSub*>(
+        user->addDynamicProperty("App::PropertyLinkSub", "Ref")
+    );
+    ASSERT_NE(ref, nullptr);
+    ref->setValue(source, std::vector<std::string> {"Face1"});
+    WarningCollector collector;
+
+    // Act
+    source->Shape.setValue(after);
+
+    // Assert
+    EXPECT_EQ(ref->getSubValues(false), std::vector<std::string> {"Face3"});
+    EXPECT_EQ(collector.count("guessed element reference"), 0);
+}
+
+TEST_F(FeaturePartTest, referenceWhoseNameMatchGeometryConfirmsDoesNotWarnV2)
+{
+    // Arrange
+    //   control: the box stays where it is and its Face1 is now a piece of the old face, so the
+    //   name match and the geometric search agree
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto top = faceName("g1");
+    TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    before.setElementName(Data::IndexedName("Face", 1), top, 7L);
+    TopoShape after(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    after.setElementName(Data::IndexedName("Face", 1), pieceName(top, 1), 7L);
+    auto source = _doc->addObject<Part::Feature>("Source");
+    source->Shape.setValue(before);
+    auto user = _doc->addObject<Part::Feature>("User");
+    auto ref = freecad_cast<App::PropertyLinkSub*>(
+        user->addDynamicProperty("App::PropertyLinkSub", "Ref")
+    );
+    ASSERT_NE(ref, nullptr);
+    ref->setValue(source, std::vector<std::string> {"Face1"});
+    WarningCollector collector;
+
+    // Act
+    source->Shape.setValue(after);
+
+    // Assert
+    EXPECT_EQ(ref->getSubValues(false), std::vector<std::string> {"Face1"});
+    EXPECT_EQ(collector.count("guessed element reference"), 0);
 }
 
 TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)

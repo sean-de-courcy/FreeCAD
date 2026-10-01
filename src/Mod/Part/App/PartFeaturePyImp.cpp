@@ -130,13 +130,16 @@ PyObject* PartFeaturePy::doNamesMatch(PyObject* args)
 {
     const char* name1;
     const char* name2;
+    PyObject* strict = Py_False;
 
-    if (!PyArg_ParseTuple(args, "ss", &name1, &name2)) {
-        return Py::new_reference_to(Py::Boolean(false));
+    if (!PyArg_ParseTuple(args, "ss|O!", &name1, &name2, &PyBool_Type, &strict)) {
+        return nullptr;
     }
 
     Data::MappedName mappedName1 {name1};
     Data::MappedName mappedName2 {name2};
 
-    return (Py::new_reference_to(Py::Boolean(Feature::doNamesMatch(mappedName1, mappedName2))));
+    return (Py::new_reference_to(Py::Boolean(
+        Feature::doNamesMatch(mappedName1, mappedName2, false, Base::asBoolean(strict))
+    )));
 }

@@ -27,7 +27,9 @@ cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2
 reason: a dress-up on an edge that a notch in the sketch splits keeps the piece of the shortened line only; the other piece comes from a new sketch line, so the multi-match flags don't find it either; section 6 of notes/scenarios.md expects every piece (every mode)
 cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2multi
 
-reason: a dress-up on a vertical edge whose sketch corner is cut off moves onto one of the two new corner edges (V2), or onto both (V2multi); the edge is gone, so it should break with them as candidates (V1 breaks)
-cli  PartDesignTests.TestNamingScenarios.FilletCornerCut.test_fillet_edge_V2
-cli  PartDesignTests.TestNamingScenarios.FilletCornerCut.test_fillet_edge_V2multi
+reason: a fillet on a sketch corner's vertical edge, after a chamfer on the front edge, breaks when a notch is cut into the front side: the chamfer kept the front line's piece and left the corner, so the geometric search can't find the old edge, and the two corners that share one vertex ID with it are ambiguous (ops#79's Track A outcome, as V1); correct needs the chamfer to keep every piece
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2multi

@@ -35,6 +35,7 @@ from .harness import (
     edge,
     expectedNames,
     face,
+    pieces,
     sameSolid,
 )
 from . import models as m
@@ -224,7 +225,8 @@ class FilletNotchBeside(Scenario):
     The corner's vertex joined the front line's end and the right line's start (g1v2, g2v1); it
     is now g12v2, g2v1, and the notch's first corner, at (8, 0), is g1v2, g9v1. With the front
     notch only (new lines g5-g8) every mode is correct. Found by the randomized sequences (seeds
-    12 and 29): with the multi-match flags on, the fillet takes both edges."""
+    12 and 29): with the multi-match flags on, the fillet took both edges (ops#76) until a match
+    on one shared vertex ID counted only when it is the only one (ops#79)."""
 
     area = "dress-ups"
     MULTI = True
@@ -257,15 +259,21 @@ class FilletNotchAfterChamfer(Scenario):
     shortened at its foot. A notch (x 8..12, 2 deep) is then cut into the front side, as in
     SketchNotch: the front line ends at x = 8, and the rest of the side is a new line. The corner
     at (20, 0) is where it was, so the fillet should stay on it. Found by the randomized sequences
-    (seeds 151, 153 and 200): V2 moves the fillet to another vertical edge; with the fillet on the
-    pad itself (FilletNotchBeside with one notch) V2 is correct."""
+    (seeds 151, 153 and 200): V2 moved the fillet to the notch's corner (ops#79); it now breaks,
+    as V1 does. With the fillet on the pad itself (FilletNotchBeside with one notch) V2 is
+    correct. The chamfer's own edge splits into x 0..8 and x 12..20, and the chamfer should take
+    both pieces (SplitFilletNotch's case, ops#7): keeping the front line's piece is what moves the
+    chamfer off the corner and takes the geometric search's rescue away from the fillet."""
 
     area = "dress-ups"
     MULTI = True
-    REFS = ("fillet_edge",)
+    REFS = ("chamfer_edge", "fillet_edge")
 
     def cornerEdge(self):
         return edge("line", direction=Z, through=(20, 0, 0))
+
+    def frontBottomEdge(self):
+        return pieces(edge("line", direction=X, through=(0, 0, 0)))
 
     def build(self, doc):
         body = m.body(doc)
@@ -273,8 +281,9 @@ class FilletNotchAfterChamfer(Scenario):
         pad = m.pad(body, profile, 10)
         doc.recompute()
         chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
-        chamfer.Base = (pad, self.names(pad, edge("line", direction=X, through=(0, 0, 0))))
+        chamfer.Base = (pad, self.names(pad, self.frontBottomEdge().predicate))
         chamfer.Size = 0.75
+        self.ref("chamfer_edge", chamfer, "Base", self.frontBottomEdge, Chamfered(0.75))
         doc.recompute()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (chamfer, self.names(chamfer, self.cornerEdge()))

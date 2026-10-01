@@ -136,10 +136,22 @@ public:
     App::Material getMaterialAppearance() const override;
     void setMaterialAppearance(const App::Material& material) override;
 
+    // With `strict`, a vertex section no longer matches on a single shared reference ID; that
+    // weak rule can't tell a replaced line from a line whose end moved to another corner.
     static bool doNamesMatch(
         Data::MappedName& name1,
         Data::MappedName& name2,
-        bool logMatchedElements = false
+        bool logMatchedElements = false,
+        bool strict = false
+    );
+
+    // The matching rule shared by the findSimilarNames() implementations: the strict matches if
+    // there are any, otherwise a loose match only when it is the only one. Several loose matches
+    // make the reference ambiguous: nothing is returned and `ambiguous` is set.
+    static std::vector<Data::MappedElement> matchSimilarNames(
+        Data::MappedName& searchName,
+        const std::vector<Data::MappedElement>& elements,
+        bool& ambiguous
     );
 
     // This method searches through the element map to find a set of similar names for the input

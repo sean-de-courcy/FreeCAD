@@ -487,6 +487,7 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     bool missing = GeoFeature::hasMissingElement(elementName.oldName.c_str());
     if (feature == geo && (missing || reverse)) {
         bool resolvedMissing = false;
+        std::string nameMatch;  // the name match's pick, to tell a geometric override (ops#20)
 
         if (elementName.newName.size() && !reverse) {
             size_t prefixOffset = strlen(subname) - strlen(element);
@@ -516,6 +517,17 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                     elementName.newName = ss.str();
 
                     missing = false;
+                    nameMatch = elementName.oldName;
+
+                    if (foundMappedElements.size() > 1) {
+                        FC_WARN(propertyName(this)
+                                << " guessed element reference " << ret->getFullName() << " "
+                                << (shadow.newName.size() ? shadow.newName : shadow.oldName)
+                                << " -> " << elementName.newName << ": "
+                                << foundMappedElements.size()
+                                << " names match, the first was taken"
+                                << (canUseMultipleMatchedNames() ? " and the others added" : ""));
+                    }
                 }
 
                 if (matchedNames != nullptr) {
@@ -547,7 +559,13 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                 const auto& oldName = shadow.newName.size() ? shadow.newName : shadow.oldName;
                 const auto& newName =
                     elementName.newName.size() ? elementName.newName : elementName.oldName;
-                if (oldName != newName) {
+                if (nameMatch.size() && nameMatch != elementName.oldName) {
+                    FC_WARN(propertyName(this)
+                            << " guessed element reference " << ret->getFullName() << " "
+                            << oldName << " -> " << newName
+                            << ": the geometric search overrode the name match " << nameMatch);
+                }
+                else if (oldName != newName) {
                     FC_LOG(propertyName(this)
                            << " auto change element reference " << ret->getFullName() << " "
                            << oldName << " -> " << newName);

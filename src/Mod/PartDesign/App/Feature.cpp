@@ -303,6 +303,15 @@ bool Feature::relinkToMatchingSubelements(
             if (foundNames.size()) {
                 names.push_back(foundNames.front().name.toString());
             }
+
+            if (foundNames.size() > 1) {
+                FC_WARN(
+                    link.getFullName() << ": guessed the relinked reference "
+                                  << sub << " -> " << foundNames.front().index.toString()
+                                  << ", the first of " << foundNames.size()
+                                  << " matching elements of " << newFeature->getFullName()
+                );
+            }
         }
 
         if (names.size() != 1) {

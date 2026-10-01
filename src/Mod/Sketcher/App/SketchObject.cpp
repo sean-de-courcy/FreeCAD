@@ -1990,25 +1990,30 @@ const char *SketchObject::convertInternalName(const char *name)
 std::vector<Data::MappedElement> SketchObject::findSimilarNames(Data::MappedName &searchName)
 {
     std::vector<Data::MappedElement> ret;
+    bool ambiguous = false;
 
-    ret = Part::Feature::findSimilarNames(searchName, Shape.getShape());
+    const Part::TopoShape &shape = Shape.getShape();
+    if (shape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+        ret = Part::Feature::matchSimilarNames(searchName, shape.getElementMap(), ambiguous);
+    }
 
-    if (ret.empty()) {
+    // An ambiguous name in Shape stays unresolved: a weak match in InternalShape would be
+    // another guess.
+    if (ret.empty() && !ambiguous
+        && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
         const Part::TopoShape &internalShape = InternalShape.getShape();
+        const auto matches =
+            Part::Feature::matchSimilarNames(searchName, internalShape.getElementMap(), ambiguous);
 
-        if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
-            for (Data::MappedElement &loopNamePair : internalShape.getElementMap()) {
-                if (loopNamePair.name == searchName || Feature::doNamesMatch(searchName, loopNamePair.name, true)) {
-                    std::string loopNameIndexString = internalPrefix();
-                    loopNameIndexString += loopNamePair.index.toString();
+        for (const Data::MappedElement &loopNamePair : matches) {
+            std::string loopNameIndexString = internalPrefix();
+            loopNameIndexString += loopNamePair.index.toString();
 
-                    Data::IndexedName loopNameIndex = Data::IndexedName(
-                        loopNameIndexString.c_str()
-                    );
+            Data::IndexedName loopNameIndex = Data::IndexedName(
+                loopNameIndexString.c_str()
+            );
 
-                    ret.emplace_back(loopNamePair.name, loopNameIndex);
-                }
-            }
+            ret.emplace_back(loopNamePair.name, loopNameIndex);
         }
     }
 
