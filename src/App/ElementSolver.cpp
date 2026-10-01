@@ -813,6 +813,53 @@ std::string formatOverlap(double value)
     return ss.str();
 }
 
+// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
+bool isCounterOpCode(const std::string& opCode)
+{
+    return opCode.size() > 1 && opCode[0] == '_'
+        && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
+               return c >= '0' && c <= '9';
+           });
+}
+
+/* True if \a name is \a oldName up to the duplicate counter of any of its sections, and not
+ * \a oldName itself: a pattern instance's copy of the old element, or another element the
+ * element map told apart only by the counter. Both forms of the counter are ignored, as
+ * harness.py's withoutCounter() does: the duplicate count field, and a counter written over the
+ * op code, which then matches any op code. A section that doesn't decode must be equal.
+ */
+bool isCounterSibling(std::string_view name, std::string_view oldName)
+{
+    if (name == oldName) {
+        return false;
+    }
+    auto sections = NameAncestry::splitSections(name);
+    auto oldSections = NameAncestry::splitSections(oldName);
+    if (sections.empty() || sections.size() != oldSections.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < sections.size(); ++i) {
+        if (sections[i] == oldSections[i]) {
+            continue;
+        }
+        const auto& decoded = MappedName::getDecodedMappedName(std::string(sections[i]));
+        const auto& oldDecoded = MappedName::getDecodedMappedName(std::string(oldSections[i]));
+        if (decoded.size() != 1 || oldDecoded.size() != 1) {
+            return false;
+        }
+        DecodedMappedSection a = decoded.front();
+        const DecodedMappedSection& b = oldDecoded.front();
+        a.duplicateCount = b.duplicateCount;
+        if (isCounterOpCode(a.opCode) || isCounterOpCode(b.opCode)) {
+            a.opCode = b.opCode;
+        }
+        if (!(a == b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::vector<SolveOutcome> solveOwner(const SolveInput& input)
@@ -1014,6 +1061,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             int k = status == MatchStatus::Resolved
                 ? elementOfId[idOfNode[matched.partner[e]]].second
                 : -1;
+            // A partner named as the old element up to the duplicate counter is a sibling (a
+            // pattern instance's copy of it), never the element itself: its ancestry and its top
+            // section are the old element's, so the evidence below can't tell them apart.
+            bool sibling = k >= 0
+                && std::any_of(
+                    state.pool->elements[k].names.begin(),
+                    state.pool->elements[k].names.end(),
+                    [&](const auto& n) { return isCounterSibling(n, state.oldName); }
+                );
             // The partner must agree with the old name on the top section, or hold the old name
             // in its ancestry: an ancestor shared with the old name alone (e.g. a sketch edge
             // that many elements embed through a face) doesn't show it is the same element.
@@ -1024,7 +1080,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         state.pool->elements[k].names.end(),
                         [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
                     ));
-            if (status == MatchStatus::Resolved && !evidenced) {
+            if (status == MatchStatus::Resolved && sibling) {
+                state.outcome.evidence = "pattern sibling";
+                listCandidates(state, state.candidates);
+            }
+            else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
                 listCandidates(state, state.candidates);
             }

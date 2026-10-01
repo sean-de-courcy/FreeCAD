@@ -381,7 +381,7 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
                 }
             }
         }
-        solveReferences(feature, solverProps, false);
+        solveReferences(feature, solverProps, reverse);
     }
 }
 
@@ -721,12 +721,9 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     };
 
     if (missing) {
-        // A solver document retries missing references on every update: warn on the first miss.
-        if (!(shadow == elementName) || !inSolverDocument()) {
-            FC_WARN(propertyName(this)
-                    << " missing element reference " << ret->getFullName() << " "
-                    << (elementName.newName.size() ? elementName.newName : elementName.oldName));
-        }
+        FC_WARN(propertyName(this)
+                << " missing element reference " << ret->getFullName() << " "
+                << (elementName.newName.size() ? elementName.newName : elementName.oldName));
         shadow.oldName.swap(elementName.oldName);
     }
     else {
@@ -1888,7 +1885,9 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
             continue;
         }
         entry.prefix = shadow.newName.substr(0, element - shadow.newName.c_str());
-        entry.oldName = App::bareMappedName(shadow.newName);
+        if (entry.kind == App::SolverEntry::Kind::Missing) {
+            entry.oldName = App::bareMappedName(shadow.newName);
+        }
         const char* oldElement = Data::findElementName(shadow.oldName.c_str());
         entry.oldIndex = oldElement ? oldElement : "";
         if (entry.kind == App::SolverEntry::Kind::Missing) {

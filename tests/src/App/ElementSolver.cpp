@@ -1055,6 +1055,68 @@ TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
     EXPECT_EQ(outcomes[0].element, "Edge7");
 }
 
+TEST(SolveOwner, patternSiblingNeverResolves)
+{
+    // A pattern of two: the referenced instance's top face is gone and the other instance's copy
+    // is the only survivor. The copy's name is the old name with another duplicate count, so it
+    // shares the old name's linked edges (overlap 0.80) and its top section: forced and
+    // evidenced, but another element.
+    const std::vector<std::string> edges {
+        sketchEdge(1),
+        sketchEdge(2),
+        sketchEdge(3),
+        sketchEdge(4),
+    };
+    auto top = [&](const char* opCode, const char* count) {
+        return Data::MappedName::makeEncodedSection({}, edges, "5", opCode, "0", 'F', count, {"LOW"}, {});
+    };
+    const auto oldTop = top("FAC", "1");
+    SolveInput input;
+    input.entries = {missing(oldTop)};
+
+    //   the count field differs
+    input.pool["Face"] = {element("Face4", {top("FAC", "2")})};
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face4"});
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the counter written over the op code (ops#55)
+    input.pool["Face"] = {element("Face4", {top("_3", "0")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the counter in an inner section, which a later feature keeps
+    const auto later = section({}, {}, 9, "XTR", 0, 'F', {"MOD"});
+    input.entries = {missing(oldTop + "|" + later)};
+    input.pool["Face"] = {element("Face4", {top("FAC", "2") + "|" + later})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   a sibling among an element's several names (a refined face) is enough
+    input.entries = {missing(oldTop)};
+    input.pool["Face"] = {element("Face4", {top("FAC", "2"), top("FAC", "3")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   another element with the counter equal still resolves: the outer wire gains an edge
+    std::vector<std::string> fiveEdges = edges;
+    fiveEdges.push_back(sketchEdge(5));
+    const auto newTop
+        = Data::MappedName::makeEncodedSection({}, fiveEdges, "5", "FAC", "0", 'F', "1", {"LOW"}, {});
+    input.pool["Face"] = {element("Face4", {newTop})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face4");
+
+    //   and so does a different op code that isn't a counter
+    input.pool["Face"] = {element("Face4", {top("XTR", "2")})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_NE(outcomes[0].evidence, "pattern sibling");
+}
+
 TEST(SolveOwner, independentOfInputOrder)
 {
     // Arrange
