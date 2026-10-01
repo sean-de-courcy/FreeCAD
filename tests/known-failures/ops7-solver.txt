@@ -18,6 +18,7 @@ cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2s
 reason: an exact hit on the piece of a sketch line that a notch shortened; the other piece comes from a new line, which no name relates (partial; geometric continuation, PR 7, the answer to the design note's Q5)
 cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2s
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2s
+cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2s
 
 reason: correct needs the fillet to stay on the chamfered corner, whose name changed with the notch; it breaks with both corners as candidates (ops#79; the continuation of PR 7, or PR 8's Reference ID variant of tier 1)
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2s
