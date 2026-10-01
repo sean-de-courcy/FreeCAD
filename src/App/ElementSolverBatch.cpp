@@ -103,11 +103,15 @@ std::vector<Data::SolveInput::Element> poolOf(GeoFeature* geo, const std::string
     return pool;
 }
 
+ParameterGrp::handle solverParameters()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Part/NamingSolver");
+}
+
 Data::Tier1Source tier1Source()
 {
-    auto group = App::GetApplication().GetParameterGroupByPath(
-        "User parameter:BaseApp/Preferences/Mod/Part/NamingSolver");
-    std::string value = group->GetASCII("Tier1Source", "union");
+    std::string value = solverParameters()->GetASCII("Tier1Source", "union");
     if (value == "overlap") {
         return Data::Tier1Source::Overlap;
     }
@@ -115,6 +119,25 @@ Data::Tier1Source tier1Source()
         return Data::Tier1Source::Names;
     }
     return Data::Tier1Source::Union;
+}
+
+// Tier 1's gap and the tolerances of tiers 2 and 3 (fork-only parameters for the tuning runs; a
+// value that isn't positive and finite keeps the default).
+void readTolerances(double& gap, Data::GeometryTolerances& tolerances)
+{
+    auto group = solverParameters();
+    auto read = [&](const char* name, double& value) {
+        double stored = group->GetFloat(name, value);
+        if (std::isfinite(stored) && stored > 0.0) {
+            value = stored;
+        }
+    };
+    read("Tier1Gap", gap);
+    read("Tier2Angle", tolerances.angle);
+    read("Tier2Radius", tolerances.radius);
+    read("Tier3Distance", tolerances.distance);
+    read("Tier3GapFactor", tolerances.gapFactor);
+    read("Tier3Size", tolerances.size);
 }
 
 Data::SolvePolicy solvePolicy(PropertyLinkBase::ElementPolicy policy)
@@ -262,6 +285,9 @@ bool solveElementReferences(DocumentObject* feature,
     const std::string targetName = feature->getFullName();
     bool sourceRead = false;
     Data::Tier1Source source = Data::Tier1Source::Union;
+    double gap = Data::SolveInput().gap;
+    Data::GeometryTolerances tolerances;
+    double diagonal = 0.0;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
 
     for (auto& [ownerName, entries] : owners) {
@@ -285,14 +311,19 @@ bool solveElementReferences(DocumentObject* feature,
             reports[entry.prop].push_back(std::move(item));
         };
 
-        if (reverse) {
-            // An element-map version change: index carry, verified by the saved fingerprint.
-            double diagonal = 0.0;
+        if (!sourceRead) {
+            source = tier1Source();
+            readTolerances(gap, tolerances);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
                 }
             }
+            sourceRead = true;
+        }
+
+        if (reverse) {
+            // An element-map version change: index carry, verified by the saved fingerprint.
             for (const auto* entry : entries) {
                 if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
@@ -337,12 +368,18 @@ bool solveElementReferences(DocumentObject* feature,
             continue;
         }
 
-        if (!sourceRead) {
-            source = tier1Source();
-            sourceRead = true;
-        }
         Data::SolveInput input;
         input.source = source;
+        input.gap = gap;
+        input.tolerances = tolerances;
+        input.diagonal = diagonal;
+        input.fingerprintOf = [geo](const std::string& index) {
+            Data::ElementFingerprint fingerprint;
+            if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
+                return Data::ElementFingerprint();
+            }
+            return fingerprint;
+        };
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);
@@ -353,6 +390,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             else {
                 item.oldName = entry->oldName;
+                item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
                 if (item.policy != Data::SolvePolicy::One) {
                     FC_LOG(referenceName(entry->prop)
                            << "[" << entry->index << "]: policy read as One until Task 2 PR 5/7");

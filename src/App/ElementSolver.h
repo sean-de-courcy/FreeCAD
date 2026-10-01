@@ -4,6 +4,8 @@
 
 #include <FCConfig.h>
 
+#include "ElementFingerprint.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -214,6 +216,50 @@ enum class Tier1Source
     Names,
 };
 
+/** The tolerances of tiers 2 and 3 (the NamingSolver parameters; conservative starts, changed
+ * only on the scorecard's evidence).
+ */
+struct AppExport GeometryTolerances
+{
+    /// Tier 2: the largest angle between directions, in radians.
+    double angle = 1e-6;
+    /// Tier 2: the largest relative difference of radii (and a cone's semi-angle).
+    double radius = 1e-6;
+    /// Tier 3: d_max, the largest distance of the nearest centre, as a share of the target's
+    /// bounding-box diagonal.
+    double distance = 0.01;
+    /// Tier 3: the second nearest centre must be at least this many times the nearest's
+    /// distance away, and at least d_max.
+    double gapFactor = 3.0;
+    /// Tier 3: the largest relative difference of sizes (area or length).
+    double size = 0.01;
+};
+
+/** Tier 2, intrinsic geometry: the same element type and surface or curve kind, directions
+ * within \a tolerances.angle (a plane's normal with its sense, an axis or a line's direction
+ * either way), and the same number of radii, each within \a tolerances.radius relative.
+ * False if either fingerprint is invalid.
+ */
+AppExport bool intrinsicAgrees(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& candidate,
+    const GeometryTolerances& tolerances
+);
+
+/** Tier 3, extrinsic geometry: the one of \a candidates whose centre is nearest \a saved's,
+ * within d_max (tolerances.distance times \a diagonal), with every other candidate at least
+ * gapFactor times as far and at least d_max away, and with a size within tolerances.size
+ * relative. Returns its index in \a candidates, or -1. A candidate without a centre is never
+ * chosen; it doesn't count as a competitor either (callers pass tier 2's survivors, which have
+ * centres when \a saved has one).
+ */
+AppExport int extrinsicNearest(
+    const ElementFingerprint& saved,
+    const std::vector<ElementFingerprint>& candidates,
+    double diagonal,
+    const GeometryTolerances& tolerances
+);
+
 /** One owner's references to one target, for solveOwner(): plain data, no document.
  *
  * Names are bare mapped names. Element types are those of the stored index names: `Face`,
@@ -233,6 +279,9 @@ struct AppExport SolveInput
         std::string exactElement;
         /// The target's findSimilarNames() result for oldName, of any type.
         std::vector<std::string> nameMatches;
+        /// The fingerprint saved with the reference; invalid if none (tiers 2 and 3 then don't
+        /// run for it).
+        ElementFingerprint fingerprint;
     };
     /// An element of the target with all its mapped names.
     struct Element
@@ -247,6 +296,14 @@ struct AppExport SolveInput
     /// Tier 1's overlap gap (NameAncestry::structuralSurvivors()).
     double gap = 0.25;
     Tier1Source source = Tier1Source::Union;
+    /// Tiers 2 and 3.
+    GeometryTolerances tolerances;
+    /// The target's bounding-box diagonal, the scale of tier 3's d_max.
+    double diagonal = 0.0;
+    /// The current fingerprint of the target's element \a index (e.g. `Face7`); invalid if it
+    /// can't be measured. Called at most once per element, only when tiers 2 and 3 run. Unset:
+    /// no element has a fingerprint.
+    std::function<ElementFingerprint(const std::string& index)> fingerprintOf;
 };
 
 enum class SolveStatus
@@ -266,7 +323,9 @@ struct AppExport SolveOutcome
     /// names by bytes; empty if it has none).
     std::string element;
     std::string name;
-    /// 0 for Exact, 1 for Resolved; -1 for Broken.
+    /// 0 for Exact; for Resolved the tier that decided: 1 (structure), 2 (intrinsic geometry
+    /// narrowed tier 1's survivors to one), 3 (extrinsic geometry did, or found the element
+    /// when tier 1 found nothing); -1 for Broken.
     int tier = -1;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
     /// with their mapped names (parallel).
@@ -276,24 +335,33 @@ struct AppExport SolveOutcome
     std::string evidence;
 };
 
-/** Tiers 0 and 1 and forced matching for one owner's references to one target (Task 2 PR 3).
+/** Tiers 0-3 and forced matching for one owner's references to one target (Task 2 PRs 3-4).
  *
  * - Exact entries keep their element, and it leaves the other entries' pools unless one of its
  *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
  *   entries never enter the graph.
  * - Missing entries with the same old name, type and policy are solved once and get the same
- *   outcome.
+ *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
  * - One (and, until PRs 5 and 7, Expand and Equivalent): a candidate that is a piece of the old
- *   element breaks the entry at once, with the pieces as candidates. Otherwise the entry goes
- *   into one MatchGraph per owner, one candidate per element, and forcedMatching() decides.
+ *   element breaks the entry at once, with the pieces as candidates.
+ * - Several candidates: tier 2 keeps those whose intrinsic geometry agrees with the saved
+ *   fingerprint (intrinsicAgrees()), if any do; among several of those, tier 3 keeps the one
+ *   extrinsicNearest() chooses, if it chooses one. Geometry only narrows tier 1's survivors,
+ *   never replaces them.
+ * - No candidates: tiers 2 and 3 run on every pool element of the type (tier-0 elements
+ *   excluded), and both must pass: the element extrinsicNearest() chooses among those tier 2
+ *   keeps, or nothing ("no candidate").
+ * - The entry then goes into one MatchGraph per owner, one candidate per element, and
+ *   forcedMatching() decides.
  * - A partner one of whose names equals the old name up to the duplicate counter of any section
  *   (a pattern sibling) never resolves the entry: broken, with its candidates ("pattern
  *   sibling").
- * - A partner resolves the entry only if one of its names agrees with the old name on the top
- *   section (NameAncestry::topAgrees()) or has the old name in its ancestry; otherwise the
- *   entry is broken, with its candidates ("no top agreement").
+ * - A partner from tier 1 resolves the entry only if one of its names agrees with the old name
+ *   on the top section (NameAncestry::topAgrees()) or has the old name in its ancestry;
+ *   otherwise the entry is broken, with its candidates ("no top agreement"). A partner that
+ *   only tiers 2 and 3 found needs both to have passed.
  *
  * The result depends only on the input as a set (pool order, name order, entry order).
  */

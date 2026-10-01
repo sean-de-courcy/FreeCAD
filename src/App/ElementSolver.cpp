@@ -3,6 +3,7 @@
 #include "ElementSolver.h"
 
 #include <algorithm>
+#include <cmath>
 #include <locale>
 #include <map>
 #include <numeric>
@@ -882,7 +883,139 @@ bool isCounterSibling(std::string_view name, std::string_view oldName)
     return name != oldName && sameUpToCounter(name, oldName);
 }
 
+std::string formatDistance(double value)
+{
+    std::ostringstream ss;
+    ss.imbue(std::locale::classic());
+    ss.precision(3);
+    ss << std::fixed << value;
+    return ss.str();
+}
+
+bool relativelyEqual(double a, double b, double tolerance)
+{
+    return std::abs(a - b) <= tolerance * std::max({std::abs(a), std::abs(b), 1e-12});
+}
+
+struct Nearest
+{
+    int index = -1;
+    double nearest = 0.0;
+    double second = -1.0;  // -1: no other candidate
+    double dMax = 0.0;
+};
+
+Nearest findNearest(
+    const ElementFingerprint& saved,
+    const std::vector<ElementFingerprint>& candidates,
+    double diagonal,
+    const GeometryTolerances& tolerances
+)
+{
+    Nearest result;
+    result.dMax = tolerances.distance * diagonal;
+    if (!saved.center || !(diagonal > 0.0)) {
+        return result;
+    }
+    int best = -1;
+    double bestDistance = 0.0;
+    double secondDistance = -1.0;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (!candidates[i].center) {
+            continue;
+        }
+        double distance = Base::Distance(*saved.center, *candidates[i].center);
+        if (best < 0 || distance < bestDistance) {
+            secondDistance = best < 0 ? secondDistance : bestDistance;
+            best = static_cast<int>(i);
+            bestDistance = distance;
+        }
+        else if (secondDistance < 0.0 || distance < secondDistance) {
+            secondDistance = distance;
+        }
+    }
+    result.nearest = bestDistance;
+    result.second = secondDistance;
+    if (best < 0 || bestDistance > result.dMax) {
+        return result;
+    }
+    if (secondDistance >= 0.0
+        && (secondDistance < tolerances.gapFactor * bestDistance || secondDistance < result.dMax)) {
+        return result;
+    }
+    const auto& candidate = candidates[best];
+    if (saved.size.has_value() != candidate.size.has_value()
+        || (saved.size && !relativelyEqual(*saved.size, *candidate.size, tolerances.size))) {
+        return result;
+    }
+    result.index = best;
+    return result;
+}
+
+std::string describeNearest(const Nearest& nearest)
+{
+    std::string text = "nearest " + formatDistance(nearest.nearest);
+    if (nearest.second >= 0.0) {
+        text += ", second " + formatDistance(nearest.second);
+    }
+    return text + ", d_max " + formatDistance(nearest.dMax);
+}
+
 }  // namespace
+
+bool intrinsicAgrees(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& candidate,
+    const GeometryTolerances& tolerances
+)
+{
+    if (!saved.isValid() || !candidate.isValid() || saved.type != candidate.type
+        || saved.kind != candidate.kind) {
+        return false;
+    }
+    if (saved.direction.has_value() != candidate.direction.has_value()) {
+        return false;
+    }
+    if (saved.direction) {
+        Base::Vector3d a = *saved.direction;
+        Base::Vector3d b = *candidate.direction;
+        if (a.Length() <= 0.0 || b.Length() <= 0.0) {
+            return false;
+        }
+        a.Normalize();
+        b.Normalize();
+        double cosine = a * b;
+        // A plane's normal carries the face's orientation; an axis or a line has no sense (the
+        // producer normalizes its sign, which a component near 0 can flip).
+        if (!(saved.type == 'F' && saved.kind == "Plane")) {
+            cosine = std::abs(cosine);
+        }
+        // The angle from the cross product: acos loses precision near 0.
+        double angle = std::atan2((a % b).Length(), cosine);
+        if (angle > tolerances.angle) {
+            return false;
+        }
+    }
+    if (saved.radii.size() != candidate.radii.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < saved.radii.size(); ++i) {
+        if (!relativelyEqual(saved.radii[i], candidate.radii[i], tolerances.radius)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int extrinsicNearest(
+    const ElementFingerprint& saved,
+    const std::vector<ElementFingerprint>& candidates,
+    double diagonal,
+    const GeometryTolerances& tolerances
+)
+{
+    return findNearest(saved, candidates, diagonal, tolerances).index;
+}
 
 std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 {
@@ -969,6 +1102,40 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         SolveOutcome outcome;
         bool decided = false;
         int graphEntry = -1;
+        // Tiers 2-3: the survivors of tier 1 before geometry narrowed them (what a broken entry
+        // lists), the tier that narrowed them (0: none), whether geometry alone found the
+        // candidate, and what it found.
+        std::vector<int> listed;
+        int geometryTier = 0;
+        bool geometric = false;
+        std::string geometryEvidence;
+    };
+
+    // The pool elements' current fingerprints, measured on first use.
+    std::map<std::string, ElementFingerprint> measured;
+    auto fingerprintOf = [&](const SolveInput::Element& element) -> const ElementFingerprint& {
+        auto it = measured.find(element.index);
+        if (it == measured.end()) {
+            ElementFingerprint fingerprint;
+            if (input.fingerprintOf) {
+                fingerprint = input.fingerprintOf(element.index);
+            }
+            it = measured.emplace(element.index, std::move(fingerprint)).first;
+        }
+        return it->second;
+    };
+    // The members' saved fingerprint, if they all hold the same valid one.
+    auto savedFingerprint = [&](const std::vector<int>& members) -> const ElementFingerprint* {
+        const ElementFingerprint& first = input.entries[members.front()].fingerprint;
+        if (!first.isValid()) {
+            return nullptr;
+        }
+        for (int member : members) {
+            if (input.entries[member].fingerprint != first) {
+                return nullptr;
+            }
+        }
+        return &first;
     };
     std::vector<GroupState> states;
     states.reserve(groups.size());
@@ -1053,6 +1220,78 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             listCandidates(state, others);
             continue;
         }
+        state.listed = state.candidates;
+
+        // Tiers 2 and 3, for a reference with a saved fingerprint.
+        const ElementFingerprint* saved = savedFingerprint(members);
+        auto intrinsicSurvivors = [&](const std::vector<int>& positions) {
+            std::vector<int> agree;
+            for (int k : positions) {
+                if (intrinsicAgrees(*saved, fingerprintOf(pool.elements[k]), input.tolerances)) {
+                    agree.push_back(k);
+                }
+            }
+            return agree;
+        };
+        auto nearestOf = [&](const std::vector<int>& positions) {
+            std::vector<ElementFingerprint> fingerprints;
+            for (int k : positions) {
+                fingerprints.push_back(fingerprintOf(pool.elements[k]));
+            }
+            return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
+        };
+        if (saved && state.candidates.size() > 1) {
+            // Geometry breaks ties among tier 1's survivors; it never replaces them.
+            std::vector<int> agree = intrinsicSurvivors(state.candidates);
+            if (agree.size() == 1) {
+                state.geometryTier = 2;
+                state.geometryEvidence = "tier 2: 1 of " + std::to_string(state.candidates.size());
+                state.candidates = agree;
+            }
+            else if (agree.size() > 1) {
+                Nearest nearest = nearestOf(agree);
+                if (nearest.index >= 0) {
+                    state.geometryTier = 3;
+                    state.geometryEvidence = "tier 3: " + describeNearest(nearest);
+                    state.candidates = {agree[nearest.index]};
+                }
+                else if (agree.size() < state.candidates.size()) {
+                    state.geometryTier = 2;
+                    state.geometryEvidence = "tier 2: " + std::to_string(agree.size()) + " of "
+                        + std::to_string(state.candidates.size());
+                    state.candidates = agree;
+                }
+            }
+        }
+        else if (saved && state.candidates.empty()) {
+            // Nothing structural: both geometric tiers must pass, on every element of the type
+            // that no other reference of the owner holds exactly.
+            std::vector<int> open;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                if (allowed[k]) {
+                    open.push_back(static_cast<int>(k));
+                }
+            }
+            std::vector<int> agree = intrinsicSurvivors(open);
+            if (!agree.empty()) {
+                Nearest nearest = nearestOf(agree);
+                if (nearest.index >= 0) {
+                    state.geometric = true;
+                    state.geometryEvidence = "no structural candidate, tier 3: "
+                        + describeNearest(nearest);
+                    state.candidates = {agree[nearest.index]};
+                    state.listed = state.candidates;
+                }
+                else {
+                    state.decided = true;
+                    state.outcome.evidence = "no structural candidate, tier 3 found none: "
+                        + describeNearest(nearest);
+                    listCandidates(state, agree);
+                    continue;
+                }
+            }
+        }
+
         if (state.candidates.empty()) {
             state.decided = true;
             state.outcome.evidence = "no candidate";
@@ -1092,11 +1331,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.pool->elements[k].names.end(),
                     [&](const auto& n) { return isCounterSibling(n, state.oldName); }
                 );
-            // The partner must agree with the old name on the top section, or hold the old name
-            // in its ancestry: an ancestor shared with the old name alone (e.g. a sketch edge
-            // that many elements embed through a face) doesn't show it is the same element.
+            // A partner from tier 1 must agree with the old name on the top section, or hold the
+            // old name in its ancestry: an ancestor shared with the old name alone (e.g. a sketch
+            // edge that many elements embed through a face) doesn't show it is the same element.
+            // A partner that only geometry found passed both geometric tiers.
             bool evidenced = k >= 0
-                && (state.inAncestry.count(k) > 0
+                && (state.geometric || state.inAncestry.count(k) > 0
                     || std::any_of(
                         state.pool->elements[k].names.begin(),
                         state.pool->elements[k].names.end(),
@@ -1104,11 +1344,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     ));
             if (status == MatchStatus::Resolved && sibling) {
                 state.outcome.evidence = "pattern sibling";
-                listCandidates(state, state.candidates);
+                listCandidates(state, state.listed);
             }
             else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
-                listCandidates(state, state.candidates);
+                listCandidates(state, state.listed);
             }
             else if (status == MatchStatus::Resolved) {
                 const auto& element = state.pool->elements[k];
@@ -1124,17 +1364,26 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     sources += sources.empty() ? "names" : "+names";
                 }
                 state.outcome.status = SolveStatus::Resolved;
-                state.outcome.tier = 1;
+                state.outcome.tier = state.geometric ? 3 : state.geometryTier ? state.geometryTier : 1;
                 state.outcome.element = element.index;
                 state.outcome.name = firstName(element);
-                state.outcome.evidence = "overlap " + formatOverlap(best) + ", sources " + sources
-                    + (state.inAncestry.count(k) ? ", in ancestry" : "");
+                if (state.geometric) {
+                    state.outcome.evidence = state.geometryEvidence;
+                }
+                else {
+                    state.outcome.evidence = "overlap " + formatOverlap(best) + ", sources "
+                        + sources + (state.inAncestry.count(k) ? ", in ancestry" : "")
+                        + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence);
+                }
             }
             else {
                 state.outcome.evidence = status == MatchStatus::TooLarge ? "too large to solve"
                     : status == MatchStatus::NoCandidate                 ? "no candidate"
                                                                          : "ambiguous";
-                listCandidates(state, state.candidates);
+                if (!state.geometryEvidence.empty()) {
+                    state.outcome.evidence += ", " + state.geometryEvidence;
+                }
+                listCandidates(state, state.listed);
             }
         }
         for (int member : *state.members) {
