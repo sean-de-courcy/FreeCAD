@@ -25,12 +25,16 @@
 
 #pragma once
 
+#include <functional>
 #include <list>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 #include <unordered_set>
 #include <unordered_map>
+
+#include <Base/Placement.h>
 
 #include "MappedElement.h"
 #include "Property.h"
@@ -51,6 +55,10 @@ class DocInfo;
 using DocInfoPtr = std::shared_ptr<DocInfo>;
 
 class PropertyXLink;
+
+// The reference solver's batch and its results (ops#7); defined where the solver is.
+struct SolverBatch;
+struct SolverResolution;
 
 /**
  * @brief Defines different scopes for which a link can be valid
@@ -427,6 +435,28 @@ public:
                                  bool notify = false,
                                  std::vector<Data::MappedElement> *matchedNames = nullptr);
 
+    /** The text form of the fingerprint of the element that sub (with its shadow) refers to
+     * in obj, or an empty string if it doesn't resolve to an existing element, or (if feature
+     * is given) the element isn't one of feature's.
+     */
+    static std::string _getElementFingerprint(App::DocumentObject* feature,
+                                              App::DocumentObject* obj,
+                                              const std::string& sub,
+                                              const ShadowSub& shadow);
+
+    /** Refreshes fingerprints[i] for every reference i that resolves (to an element of feature,
+     * if given), in solver documents only and not while restoring. The target is obj, or
+     * objs[i] for a list. When the sizes differ (the list was rebuilt), the old fingerprints
+     * can't be matched to the references and are dropped first. Returns true if any reference
+     * names an element.
+     */
+    bool _updateElementFingerprints(App::DocumentObject* feature,
+                                    App::DocumentObject* obj,
+                                    const std::vector<App::DocumentObject*>* objs,
+                                    const std::vector<std::string>& subs,
+                                    const std::vector<ShadowSub>& shadows,
+                                    std::vector<std::string>& fingerprints);
+
     /** Helper function to register geometry element reference
      *
      * @param obj: the linked object
@@ -652,6 +682,72 @@ public:
         return allowForDuplicateLinks;
     };
 
+    /** @name Reference solver (ops#7)
+     * Used only in documents with the reference solver on (Document::isReferenceSolverOn()).
+     */
+    //@{
+    /// What the owner wants when a referenced element became several candidates.
+    enum class ElementPolicy
+    {
+        One,         ///< exactly one element; pieces break the reference
+        Expand,      ///< all pieces of a split element
+        Equivalent,  ///< candidates that give the owner the same result count as one
+    };
+    void setElementPolicy(ElementPolicy policy)
+    {
+        _elementPolicy = policy;
+    }
+    ElementPolicy getElementPolicy() const
+    {
+        return _elementPolicy;
+    }
+
+    /// For Equivalent: the placement the owner would get with candidateSub as its reference
+    /// number index, or nothing if it would get none.
+    using EquivalenceProbe =
+        std::function<std::optional<Base::Placement>(int index, const std::string& candidateSub)>;
+    void setEquivalenceProbe(EquivalenceProbe probe)
+    {
+        _equivalenceProbe = std::move(probe);
+    }
+    const EquivalenceProbe& getEquivalenceProbe() const
+    {
+        return _equivalenceProbe;
+    }
+
+    /// True if the owner's document has the reference solver on.
+    bool inSolverDocument() const;
+
+    /** Fingerprints every element reference that resolves now, from the target's current
+     * geometry; a reference that doesn't resolve keeps its fingerprint. Only in solver documents.
+     * Returns true if the property holds element references.
+     */
+    virtual bool updateElementFingerprints()
+    {
+        return false;
+    }
+
+    /// The fingerprints in their text form (Data::ElementFingerprint), one per sub-element
+    /// reference, empty where there is none.
+    virtual std::vector<std::string> getElementFingerprints() const
+    {
+        return {};
+    }
+
+    /// Pass 1 of the solver: the references to elements of feature that don't resolve exactly.
+    virtual void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
+    {
+        (void)feature;
+        (void)batch;
+    }
+
+    /// Writes the solver's results for this property back.
+    virtual void applyResolutions(const std::vector<SolverResolution>& resolutions)
+    {
+        (void)resolutions;
+    }
+    //@}
+
 protected:
     void hasSetValue() override;
 
@@ -671,6 +767,8 @@ protected:
 private:
     bool allowMultipleMatchedNames = false;
     bool allowForDuplicateLinks = true;
+    ElementPolicy _elementPolicy = ElementPolicy::One;
+    EquivalenceProbe _equivalenceProbe;
     std::set<std::string> _LabelRefs;
     std::set<App::DocumentObject*> _ElementRefs;
 };
@@ -1022,6 +1120,10 @@ public:
     void updateElementReference(DocumentObject* feature,
                                 bool reverse = false,
                                 bool notify = false) override;
+    bool updateElementFingerprints() override;
+    std::vector<std::string> getElementFingerprints() const override;
+    void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
+    void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
     bool referenceChanged() const override;
 
@@ -1046,6 +1148,10 @@ protected:
     std::vector<std::string> _cSubList;
     std::vector<ShadowSub> _ShadowSubList;
     std::vector<int> _mapped;
+    // Reference solver (ops#7), parallel to _ShadowSubList: the fingerprint text of each
+    // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
+    std::vector<std::string> _Fingerprints;
+    std::vector<std::string> _ExpandedFrom;
     bool _restoreLabel {false};
 };
 
@@ -1203,6 +1309,10 @@ public:
     void updateElementReference(DocumentObject* feature,
                                 bool reverse = false,
                                 bool notify = false) override;
+    bool updateElementFingerprints() override;
+    std::vector<std::string> getElementFingerprints() const override;
+    void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
+    void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
     bool referenceChanged() const override;
 
@@ -1231,6 +1341,10 @@ private:
     std::vector<std::string> _lSubList;
     std::vector<ShadowSub> _ShadowSubList;
     std::vector<int> _mapped;
+    // Reference solver (ops#7), parallel to _ShadowSubList: the fingerprint text of each
+    // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
+    std::vector<std::string> _Fingerprints;
+    std::vector<std::string> _ExpandedFrom;
 };
 
 /** The general Link Property with Child scope
@@ -1362,6 +1476,10 @@ public:
     void updateElementReference(DocumentObject* feature,
                                 bool reverse = false,
                                 bool notify = false) override;
+    bool updateElementFingerprints() override;
+    std::vector<std::string> getElementFingerprints() const override;
+    void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
+    void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
     bool referenceChanged() const override;
 
@@ -1424,6 +1542,10 @@ protected:
     std::vector<std::string> _SubList;
     std::vector<ShadowSub> _ShadowSubList;
     std::vector<int> _mapped;
+    // Reference solver (ops#7), parallel to _ShadowSubList: the fingerprint text of each
+    // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
+    std::vector<std::string> _Fingerprints;
+    std::vector<std::string> _ExpandedFrom;
     PropertyLinkBase* parentProp;
     mutable std::string tmpShadow;
 };
@@ -1562,6 +1684,10 @@ public:
     void updateElementReference(DocumentObject* feature,
                                 bool reverse = false,
                                 bool notify = false) override;
+    bool updateElementFingerprints() override;
+    std::vector<std::string> getElementFingerprints() const override;
+    void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
+    void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
     bool referenceChanged() const override;
 

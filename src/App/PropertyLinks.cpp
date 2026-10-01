@@ -37,6 +37,7 @@
 #include "PropertyLinks.h"
 #include "Application.h"
 #include "Document.h"
+#include "ElementFingerprint.h"
 #include "DocumentObject.h"
 #include "DocumentObjectPy.h"
 #include "DocumentObserver.h"
@@ -333,6 +334,83 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
             }
         }
     }
+}
+
+bool PropertyLinkBase::inSolverDocument() const
+{
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    auto doc = owner ? owner->getDocument() : nullptr;
+    return doc && doc->isReferenceSolverOn();
+}
+
+std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* feature,
+                                                     App::DocumentObject* obj,
+                                                     const std::string& sub,
+                                                     const ShadowSub& shadow)
+{
+    if (!obj || !obj->isAttachedToDocument()) {
+        return {};
+    }
+    const char* subname = !shadow.newName.empty() ? shadow.newName.c_str()
+        : !shadow.oldName.empty()                 ? shadow.oldName.c_str()
+                                                  : sub.c_str();
+    ShadowSub elementName;
+    GeoFeature* geo = nullptr;
+    const char* element = nullptr;
+    if (!GeoFeature::resolveElement(obj,
+                                    subname,
+                                    elementName,
+                                    false,
+                                    GeoFeature::Normal,
+                                    feature,
+                                    &element,
+                                    &geo)
+        || !geo || !element || !element[0] || elementName.oldName.empty()
+        || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
+        return {};
+    }
+    Data::ElementFingerprint fingerprint;
+    if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
+        return {};
+    }
+    return fingerprint.toString();
+}
+
+bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
+                                                  App::DocumentObject* obj,
+                                                  const std::vector<App::DocumentObject*>* objs,
+                                                  const std::vector<std::string>& subs,
+                                                  const std::vector<ShadowSub>& shadows,
+                                                  std::vector<std::string>& fingerprints)
+{
+    bool holdsElements = false;
+    for (const auto& sub : subs) {
+        const char* element = Data::findElementName(sub.c_str());
+        holdsElements = holdsElements || (element && element[0]);
+    }
+    if (!holdsElements || !inSolverDocument()) {
+        return holdsElements;
+    }
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    if (owner && owner->isRestoring()) {
+        return holdsElements;
+    }
+    if (fingerprints.size() != subs.size()) {
+        // The list was rebuilt: the old fingerprints can't be matched to the references.
+        fingerprints.assign(subs.size(), std::string());
+    }
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
+        auto text = _getElementFingerprint(feature,
+                                           target,
+                                           subs[i],
+                                           i < shadows.size() ? shadows[i] : ShadowSub());
+        // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
+        if (!text.empty()) {
+            fingerprints[i] = std::move(text);
+        }
+    }
+    return holdsElements;
 }
 
 void PropertyLinkBase::_registerElementReference(App::DocumentObject* obj,
@@ -1699,23 +1777,55 @@ void PropertyLinkSub::onContainerRestored()
     for (std::size_t i = 0; i < _cSubList.size(); ++i) {
         _registerElementReference(_pcLinkSub, _cSubList[i], _ShadowSubList[i]);
     }
+    _updateElementFingerprints(nullptr, _pcLinkSub, nullptr, _cSubList, _ShadowSubList, _Fingerprints);
 }
 
 void PropertyLinkSub::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
-    if (!updateLinkReference(this,
-                             feature,
-                             reverse,
-                             notify,
-                             _pcLinkSub,
-                             _cSubList,
-                             _mapped,
-                             _ShadowSubList)) {
+    bool changed = updateLinkReference(this,
+                                       feature,
+                                       reverse,
+                                       notify,
+                                       _pcLinkSub,
+                                       _cSubList,
+                                       _mapped,
+                                       _ShadowSubList);
+    _updateElementFingerprints(feature, _pcLinkSub, nullptr, _cSubList, _ShadowSubList, _Fingerprints);
+    if (!changed) {
         return;
     }
     if (notify) {
         hasSetValue();
     }
+}
+
+bool PropertyLinkSub::updateElementFingerprints()
+{
+    return _updateElementFingerprints(nullptr,
+                                      _pcLinkSub,
+                                      nullptr,
+                                      _cSubList,
+                                      _ShadowSubList,
+                                      _Fingerprints);
+}
+
+// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+void PropertyLinkSub::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
+{
+    (void)feature;
+    (void)batch;
+}
+
+void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& resolutions)
+{
+    (void)resolutions;
+}
+
+std::vector<std::string> PropertyLinkSub::getElementFingerprints() const
+{
+    auto fingerprints = _Fingerprints;
+    fingerprints.resize(_cSubList.size());
+    return fingerprints;
 }
 
 bool PropertyLinkSub::referenceChanged() const
@@ -1952,7 +2062,8 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
     }
 }
 
-#define ATTR_SHADOWED "shadowed"
+#define ATTR_SHADOWED "shadowed"
+#define ATTR_FINGERPRINT "fp"
 #define ATTR_SHADOW "shadow"
 #define ATTR_MAPPED "mapped"
 
@@ -1974,6 +2085,7 @@ void PropertyLinkSub::Save(Base::Writer& writer) const
     writer.incInd();
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     bool exporting = owner && owner->isExporting();
+    const bool saveFingerprints = inSolverDocument();
     for (unsigned int i = 0; i < _cSubList.size(); i++) {
         const auto& shadow = _ShadowSubList[i];
         // shadow.oldName stores the old style element name. For backward
@@ -2002,6 +2114,9 @@ void PropertyLinkSub::Save(Base::Writer& writer) const
                     writer.Stream() << "\" " ATTR_SHADOW "=\"" << encodeAttribute(shadow.newName);
                 }
             }
+        }
+        if (saveFingerprints && i < _Fingerprints.size() && !_Fingerprints[i].empty()) {
+            writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
         }
         writer.Stream() << "\"/>" << endl;
     }
@@ -2035,10 +2150,14 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     std::vector<int> mapped;
     std::vector<std::string> values(count);
     std::vector<ShadowSub> shadows(count);
+    std::vector<std::string> fingerprints(count);
     bool restoreLabel = false;
     // Sub may store '.' separated object names, so be aware of the possible mapping when import
     for (int i = 0; i < count; i++) {
         reader.readElement("Sub");
+        if (reader.hasAttribute(ATTR_FINGERPRINT)) {
+            fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
+        }
         shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
         if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
             values[i] = shadows[i].newName =
@@ -2062,6 +2181,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     if (pcObject) {
         setValue(pcObject, std::move(values), std::move(shadows));
         _mapped = std::move(mapped);
+        _Fingerprints = std::move(fingerprints);
     }
     else {
         setValue(nullptr);
@@ -2168,6 +2288,7 @@ Property* PropertyLinkSub::Copy() const
     p->_pcLinkSub = _pcLinkSub;
     p->_cSubList = _cSubList;
     p->_ShadowSubList = _ShadowSubList;
+    p->_Fingerprints = _Fingerprints;
     return p;
 }
 
@@ -2178,6 +2299,9 @@ void PropertyLinkSub::Paste(const Property& from)
     }
     auto& link = static_cast<const PropertyLinkSub&>(from);
     setValue(link._pcLinkSub, link._cSubList, std::vector<ShadowSub>(link._ShadowSubList));
+    if (link._Fingerprints.size() == _cSubList.size()) {
+        _Fingerprints = link._Fingerprints;
+    }
 }
 
 void PropertyLinkSub::getLinks(std::vector<App::DocumentObject*>& objs,
@@ -2861,6 +2985,36 @@ void PropertyLinkSubList::onContainerRestored()
     for (size_t i = 0; i < _lSubList.size(); ++i) {
         _registerElementReference(_lValueList[i], _lSubList[i], _ShadowSubList[i]);
     }
+    _updateElementFingerprints(nullptr, nullptr, &_lValueList, _lSubList, _ShadowSubList, _Fingerprints);
+}
+
+bool PropertyLinkSubList::updateElementFingerprints()
+{
+    return _updateElementFingerprints(nullptr,
+                                      nullptr,
+                                      &_lValueList,
+                                      _lSubList,
+                                      _ShadowSubList,
+                                      _Fingerprints);
+}
+
+// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+void PropertyLinkSubList::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
+{
+    (void)feature;
+    (void)batch;
+}
+
+void PropertyLinkSubList::applyResolutions(const std::vector<SolverResolution>& resolutions)
+{
+    (void)resolutions;
+}
+
+std::vector<std::string> PropertyLinkSubList::getElementFingerprints() const
+{
+    auto fingerprints = _Fingerprints;
+    fingerprints.resize(_lSubList.size());
+    return fingerprints;
 }
 
 void PropertyLinkSubList::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
@@ -2887,6 +3041,7 @@ void PropertyLinkSubList::updateElementReference(DocumentObject* feature, bool r
             touched = true;
         }
     }
+    _updateElementFingerprints(feature, nullptr, &_lValueList, _lSubList, _ShadowSubList, _Fingerprints);
     if (!touched) {
         return;
     }
@@ -2931,6 +3086,7 @@ void PropertyLinkSubList::Save(Base::Writer& writer) const
     writer.incInd();
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     bool exporting = owner && owner->isExporting();
+    const bool saveFingerprints = inSolverDocument();
     for (int i = 0; i < getSize(); i++) {
         auto obj = _lValueList[i];
         if (!obj || !obj->isAttachedToDocument()) {
@@ -2965,6 +3121,9 @@ void PropertyLinkSubList::Save(Base::Writer& writer) const
                 }
             }
         }
+        if (saveFingerprints && i < (int)_Fingerprints.size() && !_Fingerprints[i].empty()) {
+            writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
+        }
         writer.Stream() << "\"/>" << endl;
     }
 
@@ -2985,6 +3144,8 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
     SubNames.reserve(count);
     std::vector<ShadowSub> shadows;
     shadows.reserve(count);
+    std::vector<std::string> fingerprints;
+    fingerprints.reserve(count);
     DocumentObject* father = freecad_cast<DocumentObject*>(getContainer());
     App::Document* document = father ? father->getDocument() : nullptr;
     std::vector<int> mapped;
@@ -3000,6 +3161,9 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
         if (child) {
             values.push_back(child);
             shadows.emplace_back();
+            fingerprints.emplace_back(reader.hasAttribute(ATTR_FINGERPRINT)
+                                          ? reader.getAttribute<const char*>(ATTR_FINGERPRINT)
+                                          : "");
             auto& shadow = shadows.back();
             shadow.oldName = importSubName(reader, reader.getAttribute<const char*>("sub"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -3030,6 +3194,9 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
 
     // assignment
     setValues(values, SubNames, std::move(shadows));
+    if (fingerprints.size() == _lSubList.size()) {
+        _Fingerprints = std::move(fingerprints);
+    }
     _mapped.swap(mapped);
 }
 
@@ -4264,23 +4431,55 @@ void PropertyXLink::onContainerRestored()
     for (size_t i = 0; i < _SubList.size(); ++i) {
         _registerElementReference(_pcLink, _SubList[i], _ShadowSubList[i]);
     }
+    _updateElementFingerprints(nullptr, _pcLink, nullptr, _SubList, _ShadowSubList, _Fingerprints);
 }
 
 void PropertyXLink::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
-    if (!updateLinkReference(this,
-                             feature,
-                             reverse,
-                             notify,
-                             _pcLink,
-                             _SubList,
-                             _mapped,
-                             _ShadowSubList)) {
+    bool changed = updateLinkReference(this,
+                                       feature,
+                                       reverse,
+                                       notify,
+                                       _pcLink,
+                                       _SubList,
+                                       _mapped,
+                                       _ShadowSubList);
+    _updateElementFingerprints(feature, _pcLink, nullptr, _SubList, _ShadowSubList, _Fingerprints);
+    if (!changed) {
         return;
     }
     if (notify) {
         hasSetValue();
     }
+}
+
+bool PropertyXLink::updateElementFingerprints()
+{
+    return _updateElementFingerprints(nullptr,
+                                      _pcLink,
+                                      nullptr,
+                                      _SubList,
+                                      _ShadowSubList,
+                                      _Fingerprints);
+}
+
+// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+void PropertyXLink::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
+{
+    (void)feature;
+    (void)batch;
+}
+
+void PropertyXLink::applyResolutions(const std::vector<SolverResolution>& resolutions)
+{
+    (void)resolutions;
+}
+
+std::vector<std::string> PropertyXLink::getElementFingerprints() const
+{
+    auto fingerprints = _Fingerprints;
+    fingerprints.resize(_SubList.size());
+    return fingerprints;
 }
 
 bool PropertyXLink::referenceChanged() const
@@ -4343,6 +4542,12 @@ void PropertyXLink::Save(Base::Writer& writer) const
         writer.Stream() << "\" partial=\"1";
     }
 
+    const bool saveFingerprints = inSolverDocument();
+    auto writeFingerprint = [&](std::size_t i) {
+        if (saveFingerprints && i < _Fingerprints.size() && !_Fingerprints[i].empty()) {
+            writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
+        }
+    };
     if (_SubList.empty()) {
         writer.Stream() << "\"/>" << std::endl;
     }
@@ -4370,6 +4575,7 @@ void PropertyXLink::Save(Base::Writer& writer) const
                 }
             }
         }
+        writeFingerprint(0);
         writer.Stream() << "\"/>" << std::endl;
     }
     else {
@@ -4402,6 +4608,7 @@ void PropertyXLink::Save(Base::Writer& writer) const
                     }
                 }
             }
+            writeFingerprint(i);
             writer.Stream() << "\"/>" << endl;
         }
         writer.decInd();
@@ -4446,6 +4653,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
 
     std::vector<std::string> subs;
     std::vector<ShadowSub> shadows;
+    std::vector<std::string> fingerprints;
     std::vector<int> mapped;
     bool restoreLabel = false;
     if (reader.hasAttribute("sub")) {
@@ -4455,6 +4663,9 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         subs.emplace_back();
         auto& subname = subs.back();
         shadows.emplace_back();
+        fingerprints.emplace_back(reader.hasAttribute(ATTR_FINGERPRINT)
+                                      ? reader.getAttribute<const char*>(ATTR_FINGERPRINT)
+                                      : "");
         auto& shadow = shadows.back();
         shadow.oldName = importSubName(reader, reader.getAttribute<const char*>("sub"), restoreLabel);
         if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -4473,8 +4684,12 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         int count = reader.getAttribute<long>("count");
         subs.resize(count);
         shadows.resize(count);
+        fingerprints.resize(count);
         for (int i = 0; i < count; i++) {
             reader.readElement("Sub");
+            if (reader.hasAttribute(ATTR_FINGERPRINT)) {
+                fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
+            }
             shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
                 subs[i] = shadows[i].newName =
@@ -4508,6 +4723,9 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         setValue(object, std::move(subs), std::move(shadows));
     }
     _mapped = std::move(mapped);
+    if (fingerprints.size() == _SubList.size()) {
+        _Fingerprints = std::move(fingerprints);
+    }
 }
 
 Property*
@@ -4584,6 +4802,7 @@ void PropertyXLink::copyTo(PropertyXLink& other,
     else {
         other._SubList = _SubList;
         other._ShadowSubList = _ShadowSubList;
+        other._Fingerprints = _Fingerprints;
     }
     other._Flags = _Flags;
 }
@@ -4622,6 +4841,9 @@ void PropertyXLink::Paste(const Property& from)
                  std::string(other.objectName),
                  std::vector<std::string>(other._SubList),
                  std::vector<ShadowSub>(other._ShadowSubList));
+    }
+    if (other._Fingerprints.size() == _SubList.size()) {
+        _Fingerprints = other._Fingerprints;
     }
     setFlag(LinkAllowPartial, other.testFlag(LinkAllowPartial));
 }
@@ -5282,6 +5504,37 @@ void PropertyXLinkSubList::updateElementReference(DocumentObject* feature,
     for (auto& l : _Links) {
         l.updateElementReference(feature, reverse, notify);
     }
+}
+
+bool PropertyXLinkSubList::updateElementFingerprints()
+{
+    bool holdsElements = false;
+    for (auto& l : _Links) {
+        holdsElements = l.updateElementFingerprints() || holdsElements;
+    }
+    return holdsElements;
+}
+
+// The reference solver's passes (ops#7); Task 2 PR 3 fills them in.
+void PropertyXLinkSubList::collectElementReferences(App::DocumentObject* feature, SolverBatch& batch)
+{
+    (void)feature;
+    (void)batch;
+}
+
+void PropertyXLinkSubList::applyResolutions(const std::vector<SolverResolution>& resolutions)
+{
+    (void)resolutions;
+}
+
+std::vector<std::string> PropertyXLinkSubList::getElementFingerprints() const
+{
+    std::vector<std::string> fingerprints;
+    for (auto& l : _Links) {
+        auto child = l.getElementFingerprints();
+        fingerprints.insert(fingerprints.end(), child.begin(), child.end());
+    }
+    return fingerprints;
 }
 
 bool PropertyXLinkSubList::referenceChanged() const

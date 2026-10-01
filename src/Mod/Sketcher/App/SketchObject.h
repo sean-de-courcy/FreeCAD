@@ -936,6 +936,9 @@ public:
 
     std::vector<Data::MappedElement> findSimilarNames(Data::MappedName& searchName) override;
 
+    /// Fingerprints of Shape's elements, and of InternalShape's for `Internal*` names (ops#7).
+    bool getElementFingerprint(const char* element, Data::ElementFingerprint& fingerprint) const override;
+
     bool isPerformingInternalTransaction() const
     {
         return internaltransaction;

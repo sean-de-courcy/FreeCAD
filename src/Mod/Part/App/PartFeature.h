@@ -151,6 +151,20 @@ public:
         const TopoShape& searchShape
     );
 
+    /// The fingerprint of an element of Shape, without the feature's placement (ops#7).
+    bool getElementFingerprint(const char* element, Data::ElementFingerprint& fingerprint) const override;
+
+    /** The fingerprint of an element of \a shape, located at identity: the shape's own
+     * placement is left out, so moving it changes no fingerprint. \a element is an indexed
+     * name (`Face3`, `Edge1`, `Vertex2`). Returns false for a null shape, an unknown element, or
+     * an element whose geometry can't be measured.
+     */
+    static bool getElementFingerprint(
+        const TopoShape& shape,
+        const char* element,
+        Data::ElementFingerprint& fingerprint
+    );
+
     /** Convenience function to extract shape from fully qualified subname
      *
      * @param obj: the parent object

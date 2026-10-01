@@ -920,6 +920,27 @@ void Document::onChanged(const Property* prop)
         selectedHistoryAlgorithm = App::getHistoryAlgorithm(HistoryAlgorithm.getValueAsString());
         recomputeSubObjects = true;
     }
+    else if (prop == &ReferenceSolver) {
+        // Off, the switch isn't saved (PropertyBoolSavedWhenTrue), so files of documents that
+        // never used it don't change.
+        if (isReferenceSolverOn() && !testStatus(Document::Restoring)) {
+            // Fingerprint every reference that resolves now, and touch its owner so that the
+            // next recompute runs it through the solver.
+            for (auto obj : d->objectArray) {
+                std::vector<Property*> props;
+                obj->getPropertyList(props);
+                bool holdsReferences = false;
+                for (auto p : props) {
+                    if (auto link = freecad_cast<PropertyLinkBase*>(p)) {
+                        holdsReferences = link->updateElementFingerprints() || holdsReferences;
+                    }
+                }
+                if (holdsReferences) {
+                    obj->touch();
+                }
+            }
+        }
+    }
 
     if (recomputeSubObjects) {
         for (auto obj : d->objectArray) {
@@ -1051,6 +1072,11 @@ Document::Document(const char* documentName)
                       PropertyType(Prop_Hidden),
                       "The Topological Naming Version to use for this document.");
     selectedHistoryAlgorithm = App::getHistoryAlgorithm(HistoryAlgorithm.getValueAsString());
+    ADD_PROPERTY_TYPE(ReferenceSolver,
+                      (false),
+                      0,
+                      PropertyType(Prop_Hidden),
+                      "Whether broken element references go to the reference solver (V2 only).");
 
     // this creates and sets 'TransientDir' in onChanged()
     ADD_PROPERTY_TYPE(TransientDir,

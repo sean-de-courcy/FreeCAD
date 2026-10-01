@@ -90,6 +90,28 @@ class Transaction;
 class StringHasher;
 using StringHasherRef = Base::Reference<StringHasher>;
 
+/** A bool that is saved only while it is true (Document::ReferenceSolver, ops#7).
+ *
+ * PropNoPersist is one of the static status bits, which setStatus() leaves alone, so the
+ * property keeps it in step with its value itself. A document that never turned it on saves
+ * exactly as before; one that did saves it as an ordinary App::PropertyBool.
+ */
+class AppExport PropertyBoolSavedWhenTrue: public PropertyBool
+{
+public:
+    PropertyBoolSavedWhenTrue()
+    {
+        StatusBits.set(PropNoPersist);
+    }
+
+protected:
+    void hasSetValue() override
+    {
+        StatusBits.set(PropNoPersist, !getValue());
+        PropertyBool::hasSetValue();
+    }
+};
+
 /**
  * @brief A class that represents a FreeCAD document.
  *
@@ -195,6 +217,9 @@ public:
     PropertyBool UseHasher;
     /// The Topological Naming Version to use for this document.
     PropertyEnumeration HistoryAlgorithm;
+    /// Whether broken element references go to the reference solver (ops#7). V2 only. Saved
+    /// only while on, so a document that never turned it on saves as before.
+    PropertyBoolSavedWhenTrue ReferenceSolver;
     /// @}
 
     /** @name Signals of the document
@@ -1299,6 +1324,13 @@ public:
     const App::HistoryAlgorithm& getSelectedHistoryAlgorithm() {
         return selectedHistoryAlgorithm;
     };
+
+    /// True if ReferenceSolver is on and the history algorithm is V2: the switch is ignored in V1.
+    bool isReferenceSolverOn() const
+    {
+        return ReferenceSolver.getValue()
+            && selectedHistoryAlgorithm == App::HistoryAlgorithm::V2;
+    }
 
     const std::string& getCorrectElementMapVersion();
 
