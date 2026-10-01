@@ -136,6 +136,17 @@ class PartFuseSink(PartFuse):
         self.move(doc.Bar, tz=3)
 
 
+class PartFuseDrop(PartFuse):
+    """The bar starts above the block (z 12..16) and drops to cross its top (z 8..12): the whole
+    top face splits in two, and its pieces carry the face's name under another op code (MKR
+    whole, FUS as the pieces' prefix). The sketch on it lies on either piece."""
+
+    tz = 12
+
+    def edit(self, doc):
+        self.move(doc.Bar, tz=8)
+
+
 class PartCut(PartBoolean):
     """Part::Cut: the bar cuts a slot across the block's top (z 8..10) and splits the top face in
     two; sketches on the block's left face, the top face's left piece and the slot's floor."""

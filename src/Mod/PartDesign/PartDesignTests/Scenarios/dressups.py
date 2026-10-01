@@ -24,6 +24,7 @@
 when the features before them change, are inserted or are reordered."""
 
 from .harness import (
+    BROKEN,
     Broken,
     Chamfered,
     Drafted,
@@ -141,6 +142,9 @@ class FilletDeleteBase(Scenario):
     def backBottomEdge(self):
         return edge("line", direction=X, through=(0, self.size, 0))
 
+    def edgeB(self):
+        return self.backBottomEdge()
+
     def block(self, doc, body):
         raise NotImplementedError
 
@@ -154,9 +158,9 @@ class FilletDeleteBase(Scenario):
         filletA.Radius = 1
         doc.recompute()
         filletB = body.newObject("PartDesign::Fillet", "FilletB")
-        filletB.Base = (filletA, self.names(filletA, self.backBottomEdge()))
+        filletB.Base = (filletA, self.names(filletA, self.edgeB()))
         filletB.Radius = 0.25
-        self.ref("fillet_edge", filletB, "Base", self.backBottomEdge, Filleted(0.25))
+        self.ref("fillet_edge", filletB, "Base", self.edgeB, Filleted(0.25))
 
     def edit(self, doc):
         self.bodyObject.removeObject(doc.FilletA)
@@ -179,6 +183,57 @@ class FilletDeleteBasePad(FilletDeleteBase):
     def block(self, doc, body):
         profile = m.sketch(doc, "Profile", m.rectangle(0, 0, self.size, self.size), body)
         return m.pad(body, profile, self.size)
+
+
+class FilletDeleteBaseTrimmed(FilletDeleteBase):
+    """As FilletDeleteBase, but fillet B is on the block's left top edge (x = 0, z = 10), which
+    fillet A trims to y 1..10. When A is deleted, B should follow the block's full edge, y 0..10
+    (the user's requirement, ops#7, 2026-09-30): a 1:1 modified edge keeps its incoming name, so
+    A's trimmed edge is named as the block's edge."""
+
+    abstract = True
+
+    def edgeB(self):
+        return edge("line", direction=Y, through=(0, 0, self.size))
+
+
+class FilletDeleteBaseTrimmedBox(FilletDeleteBaseTrimmed):
+    """The block is an AdditiveBox: A names the trimmed edge by the box's index (an IDX name
+    tagged with the box), and the box has no element map to find it by (Q5 of the plan)."""
+
+    block = FilletDeleteBaseBox.block
+
+
+class FilletDeleteBaseTrimmedPad(FilletDeleteBaseTrimmed):
+    """The block is a pad: the trimmed edge carries the pad's own name."""
+
+    block = FilletDeleteBasePad.block
+
+
+class FilletDeleteBaseArc(FilletDeleteBase):
+    """As FilletDeleteBase, but fillet B is on A's arc at x = 0, an edge A made (the end of its
+    rounded face). The block has no such edge: when A is deleted, B should break, never move to
+    one of the block's edges."""
+
+    abstract = True
+    deleted = False
+
+    def edgeB(self):
+        if self.deleted:
+            return BROKEN
+        return edge("circle", center=(0, 1, self.size - 1), radius=1)
+
+    def edit(self, doc):
+        super().edit(doc)
+        self.deleted = True
+
+
+class FilletDeleteBaseArcBox(FilletDeleteBaseArc):
+    block = FilletDeleteBaseBox.block
+
+
+class FilletDeleteBaseArcPad(FilletDeleteBaseArc):
+    block = FilletDeleteBasePad.block
 
 
 class FilletCornerCut(Scenario):
