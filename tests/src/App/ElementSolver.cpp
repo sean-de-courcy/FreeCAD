@@ -2563,6 +2563,148 @@ TEST(ReferenceReport, replacePerTargetAndClear)
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The write-back of a PropertyLinkSub (Task 2 PR 7)
+
+TEST(RemapSubIndices, shiftsAndDrops)
+{
+    // Index 1 expanded to 3, index 2 removed.
+    std::vector<int> firstNew {0, 1, 4, 4};
+    std::vector<int> countNew {1, 3, 0, 1};
+    EXPECT_EQ(App::remapSubIndices({0, 2, 3}, firstNew, countNew), (std::vector<int> {0, 4}));
+    EXPECT_EQ(App::remapSubIndices({1}, firstNew, countNew), (std::vector<int> {1, 2, 3}));
+    //   out of range: dropped
+    EXPECT_TRUE(App::remapSubIndices({7}, firstNew, countNew).empty());
+}
+
+namespace
+{
+
+App::PropertyLinkBase::ShadowSub shadowOf(
+    const std::string& oldName,
+    const std::string& newName = {}
+)
+{
+    App::PropertyLinkBase::ShadowSub shadow;
+    shadow.oldName = oldName;
+    shadow.newName = newName;
+    return shadow;
+}
+
+App::SolverResolution resolution(App::SolverResolution::Status status, int index)
+{
+    App::SolverResolution item;
+    item.status = status;
+    item.index = index;
+    return item;
+}
+
+}  // namespace
+
+TEST(RebuildSubList, expandsRemovesAndKeepsSizesEqual)
+{
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"Edge1", "?Edge2", "Edge3", "Edge4"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows {
+        shadowOf("Edge1"),
+        shadowOf("?Edge2", ";a.Edge2"),
+        shadowOf("Edge3"),
+        shadowOf("Edge4"),
+    };
+    std::vector<std::string> fingerprints {"f1", "f2", "f3", "f4"};
+    std::vector<std::string> froms {"", "", "x", "x"};
+
+    std::vector<App::SolverResolution> resolutions {resolution(Status::None, -1)};
+    //   index 1 expands to Edge5, Edge3 (held by an untouched reference: skipped) and Edge6
+    auto expanded = resolution(Status::Expanded, 1);
+    expanded.from = "a";
+    expanded.pieces = {
+        {"Edge5", shadowOf("Edge5", ";p.Edge5")},
+        {"Edge3", shadowOf("Edge3", ";q.Edge3")},
+        {"Edge6", shadowOf("Edge6", ";r.Edge6")},
+    };
+    resolutions.push_back(expanded);
+    //   index 3 is removed
+    resolutions.push_back(resolution(Status::Removed, 3));
+
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    EXPECT_TRUE(
+        App::rebuildSubList(resolutions, subs, shadows, fingerprints, froms, firstNew, countNew)
+    );
+
+    EXPECT_EQ(subs, (std::vector<std::string> {"Edge1", "Edge5", "Edge6", "Edge3"}));
+    EXPECT_EQ(shadows.size(), subs.size());
+    EXPECT_EQ(fingerprints, (std::vector<std::string> {"f1", "", "", "f3"}));
+    EXPECT_EQ(froms, (std::vector<std::string> {"", "a", "a", "x"}));
+    EXPECT_EQ(firstNew, (std::vector<int> {0, 1, 3, 4}));
+    EXPECT_EQ(countNew, (std::vector<int> {1, 2, 1, 0}));
+}
+
+TEST(RebuildSubList, collapseBrokenAndDuplicates)
+{
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"?Edge7", "Edge2", "Edge4"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows {
+        shadowOf("?Edge7", ";c.Edge7"),
+        shadowOf("Edge2", ";h.Edge2"),
+        shadowOf("Edge4"),
+    };
+    std::vector<std::string> fingerprints {"f7", "f2", "f4"};
+    std::vector<std::string> froms {"h", "h", ""};
+
+    //   index 0 collapses to Edge4, which index 2 holds untouched: one sub stays
+    auto collapsed = resolution(Status::Resolved, 0);
+    collapsed.sub = "Edge4";
+    collapsed.shadow = shadowOf("Edge4", ";h.Edge4");
+    collapsed.clearFrom = true;
+    //   index 1 breaks: it keeps its fingerprint and `from`
+    auto broken = resolution(Status::Broken, 1);
+    broken.sub = "?Edge2";
+    broken.shadow = shadowOf("?Edge2", ";h.Edge2");
+
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    std::vector<App::SolverResolution> resolutions {collapsed, broken};
+    EXPECT_TRUE(
+        App::rebuildSubList(resolutions, subs, shadows, fingerprints, froms, firstNew, countNew)
+    );
+
+    EXPECT_EQ(subs, (std::vector<std::string> {"?Edge2", "Edge4"}));
+    EXPECT_EQ(fingerprints, (std::vector<std::string> {"f2", "f4"}));
+    EXPECT_EQ(froms, (std::vector<std::string> {"h", ""}));
+    EXPECT_EQ(countNew, (std::vector<int> {0, 1, 1}));
+
+    //   nothing to write: unchanged, one each
+    resolutions = {resolution(Status::None, -1)};
+    EXPECT_FALSE(
+        App::rebuildSubList(resolutions, subs, shadows, fingerprints, froms, firstNew, countNew)
+    );
+    EXPECT_EQ(countNew, (std::vector<int> {1, 1}));
+}
+
+TEST(ReferenceReport, remapFollowsTheRebuild)
+{
+    App::PropertyLinkSub prop;
+    App::ReferenceReport::Entry first;
+    first.index = 1;
+    App::ReferenceReport::Entry second;
+    second.index = 2;
+    App::ReferenceReport::replace(&prop, "Doc#A", {first, second});
+
+    //   index 0 expanded to 3, index 1 removed
+    App::ReferenceReport::remap(&prop, {0, 3, 3}, {3, 0, 1});
+
+    auto entries = App::ReferenceReport::get(&prop);
+    ASSERT_EQ(entries.size(), 1U);
+    EXPECT_EQ(entries[0].index, 3);
+    prop.unregisterElementReference();
+    EXPECT_EQ(
+        App::ReferenceReport::statusName(App::ReferenceReport::Status::Expanded),
+        std::string("expanded")
+    );
+}
+
 TEST(ReferenceReport, reverseCheckTolerances)
 {
     auto saved = Data::ElementFingerprint::fromString("1|F|Plane|200|5,10,20|0,0,1|_");

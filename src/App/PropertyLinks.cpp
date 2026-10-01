@@ -397,7 +397,9 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
                                                      const std::string& sub,
                                                      const ShadowSub& shadow)
 {
-    if (!obj || !obj->isAttachedToDocument()) {
+    // A broken reference keeps its fingerprint, even when the name it holds is found again: an
+    // exact reference the solver broke (Task 2 PR 7) still holds its element's name.
+    if (!obj || !obj->isAttachedToDocument() || Data::hasMissingElement(shadow.oldName.c_str())) {
         return {};
     }
     const char* subname = !shadow.newName.empty() ? shadow.newName.c_str()
@@ -1590,6 +1592,18 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
         }
     }
 
+    // `from` (Task 2 PR 7) stays with a reference the caller passes on with its shadow (a
+    // restore, a paste, the relink); a sub chosen anew (no shadow, or no shadows at all) drops it.
+    if (shadows.size() != subs.size() || _ExpandedFrom.size() != subs.size()) {
+        _ExpandedFrom.assign(subs.size(), std::string());
+    }
+    else {
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            if (shadows[i].oldName.empty() && shadows[i].newName.empty()) {
+                _ExpandedFrom[i].clear();
+            }
+        }
+    }
     _pcLinkSub = lValue;
     _cSubList = std::move(subs);
     if (shadows.size() == _cSubList.size()) {
@@ -1848,7 +1862,8 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
                                   const std::vector<App::DocumentObject*>* links,
                                   std::vector<std::string>& subs,
                                   std::vector<PropertyLinkBase::ShadowSub>& shadows,
-                                  const std::vector<std::string>& fingerprints)
+                                  const std::vector<std::string>& fingerprints,
+                                  const std::vector<std::string>* froms)
 {
     shadows.resize(subs.size());
     auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
@@ -1888,6 +1903,9 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         if (entry.kind == App::SolverEntry::Kind::Missing) {
             entry.oldName = App::bareMappedName(shadow.newName);
         }
+        else {
+            entry.exactName = App::bareMappedName(shadow.newName);
+        }
         const char* oldElement = Data::findElementName(shadow.oldName.c_str());
         entry.oldIndex = oldElement ? oldElement : "";
         if (entry.kind == App::SolverEntry::Kind::Missing) {
@@ -1903,6 +1921,9 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         entry.sub = subs[i];
         entry.oldFingerprint = i < fingerprints.size() ? fingerprints[i] : std::string();
         entry.policy = prop->getElementPolicy();
+        if (froms && i < froms->size()) {
+            entry.from = (*froms)[i];
+        }
         batch.entries.push_back(std::move(entry));
     }
     batch.properties.emplace_back(prop, touched);
@@ -1910,6 +1931,7 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
 
 // Writes the solver's resolutions into subs and shadows, calling aboutToSet() first if pass 1
 // didn't change the property already. Returns true if the property changed in either pass.
+// Resolved and Broken only: the types that call it keep one sub per reference.
 static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resolutions,
                                  std::vector<std::string>& subs,
                                  std::vector<PropertyLinkBase::ShadowSub>& shadows,
@@ -1919,7 +1941,9 @@ static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resol
     bool changed = context.touched;
     shadows.resize(subs.size());
     for (const auto& resolution : resolutions) {
-        if (resolution.status != App::SolverResolution::Status::Resolved || resolution.index < 0
+        if ((resolution.status != App::SolverResolution::Status::Resolved
+             && resolution.status != App::SolverResolution::Status::Broken)
+            || resolution.index < 0
             || resolution.index >= static_cast<int>(subs.size())) {
             continue;
         }
@@ -1996,7 +2020,8 @@ void PropertyLinkSub::collectElementReferences(App::DocumentObject* feature, Sol
                           nullptr,
                           _cSubList,
                           _ShadowSubList,
-                          _Fingerprints);
+                          _Fingerprints,
+                          &_ExpandedFrom);
 }
 
 void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& resolutions)
@@ -2005,9 +2030,35 @@ void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& reso
         return;
     }
     const auto& context = resolutions.front();
-    bool changed = writeLinkResolutions(resolutions, _cSubList, _ShadowSubList, [this]() {
-        aboutToSetValue();
-    });
+    // The parallel lists are rebuilt: an expansion adds subs, a collapse removes them (Task 2
+    // PR 7). Their sizes always match, so the fingerprint refresh keeps every one.
+    auto subs = _cSubList;
+    auto shadows = _ShadowSubList;
+    auto fingerprints = _Fingerprints;
+    auto froms = _ExpandedFrom;
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    bool written =
+        rebuildSubList(resolutions, subs, shadows, fingerprints, froms, firstNew, countNew);
+    bool changed = context.touched;
+    if (written) {
+        if (!changed && context.notify) {
+            aboutToSetValue();
+        }
+        changed = true;
+        bool moved = subs.size() != _cSubList.size()
+            || std::any_of(countNew.begin(), countNew.end(), [](int n) { return n != 1; });
+        _cSubList.swap(subs);
+        _ShadowSubList.swap(shadows);
+        _Fingerprints.swap(fingerprints);
+        _ExpandedFrom.swap(froms);
+        if (moved) {
+            _mapped = remapSubIndices(_mapped, firstNew, countNew);
+            ReferenceReport::remap(this, firstNew, countNew);
+            context.firstNew = std::move(firstNew);
+            context.countNew = std::move(countNew);
+        }
+    }
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     if (changed) {
         // As updateLinkReference() does.
@@ -2275,6 +2326,7 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
 
 #define ATTR_SHADOWED "shadowed"
 #define ATTR_FINGERPRINT "fp"
+#define ATTR_FROM "from"
 #define ATTR_SHADOW "shadow"
 #define ATTR_MAPPED "mapped"
 
@@ -2329,6 +2381,9 @@ void PropertyLinkSub::Save(Base::Writer& writer) const
         if (saveFingerprints && i < _Fingerprints.size() && !_Fingerprints[i].empty()) {
             writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
         }
+        if (saveFingerprints && i < _ExpandedFrom.size() && !_ExpandedFrom[i].empty()) {
+            writer.Stream() << "\" " ATTR_FROM "=\"" << encodeAttribute(_ExpandedFrom[i]);
+        }
         writer.Stream() << "\"/>" << endl;
     }
     writer.decInd();
@@ -2362,12 +2417,16 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     std::vector<std::string> values(count);
     std::vector<ShadowSub> shadows(count);
     std::vector<std::string> fingerprints(count);
+    std::vector<std::string> froms(count);
     bool restoreLabel = false;
     // Sub may store '.' separated object names, so be aware of the possible mapping when import
     for (int i = 0; i < count; i++) {
         reader.readElement("Sub");
         if (reader.hasAttribute(ATTR_FINGERPRINT)) {
             fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
+        }
+        if (reader.hasAttribute(ATTR_FROM)) {
+            froms[i] = reader.getAttribute<const char*>(ATTR_FROM);
         }
         shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
         if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -2393,6 +2452,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         setValue(pcObject, std::move(values), std::move(shadows));
         _mapped = std::move(mapped);
         _Fingerprints = std::move(fingerprints);
+        _ExpandedFrom = std::move(froms);
     }
     else {
         setValue(nullptr);
@@ -2500,6 +2560,7 @@ Property* PropertyLinkSub::Copy() const
     p->_cSubList = _cSubList;
     p->_ShadowSubList = _ShadowSubList;
     p->_Fingerprints = _Fingerprints;
+    p->_ExpandedFrom = _ExpandedFrom;
     return p;
 }
 
@@ -2513,6 +2574,9 @@ void PropertyLinkSub::Paste(const Property& from)
     if (link._Fingerprints.size() == _cSubList.size()) {
         _Fingerprints = link._Fingerprints;
     }
+    // Undo and redo restore a property through Paste: an expansion comes back with its `from`.
+    _ExpandedFrom = link._ExpandedFrom;
+    _ExpandedFrom.resize(_cSubList.size());
 }
 
 void PropertyLinkSub::getLinks(std::vector<App::DocumentObject*>& objs,
@@ -3219,7 +3283,8 @@ void PropertyLinkSubList::collectElementReferences(App::DocumentObject* feature,
                           &_lValueList,
                           _lSubList,
                           _ShadowSubList,
-                          _Fingerprints);
+                          _Fingerprints,
+                          nullptr);
 }
 
 void PropertyLinkSubList::applyResolutions(const std::vector<SolverResolution>& resolutions)
@@ -4732,7 +4797,8 @@ void PropertyXLink::collectElementReferences(App::DocumentObject* feature, Solve
                           nullptr,
                           _SubList,
                           _ShadowSubList,
-                          _Fingerprints);
+                          _Fingerprints,
+                          nullptr);
 }
 
 void PropertyXLink::applyResolutions(const std::vector<SolverResolution>& resolutions)

@@ -54,6 +54,38 @@ void ReferenceReport::clear(const PropertyLinkBase* prop)
     }
 }
 
+void ReferenceReport::remap(const PropertyLinkBase* prop,
+                            const std::vector<int>& firstNew,
+                            const std::vector<int>& countNew)
+{
+    auto& map = reports();
+    auto it = map.find(prop);
+    if (it == map.end()) {
+        return;
+    }
+    for (auto& [target, entries] : it->second) {
+        remapEntries(entries, firstNew, countNew);
+    }
+}
+
+void ReferenceReport::remapEntries(std::vector<Entry>& entries,
+                                   const std::vector<int>& firstNew,
+                                   const std::vector<int>& countNew)
+{
+    const int size = static_cast<int>(std::min(firstNew.size(), countNew.size()));
+    std::vector<Entry> kept;
+    for (auto& entry : entries) {
+        if (entry.index < 0 || entry.index >= size) {
+            kept.push_back(std::move(entry));
+        }
+        else if (countNew[entry.index] > 0) {
+            entry.index = firstNew[entry.index];
+            kept.push_back(std::move(entry));
+        }
+    }
+    entries = std::move(kept);
+}
+
 std::vector<ReferenceReport::Entry> ReferenceReport::get(const PropertyLinkBase* prop)
 {
     std::vector<Entry> result;
@@ -95,6 +127,8 @@ const char* ReferenceReport::statusName(Status status)
             return "resolved";
         case Status::Index:
             return "index";
+        case Status::Expanded:
+            return "expanded";
         case Status::Broken:
         default:
             return "broken";

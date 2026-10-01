@@ -56,6 +56,11 @@ struct AppExport SolverEntry
     /// The reference's saved fingerprint text; empty if none.
     std::string oldFingerprint;
     PropertyLinkBase::ElementPolicy policy = PropertyLinkBase::ElementPolicy::One;
+    /// Exact: the bare mapped name the reference holds.
+    std::string exactName;
+    /// The bare mapped name the reference was expanded from (Task 2 PR 7); empty if none, and
+    /// always in a property that keeps no `from` (only PropertyLinkSub does).
+    std::string from;
 };
 
 /// What pass 1 gathers for one update of one feature.
@@ -80,22 +85,63 @@ struct AppExport SolverResolution
     enum class Status
     {
         None,
+        /// The reference names one element: sub and shadow.
         Resolved,
+        /// The reference becomes one per element (Expand, Task 2 PR 7): pieces, each with
+        /// `from`. Only PropertyLinkSub receives it.
+        Expanded,
+        /// An exact reference breaks (a continuation under One or Equivalent, or a run-past):
+        /// sub and shadow are its missing form, and it keeps its fingerprint.
+        Broken,
+        /// The reference goes (a collapsing group's other members). Only PropertyLinkSub
+        /// receives it.
+        Removed,
     };
 
     Status status = Status::None;
     PropertyLinkBase* prop = nullptr;
     int index = -1;
-    /// Resolved: the new sub and its shadow.
+    /// Resolved and Broken: the new sub and its shadow.
     std::string sub;
     PropertyLinkBase::ShadowSub shadow;
+    /// Expanded: the sub and shadow of each element, in order, and their `from`.
+    std::vector<std::pair<std::string, PropertyLinkBase::ShadowSub>> pieces;
+    std::string from;
+    /// Resolved by a collapse: the reference's `from` is cleared.
+    bool clearFrom = false;
 
     /// The update's context.
     DocumentObject* feature = nullptr;
     bool notify = false;
     /// Pass 1 changed the property already.
     bool touched = false;
+
+    /// Set on the first item by a property that rebuilt its sub list (rebuildSubList()): per
+    /// old index, the first new index and the count (0: removed). Empty otherwise.
+    mutable std::vector<int> firstNew;
+    mutable std::vector<int> countNew;
 };
+
+/** Rebuilds the parallel lists of a PropertyLinkSub from \a resolutions (Task 2 PR 7):
+ * Resolved and Broken replace a reference, Expanded replaces it by its pieces (a piece whose
+ * element another reference of the new list or an untouched one already holds is skipped),
+ * Removed drops it. Fingerprints of written references are emptied (the caller refreshes them),
+ * except a Broken one's, which it keeps. Sets \a firstNew and \a countNew per old index.
+ * Returns true if anything was written.
+ */
+AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
+                              std::vector<std::string>& subs,
+                              std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                              std::vector<std::string>& fingerprints,
+                              std::vector<std::string>& froms,
+                              std::vector<int>& firstNew,
+                              std::vector<int>& countNew);
+
+/// The indices \a mapped (of the old list) in a rebuilt list: each old index m becomes
+/// firstNew[m] .. firstNew[m] + countNew[m] - 1, a removed one disappears.
+AppExport std::vector<int> remapSubIndices(const std::vector<int>& mapped,
+                                           const std::vector<int>& firstNew,
+                                           const std::vector<int>& countNew);
 
 /** The reference solver for \a props' references to \a feature's elements: pass 1 (collect, the
  * exact lookup), pass 2 (tiers 0-1 and forced matching per owner, Data::solveOwner()), the

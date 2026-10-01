@@ -325,9 +325,11 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
 
     One dict per reference the solver resolved beyond the exact lookup, or left broken, plus one
     per missing reference it has no entry for, sorted by property and index. Keys: `property`,
-    `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken` or `index`),
-    `tier`, `new` (the element it resolved to), `candidates` (element names),
-    `candidate_names` (their mapped names), `evidence` and `target`.
+    `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken`, `index` or
+    `expanded`), `tier` (0-3 for `resolved`; 1, or 4 for a continuation, for `expanded`), `new`
+    (the element it resolved to, the first for `expanded`), `pieces` (`expanded`: every element),
+    `candidates` (element names), `candidate_names` (their mapped names), `evidence` and
+    `target`.
     """
     ...
 

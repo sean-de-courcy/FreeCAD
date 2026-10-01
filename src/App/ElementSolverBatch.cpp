@@ -4,9 +4,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include <Base/Console.h>
@@ -123,9 +126,9 @@ Data::Tier1Source tier1Source()
     return Data::Tier1Source::Union;
 }
 
-// Tier 1's gap and the tolerances of tiers 2 and 3 (fork-only parameters for the tuning runs; a
-// value that isn't positive and finite keeps the default).
-void readTolerances(double& gap, Data::GeometryTolerances& tolerances)
+// Tier 1's gap, the tolerances of tiers 2 and 3 and the continuation's distance (fork-only
+// parameters for the tuning runs; a value that isn't positive and finite keeps the default).
+void readTolerances(double& gap, Data::GeometryTolerances& tolerances, double& continuation)
 {
     auto group = solverParameters();
     auto read = [&](const char* name, double& value) {
@@ -140,6 +143,7 @@ void readTolerances(double& gap, Data::GeometryTolerances& tolerances)
     read("Tier3Distance", tolerances.distance);
     read("Tier3GapFactor", tolerances.gapFactor);
     read("Tier3Size", tolerances.size);
+    read("ContinuationDistance", continuation);
 }
 
 Data::SolvePolicy solvePolicy(PropertyLinkBase::ElementPolicy policy)
@@ -176,6 +180,38 @@ void resolutionFor(const SolverEntry& entry,
     else {
         resolution.sub = resolution.shadow.oldName;
     }
+}
+
+// An exact reference that breaks (Task 2 PR 7): its missing form, as _updateElementReference()
+// leaves a reference whose element is gone. The shadow keeps the name it held.
+void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
+{
+    resolution.status = SolverResolution::Status::Broken;
+    resolution.prop = entry.prop;
+    resolution.index = entry.index;
+    resolution.shadow.newName = entry.prefix + Data::ComplexGeoData::elementMapPrefix()
+        + entry.exactName + "." + entry.oldIndex;
+    resolution.shadow.oldName = entry.prefix + Data::MISSING_PREFIX + entry.oldIndex;
+    resolution.sub = entry.sub == resolution.shadow.newName ? resolution.shadow.newName
+                                                            : resolution.shadow.oldName;
+}
+
+// Whether an exact reference may continue (Task 2 PR 7): its saved fingerprint is a line edge
+// that its element now lies strictly within. One fingerprint per exact line edge reference.
+bool continuable(const SolverEntry& entry,
+                 GeoFeature* geo,
+                 double diagonal,
+                 const Data::GeometryTolerances& tolerances,
+                 double distance)
+{
+    if (entry.kind != SolverEntry::Kind::Exact || indexType(entry.oldIndex) != "Edge"
+        || entry.oldFingerprint.find("|E|Line|") == std::string::npos) {
+        return false;
+    }
+    auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+    Data::ElementFingerprint now;
+    return saved.isValid() && geo->getElementFingerprint(entry.oldIndex.c_str(), now)
+        && Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance);
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -231,6 +267,124 @@ std::string joinCandidates(const std::vector<std::string>& candidates)
 }
 
 }  // namespace
+
+bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
+                    std::vector<std::string>& subs,
+                    std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                    std::vector<std::string>& fingerprints,
+                    std::vector<std::string>& froms,
+                    std::vector<int>& firstNew,
+                    std::vector<int>& countNew)
+{
+    using Status = SolverResolution::Status;
+    const std::size_t count = subs.size();
+    shadows.resize(count);
+    fingerprints.resize(count);
+    froms.resize(count);
+    std::vector<const SolverResolution*> resolutionOf(count, nullptr);
+    for (const auto& resolution : resolutions) {
+        if (resolution.status != Status::None && resolution.index >= 0
+            && resolution.index < static_cast<int>(count)) {
+            resolutionOf[resolution.index] = &resolution;
+        }
+    }
+    // The element a reference holds (`Edge3`, or with its sub-object prefix), if it resolves.
+    auto elementOf = [](const std::string& sub, const PropertyLinkBase::ShadowSub& shadow) {
+        const std::string& name = shadow.oldName.empty() ? sub : shadow.oldName;
+        return Data::hasMissingElement(name.c_str()) ? std::string() : name;
+    };
+    std::set<std::string> untouched;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!resolutionOf[i]) {
+            untouched.insert(elementOf(subs[i], shadows[i]));
+        }
+    }
+    untouched.erase(std::string());
+    std::set<std::string> written;
+    // A collapse or a piece names an element another reference may hold already: one sub.
+    auto held = [&](const std::string& sub, const PropertyLinkBase::ShadowSub& shadow) {
+        std::string element = elementOf(sub, shadow);
+        if (element.empty()) {
+            return false;
+        }
+        return untouched.count(element) > 0 || !written.insert(element).second;
+    };
+
+    std::vector<std::string> newSubs, newFingerprints, newFroms;
+    std::vector<PropertyLinkBase::ShadowSub> newShadows;
+    auto add = [&](const std::string& sub,
+                   const PropertyLinkBase::ShadowSub& shadow,
+                   const std::string& fingerprint,
+                   const std::string& from) {
+        newSubs.push_back(sub);
+        newShadows.push_back(shadow);
+        newFingerprints.push_back(fingerprint);
+        newFroms.push_back(from);
+    };
+    firstNew.assign(count, 0);
+    countNew.assign(count, 0);
+    bool changed = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        firstNew[i] = static_cast<int>(newSubs.size());
+        const SolverResolution* resolution = resolutionOf[i];
+        if (!resolution) {
+            add(subs[i], shadows[i], fingerprints[i], froms[i]);
+        }
+        else {
+            changed = true;
+            switch (resolution->status) {
+                case Status::Resolved:
+                    if (resolution->clearFrom) {
+                        if (!held(resolution->sub, resolution->shadow)) {
+                            add(resolution->sub, resolution->shadow, {}, {});
+                        }
+                    }
+                    else {
+                        written.insert(elementOf(resolution->sub, resolution->shadow));
+                        add(resolution->sub, resolution->shadow, {}, froms[i]);
+                    }
+                    break;
+                case Status::Expanded:
+                    for (const auto& [sub, shadow] : resolution->pieces) {
+                        if (!held(sub, shadow)) {
+                            add(sub, shadow, {}, resolution->from);
+                        }
+                    }
+                    break;
+                case Status::Broken:
+                    // A broken reference keeps its fingerprint for the next retry.
+                    add(resolution->sub, resolution->shadow, fingerprints[i], froms[i]);
+                    break;
+                case Status::Removed:
+                case Status::None:
+                    break;
+            }
+        }
+        countNew[i] = static_cast<int>(newSubs.size()) - firstNew[i];
+    }
+    subs.swap(newSubs);
+    shadows.swap(newShadows);
+    fingerprints.swap(newFingerprints);
+    froms.swap(newFroms);
+    return changed;
+}
+
+std::vector<int> remapSubIndices(const std::vector<int>& mapped,
+                                 const std::vector<int>& firstNew,
+                                 const std::vector<int>& countNew)
+{
+    std::vector<int> result;
+    const int size = static_cast<int>(std::min(firstNew.size(), countNew.size()));
+    for (int m : mapped) {
+        if (m < 0 || m >= size) {
+            continue;
+        }
+        for (int k = 0; k < countNew[m]; ++k) {
+            result.push_back(firstNew[m] + k);
+        }
+    }
+    return result;
+}
 
 bool fingerprintsAgree(const Data::ElementFingerprint& saved,
                        const Data::ElementFingerprint& now,
@@ -332,6 +486,7 @@ bool solveElementReferences(DocumentObject* feature,
     Data::Tier1Source source = Data::Tier1Source::Union;
     double gap = Data::SolveInput().gap;
     Data::GeometryTolerances tolerances;
+    double continuationDistance = Data::SolveInput().continuationDistance;
     double diagonal = 0.0;
     std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
@@ -345,13 +500,17 @@ bool solveElementReferences(DocumentObject* feature,
         bool anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->kind == SolverEntry::Kind::Missing;
         });
-        if (!anyMissing) {
+        if (!anyMissing
+            && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
+                   return e->kind == SolverEntry::Kind::Exact
+                       && e->oldFingerprint.find("|E|Line|") != std::string::npos;
+               })) {
             continue;
         }
 
         auto report = [&](const SolverEntry& entry, ReferenceReport::Entry item) {
             item.index = entry.index;
-            item.oldName = entry.oldName;
+            item.oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             item.oldIndex = entry.oldIndex;
             item.target = targetName;
             reports[entry.prop].push_back(std::move(item));
@@ -359,7 +518,7 @@ bool solveElementReferences(DocumentObject* feature,
 
         if (!sourceRead) {
             source = tier1Source();
-            readTolerances(gap, tolerances);
+            readTolerances(gap, tolerances, continuationDistance);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
@@ -369,6 +528,12 @@ bool solveElementReferences(DocumentObject* feature,
                 }
             }
             sourceRead = true;
+        }
+        // An owner with only exact references is solved only if one of them may continue.
+        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [&](const auto* e) {
+                return continuable(*e, geo, diagonal, tolerances, continuationDistance);
+            })) {
+            continue;
         }
 
         if (reverse) {
@@ -423,6 +588,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.tolerances = tolerances;
         input.diagonal = diagonal;
         input.maplessTag = maplessTag;
+        input.continuationDistance = continuationDistance;
         input.fingerprintOf = [geo](const std::string& index) {
             Data::ElementFingerprint fingerprint;
             if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
@@ -430,24 +596,43 @@ bool solveElementReferences(DocumentObject* feature,
             }
             return fingerprint;
         };
+        // The solver's only topology: the faces an edge bounds, for the continuation.
+        input.facesOf = [geo](const std::string& index) {
+            std::vector<std::string> faces;
+            for (const auto& higher : geo->getHigherElements(index.c_str(), true)) {
+                if (std::strcmp(higher.getType(), "Face") == 0) {
+                    faces.push_back(higher.toString());
+                }
+            }
+            return faces;
+        };
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);
             item.policy = solvePolicy(entry->policy);
+            if (item.policy == Data::SolvePolicy::Expand
+                && !freecad_cast<PropertyLinkSub*>(entry->prop)) {
+                // Only a PropertyLinkSub keeps several subs for one reference, with their
+                // `from`; no other property has the Expand policy today.
+                FC_LOG(referenceName(entry->prop)
+                       << "[" << entry->index << "]: Expand read as One (not a PropertyLinkSub)");
+                item.policy = Data::SolvePolicy::One;
+            }
+            item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+            if (item.policy == Data::SolvePolicy::Equivalent) {
+                item.equivalent = equivalenceOf(*entry);
+            }
+            item.from = entry->from;
+            item.scope = std::to_string(reinterpret_cast<std::uintptr_t>(entry->prop)) + "|"
+                + entry->prefix;
+            item.position = entry->index;
             if (entry->kind == SolverEntry::Kind::Exact) {
                 item.exact = true;
                 item.exactElement = entry->oldIndex;
+                item.exactName = entry->exactName;
             }
             else {
                 item.oldName = entry->oldName;
-                item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
-                if (item.policy == Data::SolvePolicy::Expand) {
-                    FC_LOG(referenceName(entry->prop)
-                           << "[" << entry->index << "]: Expand read as One until Task 2 PR 7");
-                }
-                else if (item.policy == Data::SolvePolicy::Equivalent) {
-                    item.equivalent = equivalenceOf(*entry);
-                }
                 if (source != Data::Tier1Source::Overlap && !entry->oldName.empty()) {
                     auto it = nameMatches.find(entry->oldName);
                     if (it == nameMatches.end()) {
@@ -471,30 +656,71 @@ bool solveElementReferences(DocumentObject* feature,
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const auto& entry = *entries[i];
             const auto& outcome = outcomes[i];
+            const std::string& oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             if (outcome.status == Data::SolveStatus::Exact) {
+                continue;
+            }
+            if (outcome.status == Data::SolveStatus::Removed) {
+                SolverResolution resolution;
+                resolution.status = SolverResolution::Status::Removed;
+                resolution.prop = entry.prop;
+                resolution.index = entry.index;
+                resolutions[entry.prop].push_back(resolution);
+                FC_WARN(referenceName(entry.prop)
+                        << "[" << entry.index << "]: " << oldName << " removed ("
+                        << outcome.evidence << " to " << outcome.element << ")");
                 continue;
             }
             ReferenceReport::Entry item;
             item.evidence = outcome.evidence;
-            if (outcome.status == Data::SolveStatus::Resolved) {
+            if (outcome.status == Data::SolveStatus::Resolved && !outcome.elements.empty()) {
+                SolverResolution resolution;
+                resolution.status = SolverResolution::Status::Expanded;
+                resolution.prop = entry.prop;
+                resolution.index = entry.index;
+                resolution.from = outcome.from;
+                for (std::size_t p = 0; p < outcome.elements.size(); ++p) {
+                    SolverResolution piece;
+                    resolutionFor(entry, outcome.elements[p], outcome.names[p], piece);
+                    resolution.pieces.emplace_back(piece.sub, piece.shadow);
+                    item.pieces.emplace_back(outcome.elements[p], outcome.names[p]);
+                }
+                resolutions[entry.prop].push_back(resolution);
+                item.status = ReferenceReport::Status::Expanded;
+                item.tier = outcome.tier;
+                item.newIndex = outcome.element;
+                FC_WARN(referenceName(entry.prop)
+                        << "[" << entry.index << "]: " << oldName << " -> "
+                        << joinCandidates(outcome.elements) << " (tier " << outcome.tier << ", "
+                        << outcome.evidence << ")");
+            }
+            else if (outcome.status == Data::SolveStatus::Resolved) {
                 SolverResolution resolution;
                 resolutionFor(entry, outcome.element, outcome.name, resolution);
+                resolution.clearFrom = outcome.collapsed;
                 resolutions[entry.prop].push_back(resolution);
                 item.status = ReferenceReport::Status::Resolved;
                 item.tier = outcome.tier;
                 item.newIndex = outcome.element;
                 FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << entry.oldName << " -> "
+                        << "[" << entry.index << "]: " << oldName << " -> "
                         << outcome.element << " (tier " << outcome.tier << ", " << outcome.evidence
                         << ")");
             }
             else {
+                if (entry.kind == SolverEntry::Kind::Exact) {
+                    // A continuation under One or Equivalent, or a run-past: the exact
+                    // reference becomes missing (the owner fails, the fingerprint stays).
+                    SolverResolution resolution;
+                    brokenFor(entry, resolution);
+                    resolutions[entry.prop].push_back(resolution);
+                }
                 item.status = ReferenceReport::Status::Broken;
                 for (std::size_t c = 0; c < outcome.candidates.size(); ++c) {
                     item.candidates.emplace_back(outcome.candidates[c], outcome.candidateNames[c]);
                 }
                 FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << entry.oldName << " broken ("
+                        << "[" << entry.index << "]: " << oldName << " broken ("
                         << outcome.evidence
                         << (outcome.candidates.empty()
                                 ? std::string()
@@ -517,8 +743,7 @@ bool solveElementReferences(DocumentObject* feature,
             resolution.feature = feature;
             resolution.notify = notify;
             resolution.touched = touched;
-            changed = changed || touched
-                || resolution.status == SolverResolution::Status::Resolved;
+            changed = changed || touched || resolution.status != SolverResolution::Status::None;
         }
         try {
             prop->applyResolutions(list);
@@ -531,6 +756,8 @@ bool solveElementReferences(DocumentObject* feature,
             FC_ERR("Failed to update element reference of " << referenceName(prop) << ": "
                                                             << e.what());
         }
+        // A rebuilt sub list moved the references: the report follows them.
+        ReferenceReport::remapEntries(reports[prop], list.front().firstNew, list.front().countNew);
         ReferenceReport::replace(prop, targetName, std::move(reports[prop]));
     }
     return changed;

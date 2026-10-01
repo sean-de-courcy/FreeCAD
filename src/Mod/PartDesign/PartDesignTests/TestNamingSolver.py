@@ -31,6 +31,7 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+from xml.etree import ElementTree
 
 import FreeCAD as App
 import Part
@@ -393,3 +394,218 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(
             fillet.Base[1], edge("line", direction=Z, through=(25, 0, 0)).one(pad.Shape)
         )
+
+    # Splits (Task 2 PR 7): Expand, `from` and collapse, the continuation.
+
+    def savedSubs(self, doc, objectName, propertyName):
+        """The `<Sub>` attributes of `objectName.propertyName` (a PropertyLinkSub) as `doc`
+        saves them now."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Saved.FCStd")
+        doc.saveCopy(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for obj in root.iter("Object"):
+            if obj.get("name") != objectName:
+                continue
+            for prop in obj.iter("Property"):
+                if prop.get("name") == propertyName:
+                    return [dict(sub.attrib) for sub in prop.iter("Sub")]
+        raise AssertionError(f"{objectName}.{propertyName} isn't saved")
+
+    def froms(self, doc):
+        return [s.get("from") for s in self.savedSubs(doc, "Fillet", "Base")]
+
+    def ribAcrossFillet(self, doc):
+        """SplitFilletFuse's model: a rib (x 8..12, y 3..7, 12 high) on a block 0..20 x 0..10 x
+        10, a fillet (radius 1) on the block's front top edge. Returns (rib, fillet, the edge's
+        mapped name)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 10)
+        rib = models.sketch(doc, "RibSketch", models.rectangle(8, 3, 12, 7), body)
+        rib = models.pad(body, rib, 12, name="Rib")
+        doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10)).one(rib.Shape)
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (rib, front)
+        fillet.Radius = 1
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        name = rib.Shape.getElementMappedName(front[0])
+        name = name[0] if isinstance(name, (list, tuple)) else name
+        return rib, fillet, name
+
+    def frontPieces(self, rib):
+        return sorted(edge("line", direction=X, through=(0, 0, 10)).select(rib.Shape))
+
+    def testExpansionSavesFromAndCollapses(self):
+        """The rib moves across the filleted edge: the fillet takes both pieces, each saved with
+        `from` = the edge's old name; reopened, they keep it; the rib moved back, the pieces
+        merge back into the one edge, and `from` goes."""
+        # Arrange
+        doc = self.newDocument()
+        rib, fillet, name = self.ribAcrossFillet(doc)
+
+        # Act: split
+        models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(len(fillet.Base[1]), 2)
+        self.assertEqual(sorted(fillet.Base[1]), self.frontPieces(rib))
+        self.assertEqual(self.froms(doc), [name, name])
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("expanded", 1)])
+        self.assertEqual(sorted(report[0]["pieces"]), self.frontPieces(rib))
+
+        #   reopened, the pieces keep their `from`
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Expanded.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        rib, fillet = doc.Rib, doc.Fillet
+        self.assertEqual(len(fillet.Base[1]), 2)
+        self.assertEqual(self.froms(doc), [name, name])
+
+        # Act: merge
+        models.moveRectangle(doc.RibSketch, 8, 3, 12, 7)
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        front = edge("line", direction=X, through=(0, 0, 10)).one(rib.Shape)
+        self.assertEqual(fillet.Base[1], front)
+        self.assertEqual(self.froms(doc), [None])
+
+    def testUndoOfAnExpansion(self):
+        """Undo gives the one reference back without `from`; redo the pieces, with it (a
+        property is restored through Paste)."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        rib, fillet, name = self.ribAcrossFillet(doc)
+        doc.openTransaction("split")
+        models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+        doc.recompute()
+        doc.commitTransaction()
+        self.assertEqual(len(fillet.Base[1]), 2)
+
+        doc.undo()
+        self.assertEqual(len(fillet.Base[1]), 1)
+        self.assertEqual(self.froms(doc), [None])
+
+        doc.redo()
+        self.assertEqual(len(fillet.Base[1]), 2)
+        self.assertEqual(self.froms(doc), [name, name])
+
+    def testSetterDropsFrom(self):
+        """Setting the property anew, even to the same subs, drops `from`: the user chose them."""
+        doc = self.newDocument()
+        rib, fillet, name = self.ribAcrossFillet(doc)
+        models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+        doc.recompute()
+        self.assertEqual(self.froms(doc), [name, name])
+
+        fillet.Base = (rib, list(fillet.Base[1]))
+
+        self.assertEqual(self.froms(doc), [None, None])
+
+    def notch(self, doc):
+        """Cuts a notch (x 8..12, 2 deep) into the front of the profile: the front line ends at
+        x = 8, and four new lines follow, the last one the rest of the side (x 12..20)."""
+        models.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(
+            models.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False
+        )
+        doc.recompute()
+
+    def testContinuationReportsTier4(self):
+        """SplitFilletNotch's model: the fillet's edge keeps its name on 0..8; the rest (12..20)
+        comes from a new line. The fillet takes both, at tier 4."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10))
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, front.one(pad.Shape))
+        fillet.Radius = 1
+        doc.recompute()
+
+        self.notch(doc)
+
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(sorted(fillet.Base[1]), sorted(front.select(pad.Shape)))
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("expanded", 4)])
+        self.assertEqual(sorted(report[0]["pieces"]), sorted(front.select(pad.Shape)))
+
+    def testContinuationBreaksExternalAndRepairUsesAPiece(self):
+        """ExternalSplit's model: a sketch's external edge on the pad's front top edge, which a
+        notch splits; the kept piece is an exact hit. The reference breaks with both pieces as
+        candidates, stays broken on the next recompute, and a repair to one piece holds."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10))
+        sketch = models.sketch(doc, "OnFront", [], body, z=10)
+        sketch.addExternal(pad.Name, front.one(pad.Shape)[0])
+        doc.recompute()
+        self.assertTrue(sketch.isValid())
+
+        # Act
+        self.notch(doc)
+
+        # Assert
+        pieces = sorted(front.select(pad.Shape))
+        self.assertEqual(len(pieces), 2)
+        self.assertFalse(sketch.isValid())
+        report = App.getReferenceReport(sketch)
+        self.assertEqual(len(report), 1)
+        entry = report[0]
+        self.assertEqual(
+            (entry["property"], entry["index"], entry["status"]),
+            ("ExternalGeometry", 0, "broken"),
+        )
+        self.assertEqual(sorted(entry["candidates"]), pieces)
+        self.assertTrue(entry["evidence"].startswith("split: the old edge continues in"))
+
+        #   the break is stable
+        pad.touch()
+        doc.recompute()
+        self.assertFalse(sketch.isValid())
+
+        #   a repair to one piece holds
+        App.repairReference(sketch, "ExternalGeometry", 0, pieces[0])
+        doc.recompute()
+        self.assertTrue(sketch.isValid())
+        pad.touch()
+        doc.recompute()
+        self.assertTrue(sketch.isValid())
+
+    def testSolverOffSavesNoFrom(self):
+        """Without the switch, nothing saves `from`, and the fillet keeps one reference (the
+        solver-off behaviour)."""
+        doc = self.newDocument(solver=False)
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, edge("line", direction=X, through=(0, 0, 10)).one(pad.Shape))
+        fillet.Radius = 1
+        doc.recompute()
+
+        self.notch(doc)
+
+        self.assertEqual(len(fillet.Base[1]), 1)
+        self.assertEqual(self.froms(doc), [None])

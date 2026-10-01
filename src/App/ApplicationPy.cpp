@@ -1300,6 +1300,7 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             Py::Dict dict;
             Py::List candidates;
             Py::List candidateNames;
+            Py::List pieces;
             dict.setItem("property", Py::String(slot.property));
             dict.setItem("index", Py::Long(slot.index));
             dict.setItem("sub", Py::String(slot.sub));
@@ -1307,6 +1308,9 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
                 for (const auto& [index, name] : entry->candidates) {
                     candidates.append(Py::String(index));
                     candidateNames.append(Py::String(name));
+                }
+                for (const auto& piece : entry->pieces) {
+                    pieces.append(Py::String(piece.first));
                 }
                 dict.setItem("old", Py::String(entry->oldName));
                 dict.setItem("status", Py::String(ReferenceReport::statusName(entry->status)));
@@ -1326,6 +1330,7 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             }
             dict.setItem("candidates", candidates);
             dict.setItem("candidate_names", candidateNames);
+            dict.setItem("pieces", pieces);
             list.append(dict);
         }
         return Py::new_reference_to(list);
