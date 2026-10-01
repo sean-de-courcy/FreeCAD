@@ -282,6 +282,20 @@ AppExport int extrinsicNearest(
     const GeometryTolerances& tolerances
 );
 
+/** The geometric continuation's trigger (Task 2 PR 7): true if \a saved, the fingerprint saved
+ * with a reference, is a line edge, and \a now, its exact element's current fingerprint, is a
+ * line that lies within it (the same line within \a tolerances.angle and a distance ε, both
+ * ends within the old ends' ε) and is shorter by more than ε. ε is \a distance times
+ * max(1, \a diagonal).
+ */
+AppExport bool hitWithinOldEdge(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
 /** One owner's references to one target, for solveOwner(): plain data, no document.
  *
  * Names are bare mapped names. Element types are those of the stored index names: `Face`,
@@ -296,17 +310,26 @@ struct AppExport SolveInput
         /// The element type of the reference.
         std::string type;
         SolvePolicy policy = SolvePolicy::One;
-        /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`.
+        /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
+        /// exactName (the name the reference holds).
         bool exact = false;
         std::string exactElement;
+        std::string exactName;
         /// The target's findSimilarNames() result for oldName, of any type.
         std::vector<std::string> nameMatches;
-        /// The fingerprint saved with the reference; invalid if none (tiers 2 and 3 then don't
-        /// run for it).
+        /// The fingerprint saved with the reference, before this update; invalid if none (tiers
+        /// 2 and 3 then don't run for it, and an exact entry doesn't continue).
         ElementFingerprint fingerprint;
         /// Equivalent: whether the consumer would get the same result from either of two
         /// elements of the target (index names, e.g. `Face7`). Unset: no two are equivalent.
         std::function<bool(const std::string&, const std::string&)> equivalent;
+        /// The bare mapped name the reference named before it was expanded (Task 2 PR 7), or
+        /// empty. References with the same scope and `from` are one group.
+        std::string from;
+        /// An opaque key of the reference's property and sub-object prefix.
+        std::string scope;
+        /// The reference's position in its property; a collapsing group keeps its lowest.
+        int position = 0;
     };
     /// An element of the target with all its mapped names.
     struct Element
@@ -333,6 +356,11 @@ struct AppExport SolveInput
     /// can't be measured. Called at most once per element, only when tiers 2 and 3 run. Unset:
     /// no element has a fingerprint.
     std::function<ElementFingerprint(const std::string& index)> fingerprintOf;
+    /// The faces of the target that the edge \a index bounds (index names). Unset: none, so
+    /// no edge continues.
+    std::function<std::vector<std::string>(const std::string& index)> facesOf;
+    /// The continuation's distance ε, as a share of max(1, diagonal) (hitWithinOldEdge()).
+    double continuationDistance = 1e-7;
 };
 
 enum class SolveStatus
@@ -341,8 +369,10 @@ enum class SolveStatus
     Exact,
     /// Resolved by the solver.
     Resolved,
-    /// Not resolved: the reference stays missing.
+    /// Not resolved: the reference stays missing (an exact one becomes missing).
     Broken,
+    /// A member of a collapsing group other than the one that stays: the reference goes.
+    Removed,
 };
 
 struct AppExport SolveOutcome
@@ -352,10 +382,19 @@ struct AppExport SolveOutcome
     /// names by bytes; empty if it has none).
     std::string element;
     std::string name;
-    /// 0 for Exact; for Resolved the tier that decided: 1 (structure), 2 (intrinsic geometry
-    /// narrowed tier 1's survivors to one), 3 (extrinsic geometry did, or found the element
-    /// when tier 1 found nothing); -1 for Broken.
+    /// 0 for Exact; for Resolved the tier that decided: 0 (a collapse, the `from` name found
+    /// exactly), 1 (structure; an expansion to the pieces), 2 (intrinsic geometry narrowed tier
+    /// 1's survivors to one), 3 (extrinsic geometry did, or found the element when tier 1 found
+    /// nothing), 4 (the geometric continuation of a tier-0 hit); -1 for Broken.
     int tier = -1;
+    /// An expansion (Expand): every element, in index order, with its mapped name; element
+    /// and name are the first. Empty otherwise.
+    std::vector<std::string> elements;
+    std::vector<std::string> names;
+    /// The expansion's `from`: the entry's own, or the name it expands.
+    std::string from;
+    /// Resolved by a collapse: the group's `from` is cleared.
+    bool collapsed = false;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
     /// with their mapped names (parallel).
     std::vector<std::string> candidates;
@@ -364,11 +403,25 @@ struct AppExport SolveOutcome
     std::string evidence;
 };
 
-/** Tiers 0-3 and forced matching for one owner's references to one target (Task 2 PRs 3-4).
+/** Tiers 0-4 and forced matching for one owner's references to one target (Task 2 PRs 3-7).
  *
  * - Exact entries keep their element, and it leaves the other entries' pools unless one of its
  *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
  *   entries never enter the graph.
+ * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
+ *   an element of the target exactly and every member is missing or exact on that element,
+ *   the member with the lowest position resolves to it (tier 0, `collapsed`) and the others
+ *   are Removed: the pieces merged back.
+ * - Continuation (PR 7, tier 4): an exact `Edge` entry whose saved fingerprint is a line that
+ *   its element now lies strictly within (hitWithinOldEdge()). The other line edges of the
+ *   type, not held exactly by the owner, that lie on the old edge within its ends and bound a
+ *   face the hit bounds (facesOf) are its continuations. Expand takes them (Resolved, every
+ *   element); One breaks the entry with the hit and them as candidates; Equivalent keeps the
+ *   hit if every continuation is equivalent to it, and breaks otherwise. Such an edge that runs
+ *   past the old end, or pieces that overlap, break the entry under every policy. The
+ *   continuations taken leave the other entries' pools, as tier-0 elements do.
+ * - Expand (PR 7), with pieces among the candidates: the pieces resolve together, as one graph
+ *   node (tier 1, every element); the other survivors don't count.
  * - Missing entries with the same old name, type and policy are solved once and get the same
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
@@ -380,8 +433,8 @@ struct AppExport SolveOutcome
  *   geometry agrees with the saved fingerprint (tier 2) replace the other candidates; without
  *   a fingerprint, or if none agrees, they don't count. Split pieces of the old IDX element
  *   under another op code (NameAncestry::isIndexPieceOf()) are pieces like any other.
- * - One (and, until PR 7, Expand): a candidate that is a piece of the old element breaks the
- *   entry at once, with the pieces as candidates.
+ * - One: a candidate that is a piece of the old element breaks the entry at once, with the
+ *   pieces as candidates.
  * - Equivalent, with pieces among the candidates: when every piece gives the consumer the same
  *   result (Entry::equivalent, for every member), the pieces are one candidate, represented by
  *   the one whose first name sorts first by bytes, and geometry doesn't run; other survivors
