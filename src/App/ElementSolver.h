@@ -296,6 +296,30 @@ AppExport bool hitWithinOldEdge(
     double distance
 );
 
+/** The split face's trigger (Task 2 PR 7, Q3 (b)): true if \a saved, the fingerprint saved with
+ * a reference, is a plane, and \a now, its exact element's current fingerprint, is a plane in
+ * the same plane (planeAgrees()) with an area smaller by more than \a distance relative.
+ */
+AppExport bool faceWithinOldPlane(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
+/** True if \a face is a plane in the plane of \a saved (a plane): its normal within
+ * \a tolerances.angle with its sense, its centre within ε of that plane (ε is \a distance times
+ * max(1, \a diagonal)).
+ */
+AppExport bool planeAgrees(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
 /** One owner's references to one target, for solveOwner(): plain data, no document.
  *
  * Names are bare mapped names. Element types are those of the stored index names: `Face`,
@@ -359,6 +383,9 @@ struct AppExport SolveInput
     /// The faces of the target that the edge \a index bounds (index names). Unset: none, so
     /// no edge continues.
     std::function<std::vector<std::string>(const std::string& index)> facesOf;
+    /// The faces of the target that share an edge with the face \a index (index names). Unset:
+    /// none, so no face is split by a coplanar one.
+    std::function<std::vector<std::string>(const std::string& index)> neighboursOf;
     /// The continuation's distance ε, as a share of max(1, diagonal) (hitWithinOldEdge()).
     double continuationDistance = 1e-7;
 };
@@ -420,6 +447,11 @@ struct AppExport SolveOutcome
  *   hit if every continuation is equivalent to it, and breaks otherwise. Such an edge that runs
  *   past the old end, or pieces that overlap, break the entry under every policy. The
  *   continuations taken leave the other entries' pools, as tier-0 elements do.
+ * - A split face (PR 7, detected, never taken): an exact planar `Face` entry whose element
+ *   still lies in the plane of its saved fingerprint (the normal with its sense, the centre
+ *   within ε of the plane) but is smaller. Another planar face of that plane, not held exactly
+ *   by the owner, that shares an edge or a neighbouring face with it may be the rest of the old
+ *   face, which a fingerprint can't bound: the entry breaks under every policy, with both.
  * - Expand (PR 7), with pieces among the candidates: the pieces resolve together, as one graph
  *   node (tier 1, every element); the other survivors don't count.
  * - Missing entries with the same old name, type and policy are solved once and get the same

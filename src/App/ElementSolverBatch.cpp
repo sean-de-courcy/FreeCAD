@@ -196,22 +196,32 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
                                                             : resolution.shadow.oldName;
 }
 
-// Whether an exact reference may continue (Task 2 PR 7): its saved fingerprint is a line edge
-// that its element now lies strictly within. One fingerprint per exact line edge reference.
-bool continuable(const SolverEntry& entry,
-                 GeoFeature* geo,
-                 double diagonal,
-                 const Data::GeometryTolerances& tolerances,
-                 double distance)
+// Whether an exact reference may be split (Task 2 PR 7): its saved fingerprint is a line edge
+// that its element now lies strictly within, or a plane its element now lies in, smaller. One
+// fingerprint per exact line edge or planar face reference.
+bool mayBeSplit(const SolverEntry& entry,
+                GeoFeature* geo,
+                double diagonal,
+                const Data::GeometryTolerances& tolerances,
+                double distance)
 {
-    if (entry.kind != SolverEntry::Kind::Exact || indexType(entry.oldIndex) != "Edge"
-        || entry.oldFingerprint.find("|E|Line|") == std::string::npos) {
+    if (entry.kind != SolverEntry::Kind::Exact) {
+        return false;
+    }
+    const std::string type = indexType(entry.oldIndex);
+    const auto& text = entry.oldFingerprint;
+    const bool line = type == "Edge" && text.find("|E|Line|") != std::string::npos;
+    const bool plane = type == "Face" && text.find("|F|Plane|") != std::string::npos;
+    if (!line && !plane) {
         return false;
     }
     auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
     Data::ElementFingerprint now;
-    return saved.isValid() && geo->getElementFingerprint(entry.oldIndex.c_str(), now)
-        && Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance);
+    if (!saved.isValid() || !geo->getElementFingerprint(entry.oldIndex.c_str(), now)) {
+        return false;
+    }
+    return line ? Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance)
+                : Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance);
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -490,6 +500,39 @@ bool solveElementReferences(DocumentObject* feature,
     double diagonal = 0.0;
     std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
+    // The target's faces that share an edge, built on first use (a face split by a coplanar
+    // one): each edge's faces.
+    using Adjacency = std::map<std::string, std::set<std::string>>;
+    auto adjacency = std::make_shared<std::optional<Adjacency>>();
+    auto neighboursOf = [geo, adjacency](const std::string& face) {
+        if (!*adjacency) {
+            Adjacency map;
+            const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+            const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+            const unsigned long count = data ? data->countSubElements("Edge") : 0;
+            for (unsigned long e = 1; e <= count; ++e) {
+                std::vector<std::string> faces;
+                for (const auto& higher :
+                     geo->getHigherElements(("Edge" + std::to_string(e)).c_str(), true)) {
+                    if (std::strcmp(higher.getType(), "Face") == 0) {
+                        faces.push_back(higher.toString());
+                    }
+                }
+                for (const auto& a : faces) {
+                    for (const auto& b : faces) {
+                        if (a != b) {
+                            map[a].insert(b);
+                        }
+                    }
+                }
+            }
+            *adjacency = std::move(map);
+        }
+        auto it = (*adjacency)->find(face);
+        return it == (*adjacency)->end()
+            ? std::vector<std::string>()
+            : std::vector<std::string>(it->second.begin(), it->second.end());
+    };
 
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
@@ -500,11 +543,13 @@ bool solveElementReferences(DocumentObject* feature,
         bool anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->kind == SolverEntry::Kind::Missing;
         });
-        if (!anyMissing
-            && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
-                   return e->kind == SolverEntry::Kind::Exact
-                       && e->oldFingerprint.find("|E|Line|") != std::string::npos;
-               })) {
+        // An owner with only exact references is solved only if one of them may be split: a
+        // line edge or a planar face (the text first, then the geometry).
+        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
+                return e->kind == SolverEntry::Kind::Exact
+                    && (e->oldFingerprint.find("|E|Line|") != std::string::npos
+                        || e->oldFingerprint.find("|F|Plane|") != std::string::npos);
+            })) {
             continue;
         }
 
@@ -529,9 +574,8 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
-        // An owner with only exact references is solved only if one of them may continue.
         if (!anyMissing && std::none_of(entries.begin(), entries.end(), [&](const auto* e) {
-                return continuable(*e, geo, diagonal, tolerances, continuationDistance);
+                return mayBeSplit(*e, geo, diagonal, tolerances, continuationDistance);
             })) {
             continue;
         }
@@ -606,6 +650,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             return faces;
         };
+        input.neighboursOf = neighboursOf;
         for (const auto* entry : entries) {
             Data::SolveInput::Entry item;
             item.type = indexType(entry->oldIndex);

@@ -1156,6 +1156,52 @@ bool hitWithinOldEdge(
         && range->second - range->first < extent->length - eps;
 }
 
+namespace
+{
+
+bool isPlane(const ElementFingerprint& fp)
+{
+    return fp.isValid() && fp.type == 'F' && fp.kind == "Plane" && fp.size && fp.center
+        && fp.direction && fp.direction->Length() > 0.0;
+}
+
+}  // namespace
+
+bool planeAgrees(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    if (!isPlane(saved) || !isPlane(face)) {
+        return false;
+    }
+    Base::Vector3d normal = *saved.direction;
+    Base::Vector3d other = *face.direction;
+    normal.Normalize();
+    other.Normalize();
+    // A plane's normal keeps its sense: a face of the opposite side isn't in this plane.
+    if (std::atan2((normal % other).Length(), normal * other) > tolerances.angle) {
+        return false;
+    }
+    const double eps = distance * std::max(1.0, diagonal);
+    return std::abs((*face.center - *saved.center) * normal) <= eps;
+}
+
+bool faceWithinOldPlane(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    return planeAgrees(saved, now, diagonal, tolerances, distance)
+        && *now.size < *saved.size * (1.0 - distance);
+}
+
 bool intrinsicAgrees(
     const ElementFingerprint& saved,
     const ElementFingerprint& candidate,
@@ -1515,6 +1561,83 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         for (int k : taken) {
             pool.exact.insert(pool.elements[k].index);
+        }
+    }
+
+    // A planar face split by a coplanar one (Q3 (b)): a face's fingerprint doesn't bound its
+    // region, so the rest of the old face can't be told from a coplanar neighbour. Detected and
+    // broken, never taken.
+    {
+        Pool& pool = pools["Face"];
+        auto inPlane = [&](const ElementFingerprint& saved, const ElementFingerprint& face) {
+            return planeAgrees(saved,
+                               face,
+                               input.diagonal,
+                               input.tolerances,
+                               input.continuationDistance);
+        };
+        std::map<std::string, std::set<std::string>> neighbours;
+        auto neighboursOf = [&](const std::string& index) -> const std::set<std::string>& {
+            auto it = neighbours.find(index);
+            if (it == neighbours.end()) {
+                std::set<std::string> faces;
+                if (input.neighboursOf) {
+                    for (auto& face : input.neighboursOf(index)) {
+                        faces.insert(std::move(face));
+                    }
+                }
+                faces.erase(index);
+                it = neighbours.emplace(index, std::move(faces)).first;
+            }
+            return it->second;
+        };
+        for (std::size_t i = 0; i < input.entries.size(); ++i) {
+            const auto& entry = input.entries[i];
+            const ElementFingerprint& saved = entry.fingerprint;
+            if (!entry.exact || decidedEntry[i] || entry.type != "Face" || !isPlane(saved)) {
+                continue;
+            }
+            const std::string& hit = entry.exactElement;
+            const int hitPosition = positionOf(pool, hit);
+            if (hitPosition < 0
+                || !faceWithinOldPlane(saved,
+                                       fingerprintOfIndex(hit),
+                                       input.diagonal,
+                                       input.tolerances,
+                                       input.continuationDistance)) {
+                continue;
+            }
+            const auto& hitNeighbours = neighboursOf(hit);
+            std::vector<int> listed {hitPosition};
+            std::string beside;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& index = pool.elements[k].index;
+                if (index == hit || pool.exact.count(index)
+                    || !inPlane(saved, fingerprintOf(pool.elements[k]))) {
+                    continue;
+                }
+                const auto& faces = neighboursOf(index);
+                bool related = hitNeighbours.count(index) > 0
+                    || std::any_of(faces.begin(), faces.end(), [&](const auto& face) {
+                           return hitNeighbours.count(face) > 0;
+                       });
+                if (related) {
+                    listed.push_back(static_cast<int>(k));
+                    beside += (beside.empty() ? "" : ", ") + index;
+                }
+            }
+            if (listed.size() == 1) {
+                continue;  // only shrunk
+            }
+            std::sort(listed.begin(), listed.end());
+            auto& outcome = outcomes[i];
+            outcome = SolveOutcome();
+            outcome.evidence = "split: a coplanar face beside it, " + beside;
+            for (int k : listed) {
+                outcome.candidates.push_back(pool.elements[k].index);
+                outcome.candidateNames.push_back(firstName(pool.elements[k]));
+            }
+            decidedEntry[i] = 1;
         }
     }
 

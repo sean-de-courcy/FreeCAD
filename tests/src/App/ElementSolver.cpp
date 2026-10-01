@@ -2563,6 +2563,137 @@ TEST(ReferenceReport, replacePerTargetAndClear)
     );
 }
 
+// A split face (Task 2 PR 7, Q3 (b)): detected and broken, never taken.
+
+namespace
+{
+
+// A face in the plane y = 0 (normal -Y), x from x0 to x1, z 0..10, as a fingerprint.
+ElementFingerprint frontFace(double x0, double x1, double y = 0.0)
+{
+    return fingerprint('F',
+                       "Plane",
+                       (x1 - x0) * 10,
+                       Base::Vector3d((x0 + x1) / 2, y, 5),
+                       Base::Vector3d(0, -1, 0));
+}
+
+// The block's front face (x 0..20), which a notch splits into the hit (Face1, x 0..8) and
+// Face2 (x 12..20); both bound the top and bottom faces (Face3, Face4). Face5 is the back.
+struct FrontNotch
+{
+    const double diagonal = std::sqrt(20.0 * 20 + 10 * 10 + 10 * 10);
+    const double eps = 1e-7 * diagonal;
+    std::map<std::string, ElementFingerprint> fingerprints {
+        {"Face1", frontFace(0, 8)},
+        {"Face2", frontFace(12, 20)},
+        {"Face3",
+         fingerprint('F', "Plane", 200, Base::Vector3d(10, 5, 10), Base::Vector3d(0, 0, 1))},
+        {"Face4",
+         fingerprint('F', "Plane", 200, Base::Vector3d(10, 5, 0), Base::Vector3d(0, 0, -1))},
+        {"Face5", frontFace(0, 20, 10)},
+    };
+    std::map<std::string, std::vector<std::string>> neighbours {
+        {"Face1", {"Face3", "Face4"}},
+        {"Face2", {"Face3", "Face4"}},
+        {"Face3", {"Face1", "Face2", "Face5"}},
+        {"Face4", {"Face1", "Face2", "Face5"}},
+        {"Face5", {"Face3", "Face4"}},
+    };
+
+    SolveInput input(Data::SolvePolicy policy) const
+    {
+        SolveInput input;
+        input.diagonal = diagonal;
+        for (const auto& [index, fp] : fingerprints) {
+            input.pool["Face"].push_back(element(index, {"n" + index}));
+        }
+        auto hit = exact("Face1", "Face");
+        hit.exactName = "nFace1";
+        hit.fingerprint = frontFace(0, 20);
+        hit.policy = policy;
+        hit.equivalent = [](const std::string&, const std::string&) { return true; };
+        input.entries = {hit};
+        measure(input, fingerprints, nullptr);
+        input.neighboursOf = [map = neighbours](const std::string& index) {
+            auto it = map.find(index);
+            return it == map.end() ? std::vector<std::string>() : it->second;
+        };
+        return input;
+    }
+};
+
+}  // namespace
+
+TEST(SplitFace, faceWithinOldPlane)
+{
+    GeometryTolerances tolerances;
+    const double diagonal = 24.5;
+    const double eps = 1e-7 * diagonal;
+    auto old = frontFace(0, 20);
+    auto within = [&](const ElementFingerprint& now) {
+        return Data::faceWithinOldPlane(old, now, diagonal, tolerances, 1e-7);
+    };
+    EXPECT_TRUE(within(frontFace(0, 8)));
+    EXPECT_TRUE(within(frontFace(0, 8, 0.5 * eps)));
+    //   the same area, off the plane, the other side, not a plane
+    EXPECT_FALSE(within(frontFace(0, 20)));
+    EXPECT_FALSE(within(frontFace(0, 8, 2 * eps)));
+    auto flipped = frontFace(0, 8);
+    flipped.direction = Base::Vector3d(0, 1, 0);
+    EXPECT_FALSE(within(flipped));
+    auto cylinder = frontFace(0, 8);
+    cylinder.kind = "Cylinder";
+    EXPECT_FALSE(within(cylinder));
+}
+
+TEST(SplitFace, breaksUnderEveryPolicy)
+{
+    FrontNotch notch;
+    for (auto policy :
+         {Data::SolvePolicy::Expand, Data::SolvePolicy::One, Data::SolvePolicy::Equivalent}) {
+        auto outcome = Data::solveOwner(notch.input(policy))[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << static_cast<int>(policy);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+        EXPECT_EQ(outcome.evidence, "split: a coplanar face beside it, Face2");
+    }
+}
+
+TEST(SplitFace, notBroken)
+{
+    FrontNotch notch;
+    const std::string kept = "exact Face1 0 [] ";
+    struct Case
+    {
+        const char* what;
+        std::function<void(SolveInput&, std::map<std::string, ElementFingerprint>&)> change;
+    };
+    std::vector<Case> cases {
+        {"no shared neighbour",
+         [](auto& input, auto&) {
+             input.neighboursOf = [](const std::string& index) {
+                 return index == "Face1" ? std::vector<std::string> {"Face3"}
+                                         : std::vector<std::string> {"Face9"};
+             };
+         }},
+        {"off the plane by 2 eps",
+         [&](auto&, auto& fps) { fps["Face2"] = frontFace(12, 20, 2 * notch.eps); }},
+        {"held exactly by the owner",
+         [](auto& input, auto&) { input.entries.push_back(exact("Face2", "Face")); }},
+        {"the hit didn't shrink",
+         [](auto&, auto& fps) { fps["Face1"] = frontFace(0, 20); }},
+        {"no saved fingerprint",
+         [](auto& input, auto&) { input.entries[0].fingerprint = ElementFingerprint(); }},
+    };
+    for (const auto& c : cases) {
+        auto input = notch.input(Data::SolvePolicy::Expand);
+        auto fps = notch.fingerprints;
+        c.change(input, fps);
+        measure(input, fps, nullptr);
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]), kept) << c.what;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The write-back of a PropertyLinkSub (Task 2 PR 7)
 

@@ -46,6 +46,7 @@ from .harness import (
     Filleted,
     Scenario,
     X,
+    Y,
     Z,
     edge,
     face,
@@ -328,4 +329,38 @@ class NotchAndExtend(SplitFilletNotch):
         lines = {0: ((0, 0), (8, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
         m.setLines(doc.Profile, lines)
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (26, 0)]), False)
+        self.split = True
+
+
+class DraftFaceNotch(SplitModel):
+    """A draft, 5 degrees, of the block's front face (y = 0) on the bottom face; a notch (x 8..12,
+    2 deep) is then cut into the front side of the block's sketch, as in SplitFilletNotch. The
+    front face keeps its name on x 0..8, and the rest (x 12..20) comes from a new line, coplanar,
+    beside the same top and bottom faces. A face's fingerprint doesn't bound its region, so the
+    rest can't be told from a coplanar neighbour: the reference breaks with both as candidates
+    (Q3 (b) of the PR 7 design), never keeps 0..8 alone (partial)."""
+
+    REFS = ("draft_face",)
+    split = False
+
+    def frontFace(self):
+        front = pieces(face("plane", normal=-Y, through=(0, 0, 0)))
+        return Broken(front) if self.split else front
+
+    def bottomFace(self):
+        return face("plane", normal=-Z, through=(0, 0, 0))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (pad, self.names(pad, self.frontFace().predicate))
+        draft.NeutralPlane = (pad, self.names(pad, self.bottomFace()))
+        draft.Angle = 5
+        self.ref("draft_face", draft, "Base", self.frontFace, Drafted(5, self.bottomFace))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         self.split = True
