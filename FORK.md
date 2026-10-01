@@ -76,7 +76,8 @@ names it.
 | `feat/scenarios-5b` | feat | ops#5 | - | `integration` `ac43f08826` | `322d30842f` (fork PR 46), 2026-09-30 | never (fork tests) |
 | `fix/14-windows-test-path` | fix | ops#14 | - | `integration` `322d30842f` | `d067e0ed44` (fork PR 47), 2026-09-30 | a new base builds the Windows test PATH without a configure-time glob of `build/Mod/*` |
 | `feat/naming-id` | feat | ops#6 | - | `integration` `322d30842f` | `2e1653d882` (fork PR 49), 2026-09-30 | never (fork feature) |
-| `feat/solver-evidence` | feat | ops#7 | - | `integration` `2e1653d882` | (fork PR 50) | never (fork feature) |
+| `feat/solver-evidence` | feat | ops#7 | - | `integration` `2e1653d882` | `29ee051d75` (fork PR 50), 2026-10-01 | never (fork feature) |
+| `fix/82-dressup-insert` | fix | ops#82 | - | `integration` `29ee051d75` | (fork PR 55) | a new base's `DressUp::onChanged` moves `BaseFeature` only when `Base` is linked to another object |
 
 ## Fork-only commits in carried topics
 

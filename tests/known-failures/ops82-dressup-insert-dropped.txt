@@ -1,9 +1,0 @@
-# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5) where a feature inserted before a
-# dress-up drops out of the model: DressUp::onChanged resets BaseFeature to Base's object when a
-# refresh rewrites Base's sub-names.
-
-issue: ops#82
-
-reason: after a boss is inserted before a chamfer, a notch in the pad's sketch renames the chamfer's edge, and the chamfer's BaseFeature falls back to the pad: the boss is gone and the chamfer stays valid (V2, V2multi)
-cli  PartDesignTests.TestNamingScenarios.DressUpInsertThenNotch.test_chamfer_edge_V2
-cli  PartDesignTests.TestNamingScenarios.DressUpInsertThenNotch.test_chamfer_edge_V2multi

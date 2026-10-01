@@ -22,6 +22,9 @@
 # ***************************************************************************
 
 from math import pi
+import os
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD
@@ -205,6 +208,91 @@ class TestChamfer(unittest.TestCase):
         chamfer = self._add_chamfer(body, base, [edge], 1.0)
         self.assertFalse(chamfer.isValid())
         self.assertEqual(chamfer.getStatusString(), "Resulting shape is invalid")
+
+    # A feature inserted before a dress-up (ops#82): Body::insertObject makes it the dress-up's
+    # BaseFeature and leaves Base on the feature before it. A block 0..20 x 0..10, 10 high, with a
+    # chamfer (size 1) on its back top edge; a boss (x 5..9, y 3..7, 3 high) inserted after the
+    # block as a user does it: the tip set to the block, the boss added, the tip set back.
+
+    def _add_pad(self, body, name, x0, y0, x1, y1, z, length):
+        V = FreeCAD.Vector
+        sketch = self.Doc.addObject("Sketcher::SketchObject", name + "Sketch")
+        body.addObject(sketch)
+        sketch.Placement = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+        corners = [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)]
+        sketch.addGeometry(
+            [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])], False
+        )
+        pad = body.newObject("PartDesign::Pad", name)
+        pad.Profile = sketch
+        pad.Length = length
+        self.Doc.recompute()
+        return pad
+
+    def _block_with_inserted_boss(self):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = self._add_pad(body, "Block", 0, 0, 20, 10, 0, 10)
+        edge = self._edge_between(block.Shape, (0, 10, 10), (20, 10, 10))
+        chamfer = self._add_chamfer(body, block, [edge], 1.0)
+        body.Tip = block
+        boss = self._add_pad(body, "Boss", 5, 3, 9, 7, 10, 3)
+        body.Tip = chamfer
+        self.Doc.recompute()
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.assertEqual(chamfer.Base[0], block)
+        self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20)
+        return body, block, boss, chamfer
+
+    def testInsertBeforeChamferKeptWhenReferencesChange(self):
+        # Another edge of the block added to the chamfer: Base keeps its object, so BaseFeature
+        # stays on the boss (it used to fall back to the block, dropping the boss)
+        body, block, boss, chamfer = self._block_with_inserted_boss()
+        front = self._edge_between(block.Shape, (0, 0, 10), (20, 0, 10))
+        chamfer.Base = (block, chamfer.Base[1] + [front])
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.Doc.recompute()
+        self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20 * 2)
+        self.assertAlmostEqual(chamfer.Shape.BoundBox.ZMax, 13)
+
+    def testInsertBeforeChamferKeptOnReload(self):
+        names = [f.Name for f in self._block_with_inserted_boss()[1:]]
+        path = os.path.join(tempfile.mkdtemp(), "InsertBeforeChamfer.FCStd")
+        try:
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            block, boss, chamfer = [self.Doc.getObject(name) for name in names]
+            self.assertEqual(chamfer.BaseFeature, boss)
+            self.assertEqual(chamfer.Base[0], block)
+            chamfer.touch()
+            self.Doc.recompute()
+            self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20)
+        finally:
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.newDocument("PartDesignTestChamfer")
+            shutil.rmtree(os.path.dirname(path), ignore_errors=True)
+
+    def testChamferBaseLinkedToAnotherFeature(self):
+        # What the reset in DressUp::onChanged is for: Base linked to another feature takes
+        # BaseFeature with it, and undo restores both
+        body, block, boss, chamfer = self._block_with_inserted_boss()
+        self.Doc.UndoMode = 1
+        top = self._edge_between(boss.Shape, (5, 7, 13), (9, 7, 13))
+        self.Doc.openTransaction("Relink")
+        chamfer.Base = (boss, [top])
+        self.Doc.commitTransaction()
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.Doc.openTransaction("Relink")
+        chamfer.Base = (block, [self._edge_between(block.Shape, (0, 10, 10), (20, 10, 10))])
+        self.Doc.commitTransaction()
+        self.assertEqual(chamfer.BaseFeature, block)
+        self.Doc.recompute()
+        self._assertValidDressUp(chamfer, 2000 - 1.0**2 / 2 * 20)
+        self.Doc.undo()
+        self.assertEqual(chamfer.Base[0], boss)
+        self.assertEqual(chamfer.BaseFeature, boss)
+        self.Doc.recompute()
+        self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 4)
 
     def tearDown(self):
         # closing doc

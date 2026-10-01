@@ -280,10 +280,29 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
     return ret;
 }
 
+void DressUp::onBeforeChange(const App::Property* prop)
+{
+    if (prop == &Base) {
+        baseBeforeChange = Base.getValue();
+        baseChanging = true;
+    }
+
+    FeatureAddSub::onBeforeChange(prop);
+}
+
 void DressUp::onChanged(const App::Property* prop)
 {
     if (prop == &Base) {
-        if (BaseFeature.getValue() && Base.getValue() != BaseFeature.getValue()) {
+        // BaseFeature follows Base when Base is linked to another object. A change that keeps the
+        // object (the naming refresh after an upstream edit, references added or removed) leaves
+        // BaseFeature alone: after Body::insertObject it is the inserted feature, and Base still
+        // names the feature before it (ops#82). Restoring and undo/redo set both properties.
+        bool sameObject = baseChanging && Base.getValue() == baseBeforeChange;
+        baseChanging = false;
+        baseBeforeChange = nullptr;
+        if (!sameObject && BaseFeature.getValue() && Base.getValue() != BaseFeature.getValue()
+            && !getDocument()->testStatus(App::Document::Restoring)
+            && !getDocument()->isPerformingTransaction()) {
             BaseFeature.setValue(Base.getValue());
         }
     }
