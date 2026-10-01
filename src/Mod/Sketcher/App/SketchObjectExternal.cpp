@@ -101,6 +101,36 @@ using namespace Base;
 
 FC_LOG_LEVEL_INIT("Sketch", true, true)
 
+namespace
+{
+// Sets the links to objs/subs, keeping the shadow (the mapped name) of each entry that is one of
+// the current links. Without shadows the property resolves each sub again, and a missing one
+// (`?Edge3`, kept since ops#72) loses its old mapped name, so the sketch can no longer tell which
+// frozen geometry it gave.
+void setExternalLinks(App::PropertyLinkSubList& links,
+                      std::vector<App::DocumentObject*> objs,
+                      std::vector<std::string> subs)
+{
+    const auto& oldObjs = links.getValues();
+    const auto& oldSubs = links.getSubValues();
+    const auto& oldShadows = links.getShadowSubs();
+    std::vector<bool> used(oldObjs.size(), false);
+    std::vector<App::ElementNamePair> shadows;
+    shadows.reserve(objs.size());
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        shadows.emplace_back();
+        for (std::size_t j = 0; j < oldObjs.size() && j < oldShadows.size(); ++j) {
+            if (!used[j] && oldObjs[j] == objs[i] && oldSubs[j] == subs[i]) {
+                used[j] = true;
+                shadows.back() = oldShadows[j];
+                break;
+            }
+        }
+    }
+    links.setValues(std::move(objs), std::move(subs), std::move(shadows));
+}
+}  // namespace
+
 void SketchObject::initExternalGeo() {
     std::vector<Part::Geometry *> geos;
     auto HLine = GeometryTypedFacade<Part::GeomLineSegment>::getTypedFacade();
@@ -494,7 +524,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             si++;
         }
 
-        ExternalGeometry.setValues(Objects, SubElements);
+        setExternalLinks(ExternalGeometry, Objects, SubElements);
 
         try {
             rebuildExternalGeometry();
@@ -502,7 +532,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         catch (const Base::Exception& e) {
             Base::Console().error("%s\n", e.what());
             // revert to original values
-            ExternalGeometry.setValues(originalObjects, originalSubElements);
+            setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
             return -1;
         }
 
@@ -847,7 +877,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         }
 
         // set the Link list.
-        ExternalGeometry.setValues(Objects, SubElements);
+        setExternalLinks(ExternalGeometry, Objects, SubElements);
     }
     ExternalTypes.setValues(Types);
 
@@ -858,7 +888,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        ExternalGeometry.setValues(originalObjects, originalSubElements);
+        setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
         return -1;
     }
 
@@ -980,7 +1010,7 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
             }
         }
         if (touched) {
-            ExternalGeometry.setValues(newObjs, newSubs);
+            setExternalLinks(ExternalGeometry, newObjs, newSubs);
         }
     }
 
@@ -1030,14 +1060,14 @@ int SketchObject::delAllExternal()
         }
     }
 
-    ExternalGeometry.setValues(Objects, SubElements);
+    setExternalLinks(ExternalGeometry, Objects, SubElements);
     try {
         rebuildExternalGeometry();
     }
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        ExternalGeometry.setValues(originalObjects, originalSubElements);
+        setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
         for (Constraint* it : newConstraints) {
             delete it;
         }
@@ -1129,7 +1159,7 @@ int SketchObject::attachExternal(
     Objects.push_back(Obj);
     SubElements.push_back(std::string(SubName));
 
-    ExternalGeometry.setValues(Objects,SubElements);
+    setExternalLinks(ExternalGeometry, Objects, SubElements);
     if(externalGeoRef.size()!=Objects.size())
         return -1;
 
@@ -1327,8 +1357,12 @@ void SketchObject::validateExternalLinks()
 
     std::vector<DocumentObject*> Objects = ExternalGeometry.getValues();
     std::vector<std::string> SubElements = ExternalGeometry.getSubValues();
+    if (externalGeoRef.size() != Objects.size()) {
+        throw Base::RuntimeError("Inconsistency with external geometries");
+    }
 
-    bool rebuild = false;
+    // the references (externalGeoRef) of the links to remove
+    std::set<std::string> badRefs;
 
     for (int i = 0; i < int(Objects.size()); i++) {
         const App::DocumentObject* Obj = Objects[i];
@@ -1360,28 +1394,58 @@ void SketchObject::validateExternalLinks()
         }
         catch (Standard_Failure&) {
         }
-
-        rebuild = true;
-        Objects.erase(Objects.begin() + i);
-        SubElements.erase(SubElements.begin() + i);
-
-        const std::vector<Constraint*>& constraints = Constraints.getValues();
-        std::vector<Constraint*> newConstraints;
-        newConstraints.reserve(constraints.size());
-        int GeoId = GeoEnum::RefExt - i;
-        for (const auto& constr : constraints) {
-            auto newConstr = getConstraintAfterDeletingGeo(constr, GeoId);
-            if (newConstr) {
-                newConstraints.push_back(newConstr.release());
-            }
+        catch (Base::Exception& e) {
+            // e.g. a mapped name that no longer resolves (CADKernelError)
+            Base::Console().warning(this->getFullLabel(), (e.getMessage() + "\n").c_str());
         }
 
-        Constraints.setValues(std::move(newConstraints));
-        i--;// we deleted an item, so the next one took its place
+        // A link whose element is missing keeps its frozen geometry and the constraints on it
+        // until the user re-points or deletes it (ops#72); the recompute reports it. This runs
+        // whenever the support isn't a Part::Feature (an origin plane too), so opening the sketch
+        // must not delete them.
+        auto it = externalGeoRefMap.find(externalGeoRef[i]);
+        if (it != externalGeoRefMap.end()
+            && std::any_of(it->second.begin(), it->second.end(), [this](long id) {
+                   return externalGeoMap.count(id) != 0;
+               })) {
+            continue;
+        }
+
+        badRefs.insert(externalGeoRef[i]);
     }
 
-    if (rebuild) {
-        ExternalGeometry.setValues(Objects, SubElements);
+    if (!badRefs.empty()) {
+        // Remove each bad link with its own external geometry and the constraints on that
+        // geometry. A link can give several geometries (a face's edges, an intersection), so the
+        // link's index in ExternalGeometry is not a geometry index (ops#75).
+        std::set<long> ids;
+        for (const auto& ref : badRefs) {
+            auto it = externalGeoRefMap.find(ref);
+            if (it != externalGeoRefMap.end()) {
+                ids.insert(it->second.begin(), it->second.end());
+            }
+        }
+        // removes the geometry, the constraints on it and the links it came from
+        delExternalPrivate(ids, true);
+
+        // a bad link that had no geometry is still there
+        std::vector<DocumentObject*> objs;
+        std::vector<std::string> subs;
+        const auto& values = ExternalGeometry.getValues();
+        const auto& subValues = ExternalGeometry.getSubValues();
+        bool touched = false;
+        for (std::size_t i = 0; i < values.size() && i < externalGeoRef.size(); ++i) {
+            if (badRefs.count(externalGeoRef[i])) {
+                touched = true;
+                continue;
+            }
+            objs.push_back(values[i]);
+            subs.push_back(subValues[i]);
+        }
+        if (touched) {
+            setExternalLinks(ExternalGeometry, objs, subs);
+        }
+
         rebuildExternalGeometry();
         acceptGeometry();// This may need to be refactor to OnChanged for ExternalGeo
         solve(true);     // we have to update this sketch and everything depending on it.
@@ -2299,6 +2363,14 @@ void processFace (const Rotation& invRot,
     }
 }
 
+// the error of a sketch whose external geometry lost its element (ops#72); defined below
+std::string missingReferenceMessage(
+    const App::Document* doc,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<App::DocumentObject*>& objects,
+    const std::vector<std::string>& subElements,
+    const std::vector<std::string>& keys);
+
 }  // anonymous namespace
 
 void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd)
@@ -2342,14 +2414,21 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         throw Base::RuntimeError("Inconsistency with external geometries");
     }
     auto keys = externalGeoRef;
+    const std::size_t linkCount = Objects.size();
+    // links whose sub-element is set again below, because their element is back (ops#72)
+    std::set<std::size_t> relinked;
 
     // re-check for any missing geometry element. The code here has a side
     // effect that the linked external geometry will continue to work even if
     // ExternalGeometry is wiped out.
+    std::set<std::string> rechecked;
     for(auto &geo : ExternalGeo.getValues()) {
         auto egf = ExternalGeometryFacade::getFacade(geo);
         if(egf->getRef().size() && egf->testFlag(ExternalGeometryExtension::Missing)) {
             const std::string &ref = egf->getRef();
+            if (!rechecked.insert(ref).second) {
+                continue;
+            }
             auto pos = ref.find('.');
             if(pos == std::string::npos)
                 continue;
@@ -2362,6 +2441,20 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             if(elementName.oldName.size()
                     && !App::GeoFeature::hasMissingElement(elementName.oldName.c_str()))
             {
+                // A missing reference keeps its link (ops#72): point that link at the element
+                // again. In a solver document the solver decides (it may have broken a reference
+                // whose name still exists, ops#7), and App.repairReference re-points it. A link
+                // dropped by an older version is added back.
+                auto it = std::find(keys.begin(), keys.begin() + linkCount, ref);
+                if (it != keys.begin() + linkCount) {
+                    auto index = static_cast<std::size_t>(it - keys.begin());
+                    if (Objects[index] == obj && SubElements[index] != elementName.oldName
+                        && !ExternalGeometry.inSolverDocument()) {
+                        SubElements[index] = elementName.oldName;
+                        relinked.insert(index);
+                    }
+                    continue;
+                }
                 Objects.push_back(obj);
                 SubElements.push_back(elementName.oldName);
                 keys.push_back(ref);
@@ -2702,8 +2795,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     // Check for any missing references
     bool hasError = false;
-    for(auto geo : geoms) {
-        auto egf = ExternalGeometryFacade::getFacade(geo);
+    // the missing references, in order, with the indexes of their geometries in geoms
+    std::vector<std::pair<std::string, std::vector<std::size_t>>> missingRefs;
+    for (std::size_t index = 0; index < geoms.size(); ++index) {
+        auto egf = ExternalGeometryFacade::getFacade(geoms[index]);
         egf->setFlag(ExternalGeometryExtension::Sync,false);
         if(egf->getRef().empty())
             continue;
@@ -2712,6 +2807,14 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     << " missing reference: " << egf->getRef());
             hasError = true;
             egf->setFlag(ExternalGeometryExtension::Missing,true);
+            const std::string& ref = egf->getRef();
+            auto it = std::find_if(missingRefs.begin(), missingRefs.end(), [&](const auto& entry) {
+                return entry.first == ref;
+            });
+            if (it == missingRefs.end()) {
+                it = missingRefs.emplace(missingRefs.end(), ref, std::vector<std::size_t> {});
+            }
+            it->second.push_back(index);
         } else {
             egf->setFlag(ExternalGeometryExtension::Missing,false);
         }
@@ -2735,31 +2838,102 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     reorientConstraintsOnReversedGeometry(reversedGeoIds);
 
-    // clean up geometry reference
-    if(refSet.size() != (size_t)ExternalGeometry.getSize()) {
-        if(refSet.size() < keys.size()) {
-            auto itObj = Objects.begin();
-            auto itSub = SubElements.begin();
-            for(auto &ref : keys) {
-                if(!refSet.count(ref)) {
-                    itObj = Objects.erase(itObj);
-                    itSub = SubElements.erase(itSub);
-                }else {
-                    ++itObj;
-                    ++itSub;
-                }
+    // clean up geometry reference. A link whose geometry is missing stays, so the sketch keeps
+    // depending on its source and reports the missing element on every recompute until the user
+    // re-points or deletes it (ops#72). A link that gave no geometry and had none is dropped.
+    auto isMissing = [&](const std::string& ref) {
+        return std::any_of(missingRefs.begin(), missingRefs.end(), [&](const auto& entry) {
+            return entry.first == ref;
+        });
+    };
+    {
+        std::vector<App::DocumentObject*> newObjects;
+        std::vector<std::string> newSubElements;
+        bool linksChanged = !relinked.empty();
+        for (std::size_t index = 0; index < keys.size(); ++index) {
+            bool isLink = index < linkCount;
+            bool kept = refSet.count(keys[index]) != 0
+                || (isLink && isMissing(keys[index]) && Objects[index]
+                    && Objects[index]->isAttachedToDocument());
+            if (!kept) {
+                linksChanged = linksChanged || isLink;
+                continue;
             }
+            linksChanged = linksChanged || !isLink;
+            newObjects.push_back(Objects[index]);
+            newSubElements.push_back(SubElements[index]);
         }
-        ExternalGeometry.setValues(Objects,SubElements);
+        if (linksChanged) {
+            // a relinked entry has a new sub, so it gets no shadow and is resolved again
+            setExternalLinks(ExternalGeometry, newObjects, newSubElements);
+        }
     }
 
     solverNeedsUpdate=true;
     Constraints.acceptGeometry(getCompleteGeometry());
 
     if (hasError && this->isRecomputing()) {
-        throw Base::RuntimeError("Missing external geometry reference");
+        throw Base::RuntimeError(
+            missingReferenceMessage(getDocument(), missingRefs, Objects, SubElements, keys));
     }
 }
+
+namespace
+{
+std::string missingReferenceMessage(
+    const App::Document* doc,
+    const std::vector<std::pair<std::string, std::vector<std::size_t>>>& missingRefs,
+    const std::vector<App::DocumentObject*>& objects,
+    const std::vector<std::string>& subElements,
+    const std::vector<std::string>& keys)
+{
+    // Names each missing reference as the user sees it, Label.Element, with the external
+    // geometry it gave (ExternalEdgeN, as the sketcher selects it; the first two are the axes)
+    std::string message = missingRefs.size() == 1 ? "Missing external geometry reference: "
+                                                  : "Missing external geometry references: ";
+    bool first = true;
+    for (const auto& [ref, indexes] : missingRefs) {
+        if (!first) {
+            message += "; ";
+        }
+        first = false;
+
+        std::string source;
+        std::string element;
+        auto it = std::find(keys.begin(), keys.end(), ref);
+        if (it != keys.end() && objects[it - keys.begin()]) {
+            const auto* obj = objects[it - keys.begin()];
+            source = obj->Label.getValue();
+            element = Data::oldElementName(subElements[it - keys.begin()].c_str());
+        }
+        else {
+            // a link dropped by an older version: only the geometry's reference is left
+            auto pos = ref.find('.');
+            std::string objName = ref.substr(0, pos);
+            auto obj = doc ? doc->getObject(objName.c_str()) : nullptr;
+            source = obj ? obj->Label.getValue() : objName;
+            if (pos != std::string::npos) {
+                element = Data::oldElementName(ref.c_str() + pos + 1);
+            }
+        }
+        if (boost::starts_with(element, Data::MISSING_PREFIX)) {
+            element.erase(0, std::strlen(Data::MISSING_PREFIX));
+        }
+        message += source;
+        if (!element.empty()) {
+            message += "." + element;
+        }
+
+        message += " (";
+        for (std::size_t i = 0; i < indexes.size(); ++i) {
+            message += (i ? ", " : "") + std::string("ExternalEdge")
+                + std::to_string(static_cast<long>(indexes[i]) - 1);
+        }
+        message += ")";
+    }
+    return message;
+}
+}  // namespace
 
 void SketchObject::fixMissingAxisInExternalGeo()
 {
@@ -2827,7 +3001,7 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
 
     if(touched) {
         ExternalGeo.setValues(geos);
-        ExternalGeometry.setValues(objs,subs);
+        setExternalLinks(ExternalGeometry, objs, subs);
         rebuildExternalGeometry();
     }
 }

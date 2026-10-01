@@ -120,6 +120,23 @@ class ExternalLineToArc(ExternalEdit):
         self.arc = True
 
 
+class ExternalSideReplaced(ExternalEdit):
+    """The right line is deleted and replaced by a V, (20, 0)-(25, 5)-(20, 10): the side face at
+    x = 20 and its top edge are gone (two slanted faces take their place). The right edge's
+    sketch should report the missing reference and keep its link (ops#72: it stayed valid,
+    frozen at x = 20, and dropped the link). The front edge doesn't change."""
+
+    replaced = False
+
+    def rightEdge(self):
+        return BROKEN if self.replaced else super().rightEdge()
+
+    def edit(self, doc):
+        doc.Profile.delGeometry(1)
+        doc.Profile.addGeometry(m.polyline([(20, 0), (25, 5), (20, 10)]), False)
+        self.replaced = True
+
+
 class ExternalEdgeRemoved(Scenario):
     """A block 0..20 x 0..10 x 10 (a pad) with a hole, radius 2 at (6, 5), pocketed through it;
     a boss (x 13..17, y 3..7, 3 high) padded on the top; a sketch at z = 0 with the boss

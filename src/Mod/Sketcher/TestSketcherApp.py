@@ -31,6 +31,12 @@ from SketcherTests.TestSketchValidateCoincidents import TestSketchValidateCoinci
 from SketcherTests.TestSketchCarbonCopyReverseMapping import TestSketchCarbonCopyReverseMapping
 from SketcherTests.TestSketchInternalFaces import TestSketchInternalFaces
 from SketcherTests.TestSketcherEllipse import TestSketcherEllipse
+from SketcherTests.TestSketchMissingExternal import (
+    TestSketchMissingExternal,
+    TestSketchMissingExternalSolver,
+    TestSketchMissingExternalReturns,
+    TestSketchMissingExternalReturnsSolver,
+)
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

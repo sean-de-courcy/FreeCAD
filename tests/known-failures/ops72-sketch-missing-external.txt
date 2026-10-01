@@ -1,8 +1,0 @@
-# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5) whose sketch loses its external
-# geometry's element and stays valid: the reference is dropped from ExternalGeometry silently.
-# The ops#72 fix (an error state that keeps the link) makes them pass.
-
-issue: ops#72
-
-reason: a sketch whose external edge's element is gone (the feature that made it deleted) stays valid and drops the link (every mode)
-cli  PartDesignTests.TestNamingScenarios.ExternalEdgeRemoved.test_hole_bottom_V2
