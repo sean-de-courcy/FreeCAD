@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-#include <QByteArrayView>
-#include <QCryptographicHash>
-
-#include <algorithm>
 #include <cstring>
 
 #include <Base/Exception.h>
@@ -89,11 +85,13 @@ struct SipState
 };
 
 // SipHash-2-4 with 64 or 128 bits of output (the reference implementation's siphash.c).
-void sipHash(const unsigned char* key,
-             const char* data,
-             std::size_t size,
-             unsigned char* out,
-             bool wide)
+void sipHash(
+    const unsigned char* key,
+    const char* data,
+    std::size_t size,
+    unsigned char* out,
+    bool wide
+)
 {
     const std::uint64_t k0 = load64(key);
     const std::uint64_t k1 = load64(key + 8);
@@ -130,33 +128,32 @@ const std::array<unsigned char, 16>& SipHash::nameIdKey()
     return idKey;
 }
 
-void SipHash::hash64(const unsigned char* key, const char* data, std::size_t size, unsigned char* out8)
+void SipHash::hash64(
+    const unsigned char* key,
+    const char* data,
+    std::size_t size,
+    unsigned char* out8
+)
 {
     sipHash(key, data, size, out8, false);
 }
 
-void SipHash::hash128(const unsigned char* key, const char* data, std::size_t size, unsigned char* out16)
+void SipHash::hash128(
+    const unsigned char* key,
+    const char* data,
+    std::size_t size,
+    unsigned char* out16
+)
 {
     sipHash(key, data, size, out16, true);
 }
 
-NameId NameId::compute(const char* data, std::size_t size, int bits, NameIdHash hash)
+NameId NameId::compute(const char* data, std::size_t size, int bits)
 {
     checkWidth(bits);
     NameId id;
     id._bits = bits;
-    switch (hash) {
-        case NameIdHash::SipHash24:
-            sipHash(idKey.data(), data, size, id._bytes.data(), bits == 128);
-            break;
-        case NameIdHash::Blake2b: {
-            const QByteArray digest =
-                QCryptographicHash::hash(QByteArrayView(data, static_cast<qsizetype>(size)),
-                                         QCryptographicHash::Blake2b_256);
-            std::memcpy(id._bytes.data(), digest.constData(), bits / 8);
-            break;
-        }
-    }
+    sipHash(idKey.data(), data, size, id._bytes.data(), bits == 128);
     return id;
 }
 

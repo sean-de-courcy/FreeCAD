@@ -14,25 +14,17 @@
 namespace Data
 {
 
-/// The hash function behind a NameId.
-///
-/// Both candidates of the naming design stay until the ID width is decided: SipHash-2-4 with
-/// a fixed key (in-tree), and BLAKE2b-256 through QCryptographicHash, truncated. The microbenchmark
-/// in tests/src/App/NameId.cpp chooses between them, and the loser is then removed.
-enum class NameIdHash
-{
-    SipHash24,
-    Blake2b,
-};
-
 /** The content ID of a mapped-name node (bounded names, interning).
  *
- * The ID is the first 64 or 128 bits of a hash of the node's canonical bytes. Its text form is
+ * The ID is SipHash-2-4 of the node's canonical bytes, with a fixed key, 64 or 128 bits wide.
+ * SipHash was chosen over BLAKE2b (through QCryptographicHash) by the microbenchmark in
+ * tests/src/App/NameId.cpp: about 43 against 218 ns per hash at the median node size of 45
+ * bytes, at both widths, and faster at every size up to 4 kB (ops#6). Its text form is
  * lowercase base32hex (RFC 4648 section 7, digits `0-9a-v`, no padding): 13 characters for
  * 64 bits, 26 for 128. The text holds no name delimiter, no `.` and no whitespace, and every ID
  * has exactly one text form (the unused low bits of the last character are zero).
  *
- * The ID is a pure function of the bytes, the width and the hash: it doesn't depend on the
+ * The ID is a pure function of the bytes and the width: it doesn't depend on the
  * platform, the process or the run. The golden vectors in tests/src/App/NameId.cpp hold it there.
  */
 class AppExport NameId
@@ -44,10 +36,10 @@ public:
     NameId() = default;
 
     /// The ID of \a size bytes at \a data, \a bits wide (64 or 128).
-    static NameId compute(const char* data, std::size_t size, int bits, NameIdHash hash);
-    static NameId compute(std::string_view data, int bits, NameIdHash hash)
+    static NameId compute(const char* data, std::size_t size, int bits);
+    static NameId compute(std::string_view data, int bits)
     {
-        return compute(data.data(), data.size(), bits, hash);
+        return compute(data.data(), data.size(), bits);
     }
 
     /// The ID with the given bytes, \a bits wide (64 or 128).
@@ -110,8 +102,18 @@ namespace SipHash
 /// The fixed key of NameId: the 16 ASCII bytes "MappedName ID v1".
 AppExport const std::array<unsigned char, 16>& nameIdKey();
 
-AppExport void hash64(const unsigned char* key, const char* data, std::size_t size, unsigned char* out8);
-AppExport void hash128(const unsigned char* key, const char* data, std::size_t size, unsigned char* out16);
+AppExport void hash64(
+    const unsigned char* key,
+    const char* data,
+    std::size_t size,
+    unsigned char* out8
+);
+AppExport void hash128(
+    const unsigned char* key,
+    const char* data,
+    std::size_t size,
+    unsigned char* out16
+);
 }  // namespace SipHash
 
 }  // namespace Data

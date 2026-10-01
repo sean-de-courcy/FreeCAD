@@ -5,12 +5,8 @@
 #include <App/NameId.h>
 #include <Base/Exception.h>
 
-#include <QByteArrayView>
-#include <QCryptographicHash>
-
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -21,7 +17,6 @@
 #include <vector>
 
 using Data::NameId;
-using Data::NameIdHash;
 
 namespace
 {
@@ -45,16 +40,14 @@ std::string counting(std::size_t size)
     return data;
 }
 
-// The ID of every row, at both widths and for both hashes. The values were computed with an
-// independent implementation (Python: SipHash-2-4 per its reference code, hashlib.blake2b with
-// a 32-byte digest, RFC 4648 base32hex) and are written here; the test doesn't generate them.
+// The ID of every row at both widths. The values were computed with an independent
+// implementation (Python: SipHash-2-4 per its reference code, RFC 4648 base32hex) and are
+// written here; the test doesn't generate them.
 struct Golden
 {
     std::string data;
-    const char* sip64;
-    const char* sip128;
-    const char* blake64;
-    const char* blake128;
+    const char* id64;
+    const char* id128;
 };
 
 // clang-format off
@@ -62,65 +55,45 @@ const std::vector<Golden>& goldens()
 {
     static const std::vector<Golden> rows {
         {"",
-         "tk9bop2c56sug", "410e7kfsvera9ufku77uavrhvo",
-         "1pbl3g16sl1r4", "1pbl3g16sl1r5q5b5qo616eqk4"},
+         "tk9bop2c56sug", "410e7kfsvera9ufku77uavrhvo"},
         {"Edge1",
-         "juojvc2rvkcj0", "4b2e2j1ifm34kodma1u0dd3qmk",
-         "gfa6pr0o1feua", "gfa6pr0o1feubad52p2gcggdlg"},
+         "juojvc2rvkcj0", "4b2e2j1ifm34kodma1u0dd3qmk"},
         {"Face12",
-         "2jnrokcl56bs0", "j08o0bph7cb8pc6tgdhmqdj4d8",
-         "5p0htkth8luv4", "5p0htkth8luv5ugp56cf2ihfoo"},
+         "2jnrokcl56bs0", "j08o0bph7cb8pc6tgdhmqdj4d8"},
         {"12345678",
-         "qta1qhgnrtm5m", "9hcj6igjddmj1hnh70dt0lk7us",
-         "6dqmpaek52adq", "6dqmpaek52adqmcb3q2a68u4p4"},
+         "qta1qhgnrtm5m", "9hcj6igjddmj1hnh70dt0lk7us"},
         {"1234567890abcdef",
-         "ts9egl5jtbfvo", "0t3kj3mg5av8p0gac2dadtt6go",
-         "183v86ls4qhp0", "183v86ls4qhp1u1mstu2gqfjfc"},
+         "ts9egl5jtbfvo", "0t3kj3mg5av8p0gac2dadtt6go"},
         {"_;_;5;FLT;0;F;0;GEN;_",
-         "5frmroobjfh6m", "m48bd4f8415v1nfqtp5hmtij0c",
-         "7d2gs14jaql22", "7d2gs14jaql227ufoeu7t8gqa8"},
+         "5frmroobjfh6m", "m48bd4f8415v1nfqtp5hmtij0c"},
         {"_;_;-12;FUS;0;F;0;MOD;_",
-         "3hc36aaoe3nnm", "boq5pvpis84moup15ibb907n48",
-         "sd4j0jjivl062", "sd4j0jjivl0626rafgo94f7740"},
+         "3hc36aaoe3nnm", "boq5pvpis84moup15ibb907n48"},
         {"_;_;5;TRF;3;F;0;MOD;_",
-         "o2kpq1es845jq", "dhuajpt516qv9hfmo0nems96r8",
-         "1ao5c60hoepe2", "1ao5c60hoepe3qd3f1vml2u464"},
+         "o2kpq1es845jq", "dhuajpt516qv9hfmo0nems96r8"},
         {"_;~0123456789abc;7;FLT;0;F;0;GEN;_",
-         "ieai1i5ed318c", "66q6pe3gfpgu1mcuc5g4fpbk0k",
-         "3cpb1s9lqe3js", "3cpb1s9lqe3jskajevtdp0n5qk"},
+         "ieai1i5ed318c", "66q6pe3gfpgu1mcuc5g4fpbk0k"},
         {"_;~0123456789abe;7;FLT;0;F;0;GEN;_",
-         "1cqbes03c932q", "3krmjrdqcbk33uem6jq7pvnj1k",
-         "jtqvipq89vf5m", "jtqvipq89vf5n497onosd8s2b8"},
+         "1cqbes03c932q", "3krmjrdqcbk33uem6jq7pvnj1k"},
         {"~0123456789abc|_;_;23;CUT;0;E;0;MOD;~0123456789abc,~fedcba9876544",
-         "01k1o7kl2i5d4", "cgvb2nu1csbcg3f2g9e99ip9k8",
-         "9eqiir4idujt8", "9eqiir4idujt83e926hcl04mj4"},
+         "01k1o7kl2i5d4", "cgvb2nu1csbcg3f2g9e99ip9k8"},
         {"_;~aaaaaaaaaaaaa,~bbbbbbbbbbbb0,~cccccccccccc0;9;XTR;1;F;0;GEN;~dddddddddddd0",
-         "jk4as2r3du3ki", "f3b0iuasu0ti1gpt9gjcvnqm08",
-         "oh6tdatjo0tp2", "oh6tdatjo0tp254i0chlv3p0j0"},
+         "jk4as2r3du3ki", "f3b0iuasu0ti1gpt9gjcvnqm08"},
         {"~vvvvvvvvvvvvu|~0000000000000|_;_;-3;SKT;0;V;0;GEN;_",
-         "7496j2fc6lfr4", "hua59k57tvhlaqdd1p69jq53no",
-         "rgitqhqmprmf2", "rgitqhqmprmf27v7rurbs699kg"},
+         "7496j2fc6lfr4", "hua59k57tvhlaqdd1p69jq53no"},
         {"_;~0123456789abcdefghijklmnos;7;FLT;0;F;0;GEN;_",
-         "dc86nol6jab5a", "tqogj20mkun5o8ohh6c1jd5mus",
-         "580a44719ad4k", "580a44719ad4lcg52tci7hc1lg"},
+         "dc86nol6jab5a", "tqogj20mkun5o8ohh6c1jd5mus"},
         {"_;Edge1^;_^;5^;FLT^;0^;E^;0^;IDX^,SRC^;_;7;FLT;0;F;0;GEN;_",
-         "69qkudoski6om", "ds7i2as2lbenf49jgas0n1drlg",
-         "9tc523pkks6hi", "9tc523pkks6hije3f1kuptvoek"},
+         "69qkudoski6om", "ds7i2as2lbenf49jgas0n1drlg"},
         {"Fl\xc3\xa4" "che",
-         "iop5dge6frqoi", "3esbpeh9c5g85l9quh8eqf9gcs",
-         "1bihkpr6mjm3e", "1bihkpr6mjm3eb4fuogrv1hj8o"},
+         "iop5dge6frqoi", "3esbpeh9c5g85l9quh8eqf9gcs"},
         {std::string(127, 'x'),
-         "pf83uqpt96i10", "8v5k4redc2s7numashhhc09k3k",
-         "6anu69tepomcg", "6anu69tepomcg9qugq5u5qkiig"},
+         "pf83uqpt96i10", "8v5k4redc2s7numashhhc09k3k"},
         {std::string(128, 'x'),
-         "ct5038mej78pc", "4227knqt3ltoau4t9fpq4atpo8",
-         "2p7vms49nbjfa", "2p7vms49nbjfb9hfm1slst8tp4"},
+         "ct5038mej78pc", "4227knqt3ltoau4t9fpq4atpo8"},
         {std::string(129, 'x'),
-         "gljjs891mkcvq", "qonkummmk9k70639jfbhgafgjs",
-         "0eo7b3t73ki9o", "0eo7b3t73ki9p13c4c2a5ecpdo"},
+         "gljjs891mkcvq", "qonkummmk9k70639jfbhgafgjs"},
         {std::string(1947, 'y'),
-         "denj0cglts5hk", "bru07qrsnlblbrien2tuio0v9o",
-         "1qpme6s70rs8u", "1qpme6s70rs8uk49t47tclbo1s"},
+         "denj0cglts5hk", "bru07qrsnlblbrien2tuio0v9o"},
     };
     return rows;
 }
@@ -182,29 +155,13 @@ TEST(NameIdSipHash, fixedKey)
     EXPECT_EQ(std::string(reinterpret_cast<const char*>(key.data()), key.size()), "MappedName ID v1");
 }
 
-// BLAKE2b-256 known answers, so a Qt or OpenSSL change under QCryptographicHash would show.
-TEST(NameIdBlake2b, knownAnswers)
-{
-    auto digest = [](const char* text) {
-        return QCryptographicHash::hash(QByteArrayView(text), QCryptographicHash::Blake2b_256)
-            .toHex()
-            .toStdString();
-    };
-    EXPECT_EQ(digest(""), "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8");
-    EXPECT_EQ(digest("abc"), "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319");
-}
-
 TEST(NameId, goldenIds)
 {
     for (const auto& row : goldens()) {
         const std::string what = "input of " + std::to_string(row.data.size())
             + " bytes: " + row.data.substr(0, 80);
-        EXPECT_EQ(NameId::compute(row.data, 64, NameIdHash::SipHash24).toBase32(), row.sip64) << what;
-        EXPECT_EQ(NameId::compute(row.data, 128, NameIdHash::SipHash24).toBase32(), row.sip128)
-            << what;
-        EXPECT_EQ(NameId::compute(row.data, 64, NameIdHash::Blake2b).toBase32(), row.blake64) << what;
-        EXPECT_EQ(NameId::compute(row.data, 128, NameIdHash::Blake2b).toBase32(), row.blake128)
-            << what;
+        EXPECT_EQ(NameId::compute(row.data, 64).toBase32(), row.id64) << what;
+        EXPECT_EQ(NameId::compute(row.data, 128).toBase32(), row.id128) << what;
     }
 }
 
@@ -212,7 +169,7 @@ TEST(NameId, goldenIdsAreDistinct)
 {
     std::vector<std::string> ids;
     for (const auto& row : goldens()) {
-        ids.insert(ids.end(), {row.sip64, row.sip128, row.blake64, row.blake128});
+        ids.insert(ids.end(), {row.id64, row.id128});
     }
     std::sort(ids.begin(), ids.end());
     EXPECT_EQ(std::adjacent_find(ids.begin(), ids.end()), ids.end());
@@ -223,13 +180,10 @@ TEST(NameId, computeMatchesTheHash)
     const std::string data = "_;~0123456789abc;7;FLT;0;F;0;GEN;_";
     unsigned char out[16];
     Data::SipHash::hash128(Data::SipHash::nameIdKey().data(), data.data(), data.size(), out);
-    EXPECT_EQ(NameId::compute(data, 128, NameIdHash::SipHash24), NameId::fromBytes(out, 128));
+    EXPECT_EQ(NameId::compute(data, 128), NameId::fromBytes(out, 128));
     Data::SipHash::hash64(Data::SipHash::nameIdKey().data(), data.data(), data.size(), out);
-    EXPECT_EQ(NameId::compute(data, 64, NameIdHash::SipHash24), NameId::fromBytes(out, 64));
-    EXPECT_EQ(
-        NameId::compute(data.data(), data.size(), 64, NameIdHash::Blake2b),
-        NameId::compute(data, 64, NameIdHash::Blake2b)
-    );
+    EXPECT_EQ(NameId::compute(data, 64), NameId::fromBytes(out, 64));
+    EXPECT_EQ(NameId::compute(data.data(), data.size(), 64), NameId::compute(data, 64));
 }
 
 TEST(NameId, base32)
@@ -298,9 +252,9 @@ TEST(NameId, widths)
 {
     EXPECT_FALSE(NameId().isValid());
     EXPECT_EQ(NameId().bits(), 0);
-    EXPECT_TRUE(NameId::compute("x", 64, NameIdHash::SipHash24).isValid());
-    EXPECT_THROW(NameId::compute("x", 32, NameIdHash::SipHash24), Base::ValueError);
-    EXPECT_THROW(NameId::compute("x", 256, NameIdHash::Blake2b), Base::ValueError);
+    EXPECT_TRUE(NameId::compute("x", 64).isValid());
+    EXPECT_THROW(NameId::compute("x", 32), Base::ValueError);
+    EXPECT_THROW(NameId::compute("x", 256), Base::ValueError);
     const unsigned char bytes[16] = {};
     EXPECT_THROW(NameId::fromBytes(bytes, 96), Base::ValueError);
 
@@ -310,69 +264,40 @@ TEST(NameId, widths)
     EXPECT_TRUE(NameId::fromBytes(ones, 64) < NameId::fromBytes(ones, 128));
 }
 
-// The hash microbenchmark (notes\task1-plan.md section 6). It asserts nothing about speed:
-// the timings go to the log and, through RecordProperty, to the gtest XML of both CI platforms.
+// The hash microbenchmark (notes\task1-plan.md section 6). It asserts nothing about speed: the
+// timings go to the log and, through RecordProperty, to the gtest XML of both CI platforms.
 // NAMEID_BENCH_SCALE=<n> multiplies the work for a steadier local measurement.
+//
+// It chose SipHash-2-4 over BLAKE2b-256 through QCryptographicHash (Qt 6.11, OpenSSL 3), on
+// Windows, 2026-09-30, in ns per hash (BLAKE2b with a reused hash object, its faster form):
+//   bytes       16    32    45    64   128   256  1024  4096
+//   sip64       28    37    43    54    85   152   540  2100
+//   sip128      36    44    51    61    94   160   560  2130
+//   BLAKE2b    217   216   219   219   216   358  1217  4600
+// The BLAKE2b arm was removed with that decision (ops#6).
 TEST(NameIdBenchmark, hashSpeed)
 {
     using Clock = std::chrono::steady_clock;
 
     // 45 bytes is the median node of the Phase 4 benchmark models (results\bench-baseline.md).
     const std::vector<std::size_t> sizes {16, 32, 45, 64, 128, 256, 1024, 4096};
-    const std::size_t decisionSize = 45;
     const int runs = 5;
     std::size_t scale = 1;
     if (const char* env = std::getenv("NAMEID_BENCH_SCALE")) {
         scale = std::max<std::size_t>(1, std::strtoul(env, nullptr, 10));
     }
-    const std::size_t budget = scale * 1024 * 1024;  // bytes hashed per arm, size and run
+    const std::size_t budget = scale * 1024 * 1024;  // bytes hashed per width, size and run
 
     std::mt19937 random(45);
     std::uniform_int_distribution<int> printable(0x21, 0x7e);
     volatile unsigned sink = 0;
 
-    QCryptographicHash reused(QCryptographicHash::Blake2b_256);
-
-    struct Arm
-    {
-        const char* name;
-        int bits;
-    };
-    const std::vector<Arm> arms {
-        {"sip64", 64},
-        {"sip128", 128},
-        {"blake64", 64},
-        {"blake128", 128},
-        {"blakeReused64", 64},
-        {"blakeReused128", 128},
-    };
-    auto hashOnce = [&](std::size_t arm, const std::string& s) -> unsigned {
-        switch (arm) {
-            case 0:
-                return NameId::compute(s, 64, NameIdHash::SipHash24).bytes()[0];
-            case 1:
-                return NameId::compute(s, 128, NameIdHash::SipHash24).bytes()[0];
-            case 2:
-                return NameId::compute(s, 64, NameIdHash::Blake2b).bytes()[0];
-            case 3:
-                return NameId::compute(s, 128, NameIdHash::Blake2b).bytes()[0];
-            default: {
-                reused.reset();
-                reused.addData(QByteArrayView(s.data(), static_cast<qsizetype>(s.size())));
-                const QByteArrayView digest = reused.resultView();
-                return NameId::fromBytes(
-                           reinterpret_cast<const unsigned char*>(digest.data()),
-                           arms[arm].bits
-                )
-                    .bytes()[0];
-            }
-        }
-    };
-
-    // ns[arm][size index]
-    std::vector<std::vector<double>> ns(arms.size(), std::vector<double>(sizes.size()));
-    for (std::size_t si = 0; si < sizes.size(); ++si) {
-        const std::size_t size = sizes[si];
+    std::ostringstream table;
+    table << std::fixed << std::setprecision(1);
+    table << "NameId (SipHash-2-4), ns per hash (median of " << runs << " runs)\n"
+          << std::setw(8) << "bytes" << std::setw(10) << "64 bits" << std::setw(10) << "128 bits"
+          << '\n';
+    for (std::size_t size : sizes) {
         std::vector<std::string> pool(64);
         for (auto& s : pool) {
             s.resize(size);
@@ -381,13 +306,14 @@ TEST(NameIdBenchmark, hashSpeed)
             }
         }
         const std::size_t count = std::clamp<std::size_t>(budget / size, 500, 200000 * scale);
-        for (std::size_t arm = 0; arm < arms.size(); ++arm) {
+        table << std::setw(8) << size;
+        for (int bits : {64, 128}) {
             std::vector<double> perRun;
             for (int run = 0; run < runs; ++run) {
                 unsigned acc = 0;
                 const auto start = Clock::now();
                 for (std::size_t i = 0; i < count; ++i) {
-                    acc += hashOnce(arm, pool[i % pool.size()]);
+                    acc += NameId::compute(pool[i % pool.size()], bits).bytes()[0];
                 }
                 const auto stop = Clock::now();
                 sink = sink + acc;
@@ -397,44 +323,13 @@ TEST(NameIdBenchmark, hashSpeed)
                 );
             }
             std::nth_element(perRun.begin(), perRun.begin() + runs / 2, perRun.end());
-            ns[arm][si] = perRun[runs / 2];
-        }
-    }
-
-    std::ostringstream table;
-    table << std::fixed << std::setprecision(1);
-    table << "NameId hash, ns per hash (median of " << runs << " runs)\n"
-          << std::setw(16) << "bytes";
-    for (const auto& arm : arms) {
-        table << std::setw(16) << arm.name;
-    }
-    table << '\n';
-    for (std::size_t si = 0; si < sizes.size(); ++si) {
-        table << std::setw(16) << sizes[si];
-        for (std::size_t arm = 0; arm < arms.size(); ++arm) {
-            table << std::setw(16) << ns[arm][si];
+            const double ns = perRun[runs / 2];
+            table << std::setw(10) << ns;
             std::ostringstream value;
-            value << std::fixed << std::setprecision(1) << ns[arm][si];
-            RecordProperty(
-                std::string("ns_") + arms[arm].name + "_" + std::to_string(sizes[si]),
-                value.str()
-            );
+            value << std::fixed << std::setprecision(1) << ns;
+            RecordProperty("ns_sip" + std::to_string(bits) + "_" + std::to_string(size), value.str());
         }
         table << '\n';
-    }
-
-    // The decision rule (notes\task1-plan.md section 6), per width, at the median node size:
-    // the faster function wins; within 10%, SipHash at 64 bits and BLAKE2b at 128.
-    const std::size_t di = std::find(sizes.begin(), sizes.end(), decisionSize) - sizes.begin();
-    for (int bits : {64, 128}) {
-        const double sip = ns[bits == 64 ? 0 : 1][di];
-        const double blake = std::min(ns[bits == 64 ? 2 : 3][di], ns[bits == 64 ? 4 : 5][di]);
-        const bool close = std::abs(sip - blake) <= 0.10 * std::min(sip, blake);
-        const char* winner = close ? (bits == 64 ? "SipHash24" : "Blake2b")
-                                   : (sip < blake ? "SipHash24" : "Blake2b");
-        table << bits << " bits at " << decisionSize << " bytes: SipHash " << sip << " ns, BLAKE2b "
-              << blake << " ns -> " << winner << (close ? " (within 10%)" : "") << '\n';
-        RecordProperty("winner_" + std::to_string(bits), winner);
     }
     std::cout << table.str() << std::flush;
 }
