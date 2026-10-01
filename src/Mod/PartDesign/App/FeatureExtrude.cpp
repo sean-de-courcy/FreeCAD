@@ -26,21 +26,27 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepProj_Projection.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <gp_Dir.hxx>
 #include <TopoDS.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Pln.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Wire.hxx>
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ObjectIdentifier.h>
@@ -66,7 +72,151 @@ App::PropertyQuantityConstraint::Constraints FeatureExtrude::signedLengthConstra
 double FeatureExtrude::maxAngle = 90 - Base::toDegrees<double>(Precision::Angular());
 App::PropertyAngle::Constraints FeatureExtrude::floatAngle = {-maxAngle, maxAngle, 1.0};
 
-FeatureExtrude::FeatureExtrude() = default;
+namespace
+{
+// What an extrusion up to `face` reaches, as generateSingleExtrusionSide(), getUpToFace() and
+// makeElementPrismUntil() decide it, for the reference solver's equivalence probe (ops#7,
+// Task 2 PR 5; the plan's Q3 (a)). Two candidates are equivalent only if the extrusion decides
+// the same with either: the direction after getUpToFace()'s test of the line from the
+// profile's centre against the face, a plane, and the face's limits removed, so that the
+// unlimited plane is what the prism reaches. Then the result is that plane (the point where
+// the profile's centre line meets it, and its normal turned towards the direction). Any other
+// case (a curved or concave face, limits kept, a face the extrusion refuses) gives nothing.
+// All shapes in the feature's coordinates.
+std::optional<Base::Placement> upToFaceReached(TopoShape face, const TopoShape& profile, gp_Dir dir)
+{
+    if (Part::findAllFacesCutBy(face, profile, dir).empty()) {
+        dir.Reverse();
+    }
+    if (face.shapeType(true) != TopAbs_FACE) {
+        if (!face.hasSubShape(TopAbs_FACE)) {
+            return std::nullopt;
+        }
+        face = face.getSubTopoShape(TopAbs_FACE, 1);
+    }
+    const TopoDS_Face& topoFace = TopoDS::Face(face.getShape());
+    BRepAdaptor_Surface adapt(topoFace);
+    if (adapt.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    gp_Pln plane = adapt.Plane();
+    gp_Dir normal = plane.Axis().Direction();
+    if (dir.IsNormal(normal, Precision::Confusion())) {
+        return std::nullopt;
+    }
+    BRepExtrema_DistShapeShape distance(profile.getShape(), topoFace);
+    if (distance.Value() < Precision::Confusion()) {
+        return std::nullopt;
+    }
+    Base::Vector3d cog;
+    profile.getCenterOfGravity(cog);
+    gp_Pnt pCog(cog.x, cog.y, cog.z);
+    if (Part::Tools::isConcave(topoFace, pCog, dir) || !face.hasSubShape(TopAbs_WIRE)) {
+        return std::nullopt;
+    }
+    bool removeLimits = false;
+    for (auto& sketchFace : profile.getSubTopoShapes(TopAbs_FACE)) {
+        TopoShape outerWire = sketchFace.splitWires();
+        BRepProj_Projection projection(TopoDS::Wire(outerWire.getShape()), topoFace, dir);
+        if (!projection.More() || !projection.Current().Closed()) {
+            removeLimits = true;
+            break;
+        }
+    }
+    if (!removeLimits) {
+        std::vector<TopoShape> wires;
+        face.splitWires(&wires);
+        for (auto& wire : wires) {
+            BRepProj_Projection projection(TopoDS::Wire(wire.getShape()), profile.getShape(), -dir);
+            if (projection.More()) {
+                removeLimits = true;
+                break;
+            }
+        }
+    }
+    if (!removeLimits) {
+        return std::nullopt;
+    }
+    if (normal.Dot(dir) < 0) {
+        normal.Reverse();
+    }
+    double t = gp_Vec(pCog, plane.Location()).Dot(gp_Vec(normal)) / dir.Dot(normal);
+    gp_Pnt reached = pCog.Translated(t * gp_Vec(dir));
+    return Base::Placement(
+        Base::Vector3d(reached.X(), reached.Y(), reached.Z()),
+        Base::Rotation(Base::Vector3d(0, 0, 1), Base::Vector3d(normal.X(), normal.Y(), normal.Z()))
+    );
+}
+}  // namespace
+
+FeatureExtrude::FeatureExtrude()
+{
+    // The reference solver (ops#7, Task 2 PR 5): the pieces of a split UpToFace are equivalent
+    // when the extrusion reaches the same with each (upToFaceReached()). Only side 1 of a
+    // one-sided or symmetric extrusion from the profile plane is probed; elsewhere, and for
+    // UpToFace2, no candidates are equivalent.
+    UpToFace.setElementPolicy(App::PropertyLinkBase::ElementPolicy::Equivalent);
+    UpToFace.setEquivalenceProbe(
+        [this](int index, const std::string& sub) -> std::optional<Base::Placement> {
+            const std::string side = SideType.getValueAsString();
+            if (index != 0 || std::strcmp(Type.getValueAsString(), "UpToFace") != 0
+                || (side != "One side" && side != "Symmetric")
+                || std::strcmp(StartType.getValueAsString(), "Profile plane") != 0) {
+                return std::nullopt;
+            }
+            try {
+                App::DocumentObject* ref = UpToFace.getValue();
+                if (!ref || ref->isDerivedFrom<App::Plane>()) {
+                    return std::nullopt;
+                }
+                TopoShape profile = getTopoShapeVerifiedFace();
+                // buildExtrusion()'s direction, without computeDirection()'s property writes
+                Base::Vector3d sketchVector = getProfileNormal();
+                Base::Vector3d direction = sketchVector;
+                if (UseCustomVector.getValue()) {
+                    const Base::Vector3d& custom = Direction.getValue();
+                    if (std::fabs(custom.x) >= Precision::Confusion()
+                        || std::fabs(custom.y) >= Precision::Confusion()
+                        || std::fabs(custom.z) >= Precision::Confusion()) {
+                        direction = custom;
+                    }
+                }
+                else if (ReferenceAxis.getValue()) {
+                    Base::Vector3d base;
+                    Base::Vector3d axis;
+                    getAxis(
+                        ReferenceAxis.getValue(),
+                        ReferenceAxis.getSubValues(),
+                        base,
+                        axis,
+                        ForbiddenAxis::NotPerpendicularWithNormal
+                    );
+                    direction = addSubType == Type::Additive ? axis : -axis;
+                }
+                auto invObjLoc = getLocation().Inverted();
+                gp_Dir dir(direction.x, direction.y, direction.z);
+                dir.Transform(invObjLoc.Transformation());
+                if (Reversed.getValue()) {
+                    dir.Reverse();
+                }
+                profile.move(invObjLoc);
+                TopoShape face = Part::Feature::getTopoShape(
+                    ref,
+                    Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                        | Part::ShapeOption::Transform,
+                    sub.c_str()
+                );
+                face.move(invObjLoc);
+                return upToFaceReached(face, profile, dir);
+            }
+            catch (Base::Exception&) {
+            }
+            catch (Standard_Failure&) {
+            }
+            return std::nullopt;
+        }
+    );
+}
 
 short FeatureExtrude::mustExecute() const
 {

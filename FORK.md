@@ -85,7 +85,8 @@ names it.
 | `infra/identity` | infra | ops#15 | - | `fix/83-windows-near-macro` `caa75a92e2` (stacked on fork PR 52) | `79a0abfb78` (fork PR 48), 2026-10-01 | never (fork identity) |
 | `fix/60-consumers-getfaces` | fix | ops#60, ops#65 | - | `integration` `66a2d6ff47` | `1de0634ad8` (fork PR 58), 2026-10-01 | a new base's `DressUp::getFaces` fails on a missing face and pairs each sub-name with its own shadow |
 | `feat/solver-core` | feat | ops#7 | - | `feat/solver-headers` `96418bd25c` (fork PR 51) | `3249276a50` (fork PR 54), 2026-10-01 | never (fork feature) |
-| `feat/solver-geometry` | feat | ops#7 | - | `feat/solver-core` `503a9b2ba2` (fork PR 54) | (fork PR 57) | never (fork feature) |
+| `feat/solver-geometry` | feat | ops#7 | - | `feat/solver-core` `503a9b2ba2` (fork PR 54) | `15d80f6f76` (fork PR 57), 2026-10-01 | never (fork feature) |
+| `feat/solver-consumers` | feat | ops#7, ops#66, ops#68 | - | `feat/solver-geometry` `f674615613` (fork PR 57) | (fork PR 59) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

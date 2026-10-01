@@ -23,7 +23,7 @@
 """Attachment to moving faces: a sketch and a datum plane follow the faces they are attached
 to when the pad under them changes."""
 
-from .harness import Attached, Scenario, X, Z, face
+from .harness import BROKEN, Attached, Scenario, X, Y, Z, face
 from . import models as m
 
 
@@ -81,3 +81,55 @@ class AttachMove(AttachmentEdit):
         corners = [(5, 3), (25, 3), (25, 13), (5, 13)]
         m.setLines(doc.Profile, {i: (corners[i], corners[(i + 1) % 4]) for i in range(4)})
         self.x0, self.y0 = 5, 3
+
+
+class AttachProngDeleted(Scenario):
+    """ops#68: a U-shaped pad, 10 high: a base (y 0..5) with two prongs (x 0..10 and 20..30) up to
+    y = 20. A sketch is attached (FlatFace) to one prong's end face (y = 20). The edit deletes that
+    prong from the profile, so the face is gone; the other prong's end face is coplanar and gives
+    the same placement. The attacher's substitute (a related element, or the old index name)
+    could rebind the sketch to it silently, which is wrong: the reference should break."""
+
+    abstract = True
+    area = "attachment"
+    REFS = ("sketch_end_face",)
+    U = [(0, 0), (30, 0), (30, 20), (20, 20), (20, 5), (10, 5), (10, 20), (0, 20)]
+    prongX = None  # the x of the attached end face's centre
+    deleted = False
+
+    def endFace(self):
+        if self.deleted:
+            return BROKEN
+        return face("plane", normal=Y, through=(0, 20, 0), contains=(self.prongX, 20, 5))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.polygon(self.U), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        onEnd = body.newObject("Sketcher::SketchObject", "OnEnd")
+        onEnd.AttachmentSupport = [(pad, self.names(pad, self.endFace())[0])]
+        onEnd.MapMode = "FlatFace"
+        self.ref("sketch_end_face", onEnd, "AttachmentSupport", self.endFace, Attached())
+
+
+class AttachLeftProngDeleted(AttachProngDeleted):
+    """The left prong goes: the profile becomes (0,0) (30,0) (30,20) (20,20) (20,5) (0,5)."""
+
+    prongX = 5
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {4: ((20, 5), (0, 5)), 7: ((0, 5), (0, 0))})
+        doc.Profile.delGeometries([5, 6])
+        self.deleted = True
+
+
+class AttachRightProngDeleted(AttachProngDeleted):
+    """The right prong goes: the profile becomes (0,0) (30,0) (30,5) (10,5) (10,20) (0,20)."""
+
+    prongX = 25
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {1: ((30, 0), (30, 5)), 4: ((30, 5), (10, 5))})
+        doc.Profile.delGeometries([2, 3])
+        self.deleted = True

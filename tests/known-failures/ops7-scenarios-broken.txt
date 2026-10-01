@@ -23,6 +23,7 @@ cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2
 reason: a consumer that needs one element keeps one piece of a split element or one of two equal halves; section 8 expects broken with the pieces as candidates (V2)
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2
+cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2
 
 reason: a dress-up on an edge that a notch in the sketch splits keeps the piece of the shortened line only; the other piece comes from a new sketch line, so the multi-match flags don't find it either; section 6 of notes/scenarios.md expects every piece (every mode)
 cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2

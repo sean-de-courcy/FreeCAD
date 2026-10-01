@@ -23,6 +23,11 @@
  ***************************************************************************/
 
 
+#include <memory>
+#include <optional>
+
+#include <Standard_Failure.hxx>
+
 #include <Base/Console.h>
 #include <Base/ProgramVersion.h>
 #include <Base/Tools.h>
@@ -169,6 +174,41 @@ AttachExtension::AttachExtension()
 
     setAttacher(new AttachEngine3D);  // default attacher
     _baseProps.attacher.reset(new AttachEngine3D);
+
+    // The reference solver (ops#7, Task 2 PR 5): pieces of a split element that give the
+    // attachment the same placement are equivalent. The probe computes the placement with the
+    // candidate in place of reference `index`, on a copy of the attacher.
+    AttachmentSupport.setElementPolicy(App::PropertyLinkBase::ElementPolicy::Equivalent);
+    AttachmentSupport.setEquivalenceProbe(
+        [this](int index, const std::string& sub) -> std::optional<Base::Placement> {
+            if (!_props.attacher || MapMode.getValue() == mmDeactivated) {
+                return std::nullopt;
+            }
+            try {
+                std::unique_ptr<AttachEngine> engine(_props.attacher->copy());
+                engine->setUp(
+                    AttachmentSupport,
+                    eMapMode(MapMode.getValue()),
+                    MapReversed.getValue(),
+                    MapPathParameter.getValue(),
+                    0.0,
+                    0.0
+                );
+                auto objs = engine->getRefObjects();
+                auto subs = engine->getSubValues();
+                if (index < 0 || index >= static_cast<int>(subs.size())) {
+                    return std::nullopt;
+                }
+                subs[index] = sub;
+                return engine->_calculateAttachedPlacement(objs, subs, getPlacement().getValue());
+            }
+            catch (Base::Exception&) {
+            }
+            catch (Standard_Failure&) {
+            }
+            return std::nullopt;
+        }
+    );
 
     updatePropertyStatus(false);
 

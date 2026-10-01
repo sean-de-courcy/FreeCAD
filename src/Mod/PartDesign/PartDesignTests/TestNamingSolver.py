@@ -33,6 +33,7 @@ import unittest
 import zipfile
 
 import FreeCAD as App
+import Part
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import X, Z, edge, face
@@ -124,6 +125,38 @@ class TestNamingSolver(unittest.TestCase):
         self.assertTrue(point.isValid())
         self.assertEqual(point.AttachmentSupport, [(groove, (halves[0],))])
         self.assertEqual(App.getReferenceReport(point), [])
+
+    def testAttacherPlacementOnCoplanarPieces(self):
+        """What the attachment's equivalence relies on (Task 2 PR 5): a groove across a pad's
+        top face splits it into two coplanar pieces; FlatFace gives the same placement on
+        either, CenterOfMass a different one on each."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 10)
+        sketch = models.sketch(doc, "Groove", models.rectangle(9, -1, 11, 11), body, z=10)
+        groove = models.pocket(body, sketch, 4, "Groove")
+        doc.recompute()
+        halves = face("plane", normal=Z, through=(0, 0, 10)).select(groove.Shape)
+        self.assertEqual(len(halves), 2)
+
+        def placement(engineType, mode, name):
+            engine = Part.AttachEngine(engineType)
+            engine.References = [(groove, name)]
+            engine.Mode = mode
+            return engine.calculateAttachedPlacement(App.Placement())
+
+        def same(a, b):
+            return (a.Base - b.Base).Length < 1e-7 and a.Rotation.isSame(b.Rotation, 1e-12)
+
+        # Act
+        flat = [placement("Attacher::AttachEngine3D", "FlatFace", n) for n in halves]
+        centre = [placement("Attacher::AttachEnginePoint", "CenterOfMass", n) for n in halves]
+
+        # Assert
+        self.assertTrue(same(flat[0], flat[1]), f"{flat[0]} != {flat[1]}")
+        self.assertFalse(same(centre[0], centre[1]), f"{centre[0]} == {centre[1]}")
 
     def testBinderWithoutItsFaceFails(self):
         """A pad 0..20 x 0..10 x 10 with a slot (x 8..12, y 4..6, through all), and a

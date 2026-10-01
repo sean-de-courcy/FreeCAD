@@ -56,6 +56,9 @@ PROPERTY_SOURCE(PartDesign::DressUp, PartDesign::FeatureAddSub)
 DressUp::DressUp()
 {
     ADD_PROPERTY(Base, (nullptr));
+    // The reference solver (ops#7): a dress-up takes every piece of a split element (Task 2
+    // PR 7; read as One until then).
+    Base.setElementPolicy(App::PropertyLinkBase::ElementPolicy::Expand);
     if (PartDesignParameter::instance()->getNamingMultiMatch()) {
         Base.useMultipleMatchedNames(true);
         Base.allowDuplicateLinks(false);

@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <memory>
+#include <optional>
 #include <sstream>
 
 #include <Base/Console.h>
@@ -174,6 +176,49 @@ void resolutionFor(const SolverEntry& entry,
     else {
         resolution.sub = resolution.shadow.oldName;
     }
+}
+
+// Two results of an equivalence probe are the same as the attacher compares placements
+// (Attacher.cpp: the position within Precision::Confusion(), the rotation within
+// Precision::Angular()).
+bool samePlacement(const Base::Placement& a, const Base::Placement& b)
+{
+    constexpr double confusion = 1e-7;
+    constexpr double angular = 1e-12;
+    return a.getPosition().IsEqual(b.getPosition(), confusion)
+        && a.getRotation().isSame(b.getRotation(), angular);
+}
+
+// The equivalence predicate of a reference whose owner has a probe: the probe runs once per
+// element (with the reference's sub-object prefix), and two elements are equivalent when both
+// give a result and the results are the same. A probe that throws gives no result.
+std::function<bool(const std::string&, const std::string&)> equivalenceOf(const SolverEntry& entry)
+{
+    const auto& probe = entry.prop->getEquivalenceProbe();
+    if (!probe) {
+        return {};
+    }
+    auto results = std::make_shared<std::map<std::string, std::optional<Base::Placement>>>();
+    return [probe, results, prefix = entry.prefix, index = entry.index](const std::string& a,
+                                                                        const std::string& b) {
+        auto resultOf = [&](const std::string& element) -> const std::optional<Base::Placement>& {
+            auto it = results->find(element);
+            if (it == results->end()) {
+                std::optional<Base::Placement> result;
+                try {
+                    result = probe(index, prefix + element);
+                }
+                catch (...) {
+                    result.reset();
+                }
+                it = results->emplace(element, result).first;
+            }
+            return it->second;
+        };
+        const auto& resultA = resultOf(a);
+        const auto& resultB = resultOf(b);
+        return resultA && resultB && samePlacement(*resultA, *resultB);
+    };
 }
 
 std::string joinCandidates(const std::vector<std::string>& candidates)
@@ -391,9 +436,12 @@ bool solveElementReferences(DocumentObject* feature,
             else {
                 item.oldName = entry->oldName;
                 item.fingerprint = Data::ElementFingerprint::fromString(entry->oldFingerprint);
-                if (item.policy != Data::SolvePolicy::One) {
+                if (item.policy == Data::SolvePolicy::Expand) {
                     FC_LOG(referenceName(entry->prop)
-                           << "[" << entry->index << "]: policy read as One until Task 2 PR 5/7");
+                           << "[" << entry->index << "]: Expand read as One until Task 2 PR 7");
+                }
+                else if (item.policy == Data::SolvePolicy::Equivalent) {
+                    item.equivalent = equivalenceOf(*entry);
                 }
                 if (source != Data::Tier1Source::Overlap && !entry->oldName.empty()) {
                     auto it = nameMatches.find(entry->oldName);

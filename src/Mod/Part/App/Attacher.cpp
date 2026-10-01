@@ -1263,6 +1263,13 @@ Base::Placement AttachEngine::calculateAttachedPlacement(
     std::map<int, std::pair<std::string, std::string>> subChanges;
     int i = -1;
     auto objs = getRefObjects();
+    // With the reference solver on (ops#7, Task 2 PR 5), a missing reference is the solver's: it
+    // resolves it or reports it broken, and the owner fails. No substitute is tried, so a gone
+    // element is never replaced silently by a related one or by its old index name (ops#68).
+    auto doc = App::GetApplication().getDocument(docName.c_str());
+    if (doc && doc->isReferenceSolverOn()) {
+        return _calculateAttachedPlacement(objs, subnames, origPlacement);
+    }
     for (auto obj : objs) {
         ++i;
         auto& sub = subnames[i];

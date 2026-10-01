@@ -555,8 +555,11 @@ TaskDlgDressUpParameters::TaskDlgDressUpParameters(ViewProviderDressUp* DressUpV
     auto& shadowSubs = pcDressUp->Base.getShadowSubs();
     for (auto& shadowSub : shadowSubs) {
         auto displayName = shadowSub.oldName;
-        // If there is a missing tag on the shadow sub, take a guess at a new name.
-        if (boost::starts_with(shadowSub.oldName, Data::MISSING_PREFIX)) {
+        // If there is a missing tag on the shadow sub, take a guess at a new name. Not with the
+        // reference solver on (ops#7, Task 2 PR 5): it resolved what it could, and a reference
+        // it left broken stays broken until the user picks another element (ops#66).
+        if (boost::starts_with(shadowSub.oldName, Data::MISSING_PREFIX)
+            && !pcDressUp->Base.inSolverDocument()) {
             Part::Feature::guessNewLink(displayName, base, shadowSub.newName.c_str());
             changed = true;
         }

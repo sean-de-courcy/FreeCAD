@@ -1109,6 +1109,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         int geometryTier = 0;
         bool geometric = false;
         std::string geometryEvidence;
+        // Equivalent: the pieces that resolve as one, their representative being the only
+        // entry of `candidates`.
+        std::vector<int> equivalent;
     };
 
     // The pool elements' current fingerprints, measured on first use.
@@ -1151,7 +1154,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     };
 
     MatchGraph graph;
-    std::map<int, int> nodeOfId;  // element ID -> graph candidate
+    std::map<int, int> nodeOfId;              // element ID -> graph candidate
+    std::map<int, int> representativeOfNode;  // equivalent candidates -> representative's ID
 
     for (auto& [key, members] : groups) {
         GroupState& state = states.emplace_back();
@@ -1203,7 +1207,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         all.insert(state.fromNames.begin(), state.fromNames.end());
         state.candidates.assign(all.begin(), all.end());
 
-        // Pieces under One (Expand and Equivalent are read as One until PRs 5 and 7).
+        // Pieces. Under One (and Expand, read as One until PR 7) they break the entry at once.
+        // Under Equivalent they resolve as one candidate if every piece gives the consumer the
+        // same result, represented by the piece whose first name sorts first; otherwise the
+        // entry breaks. The other survivors don't count: the pieces are what is left of the old
+        // element. Equivalent without pieces is One (see solveOwner()'s comment).
         std::vector<int> pieces;
         std::vector<int> others;
         for (int k : state.candidates) {
@@ -1213,14 +1221,46 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             });
             (piece ? pieces : others).push_back(k);
         }
-        if (!pieces.empty()) {
+        const bool equivalentPolicy = std::get<2>(key) == static_cast<int>(SolvePolicy::Equivalent);
+        if (!pieces.empty() && equivalentPolicy) {
+            std::vector<std::string> indexes;
+            for (int k : pieces) {
+                indexes.push_back(pool.elements[k].index);
+            }
+            auto results = groupEquivalent(indexes, [&](int a, int b) {
+                return std::all_of(members.begin(), members.end(), [&](int member) {
+                    const auto& equivalent = input.entries[member].equivalent;
+                    return equivalent && equivalent(indexes[a], indexes[b]);
+                });
+            });
+            if (results.size() != 1) {
+                state.decided = true;
+                state.outcome.evidence = "split into " + std::to_string(pieces.size())
+                    + " pieces, " + std::to_string(results.size())
+                    + " different results for the consumer";
+                listCandidates(state, pieces);
+                listCandidates(state, others);
+                continue;
+            }
+            int representative = *std::min_element(pieces.begin(), pieces.end(), [&](int a, int b) {
+                const std::string na = firstName(pool.elements[a]);
+                const std::string nb = firstName(pool.elements[b]);
+                return na != nb ? na < nb : a < b;
+            });
+            state.equivalent = pieces;
+            state.candidates = {representative};
+            state.listed = pieces;
+        }
+        else if (!pieces.empty()) {
             state.decided = true;
             state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
             listCandidates(state, pieces);
             listCandidates(state, others);
             continue;
         }
-        state.listed = state.candidates;
+        else {
+            state.listed = state.candidates;
+        }
 
         // Tiers 2 and 3, for a reference with a saved fingerprint.
         const ElementFingerprint* saved = savedFingerprint(members);
@@ -1299,6 +1339,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
 
         state.graphEntry = graph.entryCount++;
+        if (!state.equivalent.empty()) {
+            // One candidate holding every equivalent element, so that no other entry takes one
+            // of them; it stands for its representative.
+            std::vector<int> ids;
+            for (int k : state.equivalent) {
+                ids.push_back(pool.ids[k]);
+            }
+            int representative = state.candidates.front();
+            int node = graph.addCandidate(std::move(ids));
+            representativeOfNode[node] = pool.ids[representative];
+            graph.addEdge(state.graphEntry, node, state.inAncestry.count(representative) > 0);
+            continue;
+        }
         for (int k : state.candidates) {
             int id = pool.ids[k];
             auto [it, inserted] = nodeOfId.emplace(id, 0);
@@ -1310,7 +1363,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     }
 
     MatchResult matched = forcedMatching(graph);
-    std::map<int, int> idOfNode;
+    std::map<int, int> idOfNode(representativeOfNode);
     for (const auto& [id, node] : nodeOfId) {
         idOfNode[node] = id;
     }
@@ -1373,7 +1426,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else {
                     state.outcome.evidence = "overlap " + formatOverlap(best) + ", sources "
                         + sources + (state.inAncestry.count(k) ? ", in ancestry" : "")
-                        + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence);
+                        + (state.geometryEvidence.empty() ? "" : ", " + state.geometryEvidence)
+                        + (state.equivalent.empty()
+                               ? ""
+                               : ", " + std::to_string(state.equivalent.size())
+                                   + " pieces equivalent for the consumer");
                 }
             }
             else {
