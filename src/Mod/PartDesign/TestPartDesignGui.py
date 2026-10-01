@@ -442,6 +442,7 @@ class TestDatumPlane(unittest.TestCase):
 
         self.assertEqual(packed_color, color)
 
+
 class TestDressUpPanelAfterInsert(unittest.TestCase):
     """ops#84: a boss inserted between a block and a chamfer on the block's back top edge. The
     chamfer's BaseFeature is the boss and its Base still names the block, while the task panel
@@ -560,3 +561,55 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
         FreeCADGui.updateGui()
         self.assertEqual(chamfer.Base, base)
         self.assertEqual(chamfer.BaseFeature, boss)
+
+
+class TestDressUpPanelBrokenReference(unittest.TestCase):
+    """ops#66, in a document with the reference solver on (ops#7, Task 2 PR 5): a fillet on a
+    pad's vertical edge at (20, 0), whose sketch corner is then cut off, so the edge is gone and
+    the solver leaves the reference broken. Opening the fillet's task panel used to replace the
+    broken reference with a guess (guessNewLink) and recompute; with the solver on it stays
+    broken until the user picks another edge."""
+
+    def setUp(self):
+        from PartDesignTests.Scenarios import models
+
+        self.models = models
+        self.Doc = models.newDocument("PartDesignDressUpBroken")
+        self.Doc.HistoryAlgorithm = "V2"
+        self.Doc.ReferenceSolver = True
+
+    def tearDown(self):
+        if FreeCADGui.Control.activeDialog():
+            FreeCADGui.Control.closeDialog()
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def testPanelKeepsTheBrokenReference(self):
+        from PartDesignTests.Scenarios.harness import Z, edge
+
+        models = self.models
+        body = models.body(self.Doc)
+        profile = models.sketch(self.Doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        self.Doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape))
+        fillet.Radius = 1
+        self.Doc.recompute()
+        self.assertTrue(fillet.isValid())
+        models.setLines(profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        self.Doc.recompute()
+        self.assertFalse(fillet.isValid())
+        base = fillet.Base
+        self.assertTrue(base[1][0].startswith("?Edge"), base)
+
+        FreeCADGui.ActiveDocument.setEdit(fillet.Name)
+        FreeCADGui.updateGui()
+        dialog = FreeCADGui.Control.activeTaskDialog()
+        self.assertIsNotNone(dialog)
+        self.assertEqual(fillet.Base, base)
+        dialog.reject()
+        FreeCADGui.updateGui()
+        self.Doc.recompute()
+        self.assertEqual(fillet.Base, base)
+        self.assertFalse(fillet.isValid())
