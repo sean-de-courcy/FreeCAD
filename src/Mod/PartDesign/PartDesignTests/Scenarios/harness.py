@@ -522,6 +522,16 @@ class Drafted(Outcome):
         return True, ""
 
 
+class Defeatured(Outcome):
+    """A defeaturing: the result equals the Part defeaturing of the dress-up's base shape with the
+    expected faces."""
+
+    def compare(self, scenario, consumer, target, expectation):
+        base = consumer.BaseFeature.Shape
+        faces = [base.getElement(n) for n in expectedNames(expectation, base)]
+        return sameSolid(consumer.Shape, base.defeaturing(faces))
+
+
 class Attached(Outcome):
     """An attached sketch or datum: its placement equals the attacher's placement for the
     expected elements."""

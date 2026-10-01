@@ -24,8 +24,10 @@
 when the features before them change, are inserted or are reordered."""
 
 from .harness import (
+    BROKEN,
     Broken,
     Chamfered,
+    Defeatured,
     Drafted,
     Filleted,
     Scenario,
@@ -35,6 +37,7 @@ from .harness import (
     edge,
     expectedNames,
     face,
+    faceNormal,
     pieces,
     sameSolid,
 )
@@ -345,3 +348,108 @@ class DressUpInsertThenNotch(Scenario):
     def edit(self, doc):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
+# Missing faces (ops#60, ops#65): a draft or a defeaturing loses one of its faces. The feature
+# should fail, whatever the face's place in Base; it used to skip a missing face ("?Face3")
+# and stay valid without it.
+
+
+class DraftSomeFacesRemoved(Scenario):
+    """A block 0..20 x 0..10 x 0..10 with a slot (x 14..16, y 4..6) through it; a draft, 5
+    degrees, of the left face (x = 0) and the right face (x = 20) on the bottom face, listed in
+    that order. The slot becomes a step along the whole right side (x 18..21, y -1..11): the
+    right face is gone, the left one stays, and the draft should fail. It used to draft the
+    left face alone (ops#60)."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("draft_faces",)
+    gone = False
+
+    def sideFaces(self):
+        def side(f):
+            n = faceNormal(f)
+            x = f.Surface.Position.x
+            return abs(n.y) < 1e-9 and abs(n.z) < 1e-9 and min(abs(x), abs(x - 20)) < 1e-9
+
+        return BROKEN if self.gone else pieces(face("plane", where=side))
+
+    def leftFace(self):
+        return face("plane", normal=-X, through=(0, 0, 0))
+
+    def rightFace(self):
+        return face("plane", normal=X, through=(20, 0, 0))
+
+    def bottomFace(self):
+        return face("plane", normal=-Z, through=(0, 0, 0))
+
+    def order(self, slot):
+        return self.names(slot, self.leftFace()) + self.names(slot, self.rightFace())
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        sketch = m.sketch(doc, "SlotSketch", m.rectangle(14, 4, 16, 6), body, z=10)
+        slot = m.pocketThroughAll(body, sketch, "Slot")
+        doc.recompute()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (slot, self.order(slot))
+        draft.NeutralPlane = (slot, self.names(slot, self.bottomFace()))
+        draft.Angle = 5
+        self.ref("draft_faces", draft, "Base", self.sideFaces, Drafted(5, self.bottomFace))
+
+    def edit(self, doc):
+        m.moveRectangle(doc.SlotSketch, 18, -1, 21, 11)
+        self.gone = True
+
+
+class DraftSomeFacesRemovedFirst(DraftSomeFacesRemoved):
+    """As DraftSomeFacesRemoved, with the faces listed right, then left: the missing face comes
+    first. The draft used to fail naming the wrong face (ops#65)."""
+
+    def order(self, slot):
+        return self.names(slot, self.rightFace()) + self.names(slot, self.leftFace())
+
+
+class DefeaturingFacesRemoved(Scenario):
+    """A block 0..20 x 0..10 x 0..10 with two holes through it, radius 2, at (5, 5) and (15, 5),
+    from one sketch; a defeaturing of the second hole's wall. The second circle is then deleted:
+    the wall is gone, and the defeaturing should fail. It used to pass its base through
+    unchanged (ops#60)."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("defeatured_faces",)
+    gone = False
+
+    def walls(self):
+        return BROKEN if self.gone else pieces(self.removed())
+
+    def removed(self):
+        return face("cylinder", contains=(17, 5, 5))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        sketch = m.sketch(doc, "HoleSketch", [m.circle(5, 5, 2), m.circle(15, 5, 2)], body, z=10)
+        holes = m.pocketThroughAll(body, sketch, "Holes")
+        doc.recompute()
+        defeaturing = body.newObject("PartDesign::Defeaturing", "Defeaturing")
+        defeaturing.Base = (holes, self.removed().select(holes.Shape))
+        self.ref("defeatured_faces", defeaturing, "Base", self.walls, Defeatured())
+
+    def edit(self, doc):
+        doc.HoleSketch.delGeometry(1)
+        self.gone = True
+
+
+class DefeaturingSomeFacesRemoved(DefeaturingFacesRemoved):
+    """As DefeaturingFacesRemoved, with both holes' walls defeatured: after the edit the first
+    wall stays, and the defeaturing should still fail. It used to fill the first hole alone
+    (ops#60)."""
+
+    def removed(self):
+        return face("cylinder")

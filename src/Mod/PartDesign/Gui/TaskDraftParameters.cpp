@@ -334,7 +334,13 @@ void TaskDraftParameters::setGizmoPositions()
         return;
     }
     Part::TopoShape baseShape = draft->getBaseTopoShape(true);
-    auto faces = draft->getFaces(baseShape);
+    std::vector<Part::TopoShape> faces;
+    try {
+        faces = draft->getFaces(baseShape);
+    }
+    catch (const Base::Exception&) {
+        return;  // a missing face, while the draft isn't recomputed yet (ops#60)
+    }
     if (faces.empty()) {
         return;
     }
