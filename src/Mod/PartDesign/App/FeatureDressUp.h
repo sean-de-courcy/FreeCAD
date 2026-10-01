@@ -69,8 +69,15 @@ public:
     void updatePreviewShape() override;
 
 protected:
+    void onBeforeChange(const App::Property* prop) override;
     void onChanged(const App::Property* prop) override;
     void onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase) override;
+
+private:
+    /// Base's object before its current change, recorded by onBeforeChange() and compared only
+    /// by address in onChanged()
+    App::DocumentObject* baseBeforeChange {nullptr};
+    bool baseChanging {false};
 };
 
 }  // namespace PartDesign

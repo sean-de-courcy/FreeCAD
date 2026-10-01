@@ -306,10 +306,10 @@ class DressUpInsertThenNotch(Scenario):
     pad, the sketch and the pad added, the tip set back). The chamfer's Base still names the pad,
     and its BaseFeature is the boss, so the chamfer should build on the boss. Then a notch (x 8..12,
     2 deep) is cut into the front side of the pad's sketch, which renumbers the pad's edges: the
-    naming refresh rewrites the chamfer's Base (Edge10 -> Edge22, the same edge), and
-    DressUp::onChanged then sets BaseFeature to Base's object, the pad. The boss drops out of the
-    model and the chamfer stays valid (ops#82). Found by the randomized sequences (seed 194).
-    V1 can't build the model: its chamfer breaks at the insert."""
+    naming refresh rewrites the chamfer's Base (Edge10 -> Edge22, the same edge). BaseFeature must
+    stay on the boss: DressUp::onChanged used to set it to Base's object, the pad, and the boss
+    dropped out of the model with the chamfer valid (ops#82). Found by the randomized sequences
+    (seed 194). V1 can't build the model: its chamfer breaks at the insert."""
 
     area = "dress-ups"
     MULTI = True
