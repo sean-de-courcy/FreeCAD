@@ -41,6 +41,7 @@ namespace Data
 class IndexedName;
 struct MappedElement;
 class MappedName;
+struct ElementFingerprint;
 }  // namespace Data
 
 namespace App
@@ -145,6 +146,23 @@ public:
         (void)searchName;
         return { };
     };
+
+    /**
+     * @brief The fingerprint of one element, for the reference solver (ops#7).
+     *
+     * @param[in] element An indexed element name of this feature's geometry, e.g. `Face3`.
+     * @param[out] fingerprint The element's geometry in this feature's coordinates without its
+     * placement.
+     *
+     * @return False if the feature has no such element or computes no fingerprints.
+     */
+    virtual bool getElementFingerprint(const char* element,
+                                       Data::ElementFingerprint& fingerprint) const
+    {
+        (void)element;
+        (void)fingerprint;
+        return false;
+    }
 
     /**
      * @brief Deprecated. Calculates the placement in the global reference coordinate system

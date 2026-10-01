@@ -2,13 +2,19 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <numbers>
+#include <set>
+
 #include <boost/core/ignore_unused.hpp>
 #include "Mod/Part/App/FeaturePartCommon.h"
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include "PartTestHelpers.h"
+#include "App/ElementFingerprint.h"
 #include "App/MappedElement.h"
 #include <Base/Interpreter.h>
 
@@ -292,8 +298,8 @@ TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
     // Act
     auto linkShape = Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform);
     auto arrayShape = Feature::getTopoShape(array, ShapeOption::ResolveLink | ShapeOption::Transform);
-    auto hiddenArrayShape =
-        Feature::getTopoShape(hiddenArray, ShapeOption::ResolveLink | ShapeOption::Transform);
+    auto hiddenArrayShape
+        = Feature::getTopoShape(hiddenArray, ShapeOption::ResolveLink | ShapeOption::Transform);
 
     // Assert
     //   the source's names are its own: no link's tag reaches them
@@ -311,8 +317,10 @@ TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
     EXPECT_EQ(arrayShape.getMappedName(face7).toString(), faceNameWithTag(elements[1]->getID()));
     //   an array that hides its elements gives both copies its own tag
     EXPECT_EQ(hiddenArrayShape.getMappedName(face1).toString(), faceNameWithTag(hiddenArray->getID()));
-    EXPECT_EQ(hiddenArrayShape.getMappedName(face7).toString(),
-              faceNameWithTag(hiddenArray->getID(), 1));
+    EXPECT_EQ(
+        hiddenArrayShape.getMappedName(face7).toString(),
+        faceNameWithTag(hiddenArray->getID(), 1)
+    );
 }
 
 TEST_F(FeaturePartTest, setValueNamesAnotherObjectsShapeWithoutMapV2)
@@ -336,8 +344,10 @@ TEST_F(FeaturePartTest, setValueNamesAnotherObjectsShapeWithoutMapV2)
         const auto count = static_cast<int>(result.countSubElements(type));
         for (int index = 1; index <= count; ++index) {
             Data::IndexedName element(type, index);
-            EXPECT_EQ(result.getMappedName(element),
-                      Data::MappedName::makeUnmappedName({element.toString()}, 7, "MKR", type[0]));
+            EXPECT_EQ(
+                result.getMappedName(element),
+                Data::MappedName::makeUnmappedName({element.toString()}, 7, "MKR", type[0])
+            );
         }
     }
     EXPECT_EQ(result.getElementMapSize(), 26);
@@ -367,11 +377,161 @@ TEST_F(FeaturePartTest, setValueNamesAShapeWithoutMapInTheDocumentsAlgorithmV1)
         const auto count = static_cast<int>(result.countSubElements(type));
         for (int index = 1; index <= count; ++index) {
             Data::IndexedName element(type, index);
-            EXPECT_EQ(result.getMappedName(element).toString(),
-                      element.toString() + ";:H7," + type[0]);
+            EXPECT_EQ(result.getMappedName(element).toString(), element.toString() + ";:H7," + type[0]);
         }
     }
     EXPECT_EQ(result.getElementMapSize(), 26);
     //   the shape it was given keeps its algorithm
     EXPECT_EQ(shape.getHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+}
+
+// Fingerprints for the reference solver (ops#7): the geometry of an element in the shape's own
+// coordinates, without its placement.
+
+TEST_F(FeaturePartTest, fingerprintsOfABox)
+{
+    // Arrange
+    //   a 1 x 2 x 3 box at the origin
+    TopoShape box(BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape());
+    const Base::Vector3d middle(0.5, 1.0, 1.5);
+
+    // Act and assert
+    for (int index = 1; index <= 6; ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(Feature::getElementFingerprint(box, ("Face" + std::to_string(index)).c_str(), fp));
+        EXPECT_EQ(fp.type, 'F');
+        EXPECT_EQ(fp.kind, "Plane");
+        ASSERT_TRUE(fp.direction && fp.center && fp.size);
+        //   the normal points out of the box: the face's orientation is taken into account
+        EXPECT_GT((*fp.center - middle) * *fp.direction, 0.4) << index;
+        EXPECT_NEAR(fp.direction->Length(), 1.0, 1e-12);
+        //   the area is the product of the two dimensions the normal doesn't cross
+        const auto& n = *fp.direction;
+        double area = std::abs(n.x) > 0.5 ? 6.0 : std::abs(n.y) > 0.5 ? 3.0 : 2.0;
+        EXPECT_NEAR(*fp.size, area, 1e-9) << index;
+        EXPECT_TRUE(fp.radii.empty());
+    }
+    for (int index = 1; index <= 12; ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(Feature::getElementFingerprint(box, ("Edge" + std::to_string(index)).c_str(), fp));
+        EXPECT_EQ(fp.type, 'E');
+        EXPECT_EQ(fp.kind, "Line");
+        ASSERT_TRUE(fp.direction && fp.size && fp.center);
+        //   an axis direction, sign-normalized: one component is 1, the others 0
+        const auto& d = *fp.direction;
+        EXPECT_NEAR(std::max({d.x, d.y, d.z}), 1.0, 1e-12) << index;
+        double length = d.x > 0.5 ? 1.0 : d.y > 0.5 ? 2.0 : 3.0;
+        EXPECT_NEAR(*fp.size, length, 1e-9) << index;
+    }
+    //   the vertices are the eight corners
+    std::set<std::string> corners;
+    for (int index = 1; index <= 8; ++index) {
+        Data::ElementFingerprint vertex;
+        ASSERT_TRUE(
+            Feature::getElementFingerprint(box, ("Vertex" + std::to_string(index)).c_str(), vertex)
+        );
+        corners.insert(vertex.toString());
+    }
+    std::set<std::string> expectedCorners;
+    for (int x : {0, 1}) {
+        for (int y : {0, 2}) {
+            for (int z : {0, 3}) {
+                expectedCorners.insert(
+                    "1|V|Point|_|" + std::to_string(x) + "," + std::to_string(y) + ","
+                    + std::to_string(z) + "|_|_"
+                );
+            }
+        }
+    }
+    EXPECT_EQ(corners, expectedCorners);
+    //   unknown elements
+    Data::ElementFingerprint none;
+    EXPECT_FALSE(Feature::getElementFingerprint(box, "Face7", none));
+    EXPECT_FALSE(Feature::getElementFingerprint(box, "Bogus1", none));
+    EXPECT_FALSE(Feature::getElementFingerprint(TopoShape(), "Face1", none));
+    EXPECT_FALSE(none.isValid());
+}
+
+TEST_F(FeaturePartTest, fingerprintsOfACylinder)
+{
+    // Arrange
+    //   radius 2, height 5, on the z axis
+    TopoShape cylinder(BRepPrimAPI_MakeCylinder(2.0, 5.0).Shape());
+    int lateral = 0;
+    int planes = 0;
+    int circles = 0;
+    int seams = 0;
+
+    // Act and assert
+    for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_FACE)); ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(
+            Feature::getElementFingerprint(cylinder, ("Face" + std::to_string(index)).c_str(), fp)
+        );
+        if (fp.kind == "Cylinder") {
+            ++lateral;
+            EXPECT_EQ(fp.toString(), "1|F|Cylinder|62.8318530718|0,0,2.5|0,0,1|2");
+        }
+        else {
+            ++planes;
+            EXPECT_EQ(fp.kind, "Plane");
+            ASSERT_TRUE(fp.center && fp.direction);
+            //   top faces up, bottom faces down
+            EXPECT_DOUBLE_EQ(fp.direction->z, fp.center->z > 2.5 ? 1.0 : -1.0);
+            EXPECT_NEAR(*fp.size, 4.0 * std::numbers::pi, 1e-9);
+        }
+    }
+    for (int index = 1; index <= static_cast<int>(cylinder.countSubShapes(TopAbs_EDGE)); ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(
+            Feature::getElementFingerprint(cylinder, ("Edge" + std::to_string(index)).c_str(), fp)
+        );
+        if (fp.kind == "Circle") {
+            ++circles;
+            ASSERT_TRUE(fp.center);
+            EXPECT_EQ(fp.radii, std::vector<double> {2.0});
+            EXPECT_EQ(*fp.direction, Base::Vector3d(0, 0, 1));
+            EXPECT_NEAR(*fp.size, 4.0 * std::numbers::pi, 1e-9);
+            //   a full circle's centre of mass is its centre
+            EXPECT_NEAR(fp.center->x, 0.0, 1e-9);
+            EXPECT_NEAR(fp.center->y, 0.0, 1e-9);
+        }
+        else {
+            ++seams;
+            EXPECT_EQ(fp.toString(), "1|E|Line|5|2,0,2.5|0,0,1|_");
+        }
+    }
+    EXPECT_EQ(lateral, 1);
+    EXPECT_EQ(planes, 2);
+    EXPECT_EQ(circles, 2);
+    EXPECT_EQ(seams, 1);
+}
+
+TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)
+{
+    // Arrange
+    //   the same box, at the origin and moved and turned
+    _boxes[0]->recomputeFeature();
+    std::vector<std::string> before;
+    for (const char* element : {"Face1", "Face6", "Edge3", "Edge12", "Vertex5"}) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(_boxes[0]->getElementFingerprint(element, fp));
+        before.push_back(fp.toString());
+    }
+
+    // Act
+    _boxes[0]->Placement.setValue(
+        Base::Placement(Base::Vector3d(10, -4, 7), Base::Rotation(Base::Vector3d(1, 1, 0), 0.7))
+    );
+    _boxes[0]->recomputeFeature();
+
+    // Assert
+    std::size_t i = 0;
+    for (const char* element : {"Face1", "Face6", "Edge3", "Edge12", "Vertex5"}) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(_boxes[0]->getElementFingerprint(element, fp));
+        EXPECT_EQ(fp.toString(), before[i++]) << element;
+    }
+    //   the shape itself did move
+    EXPECT_FALSE(_boxes[0]->Shape.getShape().getPlacement().isIdentity());
 }

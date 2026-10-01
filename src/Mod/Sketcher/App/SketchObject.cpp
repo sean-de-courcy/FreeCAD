@@ -2015,6 +2015,15 @@ std::vector<Data::MappedElement> SketchObject::findSimilarNames(Data::MappedName
     return ret;
 }
 
+bool SketchObject::getElementFingerprint(const char* element,
+                                         Data::ElementFingerprint& fingerprint) const
+{
+    if (const char* internal = convertInternalName(element)) {
+        return Part::Feature::getElementFingerprint(InternalShape.getShape(), internal, fingerprint);
+    }
+    return Part::Feature::getElementFingerprint(element, fingerprint);
+}
+
 App::ElementNamePair SketchObject::getElementName(
         const char *name, ElementNameType type) const
 {

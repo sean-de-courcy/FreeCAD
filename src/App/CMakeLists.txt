@@ -318,6 +318,7 @@ SET(FreeCADApp_CPP_SRCS
     ComplexGeoDataPyImp.cpp
     ConsoleQtBridge.cpp
     TranslationQtBridge.cpp
+    ElementFingerprint.cpp
     ElementMap.cpp
     ElementSolver.cpp
     Enumeration.cpp
@@ -351,6 +352,7 @@ SET(FreeCADApp_HPP_SRCS
     CleanupProcess.h
     ColorModel.h
     ComplexGeoData.h
+    ElementFingerprint.h
     ElementMap.h
     ElementSolver.h
     Enumeration.h

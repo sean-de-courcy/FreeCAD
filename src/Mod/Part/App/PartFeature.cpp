@@ -27,6 +27,8 @@
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
 #include <TopoDS_Compound.hxx>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Common.h>
@@ -68,6 +70,7 @@
 #include <App/GeoFeature.h>
 #include <App/Link.h>
 #include <App/GeoFeatureGroupExtension.h>
+#include <App/ElementFingerprint.h>
 #include <App/ElementNamingUtils.h>
 #include <App/Placement.h>
 #include <App/Datums.h>
@@ -372,6 +375,193 @@ std::vector<Data::MappedElement> Feature::findSimilarNames(
 std::vector<Data::MappedElement> Feature::findSimilarNames(Data::MappedName& searchName)
 {
     return findSimilarNames(searchName, Shape.getShape());
+}
+
+namespace
+{
+
+Base::Vector3d toVector(const gp_XYZ& xyz)
+{
+    return Base::Vector3d(xyz.X(), xyz.Y(), xyz.Z());
+}
+
+// An axis or a line direction, up to its sign: the first component that isn't zero is made
+// positive, so the two orientations of one axis give one fingerprint.
+Base::Vector3d unsignedDirection(const gp_Dir& dir)
+{
+    constexpr double zero = 1e-12;
+    Base::Vector3d v = toVector(dir.XYZ());
+    for (double c : {v.x, v.y, v.z}) {
+        if (std::abs(c) > zero) {
+            return c < 0 ? -v : v;
+        }
+    }
+    return v;
+}
+
+void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    BRepAdaptor_Surface surface(face);
+    switch (surface.GetType()) {
+        case GeomAbs_Plane: {
+            fp.kind = "Plane";
+            const gp_Ax3 position = surface.Plane().Position();
+            // The surface normal is X ^ Y, opposite to the main direction for an indirect frame;
+            // the face's orientation flips it again.
+            gp_Dir normal = position.XDirection().Crossed(position.YDirection());
+            if (face.Orientation() == TopAbs_REVERSED) {
+                normal.Reverse();
+            }
+            fp.direction = toVector(normal.XYZ());
+            break;
+        }
+        case GeomAbs_Cylinder:
+            fp.kind = "Cylinder";
+            fp.direction = unsignedDirection(surface.Cylinder().Axis().Direction());
+            fp.radii = {surface.Cylinder().Radius()};
+            break;
+        case GeomAbs_Cone:
+            fp.kind = "Cone";
+            fp.direction = unsignedDirection(surface.Cone().Axis().Direction());
+            fp.radii = {std::abs(surface.Cone().SemiAngle())};
+            break;
+        case GeomAbs_Sphere:
+            fp.kind = "Sphere";
+            fp.radii = {surface.Sphere().Radius()};
+            break;
+        case GeomAbs_Torus:
+            fp.kind = "Torus";
+            fp.direction = unsignedDirection(surface.Torus().Axis().Direction());
+            fp.radii = {surface.Torus().MajorRadius(), surface.Torus().MinorRadius()};
+            break;
+        case GeomAbs_SurfaceOfRevolution:
+            fp.kind = "Revolution";
+            fp.direction = unsignedDirection(surface.AxeOfRevolution().Direction());
+            break;
+        case GeomAbs_SurfaceOfExtrusion:
+            fp.kind = "Extrusion";
+            break;
+        case GeomAbs_BezierSurface:
+            fp.kind = "Bezier";
+            break;
+        case GeomAbs_BSplineSurface:
+            fp.kind = "BSpline";
+            break;
+        case GeomAbs_OffsetSurface:
+            fp.kind = "Offset";
+            break;
+        default:
+            fp.kind = "Other";
+            break;
+    }
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(face, props);
+    fp.size = props.Mass();
+    fp.center = toVector(props.CentreOfMass().XYZ());
+}
+
+void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
+{
+    fp.kind = "Other";
+    if (!BRep_Tool::Degenerated(edge)) {
+        BRepAdaptor_Curve curve(edge);
+        switch (curve.GetType()) {
+            case GeomAbs_Line:
+                fp.kind = "Line";
+                fp.direction = unsignedDirection(curve.Line().Direction());
+                break;
+            case GeomAbs_Circle:
+                fp.kind = "Circle";
+                fp.direction = unsignedDirection(curve.Circle().Axis().Direction());
+                fp.radii = {curve.Circle().Radius()};
+                break;
+            case GeomAbs_Ellipse:
+                fp.kind = "Ellipse";
+                fp.direction = unsignedDirection(curve.Ellipse().Axis().Direction());
+                fp.radii = {curve.Ellipse().MajorRadius(), curve.Ellipse().MinorRadius()};
+                break;
+            case GeomAbs_Hyperbola:
+                fp.kind = "Hyperbola";
+                break;
+            case GeomAbs_Parabola:
+                fp.kind = "Parabola";
+                break;
+            case GeomAbs_BezierCurve:
+                fp.kind = "Bezier";
+                break;
+            case GeomAbs_BSplineCurve:
+                fp.kind = "BSpline";
+                break;
+            case GeomAbs_OffsetCurve:
+                fp.kind = "Offset";
+                break;
+            default:
+                break;
+        }
+    }
+    GProp_GProps props;
+    BRepGProp::LinearProperties(edge, props);
+    fp.size = props.Mass();
+    if (props.Mass() > 0.0) {
+        fp.center = toVector(props.CentreOfMass().XYZ());
+    }
+    else {
+        // A degenerated edge has no length: its vertex stands for it.
+        TopoDS_Vertex first = TopExp::FirstVertex(edge);
+        if (!first.IsNull()) {
+            fp.center = toVector(BRep_Tool::Pnt(first).XYZ());
+        }
+    }
+}
+
+}  // namespace
+
+bool Feature::getElementFingerprint(const char* element, Data::ElementFingerprint& fingerprint) const
+{
+    return getElementFingerprint(Shape.getShape(), element, fingerprint);
+}
+
+bool Feature::getElementFingerprint(
+    const TopoShape& shape,
+    const char* element,
+    Data::ElementFingerprint& fingerprint
+)
+{
+    fingerprint = Data::ElementFingerprint();
+    if (!element || shape.isNull()) {
+        return false;
+    }
+    // Without the shape's own placement (the idiom of getElementName's export path).
+    TopoShape located(shape.getShape().Located(TopLoc_Location()));
+    TopoDS_Shape sub = located.getSubShape(element, true);
+    if (sub.IsNull()) {
+        return false;
+    }
+    Data::ElementFingerprint fp;
+    try {
+        switch (sub.ShapeType()) {
+            case TopAbs_FACE:
+                fp.type = 'F';
+                faceFingerprint(TopoDS::Face(sub), fp);
+                break;
+            case TopAbs_EDGE:
+                fp.type = 'E';
+                edgeFingerprint(TopoDS::Edge(sub), fp);
+                break;
+            case TopAbs_VERTEX:
+                fp.type = 'V';
+                fp.kind = "Point";
+                fp.center = toVector(BRep_Tool::Pnt(TopoDS::Vertex(sub)).XYZ());
+                break;
+            default:
+                return false;
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    fingerprint = std::move(fp);
+    return true;
 }
 
 App::ElementNamePair Feature::getExportElementName(TopoShape shape, const char* name) const

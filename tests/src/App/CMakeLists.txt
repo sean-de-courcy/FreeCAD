@@ -12,6 +12,7 @@ add_executable(App_tests_run
         DocumentObserver.cpp
         Expression.cpp
         ExpressionParser.cpp
+        ElementFingerprint.cpp
         ElementMap.cpp
         ElementNamingUtils.cpp
         ElementSolver.cpp
