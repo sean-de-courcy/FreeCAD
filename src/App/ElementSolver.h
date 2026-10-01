@@ -77,6 +77,28 @@ public:
      */
     static bool isPieceOf(std::string_view name, std::string_view oldName);
 
+    /** True if \a a and \a b are single sections naming the same element of a source shape by
+     * its index (the IDX flag, e.g. `Face6;_;<tag>;MKR;0;F;0;IDX,SRC;_`): equal in every field
+     * but the op code, the flags compared as sets. A shape without an element map gives its
+     * elements such names, and their op code follows what last touched them (MKR whole, FUS or
+     * CUT as a modified face's prefix), so the op code isn't part of the element's identity.
+     * A duplicate counter written over the op code (`_2`) is: such a section relates to no
+     * other. False for a name that isn't one IDX section.
+     */
+    static bool sameIndexSource(std::string_view a, std::string_view b);
+
+    /** The IDX section \a name stands for: \a name itself if it is a single IDX section, or its
+     * first section if that is an IDX section and \a name is a split piece of it (isPieceOf());
+     * otherwise empty. A view into \a name.
+     */
+    static std::string_view indexSource(std::string_view name);
+
+    /** True if \a name is a split piece of an IDX section of the same source as \a oldName
+     * (sameIndexSource()), but under another op code: isPieceOf() up to the op code of the
+     * first section. \a oldName must be a single IDX section.
+     */
+    static bool isIndexPieceOf(std::string_view name, std::string_view oldName);
+
     /// The top-level sections of \a name, split at every `|` that no `^` escapes. Views into
     /// \a name. An empty name has none.
     static std::vector<std::string_view> splitSections(std::string_view name);
@@ -303,6 +325,10 @@ struct AppExport SolveInput
     GeometryTolerances tolerances;
     /// The target's bounding-box diagonal, the scale of tier 3's d_max.
     double diagonal = 0.0;
+    /// The target's tag as names write it (decimal), if the target has no element map; empty
+    /// otherwise. An entry whose IDX source (NameAncestry::indexSource()) carries this tag
+    /// names the target's element by that index, which needs no pool entry (Q5).
+    std::string maplessTag;
     /// The current fingerprint of the target's element \a index (e.g. `Face7`); invalid if it
     /// can't be measured. Called at most once per element, only when tiers 2 and 3 run. Unset:
     /// no element has a fingerprint.
@@ -347,6 +373,13 @@ struct AppExport SolveOutcome
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
+ * - The IDX source (Task 2 PR 6): when the old name stands for an IDX section
+ *   (NameAncestry::indexSource()), the elements named by a section of the same source under any
+ *   op code (NameAncestry::sameIndexSource()), and, for a target without an element map whose
+ *   tag the section carries, the target's element of that index (Q5). Those whose intrinsic
+ *   geometry agrees with the saved fingerprint (tier 2) replace the other candidates; without
+ *   a fingerprint, or if none agrees, they don't count. Split pieces of the old IDX element
+ *   under another op code (NameAncestry::isIndexPieceOf()) are pieces like any other.
  * - One (and, until PR 7, Expand): a candidate that is a piece of the old element breaks the
  *   entry at once, with the pieces as candidates.
  * - Equivalent, with pieces among the candidates: when every piece gives the consumer the same
@@ -368,9 +401,10 @@ struct AppExport SolveOutcome
  *   (a pattern sibling) never resolves the entry: broken, with its candidates ("pattern
  *   sibling").
  * - A partner from tier 1 resolves the entry only if one of its names agrees with the old name
- *   on the top section (NameAncestry::topAgrees()) or has the old name in its ancestry;
- *   otherwise the entry is broken, with its candidates ("no top agreement"). A partner that
- *   only tiers 2 and 3 found needs both to have passed.
+ *   on the top section (NameAncestry::topAgrees()), has the old name in its ancestry, comes
+ *   from the IDX source, or stands for equivalent pieces; otherwise the entry is broken, with
+ *   its candidates ("no top agreement"). A partner that only tiers 2 and 3 found needs both to
+ *   have passed.
  *
  * The result depends only on the input as a set (pool order, name order, entry order).
  */
