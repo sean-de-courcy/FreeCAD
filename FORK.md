@@ -74,7 +74,8 @@ names it.
 | `carry/polyline-fillet` | carry | ops#10 | `upstream PR 32430`: `f705304460` (cherry-picked unchanged as `03629c6744`) | `integration` `a36ea876c9` | `6a6d9ed29b` (fork PR 44), 2026-09-30 | a new base contains `upstream PR 32430` |
 | `carry/constraint-names` | carry | ops#11 | `upstream PR 32947`: `15ce0c8d3f` (main: `9f17ec6861`; cherry-picked unchanged as `6d1ce2205d`) | `integration` `33f83dec42` | `c81649b0bc` (fork PR 45), 2026-09-30 | a new base contains `upstream PR 32947` (main `9f17ec6861`) |
 | `feat/scenarios-5b` | feat | ops#5 | - | `integration` `ac43f08826` | `322d30842f` (fork PR 46), 2026-09-30 | never (fork tests) |
-| `fix/14-windows-test-path` | fix | ops#14 | - | `integration` `322d30842f` | (fork PR 47) | a new base builds the Windows test PATH without a configure-time glob of `build/Mod/*` |
+| `fix/14-windows-test-path` | fix | ops#14 | - | `integration` `322d30842f` | `d067e0ed44` (fork PR 47), 2026-09-30 | a new base builds the Windows test PATH without a configure-time glob of `build/Mod/*` |
+| `feat/naming-id` | feat | ops#6 | - | `integration` `322d30842f` | (fork PR 49) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
