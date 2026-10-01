@@ -20,12 +20,12 @@ BEGIN
     BEGIN
         BLOCK "040904b0" // 409 stands for US English
         BEGIN
-            VALUE "CompanyName", "${PROJECT_NAME} Team"
-            VALUE "FileDescription", "${PROJECT_NAME} command line executable"
+            VALUE "CompanyName", "${FORK_COMPANY}"
+            VALUE "FileDescription", "${FORK_NAME} command line executable"
             VALUE "InternalName", "FreeCADCmd.exe"
             VALUE "LegalCopyright", "Copyright (C) 2022"
             VALUE "OriginalFilename", "FreeCADCmd.exe"
-            VALUE "ProductName", "${PROJECT_NAME}"
+            VALUE "ProductName", "${FORK_NAME}"
             VALUE "ProductVersion", "${PACKAGE_VERSION}${PACKAGE_VERSION_SUFFIX}"
         END
     END

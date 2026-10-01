@@ -2,6 +2,11 @@
 set(PACKAGE_WCREF "$WCREV$")
 set(PACKAGE_WCDATE "$WCDATE$")
 set(PACKAGE_WCURL "$WCURL$")
+set(PACKAGE_FORK_VERSION "$WCFORKVER$")
+
+# FreeCAD-CH: the fork's identity from fork.json (read in the top CMakeLists.txt)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/ForkIdentity.h.cmake
+               ${CMAKE_CURRENT_BINARY_DIR}/ForkIdentity.h)
 
 # If the sources don't include a Version.h then create one
 if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Version.h)

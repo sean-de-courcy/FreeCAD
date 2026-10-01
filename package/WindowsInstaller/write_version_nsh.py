@@ -4,9 +4,14 @@
 # from freecad and writes version.nsh file in the directory the script is located at
 import FreeCAD
 import datetime
+import json
 import os
 
 filepath=os.path.join(os.path.dirname(os.path.abspath(__file__)),"version.nsh")
+# FreeCAD-CH: the publisher and the website come from fork.json in the source tree
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "fork.json"),
+          encoding="utf-8") as fork_file:
+    fork = json.load(fork_file)
 v=FreeCAD.Version()
 content=f'''\
 !define COPYRIGHT_YEAR {datetime.date.today().year}
@@ -15,6 +20,9 @@ content=f'''\
 !define APP_VERSION_PATCH "{v[2]}"
 !define APP_VERSION_REVISION "{v[3].split()[0]}"
 !define APP_NAME "{FreeCAD.ConfigGet('ExeName')}"
+!define APP_FORK_VERSION "{FreeCAD.ConfigGet('ForkVersion')}"
+!define APP_PUBLISHER "{fork['company']}"
+!define APP_REPOSITORY_URL "{fork['repository_url']}"
 '''
 
 with open(filepath, "w", encoding="utf-8") as file:

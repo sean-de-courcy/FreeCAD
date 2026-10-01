@@ -1374,6 +1374,11 @@ std::string Application::getNameWithVersion()
 {
     auto appname = QCoreApplication::applicationName().toStdString();
     auto config = Application::Config();
+    // FreeCAD-CH: name the fork release; the upstream version only when no fork tag is known
+    auto fork = config["ForkVersion"];
+    if (!fork.empty() && fork != "fork-unknown") {
+        return fmt::format("{} {}", appname, fork);
+    }
     auto major = config["BuildVersionMajor"];
     auto minor = config["BuildVersionMinor"];
     auto point = config["BuildVersionPoint"];
@@ -1383,10 +1388,17 @@ std::string Application::getNameWithVersion()
 
 bool Application::isDevelopmentVersion()
 {
-    static std::string suffix = []() constexpr {
-        return FCVersionSuffix;
+    // FreeCAD-CH: a build of a release tag (fork-X.Y.Z, without "-<n>-g<hash>") is not a
+    // development version, although its upstream base (e.g. 26.3.0dev) is
+    static const bool development = []() {
+        const std::string fork = FCForkVersion;
+        if (fork.starts_with("fork-") && fork != "fork-unknown"
+            && fork.find('-', 5) == std::string::npos) {
+            return false;
+        }
+        return std::string(FCVersionSuffix) == "dev";
     }();
-    return suffix == "dev";
+    return development;
 }
 
 const std::unique_ptr<ApplicationDirectories>& Application::directories() {
@@ -2582,8 +2594,10 @@ void processProgramOptions(const boost::program_options::variables_map& vm, std:
 {
     if (vm.contains("version") && !vm.contains("verbose")) {
         std::stringstream str;
+        // FreeCAD-CH: the fork release goes last, so the start of the line stays as upstream's
         str << mConfig["ExeName"] << " " << mConfig["ExeVersion"]
-            << " Revision: " << mConfig["BuildRevision"] << '\n';
+            << " Revision: " << mConfig["BuildRevision"]
+            << " Release: " << mConfig["ForkVersion"] << '\n';
         if (vm.count("verbose")) {
             App::ProgramInformation::getVerboseCommonInfo(str, mConfig);
         }
@@ -2760,6 +2774,7 @@ void Application::initConfig(int argc, char ** argv)
         Application::Config()["BuildRevision"      ] = FCRevision;
         Application::Config()["BuildRepositoryURL" ] = FCRepositoryURL;
         Application::Config()["BuildRevisionDate"  ] = FCRevisionDate;
+        Application::Config()["ForkVersion"        ] = FCForkVersion;
 #if defined(FCRepositoryHash)
         Application::Config()["BuildRevisionHash"  ] = FCRepositoryHash;
 #endif
@@ -2895,9 +2910,10 @@ void Application::initConfig(int argc, char ** argv)
                               mConfig["BuildRevision"].c_str());
 
         if (SafeMode::SafeModeEnabled()) {
-            Base::Console().message("FreeCAD is running in _SAFE_MODE_.\n"
+            Base::Console().message("%s is running in _SAFE_MODE_.\n"
                               "Safe mode temporarily disables your configurations and "
-                              "addons. Restart the application to exit safe mode.\n\n");
+                              "addons. Restart the application to exit safe mode.\n\n",
+                              mConfig["ExeName"].c_str());
         }
     }
     LoadParameters();

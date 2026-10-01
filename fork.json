@@ -1,0 +1,9 @@
+{
+  "name": "FreeCAD-CH",
+  "name_note": "the application name: window title, About, settings folder (%APPDATA%\\FreeCAD-CH), installer, macOS bundle",
+  "vendor": "FreeCAD-CH",
+  "vendor_note": "names the Qt settings (HKCU\\Software\\FreeCAD-CH on Windows); must not be FreeCAD",
+  "company": "Crawlspace Habitats LLC",
+  "macos_bundle_id": "com.crawlspacehabitats.FreeCAD-CH",
+  "repository_url": "https://github.com/sean-de-courcy/FreeCAD"
+}

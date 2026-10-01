@@ -969,7 +969,11 @@ class DarwinPlatform:
 
     def post(self) -> None:
         # add special path for MacOSX (bug #0000307): Where is this bug documented?
-        sys.path.append(os.path.expanduser("~/Library/Application Support/FreeCAD/Mod"))
+        # FreeCAD-CH: named after ExeName, so the fork never loads official FreeCAD's add-ons
+        app_name = FreeCAD.ConfigGet("ExeName") or "FreeCAD"
+        sys.path.append(
+            os.path.expanduser(f"~/Library/Application Support/{app_name}/Mod")
+        )
 
 
 class ModState(IntEnum):

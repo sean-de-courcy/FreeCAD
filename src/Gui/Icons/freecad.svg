@@ -30,4 +30,9 @@
        style="fill:#fefefe;fill-opacity:1;fill-rule:evenodd;stroke:none;stroke-width:2.64567;stroke-linecap:square"
        id="path9" /></g><metadata
      id="metadata11"><rdf:RDF><cc:Work
-         rdf:about=""><dc:title>FreeCAD</dc:title></cc:Work></rdf:RDF></metadata></svg>
+         rdf:about=""><dc:title>FreeCAD</dc:title></cc:Work></rdf:RDF></metadata><g
+     id="fork-badge"><rect
+       x="22.5" y="29.5" width="25" height="18" rx="4" ry="4"
+       style="fill:#c8102e;stroke:#ffffff;stroke-width:1.5" /><path
+       d="M 33.9 35.2 A 4.6 4.6 0 1 0 33.9 41.8 M 38 34 V 43 M 44 34 V 43 M 38 38.5 H 44"
+       style="fill:none;stroke:#ffffff;stroke-width:2.4;stroke-linecap:round" /></g></svg>

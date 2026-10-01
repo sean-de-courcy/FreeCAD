@@ -437,7 +437,8 @@ QPixmap SplashScreen::splashImage()
             painter.setFont(fontVer);
             painter.drawText(x + (l + 235), y - 7, version);
             QColor warningColor(QString::fromStdString(wc->second));
-            if (suffix == QLatin1String("dev") && warningColor.isValid()) {
+            // FreeCAD-CH: no warning on a build of a fork release tag
+            if (App::Application::isDevelopmentVersion() && warningColor.isValid()) {
                 fontVer.setPointSizeF(14.0);
                 painter.setFont(fontVer);
                 const int lineHeight = metricVer.lineSpacing();

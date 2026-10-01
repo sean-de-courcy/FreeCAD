@@ -34,7 +34,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          # FreeCAD-CH: full history, so git describe finds the fork-* tag (the release in About)
+          fetch-depth: 0
           fetch-tags: true
           submodules: 'recursive'
 
@@ -51,6 +52,15 @@ jobs:
               exit 1
             fi
             export BUILD_TAG="${INPUT_TAG}"
+            # FreeCAD-CH: a release is built from its tag (WORKFLOW section 6: tag first, then
+            # build), so About shows the release that the draft is named after
+            if [[ "${BUILD_TAG}" == fork-* ]]; then
+              TAG_COMMIT=$(git rev-parse --verify --quiet "refs/tags/${BUILD_TAG}^{commit}" || true)
+              if [ "${TAG_COMMIT}" != "${{ github.sha }}" ]; then
+                echo "Tag ${BUILD_TAG} is missing or not on ${{ github.sha }}: tag the release commit, then run this workflow on the tag." >&2
+                exit 1
+              fi
+            fi
           else
             BRANCH="${{ github.ref_name }}"
             DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
@@ -78,11 +88,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          # Bakes the git information (and the fork release) into Version.h.cmake, disables
+          # SubWCRev.py's rewrite of it and commits both, so the source tarball carries them
           python3 package/scripts/write_version_info.py ../freecad_version.txt
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git config user.name 'github-actions[bot]'
-          git apply package/disable_git_info.patch
-          git commit -a -m "Disable git info write to Version.h"
+          cat ../freecad_version.txt
           git archive HEAD -o freecad_source_${BUILD_TAG}.tar
           git submodule foreach --recursive \
             "git archive HEAD --prefix=\$path/ -o \$sha1.tar && \
@@ -127,7 +137,8 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          # FreeCAD-CH: full history, so git describe finds the fork-* tag (the release in About)
+          fetch-depth: 0
           fetch-tags: true
           submodules: 'recursive'
 

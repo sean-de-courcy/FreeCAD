@@ -44,6 +44,7 @@
 #include <App/Metadata.h>
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
+#include <Build/ForkIdentity.h>
 #include <CXX/WrapPython.h>
 #include <Gui/Application.h>
 
@@ -232,6 +233,11 @@ void AboutDialog::setupLabels()
         ));
     }
 
+    // FreeCAD-CH: the fork release (fork-X.Y.Z) above the upstream version it is based on
+    QString release = ui->labelBuildRelease->text();
+    release.replace(QStringLiteral("Unknown"), QString::fromStdString(config["ForkVersion"]));
+    ui->labelBuildRelease->setText(release);
+
     QString version = ui->labelBuildVersion->text();
     version.replace(
         QStringLiteral("Unknown"),
@@ -296,7 +302,8 @@ void AboutDialog::setupLabels()
             }
 
             if (url == QStringLiteral("Unknown")) {
-                url = QStringLiteral("https://github.com/FreeCAD/FreeCAD");  // Just take a guess
+                // FreeCAD-CH: the fork's repository (fork.json), never upstream's
+                url = QStringLiteral(FCForkRepositoryURL);
             }
 
             // This may only create valid URLs for Github, but some other hosts use the same format

@@ -18,32 +18,17 @@ Section "un.FreeCAD" un.SecUnProgramFiles
   ReadRegStr $0 SHCTX "${APP_UNINST_KEY}" "StartMenu"
   RMDir /r "$0"
   # delete desktop icon
-  Delete "$DESKTOP\${APP_NAME} ${APP_SERIES_NAME}.lnk"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
 
-  # remove file extension .FCStd
+  # FreeCAD-CH: remove only what this installer wrote (configure.nsh). The .FCStd key, the
+  # other extensions, Explorer's per-user choices and the thumbnail handler belong to
+  # official FreeCAD.
   ReadRegStr $R0 SHCTX "Software\Classes\${APP_EXT}" ""
   ${if} $R0 == "${APP_REGNAME_DOC}"
-   DeleteRegKey SHCTX "Software\Classes\${APP_EXT}"
+   DeleteRegValue SHCTX "Software\Classes\${APP_EXT}" ""
   ${endif}
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT}"
-
-  # remove further FC-specific file extension
-  DeleteRegKey SHCTX "Software\Classes\${APP_EXT1}" # .FCStd1
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT1}"
-  DeleteRegKey SHCTX "Software\Classes\${APP_EXT_BAK}" # .FCBak
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT_BAK}"
-  DeleteRegKey SHCTX "Software\Classes\${APP_EXT_MACRO}" # .FCMacro
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT_MACRO}"
-  DeleteRegKey SHCTX "Software\Classes\${APP_EXT_MAT}" # .FCMat
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT_MAT}"
-  DeleteRegKey SHCTX "Software\Classes\${APP_EXT_SCRIPT}" # .FCScript
-  DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\${APP_EXT_SCRIPT}"
-
-  ${if} $MultiUser.Privileges == "Admin"
-   DeleteRegKey HKCR "${APP_REGNAME_DOC}"
-   # see https://nsis.sourceforge.io/Docs/AppendixB.html#library_install for a description of UnInstallLib
-   !insertmacro UnInstallLib REGDLL NOTSHARED NOREBOOT_NOTPROTECTED $SYSDIR\FCStdThumbnail.dll
-  ${endif}
+  DeleteRegValue SHCTX "Software\Classes\${APP_EXT}\OpenWithProgids" "${APP_REGNAME_DOC}"
+  DeleteRegKey SHCTX "Software\Classes\${APP_REGNAME_DOC}"
 
   # Uninstaller itself
   Delete "$INSTDIR\${SETUP_UNINSTALLER}"
@@ -67,7 +52,7 @@ Section "un.FreeCAD" un.SecUnProgramFiles
   ReadRegStr $FileAssociation SHELL_CONTEXT "Software\Classes\${APP_EXT}" ""
 
   ${If} $FileAssociation == "${APP_REGNAME_DOC}"
-     DeleteRegKey SHELL_CONTEXT "Software\Classes\${APP_EXT}"
+     DeleteRegValue SHELL_CONTEXT "Software\Classes\${APP_EXT}" ""
   ${EndIf}
 
   # clean other registry entry

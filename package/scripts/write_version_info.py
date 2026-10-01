@@ -18,6 +18,7 @@ for line in i.readlines():
 	line = line.replace("${PACKAGE_WCREF}",gitInfo.rev)
 	line = line.replace("${PACKAGE_WCDATE}",gitInfo.date)
 	line = line.replace("${PACKAGE_WCURL}",gitInfo.url)
+	line = line.replace("${PACKAGE_FORK_VERSION}",gitInfo.forkversion)
 	content.append(line)
 
 with open("src/Build/Version.h.cmake", "w") as o:
@@ -40,6 +41,7 @@ with open(os.sys.argv[1], "w") as f:
 	f.write(f"commit_date: {gitInfo.date}\n")
 	f.write(f"commit_hash: {gitInfo.hash}\n")
 	f.write(f"remote_url: {gitInfo.url}\n")
+	f.write(f"fork_version: {gitInfo.forkversion}\n")
 
 p = subprocess.Popen(["git", "-c", "user.name='github-actions[bot]'", "-c",
 	"user.email='41898282+github-actions[bot]@users.noreply.github.com'", "commit", "-a", "-m",
