@@ -2079,6 +2079,16 @@ TEST(SolveOwner, expandInheritsFrom)
 namespace
 {
 
+// A line edge from (x0, y, z) to (x1, y, z), as a fingerprint.
+ElementFingerprint lineX(double x0, double x1, double y = 0.0, double z = 10.0)
+{
+    return fingerprint('E',
+                       "Line",
+                       std::abs(x1 - x0),
+                       Base::Vector3d((x0 + x1) / 2, y, z),
+                       Base::Vector3d(1, 0, 0));
+}
+
 SolveInput::Entry member(
     SolveInput::Entry entry,
     const std::string& from,
@@ -2096,16 +2106,21 @@ SolveInput::Entry member(
 
 TEST(SolveOwner, collapseWhenTheOthersAreGone)
 {
-    // A continuation group {F exact, P missing} (the notch filled in), and a structural group
-    // {P1 missing, P2 missing} whose `from` is back (the rib moved away).
+    // A continuation group {F exact, P missing} (the notch filled in: F is whole again, 0..20,
+    // and covers P's saved 12..20), and a structural group {P1 missing, P2 missing} whose `from`
+    // is back (the rib moved away).
     const auto f = generated({sketchEdge(1)}, 7, "Extrude", 'E');
     const auto p = generated({sketchEdge(9)}, 7, "Extrude", 'E');
     const auto g = generated({sketchEdge(2)}, 7, "Extrude", 'E', 1);
     SolveInput input;
+    input.diagonal = 24.5;
     input.pool["Edge"] = {element("Edge1", {f}), element("Edge4", {g})};
+    measure(input, {{"Edge1", lineX(0, 20)}}, nullptr);
+    auto rest = missing(p, "Edge");
+    rest.fingerprint = lineX(12, 20);
     input.entries = {
         member(exact("Edge1", "Edge"), f, "a", 0),
-        member(missing(p, "Edge"), f, "a", 1),
+        member(rest, f, "a", 1),
         member(missing(piece(g, 9, "FUS", 0, 'E'), "Edge"), g, "a", 3),
         member(missing(piece(g, 9, "FUS", 1, 'E'), "Edge"), g, "a", 2),
     };
@@ -2122,6 +2137,64 @@ TEST(SolveOwner, collapseWhenTheOthersAreGone)
     EXPECT_EQ(outcomes[3].element, "Edge4");
     EXPECT_TRUE(outcomes[3].collapsed);
     EXPECT_EQ(outcomes[2].status, SolveStatus::Removed);
+}
+
+TEST(SolveOwner, noCollapseWhenAMissingMemberLiesElsewhere)
+{
+    // After a notch, {X exact (0..8), Y missing, saved 12..20}: Y's line was drawn again with a
+    // new ID, so its edge (Edge5, 12..20) has another name. X doesn't cover 12..20, so the
+    // group doesn't collapse (it would keep 0..8 alone, a silent partial): Y is solved on its
+    // own, and tier 3 finds its edge in place.
+    const auto x = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    const auto y = generated({sketchEdge(9)}, 7, "Extrude", 'E', 1);
+    const auto redrawn = generated({sketchEdge(12)}, 7, "Extrude", 'E', 2);
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.pool["Edge"] = {element("Edge1", {x}), element("Edge5", {redrawn})};
+    measure(input, {{"Edge1", lineX(0, 8)}, {"Edge5", lineX(12, 20)}}, nullptr);
+    auto rest = missing(y, "Edge");
+    rest.fingerprint = lineX(12, 20);
+    input.entries = {member(exact("Edge1", "Edge"), x, "a", 0), member(rest, x, "a", 1)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Exact);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Resolved) << describe(outcomes[1]);
+    EXPECT_EQ(outcomes[1].element, "Edge5");
+    EXPECT_EQ(outcomes[1].tier, 3);
+
+    //   without a saved fingerprint, nothing shows it merged back either: broken, not removed
+    input.entries[1].fingerprint = ElementFingerprint();
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Exact);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, piecesAreFoundBeyondTheTopAgreement)
+{
+    // Two pieces of X, and Z, generated from X with X's op code and flags: all three hold X in
+    // their ancestry, but only Z agrees with X on the top section, so tier 1's filter keeps Z
+    // alone. The pieces are still found: Expand takes them, One breaks with them.
+    const auto x = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    const auto z = generated({x}, 8, "Extrude", 'E', 1);
+    SolveInput input;
+    input.pool["Edge"] = {
+        element("Edge1", {piece(x, 9, "CUT", 0, 'E')}),
+        element("Edge2", {z}),
+        element("Edge3", {piece(x, 9, "CUT", 1, 'E')}),
+    };
+    auto entry = missing(x, "Edge");
+    entry.policy = Data::SolvePolicy::Expand;
+    input.entries = {entry};
+
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved);
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge1", "Edge3"}));
+
+    input.entries[0].policy = Data::SolvePolicy::One;
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge1", "Edge3", "Edge2"}));
 }
 
 TEST(SolveOwner, noCollapseWhileAPieceRemains)
@@ -2148,12 +2221,16 @@ TEST(SolveOwner, collapseNeedsTheSameScope)
     const auto c = generated({sketchEdge(9)}, 7, "Extrude", 'E', 1);
     const auto gone = generated({sketchEdge(8)}, 7, "Extrude", 'E', 2);
     SolveInput input;
+    input.diagonal = 24.5;
     input.pool["Edge"] = {element("Edge1", {f}), element("Edge2", {c})};
+    measure(input, {{"Edge1", lineX(0, 20)}}, nullptr);
+    auto rest = missing(gone, "Edge");
+    rest.fingerprint = lineX(12, 20);
     input.entries = {
         member(exact("Edge1", "Edge"), f, "a", 0),
         member(exact("Edge2", "Edge"), f, "a", 1),
         member(exact("Edge1", "Edge"), f, "b", 0),
-        member(missing(gone, "Edge"), f, "b", 1),
+        member(rest, f, "b", 1),
     };
 
     auto outcomes = Data::solveOwner(input);
@@ -2167,16 +2244,6 @@ TEST(SolveOwner, collapseNeedsTheSameScope)
 
 namespace
 {
-
-// A line edge from (x0, y, z) to (x1, y, z), as a fingerprint.
-ElementFingerprint lineX(double x0, double x1, double y = 0.0, double z = 10.0)
-{
-    return fingerprint('E',
-                       "Line",
-                       std::abs(x1 - x0),
-                       Base::Vector3d((x0 + x1) / 2, y, z),
-                       Base::Vector3d(1, 0, 0));
-}
 
 // The 20 x 10 x 10 block's front top edge, 0..20 along X at y = 0, z = 10, whose reference holds
 // its fingerprint; a notch now leaves the hit (Edge1, 0..8) and a piece (Edge2, 12..20). Both
@@ -2482,8 +2549,8 @@ TEST(Continuation, independentOfInputOrder)
     input.pool["Face"] = split.input({}).pool["Face"];
     input.entries.push_back(face);
     input.pool["Vertex"] = {element("Vertex1", {f})};
-    input.entries.push_back(member(missing("v-gone-1", "Vertex"), f, "s", 3));
-    input.entries.push_back(member(missing("v-gone-2", "Vertex"), f, "s", 2));
+    input.entries.push_back(member(missing(piece(f, 9, "CUT", 0, 'V'), "Vertex"), f, "s", 3));
+    input.entries.push_back(member(missing(piece(f, 9, "CUT", 1, 'V'), "Vertex"), f, "s", 2));
 
     const auto expected = Data::solveOwner(input);
     std::vector<std::string> expectedText;
@@ -2647,16 +2714,28 @@ TEST(SplitFace, faceWithinOldPlane)
     EXPECT_FALSE(within(cylinder));
 }
 
-TEST(SplitFace, breaksUnderEveryPolicy)
+TEST(SplitFace, breaksUnderOneAndExpand)
 {
     FrontNotch notch;
-    for (auto policy :
-         {Data::SolvePolicy::Expand, Data::SolvePolicy::One, Data::SolvePolicy::Equivalent}) {
+    for (auto policy : {Data::SolvePolicy::Expand, Data::SolvePolicy::One}) {
         auto outcome = Data::solveOwner(notch.input(policy))[0];
         EXPECT_EQ(outcome.status, SolveStatus::Broken) << static_cast<int>(policy);
         EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
         EXPECT_EQ(outcome.evidence, "split: a coplanar face beside it, Face2");
     }
+}
+
+TEST(SplitFace, equivalentKeepsTheHitWhenTheProbeAgrees)
+{
+    // An attachment to the notched face: the coplanar rest gives it the same placement.
+    FrontNotch notch;
+    auto input = notch.input(Data::SolvePolicy::Equivalent);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ");
+
+    input.entries[0].equivalent = [](const std::string&, const std::string&) { return false; };
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    input.entries[0].equivalent = {};
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
 }
 
 TEST(SplitFace, notBroken)

@@ -1383,9 +1383,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             continue;
         }
         const auto& element = pool.elements[found->second];
+        // A missing member merged back only if it is a structural piece of the `from` element,
+        // or its saved geometry lies on that element as it is now (a continuation that the
+        // element covers again). A member gone elsewhere (its line redrawn with a new ID) is
+        // solved on its own.
+        const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+        const ElementFingerprint& now = fingerprintOfIndex(element.index);
+        auto extent = OldExtent::of(now, eps, input.tolerances);
+        auto mergedBack = [&](const SolveInput::Entry& entry) {
+            if (NameAncestry::isPieceOf(entry.oldName, key.second)
+                || NameAncestry::isIndexPieceOf(entry.oldName, key.second)) {
+                return true;
+            }
+            auto range = extent ? extent->interval(entry.fingerprint) : std::nullopt;
+            return range && extent->within(*range);
+        };
         bool merged = std::all_of(members.begin(), members.end(), [&](int i) {
             const auto& entry = input.entries[i];
-            return !entry.exact || entry.exactElement == element.index;
+            return entry.exact ? entry.exactElement == element.index : mergedBack(entry);
         });
         if (!merged) {
             continue;
@@ -1629,6 +1644,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (listed.size() == 1) {
                 continue;  // only shrunk
             }
+            // Equivalent (the coordinator's decision on the review): the hit stands if every
+            // coplanar face beside it gives the consumer the same result, as for edges.
+            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                && std::all_of(listed.begin(), listed.end(), [&](int k) {
+                       return k == hitPosition
+                           || entry.equivalent(hit, pool.elements[k].index);
+                   })) {
+                decidedEntry[i] = 1;
+                continue;
+            }
             std::sort(listed.begin(), listed.end());
             auto& outcome = outcomes[i];
             outcome = SolveOutcome();
@@ -1783,6 +1808,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 else if (std::any_of(names.begin(), names.end(), [&](const auto& n) {
                              return NameAncestry::isIndexPieceOf(n, oldName);
                          })) {
+                    all.insert(static_cast<int>(k));
+                }
+            }
+        }
+        // The old element's pieces, wherever tier 1's filters left them: a piece's top section
+        // is its cutter's, so the top agreement among the overlap survivors can drop every
+        // piece in favour of an element generated from the old one (Task 2 PR 7's review).
+        if (!oldName.empty()) {
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& names = pool.elements[k].names;
+                if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                        return NameAncestry::isPieceOf(n, oldName);
+                    })) {
                     all.insert(static_cast<int>(k));
                 }
             }

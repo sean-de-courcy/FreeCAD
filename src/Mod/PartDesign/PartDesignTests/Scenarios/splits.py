@@ -364,3 +364,85 @@ class DraftFaceNotch(SplitModel):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         self.split = True
+
+
+class SolverNotchRedrawn(SplitFilletNotch):
+    """SplitFilletNotch in two steps. `notch`: the fillet takes both pieces. `redraw`: the side's
+    rest (x 12..20) is drawn again as a new line and the old one deleted, so it gets a new
+    geometry ID and its edge another name. The pieces must not merge back into the kept piece
+    alone (a silent partial): the redrawn edge is found in its place (tier 3), and the fillet
+    keeps both (the review of Task 2 PR 7, B1)."""
+
+    steps = ("notch", "redraw")
+
+    def notch(self, doc):
+        self.edit(doc)
+
+    def redraw(self, doc):
+        last = doc.Profile.GeometryCount - 1  # the side's rest, (12, 0)-(20, 0)
+        doc.Profile.addGeometry(m.polyline([(12, 0), (20, 0)]), False)
+        doc.Profile.delGeometry(last)
+
+
+class AttachFaceNotch(SplitModel):
+    """A sketch attached (FlatFace) to the block's front face (y = 0); a notch (x 8..12, 2 deep)
+    is then cut into the front side, as in SplitFilletNotch. The face keeps its name on x 0..8,
+    and the rest (x 12..20) is coplanar: the sketch's placement is the same on either, so it
+    keeps its face (Equivalent under the split face's rule)."""
+
+    REFS = ("sketch_front",)
+
+    def frontFace(self):
+        return face("plane", normal=-Y, through=(0, 0, 0), contains=(2, 0, 5))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        onFront = body.newObject("Sketcher::SketchObject", "OnFront")
+        onFront.AttachmentSupport = [(pad, self.names(pad, self.frontFace())[0])]
+        onFront.MapMode = "FlatFace"
+        self.ref("sketch_front", onFront, "AttachmentSupport", self.frontFace, Attached())
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
+class DraftUProngNarrowed(SplitModel):
+    """A U-shaped pad: the block 0..20 x 0..10, 10 high, with a slot (x 6..14, y 4..10) in its
+    profile, so two prongs (x 0..6 and 14..20) end in coplanar faces at y = 10. A draft, 5
+    degrees, of the left prong's end face on the bottom face; the left prong is then narrowed to
+    x 0..4 (its lines keep their geometry IDs). The end face only shrinks, and the draft should
+    keep it. The right prong's end face is coplanar and shares the top and bottom faces with it,
+    so the split face's rule (Q3 (b) of the Task 2 PR 7 design) can't tell this from a split:
+    V2s breaks the draft, a false break (broken, never wrong), listed for PR 8's gate."""
+
+    REFS = ("draft_face",)
+
+    def block(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        outline = [(0, 0), (20, 0), (20, 10), (14, 10), (14, 4), (6, 4), (6, 10), (0, 10)]
+        profile = m.sketch(doc, "Profile", m.polygon(outline), body)
+        m.pad(body, profile, self.height)
+        return body
+
+    def endFace(self):
+        return face("plane", normal=Y, through=(0, 10, 0), contains=(2, 10, 5))
+
+    def bottomFace(self):
+        return face("plane", normal=-Z, through=(0, 0, 0))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (pad, self.names(pad, self.endFace()))
+        draft.NeutralPlane = (pad, self.names(pad, self.bottomFace()))
+        draft.Angle = 5
+        self.ref("draft_face", draft, "Base", self.endFace, Drafted(5, self.bottomFace))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {4: ((14, 4), (4, 4)), 5: ((4, 4), (4, 10)), 6: ((4, 10), (0, 10))})

@@ -436,9 +436,12 @@ struct AppExport SolveOutcome
  *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
  *   entries never enter the graph.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
- *   an element of the target exactly and every member is missing or exact on that element,
- *   the member with the lowest position resolves to it (tier 0, `collapsed`) and the others
- *   are Removed: the pieces merged back.
+ *   an element of the target exactly and every member is exact on that element or missing and
+ *   merged back into it (a structural piece of `from`, or saved geometry lying on the element
+ *   as it is now), the member with the lowest position resolves to it (tier 0, `collapsed`)
+ *   and the others are Removed. Otherwise the members are solved one by one.
+ * - Candidates include every element with a structural piece of the old name, whatever tier 1's
+ *   filters keep.
  * - Continuation (PR 7, tier 4): an exact `Edge` entry whose saved fingerprint is a line that
  *   its element now lies strictly within (hitWithinOldEdge()). The other line edges of the
  *   type, not held exactly by the owner, that lie on the old edge within its ends and bound a
@@ -451,7 +454,8 @@ struct AppExport SolveOutcome
  *   still lies in the plane of its saved fingerprint (the normal with its sense, the centre
  *   within ε of the plane) but is smaller. Another planar face of that plane, not held exactly
  *   by the owner, that shares an edge or a neighbouring face with it may be the rest of the old
- *   face, which a fingerprint can't bound: the entry breaks under every policy, with both.
+ *   face, which a fingerprint can't bound: the entry breaks, with both, under One and Expand,
+ *   and under Equivalent unless every such face gives the consumer the hit's result.
  * - Expand (PR 7), with pieces among the candidates: the pieces resolve together, as one graph
  *   node (tier 1, every element); the other survivors don't count.
  * - Missing entries with the same old name, type and policy are solved once and get the same
