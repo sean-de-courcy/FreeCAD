@@ -35,7 +35,7 @@ import zipfile
 import FreeCAD as App
 
 from PartDesignTests.Scenarios import models
-from PartDesignTests.Scenarios.harness import Z, edge, face
+from PartDesignTests.Scenarios.harness import X, Z, edge, face
 
 
 class TestNamingSolver(unittest.TestCase):
@@ -69,50 +69,61 @@ class TestNamingSolver(unittest.TestCase):
         return pad, fillet
 
     def testReportListsCandidatesAndRepairUsesOne(self):
-        """FilletCornerCut's model: the sketch's corner at (20, 0) is cut off, so the filleted
-        edge is gone. The fillet fails naming its reference, the report lists the two new corner
-        edges as candidates, and repairing to one of them makes the fillet valid."""
+        """AmbiguousHalves' model: a datum point at the centre of mass of a pad's top face, which
+        a groove across the middle then splits into two halves. The point has no element to go
+        to: it fails naming its reference, the report lists the halves (the pieces of its old
+        face) as candidates, and repairing to one of them makes the point valid."""
         # Arrange
         doc = self.newDocument()
-        pad, fillet = self.padWithFillet(doc)
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 10)
+        sketch = models.sketch(doc, "GrooveSketch", models.rectangle(16, 2, 18, 4), body, z=10)
+        groove = models.pocket(body, sketch, 4, "Groove")
+        doc.recompute()
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        point = body.newObject("PartDesign::Point", "Centre")
+        point.AttachmentSupport = [(groove, top.one(groove.Shape)[0])]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertTrue(point.isValid())
 
         # Act
-        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
-        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        models.moveRectangle(sketch, 9, -1, 11, 11)
         doc.recompute()
 
         # Assert
-        self.assertFalse(fillet.isValid())
-        self.assertIn("Broken reference Base[0]: ?Edge", fillet.getStatusString())
-        report = App.getReferenceReport(fillet)
+        self.assertFalse(point.isValid())
+        self.assertIn("Broken reference AttachmentSupport[0]: ?Face", point.getStatusString())
+        report = App.getReferenceReport(point)
         self.assertEqual(len(report), 1)
         entry = report[0]
         self.assertEqual(
-            (entry["property"], entry["index"], entry["status"]), ("Base", 0, "broken")
+            (entry["property"], entry["index"], entry["status"]),
+            ("AttachmentSupport", 0, "broken"),
         )
-        self.assertTrue(entry["sub"].startswith("?Edge"))
-        self.assertEqual(entry["target"], pad.FullName)
-        corners = edge("line", direction=Z, through=(19, 0, 0)).one(pad.Shape) + edge(
-            "line", direction=Z, through=(20, 1, 0)
-        ).one(pad.Shape)
-        self.assertEqual(sorted(entry["candidates"]), sorted(corners))
-        self.assertEqual(len(entry["candidate_names"]), 2)
+        self.assertTrue(entry["sub"].startswith("?Face"))
+        self.assertEqual(entry["target"], groove.FullName)
+        halves = top.select(groove.Shape)
+        #   the pieces first, then any other survivor of tier 1
+        self.assertEqual(sorted(entry["candidates"][:2]), sorted(halves))
+        self.assertEqual(len(entry["candidate_names"]), len(entry["candidates"]))
         for name in entry["candidates"]:
-            self.assertIn(name, entry["evidence"] + " " + fillet.getStatusString())
+            self.assertIn(name, entry["evidence"] + " " + point.getStatusString())
 
         #   a name that isn't a candidate is refused
-        other = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)[0]
+        other = face("plane", normal=X, through=(20, 0, 0)).one(groove.Shape)[0]
         with self.assertRaises(ValueError):
-            App.repairReference(fillet, "Base", 0, other)
+            App.repairReference(point, "AttachmentSupport", 0, other)
         with self.assertRaises(ValueError):
-            App.repairReference(fillet, "Base", 1, corners[0])
+            App.repairReference(point, "AttachmentSupport", 1, halves[0])
 
         #   a candidate repairs it
-        App.repairReference(fillet, "Base", 0, corners[0])
+        App.repairReference(point, "AttachmentSupport", 0, halves[0])
         doc.recompute()
-        self.assertTrue(fillet.isValid())
-        self.assertEqual(fillet.Base[1], [corners[0]])
-        self.assertEqual(App.getReferenceReport(fillet), [])
+        self.assertTrue(point.isValid())
+        self.assertEqual(point.AttachmentSupport, [(groove, (halves[0],))])
+        self.assertEqual(App.getReferenceReport(point), [])
 
     def testBinderWithoutItsFaceFails(self):
         """A pad 0..20 x 0..10 x 10 with a slot (x 8..12, y 4..6, through all), and a
