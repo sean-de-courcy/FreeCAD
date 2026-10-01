@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <numbers>
 #include <optional>
 #include <ranges>
@@ -62,6 +63,7 @@
 
 #include <App/Document.h>
 #include <App/Datums.h>
+#include <App/ElementNamingUtils.h>
 #include <Base/Converter.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
@@ -485,6 +487,29 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
     return TopoDS_Face();
 }
 
+std::string ProfileBased::missingElements(
+    const App::DocumentObject* obj,
+    const std::vector<std::string>& subs,
+    bool sketchVertices
+)
+{
+    std::string missing;
+    bool vertexOnly = sketchVertices && obj && obj->isDerivedFrom<Part::Part2DObject>();
+    for (const auto& sub : subs) {
+        if (!obj || !Data::hasMissingElement(sub.c_str())) {
+            continue;
+        }
+        const char* element = Data::findElementName(sub.c_str());
+        std::string name(element + std::strlen(Data::MISSING_PREFIX));
+        if (vertexOnly && !name.starts_with("Vertex")) {
+            continue;
+        }
+        missing += (missing.empty() ? "" : ", ") + std::string(obj->Label.getValue()) + '.'
+            + std::string(sub.c_str(), element - sub.c_str()) + name;
+    }
+    return missing;
+}
+
 TopoShape ProfileBased::getProfileShape(Part::ShapeOptions subShapeOptions) const
 {
     TopoShape shape;
@@ -500,6 +525,17 @@ TopoShape ProfileBased::getProfileShape(Part::ShapeOptions subShapeOptions) cons
         std::vector<TopoShape> shapes;
         for (auto& sub : subs) {
             shapes.push_back(Part::Feature::getTopoShape(profile, subShapeOptions, sub.c_str()));
+            // A sub-element that no longer exists ("?Edge2") gives a null shape, which the
+            // compound below would drop: fail instead, naming it (ops#70)
+            if (shapes.back().isNull() && !sub.empty() && profile) {
+                if (auto missing = missingElements(profile, {sub}); !missing.empty()) {
+                    FC_THROWM(Part::NullShapeException, "Missing element in Profile: " << missing);
+                }
+                FC_THROWM(
+                    Part::NullShapeException,
+                    "Sub shape not found: " << profile->getFullName() << "." << sub
+                );
+            }
         }
         shape = makeTopoShape(shape.Tag).makeElementCompound(shapes);
     }

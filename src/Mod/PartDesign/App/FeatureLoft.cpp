@@ -83,6 +83,13 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
         return obj->isDerivedFrom<Part::Part2DObject>() && subName.find("Vertex") != 0;
     };
 
+    // A sketch vertex that no longer exists ("?Vertex1") fails the vertex test above, so the
+    // whole sketch would be used in its place (ops#71)
+    if (auto missing = missingElements(obj, {subs.empty() ? std::string() : subs.front()}, true);
+        !missing.empty()) {
+        FC_THROWM(Part::NullShapeException, "Missing element in " << name << ": " << missing);
+    }
+
     std::vector<TopoShape> shapes;
     auto useEntireSketch = useSketch(obj, subs);
     if (subs.empty() || std::ranges::find(subs, std::string()) != subs.end() || useEntireSketch) {

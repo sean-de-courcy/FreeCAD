@@ -766,8 +766,16 @@ void TaskHelixParameters::setGizmoPositions()
         gizmoContainer->visible = false;
         return;
     }
+    Part::TopoShape profileShape;
+    try {
+        profileShape = helix->getProfileShape();
+    }
+    catch (const Base::Exception&) {
+        // a missing profile element, while the helix isn't recomputed yet (ops#70)
+        gizmoContainer->visible = false;
+        return;
+    }
     gizmoContainer->visible = true;
-    Part::TopoShape profileShape = helix->getProfileShape();
     double reversed = propReversed->getValue() ? -1.0 : 1.0;
     auto profileCentre = getMidPointFromProfile(profileShape);
     Base::Vector3d axisDir = helix->Axis.getValue() * reversed;

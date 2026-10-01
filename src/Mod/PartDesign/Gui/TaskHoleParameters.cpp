@@ -1450,10 +1450,18 @@ void TaskHoleParameters::setGizmoPositions()
         gizmoContainer->visible = false;
         return;
     }
-    Part::TopoShape profileShape = hole->getProfileShape(
-        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-        | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound
-    );
+    Part::TopoShape profileShape;
+    try {
+        profileShape = hole->getProfileShape(
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform | Part::ShapeOption::DontSimplifyCompound
+        );
+    }
+    catch (const Base::Exception&) {
+        // a missing profile element, while the hole isn't recomputed yet (ops#70)
+        gizmoContainer->visible = false;
+        return;
+    }
     Base::Vector3d dir = hole->guessNormalDirection(profileShape);
     dir *= hole->Reversed.getValue() ? -1 : 1;
     Base::Vector3d holeDirection = -dir;
