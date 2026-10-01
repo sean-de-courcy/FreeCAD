@@ -35,6 +35,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Builder.hxx>
 
+#include <cstring>
 #include <set>
 #include <vector>
 
@@ -42,6 +43,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolverBatch.h>
 #include <App/FeaturePythonPyImp.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <Base/Console.h>
@@ -226,6 +228,69 @@ TopoShape Feature::getSolid(const TopoShape& shape) const
 void Feature::onBaseFeatureRerouted(App::DocumentObject* /*oldBase*/, App::DocumentObject* /*newBase*/)
 {}
 
+namespace
+{
+
+// The relink in a reference solver document (ops#7, Task 2 PR 6): the link moves to the new base
+// with every reference marked missing, keeping its old mapped name (the shadow) and its saved
+// fingerprint, and the solver then resolves them against the new base. An index name never
+// carries over from one shape to another: a reference is found exactly by its name (a 1:1
+// modified element keeps its incoming name, so an edge the old base only trimmed is the new
+// base's full edge), by the solver's evidence, or it breaks with its candidates reported.
+// Returns false, leaving the link as it is, if a reference has no mapped name or a sub-object
+// path, as the name match does.
+bool relinkThroughSolver(
+    App::PropertyLinkSub& link,
+    const Part::TopoShape& oldShape,
+    App::DocumentObject* newBase
+)
+{
+    const auto& oldSubs = link.getSubValues();
+    const auto& oldShadows = link.getShadowSubs();
+    std::vector<std::string> subs;
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows;
+    for (std::size_t i = 0; i < oldSubs.size(); ++i) {
+        const auto& sub = oldSubs[i];
+        if (sub.empty()) {
+            subs.emplace_back();
+            shadows.emplace_back();
+            continue;
+        }
+        if (Data::findElementName(sub.c_str()) != sub.c_str()) {
+            return false;
+        }
+        std::string mapped;
+        std::string index;
+        if (i < oldShadows.size()) {
+            mapped = App::bareMappedName(oldShadows[i].newName);
+            const char* element = Data::findElementName(oldShadows[i].oldName.c_str());
+            index = element ? element : "";
+            if (Data::hasMissingElement(index.c_str())) {
+                index.erase(0, std::strlen(Data::MISSING_PREFIX));
+            }
+        }
+        if (mapped.empty() || index.empty()) {
+            Data::MappedElement element = oldShape.getElementName(sub.c_str());
+            mapped = element.name.toString();
+            index = element.index ? element.index.toString() : std::string();
+        }
+        if (mapped.empty() || index.empty()) {
+            return false;
+        }
+        std::string missing = Data::MISSING_PREFIX + index;
+        subs.push_back(missing);
+        shadows.emplace_back(
+            Data::ComplexGeoData::elementMapPrefix() + mapped + "." + index,
+            missing
+        );
+    }
+    link.setValue(newBase, std::move(subs), std::move(shadows));
+    App::solveElementReferences(newBase, {&link}, false, true);
+    return true;
+}
+
+}  // namespace
+
 bool Feature::relinkToMatchingSubelements(
     App::PropertyLinkSub& link,
     App::DocumentObject* oldBase,
@@ -246,6 +311,10 @@ bool Feature::relinkToMatchingSubelements(
     const auto& newShape = newFeature->Shape.getShape();
     if (oldShape.isNull() || newShape.isNull()) {
         return false;
+    }
+
+    if (link.inSolverDocument()) {
+        return relinkThroughSolver(link, oldShape, newBase);
     }
 
     const auto& oldSubs = link.getSubValues();
