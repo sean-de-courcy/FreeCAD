@@ -160,9 +160,7 @@ def _makeRandomTests():
     seeds, steps = randomRuns()
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     configs = (
-        [c.strip() for c in listed.split(",") if c.strip()]
-        if listed
-        else ["V2", "V2multi", "V2s"]
+        [c.strip() for c in listed.split(",") if c.strip()] if listed else ["V2", "V2multi", "V2s"]
     )
     for seed in seeds:
         for config in configs:
@@ -176,6 +174,10 @@ def _makeRandomTests():
 
 
 _makeRandomTests()
-__all__ = [name for name, value in globals().items()
-           if isinstance(value, type) and issubclass(value, ScenarioTestCase)
-           and value is not ScenarioTestCase] + ["RandomSequences"]
+__all__ = [
+    name
+    for name, value in globals().items()
+    if isinstance(value, type)
+    and issubclass(value, ScenarioTestCase)
+    and value is not ScenarioTestCase
+] + ["RandomSequences"]

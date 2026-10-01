@@ -218,6 +218,4 @@ class TestNamingSolver(unittest.TestCase):
         doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
         doc.recompute()
         self.assertNotIn("Broken reference", fillet.getStatusString())
-        self.assertEqual(
-            [e for e in App.getReferenceReport(fillet) if e["status"] != "broken"], []
-        )
+        self.assertEqual([e for e in App.getReferenceReport(fillet) if e["status"] != "broken"], [])

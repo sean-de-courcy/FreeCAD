@@ -161,6 +161,7 @@ class Masker:
                 if expanded == name:
                     break
                 name = expanded
+
         def tag(match):
             value = match.group(2)
             if value:
@@ -269,8 +270,9 @@ def _curve(e):
         return None
 
 
-def edge(curve=None, direction=None, through=None, contains=None, where=None, center=None,
-         radius=None):
+def edge(
+    curve=None, direction=None, through=None, contains=None, where=None, center=None, radius=None
+):
     """An edge: its curve type ('line', 'circle'), its direction (lines, either sense), a point
     of its infinite line, a point on the edge itself, a circle's centre and radius, or any
     test."""
