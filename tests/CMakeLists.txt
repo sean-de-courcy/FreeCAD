@@ -112,11 +112,13 @@ if(WIN32)
     elseif(EXISTS "${CMAKE_PREFIX_PATH}/bin")
         list(APPEND _test_env_mod "PATH=path_list_prepend:${CMAKE_PREFIX_PATH}/bin")
     endif()
-    file(GLOB _mod_dirs LIST_DIRECTORIES true "${CMAKE_BINARY_DIR}/Mod/*")
+    # The module folders come from SET_BIN_DIR (cMake/FreeCadMacros.cmake), so they are known
+    # before the first build creates them: a glob here would miss them on a fresh build.
+    get_property(_mod_dirs GLOBAL PROPERTY FREECAD_BIN_OUTPUT_DIRS)
+    list(REMOVE_DUPLICATES _mod_dirs)
+    list(REMOVE_ITEM _mod_dirs "${CMAKE_BINARY_DIR}/bin")
     foreach(_mod_dir ${_mod_dirs})
-        if(IS_DIRECTORY "${_mod_dir}")
-            list(APPEND _test_env_mod "PATH=path_list_prepend:${_mod_dir}")
-        endif()
+        list(APPEND _test_env_mod "PATH=path_list_prepend:${_mod_dir}")
     endforeach()
 endif()
 

@@ -293,6 +293,9 @@ MACRO(SET_BIN_DIR ProjectName OutputName)
         set_target_properties(${ProjectName} PROPERTIES LIBRARY_OUTPUT_DIRECTORY         ${CMAKE_BINARY_DIR}${ARGV2})
         set_target_properties(${ProjectName} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}${ARGV2})
         set_target_properties(${ProjectName} PROPERTIES LIBRARY_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}${ARGV2})
+        # Remember the folder, so the Windows test PATH can list it before it exists
+        # (tests/CMakeLists.txt).
+        set_property(GLOBAL APPEND PROPERTY FREECAD_BIN_OUTPUT_DIRS ${CMAKE_BINARY_DIR}${ARGV2})
     else(${ARGC} GREATER 2)
         set_target_properties(${ProjectName} PROPERTIES RUNTIME_OUTPUT_DIRECTORY         ${CMAKE_BINARY_DIR}/bin)
         set_target_properties(${ProjectName} PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin)
