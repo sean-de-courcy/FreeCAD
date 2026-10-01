@@ -31,6 +31,7 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 
 
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <boost/algorithm/string/predicate.hpp>
@@ -603,6 +604,7 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
     bool init = (!forced && (options & UpdateForced)) ? true : false;
 
     std::string errMsg;
+    std::string missing;  // the subs that resolve to nothing, as "Label.Face3, ..."
     auto parent = Context.getValue();
     std::string parentSub = Context.getSubName(false);
     if (!Relative.getValue()) {
@@ -800,6 +802,16 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
                     shapeOwners.emplace_back(sidx, subidx);
                     shapeMats.push_back(&res.first->second);
                 }
+                else if (const char* element = Data::findElementName(sub.c_str());
+                         element && element[0]) {
+                    // the element is gone ("?Face3"), or never existed
+                    std::string name(element);
+                    if (boost::starts_with(name, Data::MISSING_PREFIX)) {
+                        name.erase(0, std::strlen(Data::MISSING_PREFIX));
+                    }
+                    missing += (missing.empty() ? "" : ", ") + std::string(obj->Label.getValue())
+                        + '.' + std::string(sub.c_str(), element - sub.c_str()) + name;
+                }
             }
             catch (Base::Exception& e) {
                 e.reportException();
@@ -837,6 +849,18 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             if (!Shape.getValue().IsNull()) {
                 return;
             }
+        }
+
+        // A sub-element that resolves to nothing must fail the binder, not leave it bound to
+        // the rest, or to its old shape when nothing is left (ops#69). Only the recompute
+        // reports it: update() also runs when Support changes, including while its references
+        // are refreshed, where an exception would only be logged as a failed refresh. The
+        // binder is recomputed after that.
+        if (!missing.empty()) {
+            if (options & UpdateForced) {
+                FC_THROWM(Base::RuntimeError, "Missing element in Support: " << missing);
+            }
+            return;
         }
 
         // If not forced, only rebuild when there is any change in
@@ -1058,6 +1082,13 @@ void SubShapeBinder::collapseGeoChildren()
         bool touched = false;
         for (auto itSub = subvals.begin(); itSub != subvals.end();) {
             auto& sub = *itSub;
+            // A sub-element that no longer exists ("?Face3") doesn't resolve, so normalize()
+            // would turn it into "", which binds the whole object and drops the other subs.
+            // Keep it as it is: update() reports it (ops#69).
+            if (Data::hasMissingElement(sub.c_str())) {
+                ++itSub;
+                continue;
+            }
             App::SubObjectT sobjT(obj, sub.c_str());
             if (sobjT.normalize(App::SubObjectT::NormalizeOption::KeepSubName)) {
                 touched = true;

@@ -171,6 +171,16 @@ protected:
     TopoDS_Face getSupportFace(const Part::Part2DObject*) const;
     TopoDS_Face getSupportFace(const App::PropertyLinkSub& link) const;
 
+    /// The sub-elements of obj that no longer exist ("?Vertex1"), as "Label.Vertex1, ...", for
+    /// an error message (ops#70, ops#71). With `sketchVertices`, a sketch's are listed only if
+    /// they are vertices: as a profile or section, a sketch is used whole unless its first sub
+    /// is a vertex.
+    static std::string missingElements(
+        const App::DocumentObject* obj,
+        const std::vector<std::string>& subs,
+        bool sketchVertices = false
+    );
+
     /// Extract a face from a given LinkSub
     static void getFaceFromLinkSub(TopoDS_Face& upToFace, const App::PropertyLinkSub& refFace);
 

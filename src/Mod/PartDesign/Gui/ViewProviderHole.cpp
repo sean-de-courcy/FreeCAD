@@ -54,6 +54,7 @@
 #include <Mod/PartDesign/App/FeatureHole.h>
 #include <Mod/PartDesign/Gui/ViewProviderHole.h>
 
+#include <Base/Exception.h>
 #include <Base/Placement.h>
 #include <Base/Tools.h>
 #include <App/Property.h>
@@ -319,7 +320,13 @@ std::optional<gp_Dir> ViewProviderHole::getHoleNormal(const PartDesign::Hole* pc
         return std::nullopt;
     }
 
-    Base::Vector3d normal = pcHole->guessNormalDirection(pcHole->getProfileShape());
+    Base::Vector3d normal;
+    try {
+        normal = pcHole->guessNormalDirection(pcHole->getProfileShape());
+    }
+    catch (const Base::Exception&) {  // a missing profile element (ops#70)
+        return std::nullopt;
+    }
 
     // Reject if direction is mathematically zero (invalid for gp_Dir)
     if (normal.IsNull()) {

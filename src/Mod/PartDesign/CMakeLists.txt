@@ -58,6 +58,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestChamfer.py
     PartDesignTests/TestDraft.py
     PartDesignTests/TestThickness.py
+    PartDesignTests/TestMissingElements.py
     PartDesignTests/TestTopologicalNamingProblem.py
     PartDesignTests/TestNamingDump.py
     PartDesignTests/TestNamingRList.py
@@ -86,6 +87,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/ambiguous.py
     PartDesignTests/Scenarios/attachment.py
     PartDesignTests/Scenarios/booleans.py
+    PartDesignTests/Scenarios/consumers.py
     PartDesignTests/Scenarios/crossdoc.py
     PartDesignTests/Scenarios/dressups.py
     PartDesignTests/Scenarios/external.py

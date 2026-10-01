@@ -125,13 +125,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
         return App::DocumentObject::StdReturn;
     }
 
-    auto getSectionShape = [](App::DocumentObject* feature,
+    auto getSectionShape = [](const char* name,
+                              App::DocumentObject* feature,
                               const std::vector<std::string>& subs) -> Part::TopoShape {
         if (!feature || !feature->isDerivedFrom<Part::Feature>()) {
             throw Base::TypeError("Pipe: Invalid profile/section");
         }
 
         auto subName = subs.empty() ? "" : subs.front();
+
+        // An element that no longer exists ("?Vertex1"): a sketch's would fail the vertex test
+        // below and give the whole sketch; a feature's would fail without naming it (ops#71)
+        if (auto missing = missingElements(feature, {subName}, true); !missing.empty()) {
+            FC_THROWM(Part::NullShapeException, "Missing element in " << name << ": " << missing);
+        }
 
         // only take the entire shape when we have a sketch selected, but
         // not a point of the sketch
@@ -204,7 +211,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         // setup the profile section
-        Part::TopoShape profileShape = getSectionShape(Profile.getValue(), Profile.getSubValues());
+        Part::TopoShape profileShape
+            = getSectionShape("Profile", Profile.getValue(), Profile.getSubValues());
         if (profileShape.isNull()) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Pipe: Could not obtain profile shape")
@@ -218,6 +226,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
         }
 
         std::vector<std::string> subedge = Spine.getSubValues();
+        if (auto missing = missingElements(spine, subedge); !missing.empty()) {
+            return new App::DocumentObjectExecReturn("Missing element in Spine: " + missing);
+        }
         Part::TopoShape path = makeTopoShape(false);
         const Part::TopoShape& shape = static_cast<Part::Feature*>(spine)->Shape.getShape();
         buildPipePath(shape, subedge, path);
@@ -233,6 +244,11 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 );
             }
             std::vector<std::string> auxsubedge = AuxiliarySpine.getSubValues();
+            if (auto missing = missingElements(auxspine, auxsubedge); !missing.empty()) {
+                return new App::DocumentObjectExecReturn(
+                    "Missing element in AuxiliarySpine: " + missing
+                );
+            }
 
             const Part::TopoShape& auxshape = static_cast<Part::Feature*>(auxspine)->Shape.getValue();
             buildPipePath(auxshape, auxsubedge, auxpath);
@@ -283,7 +299,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 }
 
                 // if the section is an object's face then take just the face
-                Part::TopoShape shape = getSectionShape(subSet.first, subSet.second);
+                Part::TopoShape shape = getSectionShape("Section", subSet.first, subSet.second);
                 if (shape.isNull()) {
                     return new App::DocumentObjectExecReturn(
                         QT_TRANSLATE_NOOP("Exception", "Pipe: Could not obtain section shape")
@@ -587,6 +603,9 @@ App::DocumentObjectExecReturn* Pipe::execute()
     }
     catch (Standard_Failure& e) {
         return new App::DocumentObjectExecReturn(e.GetMessageString());
+    }
+    catch (const Base::Exception& e) {  // e.g. a missing element (ops#71)
+        return new App::DocumentObjectExecReturn(e.what());
     }
     catch (...) {
         return new App::DocumentObjectExecReturn(
