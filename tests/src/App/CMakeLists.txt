@@ -14,6 +14,7 @@ add_executable(App_tests_run
         ExpressionParser.cpp
         ElementMap.cpp
         ElementNamingUtils.cpp
+        ElementSolver.cpp
         IndexedName.cpp
         License.cpp
         Link.cpp

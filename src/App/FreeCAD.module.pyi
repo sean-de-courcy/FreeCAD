@@ -302,3 +302,20 @@ def makeEncodedSection(
 ) -> str:
     """Returns an encoded mapped section generated with the input arguments."""
     ...
+
+def getNameAncestors(name: str, /) -> list[str]:
+    """Return the ancestor set of a V2 mapped name, sorted.
+
+    The set holds the name itself, every prefix before a top-level `|`, and every Linked or
+    Connected Name embedded at any depth: the structural evidence of the reference solver.
+    `name` is a bare mapped name, without the `;` prefix or an element suffix.
+    """
+    ...
+
+def isPieceOf(name: str, old: str, /) -> bool:
+    """Return whether V2 mapped name `name` is a split piece of `old`.
+
+    A piece is `old` followed by one or more sections that carry the MOD flag and `old`'s element
+    type.
+    """
+    ...
