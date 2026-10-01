@@ -159,12 +159,10 @@ class TestNamingSolver(unittest.TestCase):
         feature.touch()
         doc.recompute()
 
-    def testReverseUpdateCarriesTheIndexWhenTheFingerprintAgrees(self):
-        """A reference whose mapped name is gone after an element-map version change is
-        re-derived by its index, checked against its saved fingerprint: the same geometry
-        resolves ("index"). The stale name is written into the saved file; reopening breaks the
-        reference (no name relates it), and the version change then restores it."""
-        # Arrange
+    def openWithStaleName(self):
+        """The fillet's reference with a stale mapped name written into the saved file (no name
+        relates it to the pad's edges), its fingerprint kept; the file opened again. Returns
+        (document, the reference's index name)."""
         doc = self.newDocument()
         pad, fillet = self.padWithFillet(doc)
         index = fillet.Base[1][0]
@@ -186,6 +184,27 @@ class TestNamingSolver(unittest.TestCase):
                 archive.writestr(name, data)
         doc = App.openDocument(path)
         self.documents.append(doc.Name)
+        return doc, index
+
+    def testStaleNameIsFoundByItsFingerprintOnOpen(self):
+        """No name relates the stale name to the pad's edges, but the edge is in its place: on
+        opening, tiers 2 and 3 find it against the saved fingerprint (Task 2 PR 4)."""
+        doc, index = self.openWithStaleName()
+        self.assertEqual(doc.Fillet.Base[1], [index])
+        report = App.getReferenceReport(doc.Fillet)
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("resolved", 3)])
+
+    def testReverseUpdateCarriesTheIndexWhenTheFingerprintAgrees(self):
+        """A reference whose mapped name is gone after an element-map version change is
+        re-derived by its index, checked against its saved fingerprint: the same geometry
+        resolves ("index"). With tier 3 kept from deciding (NamingSolver/Tier3Distance so large
+        that every other edge is within d_max), reopening the stale-name file breaks the
+        reference, and the version change then restores it."""
+        # Arrange
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        group.SetFloat("Tier3Distance", 100.0)
+        self.addCleanup(group.RemFloat, "Tier3Distance")
+        doc, index = self.openWithStaleName()
         pad, fillet = doc.Pad, doc.Fillet
         self.assertEqual(fillet.Base[1], ["?" + index])
 
@@ -230,3 +249,114 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
         self.assertNotIn("Broken reference", fillet.getStatusString())
         self.assertEqual([e for e in App.getReferenceReport(fillet) if e["status"] != "broken"], [])
+
+    # Tiers 2 and 3 (Task 2 PR 4): the saved fingerprint is the only geometry evidence.
+
+    def redraw(self, doc):
+        """Deletes the profile's lines and draws the rectangle again from its right back corner,
+        the other way round (as the SketchRedraw scenario): the same geometry, new geometry IDs,
+        so no name relates the old edges to the new ones."""
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+        doc.recompute()
+
+    def testRedrawnSketchResolvesByGeometry(self):
+        """Every sketch line drawn again: the filleted edge is back in its place under a new
+        name. No structural candidate; tiers 2 and 3 find it against the saved fingerprint."""
+        # Arrange
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+
+        # Act
+        self.redraw(doc)
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        corner = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
+        self.assertEqual(fillet.Base[1], corner)
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("resolved", 3)])
+        self.assertTrue(report[0]["evidence"].startswith("no structural candidate, tier 3"))
+
+    def breakThenRedraw(self, stripFingerprint):
+        """FilletCornerCut's edit breaks the fillet; the document is saved (its `fp` attribute
+        taken out if `stripFingerprint`) and opened again; then the rectangle is drawn again,
+        which puts the edge back in its place under a new name."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Broken.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml = files["Document.xml"].decode("utf-8")
+        found = re.findall(r'<Sub value="\?Edge[0-9]+" shadow="[^"]*"( fp="[^"]*")', xml)
+        self.assertEqual(len(found), 1)  # the setup: the broken reference kept its fingerprint
+        if stripFingerprint:
+            xml = xml.replace(found[0], "")
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        for obj in doc.Objects:
+            obj.touch()
+        doc.recompute()
+        self.assertFalse(doc.Fillet.isValid())
+        self.redraw(doc)
+        return doc.Pad, doc.Fillet
+
+    def testBrokenReferenceIsFoundByItsSavedFingerprint(self):
+        """The retry after a reopen uses the fingerprint the broken reference kept."""
+        pad, fillet = self.breakThenRedraw(stripFingerprint=False)
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(
+            fillet.Base[1], edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
+        )
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("resolved", 3)])
+
+    def testReferenceWithoutAFingerprintStaysBroken(self):
+        """The same without the saved fingerprint (an old file): tiers 2 and 3 can't run, so
+        the reference stays broken although its edge is back."""
+        pad, fillet = self.breakThenRedraw(stripFingerprint=True)
+        self.assertFalse(fillet.isValid())
+        self.assertTrue(fillet.Base[1][0].startswith("?Edge"))
+        report = App.getReferenceReport(fillet)
+        self.assertEqual([e["status"] for e in report], ["broken"])
+
+    def testTier3TolerancesAreParameters(self):
+        """The rectangle drawn again 5 mm over. With the default tolerances (d_max 1 % of the
+        diagonal, the second nearest 3 times as far) the fillet breaks. With
+        NamingSolver/Tier3Distance at 0.3 (d_max 7.3 mm) and Tier3GapFactor at 2, the moved edge
+        (5 mm) is within reach and the next one (11.2 mm) far enough, so it resolves to it."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        self.addCleanup(group.RemFloat, "Tier3Distance")
+        self.addCleanup(group.RemFloat, "Tier3GapFactor")
+
+        def redrawMoved(doc):
+            doc.Profile.deleteAllGeometry()
+            doc.Profile.addGeometry(models.polygon([(25, 10), (25, 0), (5, 0), (5, 10)]), False)
+            doc.recompute()
+
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        redrawMoved(doc)
+        self.assertFalse(fillet.isValid())
+
+        group.SetFloat("Tier3Distance", 0.3)
+        group.SetFloat("Tier3GapFactor", 2.0)
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        redrawMoved(doc)
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(
+            fillet.Base[1], edge("line", direction=Z, through=(25, 0, 0)).one(pad.Shape)
+        )

@@ -23,9 +23,6 @@ cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_ed
 reason: correct needs the fillet to stay on the chamfered corner, whose name changed with the notch; it breaks with both corners as candidates (ops#79; the continuation of PR 7, or PR 8's Reference ID variant of tier 1)
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2s
 
-reason: the sketch corner's edge keeps its place but not its name (the notch renames its vertex); it breaks with the corner and the notch's edge as candidates (PR 8's Reference ID variant of tier 1, ops#76)
-cli  PartDesignTests.TestNamingScenarios.FilletNotchBeside.test_fillet_edge_V2s
-
 reason: a dress-up's Base on a deleted feature isn't relinked to a base without an element map (an AdditiveBox): no candidates (the relink and the IDX source, PR 6)
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2s
 
@@ -33,9 +30,6 @@ reason: the pieces of a Part::Box's top face merge again, but the whole face's n
 cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2s
 cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2s
 
-reason: two boxes' tops merge in a refined fusion: A's face name changes op code (MKR to FUS), and the merged face carries no name of B's: both break, no candidates (PR 6's IDX source for A; geometry, PR 4, for B)
+reason: two boxes' tops merge in a refined fusion: A's face name changes op code (MKR to FUS), and the merged face carries no name of B's: both break, with the merged face as the candidate. Geometry can't relate them: the merged face is twice the area and its centre 5 and 7 mm from the old ones, beyond tier 3's d_max (PR 6's design: an IDX source across op codes, and merges)
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2s
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2s
-
-reason: every sketch line is redrawn (new geometry IDs), so no name relates the old edge to the new one; V2 found it by the geometric search, which solver documents don't run (tiers 2-3, PR 4)
-cli  PartDesignTests.TestNamingScenarios.SketchRedraw.test_right_top_edge_V2s

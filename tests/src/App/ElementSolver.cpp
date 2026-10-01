@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -1261,6 +1262,358 @@ TEST(SolveOwner, independentOfInputOrder)
                 << "round " << round << ", entry " << order[i];
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tiers 2 and 3: geometry against the saved fingerprint (Task 2 PR 4)
+
+namespace
+{
+
+using Data::ElementFingerprint;
+using Data::GeometryTolerances;
+
+ElementFingerprint fingerprint(
+    char type,
+    const char* kind,
+    std::optional<double> size,
+    Base::Vector3d center,
+    std::optional<Base::Vector3d> direction = {},
+    std::vector<double> radii = {}
+)
+{
+    ElementFingerprint fp;
+    fp.type = type;
+    fp.kind = kind;
+    fp.size = size;
+    fp.center = center;
+    fp.direction = direction;
+    fp.radii = std::move(radii);
+    return fp;
+}
+
+// A direction turned from +Z towards +X by \a angle.
+Base::Vector3d tilted(double angle)
+{
+    return Base::Vector3d(std::sin(angle), 0, std::cos(angle));
+}
+
+}  // namespace
+
+TEST(Tier2, directionsWithinTheAngle)
+{
+    GeometryTolerances tol;
+    const auto top = fingerprint('F', "Plane", 100, Base::Vector3d(5, 5, 10), Base::Vector3d(0, 0, 1));
+    auto other = top;
+
+    other.direction = tilted(0.5e-6);
+    EXPECT_TRUE(Data::intrinsicAgrees(top, other, tol));
+    other.direction = tilted(2e-6);
+    EXPECT_FALSE(Data::intrinsicAgrees(top, other, tol));
+
+    //   a plane's normal has a sense: the bottom face doesn't agree with the top
+    other.direction = Base::Vector3d(0, 0, -1);
+    EXPECT_FALSE(Data::intrinsicAgrees(top, other, tol));
+
+    //   a line's direction has none (the producer's sign normalization can flip near 0)
+    const auto line = fingerprint('E', "Line", 10, Base::Vector3d(0, 5, 10), Base::Vector3d(0, 1, 0));
+    auto reversed = line;
+    reversed.direction = Base::Vector3d(0, -1, 0);
+    EXPECT_TRUE(Data::intrinsicAgrees(line, reversed, tol));
+
+    //   size and position are tier 3's: they don't matter here
+    other = top;
+    other.size = 400;
+    other.center = Base::Vector3d(50, 50, 10);
+    EXPECT_TRUE(Data::intrinsicAgrees(top, other, tol));
+
+    //   the angle is a parameter
+    other.direction = tilted(2e-6);
+    tol.angle = 3e-6;
+    EXPECT_TRUE(Data::intrinsicAgrees(top, other, tol));
+}
+
+TEST(Tier2, kindTypeAndRadii)
+{
+    GeometryTolerances tol;
+    const auto cylinder
+        = fingerprint('F', "Cylinder", 62.8, Base::Vector3d(0, 0, 5), Base::Vector3d(0, 0, 1), {2.0});
+    auto other = cylinder;
+
+    other.radii = {2.0 * (1 + 0.5e-6)};
+    EXPECT_TRUE(Data::intrinsicAgrees(cylinder, other, tol));
+    other.radii = {2.0 * (1 + 2e-6)};
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, other, tol));
+    other.radii = {2.0, 1.0};
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, other, tol));
+
+    other = cylinder;
+    other.kind = "Cone";
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, other, tol));
+    other = cylinder;
+    other.type = 'E';
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, other, tol));
+    other = cylinder;
+    other.direction.reset();
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, other, tol));
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, ElementFingerprint(), tol));
+    EXPECT_FALSE(Data::intrinsicAgrees(ElementFingerprint(), cylinder, tol));
+}
+
+TEST(Tier3, nearestWithAGap)
+{
+    GeometryTolerances tol;        // d_max 1 % of the diagonal, gap 3x, size 1 %
+    const double diagonal = 30.0;  // d_max 0.3
+    const auto saved = fingerprint('E', "Line", 10, Base::Vector3d(20, 5, 10), Base::Vector3d(0, 1, 0));
+    auto at = [&](double x, double size = 10) {
+        auto fp = saved;
+        fp.center = Base::Vector3d(x, 5, 10);
+        fp.size = size;
+        return fp;
+    };
+
+    //   in place, the next one far
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(0), at(20)}, diagonal, tol), 1);
+    //   just inside and just outside d_max
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20.29), at(0)}, diagonal, tol), 0);
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20.31), at(0)}, diagonal, tol), -1);
+    //   the second nearest within 3x the nearest, or within d_max
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20.1), at(19.75)}, diagonal, tol), -1);
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20.0), at(20.2)}, diagonal, tol), -1);
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20.05), at(19.65)}, diagonal, tol), 0);
+    //   two in the same place
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20), at(20)}, diagonal, tol), -1);
+    //   the size within 1 %
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20, 10.09)}, diagonal, tol), 0);
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20, 10.11)}, diagonal, tol), -1);
+    //   no scale, no candidate
+    EXPECT_EQ(Data::extrinsicNearest(saved, {at(20)}, 0.0, tol), -1);
+    EXPECT_EQ(Data::extrinsicNearest(saved, {}, diagonal, tol), -1);
+}
+
+namespace
+{
+
+// The outer-wire names, with fingerprints: the top face 20 x 10 at z = 10, a side face at
+// x = 20, and the top face moved along X.
+struct Placed
+{
+    OuterWire names;
+    std::string otherTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(6)}
+    );
+    ElementFingerprint top
+        = fingerprint('F', "Plane", 200, Base::Vector3d(10, 5, 10), Base::Vector3d(0, 0, 1));
+    ElementFingerprint side
+        = fingerprint('F', "Plane", 100, Base::Vector3d(20, 5, 5), Base::Vector3d(1, 0, 0));
+
+    ElementFingerprint topAt(double x) const
+    {
+        auto fp = top;
+        fp.center = Base::Vector3d(x, 5, 10);
+        return fp;
+    }
+};
+
+// Gives the pool these fingerprints, and counts the measurements in \a calls if set.
+void measure(SolveInput& input, std::map<std::string, ElementFingerprint> fingerprints, int* calls)
+{
+    input.fingerprintOf = [fingerprints, calls](const std::string& index) {
+        if (calls) {
+            ++*calls;
+        }
+        auto it = fingerprints.find(index);
+        return it == fingerprints.end() ? ElementFingerprint() : it->second;
+    };
+}
+
+}  // namespace
+
+TEST(SolveOwner, geometryBreaksTiesAmongSurvivors)
+{
+    Placed p;
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Face"] = {
+        element("Face2", {p.names.newTop}),
+        element("Face10", {p.otherTop}),
+    };
+    input.entries = {missing(p.names.oldTop)};
+
+    //   without a fingerprint: two equal survivors, broken (PR 3), nothing measured
+    int calls = 0;
+    measure(input, {{"Face2", p.top}, {"Face10", p.side}}, &calls);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "broken  -1 [Face2 Face10 ] ambiguous");
+    EXPECT_EQ(calls, 0);
+
+    //   tier 2: only one agrees in kind and direction
+    input.entries[0].fingerprint = p.top;
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+    EXPECT_EQ(outcomes[0].tier, 2);
+    EXPECT_EQ(outcomes[0].evidence, "overlap 0.80, sources overlap, tier 2: 1 of 2");
+
+    //   tier 3: both agree, one is in place and the other far
+    measure(input, {{"Face2", p.topAt(30)}, {"Face10", p.top}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face10");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_NE(outcomes[0].evidence.find("tier 3: nearest 0.000, second 20.000"), std::string::npos);
+
+    //   both agree and neither is in place: broken, both listed
+    measure(input, {{"Face2", p.topAt(15)}, {"Face10", p.topAt(5)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face10"}));
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
+
+    //   neither agrees: geometry doesn't replace tier 1, both still listed
+    measure(input, {{"Face2", p.side}, {"Face10", p.side}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face10"}));
+}
+
+TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
+{
+    // The outer wire gains an edge: the top face changed size and centre, which is what the
+    // edit did. Tier 1's one survivor resolves; geometry doesn't run.
+    Placed p;
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Face"] = {element("Face1", {p.names.side}), element("Face2", {p.names.newTop})};
+    input.entries = {missing(p.names.oldTop)};
+    input.entries[0].fingerprint = p.top;
+    int calls = 0;
+    measure(input, {{"Face1", p.side}, {"Face2", p.topAt(9)}}, &calls);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_EQ(calls, 0);
+}
+
+TEST(SolveOwner, geometryAloneNeedsBothTiers)
+{
+    // SketchRedraw: every sketch line drawn again, so no name relates the old right top edge to
+    // anything. Four edges along Y; the one in place resolves at tier 3.
+    const auto oldEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto line = [](double x, double z) {
+        return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, z), Base::Vector3d(0, 1, 0));
+    };
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.pool["Edge"] = {
+        element("Edge1", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge2", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge3", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge4", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge5", {section({}, {sketchEdge(14, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+    };
+    measure(
+        input,
+        {
+            {"Edge1", line(0, 0)},
+            {"Edge2", line(20, 0)},
+            {"Edge3", line(0, 10)},
+            {"Edge4", line(20, 10)},
+            {"Edge5",
+             fingerprint('E', "Line", 20, Base::Vector3d(10, 0, 10), Base::Vector3d(1, 0, 0))},
+        },
+        nullptr
+    );
+    input.entries = {missing(oldEdge, "Edge")};
+
+    //   no fingerprint: nothing to go on
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "no candidate");
+
+    input.entries[0].fingerprint = line(20, 10);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge4");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(
+        outcomes[0].evidence,
+        "no structural candidate, tier 3: nearest 0.000, second 10.000, d_max 0.245"
+    );
+
+    //   redrawn 5 mm over: tier 2 agrees on four edges, tier 3 on none; they're listed
+    input.entries[0].fingerprint = line(25, 10);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge2", "Edge3", "Edge4"}));
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
+
+    //   the size must agree too
+    input.entries[0].fingerprint = line(20, 10);
+    input.entries[0].fingerprint.size = 12;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    //   another reference of the owner holds the edge in place exactly: it isn't offered
+    input.entries[0].fingerprint = line(20, 10);
+    input.entries.push_back(exact("Edge4", "Edge"));
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge2", "Edge3"}));
+}
+
+TEST(SolveOwner, geometryAloneTwinsSwapStaysBroken)
+{
+    // SolverTwinRotate: two bosses at (+-5, 0) become two at (0, +-5), every name new. Each old
+    // circle has two circles of its radius and axis, neither in place.
+    auto circle = [](double x, double y) {
+        return fingerprint('E', "Circle", 12.566, Base::Vector3d(x, y, 10), Base::Vector3d(0, 0, 1), {2.0});
+    };
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Edge"] = {
+        element("Edge1", {section({}, {sketchEdge(21, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge2", {section({}, {sketchEdge(22, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+    };
+    measure(input, {{"Edge1", circle(0, 5)}, {"Edge2", circle(0, -5)}}, nullptr);
+    input.entries = {
+        missing(section({}, {sketchEdge(1)}, 7, "XTR", 0, 'E', {"PRJ"}), "Edge"),
+        missing(section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"}), "Edge"),
+    };
+    input.entries[0].fingerprint = circle(5, 0);
+    input.entries[1].fingerprint = circle(-5, 0);
+
+    auto outcomes = Data::solveOwner(input);
+
+    for (const auto& outcome : outcomes) {
+        EXPECT_EQ(outcome.status, SolveStatus::Broken);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge1", "Edge2"}));
+    }
+}
+
+TEST(SolveOwner, geometryNeedsOneFingerprintForSameNamedReferences)
+{
+    // Two references with the same old name but different saved fingerprints: no geometry.
+    Placed p;
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Face"] = {
+        element("Face2", {p.names.newTop}),
+        element("Face10", {p.otherTop}),
+    };
+    measure(input, {{"Face2", p.top}, {"Face10", p.side}}, nullptr);
+    input.entries = {missing(p.names.oldTop), missing(p.names.oldTop)};
+    input.entries[0].fingerprint = p.top;
+    input.entries[1].fingerprint = p.topAt(11);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
+    EXPECT_EQ(describe(outcomes[0]), describe(outcomes[1]));
+
+    input.entries[1].fingerprint = p.top;
+    EXPECT_EQ(Data::solveOwner(input)[1].element, "Face2");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -25,7 +25,7 @@
 import FreeCAD as App
 import Part
 
-from .harness import Attached, Filleted, ReachesFace, Scenario, X, Y, Z, edge, face
+from .harness import BROKEN, Attached, Filleted, ReachesFace, Scenario, X, Y, Z, edge, face
 from . import models as m
 
 V = App.Vector
@@ -145,3 +145,85 @@ class SolverOuterWireGains(Scenario):
     def edit(self, doc):
         m.setLines(doc.Profile, {1: ((20, 0), (20, 7)), 2: ((17, 10), (0, 10))})
         doc.Profile.addGeometry(Part.LineSegment(V(20, 7, 0), V(17, 10, 0)), False)
+
+
+# ---------------------------------------------------------------------------------------------
+# The reference solver's tiers 2 and 3 (ops#7, Task 2 PR 4): sketches drawn again, so that no
+# name relates the old elements to the new ones and only geometry can. SketchRedraw's
+# right_top_edge is the case where it should (the edge is back in its place).
+# ---------------------------------------------------------------------------------------------
+
+
+class SolverSketchReplacedMoved(Scenario):
+    """A rectangle (0..20 x 0..10) padded 10 high, a fillet on its right top edge. The rectangle
+    is deleted and drawn again 5 mm over (x 5..25): every geometry ID is new, and the old edge's
+    place is empty. The nearest edge along Y is 5 mm away, so the fillet's reference breaks
+    rather than move to it."""
+
+    area = "sketch edits"
+    MULTI = True
+    REFS = ("right_top_edge",)
+    redrawn = False
+
+    def rightTopEdge(self):
+        if self.redrawn:
+            return BROKEN
+        return edge("line", direction=Y, through=(20, 0, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.rightTopEdge()))
+        fillet.Radius = 1
+        self.ref("right_top_edge", fillet, "Base", self.rightTopEdge, Filleted(1))
+
+    def edit(self, doc):
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(m.polygon([(25, 10), (25, 0), (5, 0), (5, 10)]), False)
+        self.redrawn = True
+
+
+class SolverTwinRotate(Scenario):
+    """A plate (0..30 x 0..30, 5 high) with two round bosses (radius 3, 5 high) at (10, 15) and
+    (20, 15) from one sketch, and a fillet on each boss's top circle. The bosses' sketch is
+    replaced by two circles at (15, 10) and (15, 20): every name is new, and each old circle has
+    two circles of its radius and axis, neither in its place. Both references break; neither
+    takes a rotated boss."""
+
+    area = "sketch edits"
+    MULTI = True
+    REFS = ("edge_a", "edge_b")
+    replaced = False
+
+    def topCircle(self, x):
+        if self.replaced:
+            return BROKEN
+        return edge("circle", center=(x, 15, 10), radius=3)
+
+    def edgeA(self):
+        return self.topCircle(10)
+
+    def edgeB(self):
+        return self.topCircle(20)
+
+    def build(self, doc):
+        body = m.body(doc)
+        plate = m.sketch(doc, "Plate", m.rectangle(0, 0, 30, 30), body)
+        m.pad(body, plate, 5, name="PlatePad")
+        bosses = m.sketch(doc, "Bosses", [m.circle(10, 15, 3), m.circle(20, 15, 3)], body, z=5)
+        bossPad = m.pad(body, bosses, 5, name="BossPad")
+        doc.recompute()
+        for ref, predicate in (("edge_a", self.edgeA), ("edge_b", self.edgeB)):
+            fillet = body.newObject("PartDesign::Fillet", "Fillet_" + ref)
+            fillet.Base = (bossPad, self.names(bossPad, predicate()))
+            fillet.Radius = 0.5
+            self.ref(ref, fillet, "Base", predicate, Filleted(0.5))
+            doc.recompute()
+
+    def edit(self, doc):
+        doc.Bosses.deleteAllGeometry()
+        doc.Bosses.addGeometry([m.circle(15, 10, 3), m.circle(15, 20, 3)], False)
+        self.replaced = True

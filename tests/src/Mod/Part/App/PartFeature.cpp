@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <functional>
 #include <numbers>
 #include <set>
 
@@ -10,11 +11,17 @@
 #include "Mod/Part/App/FeaturePartCommon.h"
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
+#include <BRep_Builder.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp.hxx>
+#include <gp_Trsf.hxx>
 #include "PartTestHelpers.h"
 #include "App/ElementFingerprint.h"
+#include "App/ElementSolver.h"
 #include "App/MappedElement.h"
 #include <Base/Interpreter.h>
 #include <Base/Console.h>
@@ -923,4 +930,114 @@ TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)
     }
     //   the shape itself did move
     EXPECT_FALSE(_boxes[0]->Shape.getShape().getPlacement().isIdentity());
+}
+
+// The reference solver's tiers 2 and 3 (ops#7, Task 2 PR 4) on measured fingerprints, read back
+// from their saved text as a reference holds them.
+
+namespace
+{
+
+Data::ElementFingerprint savedFingerprint(const TopoShape& shape, const std::string& element)
+{
+    Data::ElementFingerprint fp;
+    EXPECT_TRUE(Feature::getElementFingerprint(shape, element.c_str(), fp)) << element;
+    return Data::ElementFingerprint::fromString(fp.toString());
+}
+
+// The fingerprints of the faces of \a shape that \a keep accepts, in index order.
+std::vector<Data::ElementFingerprint> facesOf(
+    const TopoShape& shape,
+    const std::function<bool(const Data::ElementFingerprint&)>& keep
+)
+{
+    std::vector<Data::ElementFingerprint> faces;
+    for (int index = 1; index <= static_cast<int>(shape.countSubShapes(TopAbs_FACE)); ++index) {
+        auto fp = savedFingerprint(shape, "Face" + std::to_string(index));
+        if (keep(fp)) {
+            faces.push_back(fp);
+        }
+    }
+    return faces;
+}
+
+bool facesUp(const Data::ElementFingerprint& fp)
+{
+    return fp.kind == "Plane" && fp.direction && fp.direction->z > 0.5;
+}
+
+}  // namespace
+
+TEST_F(FeaturePartTest, tier2AtTheToleranceBoundaries)
+{
+    Data::GeometryTolerances tol;  // 1e-6 rad, radii 1e-6 relative
+
+    //   a cylinder's radius, just inside and just outside
+    auto lateral = [](double radius) {
+        TopoShape cylinder(BRepPrimAPI_MakeCylinder(radius, 5.0).Shape());
+        auto faces = facesOf(cylinder, [](const auto& fp) { return fp.kind == "Cylinder"; });
+        EXPECT_EQ(faces.size(), 1U);
+        return faces.empty() ? Data::ElementFingerprint() : faces.front();
+    };
+    const auto cylinder = lateral(2.0);
+    EXPECT_TRUE(Data::intrinsicAgrees(cylinder, lateral(2.0 * (1 + 0.5e-6)), tol));
+    EXPECT_FALSE(Data::intrinsicAgrees(cylinder, lateral(2.0 * (1 + 2e-6)), tol));
+
+    //   a box's top face turned about X, just inside and just outside
+    auto top = [](double angle) {
+        gp_Trsf turn;
+        turn.SetRotation(gp::OX(), angle);
+        TopoShape box(
+            BRepBuilderAPI_Transform(BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), turn, true).Shape()
+        );
+        auto faces = facesOf(box, facesUp);
+        EXPECT_EQ(faces.size(), 1U);
+        return faces.empty() ? Data::ElementFingerprint() : faces.front();
+    };
+    const auto level = top(0.0);
+    EXPECT_TRUE(Data::intrinsicAgrees(level, top(0.5e-6), tol));
+    EXPECT_FALSE(Data::intrinsicAgrees(level, top(2e-6), tol));
+    //   the bottom face is parallel, but faces the other way
+    TopoShape box(BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape());
+    auto bottom = facesOf(box, [](const auto& fp) {
+        return fp.kind == "Plane" && fp.direction && fp.direction->z < -0.5;
+    });
+    ASSERT_EQ(bottom.size(), 1U);
+    EXPECT_FALSE(Data::intrinsicAgrees(level, bottom.front(), tol));
+}
+
+TEST_F(FeaturePartTest, tier3NearestWithAGapOnSixBoxes)
+{
+    // Arrange
+    //   the fixture's six boxes in one shape: at y = 0, 1, 3, 2, just past 2 (touching box 0
+    //   within the confusion) and just short of 2
+    _doc->recompute();
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (auto box : _boxes) {
+        builder.Add(compound, box->Shape.getShape().getShape());
+    }
+    TopoShape shape(compound);
+    auto tops = facesOf(shape, facesUp);
+    ASSERT_EQ(tops.size(), 6U);
+    const double diagonal = shape.getBoundBox().CalcDiagonalLength();
+    Data::GeometryTolerances tol;
+
+    // Act and assert
+    //   boxes 0, 1 and 2 are a whole unit from any other: each top face is found in place
+    for (int i : {0, 1, 2}) {
+        EXPECT_EQ(Data::extrinsicNearest(tops[i], tops, diagonal, tol), i) << i;
+    }
+    //   boxes 3, 4 and 5 lie within d_max of each other: none is found
+    for (int i : {3, 4, 5}) {
+        EXPECT_EQ(Data::extrinsicNearest(tops[i], tops, diagonal, tol), -1) << i;
+    }
+    //   without boxes 4 and 5, box 3's top is found again
+    std::vector<Data::ElementFingerprint> four(tops.begin(), tops.begin() + 4);
+    EXPECT_EQ(Data::extrinsicNearest(tops[3], four, diagonal, tol), 3);
+    //   a top face 1 % larger than the saved one isn't the same face
+    auto larger = tops[0];
+    larger.size = *tops[0].size * 1.011;
+    EXPECT_EQ(Data::extrinsicNearest(larger, tops, diagonal, tol), -1);
 }
