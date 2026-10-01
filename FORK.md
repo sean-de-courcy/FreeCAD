@@ -78,7 +78,8 @@ names it.
 | `feat/naming-id` | feat | ops#6 | - | `integration` `322d30842f` | `2e1653d882` (fork PR 49), 2026-09-30 | never (fork feature) |
 | `feat/solver-evidence` | feat | ops#7 | - | `integration` `2e1653d882` | `29ee051d75` (fork PR 50), 2026-10-01 | never (fork feature) |
 | `fix/82-dressup-insert` | fix | ops#82 | - | `integration` `29ee051d75` | `e66195d824` (fork PR 55), 2026-10-01 | a new base's `DressUp::onChanged` moves `BaseFeature` only when `Base` is linked to another object |
-| `feat/solver-headers` | feat | ops#7 | - | `feat/solver-evidence` `e681348502` (fork PR 50) | (fork PR 51) | never (fork feature) |
+| `feat/solver-headers` | feat | ops#7 | - | `feat/solver-evidence` `e681348502` (fork PR 50) | `da9a48830c` (fork PR 51), 2026-10-01 | never (fork feature) |
+| `fix/83-windows-near-macro` | fix | ops#83 | - | `integration` `29ee051d75` | (fork PR 52) | a new base has no lambda named `near` in these tests |
 
 ## Fork-only commits in carried topics
 

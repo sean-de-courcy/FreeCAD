@@ -1689,14 +1689,14 @@ TEST_F(TopoShapeExpansionTest, makeElementDraft)
     auto face = [&](const std::function<bool(const Base::Vector3d&)>& isAt) {
         return elementWhere(result, "Face", isAt);
     };
-    auto near = [](double value, double target) {
+    auto isNear = [](double value, double target) {
         return std::abs(value - target) < Base::Precision::Confusion();
     };
     std::map<std::string, std::string> sides {
-        {"Face1", face([&](auto c) { return c.x < 0.4 && near(c.y, 0.5); })},
-        {"Face2", face([&](auto c) { return c.x > 0.6 && near(c.y, 0.5); })},
-        {"Face3", face([&](auto c) { return c.y < 0.4 && near(c.x, 0.5); })},
-        {"Face4", face([&](auto c) { return c.y > 0.6 && near(c.x, 0.5); })},
+        {"Face1", face([&](auto c) { return c.x < 0.4 && isNear(c.y, 0.5); })},
+        {"Face2", face([&](auto c) { return c.x > 0.6 && isNear(c.y, 0.5); })},
+        {"Face3", face([&](auto c) { return c.y < 0.4 && isNear(c.x, 0.5); })},
+        {"Face4", face([&](auto c) { return c.y > 0.6 && isNear(c.x, 0.5); })},
     };
     for (const auto& [cubeFace, draftedFace] : sides) {
         EXPECT_TRUE(elementHasNames(
@@ -1759,14 +1759,14 @@ TEST_F(TopoShapeExpansionTest, makeElementDraftTopoShapes)
     //   face it replaces, linking that face's name, with the result's tag (cube1TS's, 7); the
     //   bottom and top faces keep their names as they are
     EXPECT_EQ(result.Tag, 7);
-    auto near = [](double value, double target) {
+    auto isNear = [](double value, double target) {
         return std::abs(value - target) < Base::Precision::Confusion();
     };
     std::map<int, std::function<bool(const Base::Vector3d&)>> sides {
-        {1, [&](auto c) { return c.x < 1.4 && near(c.y, 0.5); }},
-        {2, [&](auto c) { return c.x > 1.6 && near(c.y, 0.5); }},
-        {3, [&](auto c) { return c.y < 0.4 && near(c.x, 1.5); }},
-        {4, [&](auto c) { return c.y > 0.6 && near(c.x, 1.5); }},
+        {1, [&](auto c) { return c.x < 1.4 && isNear(c.y, 0.5); }},
+        {2, [&](auto c) { return c.x > 1.6 && isNear(c.y, 0.5); }},
+        {3, [&](auto c) { return c.y < 0.4 && isNear(c.x, 1.5); }},
+        {4, [&](auto c) { return c.y > 0.6 && isNear(c.x, 1.5); }},
     };
     for (const auto& [cubeFace, isAt] : sides) {
         auto cubeFaceName = cube2TS.getMappedName(IndexedName::fromConst("Face", cubeFace));
