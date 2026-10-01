@@ -184,7 +184,12 @@ App::ElementNamePair Feature::getElementName(const char* name, ElementNameType t
 }
 
 // This is the name matching algorithms used for the V2 algorithm.
-bool Feature::doNamesMatch(Data::MappedName& name1, Data::MappedName& name2, bool logMatchedElements)
+bool Feature::doNamesMatch(
+    Data::MappedName& name1,
+    Data::MappedName& name2,
+    bool logMatchedElements,
+    bool strict
+)
 {
     ZoneScoped;
 
@@ -253,7 +258,12 @@ bool Feature::doNamesMatch(Data::MappedName& name1, Data::MappedName& name2, boo
                             if ((name1LinkedName == name2LinkedName)
                                 || (name1LinkedName != Data::EMPTY_VALUE
                                     && name2LinkedName != Data::EMPTY_VALUE
-                                    && doNamesMatch(name1LinkedMappedName, name2LinkedMappedName))) {
+                                    && doNamesMatch(
+                                        name1LinkedMappedName,
+                                        name2LinkedMappedName,
+                                        false,
+                                        strict
+                                    ))) {
                                 linkedNameInterference++;
                             }
                         }
@@ -271,7 +281,12 @@ bool Feature::doNamesMatch(Data::MappedName& name1, Data::MappedName& name2, boo
                                 (name1ConnectedName == name2ConnectedName)
                                 || (name1ConnectedName != Data::EMPTY_VALUE
                                     && name2ConnectedName != Data::EMPTY_VALUE
-                                    && doNamesMatch(name1ConnectedMappedName, name2ConnectedMappedName))
+                                    && doNamesMatch(
+                                        name1ConnectedMappedName,
+                                        name2ConnectedMappedName,
+                                        false,
+                                        strict
+                                    ))
                             ) {
                                 connectedNameInterference++;
                             }
@@ -306,7 +321,8 @@ bool Feature::doNamesMatch(Data::MappedName& name1, Data::MappedName& name2, boo
                     if (linkedNamePass && connectedElementPass
                         && (refIDInterference >= 2
                             || mainCheckSection.referenceIDs == loopCheckSection.referenceIDs
-                            || (refIDInterference == 1 && mainCheckSection.elementType == 'V'))) {
+                            || (!strict && refIDInterference == 1
+                                && mainCheckSection.elementType == 'V'))) {
                         Data::DecodedMappedSection modifiedFirstSection {mainCheckSection};
                         Data::DecodedMappedSection modifiedSecondSection {loopCheckSection};
 
@@ -358,15 +374,69 @@ std::vector<Data::MappedElement> Feature::findSimilarNames(
 )
 {
     ZoneScoped;
-    std::vector<Data::MappedElement> ret {};
 
-    if (searchShape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
-        for (Data::MappedElement& loopNamePair : searchShape.getElementMap()) {
-            if (loopNamePair.name == searchName
-                || Feature::doNamesMatch(searchName, loopNamePair.name, true)) {
-                ret.push_back(loopNamePair);
+    if (searchShape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+        return {};
+    }
+
+    bool ambiguous = false;
+    return matchSimilarNames(searchName, searchShape.getElementMap(), ambiguous);
+}
+
+std::vector<Data::MappedElement> Feature::matchSimilarNames(
+    Data::MappedName& searchName,
+    const std::vector<Data::MappedElement>& elements,
+    bool& ambiguous
+)
+{
+    ZoneScoped;
+    std::vector<Data::MappedElement> ret {};
+    ambiguous = false;
+
+    // Strict pass: every match counts.
+    for (const Data::MappedElement& element : elements) {
+        Data::MappedName candidate {element.name};
+        if (candidate == searchName || doNamesMatch(searchName, candidate, false, true)) {
+            ret.push_back(element);
+        }
+    }
+
+    // Loose pass, only when the strict one found nothing. A match on one shared vertex ID counts
+    // only when it is the only one: several mean the old vertex's lines now meet at different
+    // corners, and picking one would be a guess (ops#79).
+    if (ret.empty()) {
+        for (const Data::MappedElement& element : elements) {
+            Data::MappedName candidate {element.name};
+            if (doNamesMatch(searchName, candidate)) {
+                ret.push_back(element);
             }
         }
+        if (ret.size() > 1) {
+            // Only logged: the reference resolver reports the reference as missing, and the
+            // reference solver (ops#7) reads this as a candidate source and warns on its own.
+            if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
+                std::ostringstream ss;
+                for (const auto& element : ret) {
+                    ss << "\n    " << element.index.toString() << " " << element.name.toString();
+                }
+                FC_LOG("Name match ambiguous: " << searchName.toString() << " loosely matches "
+                                                << ret.size() << " names, none taken:" << ss.str());
+            }
+            ret.clear();
+            ambiguous = true;
+            return ret;
+        }
+    }
+
+    for (const auto& element : ret) {
+        if (element.name == searchName) {
+            continue;
+        }
+        Base::Console().log(
+            "Name match resolved name %s as equivelent to %s\n",
+            searchName.toString(),
+            element.name.toString()
+        );
     }
 
     return ret;

@@ -80,7 +80,8 @@ names it.
 | `fix/82-dressup-insert` | fix | ops#82 | - | `integration` `29ee051d75` | `e66195d824` (fork PR 55), 2026-10-01 | a new base's `DressUp::onChanged` moves `BaseFeature` only when `Base` is linked to another object |
 | `feat/solver-headers` | feat | ops#7 | - | `feat/solver-evidence` `e681348502` (fork PR 50) | `da9a48830c` (fork PR 51), 2026-10-01 | never (fork feature) |
 | `fix/83-windows-near-macro` | fix | ops#83 | - | `integration` `29ee051d75` | `fe2cabbdf1` (fork PR 52), 2026-10-01 | a new base has no lambda named `near` in these tests |
-| `fix/84-dressup-panel-accept` | fix | ops#84 | - | `fix/82-dressup-insert` `6e3ad93d91` (stacked on fork PR 55) | (fork PR 56) | a new base's dress-up task panel keeps `Base`, its list and `BaseFeature` on the same shape after an insert |
+| `fix/84-dressup-panel-accept` | fix | ops#84 | - | `fix/82-dressup-insert` `6e3ad93d91` (stacked on fork PR 55) | `b3034b9aa5` (fork PR 56), 2026-10-01 | a new base's dress-up task panel keeps `Base`, its list and `BaseFeature` on the same shape after an insert |
+| `fix/79-strict-vertex-match` | fix | ops#79, ops#20 | - | `integration` `29ee051d75` | (fork PR 53) | a new base's V2 `doNamesMatch` stops accepting a vertex on one shared ID when several candidates do, and warns on guessed references |
 
 ## Fork-only commits in carried topics
 

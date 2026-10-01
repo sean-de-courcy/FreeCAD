@@ -1,7 +1,0 @@
-# Naming scenarios (PartDesignTests.TestNamingScenarios, ops#5) that V2 with the multi-match flags
-# on (V2multi) gets wrong: a dress-up also takes an edge that isn't the referenced one.
-
-issue: ops#76
-
-reason: a fillet on a sketch corner's vertical edge also takes the edge at a notch's corner beside it, once the sketch's new lines have two-digit IDs (V2multi; V2 is correct)
-cli  PartDesignTests.TestNamingScenarios.FilletNotchBeside.test_fillet_edge_V2multi
