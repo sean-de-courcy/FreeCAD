@@ -3,7 +3,13 @@
 set -e
 set -x
 
-conda_env="FreeCAD.app/Contents/Resources"
+# FreeCAD-CH: the bundle's name and ID come from fork.json
+fork_json="../../../fork.json"
+app_name=$(python3 -c "import json; print(json.load(open('${fork_json}'))['name'])")
+bundle_id=$(python3 -c "import json; print(json.load(open('${fork_json}'))['macos_bundle_id'])")
+app_bundle="${app_name}.app"
+
+conda_env="${app_bundle}/Contents/Resources"
 
 mkdir -p ${conda_env}
 
@@ -44,13 +50,14 @@ python ../scripts/fix_macos_lib_paths.py ${conda_env}/lib -r
 # build and install the launcher
 cmake -B build launcher
 cmake --build build
-mkdir -p FreeCAD.app/Contents/MacOS
-cp build/FreeCAD FreeCAD.app/Contents/MacOS/FreeCAD
+mkdir -p "${app_bundle}/Contents/MacOS"
+cp build/FreeCAD "${app_bundle}/Contents/MacOS/${app_name}"
 
 # Add deployment target suffix to artifact name (e.g., "-macOS11" or "-macOS15")
 deploy_target="${MACOS_DEPLOYMENT_TARGET:-11.0}"
-version_name="FreeCAD_${BUILD_TAG}-macOS${deploy_target%%.*}-$(uname -m)"
-application_menu_name="FreeCAD_${BUILD_TAG}"
+version_name="${app_name}_${BUILD_TAG}-macOS${deploy_target%%.*}-$(uname -m)"
+# the release shows in About; CFBundleName should stay under 16 characters
+application_menu_name="${app_name}"
 
 echo -e "\################"
 echo -e "version_name:  ${version_name}"
@@ -69,13 +76,19 @@ if suffix:
     v += f'd{week}'
 print(v)
 ")
+# FreeCAD-CH: a release build carries the fork release (fork-X.Y.Z -> X.Y.Z)
+if [[ "${BUILD_TAG}" =~ ^fork-([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    bundle_version="${BASH_REMATCH[1]}"
+fi
 
 cp Info.plist.template ${conda_env}/../Info.plist
 sed -i "s/FREECAD_BUNDLE_VERSION/${bundle_version}/" ${conda_env}/../Info.plist
 sed -i "s/APPLICATION_MENU_NAME/${application_menu_name}/" ${conda_env}/../Info.plist
+sed -i "s/APPLICATION_EXECUTABLE/${app_name}/" ${conda_env}/../Info.plist
+sed -i "s/BUNDLE_IDENTIFIER/${bundle_id}/" ${conda_env}/../Info.plist
 
-pixi list -e default > FreeCAD.app/Contents/packages.txt
-sed -i '1s/.*/\nLIST OF PACKAGES:/' FreeCAD.app/Contents/packages.txt
+pixi list -e default > "${app_bundle}/Contents/packages.txt"
+sed -i '1s/.*/\nLIST OF PACKAGES:/' "${app_bundle}/Contents/packages.txt"
 
 echo "Running FreeCAD command-line smoke test..."
 if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
@@ -89,6 +102,10 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --console "import pivy; from pivy
     exit 1
 fi
 
+# FreeCAD-CH: no QuickLook extensions. Their IDs must start with the app's bundle ID, and
+# official FreeCAD, which owns .FCStd, already provides the previews.
+rm -rf "${conda_env}/PlugIns" "${conda_env}/Library/QuickLook"
+
 # move plugins into their final location (Library only exists for macOS < 15.0 builds)
 if [ -d "${conda_env}/Library" ]; then
     mv ${conda_env}/Library ${conda_env}/..
@@ -101,27 +118,28 @@ fi
 
 if [[ "${MACOS_SIGN_RELEASE}" == "true" ]]; then
     # create the signed dmg
-    ../../scripts/macos_sign_and_notarize.zsh -p "FreeCAD" -k ${MACOS_SIGNING_KEY_ID} -o "${version_name}.dmg"
+    ../../scripts/macos_sign_and_notarize.zsh -p "FreeCAD" -k ${MACOS_SIGNING_KEY_ID} \
+        -n "${app_bundle}" -v "${app_name}" -o "${version_name}.dmg"
 else
     # Ad-hoc sign for local builds (required for QuickLook extensions to register)
-    if [ -d "FreeCAD.app/Contents/PlugIns" ]; then
+    if [ -d "${app_bundle}/Contents/PlugIns" ]; then
         echo "Ad-hoc signing App Extensions with entitlements..."
         codesign --force --sign - \
             --entitlements ../../../src/MacAppBundle/QuickLook/modern/ThumbnailExtension.entitlements \
-            FreeCAD.app/Contents/PlugIns/FreeCADThumbnailExtension.appex
+            "${app_bundle}/Contents/PlugIns/FreeCADThumbnailExtension.appex"
         codesign --force --sign - \
             --entitlements ../../../src/MacAppBundle/QuickLook/modern/PreviewExtension.entitlements \
-            FreeCAD.app/Contents/PlugIns/FreeCADPreviewExtension.appex
+            "${app_bundle}/Contents/PlugIns/FreeCADPreviewExtension.appex"
     fi
     echo "Ad-hoc signing app bundle..."
-    codesign --force --sign - FreeCAD.app/Contents/packages.txt
-    if [ -f "FreeCAD.app/Contents/Library/QuickLook/QuicklookFCStd.qlgenerator/Contents/MacOS/QuicklookFCStd" ]; then
-        codesign --force --sign - FreeCAD.app/Contents/Library/QuickLook/QuicklookFCStd.qlgenerator/Contents/MacOS/QuicklookFCStd
+    codesign --force --sign - "${app_bundle}/Contents/packages.txt"
+    if [ -f "${app_bundle}/Contents/Library/QuickLook/QuicklookFCStd.qlgenerator/Contents/MacOS/QuicklookFCStd" ]; then
+        codesign --force --sign - "${app_bundle}/Contents/Library/QuickLook/QuicklookFCStd.qlgenerator/Contents/MacOS/QuicklookFCStd"
     fi
-    codesign --force --sign - FreeCAD.app
+    codesign --force --sign - "${app_bundle}"
 
     # create the dmg
-    dmgbuild -s dmg_settings.py "FreeCAD" "${version_name}.dmg"
+    dmgbuild -s dmg_settings.py -D app_name="${app_bundle}" "${app_name}" "${version_name}.dmg"
 fi
 
 # create hash

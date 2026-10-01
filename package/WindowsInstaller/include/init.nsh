@@ -54,33 +54,8 @@ Function PostMultiUserPageInit
    ContinueInstall:
   ${endif}
 
-  # check if there is an existing FreeCAD installation of the same FreeCAD series
-  # we usually don't release more than 10 versions so with 20 we are safe to check if a newer version is installed
-  IntOp $4 ${APP_VERSION_PATCH} + 20
-  ${for} $5 0 $4
-   ReadRegStr $0 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}${APP_VERSION_MAJOR}${APP_VERSION_MINOR}$5" "DisplayVersion"
-   # also check for an emergency release
-   ${if} $0 == ""
-    ReadRegStr $0 SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}${APP_VERSION_MAJOR}${APP_VERSION_MINOR}$51" "DisplayVersion"
-   ${endif}
-   ${if} $0 != ""
-    StrCpy $R5 $0 # store the read version number
-    StrCpy $OldVersionNumber "${APP_VERSION_MAJOR}${APP_VERSION_MINOR}$5"
-    # we don't stop here because we want the latest installed version
-   ${endif}
-  ${next}
-
-  # NSIS cannot handle numbers with leading zero, thus cut it off before comparing
-  StrCpy $1 $OldVersionNumber "" 1
-  StrCpy $2 ${APP_SERIES_KEY} "" 1
-  ${if} $1 > $2
-   # store the version number and reformat it temporarily for the error message
-   StrCpy $R0 $OldVersionNumber
-   StrCpy $OldVersionNumber $R5
-   MessageBox MB_OK|MB_ICONSTOP "$(NewerInstalled)" /SD IDOK
-   StrCpy $OldVersionNumber $R0
-   Quit
-  ${endif}
+  # FreeCAD-CH: one unversioned install (APP_UNINST_KEY above), replaced by each release;
+  # there is no series of versioned installs to scan
 FunctionEnd
 
 
@@ -91,7 +66,7 @@ Section "!${APP_NAME}" SecCore
  SectionIn RO
 SectionEnd
 
-Section "$(SecFileAssocTitle)" SecFileAssoc
+Section /o "$(SecFileAssocTitle)" SecFileAssoc
  StrCpy $CreateFileAssociations "true"
 SectionEnd
 

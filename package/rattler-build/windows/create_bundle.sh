@@ -5,6 +5,13 @@ set -x
 
 conda_env="$(pwd)/../.pixi/envs/default/"
 
+# FreeCAD-CH: the package's name and executables come from fork.json. The executables are
+# renamed here only (build trees keep FreeCAD.exe), so that official FreeCAD's FreeCAD.exe
+# and FreeCAD-CH's can run, install and uninstall side by side.
+app_name=$(python -c "import json; print(json.load(open('../../../fork.json'))['name'])")
+app_exe="${app_name}.exe"
+app_cmd_exe="${app_name}Cmd.exe"
+
 copy_dir="FreeCAD_Windows"
 mkdir -p ${copy_dir}/bin
 
@@ -28,6 +35,8 @@ cp -a ${conda_env}/Library/bin/*.dll ${copy_dir}/bin
 # Copy FreeCAD build
 cp -a ${conda_env}/Library/bin/freecad* ${copy_dir}/bin
 cp -a ${conda_env}/Library/bin/FreeCAD* ${copy_dir}/bin
+mv ${copy_dir}/bin/freecad.exe "${copy_dir}/bin/${app_exe}"
+mv ${copy_dir}/bin/freecadcmd.exe "${copy_dir}/bin/${app_cmd_exe}"
 cp -a ${conda_env}/Library/data ${copy_dir}/data
 cp -a ${conda_env}/Library/Ext ${copy_dir}/Ext
 cp -a ${conda_env}/Library/lib ${copy_dir}/lib
@@ -53,12 +62,12 @@ echo 'Prefix = ../lib/qt6' >> ${copy_dir}/bin/qt6.conf
 # convenient shortcuts to run the binaries
 if [ -x /c/ProgramData/chocolatey/tools/shimgen.exe ]; then
     pushd ${copy_dir}
-    /c/ProgramData/chocolatey/tools/shimgen.exe -p bin/freecadcmd.exe -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/FreeCADCmd.exe"
-    /c/ProgramData/chocolatey/tools/shimgen.exe --gui -p bin/freecad.exe -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/FreeCAD.exe"
+    /c/ProgramData/chocolatey/tools/shimgen.exe -p "bin/${app_cmd_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_cmd_exe}"
+    /c/ProgramData/chocolatey/tools/shimgen.exe --gui -p "bin/${app_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_exe}"
     popd
 fi
 
-version_name="FreeCAD_${BUILD_TAG}-Windows-$(uname -m)"
+version_name="${app_name}_${BUILD_TAG}-Windows-$(uname -m)"
 
 echo -e "################"
 echo -e "version_name:  ${version_name}"
@@ -117,7 +126,7 @@ if [[ "${WINDOWS_SIGN_RELEASE:-0}" == "1" ]]; then
     done
 
     # Manually check the important one!
-    signtool verify -pa "$SIGN_DIR/bin/FreeCAD.exe"
+    signtool verify -pa "$SIGN_DIR/bin/${app_exe}"
 
     echo "Signing completed."
   else
@@ -128,13 +137,13 @@ else
 fi
 
 echo "Running FreeCAD command-line smoke test..."
-if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --version; then
+if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --version; then
   echo "FreeCAD command-line smoke test failed; the Windows bundle cannot start."
   exit 1
 fi
 
 echo "Running FreeCAD bundled Pivy smoke test..."
-if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --console "import pivy; from pivy import coin; print(pivy.__file__); print(coin.SoDB.getVersion())"; then
+if ! "$SIGN_DIR/bin/${app_cmd_exe}" --safe-mode --console "import pivy; from pivy import coin; print(pivy.__file__); print(coin.SoDB.getVersion())"; then
   echo "FreeCAD bundled Pivy smoke test failed; the Windows bundle cannot import the bundled Coin/Pivy runtime."
   exit 1
 fi
@@ -149,6 +158,7 @@ if [ "${MAKE_INSTALLER}" == "true" ]; then
     "${nsis_cmd}" -V4 \
         -D"ExeFile=${version_name}-installer.exe" \
         -D"FILES_FREECAD=${FILES_FREECAD}" \
+        -D"FILES_FREECADCMD=${FILES_FREECAD}\\bin\\${app_cmd_exe}" \
         -X'SetCompressor /FINAL lzma' \
         ../../WindowsInstaller/FreeCAD-installer.nsi
     mv ../../WindowsInstaller/${version_name}-installer.exe .

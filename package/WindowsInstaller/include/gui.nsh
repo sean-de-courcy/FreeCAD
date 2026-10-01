@@ -9,7 +9,7 @@ Installer user interface settings
 #--------------------------------
 # General
 
-Name "${APP_NAME} ${APP_VERSION}"
+Name "${APP_NAME} ${APP_FORK_VERSION}"
 BrandingText " "
 
 #--------------------------------
@@ -64,7 +64,7 @@ BrandingText " "
 !define MUI_FINISHPAGE_RUN_PARAMETERS "$\"$INSTDIR\${APP_RUN}$\""
 
 !define MUI_FINISHPAGE_LINK $(TEXT_FINISH_WEBSITE)
-!define MUI_FINISHPAGE_LINK_LOCATION "https://www.freecad.org/"
+!define MUI_FINISHPAGE_LINK_LOCATION "${APP_WEBPAGE}"
 #!define MUI_PAGE_CUSTOMFUNCTION_SHOW CheckDesktopShortcut
 !insertmacro MUI_PAGE_FINISH
 
@@ -87,9 +87,9 @@ BrandingText " "
 
 VIProductVersion "${APP_VERSION_NUMBER}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "${APP_NAME}"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductVersion" "${APP_DIR}.${APP_VERSION_PATCH}"
+VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductVersion" "${APP_FORK_VERSION}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "${APP_INFO}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "FileVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalCopyright" "${APP_COPYRIGHT}"
-VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "${APP_NAME} Team"
+VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "LegalTrademarks" ""
