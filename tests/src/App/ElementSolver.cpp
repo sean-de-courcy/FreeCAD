@@ -944,9 +944,135 @@ TEST(SolveOwner, piecesBreakAtOnceUnderOne)
     EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face3", "Face1"}));
     EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
 
-    //   Expand and Equivalent are read as One until PRs 5 and 7
+    //   Expand is read as One until PR 7
     input.entries[0].policy = Data::SolvePolicy::Expand;
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), describe(outcomes[0]));
+}
+
+// Equivalent (Task 2 PR 5): a face split in two by a slot, referenced by a consumer that may get
+// the same result from either half; the name match also offers another face.
+namespace
+{
+struct SplitFace
+{
+    std::string old = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    std::string other = generated({sketchEdge(2)}, 7, "Extrude", 'F', 1);
+    std::string first = piece(old, 9, "CUT", 0, 'F');
+    std::string second = piece(old, 9, "CUT", 1, 'F');
+
+    SolveInput input(std::function<bool(const std::string&, const std::string&)> equivalent) const
+    {
+        SolveInput input;
+        input.pool["Face"] = {
+            element("Face1", {other}),
+            element("Face2", {second}),
+            element("Face3", {first}),
+        };
+        auto entry = missing(old, "Face", {other});
+        entry.policy = Data::SolvePolicy::Equivalent;
+        entry.equivalent = std::move(equivalent);
+        input.entries = {entry};
+        return input;
+    }
+};
+}  // namespace
+
+TEST(SolveOwner, equivalentPiecesResolveToTheFirstPiece)
+{
+    SplitFace names;
+    auto input = names.input([](const std::string&, const std::string&) { return true; });
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    //   the piece whose name sorts first by bytes, never the other face
+    const bool firstSortsFirst = names.first < names.second;
+    EXPECT_EQ(outcomes[0].element, firstSortsFirst ? "Face3" : "Face2");
+    EXPECT_EQ(outcomes[0].name, firstSortsFirst ? names.first : names.second);
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_NE(outcomes[0].evidence.find("2 pieces equivalent for the consumer"), std::string::npos)
+        << outcomes[0].evidence;
+}
+
+TEST(SolveOwner, equivalentPiecesWithDifferentResultsBreak)
+{
+    SplitFace names;
+    //   the other face agrees with one half, the halves don't agree
+    auto input = names.input([](const std::string& a, const std::string& b) {
+        return (a == "Face1") != (b == "Face1");
+    });
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face3", "Face1"}));
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces, 2 different results for the consumer");
+
+    //   no probe: nothing is equivalent
+    input.entries[0].equivalent = nullptr;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces, 2 different results for the consumer");
+}
+
+TEST(SolveOwner, equivalentPiecesIgnoreTheOtherSurvivors)
+{
+    // The halves agree; the other face (a name match, not a piece) gives another result.
+    SplitFace names;
+    auto input = names.input([](const std::string& a, const std::string& b) {
+        return a != "Face1" && b != "Face1";
+    });
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_NE(outcomes[0].element, "Face1");
+}
+
+TEST(SolveOwner, equivalenceNeedsEveryReferenceWithTheOldName)
+{
+    // Two references of the owner to the same old face, solved together: one consumer gets the
+    // same result from either half, the other doesn't.
+    SplitFace names;
+    auto input = names.input([](const std::string&, const std::string&) { return true; });
+    auto second = input.entries[0];
+    second.equivalent = [](const std::string&, const std::string&) {
+        return false;
+    };
+    input.entries.push_back(second);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, equivalentWithoutPiecesIsOne)
+{
+    // Two survivors that aren't pieces of the old face: even if the consumer would get the same
+    // result from either (the coplanar neighbour of a gone face, ops#68), nothing shows that one
+    // of them is the old face.
+    OuterWire names;
+    const auto otherTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(6)}
+    );
+    SolveInput input;
+    input.pool["Face"] = {
+        element("Face2", {names.newTop}),
+        element("Face10", {otherTop}),
+        element("Face1", {names.side}),
+    };
+    auto entry = missing(names.oldTop);
+    entry.policy = Data::SolvePolicy::Equivalent;
+    entry.equivalent = [](const std::string&, const std::string&) {
+        return true;
+    };
+    input.entries = {entry};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
 }
 
 TEST(SolveOwner, tierZeroElementsLeaveTheOtherPools)

@@ -282,6 +282,9 @@ struct AppExport SolveInput
         /// The fingerprint saved with the reference; invalid if none (tiers 2 and 3 then don't
         /// run for it).
         ElementFingerprint fingerprint;
+        /// Equivalent: whether the consumer would get the same result from either of two
+        /// elements of the target (index names, e.g. `Face7`). Unset: no two are equivalent.
+        std::function<bool(const std::string&, const std::string&)> equivalent;
     };
     /// An element of the target with all its mapped names.
     struct Element
@@ -344,8 +347,14 @@ struct AppExport SolveOutcome
  *   outcome. Geometry runs for them only if they all hold the same valid fingerprint.
  * - Candidates: the overlap survivors (NameAncestry::structuralSurvivors() over every name of
  *   every pool element of the entry's type) and the name matches of that type, by \a source.
- * - One (and, until PRs 5 and 7, Expand and Equivalent): a candidate that is a piece of the old
- *   element breaks the entry at once, with the pieces as candidates.
+ * - One (and, until PR 7, Expand): a candidate that is a piece of the old element breaks the
+ *   entry at once, with the pieces as candidates.
+ * - Equivalent, with pieces among the candidates: when every piece gives the consumer the same
+ *   result (Entry::equivalent, for every member), the pieces are one candidate, represented by
+ *   the one whose first name sorts first by bytes, and geometry doesn't run; other survivors
+ *   don't count. Otherwise the entry breaks, with the pieces as candidates. Without pieces,
+ *   Equivalent is One: a gone element's coplanar neighbour gives an attachment the same
+ *   placement too (ops#68), so equivalence among unrelated survivors is no evidence.
  * - Several candidates: tier 2 keeps those whose intrinsic geometry agrees with the saved
  *   fingerprint (intrinsicAgrees()), if any do; among several of those, tier 3 keeps the one
  *   extrinsicNearest() chooses, if it chooses one. Geometry only narrows tier 1's survivors,
