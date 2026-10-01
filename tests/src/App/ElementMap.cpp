@@ -817,6 +817,88 @@ TEST_F(ElementMapTest, addChildElementsWithoutMapV2)
     }
 }
 
+TEST_F(ElementMapTest, setElementNameDuplicateCountsV2)
+{
+    // Arrange
+    //   a single-section name, as a shape without history has (ops#55): the same name set on
+    //   Face1-4 without overwrite, then a name that already carries duplicate count 2
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    const Data::MappedName name(faceName(6, 7L, 0));
+
+    // Act
+    std::vector<Data::MappedName> stored;
+    for (int i = 1; i <= 4; ++i) {
+        stored.push_back(map->setElementName(Data::IndexedName("Face", i), name, 7L));
+    }
+    auto fromCount2 =
+        map->setElementName(Data::IndexedName("Face", 5), Data::MappedName(faceName(6, 7L, 2)), 7L);
+
+    // Assert
+    //   every retry writes the duplicate count field and keeps the op code, whatever the count
+    for (int i = 1; i <= 4; ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(stored[i - 1].toString(), faceName(6, 7L, i - 1));
+        EXPECT_EQ(map->find(Data::IndexedName("Face", i)), stored[i - 1]);
+        EXPECT_EQ(map->find(stored[i - 1]), Data::IndexedName("Face", i));
+    }
+    //   a name that carries a count starts after it: 2 is Face3's, 3 is Face4's
+    EXPECT_EQ(fromCount2.toString(), faceName(6, 7L, 4));
+    EXPECT_EQ(map->find(fromCount2), Data::IndexedName("Face", 5));
+}
+
+TEST_F(ElementMapTest, addChildElementsPatternInstancesV2)
+{
+    // Arrange
+    //   pattern: PartDesign's Transformed copies an original once per instance with
+    //   makeElementTransform(..., Data::indexSuffix(k)): op "" for instance 2, "_2" for
+    //   instance 3, "_3" for instance 4 (indexSuffix() gives nothing below 2). copyElementMap()
+    //   passes that op as each child's postfix (ops#55). Four copies of Face1-6 of a box (tag 1):
+    //   instance 1 (the support, as the original's own copy) and instances 2-4.
+    const std::vector<QByteArray> postfixes = {QByteArray(), QByteArray(""), "_2", "_3"};
+    auto instances = [&](const Data::ElementMapPtr& box) {
+        std::vector<Data::ElementMap::MappedChildElements> children;
+        for (int k = 0; k < 4; ++k) {
+            children.push_back(
+                {Data::IndexedName("Face", 1), 6, 6 * k, 1L, box, postfixes[k], _sid}
+            );
+        }
+        return children;
+    };
+    auto fromMapless = std::make_shared<Data::ElementMap>();
+    fromMapless->hasher = _hasher;
+    auto fromMapped = std::make_shared<Data::ElementMap>();
+    fromMapped->hasher = _hasher;
+
+    // Act
+    //   an original without a map (an additive primitive that is the body's first feature)
+    fromMapless->addChildElements(3L, instances(Data::ElementMapPtr()));
+    //   an original with a map (a Pad, or a primitive on a base)
+    fromMapped->addChildElements(3L, instances(makeUnmappedBoxMap(1L, _hasher)));
+
+    // Assert
+    auto face = [](int k, int i) { return Data::IndexedName("Face", 6 * k + i); };
+    for (int i = 1; i <= 6; ++i) {
+        SCOPED_TRACE(i);
+        const std::string rest = ";0;F;0;IDX,SRC;_";
+        const std::string head = "Face" + std::to_string(i) + ";_;1;";
+        //   without a map, each instance's postfix is its op code (MKR when empty): instances 1
+        //   and 2 have the same name and are told apart by the duplicate count, instances 3 and 4
+        //   by their op codes "_2" and "_3", each with duplicate count 0
+        EXPECT_EQ(fromMapless->find(face(0, i)).toString(), faceName(i, 1L, 0));
+        EXPECT_EQ(fromMapless->find(face(1, i)).toString(), faceName(i, 1L, 1));
+        EXPECT_EQ(fromMapless->find(face(2, i)).toString(), head + "_2" + rest);
+        EXPECT_EQ(fromMapless->find(face(3, i)).toString(), head + "_3" + rest);
+        //   with a map, the postfix is not used: every instance keeps the original's name, told
+        //   apart by the duplicate count 0-3
+        for (int k = 0; k < 4; ++k) {
+            EXPECT_EQ(fromMapped->find(face(k, i)).toString(), faceName(i, 1L, k));
+        }
+    }
+    EXPECT_EQ(fromMapless->size(), 24);
+    EXPECT_EQ(fromMapped->size(), 24);
+}
+
 TEST_F(ElementMapTest, addChildElementsPartlyMappedV2)
 {
     // Arrange

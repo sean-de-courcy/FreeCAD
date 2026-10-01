@@ -89,7 +89,8 @@ names it.
 | `feat/solver-consumers` | feat | ops#7, ops#66, ops#68 | - | `feat/solver-geometry` `f674615613` (fork PR 57) | `3d6266c1c8` (fork PR 59), 2026-10-01 | never (fork feature) |
 | `feat/solver-relink` | feat | ops#7 | - | `feat/solver-consumers` `e140c865e1` (fork PR 59) | `0cb280a74d` (fork PR 60), 2026-10-01 | never (fork feature) |
 | `fix/69-consumers-loud` | fix | ops#69, ops#70, ops#71 | - | `integration` `0cb280a74d` | `fa4ec55a11` (fork PR 61), 2026-10-01 | a new base's SubShapeBinder, `ProfileBased::getProfileShape`, Loft and Pipe fail on a missing sub-element and name it |
-| `fix/72-sketch-external-loud` | fix | ops#72, ops#75 | - | `integration` `0cb280a74d` | (fork PR 62) | a new base's sketch fails on a missing external geometry reference and keeps the link, its frozen geometry and constraints (also on opening it) |
+| `fix/72-sketch-external-loud` | fix | ops#72, ops#75 | - | `integration` `0cb280a74d` | `004b400470` (fork PR 62), 2026-10-01 | a new base's sketch fails on a missing external geometry reference and keeps the link, its frozen geometry and constraints (also on opening it) |
+| `fix/55-duplicate-count` | fix | ops#55 | - | `integration` `004b400470` | (fork PR 64) | tests: V2 duplicate counts and pattern instance names (gtests); two patterns of one original whose references move between them (scenarios, listed as known failures for Task 1) |
 
 ## Fork-only commits in carried topics
 

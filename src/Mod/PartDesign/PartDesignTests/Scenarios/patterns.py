@@ -21,11 +21,13 @@
 # ***************************************************************************
 
 """Patterns: a chamfer on one instance's hole edge and a sketch on another instance's face
-follow their instances when the pattern's occurrences, spacing or direction change."""
+follow their instances when the pattern's occurrences, spacing or direction change. Two patterns
+of one original: a sketch on one pattern's instance stays there when the other pattern changes
+(ops#55)."""
 
 import FreeCAD as App
 
-from .harness import Attached, Chamfered, Scenario, X, Y, Z, edge, face
+from .harness import BROKEN, Attached, Chamfered, Scenario, ScenarioError, X, Y, Z, edge, face
 from . import models as m
 
 V = App.Vector
@@ -203,3 +205,113 @@ class PolarDirection(PolarPatternEdit):
     def edit(self, doc):
         doc.PolarPattern.Reversed = True
         self.sense = -1
+
+
+class TwoPatternsEdit(Scenario):
+    """Two LinearPatterns of one original, a 10 x 10 x 10 block at the origin: PatY along Y,
+    then PatX along X, each 3 occurrences 30 apart ("Spacing" mode), so the chain is original ->
+    PatY -> PatX and PatX's result holds five blocks. Sketches attached to PatX's result, on the
+    top faces of PatX's instance 3 (x 60..70) and PatY's instance 3 (y 60..70). Then PatX's
+    occurrences go 3 -> 2 -> 3, and PatY's the same way. With one fewer occurrence the pattern's
+    instance 3 is gone: its sketch's reference breaks, and the other sketch stays on its block.
+    With 3 again, each sketch is back on its own block.
+
+    V2 tells the instances apart by the element map's duplicate counter alone, with nothing of
+    the pattern in their names: when PatY loses an instance, PatX's counters shift, and the
+    sketch on PatY's instance 3 lands on one of PatX's blocks, silently (ops#55). Task 1 (ops#6)
+    names the instances by content. Subclasses make the original (`original`)."""
+
+    abstract = True
+    area = "patterns"
+    REFS = ("sketch_x3_face", "sketch_y3_face")
+    STEPS = {
+        "xTwo": ("PatX", 2),
+        "xThree": ("PatX", 3),
+        "yTwo": ("PatY", 2),
+        "yThree": ("PatY", 3),
+    }
+    steps = tuple(STEPS)
+    size, spacing = 10, 30
+
+    def original(self, doc, body):
+        raise NotImplementedError
+
+    def topFace(self, x, y):
+        centre = (x + self.size / 2, y + self.size / 2, self.size)
+        return face("plane", normal=Z, through=centre, contains=centre)
+
+    def x3Face(self):
+        return BROKEN if self.stepName == "xTwo" else self.topFace(2 * self.spacing, 0)
+
+    def y3Face(self):
+        return BROKEN if self.stepName == "yTwo" else self.topFace(0, 2 * self.spacing)
+
+    def pattern(self, doc, body, original, name, axis):
+        """Adds the pattern after the Tip once its Originals are set (see PatternEdit)."""
+        pattern = doc.addObject("PartDesign::LinearPattern", name)
+        pattern.Originals = [original]
+        pattern.Direction = (m.originFeature(body, axis), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = self.spacing
+        pattern.Occurrences = 3
+        pattern.Refine = False
+        body.addObject(pattern)
+        return pattern
+
+    def build(self, doc):
+        body = m.body(doc)
+        original = self.original(doc, body)
+        patY = self.pattern(doc, body, original, "PatY", "Y_Axis")
+        patX = self.pattern(doc, body, original, "PatX", "X_Axis")
+        doc.recompute()
+        if patX.BaseFeature != patY or patY.BaseFeature != original:
+            raise ScenarioError("the chain isn't original -> PatY -> PatX")
+        for name, ref, expect in (
+            ("OnX3", "sketch_x3_face", self.x3Face),
+            ("OnY3", "sketch_y3_face", self.y3Face),
+        ):
+            sketch = body.newObject("Sketcher::SketchObject", name)
+            sketch.AttachmentSupport = [(patX, self.names(patX, expect())[0])]
+            sketch.MapMode = "FlatFace"
+            # No outcome check: the blocks' top faces are coplanar, so a sketch on the wrong one
+            # has the same placement. The stored reference alone tells them apart.
+            self.ref(ref, sketch, "AttachmentSupport", expect)
+
+    def _occurrences(self, doc):
+        name, occurrences = self.STEPS[self.stepName]
+        doc.getObject(name).Occurrences = occurrences
+
+    xTwo = xThree = yTwo = yThree = _occurrences
+
+
+class TwoPatternsBox(TwoPatternsEdit):
+    """The original is an AdditiveBox, the body's first feature: its AddSubShape has no element
+    map, so instance 3's names carry the pattern's `_2` suffix as their op code."""
+
+    def original(self, doc, body):
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = self.size
+        return box
+
+
+class TwoPatternsBoxOnPlate(TwoPatternsEdit):
+    """The original is an AdditiveBox on a plate (an AdditiveBox 100 x 100 x 2 under it, from
+    (-10, -10, -2)): its AddSubShape has an element map, so the instances differ only in the
+    duplicate count."""
+
+    def original(self, doc, body):
+        plate = body.newObject("PartDesign::AdditiveBox", "Plate")
+        plate.Length = plate.Width = 100
+        plate.Height = 2
+        plate.Placement.Base = V(-10, -10, -2)
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = self.size
+        return box
+
+
+class TwoPatternsPad(TwoPatternsEdit):
+    """The original is a Pad of a 10 x 10 square on the XY plane, 10 long."""
+
+    def original(self, doc, body):
+        square = m.sketch(doc, "Square", m.rectangle(0, 0, self.size, self.size), body)
+        return m.pad(body, square, self.size)
