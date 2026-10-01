@@ -765,7 +765,7 @@ class Scenario:
     def __init__(self, config):
         self.config = config
         self.mode, self.multi, self.solver = CONFIGS[config]
-        self.step = None  # the step being run, for expectations that change between steps
+        self.stepName = None  # the step being run, for expectations that change between steps
         self.refs = {}
         self.documents = []
 
@@ -827,7 +827,7 @@ class Scenario:
                 raise ScenarioError("references aren't correct before the edit:\n" + "\n".join(bad))
             steps = getattr(self, "steps", None)
             if not steps:
-                self.step = "edit"
+                self.stepName = "edit"
                 self.edit(self.doc)  # may close and reopen the documents (self.doc)
                 self.doc.recompute()
                 after = {name: self.judge(ref, "edit") for name, ref in self.refs.items()}
@@ -839,7 +839,7 @@ class Scenario:
             results = {name: StepResults() for name in self.refs}
             previous = before
             for step in steps:
-                self.step = step
+                self.stepName = step
                 getattr(self, step)(self.doc)  # may close and reopen the documents (self.doc)
                 self.doc.recompute()
                 judged = {name: self.judge(ref, step) for name, ref in self.refs.items()}
@@ -924,6 +924,9 @@ class Scenario:
         result.verdict = combine(stored, outcome)
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(self._solverReport(owner, ref.prop))
+        if self.solver and not owner.isValid():
+            # a broken reference fails its owner, which names it (ops#7)
+            record["error"] = owner.getStatusString()
         return result
 
     @staticmethod

@@ -67,3 +67,4 @@ from PartDesignTests.TestNamingDump import TestNamingGolden, TestNamingSeeded
 from PartDesignTests.TestNamingDump import TestNamingRepeated, TestNamingTagCollision
 from PartDesignTests.TestNamingScenarios import *  # one class per scenario (FreeCAD-CH, ops#5)
 from PartDesignTests.TestNamingRList import TestNamingRList  # FreeCAD-CH, ops#5
+from PartDesignTests.TestNamingSolver import TestNamingSolver  # FreeCAD-CH, ops#7

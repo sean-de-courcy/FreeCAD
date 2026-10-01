@@ -86,7 +86,7 @@ class SolverEdgeReturns(ChamferEdgeShortened):
     removed = ("removeEdge",)
 
     def frontTopEdge(self):
-        if self.step in self.removed:
+        if self.stepName in self.removed:
             return BROKEN
         return super().frontTopEdge()
 

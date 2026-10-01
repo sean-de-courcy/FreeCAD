@@ -33,3 +33,7 @@ cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_ed
 reason: a fillet on a sketch corner's vertical edge, after a chamfer on the front edge, breaks when a notch is cut into the front side: the chamfer kept the front line's piece and left the corner, so the geometric search can't find the old edge, and the two corners that share one vertex ID with it are ambiguous (ops#79's Track A outcome, as V1); correct needs the chamfer to keep every piece
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2multi
+
+reason: two boxes' tops merge in a refined Part::Fuse: A's face name changes op code (MKR to FUS) and the merged face carries no name of B's, so both sketches break (V2; V2s is listed in ops7-solver.txt)
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2
