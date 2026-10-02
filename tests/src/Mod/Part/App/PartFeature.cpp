@@ -19,7 +19,12 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <TopoDS_Compound.hxx>
 #include <gp.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+#include <TopLoc_Location.hxx>
 #include "PartTestHelpers.h"
 #include "App/ElementFingerprint.h"
 #include "App/ElementSolver.h"
@@ -1078,6 +1083,87 @@ TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)
     }
     //   the shape itself did move
     EXPECT_FALSE(_boxes[0]->Shape.getShape().getPlacement().isIdentity());
+}
+
+namespace
+{
+
+// Every face, edge and vertex fingerprint of \a shape, as text, in index order.
+std::vector<std::string> allFingerprints(const TopoShape& shape)
+{
+    std::vector<std::string> result;
+    for (const char* type : {"Face", "Edge", "Vertex"}) {
+        const auto count = static_cast<int>(shape.countSubElements(type));
+        for (int index = 1; index <= count; ++index) {
+            Data::ElementFingerprint fp;
+            const std::string element = type + std::to_string(index);
+            EXPECT_TRUE(Feature::getElementFingerprint(shape, element.c_str(), fp)) << element;
+            result.push_back(element + " " + fp.toString());
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
+TEST_F(FeaturePartTest, fingerprintsThroughTheCachedShapeEqualAFreshCopy)
+{
+    // Arrange
+    //   a box and a cylinder in a compound, the cylinder placed inside it, so its sub-shapes carry
+    //   a location of their own; then the compound itself moved and turned
+    gp_Trsf inner;
+    inner.SetTranslation(gp_Vec(5, 1, 0));
+    TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(1.0, 2.0).Shape().Moved(TopLoc_Location(inner));
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    builder.Add(compound, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape());
+    builder.Add(compound, cylinder);
+    gp_Trsf outer;
+    outer.SetRotation(gp_Ax1(gp_Pnt(1, 2, 3), gp_Dir(1, 1, 0)), 0.7);
+    outer.SetTranslationPart(gp_Vec(10, -4, 7));
+    TopoShape shape(compound.Moved(TopLoc_Location(outer)));
+    ASSERT_FALSE(shape.getShape().Location().IsIdentity());
+    //   the shape's cache is built while it is placed
+    ASSERT_EQ(shape.countSubElements("Face"), 9);
+    ASSERT_FALSE(shape.getSubShape("Edge4").IsNull());
+
+    // Act
+    //   through the cached shape, twice (the second time from the filled cache)
+    auto cached = allFingerprints(shape);
+    auto again = allFingerprints(shape);
+    //   from fresh copies without a cache, placed and at the origin (the path before ops#90)
+    auto fresh = allFingerprints(TopoShape(shape.getShape()));
+    auto atOrigin = allFingerprints(TopoShape(shape.getShape().Located(TopLoc_Location())));
+
+    // Assert
+    ASSERT_EQ(cached.size(), 9u + 15u + 10u);
+    EXPECT_EQ(cached, again);
+    EXPECT_EQ(cached, fresh);
+    EXPECT_EQ(cached, atOrigin);
+}
+
+TEST_F(FeaturePartTest, fingerprintsThroughThePropertyEqualAFreshCopy)
+{
+    // Arrange
+    //   a placed box: the property's shape has an element map and a cache
+    _boxes[0]->Placement.setValue(
+        Base::Placement(Base::Vector3d(10, -4, 7), Base::Rotation(Base::Vector3d(1, 1, 0), 0.7))
+    );
+    _boxes[0]->recomputeFeature();
+    const TopoShape& shape = _boxes[0]->Shape.getShape();
+    ASSERT_FALSE(shape.getShape().Location().IsIdentity());
+
+    // Act and assert
+    auto cached = allFingerprints(shape);
+    EXPECT_EQ(cached.size(), 6u + 12u + 8u);
+    EXPECT_EQ(cached, allFingerprints(TopoShape(shape.getShape())));
+    for (int index = 1; index <= 6; ++index) {
+        const std::string element = "Face" + std::to_string(index);
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(_boxes[0]->getElementFingerprint(element.c_str(), fp));
+        EXPECT_EQ(element + " " + fp.toString(), cached[index - 1]);
+    }
 }
 
 // The reference solver's tiers 2 and 3 (ops#7, Task 2 PR 4) on measured fingerprints, read back
