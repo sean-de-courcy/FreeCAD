@@ -196,9 +196,9 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
                                                             : resolution.shadow.oldName;
 }
 
-// Whether an exact reference may be split (Task 2 PR 7): its saved fingerprint is a line edge
-// that its element now lies strictly within, or a plane its element now lies in, smaller. One
-// fingerprint per exact line edge or planar face reference.
+// Whether an exact reference may be split (Task 2 PR 7): its saved fingerprint is a line edge or
+// an arc that its element now lies strictly within, or a plane its element now lies in, smaller.
+// One fingerprint per exact line, circle or planar face reference.
 bool mayBeSplit(const SolverEntry& entry,
                 GeoFeature* geo,
                 double diagonal,
@@ -210,7 +210,9 @@ bool mayBeSplit(const SolverEntry& entry,
     }
     const std::string type = indexType(entry.oldIndex);
     const auto& text = entry.oldFingerprint;
-    const bool line = type == "Edge" && text.find("|E|Line|") != std::string::npos;
+    const bool line = type == "Edge"
+        && (text.find("|E|Line|") != std::string::npos
+            || text.find("|E|Circle|") != std::string::npos);
     const bool plane = type == "Face" && text.find("|F|Plane|") != std::string::npos;
     if (!line && !plane) {
         return false;
@@ -427,6 +429,11 @@ bool fingerprintsAgree(const Data::ElementFingerprint& saved,
             return false;
         }
     }
+    // A circle's centre (PR 7b), when both have one: a version-1 fingerprint has none.
+    if (saved.location && now.location
+        && Base::Distance(*saved.location, *now.location) > 1e-7 * std::max(diagonal, 1.0)) {
+        return false;
+    }
     return true;
 }
 
@@ -544,10 +551,11 @@ bool solveElementReferences(DocumentObject* feature,
             return e->kind == SolverEntry::Kind::Missing;
         });
         // An owner with only exact references is solved only if one of them may be split: a
-        // line edge or a planar face (the text first, then the geometry).
+        // line edge, an arc or a planar face (the text first, then the geometry).
         if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
                 return e->kind == SolverEntry::Kind::Exact
                     && (e->oldFingerprint.find("|E|Line|") != std::string::npos
+                        || e->oldFingerprint.find("|E|Circle|") != std::string::npos
                         || e->oldFingerprint.find("|F|Plane|") != std::string::npos);
             })) {
             continue;

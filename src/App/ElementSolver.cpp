@@ -1055,54 +1055,110 @@ double lineAngle(Base::Vector3d a, Base::Vector3d b)
     return std::atan2((a % b).Length(), std::abs(a * b));
 }
 
+constexpr double Pi = 3.14159265358979323846;
+
 /* Where an edge was, from the fingerprint saved with its reference (the continuation, Task 2 PR
- * 7): an extent of arc length [0, length] along the old curve. A piece of the target lies on the
- * old curve when interval() gives its extent there; everything after that (containment, a
- * run-past, the overlap check) compares intervals, so another curve kind only adds its own of()
- * and interval(). Lines only, for now.
+ * 7): an extent of arc length [0, length] along the old curve, a line or (PR 7b) a circle. A
+ * piece of the target lies on the old curve when interval() gives its extent there; everything
+ * after that (containment, a run-past, the overlap check) compares intervals.
  */
 struct OldExtent
 {
-    // A line: from origin along the unit direction axis.
+    bool circle = false;
+    // A line: from origin along the unit direction axis. A circle: centre origin, unit axis,
+    // radius, and arc length s = radius * (theta + alpha), theta being the angle from the old
+    // arc's bisector towards axis x bisector, alpha half the old arc's angle.
     Base::Vector3d origin;
     Base::Vector3d axis;
+    Base::Vector3d bisector;
+    double radius = 0.0;
+    double alpha = 0.0;
     double length = 0.0;
-    // A closed curve (a full circle): intervals wrap at length.
+    // A full circle: intervals wrap at length, and s starts opposite the hit's middle.
     bool cyclic = false;
     double eps = 0.0;
     double angle = 0.0;
 
+    // \a hit, the exact element, places a full circle's start of s.
     static std::optional<OldExtent> of(
         const ElementFingerprint& saved,
         double eps,
-        const GeometryTolerances& tolerances
+        const GeometryTolerances& tolerances,
+        const ElementFingerprint* hit = nullptr
     )
     {
-        if (!saved.isValid() || saved.type != 'E' || saved.kind != "Line" || !saved.size
-            || !saved.center || !saved.direction || saved.direction->Length() <= 0.0
-            || !(*saved.size > eps)) {
+        if (!saved.isValid() || saved.type != 'E' || !saved.size || !saved.center
+            || !saved.direction || saved.direction->Length() <= 0.0 || !(*saved.size > eps)) {
             return std::nullopt;
         }
         OldExtent extent;
         extent.axis = *saved.direction;
         extent.axis.Normalize();
         extent.length = *saved.size;
-        // A line edge's centre of mass is its midpoint.
-        extent.origin = *saved.center - extent.axis * (extent.length / 2.0);
         extent.eps = eps;
         extent.angle = tolerances.angle;
+        if (saved.kind == "Line") {
+            // A line edge's centre of mass is its midpoint.
+            extent.origin = *saved.center - extent.axis * (extent.length / 2.0);
+            return extent;
+        }
+        if (saved.kind != "Circle" || !saved.location || saved.radii.size() != 1
+            || !(saved.radii.front() > eps)) {
+            return std::nullopt;  // another curve, or a version-1 circle: not locatable
+        }
+        extent.circle = true;
+        extent.origin = *saved.location;
+        extent.radius = saved.radii.front();
+        const double full = 2.0 * Pi * extent.radius;
+        if (extent.length >= full - eps) {
+            // A full circle: s starts opposite the hit's middle, so the hit is one interval.
+            // Without a hit that shows one (a collapse checks containment only), any start does.
+            extent.cyclic = true;
+            extent.length = full;
+            extent.alpha = Pi;
+            Base::Vector3d toward;
+            if (hit && hit->center) {
+                toward = extent.inPlane(*hit->center - extent.origin);
+            }
+            if (toward.Length() < 1e-6 * extent.radius) {
+                toward = extent.inPlane(std::abs(extent.axis.x) < 0.9 ? Base::Vector3d(1, 0, 0)
+                                                                      : Base::Vector3d(0, 1, 0));
+            }
+            extent.bisector = toward;
+            extent.bisector.Normalize();
+            return extent;
+        }
+        // The centre of mass lies on the arc's bisector, r sin(alpha) / alpha from the centre.
+        extent.alpha = extent.length / (2.0 * extent.radius);
+        Base::Vector3d toward = extent.inPlane(*saved.center - extent.origin);
+        if (toward.Length() < 1e-6 * extent.radius) {
+            // Nearly a full circle: its bisector isn't reliable.
+            return std::nullopt;
+        }
+        extent.bisector = toward;
+        extent.bisector.Normalize();
         return extent;
     }
 
-    // The piece's extent along the old curve, sorted; nothing if it doesn't lie on that curve
-    // (a line: the same direction within the angle, both ends within eps of the line).
+    Base::Vector3d inPlane(const Base::Vector3d& v) const
+    {
+        return v - axis * (v * axis);
+    }
+
+    // The piece's extent along the old curve, sorted; nothing if it doesn't lie on that curve. A
+    // line: the same direction within the angle, both ends within eps of the line. A circle: a
+    // circle of the same axis (within the angle), radius, centre and plane (within eps).
     std::optional<std::pair<double, double>> interval(const ElementFingerprint& piece) const
     {
-        if (!piece.isValid() || piece.type != 'E' || piece.kind != "Line" || !piece.size
-            || !piece.center || !piece.direction || piece.direction->Length() <= 0.0) {
+        if (!piece.isValid() || piece.type != 'E' || !piece.size || !piece.center
+            || !piece.direction || piece.direction->Length() <= 0.0
+            || lineAngle(axis, *piece.direction) > angle) {
             return std::nullopt;
         }
-        if (lineAngle(axis, *piece.direction) > angle) {
+        if (circle) {
+            return arcInterval(piece);
+        }
+        if (piece.kind != "Line") {
             return std::nullopt;
         }
         Base::Vector3d direction = *piece.direction;
@@ -1124,15 +1180,74 @@ struct OldExtent
         return range;
     }
 
+    std::optional<std::pair<double, double>> arcInterval(const ElementFingerprint& piece) const
+    {
+        if (piece.kind != "Circle" || !piece.location || piece.radii.size() != 1
+            || std::abs(piece.radii.front() - radius) > eps
+            || Base::Distance(*piece.location, origin) > eps) {
+            return std::nullopt;
+        }
+        Base::Vector3d offset = *piece.center - origin;
+        if (std::abs(offset * axis) > eps) {
+            return std::nullopt;
+        }
+        const double full = 2.0 * Pi * radius;
+        Base::Vector3d toward = inPlane(offset);
+        if (toward.Length() < 1e-6 * radius) {
+            // A whole circle, or nearly: all of it.
+            return std::make_pair(radius * (alpha - Pi), radius * (alpha + Pi));
+        }
+        const double half = *piece.size / (2.0 * radius);
+        const double beta = std::atan2(toward * (axis % bisector), toward * bisector);
+        std::pair<double, double> range {radius * (beta - half + alpha),
+                                         radius * (beta + half + alpha)};
+        if (cyclic) {
+            // Starting within one turn; it may end past length (wrapping).
+            double shift = std::floor(range.first / full) * full;
+            range.first -= shift;
+            range.second -= shift;
+            return range;
+        }
+        // The turn that overlaps the old arc most.
+        std::pair<double, double> best = range;
+        for (double shift : {-full, full}) {
+            std::pair<double, double> moved {range.first + shift, range.second + shift};
+            if (overlap(moved) > overlap(best)) {
+                best = moved;
+            }
+        }
+        return best;
+    }
+
     bool within(const std::pair<double, double>& range) const
     {
+        if (cyclic) {
+            return range.second - range.first <= length + eps;
+        }
         return range.first >= -eps && range.second <= length + eps;
     }
 
     // The length the range shares with [0, length].
     double overlap(const std::pair<double, double>& range) const
     {
+        if (cyclic) {
+            return std::min(range.second - range.first, length);
+        }
         return std::min(range.second, length) - std::max(range.first, 0.0);
+    }
+
+    // Whether two of \a ranges (the pieces of one edge) overlap by more than eps.
+    bool overlapping(std::vector<std::pair<double, double>> ranges) const
+    {
+        std::sort(ranges.begin(), ranges.end());
+        for (std::size_t r = 1; r < ranges.size(); ++r) {
+            if (ranges[r - 1].second - ranges[r].first > eps) {
+                return true;
+            }
+        }
+        // Around a full circle, the last piece may wrap onto the first.
+        return cyclic && !ranges.empty()
+            && ranges.back().second - length - ranges.front().first > eps;
     }
 };
 
@@ -1147,7 +1262,7 @@ bool hitWithinOldEdge(
 )
 {
     const double eps = distance * std::max(1.0, diagonal);
-    auto extent = OldExtent::of(saved, eps, tolerances);
+    auto extent = OldExtent::of(saved, eps, tolerances, &now);
     if (!extent) {
         return false;
     }
@@ -1466,7 +1581,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                   input.continuationDistance)) {
                 continue;
             }
-            auto extent = OldExtent::of(entry.fingerprint, eps, input.tolerances);
+            auto extent = OldExtent::of(entry.fingerprint, eps, input.tolerances, &now);
             auto hitRange = extent->interval(now);
             const auto& hitFaces = facesOf(hit);
             std::vector<std::pair<int, std::pair<double, double>>> continued;  // position, range
@@ -1510,11 +1625,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             for (const auto& [k, range] : continued) {
                 ranges.push_back(range);
             }
-            std::sort(ranges.begin(), ranges.end());
-            bool overlapping = false;
-            for (std::size_t r = 1; r < ranges.size(); ++r) {
-                overlapping = overlapping || ranges[r - 1].second - ranges[r].first > eps;
-            }
+            const bool overlapping = extent->overlapping(ranges);
 
             std::vector<int> positions {hitPosition};
             std::string continuations;
@@ -1556,8 +1667,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 outcome.element = outcome.elements.front();
                 outcome.name = outcome.names.front();
                 outcome.from = entry.from.empty() ? entry.exactName : entry.from;
-                outcome.evidence = "continued by " + continuations + " (line"
-                    + (continued.size() > 1 ? "s" : "") + " within the old edge, shares "
+                outcome.evidence = "continued by " + continuations
+                    + (extent->circle ? " (arc" : " (line") + (continued.size() > 1 ? "s" : "")
+                    + " within the old edge, shares "
                     + sharedFace + ")";
                 for (const auto& [k, range] : continued) {
                     taken.push_back(k);

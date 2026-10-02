@@ -283,10 +283,12 @@ AppExport int extrinsicNearest(
 );
 
 /** The geometric continuation's trigger (Task 2 PR 7): true if \a saved, the fingerprint saved
- * with a reference, is a line edge, and \a now, its exact element's current fingerprint, is a
- * line that lies within it (the same line within \a tolerances.angle and a distance ε, both
- * ends within the old ends' ε) and is shorter by more than ε. ε is \a distance times
- * max(1, \a diagonal).
+ * with a reference, is a line edge, or (PR 7b) an arc with its circle's centre, and \a now, its
+ * exact element's current fingerprint, lies within it and is shorter by more than ε. A line
+ * within a line: the same line within \a tolerances.angle and ε, both ends within the old ends'
+ * ε. An arc within an arc: the same circle (axis within the angle; radius, centre and plane
+ * within ε), its arc-length extent within the old arc's. ε is \a distance times
+ * max(1, \a diagonal). A version-1 circle (no centre) and a nearly full arc aren't located.
  */
 AppExport bool hitWithinOldEdge(
     const ElementFingerprint& saved,
@@ -442,8 +444,8 @@ struct AppExport SolveOutcome
  *   and the others are Removed. Otherwise the members are solved one by one.
  * - Candidates include every element with a structural piece of the old name, whatever tier 1's
  *   filters keep.
- * - Continuation (PR 7, tier 4): an exact `Edge` entry whose saved fingerprint is a line that
- *   its element now lies strictly within (hitWithinOldEdge()). The other line edges of the
+ * - Continuation (PR 7, tier 4): an exact `Edge` entry whose saved fingerprint is a line or an
+ *   arc that its element now lies strictly within (hitWithinOldEdge()). The other edges of the
  *   type, not held exactly by the owner, that lie on the old edge within its ends and bound a
  *   face the hit bounds (facesOf) are its continuations. Expand takes them (Resolved, every
  *   element); One breaks the entry with the hit and them as candidates; Equivalent keeps the
