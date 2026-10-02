@@ -56,6 +56,8 @@ public:
     static constexpr const char* Tag = "TAG";
     static constexpr const char* Copy = "CPY";
     static constexpr const char* Transform = "XFM";
+    /// A PartDesign pattern instance (V2): Linear, Polar, Mirrored and MultiTransform
+    static constexpr const char* Transformed = "TRF";
     static constexpr const char* Gtransform = "GFM";
     static constexpr const char* Face = "FAC";
     static constexpr const char* FilledFace = "FFC";
