@@ -33,6 +33,21 @@ if(BUILD_GUI)
     endif()
     target_compile_warn_error(FreeCADMain)
 
+    # FreeCAD-CH: the macOS bundle's launcher runs this executable from Contents/Resources/bin,
+    # outside Contents/MacOS, so the app's Info.plist isn't its main bundle's. Qt then names
+    # the application menu's About, Hide and Quit items after the executable ("About FreeCAD").
+    # An embedded Info.plist gives them the fork's name (ops#98). A bundle's own Info.plist,
+    # when the executable is in Contents/MacOS, takes precedence over it.
+    if(APPLE)
+        configure_file(MainGuiInfo.plist.cmake ${CMAKE_CURRENT_BINARY_DIR}/MainGuiInfo.plist @ONLY)
+        target_link_options(FreeCADMain PRIVATE
+            "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/MainGuiInfo.plist"
+        )
+        set_property(TARGET FreeCADMain APPEND PROPERTY
+            LINK_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/MainGuiInfo.plist
+        )
+    endif()
+
     SET_BIN_DIR(FreeCADMain FreeCAD)
 
     if(WIN32)

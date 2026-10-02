@@ -102,6 +102,13 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --console "import pivy; from pivy
     exit 1
 fi
 
+# FreeCAD-CH: the launcher runs bin/freecad outside Contents/MacOS, so the application menu's
+# About, Hide and Quit items take their name from the Info.plist embedded in it (ops#98)
+if ! grep -q -a "<string>${app_name}</string>" "${conda_env}/bin/freecad"; then
+    echo "bin/freecad has no embedded Info.plist naming ${app_name}; the application menu would read FreeCAD."
+    exit 1
+fi
+
 # FreeCAD-CH: no QuickLook extensions. Their IDs must start with the app's bundle ID, and
 # official FreeCAD, which owns .FCStd, already provides the previews.
 rm -rf "${conda_env}/PlugIns" "${conda_env}/Library/QuickLook"

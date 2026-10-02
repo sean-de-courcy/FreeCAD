@@ -107,7 +107,8 @@ names it.
 | `feat/naming-trf-steps` | feat | ops#6 | - | `integration` `8951693731` | `fae92bde64` (fork PR 75), 2026-10-02 | never (fork feature) |
 | `fix/92-scenario-lists` | fix | ops#92, ops#94, ops#89 | - | `feat/naming-trf-steps` `4cba1ebdea` (stacked on fork PR 75) | `37c04b26f1` (fork PR 78), 2026-10-02 | never (fork tests) |
 | `fix/91-trf-followups` | fix | ops#91, ops#95 | - | `integration` `37c04b26f1` | `c0d01ea729` (fork PR 79), 2026-10-02 | never (fork naming) |
-| `fix/96-interning-review` | fix | ops#96, ops#97 | - | `integration` `37c04b26f1` | (fork PR 81) | never (fork naming) |
+| `fix/96-interning-review` | fix | ops#96, ops#97 | - | `integration` `37c04b26f1` | `527461eabb` (fork PR 81), 2026-10-02 | never (fork naming) |
+| `fix/98-macos-about` | fix | ops#98 | - | `integration` `37c04b26f1` | (fork PR 83) | never (fork identity) |
 
 ## Fork-only commits in carried topics
 
