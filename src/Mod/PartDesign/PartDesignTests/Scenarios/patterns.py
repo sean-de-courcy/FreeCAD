@@ -108,10 +108,12 @@ class PatternEdit(Scenario):
 
 class LinearPatternEdit(PatternEdit):
     """A plate 70 x 70, the boss centred at (8, 8); a LinearPattern along X, 3 occurrences,
-    18 apart ("Spacing" mode)."""
+    18 apart ("Spacing" mode; "Extent" mode keeps the overall length instead, 36, so an edit of
+    the occurrences moves the instances)."""
 
     abstract = True
     direction, spacing, occurrences = X, 18, 3
+    patternMode = "Spacing"
 
     def plateProfile(self):
         return m.rectangle(0, 0, 70, 70)
@@ -123,8 +125,11 @@ class LinearPatternEdit(PatternEdit):
         pattern = self.doc.addObject("PartDesign::LinearPattern", "LinearPattern")
         pattern.Originals = originals
         pattern.Direction = (m.originFeature(body, "X_Axis"), [""])
-        pattern.Mode = "Spacing"
-        pattern.Offset = self.spacing
+        pattern.Mode = self.patternMode
+        if self.patternMode == "Extent":
+            pattern.Length = self.spacing * (self.occurrences - 1)
+        else:
+            pattern.Offset = self.spacing
         pattern.Occurrences = self.occurrences
         body.addObject(pattern)
         return pattern
@@ -139,9 +144,9 @@ class LinearOccurrences(LinearPatternEdit):
 
 class LinearFewerOccurrences(LinearPatternEdit):
     """One occurrence fewer: 3 -> 2. Instance 3 is gone, and the sketch on its boss should
-    break. Its siblings' top faces are named as it is up to the duplicate counter, so tier 1
-    can't tell them from it: the reference solver's pattern-sibling guard (ops#7) must break the
-    reference instead of moving it to one of them."""
+    break. Its siblings' top faces are named as it is up to the instance number (the TRF
+    section's index, ops#55): the reference solver's pattern-sibling guard (ops#7) must break
+    the reference instead of moving it to one of them."""
 
     gone = False
 
@@ -153,11 +158,43 @@ class LinearFewerOccurrences(LinearPatternEdit):
         self.gone = True
 
 
+class LinearFewerOccurrencesExtent(LinearFewerOccurrences):
+    """As LinearFewerOccurrences in "Extent" mode: instance 2 moves onto instance 3's place, so
+    geometry alone finds a face where instance 3's was. It is instance 2's: the sketch on
+    instance 3 must still break, and the chamfer follow instance 2."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        super().edit(doc)
+        self.spacing = 36
+
+
+class LinearOccurrencesExtent(LinearOccurrences):
+    """As LinearOccurrences in "Extent" mode: the four instances close up to 12 apart."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        super().edit(doc)
+        self.spacing = 12
+
+
 class LinearSpacing(LinearPatternEdit):
     """The spacing shrinks: 18 -> 15."""
 
     def edit(self, doc):
         doc.LinearPattern.Offset = 15
+        self.spacing = 15
+
+
+class LinearLengthExtent(LinearPatternEdit):
+    """In "Extent" mode the overall length shrinks: 36 -> 30, so the spacing 18 -> 15."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        doc.LinearPattern.Length = 30
         self.spacing = 15
 
 
@@ -171,11 +208,13 @@ class LinearDirection(LinearPatternEdit):
 
 class PolarPatternEdit(PatternEdit):
     """A round plate of radius 35 around the Z axis, the boss centred at (22, 0); a PolarPattern
-    around Z, 4 occurrences, 60 degrees apart ("Spacing" mode)."""
+    around Z, 4 occurrences, 60 degrees apart ("Spacing" mode; "Extent" mode keeps the overall
+    angle instead, 180 degrees)."""
 
     abstract = True
     bossCentre = V(22, 0, 0)
     step, occurrences, sense = 60, 4, 1
+    patternMode = "Spacing"
 
     def plateProfile(self):
         return [m.circle(0, 0, 35)]
@@ -193,8 +232,11 @@ class PolarPatternEdit(PatternEdit):
         pattern = self.doc.addObject("PartDesign::PolarPattern", "PolarPattern")
         pattern.Originals = originals
         pattern.Axis = (m.originFeature(body, "Z_Axis"), [""])
-        pattern.Mode = "Spacing"
-        pattern.Offset = self.step
+        pattern.Mode = self.patternMode
+        if self.patternMode == "Extent":
+            pattern.Angle = self.step * (self.occurrences - 1)
+        else:
+            pattern.Offset = self.step
         pattern.Occurrences = self.occurrences
         body.addObject(pattern)
         return pattern
@@ -207,11 +249,57 @@ class PolarOccurrences(PolarPatternEdit):
         doc.PolarPattern.Occurrences = 5
 
 
+class PolarOccurrencesExtent(PolarOccurrences):
+    """As PolarOccurrences in "Extent" mode: the five instances close up to 45 degrees apart."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        super().edit(doc)
+        self.step = 45
+
+
+class PolarFewerOccurrences(PolarPatternEdit):
+    """Three occurrences, 60 degrees apart, then one fewer: 3 -> 2. Instance 3 is gone, and the
+    sketch on its boss should break; the chamfer stays on instance 2."""
+
+    occurrences = 3
+    gone = False
+
+    def attachedFace(self):
+        return BROKEN if self.gone else super().attachedFace()
+
+    def edit(self, doc):
+        doc.PolarPattern.Occurrences = 2
+        self.gone = True
+
+
+class PolarFewerOccurrencesExtent(PolarFewerOccurrences):
+    """As PolarFewerOccurrences in "Extent" mode (120 degrees): instance 2 turns onto instance
+    3's place. The sketch on instance 3 must still break, and the chamfer follow instance 2."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        super().edit(doc)
+        self.step = 120
+
+
 class PolarSpacing(PolarPatternEdit):
     """The angle between instances shrinks: 60 -> 45 degrees."""
 
     def edit(self, doc):
         doc.PolarPattern.Offset = 45
+        self.step = 45
+
+
+class PolarAngleExtent(PolarPatternEdit):
+    """In "Extent" mode the overall angle shrinks: 180 -> 135 degrees, so the step 60 -> 45."""
+
+    patternMode = "Extent"
+
+    def edit(self, doc):
+        doc.PolarPattern.Angle = 135
         self.step = 45
 
 
@@ -250,6 +338,7 @@ class TwoPatternsEdit(Scenario):
     }
     steps = tuple(STEPS)
     size, spacing = 10, 30
+    patternMode = "Spacing"
 
     def original(self, doc, body):
         raise NotImplementedError
@@ -269,8 +358,11 @@ class TwoPatternsEdit(Scenario):
         pattern = doc.addObject("PartDesign::LinearPattern", name)
         pattern.Originals = [original]
         pattern.Direction = (m.originFeature(body, axis), [""])
-        pattern.Mode = "Spacing"
-        pattern.Offset = self.spacing
+        pattern.Mode = self.patternMode
+        if self.patternMode == "Extent":
+            pattern.Length = 2 * self.spacing
+        else:
+            pattern.Offset = self.spacing
         pattern.Occurrences = 3
         pattern.Refine = False
         body.addObject(pattern)
@@ -333,3 +425,22 @@ class TwoPatternsPad(TwoPatternsEdit):
     def original(self, doc, body):
         square = m.sketch(doc, "Square", m.rectangle(0, 0, self.size, self.size), body)
         return m.pad(body, square, self.size)
+
+
+class TwoPatternsBoxExtent(TwoPatternsBox):
+    """As TwoPatternsBox in "Extent" mode (60 long): with one fewer occurrence, the pattern's
+    instance 2 moves onto instance 3's place."""
+
+    patternMode = "Extent"
+
+
+class TwoPatternsBoxOnPlateExtent(TwoPatternsBoxOnPlate):
+    """As TwoPatternsBoxOnPlate in "Extent" mode."""
+
+    patternMode = "Extent"
+
+
+class TwoPatternsPadExtent(TwoPatternsPad):
+    """As TwoPatternsPad in "Extent" mode."""
+
+    patternMode = "Extent"

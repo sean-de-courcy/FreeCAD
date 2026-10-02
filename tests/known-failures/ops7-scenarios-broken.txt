@@ -71,3 +71,15 @@ cli  PartDesignTests.TestNamingScenarios.SolverArcNotchThenFill.test_fillet_edge
 reason: a dress-up on a sketch circle's edge that two notches split keeps the arc that took the circle's geometry ID only; the other arc is new, so the multi-match flags don't find it either; the scenario expects both (V2 and V2multi; V2s takes both, the continuation around a whole circle, ops#7 Task 2 PR 8)
 cli  PartDesignTests.TestNamingScenarios.SplitCircleNotch.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitCircleNotch.test_fillet_edge_V2multi
+
+reason: an Extent-mode pattern loses its last instance and the previous one moves onto its place: the reference to the lost instance (its name is missing) resolves by geometry to the instance now there, silently (V2's geometric search; V2s breaks it with the pattern-sibling guard, ops#55)
+cli  PartDesignTests.TestNamingScenarios.LinearFewerOccurrencesExtent.test_sketch_instance3_face_V2
+cli  PartDesignTests.TestNamingScenarios.LinearFewerOccurrencesExtent.test_sketch_instance3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.PolarFewerOccurrencesExtent.test_sketch_instance3_face_V2
+cli  PartDesignTests.TestNamingScenarios.PolarFewerOccurrencesExtent.test_sketch_instance3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_x3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_y3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_x3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_y3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_x3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_face_V2
