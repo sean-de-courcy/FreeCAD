@@ -507,6 +507,49 @@ TEST(NameAncestry, instanceCopiesHaveTheirOwnAncestry)
     EXPECT_GT(weighted.overlap(oldTop2, instance(newTop, 2, 'F')), 0.0);
 }
 
+TEST(NameAncestry, instanceCopiesKeepWhatTheyShare)
+{
+    // ops#91's review: the contexts take away only what relates different elements (the support
+    // and a copy, two instances' copies). Two names of one instance keep what they shared.
+    NameAncestry ancestry;
+    const auto right = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto left = section({}, {sketchEdge(4)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto instance = [](const std::string& name, int k, char type = 'E') {
+        return piece(name, 9, "TRF", k, type);
+    };
+    //   a split made before the pattern (WholeShape mode): `X|CUT|TRF;2` is a piece of
+    //   `X|TRF;2`, which doesn't contain it, and the overlap is X's copy and its sketch edge, 2 of
+    //   3, as without the contexts
+    const auto side = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    const auto side2 = instance(side, 2, 'F');
+    const auto cutThenSide2 = instance(piece(side, 6, "CUT", 0, 'F'), 2, 'F');
+    EXPECT_TRUE(NameAncestry::isPieceOf(cutThenSide2, side2));
+    EXPECT_FALSE(ancestry.contains(cutThenSide2, side2));
+    EXPECT_DOUBLE_EQ(ancestry.overlap(side2, cutThenSide2), 2.0 / 3.0);
+    //   a fusion's face bounded by copies of two instances, after a sketch edit renamed the one
+    //   of instance 2: the copies of instance 3 are the same, 3 of 7
+    auto lowOf = [](const std::string& a, const std::string& b) {
+        return section({}, {a, b}, 9, "FUS", 0, 'F', {"LOW"});
+    };
+    const auto renamed = section({}, {sketchEdge(6)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto top23 = lowOf(instance(right, 2), instance(left, 3));
+    const auto newTop23 = lowOf(instance(renamed, 2), instance(left, 3));
+    EXPECT_DOUBLE_EQ(ancestry.overlap(top23, newTop23), 3.0 / 7.0);
+    EXPECT_EQ(ancestry.structuralSurvivors(top23, {newTop23}, 0.25), std::vector<int> {0});
+}
+
+TEST(NameAncestry, unclosedContextMarkIsAName)
+{
+    // A string that starts with the context mark and doesn't close it (only a caller, e.g.
+    // App.getNameAncestors, can pass one) is a name like any other, decoded as such, not an
+    // endless context (the call returns).
+    NameAncestry ancestry;
+    const std::string odd = "\x1e" "9;2";
+    const auto names = ancestry.ancestorNames(odd);
+    EXPECT_EQ(std::count(names.begin(), names.end(), odd), 1);
+    EXPECT_TRUE(ancestry.contains(odd, odd));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Forced matching
 

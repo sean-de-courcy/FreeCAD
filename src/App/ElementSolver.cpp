@@ -144,6 +144,9 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
         std::string_view node = _names[key];
         while (!node.empty() && node.front() == contextMark) {
             auto end = node.find(contextMark, 1);
+            if (end == std::string_view::npos) {
+                break;  // no closing mark: not a context (only a caller's string can be one)
+            }
             context.append(node.substr(0, end + 1));
             node.remove_prefix(end + 1);
         }

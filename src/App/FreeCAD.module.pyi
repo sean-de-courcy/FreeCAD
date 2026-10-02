@@ -309,6 +309,9 @@ def getNameAncestors(name: str, /) -> list[str]:
     The set holds the name itself, every prefix before a top-level `|`, and every Linked or
     Connected Name embedded at any depth: the structural evidence of the reference solver.
     `name` is a bare mapped name, without the `;` prefix or an element suffix.
+
+    Below a pattern instance's section (`...;TRF;<k>;...`) the ancestors are the instance's
+    copies, written `\\x1e<pattern tag>;<k>\\x1e<name>` (ops#91).
     """
     ...
 

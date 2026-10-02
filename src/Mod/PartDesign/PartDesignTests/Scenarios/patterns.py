@@ -783,3 +783,35 @@ class OverlappingInstances(Scenario):
 
     def back(self, doc):
         doc.LinearPattern.Occurrences = 3
+
+
+class OverlappingInstancesRefined(OverlappingInstances):
+    """As OverlappingInstances with Refine on: the top is one face over all the blocks. A sketch
+    attached to it stays on it as the occurrences go 3 -> 2 -> 3 (the positive twin of the break
+    above, ops#91). Its name is the support's top with a fusion's section embedding the
+    support's edges and instance 2's left edge, none of which the edit touches: it resolves
+    exactly. The tier-1 case of copies kept across an edit is the gtest
+    `NameAncestry.instanceCopiesKeepWhatTheyShare`."""
+
+    REFS = ("sketch_top",)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, self.length, self.width), body)
+        pad = m.pad(body, profile, self.height)
+        pattern = doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [pad]
+        pattern.Direction = (m.originFeature(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = self.spacing
+        pattern.Occurrences = 3
+        pattern.Refine = True
+        body.addObject(pattern)
+        doc.recompute()
+        sketch = body.newObject("Sketcher::SketchObject", "OnTop")
+        sketch.AttachmentSupport = [(pattern, self.names(pattern, self.top())[0])]
+        sketch.MapMode = "FlatFace"
+        self.ref("sketch_top", sketch, "AttachmentSupport", self.top, Attached())
+
+    def top(self):
+        return self.topPiece(2)
