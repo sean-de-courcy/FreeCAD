@@ -23,6 +23,7 @@
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
 #include "GeoFeature.h"
+#include "NameTable.h"
 #include "MappedElement.h"
 #include "PropertyGeo.h"
 #include "ReferenceReport.h"
@@ -78,9 +79,23 @@ std::string indexType(const std::string& index)
 
 const char* const InternalPrefix = "Internal";
 
-// The target's named elements of one type, each with all its names. A sketch's `Internal*`
-// types come from its InternalShape.
-std::vector<Data::SolveInput::Element> poolOf(GeoFeature* geo, const std::string& type)
+// A name expanded to its plain V2 form (ops#6). The solver compares names by their structure
+// (sections, prefixes, embedded names), so every name it sees is plain, and it decides as it
+// does in a document without InternNames.
+std::string plainName(const std::string& name)
+{
+    if (name.find(Data::NameTable::Marker) == std::string::npos) {
+        return name;
+    }
+    return Data::NameTable::instance().toPlain(name);
+}
+
+// The target's named elements of one type, each with all its names, plain. A sketch's
+// `Internal*` types come from its InternalShape. `forms` gets the map's form of every name that
+// isn't plain there, so that the names the solver picks are written back as the map holds them.
+std::vector<Data::SolveInput::Element> poolOf(GeoFeature* geo,
+                                              const std::string& type,
+                                              std::map<std::string, std::string>& forms)
 {
     std::vector<Data::SolveInput::Element> pool;
     const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
@@ -100,7 +115,12 @@ std::vector<Data::SolveInput::Element> poolOf(GeoFeature* geo, const std::string
         if (!mapped.index || elementType != mapped.index.getType()) {
             continue;
         }
-        names[prefix + mapped.index.toString()].push_back(mapped.name.toString());
+        std::string name = mapped.name.toString();
+        std::string plain = plainName(name);
+        if (plain != name) {
+            forms[plain] = name;  // the map's form wins over an old name's
+        }
+        names[prefix + mapped.index.toString()].push_back(std::move(plain));
     }
     for (auto& [index, list] : names) {
         pool.push_back({index, std::move(list)});
@@ -522,12 +542,18 @@ bool solveElementReferences(DocumentObject* feature,
     std::map<const PropertyLinkBase*, std::vector<SolverResolution>> resolutions;
     std::map<const PropertyLinkBase*, std::vector<ReferenceReport::Entry>> reports;
     std::map<std::string, std::vector<Data::SolveInput::Element>> pools;  // by type
+    std::map<std::string, std::string> mapForms;  // plain name -> the map's form (ops#6)
     auto pool = [&](const std::string& type) -> const std::vector<Data::SolveInput::Element>& {
         auto it = pools.find(type);
         if (it == pools.end()) {
-            it = pools.emplace(type, poolOf(geo, type)).first;
+            it = pools.emplace(type, poolOf(geo, type, mapForms)).first;
         }
         return it->second;
+    };
+    // A name the solver took from the pool, in the target map's form
+    auto mapForm = [&mapForms](const std::string& name) {
+        auto it = mapForms.find(name);
+        return it == mapForms.end() ? name : it->second;
     };
     const std::string targetName = feature->getFullName();
     bool sourceRead = false;
@@ -642,7 +668,7 @@ bool solveElementReferences(DocumentObject* feature,
                 ReferenceReport::Entry item;
                 if (exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal)) {
                     SolverResolution resolution;
-                    resolutionFor(*entry, index, name, resolution);
+                    resolutionFor(*entry, index, mapForm(name), resolution);
                     resolutions[entry->prop].push_back(resolution);
                     item.status = ReferenceReport::Status::Index;
                     item.newIndex = index;
@@ -657,7 +683,7 @@ bool solveElementReferences(DocumentObject* feature,
                         : !exists                    ? "index carry, no such element"
                                                      : "index carry, fingerprint differs";
                     if (exists) {
-                        item.candidates.emplace_back(index, name);
+                        item.candidates.emplace_back(index, mapForm(name));
                     }
                     FC_WARN(referenceName(entry->prop)
                             << "[" << entry->index << "]: " << entry->oldName << " broken ("
@@ -712,24 +738,32 @@ bool solveElementReferences(DocumentObject* feature,
             if (item.policy == Data::SolvePolicy::Equivalent) {
                 item.equivalent = equivalenceOf(*entry);
             }
-            item.from = entry->from;
+            // The old names, plain; their own forms are what `from` is written back in
+            auto plainOld = [&mapForms](const std::string& name) {
+                std::string plain = plainName(name);
+                if (plain != name) {
+                    mapForms.emplace(plain, name);
+                }
+                return plain;
+            };
+            item.from = plainOld(entry->from);
             item.scope = std::to_string(reinterpret_cast<std::uintptr_t>(entry->prop)) + "|"
                 + entry->prefix;
             item.position = entry->index;
             if (entry->kind == SolverEntry::Kind::Exact) {
                 item.exact = true;
                 item.exactElement = entry->oldIndex;
-                item.exactName = entry->exactName;
+                item.exactName = plainOld(entry->exactName);
             }
             else {
-                item.oldName = entry->oldName;
+                item.oldName = plainOld(entry->oldName);
                 if (source != Data::Tier1Source::Overlap && !entry->oldName.empty()) {
                     auto it = nameMatches.find(entry->oldName);
                     if (it == nameMatches.end()) {
                         Data::MappedName searchName(entry->oldName);
                         std::vector<std::string> names;
                         for (const auto& match : geo->findSimilarNames(searchName)) {
-                            names.push_back(match.name.toString());
+                            names.push_back(plainName(match.name.toString()));
                         }
                         it = nameMatches.emplace(entry->oldName, std::move(names)).first;
                     }
@@ -768,12 +802,12 @@ bool solveElementReferences(DocumentObject* feature,
                 resolution.status = SolverResolution::Status::Expanded;
                 resolution.prop = entry.prop;
                 resolution.index = entry.index;
-                resolution.from = outcome.from;
+                resolution.from = mapForm(outcome.from);
                 for (std::size_t p = 0; p < outcome.elements.size(); ++p) {
                     SolverResolution piece;
-                    resolutionFor(entry, outcome.elements[p], outcome.names[p], piece);
+                    resolutionFor(entry, outcome.elements[p], mapForm(outcome.names[p]), piece);
                     resolution.pieces.emplace_back(piece.sub, piece.shadow);
-                    item.pieces.emplace_back(outcome.elements[p], outcome.names[p]);
+                    item.pieces.emplace_back(outcome.elements[p], mapForm(outcome.names[p]));
                 }
                 resolutions[entry.prop].push_back(resolution);
                 item.status = ReferenceReport::Status::Expanded;
@@ -786,7 +820,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             else if (outcome.status == Data::SolveStatus::Resolved) {
                 SolverResolution resolution;
-                resolutionFor(entry, outcome.element, outcome.name, resolution);
+                resolutionFor(entry, outcome.element, mapForm(outcome.name), resolution);
                 resolution.clearFrom = outcome.collapsed;
                 resolutions[entry.prop].push_back(resolution);
                 item.status = ReferenceReport::Status::Resolved;
@@ -807,7 +841,8 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 item.status = ReferenceReport::Status::Broken;
                 for (std::size_t c = 0; c < outcome.candidates.size(); ++c) {
-                    item.candidates.emplace_back(outcome.candidates[c], outcome.candidateNames[c]);
+                    item.candidates.emplace_back(outcome.candidates[c],
+                                                 mapForm(outcome.candidateNames[c]));
                 }
                 FC_WARN(referenceName(entry.prop)
                         << "[" << entry.index << "]: " << oldName << " broken ("

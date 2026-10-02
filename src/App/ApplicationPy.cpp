@@ -1261,7 +1261,9 @@ PyObject* ApplicationPy::sGetNameAncestors(PyObject* /*self*/, PyObject* args)
     {
         Data::NameAncestry ancestry;
         Py::List list;
-        for (const auto& ancestor : ancestry.ancestorNames(name)) {
+        // The solver's view: interned names expanded (ops#6)
+        const std::string plain = Data::NameTable::instance().toPlain(name);
+        for (const auto& ancestor : ancestry.ancestorNames(plain)) {
             list.append(Py::String(ancestor));
         }
         return Py::new_reference_to(list);
@@ -1279,7 +1281,10 @@ PyObject* ApplicationPy::sIsPieceOf(PyObject* /*self*/, PyObject* args)
 
     PY_TRY
     {
-        return Py::new_reference_to(Py::Boolean(Data::NameAncestry::isPieceOf(name, oldName)));
+        const auto& table = Data::NameTable::instance();
+        return Py::new_reference_to(Py::Boolean(
+            Data::NameAncestry::isPieceOf(table.toPlain(name), table.toPlain(oldName))
+        ));
     }
     PY_CATCH;
 }

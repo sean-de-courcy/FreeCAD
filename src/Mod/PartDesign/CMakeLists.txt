@@ -93,6 +93,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/external.py
     PartDesignTests/Scenarios/harness.py
     PartDesignTests/Scenarios/internal.py
+    PartDesignTests/Scenarios/interning.py
     PartDesignTests/Scenarios/issues.py
     PartDesignTests/Scenarios/models.py
     PartDesignTests/Scenarios/patterns.py

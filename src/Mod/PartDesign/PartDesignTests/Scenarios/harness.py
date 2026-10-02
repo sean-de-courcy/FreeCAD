@@ -40,10 +40,12 @@ that gives the consumer the same result) or correct. Each verdict is printed as 
 (JSON) for the ops repo's scorecard, and appended to FREECAD_SCENARIO_SCORE_FILE if it is set.
 
 Configurations: V1, V2, V2multi (V2 with the user parameter NamingMultiMatch on: a dress-up's
-Base and a Profile keep every piece of a split element) and V2s (V2 with the document's
+Base and a Profile keep every piece of a split element), V2s (V2 with the document's
 ReferenceSolver on, ops#7: a reference that doesn't resolve exactly goes to the solver, and a
-broken one fails its owner). In V2s the SCORE record also has the solver's `tier` and
-`candidates` for the reference (App.getReferenceReport).
+broken one fails its owner) and V2i (V2 with the document's InternNames on, ops#6: names are held
+in the name table; reports show them expanded, so they read and mask as V2's); V2si is V2s with
+InternNames on. In V2s the SCORE record also has the solver's `tier` and `candidates` for the
+reference (App.getReferenceReport).
 
 A scenario edits in `edit(doc)`, or in several steps (`steps`, method names), each recomputed and
 judged: its references pass only if they pass after every step.
@@ -65,12 +67,14 @@ X, Y, Z = V(1, 0, 0), V(0, 1, 0), V(0, 0, 1)
 
 PARAM_GROUP = "User parameter:BaseApp/Preferences/Mod/PartDesign"
 MULTI_PARAM = "NamingMultiMatch"
-# config: (history algorithm, multi-match flags, reference solver)
+# config: (history algorithm, multi-match flags, reference solver, interned names)
 CONFIGS = {
-    "V1": ("V1", False, False),
-    "V2": ("V2", False, False),
-    "V2multi": ("V2", True, False),
-    "V2s": ("V2", False, True),
+    "V1": ("V1", False, False, False),
+    "V2": ("V2", False, False, False),
+    "V2multi": ("V2", True, False, False),
+    "V2s": ("V2", False, True, False),
+    "V2i": ("V2", False, False, True),
+    "V2si": ("V2", False, True, True),
 }
 VERDICTS = ("correct", "equivalent", "broken", "partial", "wrong")
 
@@ -776,7 +780,7 @@ class Scenario:
 
     def __init__(self, config):
         self.config = config
-        self.mode, self.multi, self.solver = CONFIGS[config]
+        self.mode, self.multi, self.solver, self.interned = CONFIGS[config]
         self.stepName = None  # the step being run, for expectations that change between steps
         self.refs = {}
         self.documents = []
@@ -793,14 +797,19 @@ class Scenario:
         """The index name of the one element of obj's shape the predicate matches."""
         return predicate.one(shapeFor(obj, predicate))
 
-    def newDocument(self, suffix=""):
+    def newDocument(self, suffix="", interned=None):
         """A document in the scenario's history algorithm, closed after the run. The first is
-        the scenario's own (self.doc); others hold the targets of cross-document links."""
+        the scenario's own (self.doc); others hold the targets of cross-document links.
+        `interned` overrides the configuration's InternNames (a document with the other
+        setting)."""
         doc = models.newDocument(f"Scenario{type(self).__name__}{self.config}{suffix}")
         if hasattr(doc, "HistoryAlgorithm"):
             doc.HistoryAlgorithm = self.mode
         if hasattr(doc, "ReferenceSolver"):
             doc.ReferenceSolver = self.solver
+        if hasattr(doc, "InternNames"):
+            # Explicitly, also when off: FREECAD_INTERN_NAMES=1 turns it on in new documents.
+            doc.InternNames = self.interned if interned is None else interned
         self.documents.append(doc.Name)
         return doc
 
@@ -967,6 +976,8 @@ class Scenario:
             return None
         if isinstance(name, (list, tuple)):
             name = name[0] if name else None
+        if name and mode == "V2" and hasattr(App, "expandMappedName"):
+            name = App.expandMappedName(name)  # an interned name reads as V2's (ops#6)
         return masker.mask(name, mode, shape) if name else None
 
 

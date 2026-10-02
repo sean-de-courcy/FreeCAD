@@ -1006,20 +1006,31 @@ IndexedName ElementMap::find(const MappedName& name, ElementIDRefs* sids) const
 {
     ZoneScoped;
 
+    // A name in the other form, e.g. a reference made before its document's InternNames changed
+    // or into a document with the other setting, is looked up again in this map's form (ops#6).
+    // Converting is idempotent, so this recurses at most once.
+    auto inMapForm = [&]() {
+        if (historyAlgorithm != App::HistoryAlgorithm::V2) {
+            return IndexedName();
+        }
+        MappedName form = toMapForm(name, interned);
+        return form == name ? IndexedName() : find(form, sids);
+    };
+
     auto nameIter = mappedNames.find(name);
     if (nameIter == mappedNames.end()) {
         if (childElements.isEmpty()) {
-            return IndexedName();
+            return inMapForm();
         }
 
         int len = 0;
         if (name.findTagInElementName(nullptr, &len, nullptr, nullptr, false, false) < 0) {
-            return IndexedName();
+            return inMapForm();
         }
         QByteArray key = name.toRawBytes(len);
         auto it = this->childElements.find(key);
         if (it == this->childElements.end()) {
-            return IndexedName();
+            return inMapForm();
         }
 
         const auto& child = *it.value().childMap;
@@ -1040,7 +1051,7 @@ IndexedName ElementMap::find(const MappedName& name, ElementIDRefs* sids) const
             return res;
         }
 
-        return IndexedName();
+        return inMapForm();
     }
 
     if (sids) {
@@ -1550,6 +1561,25 @@ std::vector<MappedElement> ElementMap::getAll() const
     for (auto& mappedName : this->mappedNames) {
         ret.emplace_back(mappedName.first, mappedName.second);
     }
+    if (interned && ret.size() > 1) {
+        // In the byte order of the expansions, as a plain map lists the same names: readers that
+        // take the first of several matches pick the same element in both forms (ops#6)
+        const auto& table = NameTable::instance();
+        std::vector<std::pair<std::string, std::size_t>> texts;
+        texts.reserve(ret.size());
+        for (std::size_t i = 0; i < ret.size(); ++i) {
+            texts.emplace_back(ret[i].name.toString(), i);
+        }
+        std::stable_sort(texts.begin(), texts.end(), [&table](const auto& a, const auto& b) {
+            return table.compareExpanded(a.first, b.first) < 0;
+        });
+        std::vector<MappedElement> sorted;
+        sorted.reserve(size());
+        for (const auto& text : texts) {
+            sorted.push_back(ret[text.second]);
+        }
+        ret = std::move(sorted);
+    }
     for (auto& childElement : this->childElements) {
         auto& child = *childElement.childMap;
         IndexedName idx(child.indexedName);
@@ -1634,6 +1664,11 @@ long getElementHistoryV2(const MappedName& name,
     std::string start = name.toString();
     if (boost::starts_with(start, ELEMENT_MAP_PREFIX)) {
         start.erase(0, ELEMENT_MAP_PREFIX_SIZE);
+    }
+    // The walk reads sections and prefixes: an interned name is walked in its plain form, and
+    // the names it reaches are plain (ElementMap::find takes either, ops#6)
+    if (start.find(NameTable::Marker) != std::string::npos) {
+        start = NameTable::instance().toPlain(start);
     }
 
     std::string current = start;

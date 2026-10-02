@@ -1394,4 +1394,35 @@ TEST_F(ElementMapTest, internedFlagIsCopiedAndIgnoredInV1)
     EXPECT_EQ(stored.toString(), example.face);  // V1 names are never interned
 }
 
+TEST_F(ElementMapTest, namesAreFoundInEitherFormV2)
+{
+    // ops#6, Task 1 PR 6: a reference made before the document's InternNames changed holds the
+    // other form; the lookup finds its element all the same
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    const std::string internedPiece = table.toInterned(example.piece);
+    auto plain = std::make_shared<Data::ElementMap>();
+    plain->hasher = _hasher;
+    auto interned = std::make_shared<Data::ElementMap>();
+    interned->hasher = _hasher;
+    interned->setInterned(true);
+    const Data::IndexedName element("Face", 3);
+    plain->setElementName(element, Data::MappedName(example.piece), 23);
+    interned->setElementName(element, Data::MappedName(example.piece), 23);
+
+    // Act
+    auto plainByInterned = plain->find(Data::MappedName(internedPiece));
+    auto internedByPlain = interned->find(Data::MappedName(example.piece));
+    auto internedByInterned = interned->find(Data::MappedName(internedPiece));
+    auto missing = interned->find(Data::MappedName(example.upper));
+
+    // Assert
+    EXPECT_NE(internedPiece, example.piece);
+    EXPECT_EQ(plainByInterned, element);
+    EXPECT_EQ(internedByPlain, element);
+    EXPECT_EQ(internedByInterned, element);
+    EXPECT_FALSE(missing);
+}
+
 // NOLINTEND(readability-magic-numbers)
