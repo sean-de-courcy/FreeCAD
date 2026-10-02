@@ -2,19 +2,9 @@
 # configuration (ops#7, Task 2): every V2s test that fails after PR 3, by the PR expected to fix
 # it. Each later PR removes the entries it fixes; PR 8 ends with this file empty and removed.
 # Every entry is broken (the owner fails, the candidates are reported) or partial; none is wrong.
+# PR 7 (the splits) removed the last entries of PRs 3-6, and lists one false break of its own.
 
 issue: ops#7
 
-reason: a dress-up or face profile on a split element breaks with the pieces as candidates; section 8 expects every piece (Expand, PR 7)
-cli  PartDesignTests.TestNamingScenarios.SplitFilletFuse.test_fillet_edge_V2s
-cli  PartDesignTests.TestNamingScenarios.SplitChamferCut.test_chamfer_edge_V2s
-cli  PartDesignTests.TestNamingScenarios.SplitDraftGroove.test_draft_face_V2s
-cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2s
-
-reason: an exact hit on the piece of a sketch line that a notch shortened; the other piece comes from a new line, which no name relates (partial; geometric continuation, PR 7, the answer to the design note's Q5)
-cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2s
-cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2s
-cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2s
-
-reason: correct needs the fillet to stay on the chamfered corner, whose name changed with the notch; it breaks with both corners as candidates (ops#79; the continuation of PR 7, or PR 8's Reference ID variant of tier 1)
-cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2s
+reason: a planar face that only shrank breaks when a coplanar face shares a neighbour with it: the split face's rule (Q3 (b) of the PR 7 design) can't tell that from a split, since a face's fingerprint doesn't bound its region (broken, never wrong; for PR 8's gate)
+cli  PartDesignTests.TestNamingScenarios.DraftUProngNarrowed.test_draft_face_V2s

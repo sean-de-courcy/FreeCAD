@@ -944,8 +944,9 @@ class Scenario:
     @staticmethod
     def _solverReport(owner, prop):
         """The reference solver's report on the property (ops#7): per reference the solver
-        didn't resolve exactly, its tier (1, "index" or "broken") and candidates. Empty where
-        the solver isn't (another configuration, or a build without it)."""
+        didn't resolve exactly, its tier (0-4, an expansion's too, "index" or "broken") and
+        candidates. Empty where the solver isn't (another configuration, or a build without
+        it)."""
         if not hasattr(App, "getReferenceReport"):
             return {}
         entries = [e for e in App.getReferenceReport(owner) if e["property"] == prop]
@@ -953,7 +954,7 @@ class Scenario:
             return {}
         tiers, candidates = [], []
         for e in entries:
-            tiers.append(e["tier"] if e["status"] == "resolved" else e["status"])
+            tiers.append(e["tier"] if e["status"] in ("resolved", "expanded") else e["status"])
             candidates.append(e["candidates"])
         return {"tier": tiers, "candidates": candidates}
 

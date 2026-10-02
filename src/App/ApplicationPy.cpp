@@ -35,7 +35,9 @@
 #include <Base/Parameter.h>
 #include <Base/PyWrapParseTupleAndKeywords.h>
 #include <Base/Sequencer.h>
+#include <App/ComplexGeoData.h>
 #include <App/ElementSolver.h>
+#include <App/ElementSolverBatch.h>
 #include <App/MappedName.h>
 #include <App/ReferenceReport.h>
 
@@ -1300,6 +1302,7 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             Py::Dict dict;
             Py::List candidates;
             Py::List candidateNames;
+            Py::List pieces;
             dict.setItem("property", Py::String(slot.property));
             dict.setItem("index", Py::Long(slot.index));
             dict.setItem("sub", Py::String(slot.sub));
@@ -1307,6 +1310,9 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
                 for (const auto& [index, name] : entry->candidates) {
                     candidates.append(Py::String(index));
                     candidateNames.append(Py::String(name));
+                }
+                for (const auto& piece : entry->pieces) {
+                    pieces.append(Py::String(piece.first));
                 }
                 dict.setItem("old", Py::String(entry->oldName));
                 dict.setItem("status", Py::String(ReferenceReport::statusName(entry->status)));
@@ -1326,6 +1332,7 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             }
             dict.setItem("candidates", candidates);
             dict.setItem("candidate_names", candidateNames);
+            dict.setItem("pieces", pieces);
             list.append(dict);
         }
         return Py::new_reference_to(list);
@@ -1365,46 +1372,62 @@ PyObject* ApplicationPy::sRepairReference(PyObject* /*self*/, PyObject* args)
                                    + std::to_string(index) + "]");
         }
         auto entry = ReferenceReport::find(found->prop, found->localIndex);
-        bool listed = entry
-            && std::any_of(entry->candidates.begin(),
-                           entry->candidates.end(),
-                           [&](const auto& c) {
-                               return c.first == candidate;
-                           });
+        const std::pair<std::string, std::string>* listed = nullptr;
+        if (entry) {
+            for (const auto& c : entry->candidates) {
+                if (c.first == candidate) {
+                    listed = &c;
+                    break;
+                }
+            }
+        }
         if (!listed) {
             throw Base::ValueError(std::string(candidate) + " is not a candidate of "
                                    + property + "[" + std::to_string(index) + "]");
         }
 
-        // The sub keeps its sub-object path; its shadow is cleared, so that registering it
-        // resolves the candidate exactly. The other references keep theirs.
+        // The repair is written as the solver writes a resolution (applyResolutions()): the sub
+        // keeps its sub-object path and gets the candidate's shadow, and the owner is told
+        // through onUpdateElementReference(), so whatever it keeps per reference follows (a
+        // sketch's external geometry, ops#72). The other references keep theirs. The repaired
+        // reference loses its `from`.
         const char* element = Data::findElementName(found->sub.c_str());
-        std::string newSub = found->sub.substr(0, element - found->sub.c_str()) + candidate;
-        const int i = found->localIndex;
+        const std::string prefix = found->sub.substr(0, element - found->sub.c_str());
         auto prop = const_cast<PropertyLinkBase*>(found->prop);
+        std::vector<std::string> subs;
         if (auto link = freecad_cast<PropertyLinkSub*>(prop)) {
-            auto subs = link->getSubValues();
-            auto shadows = link->getShadowSubs();
-            subs[i] = newSub;
-            shadows[i] = PropertyLinkBase::ShadowSub();
-            link->setValue(link->getValue(), std::move(subs), std::move(shadows));
+            subs = link->getSubValues();
         }
         else if (auto list = freecad_cast<PropertyLinkSubList*>(prop)) {
-            auto objs = list->getValues();
-            auto subs = list->getSubValues();
-            auto shadows = list->getShadowSubs();
-            subs[i] = newSub;
-            shadows[i] = PropertyLinkBase::ShadowSub();
-            list->setValues(std::move(objs), std::move(subs), std::move(shadows));
+            subs = list->getSubValues();
         }
         else if (auto xlink = freecad_cast<PropertyXLink*>(prop)) {
-            // A PropertyXLinkSubList's link notifies its list.
-            auto subs = xlink->getSubValues();
-            auto shadows = xlink->getShadowSubs();
-            subs[i] = newSub;
-            shadows[i] = PropertyLinkBase::ShadowSub();
-            xlink->setValue(xlink->getValue(), std::move(subs), std::move(shadows));
+            subs = xlink->getSubValues();
         }
+        const int i = found->localIndex;
+        if (i < 0 || i >= static_cast<int>(subs.size())) {
+            throw Base::RuntimeError("Inconsistent element reference " + std::string(property));
+        }
+        SolverResolution resolution;
+        resolution.status = SolverResolution::Status::Resolved;
+        resolution.prop = prop;
+        resolution.index = i;
+        resolution.shadow.oldName = prefix + candidate;
+        if (!listed->second.empty()) {
+            resolution.shadow.newName = prefix + Data::ComplexGeoData::elementMapPrefix()
+                + listed->second + "." + candidate;
+        }
+        resolution.sub = !resolution.shadow.newName.empty()
+                && Data::hasMappedElementName(subs[i].c_str())
+            ? resolution.shadow.newName
+            : resolution.shadow.oldName;
+        resolution.clearFrom = true;
+        resolution.feature =
+            prefix.empty() ? found->obj : found->obj->getSubObject(prefix.c_str());
+        resolution.notify = true;
+        prop->applyResolutions({resolution});
+        // As a setter does: the report on the property is stale now.
+        ReferenceReport::clear(prop);
         Py_Return;
     }
     PY_CATCH;

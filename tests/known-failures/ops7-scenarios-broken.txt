@@ -24,9 +24,12 @@ cli  PartDesignTests.TestNamingScenarios.SplitFilletFuse.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitChamferCut.test_chamfer_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitDraftGroove.test_draft_face_V2
 cli  PartDesignTests.TestNamingScenarios.SplitTopGroove.test_pad_profile_V2
+cli  PartDesignTests.TestNamingScenarios.SolverSplitThenMerge.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SolverSplitThenMergeReopened.test_fillet_edge_V2
 
 reason: a consumer that needs one element keeps one piece of a split element or one of two equal halves; section 8 expects broken with the pieces as candidates (V2)
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2
 cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2
 
@@ -35,6 +38,18 @@ cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitFilletNotch.test_fillet_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.SolverNotchThenFill.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SolverNotchThenFill.test_fillet_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.SolverNotchRedrawn.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SolverNotchRedrawn.test_fillet_edge_V2multi
+
+reason: a dress-up on an edge that a notch splits while the side's rest runs past the edge's old end keeps the shortened line's piece; the scenario expects broken with both edges as candidates, since the rest is partly new (V2 and V2multi; V2s breaks it, ops#7 Task 2 PR 7)
+cli  PartDesignTests.TestNamingScenarios.NotchAndExtend.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.NotchAndExtend.test_fillet_edge_V2multi
+
+reason: a draft on a face that a notch in the sketch splits keeps the shortened line's face; the rest comes from a new line, and a face's fingerprint can't bound the old face, so the scenario expects broken with both faces as candidates (V2 and V2multi; V2s breaks it, Q3 (b) of ops#7 Task 2 PR 7)
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotch.test_draft_face_V2
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotch.test_draft_face_V2multi
 
 reason: a fillet on a sketch corner's vertical edge, after a chamfer on the front edge, breaks when a notch is cut into the front side: the chamfer kept the front line's piece and left the corner, so the geometric search can't find the old edge, and the two corners that share one vertex ID with it are ambiguous (ops#79's Track A outcome, as V1); correct needs the chamfer to keep every piece
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V2

@@ -34,6 +34,8 @@ public:
         Broken,
         /// Resolved by index after an element-map version change, verified by its fingerprint.
         Index,
+        /// Resolved to several elements, one reference each (Expand, Task 2 PR 7).
+        Expanded,
     };
 
     struct Entry
@@ -44,10 +46,13 @@ public:
         std::string oldName;
         std::string oldIndex;
         Status status = Status::Broken;
-        /// 1 for Resolved, -1 for Broken; Index entries have none (-1).
+        /// The tier for Resolved (0-3) and Expanded (1, or 4 for a continuation), -1 for Broken;
+        /// Index entries have none (-1).
         int tier = -1;
-        /// The element it resolved to; empty for Broken.
+        /// The element it resolved to (Expanded: the first); empty for Broken.
         std::string newIndex;
+        /// Expanded: every element, (index name, mapped name), in order.
+        std::vector<std::pair<std::string, std::string>> pieces;
         /// The candidates: (index name, mapped name).
         std::vector<std::pair<std::string, std::string>> candidates;
         std::string evidence;
@@ -61,6 +66,15 @@ public:
                         std::vector<Entry> entries);
     /// Drops all of \a prop's entries.
     static void clear(const PropertyLinkBase* prop);
+    /// Moves \a prop's entries to their indices in its rebuilt sub list (remapSubIndices()): an
+    /// entry follows its reference's first new index, and goes with a removed one.
+    static void remap(const PropertyLinkBase* prop,
+                      const std::vector<int>& firstNew,
+                      const std::vector<int>& countNew);
+    /// The same for \a entries, not yet in the report.
+    static void remapEntries(std::vector<Entry>& entries,
+                             const std::vector<int>& firstNew,
+                             const std::vector<int>& countNew);
     /// \a prop's entries, sorted by index.
     static std::vector<Entry> get(const PropertyLinkBase* prop);
     /// \a prop's entry for reference \a index, or null.

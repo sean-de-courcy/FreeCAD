@@ -7,6 +7,7 @@
 #include <locale>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -1046,7 +1047,160 @@ std::string describeNearest(const Nearest& nearest)
     return text + ", d_max " + formatDistance(nearest.dMax);
 }
 
+// The angle between two directions, either sense, as intrinsicAgrees() measures it.
+double lineAngle(Base::Vector3d a, Base::Vector3d b)
+{
+    a.Normalize();
+    b.Normalize();
+    return std::atan2((a % b).Length(), std::abs(a * b));
+}
+
+/* Where an edge was, from the fingerprint saved with its reference (the continuation, Task 2 PR
+ * 7): an extent of arc length [0, length] along the old curve. A piece of the target lies on the
+ * old curve when interval() gives its extent there; everything after that (containment, a
+ * run-past, the overlap check) compares intervals, so another curve kind only adds its own of()
+ * and interval(). Lines only, for now.
+ */
+struct OldExtent
+{
+    // A line: from origin along the unit direction axis.
+    Base::Vector3d origin;
+    Base::Vector3d axis;
+    double length = 0.0;
+    // A closed curve (a full circle): intervals wrap at length.
+    bool cyclic = false;
+    double eps = 0.0;
+    double angle = 0.0;
+
+    static std::optional<OldExtent> of(
+        const ElementFingerprint& saved,
+        double eps,
+        const GeometryTolerances& tolerances
+    )
+    {
+        if (!saved.isValid() || saved.type != 'E' || saved.kind != "Line" || !saved.size
+            || !saved.center || !saved.direction || saved.direction->Length() <= 0.0
+            || !(*saved.size > eps)) {
+            return std::nullopt;
+        }
+        OldExtent extent;
+        extent.axis = *saved.direction;
+        extent.axis.Normalize();
+        extent.length = *saved.size;
+        // A line edge's centre of mass is its midpoint.
+        extent.origin = *saved.center - extent.axis * (extent.length / 2.0);
+        extent.eps = eps;
+        extent.angle = tolerances.angle;
+        return extent;
+    }
+
+    // The piece's extent along the old curve, sorted; nothing if it doesn't lie on that curve
+    // (a line: the same direction within the angle, both ends within eps of the line).
+    std::optional<std::pair<double, double>> interval(const ElementFingerprint& piece) const
+    {
+        if (!piece.isValid() || piece.type != 'E' || piece.kind != "Line" || !piece.size
+            || !piece.center || !piece.direction || piece.direction->Length() <= 0.0) {
+            return std::nullopt;
+        }
+        if (lineAngle(axis, *piece.direction) > angle) {
+            return std::nullopt;
+        }
+        Base::Vector3d direction = *piece.direction;
+        direction.Normalize();
+        std::pair<double, double> range;
+        for (int end = 0; end < 2; ++end) {
+            Base::Vector3d point = *piece.center
+                + direction * ((end == 0 ? -0.5 : 0.5) * *piece.size);
+            Base::Vector3d offset = point - origin;
+            double t = offset * axis;
+            if ((offset - axis * t).Length() > eps) {
+                return std::nullopt;
+            }
+            (end == 0 ? range.first : range.second) = t;
+        }
+        if (range.first > range.second) {
+            std::swap(range.first, range.second);
+        }
+        return range;
+    }
+
+    bool within(const std::pair<double, double>& range) const
+    {
+        return range.first >= -eps && range.second <= length + eps;
+    }
+
+    // The length the range shares with [0, length].
+    double overlap(const std::pair<double, double>& range) const
+    {
+        return std::min(range.second, length) - std::max(range.first, 0.0);
+    }
+};
+
 }  // namespace
+
+bool hitWithinOldEdge(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    const double eps = distance * std::max(1.0, diagonal);
+    auto extent = OldExtent::of(saved, eps, tolerances);
+    if (!extent) {
+        return false;
+    }
+    auto range = extent->interval(now);
+    return range && extent->within(*range)
+        && range->second - range->first < extent->length - eps;
+}
+
+namespace
+{
+
+bool isPlane(const ElementFingerprint& fp)
+{
+    return fp.isValid() && fp.type == 'F' && fp.kind == "Plane" && fp.size && fp.center
+        && fp.direction && fp.direction->Length() > 0.0;
+}
+
+}  // namespace
+
+bool planeAgrees(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    if (!isPlane(saved) || !isPlane(face)) {
+        return false;
+    }
+    Base::Vector3d normal = *saved.direction;
+    Base::Vector3d other = *face.direction;
+    normal.Normalize();
+    other.Normalize();
+    // A plane's normal keeps its sense: a face of the opposite side isn't in this plane.
+    if (std::atan2((normal % other).Length(), normal * other) > tolerances.angle) {
+        return false;
+    }
+    const double eps = distance * std::max(1.0, diagonal);
+    return std::abs((*face.center - *saved.center) * normal) <= eps;
+}
+
+bool faceWithinOldPlane(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    return planeAgrees(saved, now, diagonal, tolerances, distance)
+        && *now.size < *saved.size * (1.0 - distance);
+}
 
 bool intrinsicAgrees(
     const ElementFingerprint& saved,
@@ -1160,6 +1314,31 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         return element.names.empty() ? std::string() : element.names.front();
     };
 
+    // The pool elements' current fingerprints, measured on first use.
+    std::map<std::string, ElementFingerprint> measured;
+    auto fingerprintOfIndex = [&](const std::string& index) -> const ElementFingerprint& {
+        auto it = measured.find(index);
+        if (it == measured.end()) {
+            ElementFingerprint fingerprint;
+            if (input.fingerprintOf) {
+                fingerprint = input.fingerprintOf(index);
+            }
+            it = measured.emplace(index, std::move(fingerprint)).first;
+        }
+        return it->second;
+    };
+    auto fingerprintOf = [&](const SolveInput::Element& element) -> const ElementFingerprint& {
+        return fingerprintOfIndex(element.index);
+    };
+    auto positionOf = [](const Pool& pool, const std::string& index) {
+        for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+            if (pool.elements[k].index == index) {
+                return static_cast<int>(k);
+            }
+        }
+        return -1;
+    };
+
     // Tier 0.
     for (std::size_t i = 0; i < input.entries.size(); ++i) {
         const auto& entry = input.entries[i];
@@ -1179,11 +1358,319 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
     }
 
+    // Entries decided before the graph: collapsing groups and continued exact entries.
+    std::vector<char> decidedEntry(input.entries.size(), 0);
+
+    // Collapse: a group of references expanded from one name (the same scope and `from`) merges
+    // back when that name is found exactly and no member holds another element.
+    std::map<std::pair<std::string, std::string>, std::vector<int>> fromGroups;
+    for (std::size_t i = 0; i < input.entries.size(); ++i) {
+        const auto& entry = input.entries[i];
+        if (!entry.from.empty()) {
+            fromGroups[{entry.scope, entry.from}].push_back(static_cast<int>(i));
+        }
+    }
+    for (const auto& [key, members] : fromGroups) {
+        const std::string& type = input.entries[members.front()].type;
+        if (std::any_of(members.begin(), members.end(), [&](int i) {
+                return input.entries[i].type != type;
+            })) {
+            continue;
+        }
+        Pool& pool = pools[type];
+        auto found = pool.byName.find(key.second);
+        if (found == pool.byName.end()) {
+            continue;
+        }
+        const auto& element = pool.elements[found->second];
+        // A missing member merged back only if it is a structural piece of the `from` element,
+        // or its saved geometry lies on that element as it is now (a continuation that the
+        // element covers again). A member gone elsewhere (its line redrawn with a new ID) is
+        // solved on its own.
+        const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+        const ElementFingerprint& now = fingerprintOfIndex(element.index);
+        auto extent = OldExtent::of(now, eps, input.tolerances);
+        auto mergedBack = [&](const SolveInput::Entry& entry) {
+            if (NameAncestry::isPieceOf(entry.oldName, key.second)
+                || NameAncestry::isIndexPieceOf(entry.oldName, key.second)) {
+                return true;
+            }
+            auto range = extent ? extent->interval(entry.fingerprint) : std::nullopt;
+            return range && extent->within(*range);
+        };
+        bool merged = std::all_of(members.begin(), members.end(), [&](int i) {
+            const auto& entry = input.entries[i];
+            return entry.exact ? entry.exactElement == element.index : mergedBack(entry);
+        });
+        if (!merged) {
+            continue;
+        }
+        int keep = *std::min_element(members.begin(), members.end(), [&](int a, int b) {
+            return input.entries[a].position < input.entries[b].position;
+        });
+        for (int i : members) {
+            auto& outcome = outcomes[i];
+            outcome = SolveOutcome();
+            outcome.element = element.index;
+            outcome.name = firstName(element);
+            if (i == keep) {
+                outcome.status = SolveStatus::Resolved;
+                outcome.tier = 0;
+                outcome.collapsed = true;
+                outcome.evidence = "pieces merged back: " + key.second + " found exactly";
+            }
+            else {
+                outcome.status = SolveStatus::Removed;
+                outcome.evidence = "pieces merged back";
+            }
+            decidedEntry[i] = 1;
+        }
+        pool.exact.insert(element.index);
+    }
+
+    // Continuation: an exact line edge that is now a strict part of the edge its fingerprint
+    // was saved for, and the other line edges on the old edge that bound a face it bounds.
+    {
+        const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+        Pool& pool = pools["Edge"];
+        const std::set<std::string> held = pool.exact;  // before any continuation is taken
+        std::map<std::string, std::set<std::string>> facesByEdge;
+        auto facesOf = [&](const std::string& index) -> const std::set<std::string>& {
+            auto it = facesByEdge.find(index);
+            if (it == facesByEdge.end()) {
+                std::set<std::string> faces;
+                if (input.facesOf) {
+                    for (auto& face : input.facesOf(index)) {
+                        faces.insert(std::move(face));
+                    }
+                }
+                it = facesByEdge.emplace(index, std::move(faces)).first;
+            }
+            return it->second;
+        };
+        std::vector<int> taken;
+        for (std::size_t i = 0; i < input.entries.size(); ++i) {
+            const auto& entry = input.entries[i];
+            if (!entry.exact || decidedEntry[i] || entry.type != "Edge"
+                || !entry.fingerprint.isValid()) {
+                continue;
+            }
+            const std::string& hit = entry.exactElement;
+            const int hitPosition = positionOf(pool, hit);
+            const ElementFingerprint& now = fingerprintOfIndex(hit);
+            if (hitPosition < 0
+                || !hitWithinOldEdge(entry.fingerprint,
+                                  now,
+                                  input.diagonal,
+                                  input.tolerances,
+                                  input.continuationDistance)) {
+                continue;
+            }
+            auto extent = OldExtent::of(entry.fingerprint, eps, input.tolerances);
+            auto hitRange = extent->interval(now);
+            const auto& hitFaces = facesOf(hit);
+            std::vector<std::pair<int, std::pair<double, double>>> continued;  // position, range
+            std::vector<int> pastEnd;
+            std::string sharedFace;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& index = pool.elements[k].index;
+                if (index == hit || held.count(index)) {
+                    continue;
+                }
+                auto range = extent->interval(fingerprintOf(pool.elements[k]));
+                if (!range) {
+                    continue;
+                }
+                bool within = extent->within(*range);
+                if (!within && extent->overlap(*range) <= eps) {
+                    continue;  // beyond the old ends, at most touching one
+                }
+                const auto& faces = facesOf(index);
+                auto shared = std::find_if(faces.begin(), faces.end(), [&](const auto& face) {
+                    return hitFaces.count(face) > 0;
+                });
+                if (shared == faces.end()) {
+                    continue;
+                }
+                if (within) {
+                    continued.emplace_back(static_cast<int>(k), *range);
+                    if (sharedFace.empty()) {
+                        sharedFace = *shared;
+                    }
+                }
+                else {
+                    pastEnd.push_back(static_cast<int>(k));
+                }
+            }
+            if (continued.empty() && pastEnd.empty()) {
+                continue;  // only shortened
+            }
+            // Pieces of one edge are disjoint; overlapping ones are something else.
+            std::vector<std::pair<double, double>> ranges {*hitRange};
+            for (const auto& [k, range] : continued) {
+                ranges.push_back(range);
+            }
+            std::sort(ranges.begin(), ranges.end());
+            bool overlapping = false;
+            for (std::size_t r = 1; r < ranges.size(); ++r) {
+                overlapping = overlapping || ranges[r - 1].second - ranges[r].first > eps;
+            }
+
+            std::vector<int> positions {hitPosition};
+            std::string continuations;
+            for (const auto& [k, range] : continued) {
+                positions.push_back(k);
+                continuations += (continuations.empty() ? "" : ", ") + pool.elements[k].index;
+            }
+            auto& outcome = outcomes[i];
+            auto breakWith = [&](std::vector<int> listed, std::string evidence) {
+                std::sort(listed.begin(), listed.end());
+                outcome = SolveOutcome();
+                outcome.evidence = std::move(evidence);
+                for (int k : listed) {
+                    outcome.candidates.push_back(pool.elements[k].index);
+                    outcome.candidateNames.push_back(firstName(pool.elements[k]));
+                }
+            };
+            if (!pastEnd.empty() || overlapping) {
+                std::vector<int> listed = positions;
+                listed.insert(listed.end(), pastEnd.begin(), pastEnd.end());
+                std::string evidence = "pieces overlap";
+                if (!pastEnd.empty()) {
+                    evidence = "continued past the old edge by "
+                        + pool.elements[pastEnd.front()].index;
+                    for (std::size_t p = 1; p < pastEnd.size(); ++p) {
+                        evidence += ", " + pool.elements[pastEnd[p]].index;
+                    }
+                }
+                breakWith(listed, evidence);
+            }
+            else if (entry.policy == SolvePolicy::Expand) {
+                std::sort(positions.begin(), positions.end());
+                outcome.status = SolveStatus::Resolved;
+                outcome.tier = 4;
+                for (int k : positions) {
+                    outcome.elements.push_back(pool.elements[k].index);
+                    outcome.names.push_back(firstName(pool.elements[k]));
+                }
+                outcome.element = outcome.elements.front();
+                outcome.name = outcome.names.front();
+                outcome.from = entry.from.empty() ? entry.exactName : entry.from;
+                outcome.evidence = "continued by " + continuations + " (line"
+                    + (continued.size() > 1 ? "s" : "") + " within the old edge, shares "
+                    + sharedFace + ")";
+                for (const auto& [k, range] : continued) {
+                    taken.push_back(k);
+                }
+            }
+            else if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                     && std::all_of(continued.begin(), continued.end(), [&](const auto& c) {
+                            return entry.equivalent(hit, pool.elements[c.first].index);
+                        })) {
+                // Every piece gives the consumer the same result: the hit stands.
+            }
+            else {
+                breakWith(positions, "split: the old edge continues in " + continuations);
+            }
+            decidedEntry[i] = 1;
+        }
+        for (int k : taken) {
+            pool.exact.insert(pool.elements[k].index);
+        }
+    }
+
+    // A planar face split by a coplanar one (Q3 (b)): a face's fingerprint doesn't bound its
+    // region, so the rest of the old face can't be told from a coplanar neighbour. Detected and
+    // broken, never taken.
+    {
+        Pool& pool = pools["Face"];
+        auto inPlane = [&](const ElementFingerprint& saved, const ElementFingerprint& face) {
+            return planeAgrees(saved,
+                               face,
+                               input.diagonal,
+                               input.tolerances,
+                               input.continuationDistance);
+        };
+        std::map<std::string, std::set<std::string>> neighbours;
+        auto neighboursOf = [&](const std::string& index) -> const std::set<std::string>& {
+            auto it = neighbours.find(index);
+            if (it == neighbours.end()) {
+                std::set<std::string> faces;
+                if (input.neighboursOf) {
+                    for (auto& face : input.neighboursOf(index)) {
+                        faces.insert(std::move(face));
+                    }
+                }
+                faces.erase(index);
+                it = neighbours.emplace(index, std::move(faces)).first;
+            }
+            return it->second;
+        };
+        for (std::size_t i = 0; i < input.entries.size(); ++i) {
+            const auto& entry = input.entries[i];
+            const ElementFingerprint& saved = entry.fingerprint;
+            if (!entry.exact || decidedEntry[i] || entry.type != "Face" || !isPlane(saved)) {
+                continue;
+            }
+            const std::string& hit = entry.exactElement;
+            const int hitPosition = positionOf(pool, hit);
+            if (hitPosition < 0
+                || !faceWithinOldPlane(saved,
+                                       fingerprintOfIndex(hit),
+                                       input.diagonal,
+                                       input.tolerances,
+                                       input.continuationDistance)) {
+                continue;
+            }
+            const auto& hitNeighbours = neighboursOf(hit);
+            std::vector<int> listed {hitPosition};
+            std::string beside;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& index = pool.elements[k].index;
+                if (index == hit || pool.exact.count(index)
+                    || !inPlane(saved, fingerprintOf(pool.elements[k]))) {
+                    continue;
+                }
+                const auto& faces = neighboursOf(index);
+                bool related = hitNeighbours.count(index) > 0
+                    || std::any_of(faces.begin(), faces.end(), [&](const auto& face) {
+                           return hitNeighbours.count(face) > 0;
+                       });
+                if (related) {
+                    listed.push_back(static_cast<int>(k));
+                    beside += (beside.empty() ? "" : ", ") + index;
+                }
+            }
+            if (listed.size() == 1) {
+                continue;  // only shrunk
+            }
+            // Equivalent (the coordinator's decision on the review): the hit stands if every
+            // coplanar face beside it gives the consumer the same result, as for edges.
+            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                && std::all_of(listed.begin(), listed.end(), [&](int k) {
+                       return k == hitPosition
+                           || entry.equivalent(hit, pool.elements[k].index);
+                   })) {
+                decidedEntry[i] = 1;
+                continue;
+            }
+            std::sort(listed.begin(), listed.end());
+            auto& outcome = outcomes[i];
+            outcome = SolveOutcome();
+            outcome.evidence = "split: a coplanar face beside it, " + beside;
+            for (int k : listed) {
+                outcome.candidates.push_back(pool.elements[k].index);
+                outcome.candidateNames.push_back(firstName(pool.elements[k]));
+            }
+            decidedEntry[i] = 1;
+        }
+    }
+
     // Missing entries, grouped: one solve per (old name, type, policy).
     std::map<std::tuple<std::string, std::string, int>, std::vector<int>> groups;
     for (std::size_t i = 0; i < input.entries.size(); ++i) {
         const auto& entry = input.entries[i];
-        if (!entry.exact) {
+        if (!entry.exact && !decidedEntry[i]) {
             groups[{entry.oldName, entry.type, static_cast<int>(entry.policy)}].push_back(
                 static_cast<int>(i)
             );
@@ -1216,21 +1703,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // Equivalent: the pieces that resolve as one, their representative being the only
         // entry of `candidates`.
         std::vector<int> equivalent;
+        // Expand: the pieces that resolve together, the first being the only entry of
+        // `candidates`.
+        std::vector<int> expanded;
     };
 
-    // The pool elements' current fingerprints, measured on first use.
-    std::map<std::string, ElementFingerprint> measured;
-    auto fingerprintOf = [&](const SolveInput::Element& element) -> const ElementFingerprint& {
-        auto it = measured.find(element.index);
-        if (it == measured.end()) {
-            ElementFingerprint fingerprint;
-            if (input.fingerprintOf) {
-                fingerprint = input.fingerprintOf(element.index);
-            }
-            it = measured.emplace(element.index, std::move(fingerprint)).first;
-        }
-        return it->second;
-    };
     // The members' saved fingerprint, if they all hold the same valid one.
     auto savedFingerprint = [&](const std::vector<int>& members) -> const ElementFingerprint* {
         const ElementFingerprint& first = input.entries[members.front()].fingerprint;
@@ -1335,6 +1812,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
             }
         }
+        // The old element's pieces, wherever tier 1's filters left them: a piece's top section
+        // is its cutter's, so the top agreement among the overlap survivors can drop every
+        // piece in favour of an element generated from the old one (Task 2 PR 7's review).
+        if (!oldName.empty()) {
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                const auto& names = pool.elements[k].names;
+                if (allowed[k] && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                        return NameAncestry::isPieceOf(n, oldName);
+                    })) {
+                    all.insert(static_cast<int>(k));
+                }
+            }
+        }
         state.candidates.assign(all.begin(), all.end());
 
         // Tiers 2 and 3 and the IDX source, for a reference with a saved fingerprint.
@@ -1356,7 +1846,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
         };
 
-        // Pieces. Under One (and Expand, read as One until PR 7) they break the entry at once.
+        // Pieces. Under One they break the entry at once. Under Expand they resolve together.
         // Under Equivalent they resolve as one candidate if every piece gives the consumer the
         // same result, represented by the piece whose first name sorts first; otherwise the
         // entry breaks. The other survivors don't count: the pieces are what is left of the old
@@ -1399,6 +1889,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             });
             state.equivalent = pieces;
             state.candidates = {representative};
+            state.listed = pieces;
+        }
+        else if (!pieces.empty() && std::get<2>(key) == static_cast<int>(SolvePolicy::Expand)) {
+            // Structural evidence, as for Equivalent: no geometry runs.
+            state.expanded = pieces;
+            state.candidates = {pieces.front()};
             state.listed = pieces;
         }
         else if (!pieces.empty()) {
@@ -1498,6 +1994,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             graph.addEdge(state.graphEntry, node, state.inAncestry.count(representative) > 0);
             continue;
         }
+        if (!state.expanded.empty()) {
+            // One candidate holding every piece: the pieces are matched as a set. They hold the
+            // old name in their ancestry.
+            std::vector<int> ids;
+            for (int k : state.expanded) {
+                ids.push_back(pool.ids[k]);
+            }
+            int node = graph.addCandidate(std::move(ids));
+            representativeOfNode[node] = pool.ids[state.expanded.front()];
+            graph.addEdge(state.graphEntry, node, true);
+            continue;
+        }
         for (int k : state.candidates) {
             int id = pool.ids[k];
             auto [it, inserted] = nodeOfId.emplace(id, 0);
@@ -1524,12 +2032,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // A partner named as the old element up to the duplicate counter is a sibling (a
             // pattern instance's copy of it), never the element itself: its ancestry and its top
             // section are the old element's, so the evidence below can't tell them apart.
+            auto siblingElement = [&](int position) {
+                const auto& names = state.pool->elements[position].names;
+                return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                    return isCounterSibling(n, state.oldName);
+                });
+            };
             bool sibling = k >= 0
-                && std::any_of(
-                    state.pool->elements[k].names.begin(),
-                    state.pool->elements[k].names.end(),
-                    [&](const auto& n) { return isCounterSibling(n, state.oldName); }
-                );
+                && (state.expanded.empty() ? siblingElement(k)
+                                           : std::any_of(state.expanded.begin(),
+                                                         state.expanded.end(),
+                                                         siblingElement));
             // A partner from tier 1 must agree with the old name on the top section, or hold the
             // old name in its ancestry: an ancestor shared with the old name alone (e.g. a sketch
             // edge that many elements embed through a face) doesn't show it is the same element.
@@ -1539,6 +2052,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             bool evidenced = k >= 0
                 && (state.geometric || state.inAncestry.count(k) > 0
                     || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
+                    || !state.expanded.empty()
                     || std::any_of(
                         state.pool->elements[k].names.begin(),
                         state.pool->elements[k].names.end(),
@@ -1551,6 +2065,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
                 listCandidates(state, state.listed);
+            }
+            else if (status == MatchStatus::Resolved && !state.expanded.empty()) {
+                state.outcome.status = SolveStatus::Resolved;
+                state.outcome.tier = 1;
+                for (int piece : state.expanded) {
+                    state.outcome.elements.push_back(state.pool->elements[piece].index);
+                    state.outcome.names.push_back(firstName(state.pool->elements[piece]));
+                }
+                state.outcome.element = state.outcome.elements.front();
+                state.outcome.name = state.outcome.names.front();
+                state.outcome.evidence = "split into " + std::to_string(state.expanded.size())
+                    + " pieces, expanded";
             }
             else if (status == MatchStatus::Resolved) {
                 const auto& element = state.pool->elements[k];
@@ -1598,6 +2124,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         for (int member : *state.members) {
             outcomes[member] = state.outcome;
+            if (!state.outcome.elements.empty()) {
+                // Expanded: a member that was a piece already passes its `from` on.
+                const auto& from = input.entries[member].from;
+                outcomes[member].from = from.empty() ? state.oldName : from;
+            }
         }
     }
     return outcomes;

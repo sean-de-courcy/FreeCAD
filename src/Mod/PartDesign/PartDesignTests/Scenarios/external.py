@@ -100,6 +100,29 @@ class ExternalSplit(ExternalEdit):
         self.split = True
 
 
+class ExternalMoveSideIn(ExternalEdit):
+    """The right side moves in from x = 20 to x = 16, its lines keeping their geometry IDs: the
+    front edge gets shorter, and nothing lies on the rest of its old place. The external edge
+    follows it: a shortened edge isn't a split (ops#7, Task 2 PR 7)."""
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (16, 0)), 1: ((16, 0), (16, 10)), 2: ((16, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        self.width = 16
+
+
+class ExternalNotchAndExtend(ExternalSplit):
+    """ExternalSplit's notch, with the right side moved out to x = 26: the rest of the front
+    side (x 12..26) runs past the old edge's end. The reference breaks, with both edges as
+    candidates (ops#7, Task 2 PR 7)."""
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (8, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (26, 0)]), False)
+        self.width = 26
+        self.split = True
+
 
 class ExternalLineToArc(ExternalEdit):
     """The front line is deleted and an arc drawn between its end points (through (10, -3)). The

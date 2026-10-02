@@ -30,15 +30,23 @@ Each model is a block 0..20 x 0..10 x 0..10 (a pad) and a cutter, a pocket or a 
 sits where it touches nothing referenced and is then moved across the referenced element. The
 consumers reference the cutter's shape, so the split happens in the feature they link to."""
 
+import os
+import shutil
+import tempfile
+
+import FreeCAD as App
+
 from .harness import (
     BROKEN,
     Attached,
+    Broken,
     Chamfered,
     Drafted,
     Extruded,
     Filleted,
     Scenario,
     X,
+    Y,
     Z,
     edge,
     face,
@@ -176,6 +184,7 @@ class SplitFilletNotch(SplitModel):
     don't find it either."""
 
     REFS = ("fillet_edge",)
+    radius = 1
 
     def build(self, doc):
         body = self.block(doc)
@@ -183,8 +192,8 @@ class SplitFilletNotch(SplitModel):
         doc.recompute()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (pad, self.names(pad, self.frontTopEdge().predicate))
-        fillet.Radius = 1
-        self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(1))
+        fillet.Radius = self.radius
+        self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(self.radius))
 
     def edit(self, doc):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
@@ -222,3 +231,218 @@ class DraftFaceRemoved(SplitDraftGroove):
     def edit(self, doc):
         m.moveRectangle(doc.SlotSketch, 18, -1, 21, 11)
         self.gone = True
+
+
+# The reference solver's splits (ops#7, Task 2 PR 7): an expansion merged back, a notch's
+# continuation, and edits the continuation must not take.
+
+
+class SolverSplitThenMerge(SplitFilletFuse):
+    """SplitFilletFuse in two steps. `split`: the rib moves across the filleted edge, and the
+    fillet takes both pieces. `merge`: the rib moves back to y 3..7, the edge is whole again
+    under its old name, and the pieces merge back into it: the fillet holds one reference."""
+
+    steps = ("split", "merge")
+
+    def split(self, doc):
+        m.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+
+    def merge(self, doc):
+        m.moveRectangle(doc.RibSketch, 8, 3, 12, 7)
+
+
+class SolverSplitThenMergeReopened(SolverSplitThenMerge):
+    """As SolverSplitThenMerge, with the document saved, closed and opened again between the
+    steps: the pieces keep the name they were expanded from (`from`) in the file."""
+
+    steps = ("split", "reopen", "merge")
+
+    def reopen(self, doc):
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        self.doc = App.openDocument(path)
+        self.documents.append(self.doc.Name)
+        for obj in self.doc.Objects:
+            obj.touch()
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+class SolverNotchThenFill(SplitFilletNotch):
+    """SplitFilletNotch in two steps. `notch`: the fillet takes both pieces, the second (a new
+    line's edge) as the continuation of the first. `fill`: the notch's four lines are deleted
+    and the front line goes back to x 0..20: the edge is whole again, and the pieces merge back
+    into it."""
+
+    steps = ("notch", "fill")
+
+    def notch(self, doc):
+        self.edit(doc)
+
+    def fill(self, doc):
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
+
+
+class SideMovedIn(SplitFilletNotch):
+    """A fillet, radius 1, on the block's front top edge; the right side moves in to x = 16 (the
+    front, right and back lines moved, their geometry IDs kept). The edge is shorter, and nothing
+    lies on the rest of its old place: the fillet keeps the edge, 0..16."""
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (16, 0)), 1: ((16, 0), (16, 10)), 2: ((16, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+
+
+class NotchStepOffset(SplitFilletNotch):
+    """A fillet, radius 0.5, on the block's front top edge; the front line then ends at x = 8,
+    and a step follows as new lines, (8, 0)-(8, 1)-(20, 1), with the right side from (20, 1).
+    The edge at y = 1 is parallel to the old one but 1 mm off its line: never its continuation.
+    The fillet keeps 0..8."""
+
+    radius = 0.5
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 1), (20, 1)]), False)
+
+
+class NotchAndExtend(SplitFilletNotch):
+    """SplitFilletNotch's notch, with the right side moved out to x = 26: the rest of the side
+    (x 12..26) runs past the old edge's end (x = 20), part continuation and part new. The
+    reference breaks, with both edges as candidates: the fillet neither keeps 0..8 alone
+    (partial) nor takes 12..26."""
+
+    split = False
+
+    def frontTopEdge(self):
+        if self.split:
+            return Broken(super().frontTopEdge())
+        return super().frontTopEdge()
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (8, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (26, 0)]), False)
+        self.split = True
+
+
+class DraftFaceNotch(SplitModel):
+    """A draft, 5 degrees, of the block's front face (y = 0) on the bottom face; a notch (x 8..12,
+    2 deep) is then cut into the front side of the block's sketch, as in SplitFilletNotch. The
+    front face keeps its name on x 0..8, and the rest (x 12..20) comes from a new line, coplanar,
+    beside the same top and bottom faces. A face's fingerprint doesn't bound its region, so the
+    rest can't be told from a coplanar neighbour: the reference breaks with both as candidates
+    (Q3 (b) of the PR 7 design), never keeps 0..8 alone (partial)."""
+
+    REFS = ("draft_face",)
+    split = False
+
+    def frontFace(self):
+        front = pieces(face("plane", normal=-Y, through=(0, 0, 0)))
+        return Broken(front) if self.split else front
+
+    def bottomFace(self):
+        return face("plane", normal=-Z, through=(0, 0, 0))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (pad, self.names(pad, self.frontFace().predicate))
+        draft.NeutralPlane = (pad, self.names(pad, self.bottomFace()))
+        draft.Angle = 5
+        self.ref("draft_face", draft, "Base", self.frontFace, Drafted(5, self.bottomFace))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+        self.split = True
+
+
+class SolverNotchRedrawn(SplitFilletNotch):
+    """SplitFilletNotch in two steps. `notch`: the fillet takes both pieces. `redraw`: the side's
+    rest (x 12..20) is drawn again as a new line and the old one deleted, so it gets a new
+    geometry ID and its edge another name. The pieces must not merge back into the kept piece
+    alone (a silent partial): the redrawn edge is found in its place (tier 3), and the fillet
+    keeps both (the review of Task 2 PR 7, B1)."""
+
+    steps = ("notch", "redraw")
+
+    def notch(self, doc):
+        self.edit(doc)
+
+    def redraw(self, doc):
+        last = doc.Profile.GeometryCount - 1  # the side's rest, (12, 0)-(20, 0)
+        doc.Profile.addGeometry(m.polyline([(12, 0), (20, 0)]), False)
+        doc.Profile.delGeometry(last)
+
+
+class AttachFaceNotch(SplitModel):
+    """A sketch attached (FlatFace) to the block's front face (y = 0); a notch (x 8..12, 2 deep)
+    is then cut into the front side, as in SplitFilletNotch. The face keeps its name on x 0..8,
+    and the rest (x 12..20) is coplanar: the sketch's placement is the same on either, so it
+    keeps its face (Equivalent under the split face's rule)."""
+
+    REFS = ("sketch_front",)
+
+    def frontFace(self):
+        return face("plane", normal=-Y, through=(0, 0, 0), contains=(2, 0, 5))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        onFront = body.newObject("Sketcher::SketchObject", "OnFront")
+        onFront.AttachmentSupport = [(pad, self.names(pad, self.frontFace())[0])]
+        onFront.MapMode = "FlatFace"
+        self.ref("sketch_front", onFront, "AttachmentSupport", self.frontFace, Attached())
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+
+
+class DraftUProngNarrowed(SplitModel):
+    """A U-shaped pad: the block 0..20 x 0..10, 10 high, with a slot (x 6..14, y 4..10) in its
+    profile, so two prongs (x 0..6 and 14..20) end in coplanar faces at y = 10. A draft, 5
+    degrees, of the left prong's end face on the bottom face; the left prong is then narrowed to
+    x 0..4 (its lines keep their geometry IDs). The end face only shrinks, and the draft should
+    keep it. The right prong's end face is coplanar and shares the top and bottom faces with it,
+    so the split face's rule (Q3 (b) of the Task 2 PR 7 design) can't tell this from a split:
+    V2s breaks the draft, a false break (broken, never wrong), listed for PR 8's gate."""
+
+    REFS = ("draft_face",)
+
+    def block(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        outline = [(0, 0), (20, 0), (20, 10), (14, 10), (14, 4), (6, 4), (6, 10), (0, 10)]
+        profile = m.sketch(doc, "Profile", m.polygon(outline), body)
+        m.pad(body, profile, self.height)
+        return body
+
+    def endFace(self):
+        return face("plane", normal=Y, through=(0, 10, 0), contains=(2, 10, 5))
+
+    def bottomFace(self):
+        return face("plane", normal=-Z, through=(0, 0, 0))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (pad, self.names(pad, self.endFace()))
+        draft.NeutralPlane = (pad, self.names(pad, self.bottomFace()))
+        draft.Angle = 5
+        self.ref("draft_face", draft, "Base", self.endFace, Drafted(5, self.bottomFace))
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {4: ((14, 4), (4, 4)), 5: ((4, 4), (4, 10)), 6: ((4, 10), (0, 10))})
