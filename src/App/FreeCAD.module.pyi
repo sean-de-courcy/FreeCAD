@@ -337,6 +337,10 @@ def repairReference(obj: DocumentObject, property: str, index: int, candidate: s
     """Set reference `index` of `obj`'s link property `property` to `candidate`.
 
     `candidate` must be one of the candidates that getReferenceReport() lists for it; raises
-    ValueError otherwise.
+    ValueError otherwise. The reference is written as the solver writes a resolution, so the
+    owner follows it (a sketch moves its external geometry to the candidate). In a
+    PropertyLinkSub, a candidate that another reference of the property already names is not
+    added twice: the repaired reference goes. The property's report is cleared until the next
+    update, so a second broken reference of it is repaired after a recompute.
     """
     ...
