@@ -40,13 +40,17 @@ def _vector(v):
 
 
 def _planeFingerprint(face):
-    """The expected text of a planar face, from the Python geometry API (an independent path)."""
+    """The expected text of a planar face, from the Python geometry API (an independent path):
+    version 3, with the face's bounding box (Task 2 PR 8)."""
     u0, u1, v0, v1 = face.ParameterRange
     normal = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
-    return "1|F|Plane|%s|%s|%s|_" % (
+    box = face.optimalBoundingBox(False, False)
+    corners = (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)
+    return "3|F|Plane|%s|%s|%s|_|%s" % (
         _number(face.Area),
         _vector(face.CenterOfMass),
         _vector(normal),
+        ",".join(_number(c) for c in corners),
     )
 
 

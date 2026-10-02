@@ -1305,6 +1305,34 @@ bool planeAgrees(
     return std::abs((*face.center - *saved.center) * normal) <= eps;
 }
 
+ExtentRelation faceExtentRelation(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    double distance
+)
+{
+    if (!saved.extentMin || !saved.extentMax || !face.extentMin || !face.extentMax) {
+        return ExtentRelation::Unknown;
+    }
+    const double eps = distance * std::max(1.0, diagonal);
+    bool inside = true;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double oldLow = (*saved.extentMin)[axis];
+        const double oldHigh = (*saved.extentMax)[axis];
+        const double low = (*face.extentMin)[axis];
+        const double high = (*face.extentMax)[axis];
+        const double overlap = std::min(oldHigh, high) - std::max(oldLow, low);
+        if (overlap < -eps || (overlap <= eps && oldHigh - oldLow > eps && high - low > eps)) {
+            return ExtentRelation::Outside;
+        }
+        if (low < oldLow - eps || high > oldHigh + eps) {
+            inside = false;
+        }
+    }
+    return inside ? ExtentRelation::Inside : ExtentRelation::Overlapping;
+}
+
 bool faceWithinOldPlane(
     const ElementFingerprint& saved,
     const ElementFingerprint& now,
@@ -1737,10 +1765,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto& hitNeighbours = neighboursOf(hit);
             std::vector<int> listed {hitPosition};
             std::string beside;
+            std::string pastEnd;  // faces that run past the old face's extent
             for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                 const auto& index = pool.elements[k].index;
                 if (index == hit || pool.exact.count(index)
                     || !inPlane(saved, fingerprintOf(pool.elements[k]))) {
+                    continue;
+                }
+                // Outside the old face's extent, a face holds no point of it (PR 8).
+                ExtentRelation relation = faceExtentRelation(saved,
+                                                             fingerprintOf(pool.elements[k]),
+                                                             input.diagonal,
+                                                             input.continuationDistance);
+                if (relation == ExtentRelation::Outside) {
                     continue;
                 }
                 const auto& faces = neighboursOf(index);
@@ -1751,6 +1788,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (related) {
                     listed.push_back(static_cast<int>(k));
                     beside += (beside.empty() ? "" : ", ") + index;
+                    if (relation == ExtentRelation::Overlapping) {
+                        pastEnd += (pastEnd.empty() ? "" : ", ") + index;
+                    }
                 }
             }
             if (listed.size() == 1) {
@@ -1758,7 +1798,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             // Equivalent (the coordinator's decision on the review): the hit stands if every
             // coplanar face beside it gives the consumer the same result, as for edges.
-            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+            // A face that runs past the old one breaks the entry under every policy, as an edge
+            // that runs past the old end does.
+            if (pastEnd.empty() && entry.policy == SolvePolicy::Equivalent && entry.equivalent
                 && std::all_of(listed.begin(), listed.end(), [&](int k) {
                        return k == hitPosition
                            || entry.equivalent(hit, pool.elements[k].index);
@@ -1769,7 +1811,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::sort(listed.begin(), listed.end());
             auto& outcome = outcomes[i];
             outcome = SolveOutcome();
-            outcome.evidence = "split: a coplanar face beside it, " + beside;
+            outcome.evidence = pastEnd.empty()
+                ? "split: a coplanar face beside it, " + beside
+                : "split: a coplanar face beside it runs past the old face, " + pastEnd;
             for (int k : listed) {
                 outcome.candidates.push_back(pool.elements[k].index);
                 outcome.candidateNames.push_back(firstName(pool.elements[k]));

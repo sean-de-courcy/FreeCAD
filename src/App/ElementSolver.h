@@ -322,6 +322,32 @@ AppExport bool planeAgrees(
     double distance
 );
 
+/// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
+enum class ExtentRelation
+{
+    /// A fingerprint has no extent: nothing is known.
+    Unknown,
+    /// Within the old face's bounding box (ε): it may be a piece of the old face.
+    Inside,
+    /// Partly within and partly outside it: a piece of the old face that runs past it, or not.
+    Overlapping,
+    /// Apart from it, or touching it only: it holds no point of the old face.
+    Outside,
+};
+
+/** \a face's bounding box against \a saved's, both from version-3 fingerprints, with ε
+ * (\a distance times max(1, \a diagonal)). On an axis the boxes are apart when their intervals
+ * overlap by less than -ε, or touch (overlap within ε) while both are longer than ε there; a
+ * degenerate interval (the normal's axis of an axis-aligned plane) never separates. The line
+ * rule's within-the-old-ends test (hitWithinOldEdge()), for faces.
+ */
+AppExport ExtentRelation faceExtentRelation(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    double distance
+);
+
 /** One owner's references to one target, for solveOwner(): plain data, no document.
  *
  * Names are bare mapped names. Element types are those of the stored index names: `Face`,
@@ -456,8 +482,10 @@ struct AppExport SolveOutcome
  *   still lies in the plane of its saved fingerprint (the normal with its sense, the centre
  *   within ε of the plane) but is smaller. Another planar face of that plane, not held exactly
  *   by the owner, that shares an edge or a neighbouring face with it may be the rest of the old
- *   face, which a fingerprint can't bound: the entry breaks, with both, under One and Expand,
- *   and under Equivalent unless every such face gives the consumer the hit's result.
+ *   face: the entry breaks, with both, under One and Expand, and under Equivalent unless every
+ *   such face gives the consumer the hit's result. With the old face's extent (PR 8,
+ *   faceExtentRelation()), a face outside it is no piece and doesn't count, and one that runs
+ *   past it breaks the entry under every policy; without, every such face counts.
  * - Expand (PR 7), with pieces among the candidates: the pieces resolve together, as one graph
  *   node (tier 1, every element); the other survivors don't count.
  * - Missing entries with the same old name, type and policy are solved once and get the same

@@ -434,6 +434,13 @@ bool fingerprintsAgree(const Data::ElementFingerprint& saved,
         && Base::Distance(*saved.location, *now.location) > 1e-7 * std::max(diagonal, 1.0)) {
         return false;
     }
+    // A plane's extent (PR 8), when both have one.
+    if (saved.extentMin && saved.extentMax && now.extentMin && now.extentMax
+        && (Base::Distance(*saved.extentMin, *now.extentMin) > 1e-7 * std::max(diagonal, 1.0)
+            || Base::Distance(*saved.extentMax, *now.extentMax)
+                > 1e-7 * std::max(diagonal, 1.0))) {
+        return false;
+    }
     return true;
 }
 

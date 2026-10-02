@@ -3001,6 +3001,114 @@ TEST(SplitFace, notBroken)
     }
 }
 
+// With the old face's extent (fingerprint version 3, Task 2 PR 8)
+
+namespace
+{
+
+// frontFace() with its bounding box.
+ElementFingerprint boxedFront(double x0, double x1, double y = 0.0)
+{
+    auto fp = frontFace(x0, x1, y);
+    fp.extentMin = Base::Vector3d(x0, y, 0);
+    fp.extentMax = Base::Vector3d(x1, y, 10);
+    return fp;
+}
+
+}  // namespace
+
+TEST(SplitFace, faceExtentRelation)
+{
+    const double diagonal = 24.5;
+    const double eps = 1e-7 * diagonal;
+    auto old = boxedFront(0, 20);
+    auto relation = [&](const ElementFingerprint& face) {
+        return Data::faceExtentRelation(old, face, diagonal, 1e-7);
+    };
+    using Data::ExtentRelation;
+    EXPECT_EQ(relation(boxedFront(12, 20)), ExtentRelation::Inside);
+    EXPECT_EQ(relation(boxedFront(0, 20 + 0.5 * eps)), ExtentRelation::Inside);
+    EXPECT_EQ(relation(boxedFront(12, 26)), ExtentRelation::Overlapping);
+    EXPECT_EQ(relation(boxedFront(0, 20 + 2 * eps)), ExtentRelation::Overlapping);
+    EXPECT_EQ(relation(boxedFront(24, 30)), ExtentRelation::Outside);
+    //   touching the old face's end only: no point of it
+    EXPECT_EQ(relation(boxedFront(20, 26)), ExtentRelation::Outside);
+    EXPECT_EQ(relation(boxedFront(20 - 0.5 * eps, 26)), ExtentRelation::Outside);
+    EXPECT_EQ(relation(boxedFront(20 - 2 * eps, 26)), ExtentRelation::Overlapping);
+    //   the axis of the normal is degenerate in both boxes, and doesn't separate them
+    EXPECT_EQ(relation(boxedFront(4, 8, 0.5 * eps)), ExtentRelation::Inside);
+    //   without an extent, nothing is known
+    EXPECT_EQ(relation(frontFace(24, 30)), ExtentRelation::Unknown);
+    EXPECT_EQ(Data::faceExtentRelation(frontFace(0, 20), boxedFront(24, 30), diagonal, 1e-7),
+              ExtentRelation::Unknown);
+}
+
+TEST(SplitFace, extentInsideBreaks)
+{
+    // The notch, with boxes: the rest (x 12..20) lies within the old face (x 0..20).
+    FrontNotch notch;
+    for (auto policy : {Data::SolvePolicy::Expand, Data::SolvePolicy::One}) {
+        auto input = notch.input(policy);
+        auto fps = notch.fingerprints;
+        fps["Face1"] = boxedFront(0, 8);
+        fps["Face2"] = boxedFront(12, 20);
+        input.entries[0].fingerprint = boxedFront(0, 20);
+        measure(input, fps, nullptr);
+        auto outcome = Data::solveOwner(input)[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << static_cast<int>(policy);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+        EXPECT_EQ(outcome.evidence, "split: a coplanar face beside it, Face2");
+    }
+}
+
+TEST(SplitFace, extentOverlappingBreaksUnderEveryPolicy)
+{
+    // The notch with the right side moved out to x = 26: the rest runs past the old face's end.
+    // Even an Equivalent reference whose probe agrees breaks.
+    FrontNotch notch;
+    for (auto policy :
+         {Data::SolvePolicy::Expand, Data::SolvePolicy::One, Data::SolvePolicy::Equivalent}) {
+        auto input = notch.input(policy);
+        auto fps = notch.fingerprints;
+        fps["Face1"] = boxedFront(0, 8);
+        fps["Face2"] = boxedFront(12, 26);
+        input.entries[0].fingerprint = boxedFront(0, 20);
+        measure(input, fps, nullptr);
+        auto outcome = Data::solveOwner(input)[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Broken) << static_cast<int>(policy);
+        EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Face1", "Face2"}));
+        EXPECT_EQ(outcome.evidence,
+                  "split: a coplanar face beside it runs past the old face, Face2");
+    }
+}
+
+TEST(SplitFace, extentOutsideIsIgnored)
+{
+    // A U's prong narrowed (DraftUProngNarrowed): the old end face was x 0..6, now 0..4; the
+    // other prong's end face (x 14..20) is coplanar and shares the top and bottom faces, but
+    // lies outside the old face. The hit stands.
+    FrontNotch notch;
+    for (auto policy :
+         {Data::SolvePolicy::Expand, Data::SolvePolicy::One, Data::SolvePolicy::Equivalent}) {
+        auto input = notch.input(policy);
+        auto fps = notch.fingerprints;
+        fps["Face1"] = boxedFront(0, 4);
+        fps["Face2"] = boxedFront(14, 20);
+        input.entries[0].fingerprint = boxedFront(0, 6);
+        measure(input, fps, nullptr);
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ")
+            << static_cast<int>(policy);
+    }
+    //   with a version-1 saved fingerprint, the other face still counts: broken
+    auto input = notch.input(Data::SolvePolicy::Expand);
+    auto fps = notch.fingerprints;
+    fps["Face1"] = boxedFront(0, 4);
+    fps["Face2"] = boxedFront(14, 20);
+    input.entries[0].fingerprint = frontFace(0, 6);
+    measure(input, fps, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The write-back of a PropertyLinkSub (Task 2 PR 7)
 
@@ -3173,4 +3281,22 @@ TEST(ReferenceReport, reverseCheckTolerances)
     bigger.radii = {5.001};
     EXPECT_TRUE(App::fingerprintsAgree(circle, circle, 10.0));
     EXPECT_FALSE(App::fingerprintsAgree(circle, bigger, 10.0));
+    //   circles' centres (version 2, Task 2 PR 7b): compared only when both have one
+    auto located = circle;
+    located.location = Base::Vector3d(0, 0, 0);
+    EXPECT_TRUE(App::fingerprintsAgree(circle, located, 10.0));
+    EXPECT_TRUE(App::fingerprintsAgree(located, circle, 10.0));
+    EXPECT_TRUE(App::fingerprintsAgree(located, located, 10.0));
+    auto shifted = located;
+    shifted.location = Base::Vector3d(1e-3, 0, 0);
+    EXPECT_FALSE(App::fingerprintsAgree(located, shifted, 10.0));
+    //   planes' extents (version 3, Task 2 PR 8): the same
+    auto boxed = saved;
+    boxed.extentMin = Base::Vector3d(0, 5, 20);
+    boxed.extentMax = Base::Vector3d(10, 15, 20);
+    EXPECT_TRUE(App::fingerprintsAgree(saved, boxed, 50.0));
+    EXPECT_TRUE(App::fingerprintsAgree(boxed, saved, 50.0));
+    auto wider = boxed;
+    wider.extentMax = Base::Vector3d(10, 15.001, 20);
+    EXPECT_FALSE(App::fingerprintsAgree(boxed, wider, 50.0));
 }

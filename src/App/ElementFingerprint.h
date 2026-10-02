@@ -45,6 +45,14 @@ namespace Data
  * - o: the circle's centre. Without it an arc can't be placed on its circle (the centre of mass
  *   lies anywhere on a circle around it), which the solver's continuation needs.
  *
+ * Version 3 (Task 2 PR 8), written only for a planar face, which has an extent:
+ *
+ *     3|F|Plane|<size>|<cx>,<cy>,<cz>|<dx>,<dy>,<dz>|_|<x0>,<y0>,<z0>,<x1>,<y1>,<z1>
+ *
+ * - x0..z1: the face's bounding box (lower and upper corners), in the frame of c. Without it a
+ *   face's region can't be bounded, so a coplanar face beside a shrunk one can't be told from
+ *   the rest of it; with it, a face outside the old box can't hold a point of the old face.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
@@ -54,6 +62,9 @@ struct AppExport ElementFingerprint
     /// The text form of a fingerprint with a location (Task 2 PR 7b): an eighth field. Only
     /// circle edges have one, so every other fingerprint's text is version 1, as before.
     static constexpr int VersionWithLocation = 2;
+    /// The text form of a fingerprint with an extent (Task 2 PR 8): an eighth field. Only planar
+    /// faces have one.
+    static constexpr int VersionWithExtent = 3;
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -64,6 +75,10 @@ struct AppExport ElementFingerprint
     std::vector<double> radii;
     /// The centre of a circle edge (in the frame of `center`); empty otherwise.
     std::optional<Base::Vector3d> location;
+    /// The bounding box of a planar face, its lower and upper corners (in the frame of
+    /// `center`); both empty otherwise.
+    std::optional<Base::Vector3d> extentMin;
+    std::optional<Base::Vector3d> extentMax;
 
     bool isValid() const
     {
@@ -85,7 +100,8 @@ struct AppExport ElementFingerprint
     friend bool operator==(const ElementFingerprint& a, const ElementFingerprint& b)
     {
         return a.type == b.type && a.kind == b.kind && a.size == b.size && a.center == b.center
-            && a.direction == b.direction && a.radii == b.radii && a.location == b.location;
+            && a.direction == b.direction && a.radii == b.radii && a.location == b.location
+            && a.extentMin == b.extentMin && a.extentMax == b.extentMax;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {
