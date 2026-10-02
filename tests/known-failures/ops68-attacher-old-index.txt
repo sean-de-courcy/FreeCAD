@@ -10,3 +10,9 @@ issue: ops#68
 reason: PatY 3 -> 2: the sketch on PatY's removed instance 3 stays on its old index, now a PatX block's coplanar top face (V2)
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsBox.test_sketch_y3_face_V2
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPad.test_sketch_y3_face_V2
+
+reason: a LinearPattern's Occurrences2 2 -> 1: the sketch on the lost row's block (0, 30) stays on its old index, now a coplanar top face of the remaining row, and follows it when the row returns (V2; ops#6 names the instance per step, so its name is missing)
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2Steps.test_sketch_00_30_face_V2
+
+reason: as LinearDirection2Steps, in Extent mode: Occurrences2 2 -> 1, the sketch on the lost row's block (0, 30) stays on its old index, a coplanar top face of the remaining row (V2)
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_00_30_face_V2

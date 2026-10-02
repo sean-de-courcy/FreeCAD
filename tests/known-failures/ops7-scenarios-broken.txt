@@ -85,3 +85,7 @@ cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_y3_face_V2
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_x3_face_V2
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_face_V2
+
+reason: an Extent-mode two-step pattern (a MultiTransform, a LinearPattern with Direction2) loses its last X instance and the previous one moves onto its place: the sketch on the lost block (its name is missing) resolves by geometry to the block now there, silently (V2's geometric search; V2s breaks it with the pattern-sibling guard)
+cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_60_30_face_V2
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_60_30_face_V2

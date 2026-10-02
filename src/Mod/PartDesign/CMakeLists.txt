@@ -134,6 +134,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/PadPocket.V1.txt
     PartDesignTests/NamingGolden/PadPocket.V2.txt
     PartDesignTests/NamingGolden/PadPocket.V2i-ids.txt
+    PartDesignTests/NamingGolden/PatternSteps.V1.txt
+    PartDesignTests/NamingGolden/PatternSteps.V2.txt
+    PartDesignTests/NamingGolden/PatternSteps.V2i-ids.txt
     PartDesignTests/NamingGolden/PipeShell.V1.txt
     PartDesignTests/NamingGolden/PipeShell.V2.txt
     PartDesignTests/NamingGolden/PipeShell.V2i-ids.txt

@@ -22,6 +22,7 @@
  *                                                                            *
  ******************************************************************************/
 
+#include <algorithm>
 #include <limits>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -85,6 +86,14 @@ gp_Dir LinearPattern::getDirectionFromProperty(const App::PropertyLinkSub& dirPr
 const std::list<gp_Trsf> LinearPattern::getTransformations(const std::vector<App::DocumentObject*>)
 {
     return calculateTransformations();
+}
+
+std::vector<Transformed::Step> LinearPattern::getTransformationSteps() const
+{
+    // As calculateTransformations() combines them: Direction2 varies fastest
+    const int first = std::max(static_cast<int>(Occurrences.getValue()), 1);
+    const int second = std::max(static_cast<int>(Occurrences2.getValue()), 1);
+    return {{first, second}, {second, 1}};
 }
 
 void LinearPattern::handleChangedPropertyType(

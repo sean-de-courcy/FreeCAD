@@ -56,6 +56,51 @@
 
 using namespace PartDesign;
 
+namespace
+{
+
+/* The number of each transformation's instance (the first, the support, is 1) in its V2 name's
+ * TRF section (ops#6): one number per step, from 1, joined by ':', the trailing 1s left out. A
+ * single-step pattern's instance k is "k"; instance (2, 2) of a two-step one is "2:2", and (3, 1)
+ * is "3". So an instance keeps its number when another step's count changes, or when a step is
+ * added after the others. A step of one occurrence is a 1 digit: left out at the end, kept in
+ * the middle (a MultiTransform's unused Direction2 before a later feature's used one: "2:2:1:2"),
+ * so giving it more occurrences later renames no instance. ('.' would read better, but the element map rejects it in a name: it
+ * separates fields in the saved map.) Steps that don't cover the list exactly are taken as one
+ * step: the whole list.
+ */
+std::vector<std::string> instanceNumbers(std::vector<Transformed::Step> steps, std::size_t count)
+{
+    std::size_t product = 1;
+    for (const auto& step : steps) {
+        product *= static_cast<std::size_t>(std::max(step.count, 1));
+    }
+    if (steps.empty() || product != count) {
+        steps = {{static_cast<int>(count), 1}};
+    }
+    std::vector<std::string> numbers;
+    numbers.reserve(count);
+    for (std::size_t position = 0; position < count; ++position) {
+        std::vector<std::size_t> digits;
+        for (const auto& step : steps) {
+            const auto stride = static_cast<std::size_t>(std::max(step.stride, 1));
+            const auto stepCount = static_cast<std::size_t>(std::max(step.count, 1));
+            digits.push_back(position / stride % stepCount + 1);
+        }
+        while (!digits.empty() && digits.back() == 1) {
+            digits.pop_back();
+        }
+        std::string number;
+        for (auto digit : digits) {
+            number += (number.empty() ? "" : ":") + std::to_string(digit);
+        }
+        numbers.push_back(number.empty() ? "1" : number);
+    }
+    return numbers;
+}
+
+}  // namespace
+
 namespace PartDesign
 {
 extern bool getPDRefineModelParameter();
@@ -387,10 +432,13 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     supportShape.setTransform(Base::Matrix4D());
 
-    // V2 names each instance by content (ops#55): instance k (the support is 1, then the
-    // transformations in order) gets a section with this feature's ID and k appended to every
-    // name. V1 keeps the instance suffix as the op.
+    // V2 names each instance by content (ops#55): each copy gets a section with this feature's ID
+    // and its instance number appended to every name, one number per step (instanceNumbers(),
+    // ops#6). V1 keeps the instance suffix as the op.
     const bool nameInstances = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+    const auto numbers = nameInstances
+        ? instanceNumbers(getTransformationSteps(), transformations.size())
+        : std::vector<std::string>();
     auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape) {
         std::vector<TopoShape> shapes = {supportShape};
         int instance = 1;
@@ -405,7 +453,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
             shapes.emplace_back(makeResultShape(origShape)
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
             if (nameInstances) {
-                shapes.back().appendElementSection(getID(), Part::OpCodes::Transformed, instance);
+                shapes.back().appendElementSection(
+                    getID(),
+                    Part::OpCodes::Transformed,
+                    numbers[instance - 1]
+                );
             }
         }
         return shapes;

@@ -70,6 +70,10 @@ public:
      */
     const std::list<gp_Trsf> getTransformations(const std::vector<App::DocumentObject*>) override;
 
+    /// Direction, then Direction2: the instances along Direction2 are next to each other in the
+    /// list.
+    std::vector<Step> getTransformationSteps() const override;
+
 protected:
     void handleChangedPropertyType(
         Base::XMLReader& reader,

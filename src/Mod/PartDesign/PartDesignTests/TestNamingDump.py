@@ -261,6 +261,51 @@ def modelLinearPattern(doc):
     return [pad, pattern]
 
 
+def modelPatternSteps(doc):
+    """Two-step patterns of a Pad with overlapping copies: a MultiTransform of LinX (3) then
+    LinY (2), and a LinearPattern with a second direction (3 x 2): the numbers in their
+    instances' TRF sections (ops#6)."""
+
+    def linear(body, name, axis, offset, occurrences):
+        pattern = doc.addObject("PartDesign::LinearPattern", name)
+        pattern.Direction = (models.originFeature(body, axis), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = offset
+        pattern.Occurrences = occurrences
+        return pattern
+
+    body = models.body(doc)
+    profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 8, 4), body)
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = profile
+    pad.Length = 4
+    multi = doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+    multi.Originals = [pad]
+    multi.Refine = False
+    body.addObject(multi)
+    linX = linear(body, "LinX", "X_Axis", 5, 3)
+    linY = linear(body, "LinY", "Y_Axis", 3, 2)
+    body.addObject(linX)
+    body.addObject(linY)
+    multi.Transformations = [linX, linY]
+
+    body2 = doc.addObject("PartDesign::Body", "Body2")
+    profile2 = models.sketch(doc, "Profile2", models.rectangle(0, 0, 8, 4), body2)
+    pad2 = body2.newObject("PartDesign::Pad", "Pad2")
+    pad2.Profile = profile2
+    pad2.Length = 4
+    pattern = linear(body2, "LinearPattern", "X_Axis", 5, 3)
+    pattern.Originals = [pad2]
+    pattern.Direction2 = (models.originFeature(body2, "Y_Axis"), [""])
+    pattern.Mode2 = "Spacing"
+    pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
+    pattern.Offset2 = 3
+    pattern.Occurrences2 = 2
+    pattern.Refine = False
+    body2.addObject(pattern)
+    return [multi, pattern]
+
+
 def modelOffsetThickness(doc):
     """Offset and Thickness of a box (list fields)."""
     box = models.box(doc, "Box", (10, 10, 10))
@@ -291,6 +336,7 @@ MODELS = {
     "CompoundCopies": modelCompoundCopies,
     "Refine": modelRefine,
     "LinearPattern": modelLinearPattern,
+    "PatternSteps": modelPatternSteps,
     "OffsetThickness": modelOffsetThickness,
 }
 

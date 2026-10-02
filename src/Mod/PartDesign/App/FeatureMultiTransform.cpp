@@ -23,6 +23,9 @@
  ******************************************************************************/
 
 
+#include <algorithm>
+#include <utility>
+
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
@@ -97,6 +100,27 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
 
     std::list<gp_Trsf> result;
     std::list<gp_Pnt> cogs;
+    // The features' steps by level: every feature's first step, then the second ones (a
+    // LinearPattern's Direction2), ... A LinearPattern always reports both steps, so a second
+    // direction of one occurrence is a 1 digit: trailing, and left out of the number, when no
+    // later level has more than one; a 1 in the middle otherwise. Either way, using it later
+    // changes no other instance's number.
+    // Within a level the digits follow the features' object IDs, the order they were created
+    // in, not their place in Transformations: reordering the features, or inserting a new one
+    // anywhere, then changes no instance's number (a new feature's ID is the highest, so its
+    // digit comes last in its level). Removing a feature that isn't the newest, or deleting and
+    // recreating one, still shifts the later digits (ops#6).
+    std::vector<std::vector<std::pair<long, Step>>> levels;
+    auto addSteps =
+        [&levels](long id, const std::vector<Step>& featureSteps, int strideFactor) {
+            for (std::size_t level = 0; level < featureSteps.size(); ++level) {
+                if (levels.size() <= level) {
+                    levels.resize(level + 1);
+                }
+                const auto& step = featureSteps[level];
+                levels[level].push_back({id, {step.count, step.stride * strideFactor}});
+            }
+        };
 
     for (auto const& f : transFeatures) {
         auto transFeature = freecad_cast<PartDesign::Transformed*>(f);
@@ -109,9 +133,15 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
         // Offset. The helper is not executed independently, so do not let those updates schedule
         // the parent MultiTransform for a second document recompute pass.
         transFeature->purgeTouched();
+        // The feature's own steps; their strides grow as the list is combined below
+        auto featureSteps = transFeature->getTransformationSteps();
+        if (featureSteps.empty()) {
+            featureSteps = {{static_cast<int>(newTransformations.size()), 1}};
+        }
         if (result.empty()) {
             // First transformation Feature
             result = newTransformations;
+            addSteps(f->getID(), featureSteps, 1);
             for (auto nt : newTransformations) {
                 cogs.push_back(cog.Transformed(nt));
             }
@@ -179,6 +209,10 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
                 // a11 a12         b1    a11*b1 a12*b1 a11*b2 a12*b2 a11*b3 a12*b3
                 // a21 a22   mul   b2  = a21*b1 a22*b1 a21*b2 a22*b2 a21*b3 a22*b3
                 //                 b3
+                // So the old instances stay next to each other, and the new steps' instances are
+                // the old list's length apart. (The diagonal method above adds no step: it scales
+                // the instances there are.)
+                addSteps(f->getID(), featureSteps, static_cast<int>(oldTransformations.size()));
                 for (auto const& nt : newTransformations) {
                     auto oc = oldCogs.begin();
 
@@ -195,6 +229,15 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
         }
     }
 
+    steps.clear();
+    for (auto& level : levels) {
+        std::stable_sort(level.begin(), level.end(), [](const auto& a, const auto& b) {
+            return a.first < b.first;
+        });
+        for (const auto& entry : level) {
+            steps.push_back(entry.second);
+        }
+    }
     return result;
 }
 

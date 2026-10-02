@@ -85,6 +85,23 @@ public:
         return std::list<gp_Trsf>();  // Default method
     }
 
+    /// One step of a pattern: its number of instances, and how far apart two instances next to
+    /// each other along it are in the list of getTransformations() (ops#6).
+    struct Step
+    {
+        int count;
+        int stride;
+    };
+
+    /** The steps getTransformations() combined, in the order of the digits of an instance's
+     * number: a V2 instance's name holds its number along each (ops#6). The default, an empty
+     * list, is one step: the whole list. Valid after getTransformations().
+     */
+    virtual std::vector<Step> getTransformationSteps() const
+    {
+        return {};
+    }
+
     /** @name methods override feature */
     //@{
     /** Recalculate the feature

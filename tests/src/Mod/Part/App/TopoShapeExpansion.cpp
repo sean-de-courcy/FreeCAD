@@ -3562,7 +3562,7 @@ TEST_F(TopoShapeExpansionTest, appendElementSectionV2)
 
     // Act
     //   instance 3 of the pattern with ID 5
-    instance.appendElementSection(5L, OpCodes::Transformed, 3);
+    instance.appendElementSection(5L, OpCodes::Transformed, "3");
 
     // Assert
     //   every name ends in '|_;_;5;TRF;3;<type>;0;MOD;_', and an element's names keep their order
@@ -3583,6 +3583,16 @@ TEST_F(TopoShapeExpansionTest, appendElementSectionV2)
     EXPECT_EQ(originalFaceNames[1].first, secondFaceName);
     EXPECT_EQ(original.getMappedName(edge1), edgeName);
     EXPECT_EQ(original.getElementMapSize(), 3);
+    //   a multi-step pattern's instance has one number per step (ops#6): the name takes it as
+    //   it is, and it decodes as the section's one index field
+    TopoShape stepInstance(original);
+    stepInstance.appendElementSection(5L, OpCodes::Transformed, "2:2");
+    auto stepName = stepInstance.getMappedName(edge1);
+    EXPECT_EQ(stepName.toString(), edgeName.toString() + "|_;_;5;TRF;2:2;E;0;MOD;_");
+    const auto& decoded = MappedName::getDecodedMappedName(stepName.toString());
+    ASSERT_EQ(decoded.size(), 2);
+    EXPECT_EQ(decoded.back().opCode, OpCodes::Transformed);
+    EXPECT_EQ(decoded.back().index, "2:2");
 }
 
 TEST_F(TopoShapeExpansionTest, appendElementSectionLeavesV1AndUnnamedShapes)
@@ -3596,8 +3606,8 @@ TEST_F(TopoShapeExpansionTest, appendElementSectionLeavesV1AndUnnamedShapes)
     TopoShape unnamed(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
 
     // Act
-    v1.appendElementSection(5L, OpCodes::Transformed, 3);
-    unnamed.appendElementSection(5L, OpCodes::Transformed, 3);
+    v1.appendElementSection(5L, OpCodes::Transformed, "3");
+    unnamed.appendElementSection(5L, OpCodes::Transformed, "3");
 
     // Assert
     //   both are left as they were
