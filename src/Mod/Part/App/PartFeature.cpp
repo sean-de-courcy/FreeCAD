@@ -483,6 +483,17 @@ void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
                 normal.Reverse();
             }
             fp.direction = toVector(normal.XYZ());
+            // Its extent (fingerprint version 3, Task 2 PR 8): the tight bounding box of the
+            // face's boundary, without tolerances or gaps.
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(face, box, false, false);
+            if (!box.IsVoid()) {
+                box.SetGap(0.0);
+                double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+                box.Get(x0, y0, z0, x1, y1, z1);
+                fp.extentMin = Base::Vector3d(x0, y0, z0);
+                fp.extentMax = Base::Vector3d(x1, y1, z1);
+            }
             break;
         }
         case GeomAbs_Cylinder:

@@ -183,3 +183,41 @@ TEST(ElementFingerprint, circleLocationRoundTrip)
     ASSERT_TRUE(old.isValid());
     EXPECT_FALSE(old.location.has_value());
 }
+
+TEST(ElementFingerprint, planeExtentRoundTrip)
+{
+    // A planar face carries its bounding box, in version 3 (Task 2 PR 8)
+    ElementFingerprint face;
+    face.type = 'F';
+    face.kind = "Plane";
+    face.size = 80;
+    face.center = Base::Vector3d(4, 0, 5);
+    face.direction = Base::Vector3d(0, -1, 0);
+    face.extentMin = Base::Vector3d(0, 0, 0);
+    face.extentMax = Base::Vector3d(8, 0, 10);
+    const char* text = "3|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0,10";
+    EXPECT_EQ(face.toString(), text);
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, face);
+
+    //   version 3 only for a planar face, and only with six numbers in its eighth field
+    for (const auto& bad : {
+             "3|E|Line|5|0,0,0|1,0,0|_|0,0,0,1,1,1",
+             "3|F|Cylinder|5|0,0,0|0,0,1|2|0,0,0,1,1,1",
+             "3|F|Plane|80|4,0,5|0,-1,0|_",
+             "3|F|Plane|80|4,0,5|0,-1,0|_|_",
+             "3|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0",
+             "3|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0,10,1",
+             "1|F|Plane|80|4,0,5|0,-1,0|_|0,0,0,8,0,10",
+             "2|F|Plane|80|4,0,5|0,-1,0|_|0,0,0",
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+
+    //   a version-1 plane parses, without an extent
+    auto old = ElementFingerprint::fromString("1|F|Plane|80|4,0,5|0,-1,0|_");
+    ASSERT_TRUE(old.isValid());
+    EXPECT_FALSE(old.extentMin.has_value());
+    EXPECT_FALSE(old.extentMax.has_value());
+}

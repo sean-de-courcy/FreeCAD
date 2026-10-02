@@ -30,6 +30,9 @@ multi-match flags on) for the scenarios whose consumers the flags touch.
 FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi,V2s runs the listed ones for every scenario instead (the
 scorecard's local run). Every verdict is printed as a `SCORE` line.
 
+The reference solver's determinism (ops#7): `SolverSeeded` runs the V2s scenarios and random
+sequences in two child processes under two naming hash seeds, and their SCORE records must be equal.
+
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
 one test per seed and configuration, V2, V2multi and V2s. It passes when every reference is as
 expected after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
@@ -38,6 +41,8 @@ runs one seed.
 """
 
 import os
+import subprocess
+import tempfile
 import traceback
 import unittest
 
@@ -176,10 +181,83 @@ def _makeRandomTests():
 
 
 _makeRandomTests()
+
+
+# Set in the children of SolverSeeded, which run the scenarios only.
+SEEDED_CHILD = "FREECAD_SCENARIO_SEEDED_CHILD"
+
+SEEDED_CHILD_SCRIPT = """import os, traceback, unittest
+try:
+    suite = unittest.defaultTestLoader.loadTestsFromName("PartDesignTests.TestNamingScenarios")
+    with open(os.environ["FREECAD_SCENARIO_SCORE_FILE"] + ".log", "w") as log:
+        unittest.TextTestRunner(stream=log, verbosity=1).run(suite)
+except Exception:
+    with open(os.environ["FREECAD_SCENARIO_SCORE_FILE"] + ".error", "w") as fh:
+        fh.write(traceback.format_exc())
+os._exit(0)
+"""
+
+
+class SolverSeeded(unittest.TestCase):
+    """The reference solver doesn't depend on the order of the naming code's hash containers
+    (ops#7, Task 2 PR 8): the V2s scenarios and random sequences run in two child processes,
+    under FREECAD_NAMING_HASH_SEED 1 and 2, and every SCORE record is the same in both."""
+
+    SEEDS = ("1", "2")
+
+    def testScoresAreTheSameUnderTwoHashSeeds(self):
+        if os.environ.get(SEEDED_CHILD):
+            self.skipTest("a child process of SolverSeeded")
+        from PartDesignTests.TestNamingDump import _freecadCmd
+
+        workDir = tempfile.mkdtemp(prefix="solver-seeded-")
+        script = os.path.join(workDir, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(SEEDED_CHILD_SCRIPT)
+        runs = {}
+        for seed in self.SEEDS:
+            env = dict(os.environ)
+            env[SEEDED_CHILD] = "1"
+            env["FREECAD_NAMING_HASH_SEED"] = seed
+            env["FREECAD_SCENARIO_CONFIGS"] = "V2s"
+            out = os.path.join(workDir, f"seed{seed}.jsonl")
+            env["FREECAD_SCENARIO_SCORE_FILE"] = out
+            proc = subprocess.Popen(
+                [_freecadCmd(), script],
+                env=env,
+                cwd=workDir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            runs[seed] = (proc, out)
+        records = {}
+        for seed, (proc, out) in runs.items():
+            try:
+                proc.wait(timeout=1800)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            error = out + ".error"
+            if os.path.isfile(error):
+                with open(error, encoding="utf-8") as fh:
+                    self.fail(f"seed {seed}: the child failed:\n{fh.read()}")
+            self.assertTrue(os.path.isfile(out), f"seed {seed}: no SCORE records ({workDir})")
+            with open(out, encoding="utf-8") as fh:
+                records[seed] = sorted(line.strip() for line in fh if line.strip())
+        first, second = (records[seed] for seed in self.SEEDS)
+        self.assertGreater(len(first), 0, f"no SCORE records ({workDir})")
+        only = sorted(set(first) ^ set(second))
+        self.assertEqual(
+            first,
+            second,
+            f"{len(only)} SCORE records differ between FREECAD_NAMING_HASH_SEED "
+            f"{' and '.join(self.SEEDS)} ({workDir}); the first:\n" + "\n".join(only[:4]),
+        )
+
+
 __all__ = [
     name
     for name, value in globals().items()
     if isinstance(value, type)
     and issubclass(value, ScenarioTestCase)
     and value is not ScenarioTestCase
-] + ["RandomSequences"]
+] + ["RandomSequences", "SolverSeeded"]

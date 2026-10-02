@@ -409,14 +409,29 @@ class AttachFaceNotch(SplitModel):
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
 
 
+class DraftFaceNotchAndExtend(DraftFaceNotch):
+    """DraftFaceNotch's notch, with the right side moved out to x = 26: the rest of the front
+    face (x 12..26) runs past the old face's extent (x 0..20), part rest and part new. The
+    reference breaks, with both faces as candidates: the draft neither keeps 0..8 alone
+    (partial) nor takes 12..26. The face form of NotchAndExtend (ops#7, Task 2 PR 8: the plane's
+    extent in its fingerprint)."""
+
+    def edit(self, doc):
+        lines = {0: ((0, 0), (8, 0)), 1: ((26, 0), (26, 10)), 2: ((26, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (26, 0)]), False)
+        self.split = True
+
+
 class DraftUProngNarrowed(SplitModel):
     """A U-shaped pad: the block 0..20 x 0..10, 10 high, with a slot (x 6..14, y 4..10) in its
     profile, so two prongs (x 0..6 and 14..20) end in coplanar faces at y = 10. A draft, 5
     degrees, of the left prong's end face on the bottom face; the left prong is then narrowed to
     x 0..4 (its lines keep their geometry IDs). The end face only shrinks, and the draft should
     keep it. The right prong's end face is coplanar and shares the top and bottom faces with it,
-    so the split face's rule (Q3 (b) of the Task 2 PR 7 design) can't tell this from a split:
-    V2s breaks the draft, a false break (broken, never wrong), listed for PR 8's gate."""
+    but lies outside the old end face's extent, which the plane's fingerprint holds since Task 2
+    PR 8 (version 3): it can't be a piece of it. Before, the split face's rule (Q3 (b) of the
+    Task 2 PR 7 design) couldn't tell this from a split and broke the draft."""
 
     REFS = ("draft_face",)
 
@@ -504,3 +519,37 @@ class SolverArcNotchThenFill(SplitArcNotch):
 
     def fill(self, doc):
         m.fillDiscNotch(doc.Profile)
+
+
+class SplitCircleNotch(SplitModel):
+    """A boss: the circle centre (10, 5), radius 5, padded 10 high; a fillet, radius 0.5, on its
+    top circle. Two notches are cut into the circle, at 0 and 180 degrees: the circle becomes
+    the arc 10..170 degrees (its geometry ID kept), and a new arc runs on 190..350 degrees, with
+    the notches' floors at radius 3 between them. The fillet should take both arcs of radius 5
+    (the second as the continuation of the first, around a whole old circle), never the notches'
+    floors (concentric, another radius). The cyclic case of the arc rule (ops#7, Task 2 PR 8)."""
+
+    REFS = ("fillet_edge",)
+    radius = 0.5
+
+    def block(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", [m.discCircle()], body)
+        m.pad(body, profile, self.height)
+        return body
+
+    def topCircle(self):
+        return pieces(edge(center=(*m.DISC_CENTER, self.height), radius=m.DISC_RADIUS))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.topCircle().predicate))
+        fillet.Radius = self.radius
+        self.ref("fillet_edge", fillet, "Base", self.topCircle, Filleted(self.radius))
+
+    def edit(self, doc):
+        m.notchDiscCircle(doc.Profile)

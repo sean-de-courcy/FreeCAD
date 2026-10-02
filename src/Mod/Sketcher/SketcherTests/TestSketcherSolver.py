@@ -973,6 +973,13 @@ class TestSketcherSolver(unittest.TestCase):
             self.assertTrue(sketch2.ExternalGeometry[0][1][0].startswith("?"))
             self.assertFalse(sketch2.isValid())
 
+    def testRemovedExternalGeometryReferenceWithTheSolver(self):
+        """The same in a reference solver document (ops#7, ops#87): the thread's B-spline edge
+        must not resolve to the drill point's circle, which shares its sources."""
+        self.Doc.HistoryAlgorithm = "V2"
+        self.Doc.ReferenceSolver = True
+        self.testRemovedExternalGeometryReference()
+
     def testSaveLoadWithExternalGeometryReference(self):
         if "BUILD_PART_DESIGN" in FreeCAD.__cmake__:
             # Arrange

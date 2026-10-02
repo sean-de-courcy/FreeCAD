@@ -232,3 +232,25 @@ def fillDiscNotch(sketch):
     geometry = sketch.Geometry
     geometry[0].setParameterRange(-DISC_HALF_ANGLE, DISC_HALF_ANGLE)
     sketch.Geometry = geometry
+
+
+def notchDiscCircle(sketch):
+    """Cuts two notches into the full circle `discCircle()` (geometry 0), at 0 and 180 degrees:
+    the circle becomes the arc 10..170 degrees, keeping its geometry ID (a list replace would
+    give it a new one, so the ID is set back), lines go in to radius 3 and out again around each
+    notch, with a concentric arc of radius 3 as each notch's floor, and a new arc runs on
+    190..350 degrees."""
+    geometryId = sketch.getGeometryId(0)
+    geometry = sketch.Geometry
+    geometry[0] = Part.ArcOfCircle(discCircle(), math.radians(10), math.radians(170))
+    sketch.Geometry = geometry
+    sketch.setGeometryId(0, geometryId)
+    notches = []
+    for start, end in ((170, 190), (-10, 10)):
+        notches += [
+            Part.LineSegment(onDisc(DISC_RADIUS, start), onDisc(3, start)),
+            Part.ArcOfCircle(discCircle(3), math.radians(start), math.radians(end)),
+            Part.LineSegment(onDisc(3, end), onDisc(DISC_RADIUS, end)),
+        ]
+    notches.append(Part.ArcOfCircle(discCircle(), math.radians(190), math.radians(350)))
+    sketch.addGeometry(notches, False)

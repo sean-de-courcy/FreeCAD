@@ -1424,6 +1424,10 @@ PyObject* ApplicationPy::sRepairReference(PyObject* /*self*/, PyObject* args)
         resolution.clearFrom = true;
         resolution.feature =
             prefix.empty() ? found->obj : found->obj->getSubObject(prefix.c_str());
+        if (!resolution.feature) {
+            throw Base::RuntimeError("Cannot find " + prefix + " in "
+                                     + found->obj->getFullName());
+        }
         resolution.notify = true;
         prop->applyResolutions({resolution});
         // As a setter does: the report on the property is stale now.

@@ -168,6 +168,13 @@ class TestDressUpFaces(unittest.TestCase):
         self.assertRegex(message, rf"\b{right}\b")
         self.assertNotRegex(message, rf"\b{left}\b")
 
+    def testMissingFaceIsNamedWithTheSolver(self):
+        """The same in a reference solver document (ops#7): the solver's check fails the draft
+        before it runs, in the draft's words, and names the right face, not the left one."""
+        self.Doc.HistoryAlgorithm = "V2"
+        self.Doc.ReferenceSolver = True
+        self.testMissingFaceIsNamed()
+
     def testFaceAfterEdge(self):
         """A block 0..20 x 0..10 x 0..10 with a hole (radius 2 at (10, 5)) through it; a
         defeaturing whose Base lists an edge of the block, then the hole's wall. The hole is

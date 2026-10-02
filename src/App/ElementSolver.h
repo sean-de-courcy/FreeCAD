@@ -36,12 +36,30 @@ namespace Data
  * vector of keys. Shared subtrees are computed once. The keys depend on the order of the queries,
  * the results never do: every function below answers the same whatever was asked before.
  */
+/// How NameAncestry::overlap() measures shared ancestry (tier 1's variants, Task 2 PR 8).
+enum class OverlapMeasure
+{
+    /// The share of the old name's ancestors that the candidate has.
+    Plain,
+    /// The same, each ancestor weighted by 2^-d, d its shortest depth below the old name (the
+    /// name itself 0, its prefix and embedded names 1, ...).
+    DepthWeighted,
+    /// Plain, with every first section's Reference IDs as leaves of their own, qualified by the
+    /// section's tag (`g2v1@<sketch tag>`): a vertex named by `g1v2,g2v1` and one renamed to
+    /// `g12v2,g2v1` share `g2v1` (ops#76).
+    ReferenceIds,
+};
+
 class AppExport NameAncestry
 {
 public:
     using Key = std::uint32_t;
     /// Sorted, unique keys.
     using KeySet = std::vector<Key>;
+
+    explicit NameAncestry(OverlapMeasure measure = OverlapMeasure::Plain)
+        : _measure(measure)
+    {}
 
     /// The key of \a name, interned on first sight.
     Key intern(std::string_view name);
@@ -117,14 +135,23 @@ public:
 
 private:
     const KeySet& ancestorsOf(Key key);
+    // A Reference ID leaf (OverlapMeasure::ReferenceIds): a node that no name can be, whose set
+    // is itself.
+    Key internReferenceId(const std::string& id, const std::string& tag);
+    // The depth-weighted share (OverlapMeasure::DepthWeighted).
+    double weightedOverlap(Key oldKey, const KeySet& candidateSet);
 
+    OverlapMeasure _measure;
     // By key. Deques, so that interning a node keeps the views in _keys and the references to
     // computed sets valid.
     std::deque<std::string> _names;
     std::deque<KeySet> _sets;
+    std::deque<std::vector<Key>> _children;  // the prefix and embedded names, once computed
     std::deque<char> _done;  // _sets[key] is computed
     std::unordered_map<std::string_view, Key> _keys;
     std::size_t _computed = 0;
+    // Per old name: its ancestors' weights (DepthWeighted), sorted by key, and their sum.
+    std::unordered_map<Key, std::pair<std::vector<std::pair<Key, double>>, double>> _weights;
 };
 
 /** One owner's references and their surviving candidates, for forcedMatching().
@@ -238,6 +265,15 @@ enum class Tier1Source
     Names,
 };
 
+/// The geometric check of a partner that tier 1 alone found (Task 2 PR 8, ops#87), for a
+/// reference with a saved fingerprint: none, the same element type and kind, or intrinsicAgrees().
+enum class Tier1Check
+{
+    None,
+    Kind,
+    Intrinsic,
+};
+
 /** The tolerances of tiers 2 and 3 (the NamingSolver parameters; conservative starts, changed
  * only on the scorecard's evidence).
  */
@@ -322,6 +358,32 @@ AppExport bool planeAgrees(
     double distance
 );
 
+/// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
+enum class ExtentRelation
+{
+    /// A fingerprint has no extent: nothing is known.
+    Unknown,
+    /// Within the old face's bounding box (ε): it may be a piece of the old face.
+    Inside,
+    /// Partly within and partly outside it: a piece of the old face that runs past it, or not.
+    Overlapping,
+    /// Apart from it, or touching it only: it holds no point of the old face.
+    Outside,
+};
+
+/** \a face's bounding box against \a saved's, both from version-3 fingerprints, with ε
+ * (\a distance times max(1, \a diagonal)). On an axis the boxes are apart when their intervals
+ * overlap by less than -ε, or touch (overlap within ε) while both are longer than ε there; a
+ * degenerate interval (the normal's axis of an axis-aligned plane) never separates. The line
+ * rule's within-the-old-ends test (hitWithinOldEdge()), for faces.
+ */
+AppExport ExtentRelation faceExtentRelation(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& face,
+    double diagonal,
+    double distance
+);
+
 /** One owner's references to one target, for solveOwner(): plain data, no document.
  *
  * Names are bare mapped names. Element types are those of the stored index names: `Face`,
@@ -370,6 +432,8 @@ struct AppExport SolveInput
     /// Tier 1's overlap gap (NameAncestry::structuralSurvivors()).
     double gap = 0.25;
     Tier1Source source = Tier1Source::Union;
+    OverlapMeasure measure = OverlapMeasure::Plain;
+    Tier1Check check = Tier1Check::Intrinsic;
     /// Tiers 2 and 3.
     GeometryTolerances tolerances;
     /// The target's bounding-box diagonal, the scale of tier 3's d_max.
@@ -456,8 +520,10 @@ struct AppExport SolveOutcome
  *   still lies in the plane of its saved fingerprint (the normal with its sense, the centre
  *   within ε of the plane) but is smaller. Another planar face of that plane, not held exactly
  *   by the owner, that shares an edge or a neighbouring face with it may be the rest of the old
- *   face, which a fingerprint can't bound: the entry breaks, with both, under One and Expand,
- *   and under Equivalent unless every such face gives the consumer the hit's result.
+ *   face: the entry breaks, with both, under One and Expand, and under Equivalent unless every
+ *   such face gives the consumer the hit's result. With the old face's extent (PR 8,
+ *   faceExtentRelation()), a face outside it is no piece and doesn't count, and one that runs
+ *   past it breaks the entry under every policy; without, every such face counts.
  * - Expand (PR 7), with pieces among the candidates: the pieces resolve together, as one graph
  *   node (tier 1, every element); the other survivors don't count.
  * - Missing entries with the same old name, type and policy are solved once and get the same

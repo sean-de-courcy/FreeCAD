@@ -126,7 +126,10 @@ std::string ElementFingerprint::toString() const
         return formatNumber(v->x) + listDelimiter + formatNumber(v->y) + listDelimiter
             + formatNumber(v->z);
     };
-    std::string text = std::to_string(location ? VersionWithLocation : Version);
+    const bool withExtent = extentMin && extentMax;
+    std::string text = std::to_string(
+        withExtent ? VersionWithExtent : location ? VersionWithLocation : Version
+    );
     text += fieldDelimiter;
     text += type;
     text += fieldDelimiter;
@@ -151,6 +154,10 @@ std::string ElementFingerprint::toString() const
         text += fieldDelimiter;
         text += vector(location);
     }
+    else if (withExtent) {
+        text += fieldDelimiter;
+        text += vector(extentMin) + listDelimiter + vector(extentMax);
+    }
     return text;
 }
 
@@ -160,7 +167,11 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
     const bool withLocation = fields.size() == fieldCount + 1
         && fields[0] == std::to_string(VersionWithLocation) && fields[1] == "E"
         && fields[2] == "Circle";
-    if (!withLocation && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
+    const bool withExtent = fields.size() == fieldCount + 1
+        && fields[0] == std::to_string(VersionWithExtent) && fields[1] == "F"
+        && fields[2] == "Plane";
+    if (!withLocation && !withExtent
+        && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
         return {};
     }
     ElementFingerprint result;
@@ -181,6 +192,14 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
     }
     if (withLocation && (!parseVector(fields[7], result.location) || !result.location)) {
         return {};
+    }
+    if (withExtent) {
+        std::vector<double> corners;
+        if (!parseList(fields[7], corners) || corners.size() != 6) {
+            return {};
+        }
+        result.extentMin = Base::Vector3d(corners[0], corners[1], corners[2]);
+        result.extentMax = Base::Vector3d(corners[3], corners[4], corners[5]);
     }
     result.type = fields[1][0];
     return result;

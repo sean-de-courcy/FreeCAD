@@ -104,7 +104,7 @@ public:
 
     /** True if a link property of \a obj holds a missing sub-element reference; \a why then lists
      * them, with their candidates from the report:
-     * `Broken reference Base[0]: ?Edge3 (candidates: Edge7, Edge12)`.
+     * `Missing edge reference: Edge3 (Base[0], candidates: Edge7, Edge12)`, as consumers word it.
      */
     static bool describeBroken(const DocumentObject* obj, std::string& why);
 };
