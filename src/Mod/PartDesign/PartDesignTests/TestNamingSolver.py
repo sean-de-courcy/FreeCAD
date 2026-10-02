@@ -584,13 +584,23 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
         self.assertFalse(sketch.isValid())
 
-        #   a repair to one piece holds
+        #   a repair to one piece holds, and the external geometry follows it: no geometry is
+        #   left behind under the old reference (the sketch would fail on it, ops#72)
+        externalCount = len(sketch.ExternalGeo)
         App.repairReference(sketch, "ExternalGeometry", 0, pieces[0])
         doc.recompute()
         self.assertTrue(sketch.isValid())
         pad.touch()
         doc.recompute()
         self.assertTrue(sketch.isValid())
+        self.assertEqual(len(sketch.ExternalGeo), externalCount)
+        piece = pad.Shape.getElement(pieces[0])
+        line = sketch.ExternalGeo[-1]
+        ends = sorted([(p.x, p.y) for p in (line.StartPoint, line.EndPoint)])
+        expected = sorted([(v.X, v.Y) for v in piece.Vertexes])
+        for (x, y), (ex, ey) in zip(ends, expected):
+            self.assertAlmostEqual(x, ex, places=6)
+            self.assertAlmostEqual(y, ey, places=6)
 
     def testSolverOffSavesNoFrom(self):
         """Without the switch, nothing saves `from`, and the fillet keeps one reference (the
