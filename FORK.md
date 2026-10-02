@@ -93,7 +93,8 @@ names it.
 | `fix/55-duplicate-count` | fix | ops#55 | - | `integration` `004b400470` | `6b0289adb6` (fork PR 64), 2026-10-01 | tests: V2 duplicate counts and pattern instance names (gtests); two patterns of one original whose references move between them (scenarios, listed as known failures for Task 1) |
 | `fix/86-sketcher-partdesign-guard` | fix | ops#86 | - | `integration` `004b400470` | `806324817d` (fork PR 65), 2026-10-01 | tests: the Sketcher tests' PartDesign guard (`BUILD_PART_DESIGN`), and V2/ops#72 expectations for the three of them that then failed |
 | `feat/solver-splits` | feat | ops#7 | - | `integration` `0cb280a74d` | `3218449813` (fork PR 63), 2026-10-01 | never (fork feature) |
-| `feat/solver-splits-arcs` | feat | ops#7 | - | `feat/solver-splits` `0ce71ded00` (fork PR 63) | (fork PR 66) | never (fork feature) |
+| `feat/solver-splits-arcs` | feat | ops#7 | - | `feat/solver-splits` `0ce71ded00` (fork PR 63) | `ae3c586008` (fork PR 66), 2026-10-01 | never (fork feature) |
+| `fix/27-v2-element-history` | fix | ops#27 | - | `integration` `806324817d` | (fork PR 67) | the base's `getElementHistory` reads V2 names' sections |
 
 ## Fork-only commits in carried topics
 

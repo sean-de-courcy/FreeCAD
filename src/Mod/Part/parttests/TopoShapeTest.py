@@ -1099,19 +1099,66 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         self.assertEqual(box.Faces[0].ElementMapSize, 9)
 
     def testTopoShapeGetElementHistory(self):
-        self.doc.addObject("Part::Fuse", "Fuse")
-        self.doc.Fuse.Base = self.doc.Box1
-        self.doc.Fuse.Tool = self.doc.Box2
-        # Act
-        self.doc.recompute()
-        fuse1 = self.doc.Fuse.Shape
-        names = fuse1.ElementReverseMap["Vertex1"]
-        name = names if isinstance(names, str) else names[0]
-        history1 = fuse1.getElementHistory(name)
-        # Assert
-        # (source shape tag, source name, intermediate names)
-        self.assertIsNotNone(history1, f"No history for {name}")
-        self.assertEqual(len(history1), 3)
+        """Every element of a fuse of two boxes without element maps has a history: (the box's
+        tag, the box element's name, intermediate names). In V2 the history comes from the
+        name's sections (ops#27), and the box's element is where the fuse's element came from:
+        the centre of one lies on the other (a piece or a generated element lies on its source,
+        an element the fuse's refine merged holds the source). In V1 the original can be a
+        mapped name the box doesn't have, so only the tag is checked."""
+
+        def centre(sub):
+            return sub.Point if sub.ShapeType == "Vertex" else sub.CenterOfMass
+
+        def onEachOther(a, b):
+            return any(
+                other.distToShape(Part.Vertex(centre(one)))[0] < 1e-7
+                for one, other in ((a, b), (b, a))
+            )
+
+        for algorithm in ("V1", "V2"):
+            with self.subTest(algorithm=algorithm):
+                doc = App.newDocument("GetElementHistory")
+                try:
+                    doc.HistoryAlgorithm = algorithm
+                    boxes = {}
+                    for name, length, width in (("Box1", 1, 2), ("Box2", 2, 1)):
+                        box = doc.addObject("Part::Box", name)
+                        box.Length, box.Width, box.Height = length, width, 2
+                        boxes[box.ID] = box
+                    fuse = doc.addObject("Part::Fuse", "Fuse")
+                    fuse.Base, fuse.Tool = boxes.values()
+                    doc.recompute()
+                    shape = fuse.Shape
+                    count = 0
+                    for kind in ("Vertex", "Edge", "Face"):
+                        for index in range(1, shape.countElement(kind) + 1):
+                            element = f"{kind}{index}"
+                            names = shape.ElementReverseMap[element]
+                            name = names if isinstance(names, str) else names[0]
+                            # Act
+                            history = shape.getElementHistory(name)
+                            # Assert
+                            self.assertIsNotNone(history, f"No history for {element}: {name}")
+                            tag, original, intermediates = history
+                            self.assertIn(tag, boxes, f"{element}: {history}")
+                            self.assertIsInstance(intermediates, list)
+                            count += 1
+                            if algorithm != "V2":
+                                continue
+                            source = boxes[tag].Shape.getElement(original)
+                            sub = shape.getElement(element)
+                            self.assertTrue(
+                                onEachOther(sub, source), f"{element} apart from {original}"
+                            )
+                    self.assertEqual(count, 38)
+                    # The feature's history of a vertex ends at the box it came from
+                    feature = fuse.getElementHistory("Vertex1")
+                    self.assertEqual(len(feature), 2, feature)
+                    self.assertIs(feature[0][0], fuse)
+                    self.assertIn(feature[-1][0].ID, boxes)
+                    self.assertEqual(feature[-1][1], shape.getElementHistory(feature[0][1])[1])
+                finally:
+                    App.closeDocument(doc.Name)
 
     # Todo:  Still broken, still can't find parms that consistently work to test this.
     #           However, the results with an empty elementMap are consistent with making the

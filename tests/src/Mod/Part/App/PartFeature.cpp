@@ -198,6 +198,72 @@ TEST_F(FeaturePartTest, getRelatedElements)
     // EXPECT_STREQ(result.front().name.toString().c_str(),"Edge3;:M;CMN;:H38d:7,E");
 }
 
+TEST_F(FeaturePartTest, getRelatedElementsOfAMissingNameV2)
+{
+    // Arrange
+    //   a 10 mm cube with a ridge across its top face, fused: the top face is split in two. Then
+    //   the ridge moves into the cube, and the pieces' names are gone.
+    ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    auto cube = _doc->addObject<Part::Box>("Cube");
+    cube->Length.setValue(10);
+    cube->Width.setValue(10);
+    cube->Height.setValue(10);
+    auto ridge = _doc->addObject<Part::Box>("Ridge");
+    ridge->Length.setValue(2);
+    ridge->Width.setValue(12);
+    ridge->Height.setValue(2);
+    ridge->Placement.setValue(Base::Placement(Base::Vector3d(4, -1, 9), Base::Rotation()));
+    auto fuse = _doc->addObject<Part::Fuse>("Fuse");
+    fuse->Base.setValue(cube);
+    fuse->Tool.setValue(ridge);
+    fuse->Refine.setValue(false);
+    _doc->recompute();
+    //   the faces in the plane z = 10
+    auto topFaces = [&]() {
+        std::vector<Data::MappedElement> result;
+        const TopoShape& shape = fuse->Shape.getShape();
+        for (int i = 1; i <= shape.countSubShapes(TopAbs_FACE); ++i) {
+            Data::IndexedName index("Face", i);
+            auto box = TopoShape(shape.getSubShape(TopAbs_FACE, i)).getBoundBox();
+            if (std::abs(box.MinZ - 10) < 1e-7 && std::abs(box.MaxZ - 10) < 1e-7) {
+                result.emplace_back(shape.getMappedName(index), index);
+            }
+        }
+        return result;
+    };
+    auto pieces = topFaces();
+    ASSERT_EQ(pieces.size(), 2);
+    Data::MappedName oldName = pieces.front().name.copy();
+    ridge->Width.setValue(2);
+    ridge->Placement.setValue(Base::Placement(Base::Vector3d(4, 4, 4), Base::Rotation()));
+    _doc->recompute();
+    ASSERT_EQ(topFaces().size(), 1);
+    const TopoShape& shape = fuse->Shape.getShape();
+    ASSERT_FALSE(shape.getIndexedName(oldName));
+    std::string oldReference = Data::ComplexGeoData::elementMapPrefix() + oldName.toString();
+
+    // Act
+    Data::MappedName original;
+    long tag = shape.getElementHistory(oldName, &original);
+    auto related = Feature::getRelatedElements(
+        fuse,
+        oldReference.c_str(),
+        HistoryTraceType::followTypeChange,
+        false
+    );
+
+    // Assert
+    //   the old piece's history leads to the cube's top face (ops#27)
+    EXPECT_EQ(tag, cube->getID());
+    EXPECT_EQ(original.toString(), "Face6");
+    //   but getRelatedElements() can't read a missing V2 name's element type
+    //   (ComplexGeoData::elementType() reads V1 postfixes and index names), so it finds nothing
+    //   before it looks at the history. Its callers (Attacher, the Sketcher's
+    //   fixExternalGeometry, the fillet dialog, the dress-up panel's guessNewLink) keep their V2
+    //   behaviour.
+    EXPECT_TRUE(related.empty());
+}
+
 // Note that this test is pretty trivial and useless .. but the method in question is never
 // called in the codebase.
 TEST_F(FeaturePartTest, getElementFromSource)

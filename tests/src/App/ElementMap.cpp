@@ -1101,4 +1101,124 @@ TEST_F(ElementMapTest, retagElementMapLaterNamesV2)
     EXPECT_EQ(map->find(edge2), edge2Name);
 }
 
+// The history of synthetic V2 names (ops#27): the shape's own tag is 7, its inputs' are 3 and 5.
+TEST_F(ElementMapTest, getElementHistoryV2)
+{
+    // Arrange
+    auto section = [](const std::vector<std::string>& refs,
+                      const std::vector<Data::MappedName>& linked,
+                      int tag,
+                      const char* op,
+                      char type,
+                      const std::vector<std::string>& flags) {
+        return Data::MappedName(
+            Data::MappedName::makeEncodedSection(refs, linked, tag, op, 0, type, 0, flags, {}));
+    };
+    auto join = [](const Data::MappedName& prefix, const Data::MappedName& last) {
+        return Data::MappedName(prefix.toString() + Data::NAME_SECTION_DELIMINATOR
+                                + last.toString());
+    };
+    constexpr long ownTag = 7;
+    Data::ElementMap map;
+    struct Result
+    {
+        long tag;
+        std::string original;
+        std::vector<std::string> history;
+    };
+    auto historyOf = [&](const Data::MappedName& name, long masterTag = 7) {
+        Data::MappedName original;
+        std::vector<Data::MappedName> history;
+        Result result {map.getElementHistory(name, masterTag, &original, &history), "", {}};
+        result.original = original.toString();
+        for (const auto& step : history) {
+            result.history.push_back(step.toString());
+        }
+        return result;
+    };
+    // a face of map-less input 5 (by index), and an edge input 3 made
+    auto boxFace = section({"Face6"}, {}, 5, "FUS", 'F', {"IDX", "SRC"});
+    auto inputEdge = section({}, {boxFace}, 3, "FLT", 'E', {"GEN"});
+    // what this shape made: a piece of the box face, an edge from two faces, a face named after
+    // its edges, and a piece of that face
+    auto piece = join(boxFace, section({}, {}, 7, "FUS", 'F', {"MOD"}));
+    auto generated = section({}, {inputEdge, boxFace}, 7, "FUS", 'E', {"GEN"});
+    auto lower = section({}, {inputEdge}, 7, "FUS", 'F', {"LOW"});
+    auto lowerPiece = join(lower, section({}, {}, 7, "FUS", 'F', {"MOD"}));
+    auto generatedFromPiece = section({}, {lowerPiece}, 7, "FUS", 'E', {"GEN"});
+    auto partner = section({}, {inputEdge}, 7, "FUS", 'E', {"PRJ"});
+
+    // Act and assert
+    //   an input's element left unchanged: that input, under the same name
+    auto result = historyOf(inputEdge);
+    EXPECT_EQ(result.tag, 3);
+    EXPECT_EQ(result.original, inputEdge.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   with the element map prefix
+    result = historyOf(
+        Data::MappedName(std::string(Data::ELEMENT_MAP_PREFIX) + inputEdge.toString()));
+    EXPECT_EQ(result.tag, 3);
+    EXPECT_EQ(result.original, inputEdge.toString());
+    //   an element of a map-less input: its index name there
+    result = historyOf(boxFace);
+    EXPECT_EQ(result.tag, 5);
+    EXPECT_EQ(result.original, "Face6");
+    EXPECT_TRUE(result.history.empty());
+    //   a split piece: the element it was split from, through its name before the split
+    result = historyOf(piece);
+    EXPECT_EQ(result.tag, 5);
+    EXPECT_EQ(result.original, "Face6");
+    EXPECT_EQ(result.history, std::vector<std::string> {boxFace.toString()});
+    //   a generated element: its first linked name
+    result = historyOf(generated);
+    EXPECT_EQ(result.tag, 3);
+    EXPECT_EQ(result.original, inputEdge.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   a partner (PRJ): the input element
+    result = historyOf(partner);
+    EXPECT_EQ(result.tag, 3);
+    EXPECT_EQ(result.original, inputEdge.toString());
+    //   named after its edges: nothing it was made from
+    result = historyOf(lower);
+    EXPECT_EQ(result.tag, 0);
+    EXPECT_EQ(result.original, lower.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   a piece of such a face: this shape's own face, as V1 gives the master tag
+    result = historyOf(lowerPiece);
+    EXPECT_EQ(result.tag, ownTag);
+    EXPECT_EQ(result.original, lower.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   two steps of this shape: the intermediate name is in the history
+    result = historyOf(generatedFromPiece);
+    EXPECT_EQ(result.tag, ownTag);
+    EXPECT_EQ(result.original, lower.toString());
+    EXPECT_EQ(result.history, std::vector<std::string> {lowerPiece.toString()});
+    //   in the input's own shape, the input's element has nothing earlier
+    result = historyOf(boxFace, 5);
+    EXPECT_EQ(result.tag, 0);
+    //   in input 3's shape, its edge goes back to the box face it was made from
+    result = historyOf(inputEdge, 3);
+    EXPECT_EQ(result.tag, 5);
+    EXPECT_EQ(result.original, "Face6");
+    EXPECT_EQ(result.history, std::vector<std::string> {boxFace.toString()});
+    //   an untagged shape's own untagged steps: no tag to give
+    auto untagged = join(section({"Face1"}, {}, 0, "FUS", 'F', {"IDX", "SRC"}),
+                         section({}, {}, 0, "FUS", 'F', {"MOD"}));
+    result = historyOf(untagged, 0);
+    EXPECT_EQ(result.tag, 0);
+    //   not a V2 name
+    result = historyOf(Data::MappedName("Edge1"));
+    EXPECT_EQ(result.tag, 0);
+    EXPECT_EQ(result.original, "Edge1");
+    //   V1 names keep V1's history
+    result = historyOf(Data::MappedName("Edge1;:H5,E"));
+    EXPECT_EQ(result.tag, 5);
+    EXPECT_EQ(result.original, "Edge1");
+    EXPECT_TRUE(result.history.empty());
+    result = historyOf(Data::MappedName("Edge1;:H5,E;:M;FUS;:H7:7,E"));
+    EXPECT_EQ(result.tag, 5);
+    EXPECT_EQ(result.original, "Edge1");
+    EXPECT_EQ(result.history, std::vector<std::string> {"Edge1;:H5,E"});
+}
+
 // NOLINTEND(readability-magic-numbers)
