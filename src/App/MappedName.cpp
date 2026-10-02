@@ -23,10 +23,12 @@
  ****************************************************************************/
 
 #include <cstring>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "MappedName.h"
+#include "NameTable.h"
 
 
 #include "Base/Console.h"
@@ -46,6 +48,112 @@ namespace
 {
 // Decoded V2 names by name string, for MappedName::getDecodedMappedName()
 std::unordered_map<std::string, Data::DecodedMappedName> decodedMappedNameCache;  // NOLINT
+
+// Decodes a name whose sections are all written out (no leading `~<ID>`). One level of `^` comes
+// off embedded names.
+Data::DecodedMappedName decodeFullName(const std::string& mappedNameString)
+{
+    std::vector<std::string> stringVectorBuffer;
+    Data::DecodedMappedSection section;
+    Data::DecodedMappedName name;
+    std::string emptyValueLocal = Data::EMPTY_VALUE;
+    std::string stringBuffer;
+    int subSectionIndex = 0;
+    int escapeLevel = 0;
+    // Whether a field is still being read: false right after a top-level delimiter. The last
+    // field ends with the string, also when it ends in an escaped character (ops#63).
+    bool fieldPending = false;
+
+    auto finishField = [&](bool endOfSection) {
+        if (stringBuffer.size() && stringBuffer != emptyValueLocal) {
+            stringVectorBuffer.push_back(stringBuffer);
+        }
+
+        const std::string* stringVectorBufferFront =
+            stringVectorBuffer.empty() ? &emptyValueLocal : &stringVectorBuffer.front();
+
+        switch (subSectionIndex) {
+            case Data::SECTION_REFERENCE_ID_INDEX:
+                section.referenceIDs = stringVectorBuffer;
+                break;
+            case Data::SECTION_LINKED_NAME_INDEX:
+                section.linkedNames = stringVectorBuffer;
+                break;
+            case Data::SECTION_ITERATION_TAG_INDEX:
+                section.iterationTag = *stringVectorBufferFront;
+                break;
+            case Data::SECTION_OPCODE_INDEX:
+                section.opCode = *stringVectorBufferFront;
+                break;
+            case Data::SECTION_INDEX_NUM_INDEX:
+                section.index = *stringVectorBufferFront;
+                break;
+            case Data::SECTION_ELEMENT_TYPE_INDEX:
+                section.elementType = stringVectorBufferFront->front();
+                break;
+            case Data::SECTION_DUPLICATE_COUNT_INDEX:
+                section.duplicateCount = *stringVectorBufferFront;
+                break;
+            case Data::SECTION_MAPPER_FLAGS_INDEX:
+                section.mapperFlags = stringVectorBuffer;
+                break;
+            case Data::SECTION_CONNECTED_ELEMENTS_INDEX:
+                section.connectedElements = stringVectorBuffer;
+                break;
+        }
+
+        stringVectorBuffer.clear();
+        stringBuffer.clear();
+
+        if (endOfSection) {
+            name.push_back(section);
+            subSectionIndex = 0;
+        }
+        else {
+            subSectionIndex++;
+        }
+    };
+
+    for (char currentChar : mappedNameString) {
+        if (escapeLevel == 0) {
+            if (currentChar == (*Data::SECTION_SUB_DELIMINATOR)) {
+                finishField(false);
+                fieldPending = false;
+                continue;
+            }
+            if (currentChar == (*Data::NAME_SECTION_DELIMINATOR)) {
+                finishField(true);
+                fieldPending = false;
+                continue;
+            }
+            if (currentChar == (*Data::SUB_SECTION_LIST_DELIMINATOR)) {
+                stringVectorBuffer.push_back(stringBuffer);
+                stringBuffer.clear();
+                fieldPending = false;
+                continue;
+            }
+        }
+
+        fieldPending = true;
+
+        if (currentChar == (*Data::SUB_SECTION_ESCAPE_CHAR)) {
+            if (++escapeLevel == 1) {
+                continue;
+            }
+        }
+        else {
+            escapeLevel = 0;
+        }
+
+        stringBuffer += currentChar;
+    }
+
+    if (fieldPending) {
+        finishField(true);
+    }
+
+    return name;
+}
 }  // namespace
 
 namespace Data
@@ -177,117 +285,39 @@ const DecodedMappedName& MappedName::getDecodedMappedName(const std::string& map
     ZoneScoped;
 
     auto it = decodedMappedNameCache.find(mappedNameString);
-
-    if (it == decodedMappedNameCache.end()) {
-        std::vector<std::string> stringVectorBuffer;
-        DecodedMappedSection section;
-        DecodedMappedName name;
-        std::string* stringVectorBufferFront;
-        std::string emptyValueLocal = Data::EMPTY_VALUE;
-        std::string stringBuffer;
-        size_t mappedNameStringSize = mappedNameString.size();
-        bool updateSection = false;
-        bool postSection = false;
-        int subSectionIndex = 0;
-        int escapeLevel = 0;
-
-        for (size_t i = 0; i < mappedNameStringSize; i++) {
-            const char& currentChar = mappedNameString[i];
-
-            if (escapeLevel == 0) {
-                updateSection = false;
-                postSection = false;
-                
-                if (currentChar == (*Data::SECTION_SUB_DELIMINATOR)) {
-                    updateSection = true;
-                } else if (currentChar == (*Data::NAME_SECTION_DELIMINATOR)) {
-                    updateSection = true;
-                    postSection = true;
-                } else if (currentChar == (*Data::SUB_SECTION_LIST_DELIMINATOR)) {
-                    stringVectorBuffer.push_back(stringBuffer);
-                    stringBuffer.clear();
-                    
-                    continue;
-                } else if ((i + 1) == mappedNameStringSize) {
-                    stringBuffer += currentChar;
-
-                    updateSection = true;
-                    postSection = true;
-                }
-
-                if (updateSection) {
-                    if (stringBuffer.size() && stringBuffer != emptyValueLocal) {
-                        stringVectorBuffer.push_back(stringBuffer);
-                    }
-
-                    if (stringVectorBuffer.size()) {
-                        stringVectorBufferFront = &stringVectorBuffer.front();
-                    } else {
-                        stringVectorBufferFront = &emptyValueLocal;
-                    }
-
-                    switch (subSectionIndex) {
-                    case Data::SECTION_REFERENCE_ID_INDEX:
-                        section.referenceIDs = stringVectorBuffer;
-                        break;
-                    case Data::SECTION_LINKED_NAME_INDEX:
-                        section.linkedNames = stringVectorBuffer;
-                        break;
-                    case Data::SECTION_ITERATION_TAG_INDEX:
-                        section.iterationTag = *stringVectorBufferFront;
-                        break;
-                    case Data::SECTION_OPCODE_INDEX:
-                        section.opCode = *stringVectorBufferFront;
-                        break;
-                    case Data::SECTION_INDEX_NUM_INDEX:
-                        section.index = *stringVectorBufferFront;
-                        break;
-                    case Data::SECTION_ELEMENT_TYPE_INDEX:
-                        section.elementType = stringVectorBufferFront->front();
-                        break;
-                    case Data::SECTION_DUPLICATE_COUNT_INDEX:
-                        section.duplicateCount = *stringVectorBufferFront;
-                        break;
-                    case Data::SECTION_MAPPER_FLAGS_INDEX:
-                        section.mapperFlags = stringVectorBuffer;
-                        break;
-                    case Data::SECTION_CONNECTED_ELEMENTS_INDEX:
-                        section.connectedElements = stringVectorBuffer;
-                        break;
-                    }
-                    
-                    stringVectorBufferFront = nullptr;
-                    stringVectorBuffer.clear();
-                    stringBuffer.clear();
-
-                    if (postSection) {
-                        name.push_back(section);
-                        subSectionIndex = 0;
-                    } else {
-                        subSectionIndex++;
-                    }
-
-                    continue;
-                }
-            }
-
-            if (currentChar == (*Data::SUB_SECTION_ESCAPE_CHAR)) {
-                if (++escapeLevel == 1) {
-                    continue;
-                }
-            } else {
-                escapeLevel = 0;
-            }
-
-            stringBuffer += currentChar;
-        }
-
-        auto emplacedCacheIterator = decodedMappedNameCache.try_emplace(mappedNameString, name);
-
-        return emplacedCacheIterator.first->second;
-    } else {
+    if (it != decodedMappedNameCache.end()) {
         return it->second;
     }
+
+    // An interned name (NameTable.h) that starts with a reference `~<ID>` (a split piece's
+    // prefix, or a whole name) decodes to the referenced node's sections followed by its own.
+    // Embedded names stay `~<ID>` strings; decoding one gives that node's sections.
+    if (!mappedNameString.empty() && mappedNameString.front() == NameTable::Marker) {
+        std::string_view text(mappedNameString);
+        auto id = NameTable::parseRef(text.substr(0, NameTable::RefLength));
+        if (id
+            && (text.size() == NameTable::RefLength
+                || text[NameTable::RefLength] == *Data::NAME_SECTION_DELIMINATOR)) {
+            auto content = NameTable::instance().lookup(*id);
+            if (!content) {
+                // Unresolved, and not cached: the entry may still be loaded
+                FC_LOG("Unknown name ID in '" << mappedNameString << "'");
+                static const DecodedMappedName unresolved;
+                return unresolved;
+            }
+            DecodedMappedName name = getDecodedMappedName(*content);
+            if (text.size() > NameTable::RefLength) {
+                DecodedMappedName rest =
+                    decodeFullName(mappedNameString.substr(NameTable::RefLength + 1));
+                name.insert(name.end(), rest.begin(), rest.end());
+            }
+            return decodedMappedNameCache.try_emplace(mappedNameString, std::move(name))
+                .first->second;
+        }
+    }
+
+    return decodedMappedNameCache.try_emplace(mappedNameString, decodeFullName(mappedNameString))
+        .first->second;
 }
 
 const DecodedMappedName& MappedName::getDecodedMappedName() const {

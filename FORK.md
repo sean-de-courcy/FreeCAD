@@ -96,7 +96,8 @@ names it.
 | `feat/solver-splits-arcs` | feat | ops#7 | - | `feat/solver-splits` `0ce71ded00` (fork PR 63) | `ae3c586008` (fork PR 66), 2026-10-01 | never (fork feature) |
 | `fix/27-v2-element-history` | fix | ops#27 | - | `integration` `806324817d` | `5054da5c2b` (fork PR 67), 2026-10-01 | the base's `getElementHistory` reads V2 names' sections |
 | `feat/solver-gate` | feat | ops#7, ops#87 | - | `feat/solver-splits-arcs` `0ce556ea66` (fork PR 66) | `2af4d842d2` (fork PR 68), 2026-10-01 | never (fork feature) |
-| `fix/62-element-map-version` | fix | ops#62 | - | `integration` `2af4d842d2` | (fork PR 69) | a new base's `Document::onChanged` refreshes the element map version when `HistoryAlgorithm` changes |
+| `fix/62-element-map-version` | fix | ops#62 | - | `integration` `2af4d842d2` | `4782d97247` (fork PR 69), 2026-10-01 | a new base's `Document::onChanged` refreshes the element map version when `HistoryAlgorithm` changes |
+| `feat/naming-table` | feat | ops#6, ops#63 | - | `integration` `4782d97247` | (fork PR 71) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

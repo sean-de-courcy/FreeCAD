@@ -320,6 +320,37 @@ def isPieceOf(name: str, old: str, /) -> bool:
     """
     ...
 
+def expandMappedName(name: str, /) -> str:
+    """Return the full V2 form of mapped name `name`, which may be interned (ops#6).
+
+    Every `~<ID>` the process's name table knows is replaced by its expansion, escaped as V2
+    escapes embedded names, so an interned name expands to the plain V2 string byte for byte.
+    Unknown IDs are kept. A plain name comes back unchanged.
+    """
+    ...
+
+def internMappedName(name: str, /) -> str:
+    """Return the interned form of V2 mapped name `name`, and add its nodes to the name table.
+
+    Each Linked and Connected Name becomes `~<ID>`, and the sections before the last become one
+    `~<ID>|` prefix. For tests: nothing in FreeCAD interns names yet.
+    """
+    ...
+
+def getMappedNameId(name: str, /) -> str | None:
+    """Return the ID of V2 mapped name `name` as a node of the name table (13 base32 characters).
+
+    The name's node is added to the table, so `~<ID>` can be embedded in another name. Returns
+    None if its ID is taken by another content (a collision). For tests.
+    """
+    ...
+
+def getNameTableEntry(id: str, /) -> tuple[str, int] | None:
+    """Return the name table's entry for `id` (`<ID>` or `~<ID>`): its interned content and its
+    depth. Returns None for an ID the table doesn't have. For tests.
+    """
+    ...
+
 def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     """Return what the reference solver did with `obj`'s element references (ops#7).
 

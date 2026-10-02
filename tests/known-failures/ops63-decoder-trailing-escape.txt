@@ -1,7 +1,0 @@
-# The V2 decoder returns nothing for a name whose last field ends in an escaped character (R5).
-# Remove the entry in the PR that makes its test pass.
-
-issue: ops#63
-
-reason: a section whose Connected Names end in an escaped ';' doesn't decode
-cli  PartDesignTests.TestNamingRList.TestNamingRList.testDecodeLastFieldEndingInEscapedCharacter
