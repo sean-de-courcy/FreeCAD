@@ -41,13 +41,32 @@ std::vector<std::string> sortedFlags(const DecodedMappedSection& section)
     return flags;
 }
 
-// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
+// An index suffix as the op code: `_2`, `_3`, ... (`Data::indexSuffix`). PartDesign's patterns
+// gave it to their instances before ops#55; the solver still treats it as a counter.
 bool isCounterOpCode(const std::string& opCode)
 {
     return opCode.size() > 1 && opCode[0] == '_'
         && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
                return c >= '0' && c <= '9';
            });
+}
+
+// The op code of a pattern instance's section, `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_` (Part's
+// OpCodes::Transformed, ops#55). It carries the MOD flag, but it's no split: it says which
+// instance of which pattern the element is in.
+constexpr const char* patternInstanceOpCode = "TRF";
+
+// The pattern instances a name is in: (pattern, k) of each of its top-level TRF sections.
+std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
+{
+    std::vector<std::pair<std::string, std::string>> instances;
+    for (auto section : NameAncestry::splitSections(name)) {
+        const auto& decoded = decodeSection(section);
+        if (decoded.opCode == patternInstanceOpCode) {
+            instances.emplace_back(decoded.iterationTag, decoded.index);
+        }
+    }
+    return instances;
 }
 
 }  // namespace
@@ -293,6 +312,32 @@ bool NameAncestry::topAgrees(std::string_view oldName, std::string_view candidat
 
 bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
 {
+    // A split made before a pattern instance's section (WholeShape mode, or an edit upstream of
+    // the pattern): the instance's piece is `X|<split>|<TRF>`, its element `X|<TRF>`. They are
+    // compared without the chain of TRF sections both end in.
+    {
+        auto nameSections = splitSections(name);
+        auto oldSections = splitSections(oldName);
+        std::size_t common = 0;
+        while (common < nameSections.size() && common < oldSections.size()) {
+            auto section = nameSections[nameSections.size() - 1 - common];
+            if (section != oldSections[oldSections.size() - 1 - common]
+                || decodeSection(section).opCode != patternInstanceOpCode) {
+                break;
+            }
+            ++common;
+        }
+        if (common > 0 && common < nameSections.size() && common < oldSections.size()) {
+            // Each head ends before the delimiter of its first TRF section.
+            auto head = [](std::string_view whole, std::string_view firstStripped) {
+                return whole.substr(0, firstStripped.data() - whole.data() - 1);
+            };
+            return isPieceOf(
+                head(name, nameSections[nameSections.size() - common]),
+                head(oldName, oldSections[oldSections.size() - common])
+            );
+        }
+    }
     if (oldName.empty() || name.size() <= oldName.size() + 1
         || name.substr(0, oldName.size()) != oldName) {
         return false;
@@ -310,7 +355,8 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
     }
     for (auto section : added) {
         const auto& decoded = decodeSection(section);
-        if (!decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.elementType != elementType) {
+        if (!decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.elementType != elementType
+            || decoded.opCode == patternInstanceOpCode) {
             return false;
         }
     }
@@ -385,11 +431,16 @@ std::vector<int> NameAncestry::structuralSurvivors(
     // candidate exactly at the boundary through rounding.
     constexpr double slack = 1e-12;
 
+    // An element of another pattern instance, or of the original, shares the old element's
+    // history up to the instances' sections: it is another element (ops#55).
+    const auto oldInstances = patternInstances(oldName);
     std::vector<double> overlaps;
     overlaps.reserve(candidates.size());
     double best = 0.0;
     for (const auto& candidate : candidates) {
-        overlaps.push_back(overlap(oldName, candidate));
+        overlaps.push_back(
+            patternInstances(candidate) == oldInstances ? overlap(oldName, candidate) : 0.0
+        );
         best = std::max(best, overlaps.back());
     }
     std::vector<int> survivors;
@@ -956,8 +1007,9 @@ std::string formatOverlap(double value)
  * depth: the sections of the embedded Linked and Connected Names are compared the same way, so a
  * face built on instance 1's edges and one built on instance 2's are equal up to the counter.
  * Both forms of the counter are ignored, as harness.py's withoutCounter() does: the duplicate
- * count field, and a counter written over the op code, which then matches any op code. A section
- * that doesn't decode must be equal as text.
+ * count field, and a counter written over the op code, which then matches any op code. So is the
+ * instance number of a pattern instance's TRF section: two instances of one pattern are siblings.
+ * A section that doesn't decode must be equal as text.
  */
 bool sameUpToCounter(std::string_view a, std::string_view b)
 {
@@ -983,8 +1035,12 @@ bool sameUpToCounter(std::string_view a, std::string_view b)
         const DecodedMappedSection& y = decodedB.front();
         bool opCodesAgree = x.opCode == y.opCode || isCounterOpCode(x.opCode)
             || isCounterOpCode(y.opCode);
+        // The copies of an element in two instances of one pattern are siblings: the instance
+        // number in a TRF section's index counts as a counter here (ops#55).
+        bool instanceSections
+            = x.opCode == patternInstanceOpCode && y.opCode == patternInstanceOpCode;
         if (!opCodesAgree || x.referenceIDs != y.referenceIDs || x.iterationTag != y.iterationTag
-            || x.index != y.index || x.elementType != y.elementType
+            || (x.index != y.index && !instanceSections) || x.elementType != y.elementType
             || x.mapperFlags != y.mapperFlags || x.linkedNames.size() != y.linkedNames.size()
             || x.connectedElements.size() != y.connectedElements.size()) {
             return false;

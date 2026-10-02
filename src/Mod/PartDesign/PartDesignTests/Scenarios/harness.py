@@ -1016,9 +1016,11 @@ def withoutCounter(name):
     later feature keeps the counter of the name it builds on):
     - the duplicate count field (`...;F;1;IDX,SRC;_`): set to 0;
     - a `_<n>` op code (`...;_2;0;F;0;...`): the op code becomes None, which matches any op code
-      (`sameUpToCounter`). It isn't the counter but a pattern's instance suffix: PartDesign's
-      Transformed passes `_<k-1>` as the op of instance k >= 3, which V2 uses as the op code of
-      an original without an element map (ops#55). It is taken out here all the same.
+      (`sameUpToCounter`). It isn't the counter but an index suffix (`Data::indexSuffix`), which
+      V2 uses as the op code of an element without a name. PartDesign's Transformed passed it for
+      its instances until ops#55; V2 instances now end in a section of their own,
+      `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_`, which this keeps. Part's cross sections still pass
+      such suffixes. It is taken out here all the same.
     A name that doesn't decode (V1) is returned as it is."""
     sections = App.getDecodedMappedName(name)
     if not sections:

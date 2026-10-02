@@ -340,6 +340,40 @@ TEST(NameAncestry, cornerEdgeAfterTheNotchIsNotAPiece)
     EXPECT_FALSE(NameAncestry::isPieceOf(longerId, sketchEdge(1)));
 }
 
+TEST(NameAncestry, patternInstancesAreNeitherPiecesNorPartners)
+{
+    // ops#55: a pattern's instance k is a copy of the support's element with a section
+    // `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_` appended. It has the MOD flag, but the instance is
+    // another element: neither a piece of the support's element nor a tier-1 partner of another
+    // instance's, of this pattern or another.
+    NameAncestry ancestry;
+    const auto support = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    const auto instance = [&](int pattern, int k) {
+        return piece(support, pattern, "TRF", k, 'F');
+    };
+    const auto x3 = instance(9, 3);
+    const auto y3 = instance(8, 3);
+
+    EXPECT_FALSE(NameAncestry::isPieceOf(x3, support));
+    //   a split piece of an instance is still a piece of it
+    EXPECT_TRUE(NameAncestry::isPieceOf(piece(x3, 10, "FUS", 0, 'F'), x3));
+    //   so is a piece of a split made before the pattern (WholeShape mode): `X|<cut>|TRF;3` of
+    //   `X|TRF;3`, but not of another instance, nor of the support
+    const auto cutThenX3 = piece(piece(support, 6, "CUT", 0, 'F'), 9, "TRF", 3, 'F');
+    EXPECT_TRUE(NameAncestry::isPieceOf(cutThenX3, x3));
+    EXPECT_FALSE(NameAncestry::isPieceOf(cutThenX3, instance(9, 2)));
+    EXPECT_FALSE(NameAncestry::isPieceOf(cutThenX3, support));
+    EXPECT_FALSE(NameAncestry::isPieceOf(x3, x3));
+    //   only the same instance survives tier 1, whatever its overlap with the others
+    const std::vector<std::string> candidates {support, instance(9, 2), x3, instance(8, 2)};
+    EXPECT_EQ(ancestry.structuralSurvivors(y3, candidates, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(x3, candidates, 1.0), std::vector<int> {2});
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(support, {support, x3, y3}, 1.0),
+        std::vector<int> {0}
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Forced matching
 
@@ -1627,6 +1661,45 @@ TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
     EXPECT_EQ(outcomes[0].element, "Face2");
     EXPECT_EQ(outcomes[0].tier, 1);
     EXPECT_EQ(calls, 1);
+}
+
+TEST(SolveOwner, patternInstanceSiblingNeverResolves)
+{
+    // ops#55, a LinearPattern in Extent mode: 3 occurrences -> 2 moves instance 2 onto instance
+    // 3's place. The reference to instance 3's top face (`X|TRF;3`) has no structural candidate,
+    // and geometry alone finds instance 2's copy (`X|TRF;2`) in place: another element.
+    Placed p;
+    const auto x = p.names.oldTop;
+    auto instance = [&](const std::string& name, int k) {
+        return piece(name, 9, "TRF", k, 'F');
+    };
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.entries = {missing(instance(x, 3))};
+    input.entries[0].fingerprint = p.top;
+    input.pool["Face"] = {element("Face4", {instance(x, 2)}), element("Face9", {x})};
+    measure(input, {{"Face4", p.top}, {"Face9", p.topAt(-20)}}, nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    const auto& candidates = outcomes[0].candidates;
+    EXPECT_NE(std::find(candidates.begin(), candidates.end(), "Face4"), candidates.end());
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+
+    //   the same through an embedded name: a face generated from instance 3's edge, and the one
+    //   from instance 2's
+    const auto edge = generated({sketchEdge(1)}, 7, "XTR", 'E');
+    auto faceOn = [&](int k) {
+        return generated({piece(edge, 9, "TRF", k, 'E')}, 10, "FLT", 'F');
+    };
+    input.entries = {missing(faceOn(3))};
+    input.entries[0].fingerprint = p.top;
+    input.pool["Face"] = {element("Face4", {faceOn(2)})};
+    measure(input, {{"Face4", p.top}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
 }
 
 TEST(SolveOwner, geometryAloneNeedsBothTiers)

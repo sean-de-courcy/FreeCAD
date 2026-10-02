@@ -387,18 +387,26 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     supportShape.setTransform(Base::Matrix4D());
 
+    // V2 names each instance by content (ops#55): instance k (the support is 1, then the
+    // transformations in order) gets a section with this feature's ID and k appended to every
+    // name. V1 keeps the instance suffix as the op.
+    const bool nameInstances = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
     auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape) {
         std::vector<TopoShape> shapes = {supportShape};
-        int idx = 1;
+        int instance = 1;
         auto transformIter = transformations.cbegin();
         transformIter++;
         for (; transformIter != transformations.end(); transformIter++) {
             if (Base::Sequencer().wasCanceled()) {
                 return std::vector<TopoShape>();
             }
-            auto opName = Data::indexSuffix(idx++);
+            auto opName = nameInstances ? std::string() : Data::indexSuffix(instance);
+            ++instance;
             shapes.emplace_back(makeResultShape(origShape)
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
+            if (nameInstances) {
+                shapes.back().appendElementSection(getID(), Part::OpCodes::Transformed, instance);
+            }
         }
         return shapes;
     };

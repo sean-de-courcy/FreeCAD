@@ -850,6 +850,46 @@ void TopoShape::copyElementMap(const TopoShape& topoShape, const char* op)
     setMappedChildElements(children);
 }
 
+TopoShape& TopoShape::appendElementSection(long tag, const char* op, int index)
+{
+    if (getHistoryAlgorithm() != App::HistoryAlgorithm::V2 || isNull() || !hasElementMap()) {
+        return *this;
+    }
+    const std::vector<Data::MappedName> noNames;
+    std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
+    for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        const auto& typeName = shapeName(type);
+        const std::string section = Data::NAME_SECTION_DELIMINATOR
+            + Data::MappedName::makeEncodedSection(
+                {},
+                noNames,
+                static_cast<int>(tag),
+                op,
+                index,
+                typeName[0],
+                0,
+                {Data::MAPPER_FLAG_MODIFIED},
+                noNames
+            );
+        const auto count = static_cast<int>(countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            auto element = Data::IndexedName::fromConst(typeName.c_str(), i);
+            // In the element's order, so its first name stays first
+            for (auto& [name, sids] : getElementMappedNames(element)) {
+                Data::MappedName newName(name);
+                newName.append(section.c_str());
+                names.emplace_back(element, newName, sids);
+            }
+        }
+    }
+    // A new map: the old one may be shared, e.g. with the shape this one is a copy of
+    resetElementMap(std::make_shared<Data::ElementMap>());
+    for (const auto& [element, name, sids] : names) {
+        setElementName(element, name, Tag, &sids);
+    }
+    return *this;
+}
+
 
 // TODO: Refactor mapSubElementTypeForShape to reduce complexity
 void TopoShape::mapSubElementTypeForShape(

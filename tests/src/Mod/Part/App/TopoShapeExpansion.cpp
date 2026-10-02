@@ -3543,4 +3543,71 @@ TEST_F(TopoShapeExpansionTest, makeElementOffset2DOneWireVertices)
     ));
 }
 
+TEST_F(TopoShapeExpansionTest, appendElementSectionV2)
+{
+    // Arrange
+    //   pattern: a pattern instance, a copy of its original's shape that shares the original's
+    //   element map (ops#55). Face1 has two names, Edge1 one, the other elements none.
+    TopoShape original(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    IndexedName face1("Face", 1);
+    IndexedName edge1("Edge", 1);
+    auto faceName = MappedName::makeUnmappedName({"Face1"}, 7, "MKR", 'F');
+    auto secondFaceName = MappedName::makeUnmappedName({"Face1"}, 7, "XTR", 'F');
+    auto edgeName = MappedName::makeUnmappedName({"Edge1"}, 7, "MKR", 'E');
+    original.setElementName(face1, faceName, 7L);
+    original.setElementName(face1, secondFaceName, 7L);
+    original.setElementName(edge1, edgeName, 7L);
+    ASSERT_EQ(original.getElementMapSize(), 3);
+    TopoShape instance(original);
+
+    // Act
+    //   instance 3 of the pattern with ID 5
+    instance.appendElementSection(5L, OpCodes::Transformed, 3);
+
+    // Assert
+    //   every name ends in '|_;_;5;TRF;3;<type>;0;MOD;_', and an element's names keep their order
+    auto faceNames = instance.getElementMappedNames(face1);
+    ASSERT_EQ(faceNames.size(), 2);
+    EXPECT_EQ(faceNames[0].first.toString(), faceName.toString() + "|_;_;5;TRF;3;F;0;MOD;_");
+    EXPECT_EQ(faceNames[1].first.toString(), secondFaceName.toString() + "|_;_;5;TRF;3;F;0;MOD;_");
+    EXPECT_EQ(
+        instance.getMappedName(edge1).toString(),
+        edgeName.toString() + "|_;_;5;TRF;3;E;0;MOD;_"
+    );
+    EXPECT_EQ(instance.getElementMapSize(), 3);
+    EXPECT_FALSE(instance.getMappedName(IndexedName("Face", 2)));
+    //   the original keeps its names
+    auto originalFaceNames = original.getElementMappedNames(face1);
+    ASSERT_EQ(originalFaceNames.size(), 2);
+    EXPECT_EQ(originalFaceNames[0].first, faceName);
+    EXPECT_EQ(originalFaceNames[1].first, secondFaceName);
+    EXPECT_EQ(original.getMappedName(edge1), edgeName);
+    EXPECT_EQ(original.getElementMapSize(), 3);
+}
+
+TEST_F(TopoShapeExpansionTest, appendElementSectionLeavesV1AndUnnamedShapes)
+{
+    // Arrange
+    //   a V1 shape with a name, and a V2 shape without a map
+    IndexedName face1("Face", 1);
+    TopoShape v1(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+    v1.setElementName(face1, MappedName("Face1;:H7,F"), 7L);
+    auto v1Names = v1.getElementMap();
+    TopoShape unnamed(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
+
+    // Act
+    v1.appendElementSection(5L, OpCodes::Transformed, 3);
+    unnamed.appendElementSection(5L, OpCodes::Transformed, 3);
+
+    // Assert
+    //   both are left as they were
+    auto names = v1.getElementMap();
+    ASSERT_EQ(names.size(), v1Names.size());
+    for (size_t i = 0; i < names.size(); ++i) {
+        EXPECT_EQ(names[i].name, v1Names[i].name);
+        EXPECT_EQ(names[i].index, v1Names[i].index);
+    }
+    EXPECT_FALSE(unnamed.hasElementMap());
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

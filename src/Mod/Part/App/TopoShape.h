@@ -1801,6 +1801,23 @@ public:
     //@}
 
     void copyElementMap(const TopoShape& topoShape, const char* op = nullptr);
+
+    /**
+     * Append a section to every name of the element map (V2 only).
+     *
+     * Each name of a vertex, edge or face becomes
+     * `<name>|_;_;<tag>;<op>;<index>;<type>;0;MOD;_`, and an element keeps its names in their
+     * order. The map is replaced, not edited, so a map shared with another shape keeps its
+     * names. A V1 shape, or one without a map, is left as it is.
+     *
+     * @param tag: the iteration tag of the new section
+     * @param op: its op code
+     * @param index: its index field, e.g. a pattern instance's number
+     *
+     * @return Return this shape.
+     */
+    TopoShape& appendElementSection(long tag, const char* op, int index);
+
     bool canMapElement(const TopoShape& other) const;
     void cacheRelatedElements(
         const Data::MappedName& name,
