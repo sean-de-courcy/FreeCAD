@@ -84,6 +84,14 @@ MappedName retagInterned(const MappedName& name, long newTag)
     return MappedName(NameTable::instance().toInterned(retagged));
 }
 
+// A name read from a file, as the load's remap reads it (NameRemap, ops#6).
+// Returns true if it changed. A name the remap drops (a newer naming format) is kept here: it
+// counts it, and ComplexGeoData drops the whole map.
+bool remapName(NameRemap& remap, std::string& text)
+{
+    return remap.remapMapName(text) == NameRemap::MapName::Changed;
+}
+
 }  // namespace
 
 
@@ -388,6 +396,8 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
     const char* postfixWarn = nullptr;
     const char* childSIDWarn = nullptr;
     std::vector<std::string> tokens;
+    // The references to interned names mean what the file's name table says (ops#6)
+    NameRemap* remap = NameRemap::active();
 
     for (int i = 0; i < typeCount; ++i) {
         int outerCount = 0;
@@ -429,6 +439,9 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
             }
             else {
                 child.elementMap = nullptr;
+            }
+            if (remap) {
+                remap->remapSubName(tmp);  // a postfix isn't a name: rewritten as text
             }
             child.postfix = tmp.c_str();
             this->childElements[child.postfix].childMap = &child;
@@ -526,6 +539,14 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
                     }
                     else {
                         ref->name += postfixes[postfixIndex - 1];
+                    }
+                }
+
+                if (remap && (ref->name.dataBytes().contains(NameTable::Marker)
+                              || ref->name.postfixBytes().contains(NameTable::Marker))) {
+                    std::string text = ref->name.toString();
+                    if (remapName(*remap, text)) {
+                        ref->name = MappedName(text);
                     }
                 }
 

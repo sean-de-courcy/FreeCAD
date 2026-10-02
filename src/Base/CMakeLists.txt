@@ -317,6 +317,7 @@ SET(FreeCADBase_HPP_SRCS
     Stream.h
     StringUtils.h
     Swap.h
+    XMLAttributeFilter.h
     ${SWIG_HEADERS}
     SystemHandler.h
     TimeInfo.h

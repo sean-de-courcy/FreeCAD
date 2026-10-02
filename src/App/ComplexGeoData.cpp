@@ -32,6 +32,7 @@
 #include "ComplexGeoData.h"
 #include "ElementMap.h"
 #include "ElementNamingUtils.h"
+#include "NameTable.h"
 
 #include <Base/BoundBox.h>
 #include <Base/Placement.h>
@@ -53,6 +54,26 @@ FC_LOG_LEVEL_INIT("ComplexGeoData", true, true)  // NOLINT
 
 namespace bio = boost::iostreams;
 using namespace Data;
+
+namespace
+{
+/** Restores an element map through \a restore. If the load's remap refused names in it (their
+ * naming format is newer than this build's, ops#6), the map is dropped and the restore counts as
+ * failed, so the owner is recomputed (PropertyComplexGeoData::afterRestore()).
+ */
+template<class Restore>
+ElementMapPtr restoreRemapped(Restore restore, bool& failed)
+{
+    NameRemap* remap = NameRemap::active();
+    std::size_t dropped = remap ? remap->droppedCount() : 0;
+    ElementMapPtr map = restore();
+    if (remap && remap->droppedCount() != dropped) {
+        failed = true;
+        return {};
+    }
+    return map;
+}
+}  // namespace
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
@@ -515,8 +536,13 @@ void ComplexGeoData::Restore(Base::XMLReader& reader)
 
     if (newTag) {
         resetElementMap(std::make_shared<ElementMap>());
-        _elementMap =
-            _elementMap->restore(Hasher, reader.beginCharStream(Base::CharStreamFormat::Raw));
+        _elementMap = restoreRemapped(
+            [&] {
+                return _elementMap->restore(Hasher,
+                                            reader.beginCharStream(Base::CharStreamFormat::Raw));
+            },
+            _restoreFailed
+        );
         
         if (_elementMap) {
             _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
@@ -671,7 +697,12 @@ void ComplexGeoData::RestoreDocFile(Base::Reader& reader)
         }
         else {
             resetElementMap(std::make_shared<ElementMap>());
-            _elementMap = _elementMap->restore(Hasher, reader);
+            _elementMap = restoreRemapped(
+                [&] {
+                    return _elementMap->restore(Hasher, reader);
+                },
+                _restoreFailed
+            );
             if (_elementMap) {
                 _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
                 _elementMap->setInterned(internNames);

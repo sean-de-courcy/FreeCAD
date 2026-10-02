@@ -21,8 +21,16 @@
 
 #include "NameId.h"
 
+namespace Base
+{
+class XMLAttributeFilter;
+class XMLReader;
+}  // namespace Base
+
 namespace Data
 {
+
+class NameRemap;
 
 /** The process-wide table of interned V2 name nodes (bounded names, ops#6).
  *
@@ -119,8 +127,15 @@ public:
         std::size_t malformed = 0;
     };
 
-    /// Reads entries written by writeEntries() into this table, each through insertLoaded().
-    LoadSummary readEntries(std::istream& stream);
+    /** Reads entries written by writeEntries() into this table, each through insertLoaded().
+     * \a entries, if given, gets every well-formed entry as the file has it, refused ones too.
+     */
+    LoadSummary readEntries(std::istream& stream, std::vector<SavedEntry>* entries = nullptr);
+
+    /** Inserts \a content under \a id whatever its real ID, if \a id is free; for tests that
+     * force a collision with a file's entry. Returns false if \a id was taken.
+     */
+    bool insertForTesting(const NameId& id, std::string_view content);
 
     /// The canonical string of the node \a id, or nothing if it isn't in the table.
     std::optional<std::string> lookup(const NameId& id) const;
@@ -187,14 +202,20 @@ private:
         std::size_t operator()(const NameId& id) const;
     };
 
-    /// The entry of  id, or null. Entries never change or go, so the pointer stays valid
+    /// The entry of \a id, or null. Entries never change or go, so the pointer stays valid
     /// for the table's life without the lock.
     const Entry* get(const NameId& id) const;
     int depthOfContent(std::string_view content) const;
     std::string internSection(std::string_view section);
-    std::string plainSection(std::string_view section) const;
+    /// toPlain(), with the references \a remap rewrites resolved as its file has them
+    std::string toPlain(std::string_view name, const NameRemap* remap) const;
+    std::string plainSection(std::string_view section, const NameRemap* remap) const;
+    /// The content \a id expands to: the file's for \a remap's inline IDs, nothing for its
+    /// unknown ones, else this table's
+    const std::string* contentOf(const NameId& id, const NameRemap* remap) const;
 
     friend class ExpansionCursor;
+    friend class NameRemap;
 
     mutable std::shared_mutex _mutex;
     std::unordered_map<NameId, std::unique_ptr<Entry>, IdHash> _entries;
@@ -268,6 +289,122 @@ private:
     std::streambuf* _target;
     NameRefCollector& _collector;
     std::string _tail;  // the last bytes written, shorter than a reference
+};
+
+/** Rewrites the interned names a document load reads (ops#6, Task 1 PR 8).
+ *
+ * A file's references (`~<ID>`) mean what its own `NameTable` element says. In this process an
+ * ID can mean something else, or nothing yet; the remap makes the names that the load reads
+ * mean what the file meant, or nothing:
+ * - **Inline IDs**: an entry the process table refused (its ID holds other content here: a
+ *   collision, or the ID isn't the content's), and every entry of the file whose content
+ *   refers to one. A reference to one is replaced by the file's name in full V2 form (inline,
+ *   as for a collision while interning), so it can't resolve to this process's content.
+ * - **Unknown IDs**: one the file's table lacks, or an entry of it that refers to one. A
+ *   reference to one is made unresolvable (`~!<ID>`): it is missing, and stays missing even
+ *   if another document brings an entry with that ID.
+ * - **A newer naming format**: the file's table isn't read, every ID is unknown, and the maps
+ *   holding references are dropped (the shape is recomputed).
+ *
+ * One is active on its thread from its construction to its destruction (Document::restore()
+ * and Document::importObjects() make one). The load reads the file's table into it first,
+ * before the objects, and then:
+ * - every attribute of the document's XML passes through remapText(), if there are inline IDs
+ *   (filterAttributes());
+ * - link subnames, shadows and the solver's `from` pass through remapSubName();
+ * - every element map name passes through remapMapName().
+ * Unknown IDs are made unresolvable only in names, not in other text (expressions, labels,
+ * spreadsheet cells), where a `~` and 13 characters can be the user's own.
+ */
+class AppExport NameRemap
+{
+public:
+    /// What remapMapName() did.
+    enum class MapName
+    {
+        Unchanged,
+        Changed,
+        Dropped,  ///< a newer naming format: the map must be dropped
+    };
+
+    /// Inserted after the marker of an unknown reference: `~!<ID>` is no reference.
+    static constexpr char UnknownMark = '!';
+
+    explicit NameRemap(NameTable& table = NameTable::instance());
+    ~NameRemap();
+    NameRemap(const NameRemap&) = delete;
+    NameRemap& operator=(const NameRemap&) = delete;
+
+    /// The remap active on this thread (the latest one constructed), or null.
+    static NameRemap* active();
+
+    /// Reads the file's entries into the table (NameTable::readEntries()) and works out which
+    /// IDs are inline and which unknown.
+    NameTable::LoadSummary load(std::istream& stream);
+    /// The file's names are in a newer naming format than this build's.
+    void setNewerFormat();
+    bool isNewerFormat() const
+    {
+        return _newerFormat;
+    }
+
+    /// Makes every attribute that \a reader reads from now on pass through remapText(), while
+    /// this remap lives. Does nothing if there are no inline IDs.
+    void filterAttributes(const Base::XMLReader& reader);
+
+    /// The number of inline IDs (collisions and the entries above them).
+    std::size_t inlineCount() const
+    {
+        return _inlineIds.size();
+    }
+    /// True if \a id is unknown to the file (or refers to an ID unknown to it).
+    bool isUnknown(const NameId& id) const;
+    /// True if a reference to \a id is replaced by the file's name in full form.
+    bool isInline(const NameId& id) const;
+
+    /** Any text read from the file: each reference to an inline ID is replaced by the file's
+     * name in full form, escaped as an embedded name unless it is a prefix (followed by `|`).
+     * Returns true if \a text changed.
+     */
+    bool remapText(std::string& text) const;
+    /// A link's subname, shadow or `from`: as remapText(), and every unknown reference made
+    /// unresolvable. Returns true if \a text changed.
+    bool remapSubName(std::string& text);
+    /// A name of an element map: with an inline reference, the file's name in canonical form
+    /// (colliding nodes inline); unknown references unresolvable.
+    MapName remapMapName(std::string& name);
+
+    /// The distinct unknown IDs met in names so far.
+    std::size_t unknownCount() const
+    {
+        return _unknownSeen.size();
+    }
+    /// The map names refused so far (a newer naming format).
+    std::size_t droppedCount() const
+    {
+        return _dropped;
+    }
+
+private:
+    friend class NameTable;
+
+    /// The file's full form of the node \a id (unknown references inside unresolvable).
+    std::string inlineForm(const NameId& id) const;
+    /// Marks every unknown reference in \a text unresolvable; true if any.
+    bool markUnknown(std::string& text) const;
+    /// Whether \a text refers to an inline or an unknown ID.
+    void scan(std::string_view text, bool& hasInline, bool& hasUnknown) const;
+
+    NameTable& _table;
+    NameRemap* _previous;
+    bool _newerFormat = false;
+    /// Every well-formed entry of the file, as it has it
+    std::unordered_map<NameId, std::string, NameTable::IdHash> _file;
+    std::set<NameId> _inlineIds;
+    std::set<NameId> _incomplete;  // entries of the file that refer to an ID it lacks
+    mutable std::set<NameId> _unknownSeen;
+    std::size_t _dropped = 0;
+    std::unique_ptr<Base::XMLAttributeFilter> _filter;
 };
 
 }  // namespace Data

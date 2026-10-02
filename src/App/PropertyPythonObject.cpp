@@ -37,6 +37,7 @@
 
 #include "PropertyPythonObject.h"
 #include "DocumentObject.h"
+#include "NameTable.h"
 
 
 using namespace App;
@@ -432,6 +433,11 @@ void PropertyPythonObject::restoreObject(Base::XMLReader& reader)
 void PropertyPythonObject::Save(Base::Writer& writer) const
 {
     std::string repr = this->toString();
+    // The state is written encoded, so a save's scan of the XML can't see the references to
+    // interned names a proxy may hold (a subname): they are given to the collector here (ops#6)
+    if (auto* collector = Data::NameRefCollector::active()) {
+        collector->add(repr);
+    }
     repr = Base::base64_encode((const unsigned char*)repr.c_str(), repr.size());
     std::string val = /*encodeValue*/ (repr);
     writer.Stream() << writer.ind() << "<Python value=\"" << val << R"(" encoded="yes")";
@@ -473,6 +479,10 @@ void PropertyPythonObject::Restore(Base::XMLReader& reader)
         std::string buffer = reader.getAttribute<const char*>("value");
         if (reader.hasAttribute("encoded") && strcmp(reader.getAttribute<const char*>("encoded"), "yes") == 0) {
             buffer = Base::base64_decode(buffer);
+            // What the load's attribute filter does for plain text, after the decoding (ops#6)
+            if (auto* remap = Data::NameRemap::active()) {
+                remap->remapText(buffer);
+            }
         }
         else {
             buffer = decodeValue(buffer);

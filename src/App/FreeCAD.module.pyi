@@ -351,6 +351,13 @@ def getNameTableEntry(id: str, /) -> tuple[str, int] | None:
     """
     ...
 
+def insertNameTableEntryForTesting(id: str, content: str, /) -> bool:
+    """Put `content` into the name table under `id` (`<ID>` or `~<ID>`), whatever the content's
+    own ID, if `id` is free. Returns False if it was taken. For tests that force a collision
+    with the entries of a file opened afterwards (ops#6).
+    """
+    ...
+
 def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     """Return what the reference solver did with `obj`'s element references (ops#7).
 

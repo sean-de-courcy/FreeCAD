@@ -47,6 +47,7 @@
 #include "ElementNamingUtils.h"
 #include "GeoFeature.h"
 #include "ComplexGeoData.h"
+#include "NameTable.h"
 
 
 FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
@@ -2095,12 +2096,11 @@ bool PropertyLinkSub::referenceChanged() const
     return !_mapped.empty();
 }
 
-std::string
-PropertyLinkBase::importSubName(Base::XMLReader& reader, const char* sub, bool& restoreLabel)
+namespace
 {
-    if (!reader.doNameMapping()) {
-        return sub;
-    }
+/// importSubName() for a reader that maps object names (an import)
+std::string importMappedSubName(Base::XMLReader& reader, const char* sub, bool& restoreLabel)
+{
     std::ostringstream str;
     for (const char* dot = strchr(sub, '.'); dot; sub = dot + 1, dot = strchr(sub, '.')) {
         size_t count = dot - sub;
@@ -2116,6 +2116,22 @@ PropertyLinkBase::importSubName(Base::XMLReader& reader, const char* sub, bool& 
     }
     str << sub;
     return str.str();
+}
+}  // namespace
+
+std::string
+PropertyLinkBase::importSubName(Base::XMLReader& reader, const char* sub, bool& restoreLabel)
+{
+    std::string result = sub;
+    if (reader.doNameMapping()) {
+        result = importMappedSubName(reader, sub, restoreLabel);
+    }
+    // The references to interned names in a subname or shadow mean what the file's name table
+    // says: a reference the table lacks is made unresolvable (ops#6, Data::NameRemap)
+    if (auto* remap = Data::NameRemap::active()) {
+        remap->remapSubName(result);
+    }
+    return result;
 }
 
 const char* PropertyLinkBase::exportSubName(std::string& output,
@@ -2427,6 +2443,9 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         }
         if (reader.hasAttribute(ATTR_FROM)) {
             froms[i] = reader.getAttribute<const char*>(ATTR_FROM);
+            if (auto* remap = Data::NameRemap::active()) {
+                remap->remapSubName(froms[i]);  // as importSubName() does (ops#6)
+            }
         }
         shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
         if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
