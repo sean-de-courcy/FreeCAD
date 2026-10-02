@@ -638,8 +638,10 @@ bool Feature::getElementFingerprint(
     if (!element || shape.isNull()) {
         return false;
     }
-    // Without the shape's own placement (the idiom of getElementName's export path).
-    TopoShape located(shape.getShape().Located(TopLoc_Location()));
+    // Without the shape's own placement. The copy keeps the shape's cache, which doesn't depend
+    // on the location: a copy of the bare TopoDS_Shape would rebuild the whole sub-shape map on
+    // every call (ops#90).
+    TopoShape located = shape.located(TopLoc_Location());
     TopoDS_Shape sub = located.getSubShape(element, true);
     if (sub.IsNull()) {
         return false;
