@@ -446,3 +446,61 @@ class DraftUProngNarrowed(SplitModel):
 
     def edit(self, doc):
         m.setLines(doc.Profile, {4: ((14, 4), (4, 4)), 5: ((4, 4), (4, 10)), 6: ((4, 10), (0, 10))})
+
+
+# Arcs (ops#7, Task 2 PR 7b): the continuation along a circle.
+
+
+class SplitArcNotch(SplitModel):
+    """A disc with two flats (centre (10, 5), radius 5, the chords y = 1 and y = 9) padded 10
+    high; a fillet, radius 0.5, on its right arc's top edge. A notch is then cut into the right
+    arc: the arc ends at -10 degrees (its geometry ID kept), lines go in to radius 3 and out, with
+    a concentric arc of radius 3 as the notch's floor, and a new arc runs from 10 degrees to the
+    old end. The fillet should take both outer pieces of the right arc (the second as the
+    continuation of the first), never the notch's floor (concentric, another radius) nor the
+    left arc (the same circle, beyond the old ends)."""
+
+    REFS = ("fillet_edge",)
+    radius = 0.5
+
+    def block(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.twoFlatDisc(), body)
+        m.pad(body, profile, self.height)
+        return body
+
+    def rightArcTop(self):
+        return pieces(
+            edge(
+                center=(*m.DISC_CENTER, self.height),
+                radius=m.DISC_RADIUS,
+                where=lambda e: e.CenterOfMass.x > m.DISC_CENTER[0],
+            )
+        )
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.rightArcTop().predicate))
+        fillet.Radius = self.radius
+        self.ref("fillet_edge", fillet, "Base", self.rightArcTop, Filleted(self.radius))
+
+    def edit(self, doc):
+        m.notchDiscArc(doc.Profile)
+
+
+class SolverArcNotchThenFill(SplitArcNotch):
+    """SplitArcNotch in two steps. `notch`: the fillet takes both outer pieces. `fill`: the
+    notch's geometries are deleted and the right arc is whole again: the pieces merge back into
+    it."""
+
+    steps = ("notch", "fill")
+
+    def notch(self, doc):
+        self.edit(doc)
+
+    def fill(self, doc):
+        m.fillDiscNotch(doc.Profile)

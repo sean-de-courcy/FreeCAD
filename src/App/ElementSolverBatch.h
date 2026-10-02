@@ -157,7 +157,8 @@ AppExport bool solveElementReferences(DocumentObject* feature,
 /** The reverse update's check (an element-map version change): the element now at a
  * reference's old index is its old element if the fingerprints have the same type and kind, the
  * sizes and radii agree within 1e-9 relative, the directions within 1e-9, and the centres within
- * 1e-7 times \a diagonal (the target's bounding box diagonal).
+ * 1e-7 times \a diagonal (the target's bounding box diagonal), and so do circles' centres when
+ * both have one.
  */
 AppExport bool fingerprintsAgree(const Data::ElementFingerprint& saved,
                                  const Data::ElementFingerprint& now,

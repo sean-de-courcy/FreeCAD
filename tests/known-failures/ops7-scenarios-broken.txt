@@ -30,6 +30,7 @@ cli  PartDesignTests.TestNamingScenarios.SolverSplitThenMergeReopened.test_fille
 reason: a consumer that needs one element keeps one piece of a split element or one of two equal halves; section 8 expects broken with the pieces as candidates (V2)
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalArcSplit.test_right_arc_V2
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2
 cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2
 
@@ -58,3 +59,9 @@ cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edg
 reason: two boxes' tops merge in a refined Part::Fuse: the merged face carries both faces' names under another op code (MKR to FUS), which V2's name match doesn't relate, so both sketches break (V2; V2s resolves both through the IDX source)
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2
 cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2
+
+reason: a dress-up on an arc that a notch in the sketch splits keeps the shortened arc's piece only; the rest comes from a new arc, so the multi-match flags don't find it either; the scenario expects every piece (V2 and V2multi; V2s takes both, the continuation of arcs, ops#7 Task 2 PR 7b)
+cli  PartDesignTests.TestNamingScenarios.SplitArcNotch.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SplitArcNotch.test_fillet_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.SolverArcNotchThenFill.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SolverArcNotchThenFill.test_fillet_edge_V2multi

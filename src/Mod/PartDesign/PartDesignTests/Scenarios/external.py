@@ -193,3 +193,37 @@ class ExternalEdgeRemoved(Scenario):
         self.bodyObject.removeObject(doc.Hole)
         doc.removeObject("Hole")
         self.gone = True
+
+
+class ExternalArcSplit(Scenario):
+    """A disc with two flats (centre (10, 5), radius 5, the chords y = 1 and y = 9) padded 10
+    high; a sketch at z = 10 with the right arc's top edge as external geometry. A notch is cut
+    into the right arc as in SplitArcNotch: the arc keeps its ID on -53..-10 degrees, and a new arc
+    continues it on 10..53. The external edge needs one element, so its reference breaks with the
+    two outer pieces as candidates (ops#7, Task 2 PR 7b)."""
+
+    area = "external geometry"
+    REFS = ("right_arc",)
+    height = 10
+    split = False
+
+    def rightArc(self):
+        arc = edge(
+            center=(*m.DISC_CENTER, self.height),
+            radius=m.DISC_RADIUS,
+            where=lambda e: e.CenterOfMass.x > m.DISC_CENTER[0],
+        )
+        return Broken(pieces(arc)) if self.split else arc
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.twoFlatDisc(), body)
+        pad = m.pad(body, profile, self.height)
+        doc.recompute()
+        sketch = m.sketch(doc, "OnTop", [], body, z=self.height)
+        sketch.addExternal(pad.Name, self.names(pad, self.rightArc())[0])
+        self.ref("right_arc", sketch, "ExternalGeometry", self.rightArc, ExternalCoincides())
+
+    def edit(self, doc):
+        m.notchDiscArc(doc.Profile)
+        self.split = True

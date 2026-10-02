@@ -38,12 +38,22 @@ namespace Data
  * - r: a cylinder's, sphere's or circle's radius; a cone's semi-angle; a torus's or ellipse's
  *   major and minor radii; empty otherwise.
  *
+ * Version 2 (Task 2 PR 7b), written only for a circle edge, which has a location:
+ *
+ *     2|E|Circle|<size>|<cx>,<cy>,<cz>|<dx>,<dy>,<dz>|<r>|<ox>,<oy>,<oz>
+ *
+ * - o: the circle's centre. Without it an arc can't be placed on its circle (the centre of mass
+ *   lies anywhere on a circle around it), which the solver's continuation needs.
+ *
  * Numbers have 12 significant digits, in the classic locale, so the text is the same on every
  * platform and in every locale. A reader takes a version it doesn't know as no fingerprint.
  */
 struct AppExport ElementFingerprint
 {
     static constexpr int Version = 1;
+    /// The text form of a fingerprint with a location (Task 2 PR 7b): an eighth field. Only
+    /// circle edges have one, so every other fingerprint's text is version 1, as before.
+    static constexpr int VersionWithLocation = 2;
 
     /// `F`, `E` or `V`; 0 for no fingerprint.
     char type = 0;
@@ -52,6 +62,8 @@ struct AppExport ElementFingerprint
     std::optional<Base::Vector3d> center;
     std::optional<Base::Vector3d> direction;
     std::vector<double> radii;
+    /// The centre of a circle edge (in the frame of `center`); empty otherwise.
+    std::optional<Base::Vector3d> location;
 
     bool isValid() const
     {
@@ -73,7 +85,7 @@ struct AppExport ElementFingerprint
     friend bool operator==(const ElementFingerprint& a, const ElementFingerprint& b)
     {
         return a.type == b.type && a.kind == b.kind && a.size == b.size && a.center == b.center
-            && a.direction == b.direction && a.radii == b.radii;
+            && a.direction == b.direction && a.radii == b.radii && a.location == b.location;
     }
     friend bool operator!=(const ElementFingerprint& a, const ElementFingerprint& b)
     {

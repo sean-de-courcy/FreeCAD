@@ -2630,6 +2630,234 @@ TEST(ReferenceReport, replacePerTargetAndClear)
     );
 }
 
+// Arcs (Task 2 PR 7b): the continuation along a circle, located by its centre.
+
+namespace
+{
+
+constexpr double Pi = 3.14159265358979323846;
+
+// An arc of the circle of radius r around \a centre (axis +Z) from \a from to \a to degrees
+// (counter-clockwise), as a version-2 fingerprint.
+ElementFingerprint arcOf(
+    double r,
+    double from,
+    double to,
+    Base::Vector3d centre = Base::Vector3d(10, 5, 10),
+    Base::Vector3d axis = Base::Vector3d(0, 0, 1)
+)
+{
+    const double a0 = from * Pi / 180;
+    const double a1 = to * Pi / 180;
+    const double half = (a1 - a0) / 2;
+    const double middle = (a0 + a1) / 2;
+    // The centre of mass: on the bisector, r sin(half) / half from the centre.
+    const double distance = r * std::sin(half) / half;
+    auto fp = fingerprint('E',
+                          "Circle",
+                          r * (a1 - a0),
+                          centre + Base::Vector3d(std::cos(middle), std::sin(middle), 0) * distance,
+                          axis,
+                          {r});
+    fp.location = centre;
+    return fp;
+}
+
+// An arc of radius 5, -60..60 degrees, whose reference holds its fingerprint; a notch leaves
+// the hit (Edge1, -60..-10) and a piece (Edge2, 10..60), both on the pad's top face (Face1).
+struct ArcNotch
+{
+    const double diagonal = std::sqrt(20.0 * 20 + 10 * 10 + 10 * 10);
+    const double eps = 1e-7 * diagonal;
+    ElementFingerprint old = arcOf(5, -60, 60);
+    std::map<std::string, ElementFingerprint> fingerprints {
+        {"Edge1", arcOf(5, -60, -10)},
+        {"Edge2", arcOf(5, 10, 60)},
+        {"Edge3", lineX(0, 20, 10)},
+    };
+    std::map<std::string, std::vector<std::string>> faces {
+        {"Edge1", {"Face1", "Face2"}},
+        {"Edge2", {"Face1", "Face3"}},
+        {"Edge3", {"Face1", "Face4"}},
+    };
+
+    SolveInput input(Data::SolvePolicy policy) const
+    {
+        SolveInput input;
+        input.diagonal = diagonal;
+        input.pool["Edge"] = {
+            element("Edge1", {"a1"}),
+            element("Edge2", {"a2"}),
+            element("Edge3", {"a3"}),
+        };
+        auto hit = exact("Edge1", "Edge");
+        hit.exactName = "a1";
+        hit.fingerprint = old;
+        hit.policy = policy;
+        input.entries = {hit};
+        measure(input, fingerprints, nullptr);
+        input.facesOf = [map = faces](const std::string& index) {
+            auto it = map.find(index);
+            return it == map.end() ? std::vector<std::string>() : it->second;
+        };
+        return input;
+    }
+};
+
+}  // namespace
+
+TEST(Continuation, arcOnTheSameCircleIsTaken)
+{
+    ArcNotch notch;
+    GeometryTolerances tolerances;
+    auto within = [&](const ElementFingerprint& now) {
+        return Data::hitWithinOldEdge(notch.old, now, notch.diagonal, tolerances, 1e-7);
+    };
+    EXPECT_TRUE(within(arcOf(5, -60, -10)));
+    EXPECT_FALSE(within(arcOf(5, -60, 60)));
+    EXPECT_FALSE(within(arcOf(5, -70, 0)));
+
+    auto outcome = Data::solveOwner(notch.input(Data::SolvePolicy::Expand))[0];
+
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved);
+    EXPECT_EQ(outcome.tier, 4);
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(outcome.evidence, "continued by Edge2 (arc within the old edge, shares Face1)");
+
+    //   One breaks
+    auto one = Data::solveOwner(notch.input(Data::SolvePolicy::One))[0];
+    EXPECT_EQ(one.status, SolveStatus::Broken);
+    EXPECT_EQ(one.candidates, (std::vector<std::string> {"Edge1", "Edge2"}));
+}
+
+TEST(Continuation, arcMustNotTake)
+{
+    ArcNotch notch;
+    const double eps = notch.eps;
+    const std::string kept = "exact Edge1 0 [] ";
+    struct Case
+    {
+        const char* what;
+        std::function<void(SolveInput&, std::map<std::string, ElementFingerprint>&)> change;
+    };
+    std::vector<Case> cases {
+        {"concentric, another radius",
+         [](auto&, auto& fps) { fps["Edge2"] = arcOf(3, 10, 60); }},
+        {"the same circle beyond the old ends",
+         [](auto&, auto& fps) { fps["Edge2"] = arcOf(5, 120, 240); }},
+        {"the centre moved by 2 eps",
+         [&](auto&, auto& fps) {
+             fps["Edge2"] = arcOf(5, 10, 60, Base::Vector3d(10 + 2 * eps, 5, 10));
+         }},
+        {"the axis tilted by 2 x the angle",
+         [](auto&, auto& fps) {
+             fps["Edge2"].direction = Base::Vector3d(std::sin(2e-6), 0, std::cos(2e-6));
+         }},
+        {"a version-1 saved fingerprint",
+         [](auto& input, auto&) { input.entries[0].fingerprint.location.reset(); }},
+        {"no shared face",
+         [](auto& input, auto&) {
+             input.facesOf = [](const std::string& index) {
+                 return index == "Edge1" ? std::vector<std::string> {"Face1"}
+                                         : std::vector<std::string> {"Face9"};
+             };
+         }},
+    };
+    for (const auto& c : cases) {
+        auto input = notch.input(Data::SolvePolicy::Expand);
+        auto fps = notch.fingerprints;
+        c.change(input, fps);
+        measure(input, fps, nullptr);
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]), kept) << c.what;
+    }
+}
+
+TEST(Continuation, arcRunPastBreaks)
+{
+    ArcNotch notch;
+    auto input = notch.input(Data::SolvePolicy::Expand);
+    auto fps = notch.fingerprints;
+    fps["Edge2"] = arcOf(5, 10, 80);
+    measure(input, fps, nullptr);
+
+    auto outcome = Data::solveOwner(input)[0];
+
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(outcome.evidence, "continued past the old edge by Edge2");
+}
+
+TEST(Continuation, fullCircleSplit)
+{
+    // A whole circle, split: the hit 0..150, the rest 210..360.
+    ArcNotch notch;
+    auto input = notch.input(Data::SolvePolicy::Expand);
+    input.entries[0].fingerprint = arcOf(5, 0, 360);
+    auto fps = notch.fingerprints;
+    fps["Edge1"] = arcOf(5, 0, 150);
+    fps["Edge2"] = arcOf(5, 210, 360);
+    measure(input, fps, nullptr);
+
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.tier, 4) << describe(outcome);
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+
+    //   a third piece overlapping the hit: broken
+    fps["Edge3"] = arcOf(5, 140, 200);
+    measure(input, fps, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.evidence, "pieces overlap");
+
+    //   a piece across the start of the circle, as seen from the hit, is still on it
+    fps = notch.fingerprints;
+    fps["Edge1"] = arcOf(5, 90, 180);
+    fps["Edge2"] = arcOf(5, 200, 420);
+    measure(input, fps, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].tier, 4);
+}
+
+TEST(Continuation, wholeCircleCollapses)
+{
+    // A notch in a whole circle, filled in again: the kept piece is the whole circle once more,
+    // and the missing rest's saved arc lies on it, so the group collapses.
+    ArcNotch notch;
+    const auto x = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    const auto y = generated({sketchEdge(9)}, 7, "Extrude", 'E', 1);
+    SolveInput input;
+    input.diagonal = notch.diagonal;
+    input.pool["Edge"] = {element("Edge1", {x})};
+    measure(input, {{"Edge1", arcOf(5, 0, 360)}}, nullptr);
+    auto rest = missing(y, "Edge");
+    rest.fingerprint = arcOf(5, 210, 360);
+    input.entries = {member(exact("Edge1", "Edge"), x, "a", 0), member(rest, x, "a", 1)};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_TRUE(outcomes[0].collapsed) << describe(outcomes[0]);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Removed);
+
+    //   a rest on another circle didn't merge back
+    input.entries[1].fingerprint = arcOf(3, 210, 360);
+    outcomes = Data::solveOwner(input);
+    EXPECT_FALSE(outcomes[0].collapsed);
+    EXPECT_NE(outcomes[1].status, SolveStatus::Removed);
+}
+
+TEST(Continuation, nearlyFullArcIsNotLocatable)
+{
+    // Its centre of mass is within 1e-6 r of the circle's centre: the bisector isn't reliable.
+    ArcNotch notch;
+    auto input = notch.input(Data::SolvePolicy::Expand);
+    input.entries[0].fingerprint = arcOf(5, -179.9999, 179.9999);
+    auto fps = notch.fingerprints;
+    fps["Edge1"] = arcOf(5, 0, 150);
+    fps["Edge2"] = arcOf(5, 170, 300);
+    measure(input, fps, nullptr);
+
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Edge1 0 [] ");
+}
+
 // A split face (Task 2 PR 7, Q3 (b)): detected and broken, never taken.
 
 namespace

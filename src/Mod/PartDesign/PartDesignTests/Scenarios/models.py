@@ -22,6 +22,8 @@
 
 """Model helpers for the naming dump and the naming scenarios."""
 
+import math
+
 import FreeCAD as App
 import Part
 
@@ -171,3 +173,62 @@ def rotationFromAxes(x, y):
     z = x.cross(y)
     matrix = App.Matrix(x.x, y.x, z.x, 0, x.y, y.y, z.y, 0, x.z, y.z, z.z, 0, 0, 0, 0, 1)
     return App.Rotation(matrix)
+
+
+# ---------------------------------------------------------------------------------------------
+# A disc with two flats, and a notch in its right arc (the continuation of arcs, ops#7, Task 2
+# PR 7b)
+# ---------------------------------------------------------------------------------------------
+
+DISC_CENTER, DISC_RADIUS = (10, 5), 5
+# Half the angle of the disc's right arc: its ends are on the chords y = 1 and y = 9.
+DISC_HALF_ANGLE = math.asin(4 / 5)
+
+
+def discCircle(radius=DISC_RADIUS):
+    return Part.Circle(V(*DISC_CENTER, 0), V(0, 0, 1), radius)
+
+
+def onDisc(radius, degrees):
+    """The point at `radius` from the disc's centre, `degrees` from +X."""
+    a = math.radians(degrees)
+    return V(DISC_CENTER[0] + radius * math.cos(a), DISC_CENTER[1] + radius * math.sin(a), 0)
+
+
+def twoFlatDisc():
+    """A circle, centre (10, 5), radius 5, cut by the chords y = 1 and y = 9: geometry 0 is the
+    right arc (about -53..53 degrees), 1 the top flat, 2 the left arc, 3 the bottom flat."""
+    a = DISC_HALF_ANGLE
+    return [
+        Part.ArcOfCircle(discCircle(), -a, a),
+        Part.LineSegment(V(13, 9, 0), V(7, 9, 0)),
+        Part.ArcOfCircle(discCircle(), math.pi - a, math.pi + a),
+        Part.LineSegment(V(7, 1, 0), V(13, 1, 0)),
+    ]
+
+
+def notchDiscArc(sketch):
+    """Cuts a notch into the right arc of `twoFlatDisc()`: the arc ends at -10 degrees (its
+    geometry ID kept), lines go in to radius 3 and out again, with a concentric arc of radius 3
+    between them (the notch's floor), and a new arc from 10 degrees to the arc's old end."""
+    geometry = sketch.Geometry
+    geometry[0].setParameterRange(-DISC_HALF_ANGLE, math.radians(-10))
+    sketch.Geometry = geometry
+    sketch.addGeometry(
+        [
+            Part.LineSegment(onDisc(DISC_RADIUS, -10), onDisc(3, -10)),
+            Part.ArcOfCircle(discCircle(3), math.radians(-10), math.radians(10)),
+            Part.LineSegment(onDisc(3, 10), onDisc(DISC_RADIUS, 10)),
+            Part.ArcOfCircle(discCircle(), math.radians(10), DISC_HALF_ANGLE),
+        ],
+        False,
+    )
+
+
+def fillDiscNotch(sketch):
+    """Undoes `notchDiscArc()`: its four geometries deleted, the right arc whole again."""
+    for geoId in reversed(range(4, sketch.GeometryCount)):
+        sketch.delGeometry(geoId)
+    geometry = sketch.Geometry
+    geometry[0].setParameterRange(-DISC_HALF_ANGLE, DISC_HALF_ANGLE)
+    sketch.Geometry = geometry

@@ -544,6 +544,7 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
                 fp.kind = "Circle";
                 fp.direction = unsignedDirection(curve.Circle().Axis().Direction());
                 fp.radii = {curve.Circle().Radius()};
+                fp.location = toVector(curve.Circle().Location().XYZ());
                 break;
             case GeomAbs_Ellipse:
                 fp.kind = "Ellipse";
