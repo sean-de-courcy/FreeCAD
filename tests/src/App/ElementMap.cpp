@@ -4,6 +4,7 @@
 
 #include <App/Application.h>
 #include <App/ElementMap.h>
+#include <App/NameTable.h>
 #include <src/App/InitApplication.h>
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -1219,6 +1220,178 @@ TEST_F(ElementMapTest, getElementHistoryV2)
     EXPECT_EQ(result.tag, 5);
     EXPECT_EQ(result.original, "Edge1");
     EXPECT_EQ(result.history, std::vector<std::string> {"Edge1;:H5,E"});
+}
+
+// Interned maps (ops#6, Task 1 PR 4). Nothing in FreeCAD sets the flag yet.
+namespace
+{
+
+std::string encodedSection(
+    const std::vector<std::string>& linked,
+    long tag,
+    const char* op,
+    char type,
+    const std::vector<std::string>& flags,
+    const std::vector<std::string>& connected
+)
+{
+    return Data::MappedName::makeEncodedSection(
+        std::vector<std::string> {},
+        linked,
+        std::to_string(tag),
+        op,
+        "0",
+        type,
+        "0",
+        flags,
+        connected
+    );
+}
+
+// The worked example of notes/naming-v2.md: a box edge, a fillet face on it, an edge bounded by
+// that face (UPP), and a split piece of the face; the piece's last section is tagged pieceTag.
+struct InternExample
+{
+    explicit InternExample(long pieceTag = 23)
+        : piece(face + "|" + encodedSection({}, pieceTag, "CUT", 'F', {"MOD"}, {upper}))
+    {}
+
+    std::string edge = Data::MappedName::makeUnmappedName({"Edge1"}, 5, "FLT", 'E').toString();
+    std::string face = encodedSection({edge}, 7, "FLT", 'F', {"GEN"}, {});
+    std::string upper = encodedSection({face}, 9, "CUT", 'E', {"UPP"}, {});
+    std::string piece;
+};
+
+std::string lastDuplicateCount(const Data::MappedName& name)
+{
+    const auto& decoded = name.getDecodedMappedName();
+    return decoded.empty() ? std::string() : decoded.back().duplicateCount;
+}
+
+}  // namespace
+
+TEST_F(ElementMapTest, internedAndPlainMapsGiveTheSameNamesV2)
+{
+    // Arrange
+    //   the same names, in full and interned form, into a plain and an interned map; Face2-4 and
+    //   Edge1-3 get one name each in either form, so the duplicate counts must agree too
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    const std::vector<std::pair<Data::IndexedName, std::string>> inputs {
+        {Data::IndexedName("Face", 1), example.face},
+        {Data::IndexedName("Face", 2), example.piece},
+        {Data::IndexedName("Face", 3), table.toInterned(example.piece)},
+        {Data::IndexedName("Face", 4), example.piece},
+        {Data::IndexedName("Edge", 1), table.toInterned(example.upper)},
+        {Data::IndexedName("Edge", 2), example.upper},
+        {Data::IndexedName("Edge", 3), example.upper},
+        {Data::IndexedName("Edge", 4), example.edge},
+    };
+    auto plain = std::make_shared<Data::ElementMap>();
+    plain->hasher = _hasher;
+    auto interned = std::make_shared<Data::ElementMap>();
+    interned->hasher = _hasher;
+    interned->setInterned(true);
+
+    // Act
+    std::vector<Data::MappedName> plainNames;
+    std::vector<Data::MappedName> internedNames;
+    for (const auto& [element, name] : inputs) {
+        plainNames.push_back(plain->setElementName(element, Data::MappedName(name), 23));
+        internedNames.push_back(interned->setElementName(element, Data::MappedName(name), 23));
+    }
+
+    // Assert
+    EXPECT_FALSE(plain->isInterned());
+    EXPECT_TRUE(interned->isInterned());
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+        SCOPED_TRACE(i);
+        const auto& element = inputs[i].first;
+        std::string plainName = plainNames[i].toString();
+        std::string internedName = internedNames[i].toString();
+        EXPECT_EQ(plainName.find(Data::NameTable::Marker), std::string::npos) << plainName;
+        EXPECT_EQ(internedName.find('^'), std::string::npos) << internedName;
+        EXPECT_EQ(table.toPlain(internedName), plainName);
+        EXPECT_EQ(plain->find(element), plainNames[i]);
+        EXPECT_EQ(interned->find(element), internedNames[i]);
+        EXPECT_EQ(interned->find(internedNames[i]), element);
+        EXPECT_EQ(lastDuplicateCount(internedNames[i]), lastDuplicateCount(plainNames[i]));
+    }
+    //   the duplicates are counted across forms
+    EXPECT_EQ(lastDuplicateCount(plainNames[1]), "0");
+    EXPECT_EQ(lastDuplicateCount(plainNames[2]), "1");
+    EXPECT_EQ(lastDuplicateCount(plainNames[3]), "2");
+    EXPECT_EQ(lastDuplicateCount(plainNames[6]), "2");
+    //   a name without embedded names is the same in both maps
+    EXPECT_EQ(internedNames[7].toString(), example.edge);
+    EXPECT_EQ(interned->getAll().size(), plain->getAll().size());
+}
+
+TEST_F(ElementMapTest, retagInternedMapKeepsThePrefixV2)
+{
+    // Arrange
+    //   a split piece whose last section isn't tagged yet, and a face that is
+    auto& table = Data::NameTable::instance();
+    InternExample untagged(0);
+    InternExample tagged(31);
+    Data::IndexedName face1("Face", 1);
+    Data::IndexedName face2("Face", 2);
+    auto makeMap = [&](bool internNames) {
+        auto map = std::make_shared<Data::ElementMap>();
+        map->hasher = _hasher;
+        map->setInterned(internNames);
+        map->setElementName(face1, Data::MappedName(untagged.piece), 0);
+        map->setElementName(face2, Data::MappedName(untagged.face), 0);
+        return map;
+    };
+    auto plain = makeMap(false);
+    auto interned = makeMap(true);
+    std::string before = interned->find(face1).toString();
+
+    // Act
+    plain->retagElementMap(31);
+    interned->retagElementMap(31);
+
+    // Assert
+    std::string after = interned->find(face1).toString();
+    std::size_t bar = Data::NameTable::lastTopLevelBar(after);
+    ASSERT_NE(bar, std::string::npos);
+    //   the prefix `~<ID>` and the Connected Name's `~<ID>` are kept, only the tag changes
+    EXPECT_EQ(after.substr(0, bar), before.substr(0, bar));
+    EXPECT_TRUE(Data::NameTable::parseRef(after.substr(0, bar)));
+    EXPECT_EQ(after.substr(after.rfind(';')), before.substr(before.rfind(';')));
+    EXPECT_NE(after.find(";31;CUT;"), std::string::npos) << after;
+    EXPECT_EQ(after, table.toInterned(tagged.piece));
+    //   the same as retagging the plain map
+    EXPECT_EQ(plain->find(face1).toString(), tagged.piece);
+    EXPECT_EQ(table.toPlain(after), tagged.piece);
+    EXPECT_EQ(interned->find(Data::MappedName(after)), face1);
+    EXPECT_EQ(interned->find(Data::MappedName(before)), Data::IndexedName());
+    //   a tagged last section isn't retagged
+    EXPECT_EQ(plain->find(face2).toString(), untagged.face);
+    EXPECT_EQ(table.toPlain(interned->find(face2).toString()), untagged.face);
+}
+
+TEST_F(ElementMapTest, internedFlagIsCopiedAndIgnoredInV1)
+{
+    // Arrange
+    InternExample example;
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setInterned(true);
+    auto v1 = std::make_shared<Data::ElementMap>();
+    v1->setHistoryAlgorithm(_v1);
+    v1->hasher = _hasher;
+    v1->setInterned(true);
+
+    // Act
+    auto copied = map->copy();
+    auto stored = v1->setElementName(Data::IndexedName("Face", 1), Data::MappedName(example.face), 1);
+
+    // Assert
+    EXPECT_TRUE(copied->isInterned());
+    EXPECT_FALSE(std::make_shared<Data::ElementMap>()->isInterned());
+    EXPECT_EQ(stored.toString(), example.face);  // V1 names are never interned
 }
 
 // NOLINTEND(readability-magic-numbers)

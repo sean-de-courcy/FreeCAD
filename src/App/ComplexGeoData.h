@@ -645,6 +645,19 @@ public:
         }
     };
 
+    /// Whether this shape's V2 names are interned (Data::NameTable, ops#6). Off by default.
+    bool getInternNames() const {
+        return internNames;
+    }
+
+    /// Set whether names are interned; the element map, if there is one, follows it
+    void setInternNames(bool value) {
+        internNames = value;
+        if (_elementMap) {
+            _elementMap->setInterned(value);
+        }
+    }
+
 protected:
     /// Transform the point from local to outside.
     inline Base::Vector3d transformPointToOutside(const Base::Vector3f& vec) const
@@ -757,6 +770,7 @@ protected:
 private:
     ElementMapPtr _elementMap;
     App::HistoryAlgorithm selectedHistoryAlgorithm = App::HistoryAlgorithm::V2;
+    bool internNames = false;
 
 protected:
     /// The persistence file name.

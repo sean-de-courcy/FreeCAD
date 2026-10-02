@@ -11,6 +11,7 @@
 #include "ElementMap.h"
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
+#include "NameTable.h"
 
 #include <charconv>
 #include <cstdlib>
@@ -32,6 +33,58 @@ FC_LOG_LEVEL_INIT("ElementMap", true, 2);  // NOLINT
 
 namespace Data
 {
+
+namespace
+{
+
+// A V2 name in a map's form (NameTable.h, ops#6): interned in an interned map, full in a plain
+// one. A full, interned or mixed name of one content gives the same string.
+MappedName toMapForm(const MappedName& name, bool interned)
+{
+    if (interned) {
+        std::string text = name.toString();
+        std::string form = NameTable::instance().toInterned(text);
+        return form == text ? name : MappedName(form);
+    }
+    if (name.find(std::string(1, NameTable::Marker)) < 0) {
+        return name;
+    }
+    return MappedName(NameTable::instance().toPlain(name.toString()));
+}
+
+// The name with its last section's tag set to newTag, if that tag is 0 (not yet tagged); else a
+// null name. A full name is decoded and encoded again as a whole.
+MappedName retagFull(const MappedName& name, long newTag)
+{
+    const DecodedMappedName& cachedName = name.getDecodedMappedName();
+    if (cachedName.empty() || cachedName.back().iterationTag != "0") {
+        return {};
+    }
+    // Retag a copy: the decoding is shared by every name with this string
+    DecodedMappedName decodedName = cachedName;
+    decodedName.back().iterationTag = std::to_string(newTag);
+    return MappedName(MappedName::makeEncodedName(decodedName));
+}
+
+// As retagFull, for an interned name: only the last section is encoded again, so the prefix
+// `~<ID>` and the embedded `~<ID>`s are kept as they are.
+MappedName retagInterned(const MappedName& name, long newTag)
+{
+    std::string text = name.toString();
+    std::size_t bar = NameTable::lastTopLevelBar(text);
+    std::size_t start = bar == std::string::npos ? 0 : bar + 1;
+    const DecodedMappedName& lastSection =
+        MappedName::getDecodedMappedName(text.substr(start));
+    if (lastSection.size() != 1 || lastSection.back().iterationTag != "0") {
+        return {};
+    }
+    DecodedMappedSection section = lastSection.back();
+    section.iterationTag = std::to_string(newTag);
+    std::string retagged = text.substr(0, start) + MappedName::makeEncodedSection(section);
+    return MappedName(NameTable::instance().toInterned(retagged));
+}
+
+}  // namespace
 
 
 // Because the existence of hierarchical element maps, for the same document
@@ -615,6 +668,11 @@ MappedName ElementMap::setElementName(const IndexedName& element,
     const App::HistoryAlgorithm& selectedHistoryVersion = getHistoryAlgorithm();
     Data::MappedName mappedName(name);
 
+    if (selectedHistoryVersion == App::HistoryAlgorithm::V2) {
+        // The map's form, before the duplicate check: the forms of one name give one string
+        mappedName = toMapForm(name, interned);
+    }
+
     if (selectedHistoryVersion == App::HistoryAlgorithm::V1) {
         std::ostringstream ss;
 
@@ -720,7 +778,7 @@ MappedName ElementMap::setElementName(const IndexedName& element,
         }
 
         ZoneNameF("%s, %d", name.toString().c_str(), static_cast<int>(duplicateIndex));
-        return res ? res : name;
+        return res ? res : mappedName;
     }
 
     return { };
@@ -1798,6 +1856,7 @@ ElementMapPtr ElementMap::copy() const
 {
     auto res = std::make_shared<ElementMap>();
     res->historyAlgorithm = historyAlgorithm;
+    res->interned = interned;
     res->hasher = hasher;
     res->mappedNames = mappedNames;
     res->childElementSize = childElementSize;
@@ -1838,17 +1897,14 @@ void ElementMap::retagElementMap(long newTag) {
             // An element's second and later names are in its first name's chain
             for (MappedNameRef* foundNameRef = &head; foundNameRef;
                  foundNameRef = foundNameRef->next.get()) {
-                const DecodedMappedName& cachedName = foundNameRef->name.getDecodedMappedName();
-                if (cachedName.empty() || cachedName.back().iterationTag != "0") {
+                MappedName retagged = interned ? retagInterned(foundNameRef->name, newTag)
+                                               : retagFull(foundNameRef->name, newTag);
+                if (!retagged) {
                     continue;
                 }
 
-                // Retag a copy: the decoding is shared by every name with this string
-                DecodedMappedName decodedName = cachedName;
-                decodedName.back().iterationTag = std::to_string(newTag);
-
                 auto it = mappedNames.find(foundNameRef->name);
-                foundNameRef->name = MappedName::makeEncodedName(decodedName);
+                foundNameRef->name = retagged;
 
                 if (it != mappedNames.end()) {
                     auto extractedNode = mappedNames.extract(it);

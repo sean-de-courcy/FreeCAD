@@ -98,7 +98,8 @@ names it.
 | `feat/solver-gate` | feat | ops#7, ops#87 | - | `feat/solver-splits-arcs` `0ce556ea66` (fork PR 66) | `2af4d842d2` (fork PR 68), 2026-10-01 | never (fork feature) |
 | `fix/62-element-map-version` | fix | ops#62 | - | `integration` `2af4d842d2` | `4782d97247` (fork PR 69), 2026-10-01 | a new base's `Document::onChanged` refreshes the element map version when `HistoryAlgorithm` changes |
 | `feat/naming-table` | feat | ops#6, ops#63 | - | `integration` `4782d97247` | `c3e4da5153` (fork PR 71), 2026-10-02 | never (fork feature) |
-| `feat/naming-trf` | feat | ops#6, ops#55 | - | `integration` `2af4d842d2` | (fork PR 70) | never (fork feature) |
+| `feat/naming-trf` | feat | ops#6, ops#55 | - | `integration` `2af4d842d2` | `f356d6f416` (fork PR 70), 2026-10-02 | never (fork feature) |
+| `feat/naming-map` | feat | ops#6, ops#64 | - | `feat/naming-table` `6c2085c074` (fork PR 71) | (fork PR 72) | a new base's `MappedName::hash` hashes data followed by postfix (ops#64); otherwise never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -50,17 +50,6 @@ std::vector<std::string_view> splitTopLevel(std::string_view text, char delimite
     return parts;
 }
 
-/// The position of the last top-level `|` in \a name, or npos.
-std::size_t lastTopLevelBar(std::string_view name)
-{
-    for (std::size_t i = name.size(); i-- > 0;) {
-        if (name[i] == nameDelimiter && (i == 0 || name[i - 1] != escapeChar)) {
-            return i;
-        }
-    }
-    return std::string_view::npos;
-}
-
 /// One level of unescaping, as the decoder does it: the first `^` of each run goes.
 std::string unescapeOnce(std::string_view text)
 {
@@ -118,6 +107,16 @@ NameTable& NameTable::instance()
 {
     static NameTable table;
     return table;
+}
+
+std::size_t NameTable::lastTopLevelBar(std::string_view name)
+{
+    for (std::size_t i = name.size(); i-- > 0;) {
+        if (name[i] == nameDelimiter && (i == 0 || name[i - 1] != escapeChar)) {
+            return i;
+        }
+    }
+    return std::string_view::npos;
 }
 
 std::optional<NameId> NameTable::parseRef(std::string_view text)

@@ -394,3 +394,28 @@ TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapV2)
     EXPECT_EQ(shape.getElementMapSize(), 26);
     EXPECT_EQ(names.size(), 26);
 }
+
+TEST_F(TopoShapeTest, internNamesFollowCopiesAndTheMap)
+{
+    // ops#6, Task 1 PR 4: the interned flag sits next to the shape's algorithm; nothing sets it
+    // yet. Its map follows the shape that last took it.
+    // Arrange
+    Part::TopoShape shape(1L);
+    auto map = std::make_shared<Data::ElementMap>();
+    shape.resetElementMap(map);
+
+    // Act
+    shape.setInternNames(true);
+    Part::TopoShape copied(shape);
+    Part::TopoShape assigned;
+    assigned = shape;
+
+    // Assert
+    EXPECT_FALSE(Part::TopoShape().getInternNames());
+    EXPECT_TRUE(map->isInterned());
+    EXPECT_TRUE(copied.getInternNames());
+    EXPECT_TRUE(assigned.getInternNames());
+    Part::TopoShape plain;
+    plain.resetElementMap(map);
+    EXPECT_FALSE(map->isInterned());
+}
