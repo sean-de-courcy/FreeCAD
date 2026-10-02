@@ -66,6 +66,8 @@ from PartDesignTests.TestSuppressed import TestSuppressed
 from PartDesignTests.TestTopologicalNamingProblem import TestTopologicalNamingProblem
 from PartDesignTests.TestNamingDump import TestNamingGolden, TestNamingSeeded
 from PartDesignTests.TestNamingDump import TestNamingRepeated, TestNamingTagCollision
+from PartDesignTests.TestNamingDump import TestNamingInterning  # FreeCAD-CH, ops#6
+from PartDesignTests.TestNamingSave import *  # FreeCAD-CH, ops#6
 from PartDesignTests.TestNamingScenarios import *  # one class per scenario (FreeCAD-CH, ops#5)
 from PartDesignTests.TestNamingRList import TestNamingRList  # FreeCAD-CH, ops#5
 from PartDesignTests.TestNamingSolver import TestNamingSolver  # FreeCAD-CH, ops#7

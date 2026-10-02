@@ -7,12 +7,17 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <optional>
+#include <set>
 #include <shared_mutex>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "NameId.h"
 
@@ -94,6 +99,29 @@ public:
     /// Inserts an entry read from a file. The content isn't checked for canonical form.
     LoadResult insertLoaded(const NameId& id, std::string_view content);
 
+    /// An entry as a file holds it: its ID and its canonical string.
+    using SavedEntry = std::pair<NameId, std::string>;
+
+    /** Writes \a entries as text: a line `NameTableStart v1 <count>`, then one line per entry,
+     * `<ID> <content>`, in the order given. A content holds no whitespace (setElementName()
+     * refuses it in a name).
+     */
+    static void writeEntries(std::ostream& stream, const std::vector<SavedEntry>& entries);
+
+    /// What readEntries() did.
+    struct LoadSummary
+    {
+        std::size_t inserted = 0;
+        std::size_t identical = 0;
+        /// The entries refused as Collision or WrongId (insertLoaded()), as the file has them.
+        std::vector<SavedEntry> refused;
+        /// Lines that aren't an entry (no valid ID, or no content).
+        std::size_t malformed = 0;
+    };
+
+    /// Reads entries written by writeEntries() into this table, each through insertLoaded().
+    LoadSummary readEntries(std::istream& stream);
+
     /// The canonical string of the node \a id, or nothing if it isn't in the table.
     std::optional<std::string> lookup(const NameId& id) const;
 
@@ -172,6 +200,74 @@ private:
     std::unordered_map<NameId, std::unique_ptr<Entry>, IdHash> _entries;
     std::atomic<std::size_t> _collisions {0};
     IdHook _hook;
+};
+
+/** Gathers the entries a saved document needs (ops#6, Task 1 PR 7).
+ *
+ * A file that holds interned names must hold the entries they refer to, or another process
+ * can't expand them. A collector takes the references (`~<ID>`) in whatever is added to it, and
+ * entries() closes them over the table: an entry's content can refer to other entries.
+ *
+ * It reads the references from what a save writes, not from each kind of property: while a
+ * collector is active on a thread (from its construction to its destruction),
+ * ElementMap::beforeSave() adds every name of the maps it prepares for saving, and a
+ * NameRefScanBuffer adds everything written through it. So a carrier of names needs no code of
+ * its own here, as long as it writes into the scanned stream or is an element map.
+ */
+class AppExport NameRefCollector
+{
+public:
+    NameRefCollector();
+    ~NameRefCollector();
+    NameRefCollector(const NameRefCollector&) = delete;
+    NameRefCollector& operator=(const NameRefCollector&) = delete;
+
+    /// The collector active on this thread (the latest one constructed), or null.
+    static NameRefCollector* active();
+
+    /// Adds every reference in \a text: a `~` followed by an ID in valid form.
+    void add(std::string_view text);
+
+    /// The distinct references added so far.
+    const std::set<NameId>& refs() const
+    {
+        return _refs;
+    }
+
+    /** The entries of \a table reachable from the references added: those referenced, and
+     * recursively the ones their contents refer to. Sorted by ID. References \a table doesn't
+     * know are left out and counted in \a unknown.
+     */
+    std::vector<NameTable::SavedEntry> entries(const NameTable& table,
+                                               std::size_t* unknown = nullptr) const;
+
+private:
+    static void addRefs(std::string_view text, std::set<NameId>& refs);
+
+    std::set<NameId> _refs;
+    NameRefCollector* _previous;
+};
+
+/** A stream buffer that passes everything on to another one and adds it to a collector,
+ * references split between two writes included. Document::Save() puts one in front of the
+ * stream it writes the document's XML to.
+ */
+class AppExport NameRefScanBuffer: public std::streambuf
+{
+public:
+    NameRefScanBuffer(std::streambuf* target, NameRefCollector& collector);
+
+protected:
+    int_type overflow(int_type c) override;
+    std::streamsize xsputn(const char* s, std::streamsize n) override;
+    int sync() override;
+
+private:
+    void scan(std::string_view data);
+
+    std::streambuf* _target;
+    NameRefCollector& _collector;
+    std::string _tail;  // the last bytes written, shorter than a reference
 };
 
 }  // namespace Data

@@ -61,6 +61,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestMissingElements.py
     PartDesignTests/TestTopologicalNamingProblem.py
     PartDesignTests/TestNamingDump.py
+    PartDesignTests/TestNamingSave.py
     PartDesignTests/TestNamingRList.py
     PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestNamingSolver.py

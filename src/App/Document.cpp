@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <bitset>
+#include <cstring>
 #include <stack>
 #include <deque>
 #include <iostream>
@@ -81,6 +82,7 @@
 #include "License.h"
 #include "Link.h"
 #include "MergeDocuments.h"
+#include "NameTable.h"
 #include "StringHasher.h"
 #include "Transactions.h"
 
@@ -115,6 +117,98 @@ bool transactionStateBlocksRecoveryWrite(const DocumentP& documentPrivate)
 {
     return documentPrivate.bookedTransaction != NullTransaction
         || documentPrivate.activeUndoTransaction != nullptr || documentPrivate.committing;
+}
+
+/// The format of the interned names a file holds and of its `NameTable` element (ops#6). A build
+/// reads files up to this format.
+constexpr int namingFormat = 1;
+
+/** Collects the references to interned names (ops#6) in everything written to a stream while it
+ * lives: its NameRefScanBuffer stands in front of the stream's buffer. release() (or the
+ * destructor, also when a save throws) puts the stream's own buffer back.
+ */
+class NameRefScan
+{
+public:
+    NameRefScan(std::ostream& stream, Data::NameRefCollector& collector)
+        : _stream(stream)
+        , _original(stream.rdbuf())
+        , _buffer(_original, collector)
+    {
+        _stream.rdbuf(&_buffer);
+    }
+    ~NameRefScan()
+    {
+        release();
+    }
+    NameRefScan(const NameRefScan&) = delete;
+    NameRefScan& operator=(const NameRefScan&) = delete;
+
+    void release()
+    {
+        if (_original) {
+            auto state = _stream.rdstate();  // rdbuf() clears it
+            _stream.rdbuf(_original);
+            _stream.setstate(state);
+            _original = nullptr;
+        }
+    }
+
+private:
+    std::ostream& _stream;
+    std::streambuf* _original;
+    Data::NameRefScanBuffer _buffer;
+};
+
+/// Writes the `NameTable` element with \a entries, if there are any (ops#6).
+void saveNameTable(Base::Writer& writer, const std::vector<Data::NameTable::SavedEntry>& entries)
+{
+    if (entries.empty()) {
+        return;
+    }
+    writer.incInd();
+    writer.Stream() << writer.ind() << "<NameTable NamingFormat=\"" << namingFormat
+                    << "\" count=\"" << entries.size() << "\">\n";
+    Data::NameTable::writeEntries(writer.beginCharStream() << '\n', entries);
+    writer.endCharStream() << '\n';
+    writer.Stream() << writer.ind() << "</NameTable>\n";
+    writer.decInd();
+}
+
+/// Reads the `NameTable` element the reader is at into the process's table (ops#6).
+void restoreNameTable(Base::XMLReader& reader)
+{
+    int format = reader.getAttribute<int>("NamingFormat", 0);
+    if (format > namingFormat) {
+        FC_WARN("The file's interned names are in naming format "
+                << format << ", newer than this build's " << namingFormat
+                << ": they are left unresolved");
+        reader.readEndElement("NameTable");
+        return;
+    }
+    auto summary = Data::NameTable::instance().readEntries(reader.beginCharStream());
+    reader.readEndElement("NameTable");
+    if (!summary.refused.empty()) {
+        FC_WARN(summary.refused.size() << " name table entries of the file were refused");
+    }
+    FC_LOG("Name table: " << summary.inserted << " entries loaded, " << summary.identical
+                          << " already known");
+}
+
+/** Reads the rest of a `Document` element after its objects: the `NameTable` element, if one
+ * follows (ops#6), and the element's end.
+ */
+void restoreNameTableAndEnd(Base::XMLReader& reader)
+{
+    if (!reader.readNextElement()) {
+        // The end of `Document`, which ends the XML: the reader reports the end of the
+        // document there, and readEndElement() would throw
+        return;
+    }
+    if (std::strcmp(reader.localName(), "NameTable") == 0) {
+        restoreNameTable(reader);
+    }
+    reader.readEndElement("Document");
 }
 
 }  // namespace
@@ -1187,6 +1281,18 @@ void Document::Save(Base::Writer& writer) const
     d->hashers.clear();
     addStringHasher(d->Hasher);
 
+    // Interned names (ops#6): the file must hold the table entries its names refer to. They are
+    // collected from what this save writes: the element maps it saves (ElementMap::beforeSave)
+    // and everything written into the document's XML (links, shadows, expressions, sketch
+    // references, ...). Their entries go into the NameTable element at the end, which a reader
+    // reaches before any map file. While the process table is empty, no name refers to it.
+    std::optional<Data::NameRefCollector> collector;
+    std::optional<NameRefScan> scan;
+    if (Data::NameTable::instance().size() != 0) {
+        collector.emplace();
+        scan.emplace(writer.Stream(), *collector);
+    }
+
     writer.Stream() << R"(<Document SchemaVersion="4" ProgramVersion=")"
                     << Application::Config()["BuildVersionMajor"] << "."
                     << Application::Config()["BuildVersionMinor"] << "R"
@@ -1216,6 +1322,15 @@ void Document::Save(Base::Writer& writer) const
 
     // writing the features types
     writeObjects(d->objectArray, writer);
+
+    if (collector) {
+        scan->release();
+        std::size_t unknown = 0;
+        saveNameTable(writer, collector->entries(Data::NameTable::instance(), &unknown));
+        if (unknown != 0) {
+            FC_LOG(getName() << ": " << unknown << " references to no known name table entry");
+        }
+    }
     writer.Stream() << "</Document>" << '\n';
 }
 
@@ -1309,7 +1424,8 @@ void Document::Restore(Base::XMLReader& reader)
         Tip.setValue(getObject(TipName.getValue()));
     }
 
-    reader.readEndElement("Document");
+    // The entries of the file's interned names (ops#6), before readFiles() reads the maps
+    restoreNameTableAndEnd(reader);
 }
 
 void DocumentP::checkStringHasher(const Base::XMLReader& reader)
@@ -1892,7 +2008,8 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
         }
     }
 
-    reader.readEndElement("Document");
+    // The entries of interned names in a merged file (ops#6), before readFiles() reads its maps
+    restoreNameTableAndEnd(reader);
 
     signalImportObjects(objs, reader);
     DocumentP::checkStringHasher(reader);
