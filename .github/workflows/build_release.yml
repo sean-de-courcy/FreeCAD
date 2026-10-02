@@ -46,6 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.build_tag }}
         run: |
+          set -euo pipefail
           if [ -n "${INPUT_TAG}" ]; then
             if ! [[ "${INPUT_TAG}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
               echo "Invalid build_tag '${INPUT_TAG}'" >&2
@@ -72,13 +73,23 @@ jobs:
               export BUILD_TAG=${SAFE_BRANCH}-$(date "+%Y.%m.%d")
             fi
           fi
-          # Always a draft: CI never publishes. gh also finds drafts by tag name, so a
-          # re-run for the same tag reuses the draft (the uploads use --clobber).
-          gh release create ${BUILD_TAG} --target "${{ github.sha }}" \
-                                         --title "FreeCAD-CH build ${BUILD_TAG}" \
-                                         -F .github/workflows/build-notes.md \
-                                         --draft || \
-          gh release view ${BUILD_TAG} > /dev/null  # fail if it doesn't exist
+          # Always a draft: CI never publishes. A re-run for the same tag reuses its draft (the
+          # uploads use --clobber and find drafts by tag name). gh release create doesn't: a
+          # draft has no git tag yet, so it makes a second draft. So look the tag up first.
+          RELEASES=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" \
+                       --jq ".[] | select(.tag_name == \"${BUILD_TAG}\") | if .draft then \"draft\" else \"published\" end")
+          if [ -z "${RELEASES}" ]; then
+            gh release create "${BUILD_TAG}" --target "${{ github.sha }}" \
+                                             --title "FreeCAD-CH build ${BUILD_TAG}" \
+                                             -F .github/workflows/build-notes.md \
+                                             --draft
+          elif [ "${RELEASES}" = "draft" ]; then
+            echo "Reusing the draft release ${BUILD_TAG}"
+          else
+            echo "Releases with tag ${BUILD_TAG}: $(echo ${RELEASES})." >&2
+            echo "Expected none or one draft (a published release is never reused): delete the extra drafts, or run with another build_tag." >&2
+            exit 1
+          fi
           echo "BUILD_TAG=${BUILD_TAG}" >> "$GITHUB_ENV"
           echo "build_tag=${BUILD_TAG}" >> "$GITHUB_OUTPUT"
 
