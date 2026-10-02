@@ -96,7 +96,9 @@ class TestNamingSolver(unittest.TestCase):
 
         # Assert
         self.assertFalse(point.isValid())
-        self.assertIn("Broken reference AttachmentSupport[0]: ?Face", point.getStatusString())
+        self.assertRegex(
+            point.getStatusString(), r"Missing face reference: Face\d+ \(AttachmentSupport\[0\]"
+        )
         report = App.getReferenceReport(point)
         self.assertEqual(len(report), 1)
         entry = report[0]
@@ -184,7 +186,7 @@ class TestNamingSolver(unittest.TestCase):
 
         # Assert
         self.assertFalse(binder.isValid())
-        self.assertIn("Broken reference Support[0]", binder.getStatusString())
+        self.assertIn("(Support[0], ", binder.getStatusString())
 
     def stale(self, doc, feature):
         """Recomputes `feature` as after an element-map version change (as Task 1's files will
@@ -281,7 +283,8 @@ class TestNamingSolver(unittest.TestCase):
         models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
         doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
         doc.recompute()
-        self.assertNotIn("Broken reference", fillet.getStatusString())
+        # the solver's check names candidates; a solver-off owner's error doesn't
+        self.assertNotIn("candidates", fillet.getStatusString())
         self.assertEqual([e for e in App.getReferenceReport(fillet) if e["status"] != "broken"], [])
 
     # Tiers 2 and 3 (Task 2 PR 4): the saved fingerprint is the only geometry evidence.

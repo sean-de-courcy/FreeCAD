@@ -3,6 +3,7 @@
 #include "ReferenceReport.h"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <sstream>
 
@@ -228,19 +229,29 @@ bool ReferenceReport::describeBroken(const DocumentObject* obj, std::string& why
         if (!Data::hasMissingElement(slot.sub.c_str())) {
             continue;
         }
-        ss << (count++ ? "; " : "Broken reference ") << slot.property << '[' << slot.index
-           << "]: " << slot.sub;
+        // In the consumers' words ("Missing face reference: Face3"), naming the element, then
+        // where the reference is and what the user may repair it to.
+        std::string element = Data::findElementName(slot.sub.c_str());
+        if (!element.empty() && element.front() == '?') {
+            element.erase(0, 1);
+        }
+        std::string type = element.substr(0, element.find_first_of("0123456789"));
+        std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        ss << (count++ ? "; " : "") << "Missing " << (type.empty() ? "element" : type)
+           << " reference: " << element << " (" << slot.property << '[' << slot.index << "], ";
         auto entry = find(slot.prop, slot.localIndex);
         if (entry && !entry->candidates.empty()) {
-            ss << " (candidates: ";
+            ss << "candidates: ";
             for (std::size_t i = 0; i < entry->candidates.size(); ++i) {
                 ss << (i ? ", " : "") << entry->candidates[i].first;
             }
-            ss << ')';
         }
         else {
-            ss << " (no candidates)";
+            ss << "no candidates";
         }
+        ss << ')';
     }
     if (!count) {
         return false;
