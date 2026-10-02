@@ -922,6 +922,12 @@ void Document::onChanged(const Property* prop)
         elementMapVersion.clear();
         recomputeSubObjects = true;
     }
+    else if (prop == &InternNames) {
+        // The element map version names the switch too (getCorrectElementMapVersion), and every
+        // shape is named again in the new form.
+        elementMapVersion.clear();
+        recomputeSubObjects = true;
+    }
     else if (prop == &ReferenceSolver) {
         // Off, the switch isn't saved (PropertyBoolSavedWhenTrue), so files of documents that
         // never used it don't change.
@@ -1084,6 +1090,17 @@ Document::Document(const char* documentName)
     if (const char* solver = std::getenv("FREECAD_REFERENCE_SOLVER");
         solver && std::string(solver) == "1") {
         ReferenceSolver.setValue(true);
+    }
+    ADD_PROPERTY_TYPE(InternNames,
+                      (false),
+                      0,
+                      PropertyType(Prop_Hidden),
+                      "Whether element names are interned (V2 only).");
+    // A local test aid (ops#6), never set in CI: FREECAD_INTERN_NAMES=1 interns the names of every
+    // document, to run whole test suites with it.
+    if (const char* intern = std::getenv("FREECAD_INTERN_NAMES");
+        intern && std::string(intern) == "1") {
+        InternNames.setValue(true);
     }
 
     // this creates and sets 'TransientDir' in onChanged()
@@ -2197,6 +2214,11 @@ const std::string& Document::getCorrectElementMapVersion() {
         unsigned occ_ver {0x070200};
         ss << Data::ELEMENT_NAME_ENCODING_VERSION << '.' << std::hex << occ_ver << '.'
            << App::getHistoryAlgorithm(selectedHistoryAlgorithm) << "." << Data::ELEMENT_MAP_VERSION;
+        // Interned maps hold names in another form: a build or a document that expects the other
+        // form sees a different version and asks for a recompute (ops#6).
+        if (isInternNamesOn()) {
+            ss << ".N1";
+        }
         
         elementMapVersion = ss.str();
     }

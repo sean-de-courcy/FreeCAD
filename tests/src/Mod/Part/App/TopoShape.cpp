@@ -3,10 +3,15 @@
 #include <gtest/gtest.h>
 #include "PartTestHelpers.h"
 #include <Mod/Part/App/TopoShape.h>
+#include <Mod/Part/App/NameSetOrder.h>
 #include "src/App/InitApplication.h"
 
 #include <App/ElementMap.h>
+#include <App/NameTable.h>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <algorithm>
+#include <random>
+#include <type_traits>
 #include <cstring>
 #include <new>
 #include <set>
@@ -397,8 +402,8 @@ TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapV2)
 
 TEST_F(TopoShapeTest, internNamesFollowCopiesAndTheMap)
 {
-    // ops#6, Task 1 PR 4: the interned flag sits next to the shape's algorithm; nothing sets it
-    // yet. Its map follows the shape that last took it.
+    // ops#6, Task 1 PR 4: the interned flag sits next to the shape's algorithm. PR 5: taking an
+    // interned map interns the shape, and never clears the map's flag.
     // Arrange
     Part::TopoShape shape(1L);
     auto map = std::make_shared<Data::ElementMap>();
@@ -417,5 +422,106 @@ TEST_F(TopoShapeTest, internNamesFollowCopiesAndTheMap)
     EXPECT_TRUE(assigned.getInternNames());
     Part::TopoShape plain;
     plain.resetElementMap(map);
+    EXPECT_TRUE(map->isInterned());
+    EXPECT_TRUE(plain.getInternNames());
+    // Only setInternNames() turns a shape and its map plain
+    plain.setInternNames(false);
     EXPECT_FALSE(map->isInterned());
+    EXPECT_FALSE(plain.getInternNames());
+}
+
+namespace
+{
+/// Plain V2 names of depth 1 to 3, some with split pieces (seeded)
+std::vector<std::string> generatedPlainNames(std::mt19937& random)
+{
+    std::vector<std::string> pool {"g1;SKT", "g2;SKT", "g10;SKT", "Edge3", "Face1"};
+    const std::vector<const char*> ops {"FUS", "CUT", "FLT", "XTR"};
+    for (int i = 0; i < 300; ++i) {
+        auto pick = [&]() {
+            return Data::MappedName(pool[random() % pool.size()]);
+        };
+        std::vector<Data::MappedName> linked;
+        std::vector<Data::MappedName> connected;
+        for (unsigned k = random() % 3 + 1; k > 0; --k) {
+            linked.push_back(pick());
+        }
+        if (random() % 3 == 0) {
+            connected.push_back(pick());
+        }
+        std::string name = Data::MappedName::makeEncodedSection(
+            {},
+            linked,
+            static_cast<int>(random() % 7) - 2,
+            ops[random() % ops.size()],
+            static_cast<int>(random() % 3),
+            "VEF" [random() % 3],
+            0,
+            { random() % 2 ? "GEN" : "MOD" },
+            connected
+        );
+        if (random() % 4 == 0) {
+            name = pool[random() % pool.size()] + "|" + name;  // a split piece
+        }
+        if (name.size() < 2000) {  // names that embed long names grow fast
+            pool.push_back(name);
+        }
+    }
+    return pool;
+}
+}  // namespace
+
+TEST_F(TopoShapeTest, sortNameSetOrdersInternedNamesAsTheirExpansions)
+{
+    // ops#6, Task 1 PR 5: a list field of interned names is in the order of the plain names, so
+    // the name holding it expands to the plain one. Mixed forms too; equal expansions are one.
+    // Arrange
+    std::mt19937 random(20261002);
+    const auto plainNames = generatedPlainNames(random);
+    auto& table = Data::NameTable::instance();
+    std::vector<std::string> internedNames;
+    for (const auto& name : plainNames) {
+        internedNames.push_back(table.toInterned(name));
+    }
+    for (int round = 0; round < 500; ++round) {
+        std::vector<Data::MappedName> plain;
+        std::vector<Data::MappedName> interned;
+        std::vector<Data::MappedName> mixed;
+        std::vector<std::string> internedText;
+        for (unsigned k = random() % 6 + 2; k > 0; --k) {
+            auto pick = random() % plainNames.size();
+            plain.emplace_back(plainNames[pick]);
+            interned.emplace_back(internedNames[pick]);
+            internedText.push_back(internedNames[pick]);
+            mixed.emplace_back(random() % 2 ? plainNames[pick] : internedNames[pick]);
+        }
+
+        // Act
+        Part::sortNameSet(plain);
+        Part::sortNameSet(interned);
+        Part::sortNameSet(mixed);
+        Part::sortNameSet(internedText);
+
+        // Assert
+        auto expanded = [&table](const auto& names) {
+            std::vector<std::string> result;
+            for (const auto& name : names) {
+                if constexpr (std::is_same_v<std::decay_t<decltype(name)>, std::string>) {
+                    result.push_back(table.toPlain(name));
+                }
+                else {
+                    result.push_back(table.toPlain(name.toString()));
+                }
+            }
+            return result;
+        };
+        std::vector<std::string> expected;
+        for (const auto& name : plain) {
+            expected.push_back(name.toString());
+        }
+        EXPECT_TRUE(std::is_sorted(expected.begin(), expected.end()));
+        EXPECT_EQ(expanded(interned), expected);
+        EXPECT_EQ(expanded(mixed), expected);
+        EXPECT_EQ(expanded(internedText), expected);
+    }
 }

@@ -110,6 +110,7 @@
 #include "TopoShapeCache.h"
 #include "TopoShapeMapper.h"
 #include "NamingHash.h"
+#include "NameSetOrder.h"
 #include "FaceMaker.h"
 #include "Geometry.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
@@ -120,6 +121,7 @@
 #include <App/Document.h>
 #include <App/ElementMap.h>
 #include <App/ElementNamingUtils.h>
+#include <App/NameTable.h>
 #include <Base/BoundBox.h>
 #include <Base/Exception.h>
 #include <Base/Sequencer.h>
@@ -154,6 +156,56 @@ static void expandCompound(const TopoShape& shape, std::vector<TopoShape>& res)
         expandCompound(s, res);
     }
 }
+
+namespace
+{
+/// A name in the form of a map that interns or not (ops#6), as ElementMap::setElementName stores it
+Data::MappedName toMapForm(const Data::MappedName& name, bool interned)
+{
+    auto& table = Data::NameTable::instance();
+    if (interned) {
+        std::string text = name.toString();
+        std::string form = table.toInterned(text);
+        return form == text ? name : Data::MappedName(form);
+    }
+    if (name.find(std::string(1, Data::NameTable::Marker)) < 0) {
+        return name;
+    }
+    return Data::MappedName(table.toPlain(name.toString()));
+}
+
+/// The names of an input, in this shape's form, so that a builder's uniqueness counts see one
+/// form when its inputs differ in it (a plain and an interned document's shapes)
+void toMapForm(
+    std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>& names,
+    const TopoShape& input,
+    const TopoShape& result
+)
+{
+    if (input.getInternNames() == result.getInternNames()) {
+        return;
+    }
+    for (auto& entry : names) {
+        entry.first = toMapForm(entry.first, result.getInternNames());
+    }
+}
+
+/// A shape built from an interned input interns its names too (ops#6): the document's switch
+/// reaches every shape built from its features' shapes, along with the algorithm
+void inheritInternNames(TopoShape& result, const TopoShape& input)
+{
+    if (input.getInternNames() && !result.getInternNames()) {
+        result.setInternNames(true);
+    }
+}
+
+void inheritInternNames(TopoShape& result, const std::vector<TopoShape>& inputs)
+{
+    for (const auto& input : inputs) {
+        inheritInternNames(result, input);
+    }
+}
+}  // namespace
 
 void TopoShape::initCache(int reset) const
 {
@@ -845,6 +897,7 @@ void TopoShape::copyElementMap(const TopoShape& topoShape, const char* op)
         setupChild(child, elementType, topoShape, count, op);
     }
     resetElementMap();
+    inheritInternNames(*this, topoShape);
     if (!Hasher) {
         Hasher = topoShape.Hasher;
     }
@@ -972,6 +1025,7 @@ void TopoShape::mapSubElementTypeForShape(
 
 void TopoShape::mapSubElementForShape(const TopoShape& other, const char* op)
 {
+    inheritInternNames(*this, other);
     bool warned = false;
     static const std::array<TopAbs_ShapeEnum, 3> types = {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE};
 
@@ -1006,6 +1060,7 @@ void TopoShape::mapSubElement(
     if (!canMapElement(other)) {
         return;
     }
+    inheritInternNames(*this, other);
 
     if (!getElementMapSize(false) && this->_Shape.IsPartner(other._Shape)) {
         if (!this->Hasher) {
@@ -1105,6 +1160,11 @@ void TopoShape::mapSubElement(
                 }
             }
 
+            if (historyVersion == App::HistoryAlgorithm::V2) {
+                // Before the name map records the first one (the seed of a V2 builder)
+                toMapForm(mappedNames, other, *this);
+            }
+
             if (mappedNames.size()) {
                 for (auto& v : mappedNames) {
                     auto& name = v.first;
@@ -1199,6 +1259,7 @@ void TopoShape::mapCompoundSubElements(const std::vector<TopoShape>& shapes, con
         }
     }
     auto children {createChildMap(count, shapes, op)};
+    inheritInternNames(*this, shapes);
     setMappedChildElements(children);
 }
 
@@ -1207,6 +1268,7 @@ void TopoShape::mapSubElement(const std::vector<TopoShape>& shapes, const char* 
     if (shapes.empty()) {
         return;
     }
+    inheritInternNames(*this, shapes);
 
     if (shapeType(true) == TopAbs_COMPOUND) {
         int count = 0;
@@ -1643,14 +1705,76 @@ private:
 
 namespace
 {
-/// A list field that holds a set of names: sorted by bytes, without duplicates (ops#19).
-template<class Name>
-void sortNameSet(std::vector<Name>& names)
+bool holdsInternedName(const std::string& name)
 {
-    std::sort(names.begin(), names.end());
-    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return name.find(Data::NameTable::Marker) != std::string::npos;
+}
+
+/// Sorted by the bytes of the expansions, without duplicates. Equal expansions are duplicates
+/// whatever their forms; the first of them in the input stays.
+void sortByExpansion(std::vector<std::pair<std::string, std::size_t>>& texts)
+{
+    const auto& table = Data::NameTable::instance();
+    std::stable_sort(texts.begin(), texts.end(), [&table](const auto& left, const auto& right) {
+        return table.compareExpanded(left.first, right.first) < 0;
+    });
+    texts.erase(
+        std::unique(
+            texts.begin(),
+            texts.end(),
+            [&table](const auto& left, const auto& right) {
+                return table.compareExpanded(left.first, right.first) == 0;
+            }
+        ),
+        texts.end()
+    );
 }
 }  // namespace
+
+void sortNameSet(std::vector<Data::MappedName>& names)
+{
+    static const char marker[] = {Data::NameTable::Marker, 0};
+    if (std::ranges::none_of(names, [](const Data::MappedName& name) {
+            return name.find(marker) >= 0;
+        })) {
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return;
+    }
+    std::vector<std::pair<std::string, std::size_t>> texts;
+    texts.reserve(names.size());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        texts.emplace_back(names[i].toString(), i);
+    }
+    sortByExpansion(texts);
+    std::vector<Data::MappedName> sorted;
+    sorted.reserve(texts.size());
+    for (const auto& text : texts) {
+        sorted.push_back(names[text.second]);
+    }
+    names = std::move(sorted);
+}
+
+void sortNameSet(std::vector<std::string>& names)
+{
+    if (std::ranges::none_of(names, holdsInternedName)) {
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        return;
+    }
+    std::vector<std::pair<std::string, std::size_t>> texts;
+    texts.reserve(names.size());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        texts.emplace_back(names[i], i);
+    }
+    sortByExpansion(texts);
+    std::vector<std::string> sorted;
+    sorted.reserve(texts.size());
+    for (auto& text : texts) {
+        sorted.push_back(std::move(text.first));
+    }
+    names = std::move(sorted);
+}
 
 const std::string& modPostfix()
 {
@@ -1773,6 +1897,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
     if (canMap == 0U) {
         return *this;
     }
+    inheritInternNames(*this, shapes);
     if (canMap != shapes.size() && FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
         FC_WARN("Not all input shapes are mappable");  // NOLINT
     }
@@ -2430,6 +2555,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                              {}}
                         );
                     }
+                    // In the result's form, as the seed's name map records them
+                    toMapForm(incomingShapeElementMappedNames, incomingShape, *this);
 
                     // Use copies here, because if we store a reference to `modified`, then call the
                     // `generated` method, the `modified` reference will change to the `generated`
@@ -2950,6 +3077,12 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                                     op,
                                     (*incomingShapeIndexedName.getType())
                                 );
+                            }
+
+                            if (incomingShapeMapName
+                                && incomingShape.getInternNames() != getInternNames()) {
+                                incomingShapeMapName
+                                    = toMapForm(incomingShapeMapName, getInternNames());
                             }
 
                             if (incomingShapeMapName) {

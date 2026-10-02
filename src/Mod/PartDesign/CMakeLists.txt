@@ -107,30 +107,43 @@ set(PartDesign_TestScenarios
 set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/CompoundCopies.V1.txt
     PartDesignTests/NamingGolden/CompoundCopies.V2.txt
+    PartDesignTests/NamingGolden/CompoundCopies.V2i-ids.txt
     PartDesignTests/NamingGolden/CutSplit.V1.txt
     PartDesignTests/NamingGolden/CutSplit.V2.txt
+    PartDesignTests/NamingGolden/CutSplit.V2i-ids.txt
     PartDesignTests/NamingGolden/FilletChamfer.V1.txt
     PartDesignTests/NamingGolden/FilletChamfer.V2.txt
+    PartDesignTests/NamingGolden/FilletChamfer.V2i-ids.txt
     PartDesignTests/NamingGolden/FuseCommon.V1.txt
     PartDesignTests/NamingGolden/FuseCommon.V2.txt
+    PartDesignTests/NamingGolden/FuseCommon.V2i-ids.txt
     PartDesignTests/NamingGolden/LinearPattern.V1.txt
     PartDesignTests/NamingGolden/LinearPattern.V2.txt
+    PartDesignTests/NamingGolden/LinearPattern.V2i-ids.txt
     PartDesignTests/NamingGolden/LoftRevolve.V1.txt
     PartDesignTests/NamingGolden/LoftRevolve.V2.txt
+    PartDesignTests/NamingGolden/LoftRevolve.V2i-ids.txt
     PartDesignTests/NamingGolden/OffsetThickness.V1.txt
     PartDesignTests/NamingGolden/OffsetThickness.V2.txt
+    PartDesignTests/NamingGolden/OffsetThickness.V2i-ids.txt
     PartDesignTests/NamingGolden/PadCollinear.V1.txt
     PartDesignTests/NamingGolden/PadCollinear.V2.txt
+    PartDesignTests/NamingGolden/PadCollinear.V2i-ids.txt
     PartDesignTests/NamingGolden/PadPocket.V1.txt
     PartDesignTests/NamingGolden/PadPocket.V2.txt
+    PartDesignTests/NamingGolden/PadPocket.V2i-ids.txt
     PartDesignTests/NamingGolden/PipeShell.V1.txt
     PartDesignTests/NamingGolden/PipeShell.V2.txt
+    PartDesignTests/NamingGolden/PipeShell.V2i-ids.txt
     PartDesignTests/NamingGolden/Refine.V1.txt
     PartDesignTests/NamingGolden/Refine.V2.txt
+    PartDesignTests/NamingGolden/Refine.V2i-ids.txt
     PartDesignTests/NamingGolden/Sketch.V1.txt
     PartDesignTests/NamingGolden/Sketch.V2.txt
+    PartDesignTests/NamingGolden/Sketch.V2i-ids.txt
     PartDesignTests/NamingGolden/Slice.V1.txt
     PartDesignTests/NamingGolden/Slice.V2.txt
+    PartDesignTests/NamingGolden/Slice.V2i-ids.txt
 )
 
 set(PartDesign_GearScripts
