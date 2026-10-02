@@ -41,6 +41,12 @@ masking, since a new document's object IDs start at a random offset. Three check
 - TestNamingRepeated: the model is built 5 times in this process, and the dumps with element
   indexes must be identical.
 
+Each check also runs in V2i: a V2 document with InternNames on (ops#6, Task 1). Its names are
+dumped through `App.expandMappedName`, and the dump must equal V2's: TestNamingGolden compares it
+with the V2 golden file, so interning changes no name on any platform. TestNamingInterning checks
+the exact bytes in one process (two documents from object ID 0, one plain and one interned), and
+the interned names themselves against `NamingGolden/<Model>.V2i-ids.txt`.
+
 The models are built in documents whose object IDs are above a bound (`models.newDocument`), so a
 small tag that is no object's ID can't be masked as an object's name; TestNamingTagCollision
 forces that case (ops#52).
@@ -69,7 +75,7 @@ from PartDesignTests.Scenarios.harness import Masker
 V = App.Vector
 
 GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NamingGolden")
-MODES = ("V1", "V2")
+MODES = ("V1", "V2", "V2i")
 REPEATS = 5
 SEEDS = ("0x5eed0001", "0x9e3779b97f4a7c15")
 
@@ -312,8 +318,14 @@ def _elementKey(kind, element):
     return f"{kind} c=({coords}) m={_number(mass)}"
 
 
+def _algorithm(mode):
+    """The document's HistoryAlgorithm in a mode: V2i is V2 with InternNames on."""
+    return "V2" if mode == "V2i" else mode
+
+
 def dumpShape(shape, masker, mode, indexed=False):
-    """The shape's elements and names as sorted lines."""
+    """The shape's elements and names as sorted lines. V2i names are expanded first. Without a
+    masker, the names are written as they are."""
     table = {}
     if mode == "V1" and shape.Hasher is not None:
         try:
@@ -336,33 +348,48 @@ def dumpShape(shape, masker, mode, indexed=False):
             if not names:
                 lines.append(f"{key} : -")
             for name in names:
-                if mode == "V2":
-                    masked = masker.maskV2(name)
-                else:
+                if mode == "V2i":
+                    name = App.expandMappedName(name)
+                if masker is None:
+                    masked = name
+                elif mode == "V1":
                     masked = masker.maskV1(name, table)
+                else:
+                    masked = masker.maskV2(name)
                 lines.append(f"{key} : {masked}")
     return sorted(lines)
+
+
+def _setMode(doc, mode):
+    doc.HistoryAlgorithm = _algorithm(mode)
+    # Explicitly, also when off: FREECAD_INTERN_NAMES=1 turns it on in new documents.
+    doc.InternNames = mode == "V2i"
+
+
+def _dumpFeatures(model, features, masker, mode, indexed=False):
+    """The dump of the model's features. Its header names the algorithm, so that a V2i dump can
+    equal the V2 one."""
+    out = [f"# {model} {_algorithm(mode)}"]
+    for feature in features:
+        shape = feature.Shape
+        errors = [] if feature.isValid() else [" INVALID"]
+        out.append(
+            f"[{feature.Name} {feature.TypeId}{''.join(errors)}] "
+            f"faces={len(shape.Faces)} edges={len(shape.Edges)} "
+            f"vertexes={len(shape.Vertexes)} names={shape.ElementMapSize}"
+        )
+        out.extend(dumpShape(shape, masker, mode, indexed))
+    return "\n".join(out) + "\n"
 
 
 def dumpModel(model, mode, indexed=False):
     """Builds the model in a new document in `mode` and returns its dump as text."""
     doc = models.newDocument(f"NamingDump{model}{mode}")
     try:
-        doc.HistoryAlgorithm = mode
+        _setMode(doc, mode)
         features = MODELS[model](doc)
         doc.recompute()
-        masker = Masker(doc)
-        out = [f"# {model} {mode}"]
-        for feature in features:
-            shape = feature.Shape
-            errors = [] if feature.isValid() else [" INVALID"]
-            out.append(
-                f"[{feature.Name} {feature.TypeId}{''.join(errors)}] "
-                f"faces={len(shape.Faces)} edges={len(shape.Edges)} "
-                f"vertexes={len(shape.Vertexes)} names={shape.ElementMapSize}"
-            )
-            out.extend(dumpShape(shape, masker, mode, indexed))
-        return "\n".join(out) + "\n"
+        return _dumpFeatures(model, features, Masker(doc), mode, indexed)
     finally:
         App.closeDocument(doc.Name)
 
@@ -487,11 +514,13 @@ class TestNamingGolden(unittest.TestCase):
 
     def check(self, model, mode):
         actual = dumpModel(model, mode)
-        fileName = f"{model}.{mode}.txt"
+        fileName = f"{model}.{_algorithm(mode)}.txt"  # V2i expands to V2: no file of its own
         update = os.environ.get("FREECAD_NAMING_GOLDEN_UPDATE")
         if update:
-            with open(os.path.join(update, fileName), "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(actual)
+            if mode != "V2i":
+                path = os.path.join(update, fileName)
+                with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(actual)
             return
         with open(os.path.join(GOLDEN_DIR, fileName), encoding="utf-8") as fh:
             expected = fh.read().replace("\r\n", "\n")
@@ -541,6 +570,62 @@ class TestNamingRepeated(unittest.TestCase):
                     f"run {run} of {REPEATS} differs from run 1 ({path1}, {path}):\n"
                     + _diff(first, again, "run1", f"run{run}")
                 )
+
+
+class TestNamingInterning(unittest.TestCase):
+    """Interning changes no byte of a name (ops#6, Task 1). The model is built in two documents
+    whose object IDs start at 0 (`clearDocument`), so their tags are equal and nothing is masked:
+    one plain, one with InternNames on. The interned names must expand to the plain names, element
+    by element (keyed index-free, ops#49), and equal `NamingGolden/<Model>.V2i-ids.txt` as they
+    are, which fixes the IDs on every platform."""
+
+    def build(self, model, mode):
+        doc = App.newDocument(f"NamingInterning{model}{mode}")
+        doc.clearDocument()
+        _setMode(doc, mode)
+        features = MODELS[model](doc)
+        doc.recompute()
+        return doc, features
+
+    def check(self, model):
+        plainDoc, plainFeatures = self.build(model, "V2")
+        try:
+            plain = _dumpFeatures(model, plainFeatures, None, "V2")
+        finally:
+            App.closeDocument(plainDoc.Name)
+        internedDoc, internedFeatures = self.build(model, "V2i")
+        try:
+            expanded = _dumpFeatures(model, internedFeatures, None, "V2i")
+            interned = _dumpFeatures(model, internedFeatures, None, "V2")
+        finally:
+            App.closeDocument(internedDoc.Name)
+
+        if expanded != plain:
+            _save(model, "V2", "plain", plain)
+            path = _save(model, "V2i", "expanded", expanded)
+            self.fail(
+                f"interned names don't expand to the plain ones ({path}):\n"
+                + _diff(plain, expanded, "plain", "expanded")
+            )
+        # The interned form: escapes only stand for embedded names, which are references now
+        self.assertNotIn("^", interned)
+        if "^" in plain:
+            self.assertIn("~", interned)
+
+        fileName = f"{model}.V2i-ids.txt"
+        update = os.environ.get("FREECAD_NAMING_GOLDEN_UPDATE")
+        if update:
+            with open(os.path.join(update, fileName), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(interned)
+            return
+        with open(os.path.join(GOLDEN_DIR, fileName), encoding="utf-8") as fh:
+            expected = fh.read().replace("\r\n", "\n")
+        if interned != expected:
+            path = _save(model, "V2i", "ids", interned)
+            self.fail(
+                f"interned names differ from {fileName} ({path}):\n"
+                + _diff(expected, interned, "golden", "actual")
+            )
 
 
 class TestNamingTagCollision(unittest.TestCase):
@@ -593,6 +678,14 @@ def _addTests():
                 test.__name__ = f"test{model}{mode}"
                 test.__doc__ = f"{MODELS[model].__doc__.split('.')[0]} ({mode})"
                 setattr(cls, test.__name__, test)
+    for model in MODELS:
+
+        def test(self, model=model):
+            self.check(model)
+
+        test.__name__ = f"test{model}"
+        test.__doc__ = f"{MODELS[model].__doc__.split('.')[0]} (V2 and V2i)"
+        setattr(TestNamingInterning, test.__name__, test)
 
 
 _addTests()

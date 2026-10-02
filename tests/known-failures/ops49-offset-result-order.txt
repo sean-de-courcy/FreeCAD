@@ -5,3 +5,4 @@ reason: OCCT's Offset and Thickness results list their sub-shapes in an order th
 # (the index-free dumps pass since ops#19 sorts the UPP Linked Names; the indexes still vary)
 cli  PartDesignTests.TestNamingDump.TestNamingRepeated.testOffsetThicknessV1
 cli  PartDesignTests.TestNamingDump.TestNamingRepeated.testOffsetThicknessV2
+cli  PartDesignTests.TestNamingDump.TestNamingRepeated.testOffsetThicknessV2i

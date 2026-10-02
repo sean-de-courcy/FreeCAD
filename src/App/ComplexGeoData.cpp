@@ -316,6 +316,11 @@ ElementMapPtr ComplexGeoData::resetElementMap(ElementMapPtr elementMap)
         }
 
         _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
+        // Interning spreads: a shape that takes an interned map interns its own names too, and
+        // a map taken by an interned shape interns the names added to it. Taking a map never
+        // clears its flag, so a temporary plain shape can't turn another shape's map plain.
+        // setInternNames() sets both exactly.
+        internNames = internNames || _elementMap->isInterned();
         _elementMap->setInterned(internNames);
     }
     return elementMap;

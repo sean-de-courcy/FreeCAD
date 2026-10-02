@@ -77,6 +77,8 @@ cli  PartDesignTests.TestNamingScenarios.LinearFewerOccurrencesExtent.test_sketc
 cli  PartDesignTests.TestNamingScenarios.LinearFewerOccurrencesExtent.test_sketch_instance3_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.PolarFewerOccurrencesExtent.test_sketch_instance3_face_V2
 cli  PartDesignTests.TestNamingScenarios.PolarFewerOccurrencesExtent.test_sketch_instance3_face_V2multi
+
+reason: an Extent-mode pattern of two patterns loses its last instance and the previous one moves onto its place: the sketch on the lost instance (its name is missing) moves silently to a coplanar face, either through V2's geometric search or through the Attacher's old index name (ops#68); V2s breaks it with the pattern-sibling guard (ops#55)
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_x3_face_V2
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_y3_face_V2
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_x3_face_V2

@@ -594,6 +594,7 @@ SET(Part_SRCS
     TopoShapeMapper.h
     TopoShapeMapper.cpp
     NamingHash.h
+    NameSetOrder.h
     TopoShapeOpCode.h
     edgecluster.cpp
     edgecluster.h

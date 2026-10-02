@@ -220,6 +220,9 @@ public:
     /// Whether broken element references go to the reference solver (ops#7). V2 only. Saved
     /// only while on, so a document that never turned it on saves as before.
     PropertyBoolSavedWhenTrue ReferenceSolver;
+    /// Whether V2 element names are interned (Data::NameTable, ops#6). Off by default; saved
+    /// only while on, so a document that never turned it on saves as before.
+    PropertyBoolSavedWhenTrue InternNames;
     /// @}
 
     /** @name Signals of the document
@@ -1330,6 +1333,12 @@ public:
     {
         return ReferenceSolver.getValue()
             && selectedHistoryAlgorithm == App::HistoryAlgorithm::V2;
+    }
+
+    /// True if InternNames is on and the history algorithm is V2: the switch is ignored in V1.
+    bool isInternNamesOn() const
+    {
+        return InternNames.getValue() && selectedHistoryAlgorithm == App::HistoryAlgorithm::V2;
     }
 
     const std::string& getCorrectElementMapVersion();

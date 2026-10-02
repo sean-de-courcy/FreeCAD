@@ -1,0 +1,28 @@
+# PipeShell V2
+[Sweep Part::Sweep] faces=6 edges=12 vertexes=8 names=26
+Edge c=(0.0000,0.0000,10.0000) m=20.0000 : _;~qdb800gjcgjha;3;SWP;0;E;0;GEN;_
+Edge c=(0.0000,1.0000,0.0000) m=2.0000 : _;~6su3he3tj0ffi;3;SWP;3;E;0;GEN;_
+Edge c=(0.0000,1.0000,20.0000) m=2.0000 : _;~sire98hq40vju;3;SWP;3;E;0;GEN;_
+Edge c=(0.0000,2.0000,10.0000) m=20.0000 : _;~tj1bpm3e5mgqa;3;SWP;0;E;0;GEN;_
+Edge c=(2.0000,0.0000,0.0000) m=4.0000 : _;~6su3he3tj0ffi;3;SWP;0;E;0;GEN;_
+Edge c=(2.0000,0.0000,20.0000) m=4.0000 : _;~sire98hq40vju;3;SWP;0;E;0;GEN;_
+Edge c=(2.0000,2.0000,0.0000) m=4.0000 : _;~6su3he3tj0ffi;3;SWP;2;E;0;GEN;_
+Edge c=(2.0000,2.0000,20.0000) m=4.0000 : _;~sire98hq40vju;3;SWP;2;E;0;GEN;_
+Edge c=(4.0000,0.0000,10.0000) m=20.0000 : _;~93g67u0nsesl0;3;SWP;0;E;0;GEN;_
+Edge c=(4.0000,1.0000,0.0000) m=2.0000 : _;~6su3he3tj0ffi;3;SWP;1;E;0;GEN;_
+Edge c=(4.0000,1.0000,20.0000) m=2.0000 : _;~sire98hq40vju;3;SWP;1;E;0;GEN;_
+Edge c=(4.0000,2.0000,10.0000) m=20.0000 : _;~n8n42ie4fq4se;3;SWP;0;E;0;GEN;_
+Face c=(0.0000,1.0000,10.0000) m=40.0000 : _;~b9is05mtohkt0,~d88anqjn6esig;3;SWP;0;F;0;GEN;_
+Face c=(2.0000,0.0000,10.0000) m=80.0000 : _;~ful5ge86oubgs,~b9is05mtohkt0;3;SWP;0;F;0;GEN;_
+Face c=(2.0000,1.0000,0.0000) m=8.0000 : _;~squ85v1to6eia,~9pvt3kcl5r1m8,~a3scl9of9rivs,~7ags8u6ht2a2m;3;SWP;0;F;0;LOW;_
+Face c=(2.0000,1.0000,20.0000) m=8.0000 : _;~np4d3tdmtv5eg,~n6lptpqje5a8e,~ttk7p8evnm7si,~hrq9hkfmji5gg;3;SWP;0;F;0;LOW;_
+Face c=(2.0000,2.0000,10.0000) m=80.0000 : _;~b9is05mtohkt0,~jf5rgvb366vpe;3;SWP;0;F;0;GEN;_
+Face c=(4.0000,1.0000,10.0000) m=40.0000 : _;~b9is05mtohkt0,~o1nj9nrf2nlqu;3;SWP;0;F;0;GEN;_
+Vertex c=(0.0000,0.0000,0.0000) m=0.0000 : _;~oflaq5l2tqhnm,~oib514t7ao7j6,~07bmlvvifiide;3;SWP;0;V;0;UPP;_
+Vertex c=(0.0000,0.0000,20.0000) m=0.0000 : _;~oflaq5l2tqhnm,~oib514t7ao7j6,~bcdvbg07jp572;3;SWP;0;V;0;UPP;_
+Vertex c=(0.0000,2.0000,0.0000) m=0.0000 : _;~avsqmf7asv012,~oib514t7ao7j6,~07bmlvvifiide;3;SWP;0;V;0;UPP;_
+Vertex c=(0.0000,2.0000,20.0000) m=0.0000 : _;~avsqmf7asv012,~oib514t7ao7j6,~bcdvbg07jp572;3;SWP;0;V;0;UPP;_
+Vertex c=(4.0000,0.0000,0.0000) m=0.0000 : _;~oflaq5l2tqhnm,~cfilm94damf1m,~07bmlvvifiide;3;SWP;0;V;0;UPP;_
+Vertex c=(4.0000,0.0000,20.0000) m=0.0000 : _;~oflaq5l2tqhnm,~cfilm94damf1m,~bcdvbg07jp572;3;SWP;0;V;0;UPP;_
+Vertex c=(4.0000,2.0000,0.0000) m=0.0000 : _;~cfilm94damf1m,~avsqmf7asv012,~07bmlvvifiide;3;SWP;0;V;0;UPP;_
+Vertex c=(4.0000,2.0000,20.0000) m=0.0000 : _;~cfilm94damf1m,~avsqmf7asv012,~bcdvbg07jp572;3;SWP;0;V;0;UPP;_

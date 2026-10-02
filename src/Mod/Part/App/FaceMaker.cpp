@@ -36,6 +36,7 @@
 #include <App/MappedElement.h>
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
+#include "NameSetOrder.h"
 #include <App/ElementNamingUtils.h>
 #include <unordered_set>
 
@@ -355,12 +356,9 @@ void Part::FaceMaker::postBuild()
                 linkedNameEntry.second = false;
             }
 
-            // A set of names: sorted by bytes, without duplicates (ops#19)
-            std::sort(linkedNameEntry.first.begin(), linkedNameEntry.first.end());
-            linkedNameEntry.first.erase(
-                std::unique(linkedNameEntry.first.begin(), linkedNameEntry.first.end()),
-                linkedNameEntry.first.end()
-            );
+            // A set of names: sorted by the bytes of their expansions, without duplicates
+            // (ops#19, ops#6)
+            Part::sortNameSet(linkedNameEntry.first);
         }
 
         std::vector<std::string> mapperFlags {Data::MAPPER_FLAG_LOWER};

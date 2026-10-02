@@ -38,6 +38,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -59,6 +60,74 @@ using namespace Part;
 
 TYPESYSTEM_SOURCE(Part::PropertyPartShape, App::PropertyComplexGeoData)
 
+namespace
+{
+/// Whether a name is in canonical interned form: no escaped embedded name, and at most one
+/// section after a reference to its prefix (`~<ID>|<last section>`)
+bool isInternedForm(const std::string& name)
+{
+    if (name.find('^') != std::string::npos) {
+        return false;  // an embedded name inline (or a collision's fallback, interned again)
+    }
+    const auto bar = name.find(Data::NAME_SECTION_DELIMINATOR);
+    if (bar == std::string::npos) {
+        return true;
+    }
+    return name.front() == Data::NameTable::Marker && bar == Data::NameTable::RefLength
+        && name.find(Data::NAME_SECTION_DELIMINATOR, bar + 1) == std::string::npos;
+}
+
+/** Puts a V2 shape's names in the form its document's InternNames says (ops#6).
+ *
+ * Builders take the form of their inputs, so a feature's result is mostly in its document's form
+ * already. An interned map can still hold plain names it got before it was interned, and a shape
+ * from a document with the other setting has the other form. A plain map holds no interned name
+ * (ElementMap::setElementName expands them), so in a plain document only an interned shape is
+ * looked at.
+ */
+void toDocumentForm(TopoShape& shape, bool interned)
+{
+    if (shape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2
+        || (!interned && !shape.getInternNames())) {
+        return;
+    }
+    bool inOtherForm = false;
+    if (interned && shape.getElementMapSize(false) > 0) {
+        for (const auto& element : shape.getElementMap()) {
+            if (!isInternedForm(element.name.toString())) {
+                inOtherForm = true;
+                break;
+            }
+        }
+    }
+    else if (!interned) {
+        inOtherForm = shape.getElementMapSize(false) > 0;
+    }
+    if (!inOtherForm) {
+        shape.setInternNames(interned);
+        return;
+    }
+    std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
+    for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        const auto& typeName = TopoShape::shapeName(type);
+        const auto count = static_cast<int>(shape.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            auto element = Data::IndexedName::fromConst(typeName.c_str(), i);
+            // In the element's order, so its first name stays first
+            for (auto& [name, sids] : shape.getElementMappedNames(element)) {
+                names.emplace_back(element, name, sids);
+            }
+        }
+    }
+    // A new map: the old one may be shared with the shape this one was set from
+    shape.resetElementMap(std::make_shared<Data::ElementMap>());
+    shape.setInternNames(interned);  // before the names: the map stores them in its form
+    for (const auto& [element, name, sids] : names) {
+        shape.setElementName(element, name, shape.Tag, &sids);
+    }
+}
+}  // namespace
+
 PropertyPartShape::PropertyPartShape() = default;
 
 PropertyPartShape::~PropertyPartShape() = default;
@@ -77,6 +146,9 @@ void PropertyPartShape::setValue(const TopoShape& sh)
             // document (ops#35). Its empty map may be the given shape's: drop it first.
             _Shape.resetElementMap();
             _Shape.setHistoryAlgorithm(obj->getSelectedHistoryAlgorithm());
+        }
+        if (obj->isAttachedToDocument()) {
+            toDocumentForm(_Shape, obj->getDocument()->isInternNamesOn());
         }
         const App::HistoryAlgorithm& historyAlgorithm = _Shape.getHistoryAlgorithm();
 
@@ -124,8 +196,10 @@ void PropertyPartShape::setValue(const TopoDS_Shape& sh, bool resetElementMap)
     _Shape.setShape(sh, resetElementMap);
     if (obj && obj->isAttachedToDocument()) {
         // A shape set without a TopoShape (primitives) takes the document's algorithm, so that
-        // the features that use it name their results with it (ops#30).
+        // the features that use it name their results with it (ops#30), and its interning
+        // switch (ops#6).
         _Shape.setHistoryAlgorithm(obj->getSelectedHistoryAlgorithm());
+        _Shape.setInternNames(obj->getDocument()->isInternNamesOn());
     }
     hasSetValue();
     _Ver.clear();
@@ -477,6 +551,11 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
     int history_algorithm = reader.getAttribute<int>("HistoryAlgorithm", 0);
 
     _Shape.setHistoryAlgorithm(App::getHistoryAlgorithm(history_algorithm));
+    // The document's properties are restored before its objects
+    _Shape.setInternNames(
+        owner && owner->getDocument() && owner->getDocument()->isInternNamesOn()
+        && _Shape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2
+    );
 
     TopoShape shape;
 
