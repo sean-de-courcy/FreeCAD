@@ -1425,6 +1425,35 @@ TEST_F(ElementMapTest, namesAreFoundInEitherFormV2)
     EXPECT_FALSE(missing);
 }
 
+TEST_F(ElementMapTest, namesAreFoundInAMixedMapV2)
+{
+    // ops#97: a map can hold names in the other form than its flag's, e.g. names stored before
+    // the flag was set (a map restored before its document's form was applied). A lookup finds
+    // them in either form all the same.
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    const std::string internedPiece = table.toInterned(example.piece);
+    const Data::IndexedName element("Face", 3);
+    auto flaggedInterned = std::make_shared<Data::ElementMap>();  // plain names, interned flag
+    flaggedInterned->hasher = _hasher;
+    flaggedInterned->setElementName(element, Data::MappedName(example.piece), 23);
+    flaggedInterned->setInterned(true);
+    auto flaggedPlain = std::make_shared<Data::ElementMap>();  // interned names, plain flag
+    flaggedPlain->hasher = _hasher;
+    flaggedPlain->setInterned(true);
+    flaggedPlain->setElementName(element, Data::MappedName(example.piece), 23);
+    flaggedPlain->setInterned(false);
+
+    // Act and assert
+    EXPECT_EQ(flaggedInterned->find(Data::MappedName(example.piece)), element);
+    EXPECT_EQ(flaggedInterned->find(Data::MappedName(internedPiece)), element);
+    EXPECT_EQ(flaggedPlain->find(Data::MappedName(internedPiece)), element);
+    EXPECT_EQ(flaggedPlain->find(Data::MappedName(example.piece)), element);
+    EXPECT_FALSE(flaggedInterned->find(Data::MappedName(example.upper)));
+    EXPECT_FALSE(flaggedPlain->find(Data::MappedName(example.upper)));
+}
+
 TEST_F(ElementMapTest, beforeSaveCollectsTheReferencesV2)
 {
     // ops#6, Task 1 PR 7: while a document saves, its maps hand the references in their names to

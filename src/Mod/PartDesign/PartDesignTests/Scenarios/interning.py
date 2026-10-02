@@ -24,19 +24,21 @@
 named again in the other form, and the references, which hold names in the old form, must still
 find their elements."""
 
-from .harness import Attached, Filleted, Scenario, X, edge, face
+from .harness import Attached, ExternalCoincides, Filleted, Scenario, X, edge, face
 from . import models as m
 
 
 class InternSwitch(Scenario):
     """A pad (0..20 x 0..10 x 0..10) with a hole through it (x = 10, radius 2), a fillet of its
-    front top edge (radius 1), and a sketch attached to the fillet's right face. Step 1 turns the
-    document's InternNames over (on in V2, V2multi and V2s; off in V2i); step 2 makes the pad
-    longer (10 -> 15) in the new form; step 3 turns the switch back."""
+    front top edge (radius 1), a sketch attached to the fillet's right face, and a sketch on the
+    XY plane with the fillet's back bottom edge as external geometry (its Ref and its link's
+    shadow must stay in one form, ops#97). Step 1 turns the document's InternNames over (on in
+    V2, V2multi and V2s; off in V2i); step 2 makes the pad longer (10 -> 15) in the new form;
+    step 3 turns the switch back."""
 
     area = "interning"
     MULTI = True
-    REFS = ("fillet_edge", "sketch_right_face")
+    REFS = ("fillet_edge", "sketch_right_face", "external_back_edge")
     steps = ("turnOver", "longer", "turnBack")
     height = 10
 
@@ -45,6 +47,9 @@ class InternSwitch(Scenario):
 
     def rightFace(self):
         return face("plane", normal=X, through=(20, 0, 0))
+
+    def backBottomEdge(self):
+        return edge("line", direction=X, through=(0, 10, 0))
 
     def build(self, doc):
         body = m.body(doc)
@@ -62,6 +67,15 @@ class InternSwitch(Scenario):
         onSide.MapMode = "FlatFace"
         self.ref("fillet_edge", fillet, "Base", self.frontTopEdge, Filleted(1))
         self.ref("sketch_right_face", onSide, "AttachmentSupport", self.rightFace, Attached())
+        onBottom = m.sketch(doc, "OnBottom", [], body)
+        onBottom.addExternal(fillet.Name, self.names(fillet, self.backBottomEdge())[0])
+        self.ref(
+            "external_back_edge",
+            onBottom,
+            "ExternalGeometry",
+            self.backBottomEdge,
+            ExternalCoincides(),
+        )
 
     def turnOver(self, doc):
         doc.InternNames = not doc.InternNames

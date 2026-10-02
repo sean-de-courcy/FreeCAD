@@ -173,11 +173,14 @@ def _childModels(manifest):
 
 
 def _childMerge(manifest):
-    """Merges each file into a new document (File > Merge project): the same names."""
+    """Merges each file into a new interned document (File > Merge project), as the files are:
+    the same names. (Merged into a plain document, the names take its form: ops#97,
+    InternNamesTest.testRestoredMapsTakeTheDocumentsForm.)"""
     out = {}
     for model, info in manifest["models"].items():
         try:
             doc = App.newDocument(f"Merged{model}")
+            doc.InternNames = True
             doc.mergeProject(info["path"])
             features = [doc.getObject(name) for name in info["features"]]
             out[model] = {

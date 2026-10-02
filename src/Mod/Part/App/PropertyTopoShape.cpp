@@ -83,27 +83,45 @@ bool isInternedForm(const std::string& name)
  * already. An interned map can still hold plain names it got before it was interned, and a shape
  * from a document with the other setting has the other form. A plain map holds no interned name
  * (ElementMap::setElementName expands them), so in a plain document only an interned shape is
- * looked at.
+ * looked at, unless the map was restored: a restored map holds the file's names as they are,
+ * whatever its flag (ops#97).
+ *
+ * The shape's map and cache may be shared with the shape it was set from, so they are replaced,
+ * not changed in place, when the form changes (ops#97).
  */
-void toDocumentForm(TopoShape& shape, bool interned)
+void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
 {
     if (shape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2
-        || (!interned && !shape.getInternNames())) {
+        || (!interned && !shape.getInternNames() && !restored)) {
         return;
     }
     bool inOtherForm = false;
-    if (interned && shape.getElementMapSize(false) > 0) {
-        for (const auto& element : shape.getElementMap()) {
-            if (!isInternedForm(element.name.toString())) {
-                inOtherForm = true;
-                break;
+    if (shape.getElementMapSize(false) > 0) {
+        if (interned) {
+            for (const auto& element : shape.getElementMap()) {
+                if (!isInternedForm(element.name.toString())) {
+                    inOtherForm = true;
+                    break;
+                }
+            }
+        }
+        else if (shape.getInternNames()) {
+            inOtherForm = true;
+        }
+        else {
+            const std::string marker(1, Data::NameTable::Marker);
+            for (const auto& element : shape.getElementMap()) {
+                if (element.name.find(marker) >= 0) {
+                    inOtherForm = true;
+                    break;
+                }
             }
         }
     }
-    else if (!interned) {
-        inOtherForm = shape.getElementMapSize(false) > 0;
-    }
-    if (!inOtherForm) {
+    // Only the flag differs: an empty map takes it; a map with names is built again below, since
+    // flagging it in place would also flag the map of the shape it was set from (ops#97)
+    if (!inOtherForm
+        && (shape.getInternNames() == interned || shape.getElementMapSize(false) == 0)) {
         shape.setInternNames(interned);
         return;
     }
@@ -119,7 +137,8 @@ void toDocumentForm(TopoShape& shape, bool interned)
             }
         }
     }
-    // A new map: the old one may be shared with the shape this one was set from
+    // A new map and cache: the old ones may be shared with the shape this one was set from
+    shape.initCache(1);
     shape.resetElementMap(std::make_shared<Data::ElementMap>());
     shape.setInternNames(interned);  // before the names: the map stores them in its form
     for (const auto& [element, name, sids] : names) {
@@ -659,6 +678,13 @@ void PropertyPartShape::afterRestore()
         if (_Shape.Hasher) {
             _Shape.Hasher->clear();
         }
+    }
+    else if (auto owner = freecad_cast<App::DocumentObject*>(getContainer());
+             owner && owner->getDocument()) {
+        // The map is read after Restore() set the document's flag, and holds the file's names as
+        // they are: a file saved in the other form (the switch turned over and saved before the
+        // recompute), or objects pasted from a document with the other setting (ops#97)
+        toDocumentForm(_Shape, owner->getDocument()->isInternNamesOn(), true);
     }
     PropertyComplexGeoData::afterRestore();
 }
