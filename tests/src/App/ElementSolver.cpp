@@ -432,6 +432,124 @@ TEST(NameAncestry, patternStepNumbersAreOneField)
     );
 }
 
+TEST(NameAncestry, instanceCopiesHaveTheirOwnAncestry)
+{
+    // ops#91: instance k's copy of an element, `X|TRF;k`, has X as its prefix, but its history
+    // is X's history in instance k: the support's names aren't its ancestors. Names that embed
+    // instances' names (a fusion's face bounded by an edge of each of two overlapping blocks)
+    // relate to the support's names only through what they embed of the support itself.
+    NameAncestry ancestry;
+    const auto right = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto left = section({}, {sketchEdge(4)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto instance = [](const std::string& name, int k, char type = 'E', int pattern = 9) {
+        return piece(name, pattern, "TRF", k, type);
+    };
+    // OverlappingInstances: the tops of the overlaps of the support and instance 2, and of
+    // instances 2 and 3
+    const auto top12 = section({}, {right, instance(left, 2)}, 9, "FUS", 0, 'F', {"LOW"});
+    const auto top23 = section(
+        {},
+        {instance(right, 2), instance(left, 3)},
+        9,
+        "FUS",
+        0,
+        'F',
+        {"LOW"}
+    );
+
+    EXPECT_FALSE(ancestry.contains(instance(right, 2), right));
+    EXPECT_TRUE(ancestry.contains(top12, right));
+    EXPECT_TRUE(ancestry.contains(top23, instance(right, 2)));
+    EXPECT_FALSE(ancestry.contains(top23, right));
+    //   through the instances' sections alone they shared 4 of top23's 7 ancestors, and the
+    //   support's edge was wholly in top23's ancestry
+    EXPECT_EQ(ancestry.overlap(top23, top12), 0.0);
+    EXPECT_EQ(ancestry.overlap(right, top23), 0.0);
+    EXPECT_EQ(ancestry.structuralSurvivors(top23, {top12}, 1.0), std::vector<int> {});
+    //   the instance's own names: as many ancestors as before, the prefix's in its context
+    const auto names = ancestry.ancestorNames(instance(right, 2));
+    EXPECT_EQ(names.size(), 3U);
+    EXPECT_EQ(std::count(names.begin(), names.end(), right), 0);
+    EXPECT_EQ(std::count(names.begin(), names.end(), instance(right, 2)), 1);
+
+    //   two names of one instance share the copies' ancestors as before: the top face gains an
+    //   edge in the original, and in each instance
+    const auto oldTop = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    const auto newTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(5)}
+    );
+    const auto oldTop2 = instance(oldTop, 2, 'F');
+    EXPECT_DOUBLE_EQ(ancestry.overlap(oldTop2, instance(newTop, 2, 'F')), 4.0 / 6.0);
+    EXPECT_EQ(ancestry.overlap(oldTop2, instance(newTop, 3, 'F')), 0.0);
+    EXPECT_EQ(ancestry.overlap(oldTop2, instance(newTop, 2, 'F', 8)), 0.0);
+    EXPECT_EQ(ancestry.overlap(oldTop2, newTop), 0.0);
+    //   a piece of an instance's element holds it, and a split piece's split pieces too
+    const auto split = piece(oldTop2, 10, "FUS", 0, 'F');
+    EXPECT_TRUE(ancestry.contains(split, oldTop2));
+    EXPECT_TRUE(ancestry.contains(piece(split, 11, "CUT", 0, 'F'), oldTop2));
+    //   a pattern of a pattern: pattern 8's copy of instance 2 of pattern 9 is another element
+    //   again, and its ancestry is 2's in that copy
+    const auto copyOfCopy = instance(instance(right, 2), 3, 'E', 8);
+    EXPECT_FALSE(ancestry.contains(copyOfCopy, instance(right, 2)));
+    EXPECT_FALSE(ancestry.contains(copyOfCopy, right));
+    EXPECT_EQ(ancestry.ancestorNames(copyOfCopy).size(), 4U);
+    EXPECT_EQ(ancestry.overlap(instance(right, 2), copyOfCopy), 0.0);
+    EXPECT_DOUBLE_EQ(ancestry.overlap(copyOfCopy, instance(instance(right, 2), 3, 'E', 8)), 1.0);
+
+    //   Reference IDs as leaves (Task 2 PR 8's variant): an instance's leaves are its own
+    NameAncestry ids(Data::OverlapMeasure::ReferenceIds);
+    EXPECT_EQ(ids.overlap(instance(right, 2), right), 0.0);
+    EXPECT_EQ(ids.overlap(top23, top12), 0.0);
+    EXPECT_GT(ids.overlap(oldTop2, instance(newTop, 2, 'F')), 0.0);
+    //   and depth-weighted
+    NameAncestry weighted(Data::OverlapMeasure::DepthWeighted);
+    EXPECT_EQ(weighted.overlap(top23, top12), 0.0);
+    EXPECT_GT(weighted.overlap(oldTop2, instance(newTop, 2, 'F')), 0.0);
+}
+
+TEST(NameAncestry, instanceCopiesKeepWhatTheyShare)
+{
+    // ops#91's review: the contexts take away only what relates different elements (the support
+    // and a copy, two instances' copies). Two names of one instance keep what they shared.
+    NameAncestry ancestry;
+    const auto right = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto left = section({}, {sketchEdge(4)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto instance = [](const std::string& name, int k, char type = 'E') {
+        return piece(name, 9, "TRF", k, type);
+    };
+    //   a split made before the pattern (WholeShape mode): `X|CUT|TRF;2` is a piece of
+    //   `X|TRF;2`, which doesn't contain it, and the overlap is X's copy and its sketch edge, 2 of
+    //   3, as without the contexts
+    const auto side = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    const auto side2 = instance(side, 2, 'F');
+    const auto cutThenSide2 = instance(piece(side, 6, "CUT", 0, 'F'), 2, 'F');
+    EXPECT_TRUE(NameAncestry::isPieceOf(cutThenSide2, side2));
+    EXPECT_FALSE(ancestry.contains(cutThenSide2, side2));
+    EXPECT_DOUBLE_EQ(ancestry.overlap(side2, cutThenSide2), 2.0 / 3.0);
+    //   a fusion's face bounded by copies of two instances, after a sketch edit renamed the one
+    //   of instance 2: the copies of instance 3 are the same, 3 of 7
+    auto lowOf = [](const std::string& a, const std::string& b) {
+        return section({}, {a, b}, 9, "FUS", 0, 'F', {"LOW"});
+    };
+    const auto renamed = section({}, {sketchEdge(6)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto top23 = lowOf(instance(right, 2), instance(left, 3));
+    const auto newTop23 = lowOf(instance(renamed, 2), instance(left, 3));
+    EXPECT_DOUBLE_EQ(ancestry.overlap(top23, newTop23), 3.0 / 7.0);
+    EXPECT_EQ(ancestry.structuralSurvivors(top23, {newTop23}, 0.25), std::vector<int> {0});
+}
+
+TEST(NameAncestry, unclosedContextMarkIsAName)
+{
+    // A string that starts with the context mark and doesn't close it (only a caller, e.g.
+    // App.getNameAncestors, can pass one) is a name like any other, decoded as such, not an
+    // endless context (the call returns).
+    NameAncestry ancestry;
+    const std::string odd = "\x1e" "9;2";
+    const auto names = ancestry.ancestorNames(odd);
+    EXPECT_EQ(std::count(names.begin(), names.end(), odd), 1);
+    EXPECT_TRUE(ancestry.contains(odd, odd));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Forced matching
 
@@ -1783,6 +1901,106 @@ TEST(SolveOwner, patternStepSiblingNeverResolves)
         EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << sibling;
         EXPECT_EQ(outcomes[0].evidence, "pattern sibling") << sibling;
     }
+}
+
+TEST(SolveOwner, lostOverlapOfInstancesHasNoPartnerThroughTheSupport)
+{
+    // ops#91, OverlappingInstances: blocks x 0..8, 5..13 and 10..18 overlap, and the top is
+    // split where they do. Instance 3 is removed: the piece over instances 2 and 3 (x 10..13) is
+    // gone. The piece over the support and instance 2 (x 5..8) shared most of its ancestry
+    // through the instances' sections alone: tier 1's one survivor, coplanar, so the tier-1
+    // check agreed, and the sketch moved there. Now nothing structural survives, and geometry
+    // finds no piece in place: broken.
+    const auto right = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto left = section({}, {sketchEdge(4)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto top = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    auto instance = [](const std::string& name, int k, char type) {
+        return piece(name, 9, "TRF", k, type);
+    };
+    const auto top12 = section({}, {right, instance(left, 2, 'E')}, 9, "FUS", 0, 'F', {"LOW"});
+    const auto top23 = section(
+        {},
+        {instance(right, 2, 'E'), instance(left, 3, 'E')},
+        9,
+        "FUS",
+        0,
+        'F',
+        {"LOW"}
+    );
+    auto at = [](double x, double length) {
+        Base::Vector3d up(0, 0, 1);
+        return fingerprint('F', "Plane", 4 * length, Base::Vector3d(x, 2, 4), up);
+    };
+    SolveInput input;
+    input.diagonal = 19.3;
+    input.pool["Face"] = {
+        element("Face4", {piece(top, 9, "FUS", 0, 'F')}),
+        element("Face9", {top12}),
+        element("Face13", {piece(instance(top, 2, 'F'), 9, "FUS", 0, 'F')}),
+    };
+    measure(
+        input,
+        {{"Face4", at(2.5, 5)}, {"Face9", at(6.5, 3)}, {"Face13", at(10.5, 5)}},
+        nullptr
+    );
+    input.entries = {missing(top23)};
+    input.entries[0].fingerprint = at(11.5, 3);
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
+}
+
+TEST(SolveOwner, supportReferenceHasNoPartnerAmongInstanceCopies)
+{
+    // ops#91, the review's case: the support's top right edge is gone, and the edges left that
+    // embed instance 2's copy of it (a fusion's edges where instances 2 and 3 overlap) held it
+    // wholly in their ancestry (overlap 1, in ancestry) through the instance's section. They
+    // are other elements.
+    const auto right = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto left = section({}, {sketchEdge(4)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto instance = [](const std::string& name, int k) {
+        return piece(name, 9, "TRF", k, 'E');
+    };
+    const auto top23 = section(
+        {},
+        {instance(right, 2), instance(left, 3)},
+        9,
+        "FUS",
+        0,
+        'F',
+        {"LOW"}
+    );
+    const auto front23 = generated({instance(right, 2)}, 9, "FUS", 'F', 1);
+    auto lineAlong = [](Base::Vector3d direction, double x) {
+        return fingerprint('E', "Line", 3, Base::Vector3d(x, 0, 4), direction);
+    };
+    SolveInput input;
+    input.diagonal = 19.3;
+    // the edge between the overlap's top and front, along X, and a seam along Y
+    input.pool["Edge"] = {
+        element("Edge5", {upper({top23, front23}, 9, "FUS")}),
+        element("Edge6", {section({}, {top23}, 9, "FUS", 0, 'E', {"GEN"})}),
+    };
+    measure(
+        input,
+        {{"Edge5", lineAlong(Base::Vector3d(1, 0, 0), 11.5)},
+         {"Edge6", lineAlong(Base::Vector3d(0, 1, 0), 13)}},
+        nullptr
+    );
+    input.entries = {missing(right, "Edge")};
+
+    //   without a fingerprint: no structural candidate (before, both, in ancestry)
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(describe(outcomes[0]), "broken  -1 [] no candidate");
+    //   with one: the seam along Y agrees in kind and direction, as a copy's edge does, which
+    //   the tier-1 check let through; it isn't in place
+    input.entries[0].fingerprint = lineAlong(Base::Vector3d(0, 1, 0), 8);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge6"});
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
 }
 
 TEST(SolveOwner, geometryAloneNeedsBothTiers)
