@@ -316,6 +316,7 @@ ElementMapPtr ComplexGeoData::resetElementMap(ElementMapPtr elementMap)
         }
 
         _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
+        _elementMap->setInterned(internNames);
     }
     return elementMap;
 }
@@ -354,6 +355,7 @@ void ComplexGeoData::setElementMap(const std::vector<MappedElement>& map)
                                                          // sure the memory exists for the new data.
     // before the names: the algorithm decides how duplicate names are resolved
     _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
+    _elementMap->setInterned(internNames);
     for (auto& element : map) {
         _elementMap->setElementName(element.index, element.name, Tag);
     }
@@ -513,6 +515,7 @@ void ComplexGeoData::Restore(Base::XMLReader& reader)
         
         if (_elementMap) {
             _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
+            _elementMap->setInterned(internNames);
         }
 
         reader.endCharStream();
@@ -664,8 +667,10 @@ void ComplexGeoData::RestoreDocFile(Base::Reader& reader)
         else {
             resetElementMap(std::make_shared<ElementMap>());
             _elementMap = _elementMap->restore(Hasher, reader);
-            if (_elementMap)
+            if (_elementMap) {
                 _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
+                _elementMap->setInterned(internNames);
+            }
             return;
         }
     }

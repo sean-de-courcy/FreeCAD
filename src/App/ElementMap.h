@@ -323,6 +323,22 @@ public:
     }
 
     /**
+     * @brief Whether this map holds its V2 names in interned form (NameTable.h, ops#6).
+     *
+     * setElementName() turns each V2 name into the map's form before it is stored: interned in an
+     * interned map, full in a plain one. Every form of a name gives the same string, so duplicate
+     * counts don't depend on the form a name came in. Like the algorithm, the flag is the one of
+     * the shape (ComplexGeoData) that last took the map. Off by default.
+     */
+    bool isInterned() const {
+        return interned;
+    }
+
+    void setInterned(bool value) {
+        interned = value;
+    }
+
+    /**
      * @brief Copy the map: every name of every element, with its string IDs.
      *
      * Child element maps (V1) are shared with this map, not copied. Shapes that are copies of
@@ -330,7 +346,8 @@ public:
      */
     ElementMapPtr copy() const;
 
-    /// Retag method, only used with V2 element maps.
+    /// Retag method, only used with V2 element maps. In an interned map only the last section is
+    /// re-encoded: the prefix `~<ID>` and the embedded IDs are kept.
     void retagElementMap(long newTag);
 
 private:
@@ -430,6 +447,7 @@ private:
     // Held by value: maps are shared between shapes, so a pointer to one shape's field is
     // left null or dangling when that shape dies
     App::HistoryAlgorithm historyAlgorithm = App::HistoryAlgorithm::V2;
+    bool interned = false;
 
 
     struct ChildMapInfo

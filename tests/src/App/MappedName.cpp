@@ -7,6 +7,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -998,7 +999,36 @@ TEST(MappedName, hash)
     Data::MappedName mappedName(Data::MappedName("TEST"), "POSTFIXTEST");
 
     // Act & Assert
-    EXPECT_EQ(mappedName.hash(), qHash(QByteArray("TEST"), qHash(QByteArray("POSTFIXTEST"))));
+    EXPECT_EQ(mappedName.hash(), qHash(QByteArray("TESTPOSTFIXTEST")));
+    EXPECT_EQ(Data::MappedName("TEST").hash(), qHash(QByteArray("TEST")));
+}
+
+TEST(MappedName, hashIgnoresPostfixSplit)
+{
+    // ops#64: names equal by operator== hash equally, however data and postfix split them, as a
+    // split piece built with append("|...") and the same bytes built as one string
+    // Arrange
+    const char* section = "g1;_;3;SKT;0;E;0;SRC;_";
+    const char* piece = "|_;_;9;CUT;0;E;0;MOD;_";
+    Data::MappedName split(Data::MappedName(section), piece);
+    Data::MappedName whole(std::string(section) + piece);
+    const std::string otherPostfix = std::string(";0;E;0;SRC;_") + piece;
+    Data::MappedName otherSplit(Data::MappedName("g1;_;3;SKT"), otherPostfix.c_str());
+    std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> names;
+    names.insert(split);
+
+    // Act & Assert
+    ASSERT_FALSE(split.postfixBytes().isEmpty());
+    ASSERT_TRUE(whole.postfixBytes().isEmpty());
+    EXPECT_EQ(split, whole);
+    EXPECT_EQ(split.hash(), whole.hash());
+    EXPECT_EQ(otherSplit.hash(), whole.hash());
+    EXPECT_EQ(names.count(whole), 1U);
+    EXPECT_EQ(names.count(otherSplit), 1U);
+    EXPECT_EQ(
+        Data::MappedNameHasher()(std::vector {split}),
+        Data::MappedNameHasher()(std::vector {whole})
+    );
 }
 
 TEST(MappedName, decodeLastFieldEndingInEscapedCharacter)

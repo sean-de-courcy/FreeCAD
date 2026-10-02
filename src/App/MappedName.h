@@ -1090,10 +1090,16 @@ public:
                              bool negative = false,
                              bool recursive = true) const;
 
-    /// Get a hash for this MappedName
+    /// Get a hash for this MappedName: of data followed by postfix, so that names equal by
+    /// operator== hash equally however they are split (ops#64)
     std::size_t hash() const
     {
-        return qHash(data, qHash(postfix));
+        if (postfix.isEmpty()) {
+            return qHash(data);
+        }
+        QByteArray joined(data);
+        joined.append(postfix);
+        return qHash(joined);
     }
 
     // Decodings are cached for the whole process, and every caller that decodes the same string

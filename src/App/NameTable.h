@@ -134,6 +134,10 @@ public:
     using IdHook = std::function<std::optional<NameId>(std::string_view content)>;
     void setIdHookForTesting(IdHook hook);
 
+    /// The position of the last top-level `|` in \a name (the one before its last section), or
+    /// npos for a name of one section.
+    static std::size_t lastTopLevelBar(std::string_view name);
+
     /// `~<ID>`, or nothing if \a text isn't exactly a reference in valid form.
     static std::optional<NameId> parseRef(std::string_view text);
     static std::string makeRef(const NameId& id);

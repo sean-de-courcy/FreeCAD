@@ -326,6 +326,7 @@ void TopoShape::operator=(const TopoShape& sh)
         this->_parentCache = sh._parentCache;
         this->_subLocation = sh._subLocation;
         setHistoryAlgorithm(sh.getHistoryAlgorithm());
+        setInternNames(sh.getInternNames());
         resetElementMap(sh.elementMap(false));
     }
 }
