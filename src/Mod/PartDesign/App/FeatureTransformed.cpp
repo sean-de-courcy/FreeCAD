@@ -65,9 +65,9 @@ namespace
  * is "3". So an instance keeps its number when another step's count changes, or when a step is
  * added after the others. A step of one occurrence is a 1 digit: left out at the end, kept in
  * the middle (a MultiTransform's unused Direction2 before a later feature's used one: "2:2:1:2"),
- * so giving it more occurrences later renames no instance. ('.' would read better, but the element map rejects it in a name: it
- * separates fields in the saved map.) Steps that don't cover the list exactly are taken as one
- * step: the whole list.
+ * so giving it more occurrences later renames no instance. ('.' would read better, but the
+ * element map rejects it in a name: it separates fields in the saved map.) Steps that don't
+ * cover the list exactly are taken as one step: the whole list.
  */
 std::vector<std::string> instanceNumbers(std::vector<Transformed::Step> steps, std::size_t count)
 {

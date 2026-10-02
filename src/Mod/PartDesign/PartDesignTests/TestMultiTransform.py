@@ -267,7 +267,8 @@ class TestMultiTransform(unittest.TestCase):
     def testInstanceNumbersScaledStep(self):
         """A Scaled feature after another one scales the instances there are and adds no step
         (ops#6): LinX (3) then Scaled (factor 2, 3 occurrences) keeps the numbers `2` and `3`
-        for blocks 2 and 3, now 15 and 20 high."""
+        for blocks 2 and 3, scaled 1.5 and 2 times about their centres: their tops are at
+        z = 12.5 and 15."""
         body, multi = self.newStepsBody()
         linX = self.newLinear(body, "LinX", self.Doc.X_Axis, 3)
         scaled = self.Doc.addObject("PartDesign::Scaled", "Scaled")
