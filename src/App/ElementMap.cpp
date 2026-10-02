@@ -1025,13 +1025,45 @@ IndexedName ElementMap::find(const MappedName& name, ElementIDRefs* sids) const
 
     // A name in the other form, e.g. a reference made before its document's InternNames changed
     // or into a document with the other setting, is looked up again in this map's form (ops#6).
-    // Converting is idempotent, so this recurses at most once.
+    // Converting is idempotent, so this recurses at most once per form. A map can hold names in
+    // the other form too (a name stored before its flag was set), so the other form is tried
+    // after the map's (ops#97). Interning a name inserts its nodes into the table: that form is
+    // only tried when the table has entries, i.e. when some document interns its names.
     auto inMapForm = [&]() {
-        if (historyAlgorithm != App::HistoryAlgorithm::V2) {
+        // The map being retried on this thread: a retry looks up each form once, without
+        // retrying from there (the two forms would lead back to each other).
+        static thread_local const ElementMap* retrying = nullptr;
+        if (historyAlgorithm != App::HistoryAlgorithm::V2 || retrying == this) {
             return IndexedName();
         }
-        MappedName form = toMapForm(name, interned);
-        return form == name ? IndexedName() : find(form, sids);
+        struct Retry
+        {
+            const ElementMap* previous;
+            explicit Retry(const ElementMap* map)
+                : previous(retrying)
+            {
+                retrying = map;
+            }
+            ~Retry()
+            {
+                retrying = previous;
+            }
+            Retry(const Retry&) = delete;
+            Retry& operator=(const Retry&) = delete;
+        } retry(this);
+        for (bool form : {interned, !interned}) {
+            if (form && NameTable::instance().size() == 0) {
+                continue;
+            }
+            MappedName converted = toMapForm(name, form);
+            if (converted == name) {
+                continue;
+            }
+            if (auto res = find(converted, sids)) {
+                return res;
+            }
+        }
+        return IndexedName();
     };
 
     auto nameIter = mappedNames.find(name);

@@ -7,8 +7,11 @@ byte for byte. The models here are built in documents whose object IDs start at 
 (`clearDocument`), so the tags of two documents agree and names are compared unmasked.
 """
 
+import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -224,3 +227,144 @@ class InternNamesTest(unittest.TestCase):
         self.assertInterned(_names(internedCut))
         self.assertPlain(_names(plainCut))
         self.assertEqual(_expanded(_names(internedCut)), _names(plainCut))
+
+    def testRestoredMapsTakeTheDocumentsForm(self):
+        """ops#97: a map read from a file holds the file's names as they are. When they are in
+        the other form than the document's, they are put in the document's form once read: a
+        file saved after the switch was turned over but before the recompute, and objects
+        merged from a file of a document with the other setting. Checked in another process,
+        whose name table holds only what the files bring."""
+        files = {}
+        for name, interned in (("turnedOff", True), ("turnedOn", False)):
+            doc = self._document("Restore" + name, interned)
+            self._model(doc)
+            doc.InternNames = not interned  # turned over, saved before the recompute
+            files[name] = (self._save(doc, name), not interned)
+        for name, interned in (("interned", True), ("plain", False)):
+            doc = self._document("Restore" + name, interned)
+            self._model(doc)
+            files[name] = (self._save(doc, name), interned)
+        expected = _names(self._model(self._document("RestoreExpected", False)).Shape)
+        manifest = os.path.join(self.dir, "manifest.json")
+        out = os.path.join(self.dir, "out.json")
+        with open(manifest, "w", encoding="utf-8") as fh:
+            json.dump({"files": files, "out": out}, fh)
+        script = os.path.join(self.dir, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(_RESTORE_CHILD)
+        env = dict(os.environ)
+        env.pop("FREECAD_INTERN_NAMES", None)
+        env["INTERN_NAMES_TEST_MANIFEST"] = manifest
+        subprocess.run([_freecadCmd(), script], env=env, cwd=self.dir, timeout=600, check=False)
+        if os.path.isfile(out + ".error"):
+            with open(out + ".error", encoding="utf-8") as fh:
+                self.fail(fh.read())
+        with open(out, encoding="utf-8") as fh:
+            results = json.load(fh)
+        self.assertEqual(
+            sorted(results), ["mergedIntoInterned", "mergedIntoPlain", "turnedOff", "turnedOn"]
+        )
+        for case, result in results.items():
+            with self.subTest(case=case):
+                if result["interned"]:
+                    self.assertInterned(result["names"])
+                else:
+                    self.assertPlain(result["names"])
+                self.assertEqual(result["expanded"], expected)
+                self.assertEqual(result["found"], len(expected))
+
+    def testBuilderWithInputsInBothForms(self):
+        """ops#97: a Cut whose tool is a link to a feature of a document with the other setting
+        gets its inputs in both forms in one call. Its names are in its document's form, and
+        expand to the names of the same model with every document plain."""
+        results = {}
+        for toolInterned, interned in ((False, False), (True, False), (False, True)):
+            key = f"{int(toolInterned)}{int(interned)}"
+            toolDoc = self._document("BothTool" + key, toolInterned)
+            self._model(toolDoc)
+            self._save(toolDoc, "tool" + key)
+            doc = self._document("BothCut" + key, interned)
+            base = self._model(doc)
+            self._save(doc, "cut" + key)  # a link to another document needs its owner saved
+            link = doc.addObject("App::Link", "Tool")
+            link.LinkedObject = toolDoc.getObject("Fillet")
+            link.LinkPlacement = App.Placement(App.Vector(5, 5, 5), App.Rotation())
+            cut = doc.addObject("Part::Cut", "CutBoth")
+            cut.Base, cut.Tool = base, link
+            doc.recompute()
+            self.assertTrue(cut.Shape.isValid(), key)
+            # the tool comes in its own document's form: the Cut's inputs are in both forms
+            toolNames = "".join(_names(Part.getShape(link)))
+            self.assertEqual("~" in toolNames, toolInterned, key)
+            names = _names(cut.Shape)
+            if interned:
+                self.assertInterned(names)
+            else:
+                self.assertPlain(names)
+            results[key] = _expanded(names)
+        self.assertGreater(len(results["00"]), 0)
+        self.assertEqual(results["10"], results["00"])
+        self.assertEqual(results["01"], results["00"])
+
+
+def _freecadCmd():
+    names = ("FreeCADCmd.exe", "FreeCADCmd") if sys.platform == "win32" else ("FreeCADCmd",)
+    if os.path.basename(sys.executable).lower().startswith("freecadcmd"):
+        return sys.executable
+    for folder in ("bin", "MacOS", ""):
+        for name in names:
+            path = os.path.join(App.getHomePath(), folder, name)
+            if os.path.isfile(path):
+                return path
+    raise FileNotFoundError("FreeCADCmd next to " + App.getHomePath())
+
+
+def restoreChild(manifestPath):
+    """In the child process of testRestoredMapsTakeTheDocumentsForm: opens the files saved after
+    the switch was turned over, and merges the interned file into a plain document and the plain
+    file into an interned one. Reports the fillet's names, the document's form, and how many
+    names find their element."""
+    with open(manifestPath, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    files = manifest["files"]
+
+    def report(doc):
+        shape = doc.getObject("Fillet").Shape
+        names = _names(shape)
+        found = sum(1 for n, e in names.items() if shape.getElementIndexedName(n) == e)
+        return {
+            "interned": doc.InternNames,
+            "names": names,
+            "expanded": _expanded(names),
+            "found": found,
+        }
+
+    results = {}
+    for case in ("turnedOff", "turnedOn"):
+        doc = App.openDocument(files[case][0])
+        results[case] = report(doc)
+        App.closeDocument(doc.Name)
+    for case, (source, interned) in (
+        ("mergedIntoPlain", ("interned", False)),
+        ("mergedIntoInterned", ("plain", True)),
+    ):
+        doc = App.newDocument(case)
+        doc.InternNames = interned
+        doc.mergeProject(files[source][0])
+        results[case] = report(doc)
+        App.closeDocument(doc.Name)
+    with open(manifest["out"], "w", encoding="utf-8") as fh:
+        json.dump(results, fh)
+
+
+_RESTORE_CHILD = """\
+import json, os, traceback
+manifest = os.environ["INTERN_NAMES_TEST_MANIFEST"]
+try:
+    from parttests import InternNamesTest
+    InternNamesTest.restoreChild(manifest)
+except Exception:
+    with open(json.load(open(manifest))["out"] + ".error", "w") as fh:
+        fh.write(traceback.format_exc())
+os._exit(0)
+"""

@@ -29,6 +29,7 @@
 #include "App/ElementFingerprint.h"
 #include "App/ElementSolver.h"
 #include "App/MappedElement.h"
+#include "App/NameTable.h"
 #include <Base/Interpreter.h>
 #include <Base/Console.h>
 #include <App/PropertyLinks.h>
@@ -1288,4 +1289,34 @@ TEST_F(FeaturePartTest, tier3NearestWithAGapOnSixBoxes)
     auto larger = tops[0];
     larger.size = *tops[0].size * 1.011;
     EXPECT_EQ(Data::extrinsicNearest(larger, tops, diagonal, tol), -1);
+}
+
+TEST_F(FeaturePartTest, matchSimilarNamesTakesTheSameNameInTheOtherForm)
+{
+    // ops#97: the strict pass took the exact element by comparing bytes, else through
+    // doNamesMatch, which isn't reflexive for every name: here a face's two linked edges match
+    // each other (they're equal), so the face doesn't match itself. The same name in the other
+    // form (interned) was then missed.
+    // Arrange
+    auto edge = Data::MappedName::makeUnmappedName({"Edge1"}, 5, "MKR", 'E');
+    auto face = Data::MappedName(
+        Data::MappedName::makeEncodedSection({}, {edge, edge}, 7, "FLT", 0, 'F', 0, {"GEN"})
+    );
+    auto interned = Data::MappedName(Data::NameTable::instance().toInterned(face.toString()));
+    auto other = Data::MappedName::makeUnmappedName({"Face2"}, 5, "MKR", 'F');
+    std::vector<Data::MappedElement> elements {
+        {other, Data::IndexedName("Face", 2)},
+        {interned, Data::IndexedName("Face", 1)},
+    };
+    bool ambiguous = false;
+
+    // Act
+    auto found = Feature::matchSimilarNames(face, elements, ambiguous);
+
+    // Assert
+    ASSERT_NE(interned, face);
+    EXPECT_FALSE(Feature::doNamesMatch(face, face, false, true));  // the premise
+    ASSERT_EQ(found.size(), 1U);
+    EXPECT_EQ(found.front().index, Data::IndexedName("Face", 1));
+    EXPECT_FALSE(ambiguous);
 }

@@ -72,6 +72,7 @@
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/ElementFingerprint.h>
 #include <App/ElementNamingUtils.h>
+#include <App/NameTable.h>
 #include <App/Placement.h>
 #include <App/Datums.h>
 #include <Base/Exception.h>
@@ -186,6 +187,20 @@ App::ElementNamePair Feature::getElementName(const char* name, ElementNameType t
 
 namespace
 {
+// True if a and b are the same name, in whatever form each is (full or interned, ops#6):
+// the same bytes, or the same full V2 form (ops#97).
+bool sameName(const Data::MappedName& a, const Data::MappedName& b)
+{
+    if (a == b) {
+        return true;
+    }
+    static const std::string marker(1, Data::NameTable::Marker);
+    if (a.find(marker) < 0 && b.find(marker) < 0) {
+        return false;
+    }
+    return Data::NameTable::instance().compareExpanded(a.toString(), b.toString()) == 0;
+}
+
 // The pattern instances a V2 name is in (ops#55): the tag and the instance number of each of its
 // TRF sections, in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(
@@ -421,7 +436,7 @@ std::vector<Data::MappedElement> Feature::matchSimilarNames(
     // Strict pass: every match counts.
     for (const Data::MappedElement& element : elements) {
         Data::MappedName candidate {element.name};
-        if (candidate == searchName || doNamesMatch(searchName, candidate, false, true)) {
+        if (sameName(candidate, searchName) || doNamesMatch(searchName, candidate, false, true)) {
             ret.push_back(element);
         }
     }
@@ -454,7 +469,7 @@ std::vector<Data::MappedElement> Feature::matchSimilarNames(
     }
 
     for (const auto& element : ret) {
-        if (element.name == searchName) {
+        if (sameName(element.name, searchName)) {
             continue;
         }
         Base::Console().log(

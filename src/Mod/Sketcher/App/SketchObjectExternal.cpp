@@ -2991,7 +2991,11 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
         egf->setGeometry(geo);
         egf->setFlag(ExternalGeometryExtension::Missing,false);
         ref = objName + "." + Data::ComplexGeoData::elementMapPrefix();
-        elements.front().name.appendToBuffer(ref);
+        // The name in the shape's form (interned or full, ops#97), as the link's shadow will
+        // hold it: updateGeometryRefs() keys the geometry by the shadow's name.
+        auto mapped = Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
+                          .getMappedName(elements.front().index);
+        (mapped ? mapped : elements.front().name).appendToBuffer(ref);
         egf->setRef(ref);
         objs.push_back(obj);
         subs.emplace_back();
