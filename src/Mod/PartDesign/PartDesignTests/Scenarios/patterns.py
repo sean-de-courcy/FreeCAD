@@ -137,6 +137,22 @@ class LinearOccurrences(LinearPatternEdit):
         doc.LinearPattern.Occurrences = 4
 
 
+class LinearFewerOccurrences(LinearPatternEdit):
+    """One occurrence fewer: 3 -> 2. Instance 3 is gone, and the sketch on its boss should
+    break. Its siblings' top faces are named as it is up to the duplicate counter, so tier 1
+    can't tell them from it: the reference solver's pattern-sibling guard (ops#7) must break the
+    reference instead of moving it to one of them."""
+
+    gone = False
+
+    def attachedFace(self):
+        return BROKEN if self.gone else super().attachedFace()
+
+    def edit(self, doc):
+        doc.LinearPattern.Occurrences = 2
+        self.gone = True
+
+
 class LinearSpacing(LinearPatternEdit):
     """The spacing shrinks: 18 -> 15."""
 

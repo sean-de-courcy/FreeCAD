@@ -67,3 +67,7 @@ cli  PartDesignTests.TestNamingScenarios.SplitArcNotch.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SplitArcNotch.test_fillet_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.SolverArcNotchThenFill.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SolverArcNotchThenFill.test_fillet_edge_V2multi
+
+reason: a dress-up on a sketch circle's edge that two notches split keeps the arc that took the circle's geometry ID only; the other arc is new, so the multi-match flags don't find it either; the scenario expects both (V2 and V2multi; V2s takes both, the continuation around a whole circle, ops#7 Task 2 PR 8)
+cli  PartDesignTests.TestNamingScenarios.SplitCircleNotch.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.SplitCircleNotch.test_fillet_edge_V2multi

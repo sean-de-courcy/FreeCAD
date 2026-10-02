@@ -519,3 +519,37 @@ class SolverArcNotchThenFill(SplitArcNotch):
 
     def fill(self, doc):
         m.fillDiscNotch(doc.Profile)
+
+
+class SplitCircleNotch(SplitModel):
+    """A boss: the circle centre (10, 5), radius 5, padded 10 high; a fillet, radius 0.5, on its
+    top circle. Two notches are cut into the circle, at 0 and 180 degrees: the circle becomes
+    the arc 10..170 degrees (its geometry ID kept), and a new arc runs on 190..350 degrees, with
+    the notches' floors at radius 3 between them. The fillet should take both arcs of radius 5
+    (the second as the continuation of the first, around a whole old circle), never the notches'
+    floors (concentric, another radius). The cyclic case of the arc rule (ops#7, Task 2 PR 8)."""
+
+    REFS = ("fillet_edge",)
+    radius = 0.5
+
+    def block(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", [m.discCircle()], body)
+        m.pad(body, profile, self.height)
+        return body
+
+    def topCircle(self):
+        return pieces(edge(center=(*m.DISC_CENTER, self.height), radius=m.DISC_RADIUS))
+
+    def build(self, doc):
+        body = self.block(doc)
+        pad = doc.Pad
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.topCircle().predicate))
+        fillet.Radius = self.radius
+        self.ref("fillet_edge", fillet, "Base", self.topCircle, Filleted(self.radius))
+
+    def edit(self, doc):
+        m.notchDiscCircle(doc.Profile)
