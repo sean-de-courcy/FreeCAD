@@ -39,6 +39,7 @@
 #include <App/ElementSolver.h>
 #include <App/ElementSolverBatch.h>
 #include <App/MappedName.h>
+#include <App/NameTable.h>
 #include <App/ReferenceReport.h>
 
 #include "Application.h"
@@ -1279,6 +1280,82 @@ PyObject* ApplicationPy::sIsPieceOf(PyObject* /*self*/, PyObject* args)
     PY_TRY
     {
         return Py::new_reference_to(Py::Boolean(Data::NameAncestry::isPieceOf(name, oldName)));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sExpandMappedName(PyObject* /*self*/, PyObject* args)
+{
+    const char* name {};
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        return Py::new_reference_to(Py::String(Data::NameTable::instance().toPlain(name)));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sInternMappedName(PyObject* /*self*/, PyObject* args)
+{
+    const char* name {};
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        return Py::new_reference_to(Py::String(Data::NameTable::instance().toInterned(name)));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sGetMappedNameId(PyObject* /*self*/, PyObject* args)
+{
+    const char* name {};
+    if (!PyArg_ParseTuple(args, "s", &name)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        auto id = Data::NameTable::instance().internName(name);
+        if (!id) {
+            Py_Return;
+        }
+        return Py::new_reference_to(Py::String(id->toBase32()));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sGetNameTableEntry(PyObject* /*self*/, PyObject* args)
+{
+    const char* text {};
+    if (!PyArg_ParseTuple(args, "s", &text)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        std::string_view idText(text);
+        if (!idText.empty() && idText.front() == Data::NameTable::Marker) {
+            idText.remove_prefix(1);
+        }
+        auto id = Data::NameId::fromBase32(idText);
+        if (!id) {
+            throw Py::ValueError(std::string("Not a name ID: ") + text);
+        }
+        auto& table = Data::NameTable::instance();
+        auto content = table.lookup(*id);
+        if (!content) {
+            Py_Return;
+        }
+        Py::Tuple entry(2);
+        entry.setItem(0, Py::String(*content));
+        entry.setItem(1, Py::Long(table.depth(*id)));
+        return Py::new_reference_to(entry);
     }
     PY_CATCH;
 }

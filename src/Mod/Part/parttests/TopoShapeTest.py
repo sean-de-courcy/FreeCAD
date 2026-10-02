@@ -819,6 +819,57 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         finally:
             App.closeDocument(doc.Name)
 
+    def testInternedNamesExpandToV2(self):
+        """The name table (ops#6, Task 1 PR 3): every V2 name of a fillet cut by a slot, interned,
+        expands back to itself byte for byte and decodes to as many sections. Nothing interns
+        names in FreeCAD yet, so the shapes keep their plain names."""
+        doc = App.newDocument("InternedNames")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            box = doc.addObject("Part::Box", "Box")
+            fillet = doc.addObject("Part::Fillet", "Fillet")
+            fillet.Base = box
+            fillet.Edges = [(1, 1.0, 1.0), (2, 1.0, 1.0)]
+            slot = doc.addObject("Part::Box", "Slot")
+            slot.Length = 2
+            slot.Width = 12
+            slot.Height = 6
+            slot.Placement.Base = App.Vector(4, -1, 5)
+            cut = doc.addObject("Part::Cut", "Cut")
+            cut.Base = fillet
+            cut.Tool = slot
+            doc.recompute()
+
+            names = list(cut.Shape.ElementMap)
+            self.assertGreater(len(names), 20)
+            self.assertTrue(any("^" in name for name in names))  # embedded names
+            self.assertTrue(any("|" in name.replace("^|", "") for name in names))  # pieces
+            for name in names:
+                interned = App.internMappedName(name)
+                self.assertNotIn("^", interned, name)
+                self.assertLessEqual(len(interned), len(name))
+                self.assertEqual(App.expandMappedName(interned), name)
+                self.assertEqual(App.internMappedName(interned), interned)
+                self.assertEqual(
+                    len(App.getDecodedMappedName(interned)), len(App.getDecodedMappedName(name))
+                )
+            self.assertEqual(sorted(cut.Shape.ElementMap), sorted(names))  # unchanged
+
+            # a node: its ID, its entry and its depth
+            deepest = max(names, key=len)
+            nodeId = App.getMappedNameId(deepest)
+            self.assertEqual(len(nodeId), 13)
+            content, depth = App.getNameTableEntry(nodeId)
+            self.assertEqual(content, App.internMappedName(deepest))
+            self.assertEqual(App.getNameTableEntry("~" + nodeId), (content, depth))
+            self.assertGreaterEqual(depth, 2)
+            self.assertEqual(App.expandMappedName("~" + nodeId), deepest)
+            self.assertIsNone(App.getNameTableEntry("0123456789abc"))
+            with self.assertRaises(ValueError):
+                App.getNameTableEntry("not an id")
+        finally:
+            App.closeDocument(doc.Name)
+
     def testTopoShapeRevolve(self):
         # Arrange
         face = self.doc.Box1.Shape.Faces[0]

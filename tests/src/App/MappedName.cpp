@@ -7,6 +7,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 // NOLINTBEGIN(readability-magic-numbers)
 
@@ -998,6 +999,59 @@ TEST(MappedName, hash)
 
     // Act & Assert
     EXPECT_EQ(mappedName.hash(), qHash(QByteArray("TEST"), qHash(QByteArray("POSTFIXTEST"))));
+}
+
+TEST(MappedName, decodeLastFieldEndingInEscapedCharacter)
+{
+    // ops#63 (R5): a name whose last field ends in an escaped character decodes. The decoder
+    // returned nothing for it.
+    for (const std::vector<std::string>& connected :
+         {std::vector<std::string> {"a"}, {"a;"}, {"b", "a;"}, {"a|"}, {"a,"}, {"a^;"}}) {
+        // Arrange
+        std::string section = Data::MappedName::makeEncodedSection(
+            {"g1"},
+            std::vector<std::string> {},
+            "12",
+            "XTR",
+            "0",
+            'E',
+            "0",
+            {},
+            connected
+        );
+        std::string twoSections = std::string("g2;_;3;SKT;0;E;0;SRC;_|") + section;
+
+        // Act
+        const auto& decoded = Data::MappedName::getDecodedMappedName(section);
+        const auto& decodedTwo = Data::MappedName::getDecodedMappedName(twoSections);
+
+        // Assert
+        ASSERT_EQ(decoded.size(), 1U) << section;
+        EXPECT_EQ(decoded[0].connectedElements, connected) << section;
+        EXPECT_EQ(decoded[0].referenceIDs, std::vector<std::string> {"g1"});
+        EXPECT_EQ(decoded[0].opCode, "XTR");
+        ASSERT_EQ(decodedTwo.size(), 2U) << twoSections;
+        EXPECT_EQ(decodedTwo[0].referenceIDs, std::vector<std::string> {"g2"});
+        EXPECT_EQ(decodedTwo[1].connectedElements, connected) << twoSections;
+    }
+}
+
+TEST(MappedName, decodeEndsAsBefore)
+{
+    // The ops#63 fix changes nothing for names that decoded before
+    const auto& plain = Data::MappedName::getDecodedMappedName("g1;_;3;SKT;0;E;0;SRC;_");
+    ASSERT_EQ(plain.size(), 1U);
+    EXPECT_EQ(plain[0].referenceIDs, std::vector<std::string> {"g1"});
+    EXPECT_EQ(plain[0].mapperFlags, std::vector<std::string> {"SRC"});
+    EXPECT_TRUE(plain[0].connectedElements.empty());
+
+    const auto& bare = Data::MappedName::getDecodedMappedName("Edge1");
+    ASSERT_EQ(bare.size(), 1U);
+    EXPECT_EQ(bare[0].referenceIDs, std::vector<std::string> {"Edge1"});
+
+    EXPECT_TRUE(Data::MappedName::getDecodedMappedName("").empty());
+    // a trailing top-level `|` ends the name without an empty section
+    EXPECT_EQ(Data::MappedName::getDecodedMappedName("g1;_;3;SKT;0;E;0;SRC;_|").size(), 1U);
 }
 
 // NOLINTEND(readability-magic-numbers)
