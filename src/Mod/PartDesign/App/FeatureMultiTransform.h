@@ -61,7 +61,8 @@ public:
     ) override;
 
     /// The steps of the transformation features as the last getTransformations() combined them
-    /// (ops#6): every feature's first step in order, then their second steps, ...
+    /// (ops#6): every feature's first step, then their second steps, ...; within each level in
+    /// the order of the features' object IDs, not of Transformations
     std::vector<Step> getTransformationSteps() const override
     {
         return steps;

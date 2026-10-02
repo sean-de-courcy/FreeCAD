@@ -178,7 +178,7 @@ class TestMultiTransform(unittest.TestCase):
             steps.append(step)
         multi.Transformations = steps
         linX, linY = steps
-        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2)):
+        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2), (1, 2), (3, 2)):
             linX.Occurrences = xCount
             linY.Occurrences = yCount
             self.Doc.recompute()
@@ -187,6 +187,99 @@ class TestMultiTransform(unittest.TestCase):
                 harness.gridInstances(xCount, yCount, 30, 10),
                 f"LinX {xCount}, LinY {yCount}",
             )
+
+    def newStepsBody(self):
+        """A V2 body with a 10 x 10 x 10 box at the origin and a MultiTransform of it."""
+        if hasattr(self.Doc, "HistoryAlgorithm"):
+            self.Doc.HistoryAlgorithm = "V2"
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        multi = self.Doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = [box]
+        multi.Refine = False
+        body.addObject(multi)
+        return body, multi
+
+    def newLinear(self, body, name, axis, occurrences, axis2=None, offset2=30, occurrences2=1):
+        step = self.Doc.addObject("PartDesign::LinearPattern", name)
+        step.Direction = (axis, [""])
+        step.Mode = "Spacing"
+        step.Offset = 30
+        step.Occurrences = occurrences
+        if axis2 is not None:
+            step.Direction2 = (axis2, [""])
+            step.Mode2 = "Spacing"
+            step.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
+            step.Offset2 = offset2
+            step.Occurrences2 = occurrences2
+        body.addObject(step)
+        return step
+
+    def testInstanceNumbersInnerDirection2(self):
+        """The digits go by level (ops#6): every feature's first step, then their second steps.
+        LinX (3 along X; Direction2 along Z) then LinY (2 along Y; Direction2 along X, 100
+        apart, 2): block (a, b, x2, y2) is `a:b:x2:y2`, the trailing 1s left out. While LinX's
+        Direction2 has one occurrence, its digit is a 1 in the middle (`2:2:1:2`), so giving it
+        two renames none of the blocks there were: the new ones, 30 higher, are `a:b:2:y2`."""
+        body, multi = self.newStepsBody()
+        linX = self.newLinear(body, "LinX", self.Doc.X_Axis, 3, self.Doc.Z_Axis)
+        linY = self.newLinear(body, "LinY", self.Doc.Y_Axis, 2, self.Doc.X_Axis, 100, 2)
+        multi.Transformations = [linX, linY]
+
+        def layer(x2):
+            instances = {}
+            for a in range(1, 4):
+                for b in range(1, 3):
+                    for y2 in range(1, 3):
+                        digits = [a, b, x2, y2]
+                        while digits and digits[-1] == 1:
+                            digits.pop()
+                        centre = (30.0 * (a - 1) + 100.0 * (y2 - 1) + 5, 30.0 * (b - 1) + 5)
+                        instances[centre] = [":".join(map(str, digits))] if digits else []
+            return instances
+
+        for x2Count in (1, 2, 1):
+            linX.Occurrences2 = x2Count
+            self.Doc.recompute()
+            self.assertEqual(
+                harness.topFaceInstances(multi.Shape, 10), layer(1), f"Occurrences2 {x2Count}"
+            )
+            if x2Count == 2:
+                self.assertEqual(harness.topFaceInstances(multi.Shape, 40), layer(2))
+
+    def testInstanceNumbersMirroredStep(self):
+        """A Mirrored feature is one step of 2 (ops#6): LinX (3) then a mirror in the XZ plane
+        numbers the mirrored copy of block a `a:2`."""
+        body, multi = self.newStepsBody()
+        linX = self.newLinear(body, "LinX", self.Doc.X_Axis, 3)
+        mirrored = self.Doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.MirrorPlane = (self.Doc.XZ_Plane, [""])
+        body.addObject(mirrored)
+        multi.Transformations = [linX, mirrored]
+        self.Doc.recompute()
+        expected = {}
+        for a in range(1, 4):
+            expected[(30.0 * (a - 1) + 5, 5.0)] = [str(a)] if a > 1 else []
+            expected[(30.0 * (a - 1) + 5, -5.0)] = [f"{a}:2"]
+        self.assertEqual(harness.topFaceInstances(multi.Shape, 10), expected)
+
+    def testInstanceNumbersScaledStep(self):
+        """A Scaled feature after another one scales the instances there are and adds no step
+        (ops#6): LinX (3) then Scaled (factor 2, 3 occurrences) keeps the numbers `2` and `3`
+        for blocks 2 and 3, now 15 and 20 high."""
+        body, multi = self.newStepsBody()
+        linX = self.newLinear(body, "LinX", self.Doc.X_Axis, 3)
+        scaled = self.Doc.addObject("PartDesign::Scaled", "Scaled")
+        scaled.Factor = 2
+        scaled.Occurrences = 3
+        body.addObject(scaled)
+        multi.Transformations = [linX, scaled]
+        self.Doc.recompute()
+        tops = {}
+        for z in (10, 12.5, 15):
+            tops.update(harness.topFaceInstances(multi.Shape, z))
+        self.assertEqual(sorted(tops.values()), [[], ["2"], ["3"]])
 
     def tearDown(self):
         # closing doc

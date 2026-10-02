@@ -186,7 +186,7 @@ class TestLinearPattern(unittest.TestCase):
         pattern.Offset2 = 30
         pattern.Refine = False
         body.addObject(pattern)
-        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2)):
+        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2), (1, 2), (3, 2)):
             pattern.Occurrences = xCount
             pattern.Occurrences2 = yCount
             self.Doc.recompute()

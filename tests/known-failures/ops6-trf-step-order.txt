@@ -1,0 +1,25 @@
+# A MultiTransform numbers its instances with one digit per step, the digits in the order the
+# step features were created (their object IDs; Transformed's instanceNumbers, ops#6). Reordering
+# the features or inserting a new one renames nothing (MultiTransformReorder). Two edits still
+# shift digits, accepted with the user's choice of creation-order digits (2026-10-02): removing a
+# step feature that isn't the newest (the later digits move left), and deleting a feature and
+# making it again (its digit moves to the end). A reference to a block then lands on another
+# block that now has its old number, silently, in V2s too (tier 0 takes the exact name). Remove
+# the entries if the digits are ever keyed to their features.
+
+issue: ops#6
+
+reason: LinY, the middle of LinX, LinY, LinZ, is removed: LinZ's digit moves into its place, so the sketches on the lost y = 30 row land on the blocks above the y = 0 row whose numbers they had (V2, V2s)
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_00_30_face_V2
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_00_30_face_V2s
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_30_30_face_V2
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_30_30_face_V2s
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_60_30_face_V2
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRemoveStep.test_sketch_60_30_face_V2s
+
+reason: LinX is deleted and made again: its digit now comes after LinY's, so the sketches on (0, 30) (`1:2`) and (30, 0) (`2`) trade blocks (V2, V2s); (60, 30)'s `3:2` is gone, and V2s breaks it with the pattern-sibling guard (V2 finds it by geometry)
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_00_30_face_V2
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_00_30_face_V2s
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_30_00_face_V2
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_30_00_face_V2s
+cli  PartDesignTests.TestNamingScenarios.MultiTransformRecreateStep.test_sketch_60_30_face_V2s

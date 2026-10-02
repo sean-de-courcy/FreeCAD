@@ -26,6 +26,10 @@ of one original: a sketch on one pattern's instance stays there when the other p
 (ops#55). A two-step pattern (a MultiTransform, a LinearPattern with a second direction): a
 sketch on an instance stays there when an earlier step's count changes (ops#6)."""
 
+import os
+import shutil
+import tempfile
+
 import FreeCAD as App
 
 from .harness import BROKEN, Attached, Chamfered, Scenario, ScenarioError, X, Y, Z, edge, face
@@ -460,10 +464,17 @@ class PatternStepsEdit(Scenario):
     edit of the earlier step's count renumbered the later instances under the same names: the
     sketch on (0, 30) moved to (30, 30), silently, even in V2s (ops#6). Each TRF section now holds
     one number per step (`...;TRF;2:2;F;0;MOD;_` for (30, 30)). Subclasses make the pattern
-    (`pattern`) and say how to set a step's count (`setCount`)."""
+    (`pattern`) and say how to set a step's count (`setCount`).
+
+    In "Extent" mode (`patternMode`) each step keeps its overall length (60 along X, 30 along Y),
+    so one occurrence fewer moves the later instances: with X at 2, instance 2 is at x = 60, in
+    instance 3's place. A sketch follows its instance there, and the one on the lost instance
+    breaks; geometry alone would find instance 2's face where instance 3's was."""
 
     abstract = True
     area = "patterns"
+    patternMode = "Spacing"
+    INITIAL = {"x": 3, "y": 2}
     REFS = ("sketch_00_30_face", "sketch_30_30_face", "sketch_60_30_face", "sketch_30_00_face")
     BLOCKS = {
         "sketch_00_30_face": (0, 1),
@@ -489,29 +500,42 @@ class PatternStepsEdit(Scenario):
     def linear(self, doc, body, name, axis, occurrences):
         pattern = doc.addObject("PartDesign::LinearPattern", name)
         pattern.Direction = (m.originFeature(body, axis), [""])
-        pattern.Mode = "Spacing"
-        pattern.Offset = self.spacing
+        pattern.Mode = self.patternMode
+        if self.patternMode == "Extent":
+            pattern.Length = self.spacing * (occurrences - 1)
+        else:
+            pattern.Offset = self.spacing
         pattern.Occurrences = occurrences
         return pattern
 
     def counts(self):
         """The two steps' counts after the current step (the steps run in order)."""
-        x, y = 3, 2
+        x, y = self.INITIAL["x"], self.INITIAL["y"]
         done = self.steps[: self.steps.index(self.stepName) + 1] if self.stepName else ()
         for name in done:
-            step, count = self.STEPS[name]
+            step, count = self.STEPS.get(name, (None, None))
             if step == "x":
                 x = count
-            else:
+            elif step == "y":
                 y = count
         return x, y
+
+    def pitch(self, step, count):
+        """How far apart the step's instances are with `count` occurrences."""
+        if self.patternMode != "Extent":
+            return self.spacing
+        return self.spacing * (self.INITIAL[step] - 1) / (count - 1) if count > 1 else 0
 
     def topFace(self, ref):
         i, j = self.BLOCKS[ref]
         x, y = self.counts()
         if i >= x or j >= y:
             return BROKEN
-        centre = (i * self.spacing + self.size / 2, j * self.spacing + self.size / 2, self.size)
+        centre = (
+            i * self.pitch("x", x) + self.size / 2,
+            j * self.pitch("y", y) + self.size / 2,
+            self.size,
+        )
         return face("plane", normal=Z, through=centre, contains=centre)
 
     def build(self, doc):
@@ -563,9 +587,12 @@ class LinearDirection2Steps(PatternStepsEdit):
         pattern = self.linear(doc, body, "LinearPattern", "X_Axis", 3)
         pattern.Originals = [original]
         pattern.Direction2 = (m.originFeature(body, "Y_Axis"), [""])
-        pattern.Mode2 = "Spacing"
+        pattern.Mode2 = self.patternMode
         pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
-        pattern.Offset2 = self.spacing
+        if self.patternMode == "Extent":
+            pattern.Length2 = self.spacing
+        else:
+            pattern.Offset2 = self.spacing
         pattern.Occurrences2 = 2
         pattern.Refine = False
         body.addObject(pattern)
@@ -574,3 +601,115 @@ class LinearDirection2Steps(PatternStepsEdit):
     def setCount(self, doc, step, count):
         prop = "Occurrences" if step == "x" else "Occurrences2"
         setattr(doc.getObject("LinearPattern"), prop, count)
+
+
+class MultiTransformStepsExtent(MultiTransformSteps):
+    """MultiTransformSteps in "Extent" mode: one occurrence fewer moves the later instances."""
+
+    patternMode = "Extent"
+
+
+class LinearDirection2StepsExtent(LinearDirection2Steps):
+    """LinearDirection2Steps in "Extent" mode: one occurrence fewer moves the later instances."""
+
+    patternMode = "Extent"
+
+
+class MultiTransformStepsReopened(MultiTransformSteps):
+    """As MultiTransformSteps, with the document saved, closed and opened again after `xTwo`:
+    the per-step numbers (`2:2`) go through the saved element map, where ':' would end a name if
+    it were taken for a separator (ops#6)."""
+
+    steps = ("xTwo", "reopen", "xThree", "yOne", "yTwo")
+
+    def reopen(self, doc):
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        self.doc = App.openDocument(path)
+        self.documents.append(self.doc.Name)
+        for obj in self.doc.Objects:
+            obj.touch()
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+def removeStep(doc, name):
+    """Removes a MultiTransform's feature from its Transformations, its body and the document."""
+    obj = doc.getObject(name)
+    for multi in obj.InList:
+        if multi.isDerivedFrom("PartDesign::MultiTransform"):
+            multi.Transformations = [f for f in multi.Transformations if f != obj]
+    obj.getParentGeoFeatureGroup().removeObject(obj)
+    doc.removeObject(name)
+
+
+class MultiTransformReorder(MultiTransformSteps):
+    """MultiTransformSteps' model, its features reordered instead of counted: `swap` makes
+    Transformations [LinY, LinX], `swapBack` restores it; `insert` puts a new LinZ (2 along Z,
+    30 apart: blocks above the others) at the front, and `dropInserted` removes it again. The
+    blocks stay where they are (the translations commute), and every sketch must stay on its
+    block. A block's number follows the features' creation order (their object IDs), not their
+    place in Transformations, so none of these edits renumbers an instance (ops#6). With the
+    digits in Transformations' order, `swap` traded (0, 30)'s `1:2` and (30, 0)'s `2`: both
+    sketches moved, in V2s too, since the exact name was found."""
+
+    steps = ("swap", "swapBack", "insert", "dropInserted")
+
+    def swap(self, doc):
+        multi = doc.getObject("MultiTransform")
+        multi.Transformations = list(reversed(multi.Transformations))
+
+    swapBack = swap
+
+    def insert(self, doc):
+        multi = doc.getObject("MultiTransform")
+        linZ = self.linear(doc, multi.getParentGeoFeatureGroup(), "LinZ", "Z_Axis", 2)
+        multi.getParentGeoFeatureGroup().addObject(linZ)
+        multi.Transformations = [linZ] + multi.Transformations
+
+    def dropInserted(self, doc):
+        removeStep(doc, "LinZ")
+
+
+class MultiTransformRemoveStep(MultiTransformSteps):
+    """LinX, LinY and LinZ (2 along Z, 30 apart: blocks above the others), made in that order;
+    then LinY is removed. The y = 30 row is gone, and its three sketches should break; the one
+    on (30, 0) stays. LinY's digit was the middle one, so LinZ's moves into its place: (30, 30)'s
+    `2:2` now names the block above (30, 0), and the sketch moves there, silently, in V2s too.
+    Removing a step feature that isn't the newest is the edit the creation-order digits don't
+    cover (ops#6, accepted and listed)."""
+
+    steps = ("removeY",)
+
+    def pattern(self, doc, body, original):
+        multi = super().pattern(doc, body, original)
+        linZ = self.linear(doc, body, "LinZ", "Z_Axis", 2)
+        body.addObject(linZ)
+        multi.Transformations = multi.Transformations + [linZ]
+        return multi
+
+    def counts(self):
+        return (3, 1) if self.stepName == "removeY" else (3, 2)
+
+    def removeY(self, doc):
+        removeStep(doc, "LinY")
+
+
+class MultiTransformRecreateStep(MultiTransformSteps):
+    """LinX is deleted and made again, the same, as a user redoing it. The blocks are where they
+    were, and every sketch should stay. The new LinX's object ID is the highest, so its digit
+    now comes after LinY's: (0, 30)'s `1:2` and (30, 0)'s `2` trade blocks, silently, in V2s too
+    (ops#6, accepted and listed, as removing a step feature that isn't the newest)."""
+
+    steps = ("recreateX",)
+
+    def recreateX(self, doc):
+        multi = doc.getObject("MultiTransform")
+        removeStep(doc, "LinX")
+        linX = self.linear(doc, multi.getParentGeoFeatureGroup(), "LinXAgain", "X_Axis", 3)
+        multi.getParentGeoFeatureGroup().addObject(linX)
+        multi.Transformations = [linX] + multi.Transformations
