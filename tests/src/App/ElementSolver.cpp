@@ -340,6 +340,33 @@ TEST(NameAncestry, cornerEdgeAfterTheNotchIsNotAPiece)
     EXPECT_FALSE(NameAncestry::isPieceOf(longerId, sketchEdge(1)));
 }
 
+TEST(NameAncestry, patternInstancesAreNeitherPiecesNorPartners)
+{
+    // ops#55: a pattern's instance k is a copy of the support's element with a section
+    // `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_` appended. It has the MOD flag, but the instance is
+    // another element: neither a piece of the support's element nor a tier-1 partner of another
+    // instance's, of this pattern or another.
+    NameAncestry ancestry;
+    const auto support = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    const auto instance = [&](int pattern, int k) {
+        return piece(support, pattern, "TRF", k, 'F');
+    };
+    const auto x3 = instance(9, 3);
+    const auto y3 = instance(8, 3);
+
+    EXPECT_FALSE(NameAncestry::isPieceOf(x3, support));
+    //   a split piece of an instance is still a piece of it
+    EXPECT_TRUE(NameAncestry::isPieceOf(piece(x3, 10, "FUS", 0, 'F'), x3));
+    //   only the same instance survives tier 1, whatever its overlap with the others
+    const std::vector<std::string> candidates {support, instance(9, 2), x3, instance(8, 2)};
+    EXPECT_EQ(ancestry.structuralSurvivors(y3, candidates, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(x3, candidates, 1.0), std::vector<int> {2});
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(support, {support, x3, y3}, 1.0),
+        std::vector<int> {0}
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Forced matching
 

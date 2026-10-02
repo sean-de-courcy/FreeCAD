@@ -1,0 +1,12 @@
+# The Attacher keeps a missing reference on its old index name when the placement there is the
+# same (AttachExtension's substitute). Two patterns of one original (Scenarios/patterns.py,
+# TwoPatterns*): once PatY loses its instance 3, the sketch's name for it is missing (V2 names the
+# instances by content, ops#55), but its old index now holds a PatX block's top face, coplanar with
+# the lost one, so the sketch moves there silently. V2s breaks the reference instead. Remove the
+# entries in the PR that makes them pass.
+
+issue: ops#68
+
+reason: PatY 3 -> 2: the sketch on PatY's removed instance 3 stays on its old index, now a PatX block's coplanar top face (V2)
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBox.test_sketch_y3_face_V2
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPad.test_sketch_y3_face_V2

@@ -9,6 +9,7 @@
 
 #include <boost/core/ignore_unused.hpp>
 #include "Mod/Part/App/FeaturePartCommon.h"
+#include "Mod/Part/App/TopoShapeOpCode.h"
 #include <App/Link.h>
 #include <src/App/InitApplication.h>
 #include <BRep_Builder.hxx>
@@ -395,6 +396,50 @@ TEST_F(FeaturePartTest, doNamesMatchStrictRejectsOneSharedVertexID)
     //   no shared ID matches in neither mode
     EXPECT_FALSE(Feature::doNamesMatch(corner, otherCorner));
     EXPECT_FALSE(Feature::doNamesMatch(corner, otherCorner, false, true));
+}
+
+TEST_F(FeaturePartTest, doNamesMatchKeepsPatternInstancesApart)
+{
+    // Arrange
+    //   pattern: a pattern's instances are copies of the support's face that end in a TRF section
+    //   with the pattern's ID and the instance number (ops#55); a fusion splits a face by
+    //   appending a MOD section of its own
+    auto section = [](long tag, const char* op, int index) {
+        return std::string("|")
+            + Data::MappedName::makeEncodedSection(
+                   std::vector<std::string> {},
+                   std::vector<Data::MappedName> {},
+                   tag,
+                   op,
+                   index,
+                   'F',
+                   0,
+                   {Data::MAPPER_FLAG_MODIFIED},
+                   std::vector<Data::MappedName> {}
+            );
+    };
+    auto withSection = [&](const Data::MappedName& name, long tag, const char* op, int index) {
+        return Data::MappedName(name.toString() + section(tag, op, index));
+    };
+    auto support = Data::MappedName::makeUnmappedName({"Face6"}, 5, "MKR", 'F');
+    auto instance2 = withSection(support, 9, OpCodes::Transformed, 2);
+    auto instance3 = withSection(support, 9, OpCodes::Transformed, 3);
+    auto sameInstance3 = withSection(support, 9, OpCodes::Transformed, 3);
+    auto otherPatternsInstance3 = withSection(support, 8, OpCodes::Transformed, 3);
+    auto pieceOfInstance3 = withSection(instance3, 10, OpCodes::Fuse, 0);
+    auto pieceOfSupport = withSection(support, 10, OpCodes::Fuse, 0);
+
+    // Act and assert
+    //   an instance is neither the support nor another instance, of this pattern or another
+    EXPECT_FALSE(Feature::doNamesMatch(instance3, support));
+    EXPECT_FALSE(Feature::doNamesMatch(support, instance3));
+    EXPECT_FALSE(Feature::doNamesMatch(instance3, instance2));
+    EXPECT_FALSE(Feature::doNamesMatch(instance3, otherPatternsInstance3));
+    EXPECT_TRUE(Feature::doNamesMatch(instance3, sameInstance3));
+    //   a piece still matches the face it was split from, in an instance as in the support
+    EXPECT_TRUE(Feature::doNamesMatch(pieceOfInstance3, instance3));
+    EXPECT_TRUE(Feature::doNamesMatch(pieceOfSupport, support));
+    EXPECT_FALSE(Feature::doNamesMatch(pieceOfInstance3, support));
 }
 
 TEST_F(FeaturePartTest, matchSimilarNamesSeveralLooseMatchesAreAmbiguous)

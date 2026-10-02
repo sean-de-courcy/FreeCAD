@@ -41,13 +41,32 @@ std::vector<std::string> sortedFlags(const DecodedMappedSection& section)
     return flags;
 }
 
-// The duplicate counter written over the op code from count 2 on: `_2`, `_3`, ... (ops#55).
+// An index suffix as the op code: `_2`, `_3`, ... (`Data::indexSuffix`). PartDesign's patterns
+// gave it to their instances before ops#55; the solver still treats it as a counter.
 bool isCounterOpCode(const std::string& opCode)
 {
     return opCode.size() > 1 && opCode[0] == '_'
         && std::all_of(opCode.begin() + 1, opCode.end(), [](char c) {
                return c >= '0' && c <= '9';
            });
+}
+
+// The op code of a pattern instance's section, `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_` (Part's
+// OpCodes::Transformed, ops#55). It carries the MOD flag, but it's no split: it says which
+// instance of which pattern the element is in.
+constexpr const char* patternInstanceOpCode = "TRF";
+
+// The pattern instances a name is in: (pattern, k) of each of its top-level TRF sections.
+std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
+{
+    std::vector<std::pair<std::string, std::string>> instances;
+    for (auto section : NameAncestry::splitSections(name)) {
+        const auto& decoded = decodeSection(section);
+        if (decoded.opCode == patternInstanceOpCode) {
+            instances.emplace_back(decoded.iterationTag, decoded.index);
+        }
+    }
+    return instances;
 }
 
 }  // namespace
@@ -310,7 +329,8 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
     }
     for (auto section : added) {
         const auto& decoded = decodeSection(section);
-        if (!decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.elementType != elementType) {
+        if (!decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.elementType != elementType
+            || decoded.opCode == patternInstanceOpCode) {
             return false;
         }
     }
@@ -385,11 +405,16 @@ std::vector<int> NameAncestry::structuralSurvivors(
     // candidate exactly at the boundary through rounding.
     constexpr double slack = 1e-12;
 
+    // An element of another pattern instance, or of the original, shares the old element's
+    // history up to the instances' sections: it is another element (ops#55).
+    const auto oldInstances = patternInstances(oldName);
     std::vector<double> overlaps;
     overlaps.reserve(candidates.size());
     double best = 0.0;
     for (const auto& candidate : candidates) {
-        overlaps.push_back(overlap(oldName, candidate));
+        overlaps.push_back(
+            patternInstances(candidate) == oldInstances ? overlap(oldName, candidate) : 0.0
+        );
         best = std::max(best, overlaps.back());
     }
     std::vector<int> survivors;

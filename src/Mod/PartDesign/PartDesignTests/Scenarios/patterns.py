@@ -232,10 +232,12 @@ class TwoPatternsEdit(Scenario):
     instance 3 is gone: its sketch's reference breaks, and the other sketch stays on its block.
     With 3 again, each sketch is back on its own block.
 
-    V2 tells the instances apart by the element map's duplicate counter alone, with nothing of
-    the pattern in their names: when PatY loses an instance, PatX's counters shift, and the
-    sketch on PatY's instance 3 lands on one of PatX's blocks, silently (ops#55). Task 1 (ops#6)
-    names the instances by content. Subclasses make the original (`original`)."""
+    V2 told the instances apart by the element map's duplicate counter alone, with nothing of
+    the pattern in their names: when PatY lost an instance, PatX's counters shifted, and the
+    sketch on PatY's instance 3 landed on one of PatX's blocks, silently (ops#55). Instance k now
+    ends in a section `_;_;<pattern>;TRF;<k>;<type>;0;MOD;_`, so a lost instance's name is
+    missing; the Attacher may still keep its old index (ops#68). Subclasses make the original
+    (`original`)."""
 
     abstract = True
     area = "patterns"
@@ -302,7 +304,7 @@ class TwoPatternsEdit(Scenario):
 
 class TwoPatternsBox(TwoPatternsEdit):
     """The original is an AdditiveBox, the body's first feature: its AddSubShape has no element
-    map, so instance 3's names carry the pattern's `_2` suffix as their op code."""
+    map, so the instances' names start from the box's index names (`Face6;_;<Box>;MKR;...`)."""
 
     def original(self, doc, body):
         box = body.newObject("PartDesign::AdditiveBox", "Box")
@@ -312,8 +314,8 @@ class TwoPatternsBox(TwoPatternsEdit):
 
 class TwoPatternsBoxOnPlate(TwoPatternsEdit):
     """The original is an AdditiveBox on a plate (an AdditiveBox 100 x 100 x 2 under it, from
-    (-10, -10, -2)): its AddSubShape has an element map, so the instances differ only in the
-    duplicate count."""
+    (-10, -10, -2)): its AddSubShape has an element map, so the instances' names start from the
+    box's mapped names."""
 
     def original(self, doc, body):
         plate = body.newObject("PartDesign::AdditiveBox", "Plate")

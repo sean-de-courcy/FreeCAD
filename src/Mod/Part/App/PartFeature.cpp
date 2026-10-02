@@ -87,6 +87,7 @@
 #include "PartPyCXX.h"
 #include "TopoShapePy.h"
 #include "Tools.h"
+#include "TopoShapeOpCode.h"
 
 using namespace Part;
 namespace sp = std::placeholders;
@@ -183,6 +184,24 @@ App::ElementNamePair Feature::getElementName(const char* name, ElementNameType t
     return getExportElementName(prop->getShape(), name);
 }
 
+namespace
+{
+// The pattern instances a V2 name is in (ops#55): the tag and the instance number of each of its
+// TRF sections, in order.
+std::vector<std::pair<std::string, std::string>> patternInstances(
+    const Data::DecodedMappedName& name
+)
+{
+    std::vector<std::pair<std::string, std::string>> instances;
+    for (const auto& section : name) {
+        if (section.opCode == OpCodes::Transformed) {
+            instances.emplace_back(section.iterationTag, section.index);
+        }
+    }
+    return instances;
+}
+}  // namespace
+
 // This is the name matching algorithms used for the V2 algorithm.
 bool Feature::doNamesMatch(
     Data::MappedName& name1,
@@ -199,6 +218,12 @@ bool Feature::doNamesMatch(
 
     Data::DecodedMappedName decodedName1 = name1.getDecodedMappedName();
     Data::DecodedMappedName decodedName2 = name2.getDecodedMappedName();
+
+    // Copies of an element in other pattern instances, or the original, share its history up to
+    // their TRF sections, which the pairing below would skip. They are other elements.
+    if (patternInstances(decodedName1) != patternInstances(decodedName2)) {
+        return false;
+    }
 
     if (decodedName1.size() && decodedName2.size()) {
         std::vector<std::pair<Data::DecodedMappedSection, std::vector<Data::DecodedMappedSection>>>
