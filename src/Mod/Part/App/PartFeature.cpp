@@ -988,7 +988,10 @@ static std::vector<std::pair<long, Data::MappedName>> getElementSource(
             shape.Hasher = owner->getDocument()->getStringHasher();
         }
         long tag = shape.getElementHistory(ret.back().second, &original, &history);
-        if (!tag) {
+        // No progress: the same name under the same tag again, e.g. through a shape whose tag
+        // isn't its object's ID. A V2 name keeps its name across objects (ops#27).
+        if (!tag
+            || (std::abs(tag) == std::abs(ret.back().first) && original == ret.back().second)) {
             break;
         }
         auto obj = owner;
@@ -1133,7 +1136,9 @@ std::list<Data::HistoryItem> Feature::getElementHistory(
             ret.back().tag = tag;
             return ret;
         }
-        if (!obj) {
+        // No progress: the same element of the same object again, e.g. through a shape whose tag
+        // isn't its object's ID. A V2 name keeps its name across objects (ops#27).
+        if (!obj || (obj == feature && original == element)) {
             break;
         }
         if (element_type) {

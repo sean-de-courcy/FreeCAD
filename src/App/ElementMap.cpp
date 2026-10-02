@@ -10,6 +10,11 @@
 
 #include "ElementMap.h"
 #include "ElementNamingUtils.h"
+#include "ElementSolver.h"
+
+#include <charconv>
+#include <cstdlib>
+#include <string_view>
 
 #include "App/Application.h"
 #include "Base/Console.h"
@@ -1509,6 +1514,136 @@ std::vector<MappedElement> ElementMap::getAll() const
     return ret;
 }
 
+namespace
+{
+
+// The last top-level section of \a name if it is a V2 section (nine fields and a decimal
+// iteration tag, stored in \a tag), decoded; otherwise null. The decode cache keeps its entries
+// for the whole process, so the pointer stays valid.
+const DecodedMappedSection* lastV2Section(std::string_view name, long& tag)
+{
+    auto sections = NameAncestry::splitSections(name);
+    if (sections.empty()) {
+        return nullptr;
+    }
+    std::string_view last = sections.back();
+    int fields = 1;
+    for (std::size_t i = 0; i < last.size(); ++i) {
+        // A delimiter after a caret belongs to an embedded name.
+        if (last[i] == *SECTION_SUB_DELIMINATOR
+            && (i == 0 || last[i - 1] != *SUB_SECTION_ESCAPE_CHAR)) {
+            ++fields;
+        }
+    }
+    if (fields != SECTION_SIZE) {
+        return nullptr;
+    }
+    const auto& decoded = MappedName::getDecodedMappedName(std::string(last));
+    if (decoded.size() != 1) {
+        return nullptr;
+    }
+    const std::string& text = decoded.front().iterationTag;
+    const char* end = text.data() + text.size();
+    auto result = std::from_chars(text.data(), end, tag);
+    if (result.ec != std::errc() || result.ptr != end) {
+        return nullptr;
+    }
+    return &decoded.front();
+}
+
+/* The history of a V2 name (ops#27), in the terms of the V1 history: the tag of the object the
+ * element came from, its name there (\a original), and the names in between (\a history).
+ *
+ * A V2 name has no tag postfixes; its last section's iteration tag is the object that made that
+ * section. Elements an operation leaves unchanged keep their names, so:
+ * - A last section of another object (not \a masterTag) means the element came unchanged from
+ *   that object, where it has the same name. An IDX section names an element of a shape without
+ *   an element map by its index, so its name there is the section's reference ID (`Face6`).
+ * - A last section of this shape's own object (or untagged) is a step this object made: the
+ *   walk goes back to the name before it, the prefix before the last `|` of a split piece (MOD),
+ *   or the first linked name of a generated (GEN) or partner (PRJ) element, and goes on from
+ *   there. LOW and UPP sections (named after neighbours, not made from them), SRC sections
+ *   (sketch geometry) and IDX sections of this object have nothing earlier.
+ * If the walk stops at a step of this object, the result is \a masterTag and the last name
+ * reached, as in V1; if it stops at once, there is no history (0). Each step makes the name
+ * shorter, so the walk ends, and the original is never the name itself under its own tag.
+ */
+long getElementHistoryV2(const MappedName& name,
+                         long masterTag,
+                         MappedName* original,
+                         std::vector<MappedName>* history)
+{
+    std::string start = name.toString();
+    if (boost::starts_with(start, ELEMENT_MAP_PREFIX)) {
+        start.erase(0, ELEMENT_MAP_PREFIX_SIZE);
+    }
+
+    std::string current = start;
+    std::vector<std::string> visited;  // the names after \a name, \a current last
+    std::string source;
+    long result = 0;
+    while (true) {
+        long tag = 0;
+        const DecodedMappedSection* section = lastV2Section(current, tag);
+        if (!section) {
+            break;
+        }
+        if (tag != 0 && std::abs(tag) != std::abs(masterTag)) {
+            result = tag;
+            if (section->hasMapperFlag(MAPPER_FLAG_INDEX) && section->referenceIDs.size() == 1
+                && current.find(*NAME_SECTION_DELIMINATOR) == std::string::npos) {
+                source = section->referenceIDs.front();
+            }
+            else {
+                source = current;
+            }
+            break;
+        }
+
+        std::string next;
+        auto sections = NameAncestry::splitSections(current);
+        if (sections.size() > 1) {
+            auto prefixSize = static_cast<std::size_t>(sections.back().data() - current.data()) - 1;
+            next = current.substr(0, prefixSize);
+        }
+        else if ((section->hasMapperFlag(MAPPER_FLAG_GENERATED)
+                  || section->hasMapperFlag(MAPPER_FLAG_PROJECTION))
+                 && !section->linkedNames.empty()) {
+            next = section->linkedNames.front();
+        }
+        if (next.empty() || next.size() >= current.size()) {
+            if (!visited.empty()) {
+                result = masterTag;
+                source = current;
+            }
+            break;
+        }
+        visited.push_back(next);
+        current = std::move(next);
+    }
+
+    if (result == 0) {
+        if (original) {
+            *original = name;
+        }
+        return 0;
+    }
+    if (!visited.empty() && visited.back() == source) {
+        visited.pop_back();
+    }
+    if (original) {
+        *original = MappedName(source);
+    }
+    if (history) {
+        for (const auto& step : visited) {
+            history->push_back(MappedName(step));
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
 long ElementMap::getElementHistory(const MappedName& name,
                                    long masterTag,
                                    MappedName* original,
@@ -1520,10 +1655,8 @@ long ElementMap::getElementHistory(const MappedName& name,
     int len = 0;
     int pos = name.findTagInElementName(&tag, &len, nullptr, nullptr, true);
     if (pos < 0) {
-        if (original) {
-            *original = name;
-        }
-        return tag;
+        // No V1 tag postfix: a V2 name keeps its history in its sections (ops#27).
+        return getElementHistoryV2(name, masterTag, original, history);
     }
     if (!original && !history) {
         return tag;
