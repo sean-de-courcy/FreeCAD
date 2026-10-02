@@ -904,7 +904,7 @@ void TopoShape::copyElementMap(const TopoShape& topoShape, const char* op)
     setMappedChildElements(children);
 }
 
-TopoShape& TopoShape::appendElementSection(long tag, const char* op, int index)
+TopoShape& TopoShape::appendElementSection(long tag, const char* op, const std::string& index)
 {
     if (getHistoryAlgorithm() != App::HistoryAlgorithm::V2 || isNull() || !hasElementMap()) {
         return *this;
@@ -917,11 +917,11 @@ TopoShape& TopoShape::appendElementSection(long tag, const char* op, int index)
             + Data::MappedName::makeEncodedSection(
                 {},
                 noNames,
-                static_cast<int>(tag),
+                std::to_string(tag),
                 op,
                 index,
                 typeName[0],
-                0,
+                std::string("0"),
                 {Data::MAPPER_FLAG_MODIFIED},
                 noNames
             );

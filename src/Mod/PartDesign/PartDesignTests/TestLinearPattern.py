@@ -165,6 +165,37 @@ class TestLinearPattern(unittest.TestCase):
         harness.assertEveryElementNamed(pattern.Shape)
         harness.assertDistinctNames(pattern.Shape)
 
+    def testInstanceNumbersPerDirection(self):
+        """V2 numbers the instances of a LinearPattern with a second direction per direction
+        (ops#6): block (i, j) is `i:j`, so an edit of either count leaves every other block's
+        number alone. With one occurrence along Direction2 the numbers are those of a plain
+        pattern."""
+        if hasattr(self.Doc, "HistoryAlgorithm"):
+            self.Doc.HistoryAlgorithm = "V2"
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        pattern = self.Doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [box]
+        pattern.Direction = (self.Doc.X_Axis, [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 30
+        pattern.Direction2 = (self.Doc.Y_Axis, [""])
+        pattern.Mode2 = "Spacing"
+        pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
+        pattern.Offset2 = 30
+        pattern.Refine = False
+        body.addObject(pattern)
+        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2)):
+            pattern.Occurrences = xCount
+            pattern.Occurrences2 = yCount
+            self.Doc.recompute()
+            self.assertEqual(
+                harness.topFaceInstances(pattern.Shape, 10),
+                harness.gridInstances(xCount, yCount, 30, 10),
+                f"Occurrences {xCount}, Occurrences2 {yCount}",
+            )
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestLinearPattern")

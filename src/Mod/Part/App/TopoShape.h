@@ -1812,11 +1812,12 @@ public:
      *
      * @param tag: the iteration tag of the new section
      * @param op: its op code
-     * @param index: its index field, e.g. a pattern instance's number
+     * @param index: its index field as text, e.g. a pattern instance's number (`3`, or one
+     *              number per step of a multi-step pattern, `2:2`)
      *
      * @return Return this shape.
      */
-    TopoShape& appendElementSection(long tag, const char* op, int index);
+    TopoShape& appendElementSection(long tag, const char* op, const std::string& index);
 
     bool canMapElement(const TopoShape& other) const;
     void cacheRelatedElements(

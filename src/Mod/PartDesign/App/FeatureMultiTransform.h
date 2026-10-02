@@ -60,8 +60,18 @@ public:
         const std::vector<App::DocumentObject*> originals
     ) override;
 
+    /// The steps of the transformation features as the last getTransformations() combined them
+    /// (ops#6): every feature's first step in order, then their second steps, ...
+    std::vector<Step> getTransformationSteps() const override
+    {
+        return steps;
+    }
+
 protected:
     void positionBySupport() override;
+
+private:
+    std::vector<Step> steps;
 };
 
 }  // namespace PartDesign

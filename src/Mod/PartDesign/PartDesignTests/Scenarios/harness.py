@@ -1088,6 +1088,40 @@ def sharedNames(names):
     return shared
 
 
+def topFaceInstances(shape, z):
+    """The pattern instances of the shape's horizontal faces at height z, by the face's centre:
+    {(x, y): [the instance number of each top-level TRF section of the face's first name]}. A
+    V2 pattern's instance ends in `_;_;<pattern>;TRF;<number>;F;0;MOD;_`, one number per step
+    of a multi-step pattern (ops#6); the support has no such section."""
+    names = elementNames(shape)
+    instances = {}
+    for index, element in enumerate(shape.Faces, 1):
+        centre = element.CenterOfMass
+        if abs(centre.z - z) > 1e-6 or abs(abs(faceNormal(element).z) - 1) > 1e-6:
+            continue
+        own = names[f"Face{index}"]
+        sections = App.getDecodedMappedName(own[0]) if own else []
+        instances[(round(centre.x, 6), round(centre.y, 6))] = [
+            section["index"] for section in sections if section["opCode"] == "TRF"
+        ]
+    return instances
+
+
+def gridInstances(xCount, yCount, spacing, size):
+    """What topFaceInstances() gives for blocks of the given size at the origin, patterned
+    along X then Y with the given spacing: block (i, j) is instance `<i+1>:<j+1>`, with the
+    trailing 1s left out (`3` for (3, 1)), and the support (1, 1) has no TRF section."""
+    instances = {}
+    for i in range(xCount):
+        for j in range(yCount):
+            numbers = [i + 1, j + 1]
+            while numbers and numbers[-1] == 1:
+                numbers.pop()
+            centre = (round(i * spacing + size / 2, 6), round(j * spacing + size / 2, 6))
+            instances[centre] = [":".join(str(n) for n in numbers)] if numbers else []
+    return instances
+
+
 def _listed(items, limit=8):
     lines = [f"  {item}" for item in items[:limit]]
     if len(items) > limit:

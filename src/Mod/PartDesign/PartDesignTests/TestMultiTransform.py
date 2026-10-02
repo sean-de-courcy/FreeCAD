@@ -26,6 +26,7 @@ import math
 
 import FreeCAD
 import TestSketcherApp
+from PartDesignTests.Scenarios import harness
 
 App = FreeCAD
 
@@ -150,6 +151,42 @@ class TestMultiTransform(unittest.TestCase):
         #  write a test here.  Maybe close to  testMultiTransform but with
         #  self.Mirrored.TransformMode="Transform body"  instead of
         #  self.Mirrored.TransformMode="Transform tools"
+
+    def testInstanceNumbersPerStep(self):
+        """V2 numbers a MultiTransform's instances per step (ops#6): block (i, j) of LinX then
+        LinY is `i:j`, so an edit of LinX's count leaves every other block's number alone."""
+        if hasattr(self.Doc, "HistoryAlgorithm"):
+            self.Doc.HistoryAlgorithm = "V2"
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        multi = self.Doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = [box]
+        multi.Refine = False
+        body.addObject(multi)
+        steps = []
+        for name, axis, occurrences in (
+            ("LinX", self.Doc.X_Axis, 3),
+            ("LinY", self.Doc.Y_Axis, 2),
+        ):
+            step = self.Doc.addObject("PartDesign::LinearPattern", name)
+            step.Direction = (axis, [""])
+            step.Mode = "Spacing"
+            step.Offset = 30
+            step.Occurrences = occurrences
+            body.addObject(step)
+            steps.append(step)
+        multi.Transformations = steps
+        linX, linY = steps
+        for xCount, yCount in ((3, 2), (2, 2), (3, 2), (3, 1), (3, 2)):
+            linX.Occurrences = xCount
+            linY.Occurrences = yCount
+            self.Doc.recompute()
+            self.assertEqual(
+                harness.topFaceInstances(multi.Shape, 10),
+                harness.gridInstances(xCount, yCount, 30, 10),
+                f"LinX {xCount}, LinY {yCount}",
+            )
 
     def tearDown(self):
         # closing doc

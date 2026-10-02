@@ -97,6 +97,19 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
 
     std::list<gp_Trsf> result;
     std::list<gp_Pnt> cogs;
+    // The features' steps by level: every feature's first step, then the second ones (a
+    // LinearPattern's Direction2), ... So an unused second direction is a trailing step, which
+    // the instance numbers leave out, and using it later changes no other instance's number.
+    std::vector<std::vector<Step>> levels;
+    auto addSteps = [&levels](const std::vector<Step>& featureSteps, int strideFactor) {
+        for (std::size_t level = 0; level < featureSteps.size(); ++level) {
+            if (levels.size() <= level) {
+                levels.resize(level + 1);
+            }
+            const auto& step = featureSteps[level];
+            levels[level].push_back({step.count, step.stride * strideFactor});
+        }
+    };
 
     for (auto const& f : transFeatures) {
         auto transFeature = freecad_cast<PartDesign::Transformed*>(f);
@@ -109,9 +122,15 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
         // Offset. The helper is not executed independently, so do not let those updates schedule
         // the parent MultiTransform for a second document recompute pass.
         transFeature->purgeTouched();
+        // The feature's own steps; their strides grow as the list is combined below
+        auto featureSteps = transFeature->getTransformationSteps();
+        if (featureSteps.empty()) {
+            featureSteps = {{static_cast<int>(newTransformations.size()), 1}};
+        }
         if (result.empty()) {
             // First transformation Feature
             result = newTransformations;
+            addSteps(featureSteps, 1);
             for (auto nt : newTransformations) {
                 cogs.push_back(cog.Transformed(nt));
             }
@@ -179,6 +198,10 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
                 // a11 a12         b1    a11*b1 a12*b1 a11*b2 a12*b2 a11*b3 a12*b3
                 // a21 a22   mul   b2  = a21*b1 a22*b1 a21*b2 a22*b2 a21*b3 a22*b3
                 //                 b3
+                // So the old instances stay next to each other, and the new steps' instances are
+                // the old list's length apart. (The diagonal method above adds no step: it scales
+                // the instances there are.)
+                addSteps(featureSteps, static_cast<int>(oldTransformations.size()));
                 for (auto const& nt : newTransformations) {
                     auto oc = oldCogs.begin();
 
@@ -195,6 +218,10 @@ const std::list<gp_Trsf> MultiTransform::getTransformations(
         }
     }
 
+    steps.clear();
+    for (const auto& level : levels) {
+        steps.insert(steps.end(), level.begin(), level.end());
+    }
     return result;
 }
 

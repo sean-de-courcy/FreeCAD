@@ -445,6 +445,20 @@ TEST_F(FeaturePartTest, doNamesMatchKeepsPatternInstancesApart)
     EXPECT_TRUE(Feature::doNamesMatch(pieceOfInstance3, instance3));
     EXPECT_TRUE(Feature::doNamesMatch(pieceOfSupport, support));
     EXPECT_FALSE(Feature::doNamesMatch(pieceOfInstance3, support));
+    //   a multi-step pattern's numbers (ops#6) compare as text: instance (2, 2) is neither (2, 1)
+    //   nor (1, 2), and its pieces match it
+    auto stepped = [&](const char* number) {
+        return Data::MappedName(support.toString() + "|_;_;9;TRF;" + number + ";F;0;MOD;_");
+    };
+    auto x2y2 = stepped("2:2");
+    auto sameX2y2 = stepped("2:2");
+    auto x2 = stepped("2");
+    auto x1y2 = stepped("1:2");
+    auto pieceOfX2y2 = withSection(x2y2, 10, OpCodes::Fuse, 0);
+    EXPECT_TRUE(Feature::doNamesMatch(x2y2, sameX2y2));
+    EXPECT_FALSE(Feature::doNamesMatch(x2y2, x2));
+    EXPECT_FALSE(Feature::doNamesMatch(x2y2, x1y2));
+    EXPECT_TRUE(Feature::doNamesMatch(pieceOfX2y2, x2y2));
 }
 
 TEST_F(FeaturePartTest, matchSimilarNamesSeveralLooseMatchesAreAmbiguous)

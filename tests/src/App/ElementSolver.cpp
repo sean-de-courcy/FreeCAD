@@ -103,6 +103,29 @@ std::string piece(
     return incoming + "|" + section({}, {}, tag, opCode, index, elementType, {"MOD"}, connected);
 }
 
+// Instance  number of pattern  tag, with the number as text: one number per step of a
+// multi-step pattern (`2:2`, ops#6).
+std::string stepInstance(
+    const std::string& incoming,
+    int tag,
+    const std::string& number,
+    char elementType = 'F'
+)
+{
+    return incoming + "|"
+        + Data::MappedName::makeEncodedSection(
+               std::vector<std::string> {},
+               std::vector<std::string> {},
+               std::to_string(tag),
+               "TRF",
+               number,
+               elementType,
+               "0",
+               {"MOD"},
+               std::vector<std::string> {}
+        );
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -371,6 +394,41 @@ TEST(NameAncestry, patternInstancesAreNeitherPiecesNorPartners)
     EXPECT_EQ(
         ancestry.structuralSurvivors(support, {support, x3, y3}, 1.0),
         std::vector<int> {0}
+    );
+}
+
+TEST(NameAncestry, patternStepNumbersAreOneField)
+{
+    // ops#6: a multi-step pattern numbers its instances per step, `2:2` for instance (2, 2), and
+    // `2` for (2, 1) (the trailing 1s are left out). The TRF readers take the number as one field
+    // and compare it as text, so each number is its own instance.
+    NameAncestry ancestry;
+    const auto support = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    const auto x2y2 = stepInstance(support, 9, "2:2");
+    const auto x2 = stepInstance(support, 9, "2");
+    const auto x1y2 = stepInstance(support, 9, "1:2");
+    const auto x3y2 = stepInstance(support, 9, "3:2");
+    //   one index field
+    const auto& decoded = Data::MappedName::getDecodedMappedName(x2y2);
+    ASSERT_EQ(decoded.size(), 2U);
+    EXPECT_EQ(decoded.back().opCode, "TRF");
+    EXPECT_EQ(decoded.back().index, "2:2");
+    //   an instance is a piece of nothing; its split pieces, and those of a split made before the
+    //   pattern (isPieceOf's TRF tail), are pieces of that instance only
+    EXPECT_FALSE(NameAncestry::isPieceOf(x2y2, support));
+    EXPECT_FALSE(NameAncestry::isPieceOf(x2y2, x2));
+    EXPECT_TRUE(NameAncestry::isPieceOf(piece(x2y2, 10, "FUS", 0, 'F'), x2y2));
+    const auto cutThenX2Y2 = stepInstance(piece(support, 6, "CUT", 0, 'F'), 9, "2:2");
+    EXPECT_TRUE(NameAncestry::isPieceOf(cutThenX2Y2, x2y2));
+    EXPECT_FALSE(NameAncestry::isPieceOf(cutThenX2Y2, x2));
+    EXPECT_FALSE(NameAncestry::isPieceOf(cutThenX2Y2, x3y2));
+    EXPECT_FALSE(NameAncestry::isPieceOf(cutThenX2Y2, support));
+    //   tier 1 keeps only the same instance; a lost instance has no structural candidate
+    const std::vector<std::string> candidates {support, x2, x1y2, x2y2, x3y2};
+    EXPECT_EQ(ancestry.structuralSurvivors(x2y2, candidates, 1.0), std::vector<int> {3});
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(stepInstance(support, 9, "3:3"), candidates, 1.0),
+        std::vector<int> {}
     );
 }
 
@@ -1700,6 +1758,31 @@ TEST(SolveOwner, patternInstanceSiblingNeverResolves)
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
     EXPECT_EQ(outcomes[0].evidence, "pattern sibling");
+}
+
+TEST(SolveOwner, patternStepSiblingNeverResolves)
+{
+    // ops#6, a two-step pattern: the reference to instance (3, 2)'s top face is missing, and
+    // geometry alone finds another instance's copy in place, (2, 2) or (2, 1). The sibling guard
+    // takes any two numbers of one pattern's TRF sections as siblings, multi-step ones too.
+    Placed p;
+    const auto x = p.names.oldTop;
+    SolveInput input;
+    input.diagonal = 30.0;
+    for (const char* sibling : {"2:2", "2"}) {
+        input.entries = {missing(stepInstance(x, 9, "3:2"))};
+        input.entries[0].fingerprint = p.top;
+        input.pool["Face"] = {
+            element("Face4", {stepInstance(x, 9, sibling)}),
+            element("Face9", {x}),
+        };
+        measure(input, {{"Face4", p.top}, {"Face9", p.topAt(-20)}}, nullptr);
+
+        auto outcomes = Data::solveOwner(input);
+
+        EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << sibling;
+        EXPECT_EQ(outcomes[0].evidence, "pattern sibling") << sibling;
+    }
 }
 
 TEST(SolveOwner, geometryAloneNeedsBothTiers)
