@@ -126,7 +126,7 @@ std::string ElementFingerprint::toString() const
         return formatNumber(v->x) + listDelimiter + formatNumber(v->y) + listDelimiter
             + formatNumber(v->z);
     };
-    std::string text = std::to_string(Version);
+    std::string text = std::to_string(location ? VersionWithLocation : Version);
     text += fieldDelimiter;
     text += type;
     text += fieldDelimiter;
@@ -147,13 +147,20 @@ std::string ElementFingerprint::toString() const
         }
         text += formatNumber(radii[i]);
     }
+    if (location) {
+        text += fieldDelimiter;
+        text += vector(location);
+    }
     return text;
 }
 
 ElementFingerprint ElementFingerprint::fromString(std::string_view text)
 {
     auto fields = split(text, fieldDelimiter);
-    if (fields.size() != fieldCount || fields[0] != std::to_string(Version)) {
+    const bool withLocation = fields.size() == fieldCount + 1
+        && fields[0] == std::to_string(VersionWithLocation) && fields[1] == "E"
+        && fields[2] == "Circle";
+    if (!withLocation && (fields.size() != fieldCount || fields[0] != std::to_string(Version))) {
         return {};
     }
     ElementFingerprint result;
@@ -170,6 +177,9 @@ ElementFingerprint ElementFingerprint::fromString(std::string_view text)
     }
     if (!parseVector(fields[4], result.center) || !parseVector(fields[5], result.direction)
         || !parseList(fields[6], result.radii) || result.radii.size() > 2) {
+        return {};
+    }
+    if (withLocation && (!parseVector(fields[7], result.location) || !result.location)) {
         return {};
     }
     result.type = fields[1][0];

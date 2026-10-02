@@ -82,7 +82,7 @@ TEST(ElementFingerprint, unknownOrMalformedIsNoFingerprint)
 {
     for (const auto& text : {
              "",
-             "2|F|Cylinder|62.8|0,0,5|0,0,1|1",   // a later version
+             "3|F|Cylinder|62.8|0,0,5|0,0,1|1",   // a later version
              "1|F|Cylinder|62.8|0,0,5|0,0,1",     // a field missing
              "1|F|Cylinder|62.8|0,0,5|0,0,1|1|",  // one too many
              "1|X|Point|_|0,0,0|_|_",             // unknown type
@@ -144,4 +144,42 @@ TEST(ElementFingerprint, numbers)
     EXPECT_EQ(ElementFingerprint::formatNumber(1.2e-16), "0");
     EXPECT_EQ(ElementFingerprint::formatNumber(-9.9e-13), "0");
     EXPECT_EQ(ElementFingerprint::formatNumber(1e-12), "1e-12");
+}
+
+TEST(ElementFingerprint, circleLocationRoundTrip)
+{
+    // A circle edge carries its centre, in version 2 (Task 2 PR 7b)
+    ElementFingerprint arc;
+    arc.type = 'E';
+    arc.kind = "Circle";
+    arc.size = 5.23598775598;
+    arc.center = Base::Vector3d(14.7746482928, 5, 10);
+    arc.direction = Base::Vector3d(0, 0, 1);
+    arc.radii = {5};
+    arc.location = Base::Vector3d(10, 5, 10);
+    const char* text = "2|E|Circle|5.23598775598|14.7746482928,5,10|0,0,1|5|10,5,10";
+    EXPECT_EQ(arc.toString(), text);
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, arc);
+
+    //   everything else is still written as version 1
+    EXPECT_EQ(cylinderFace().toString().substr(0, 2), "1|");
+
+    //   version 2 only for a circle edge, and only with its eighth field
+    for (const auto& bad : {
+             "2|E|Line|5|0,0,0|1,0,0|_|0,0,0",
+             "2|F|Circle|5|0,0,0|0,0,1|5|0,0,0",
+             "2|E|Circle|5|0,0,0|0,0,1|5",
+             "2|E|Circle|5|0,0,0|0,0,1|5|_",
+             "2|E|Circle|5|0,0,0|0,0,1|5|1,2",
+             "1|E|Circle|5|0,0,0|0,0,1|5|0,0,0",
+         }) {
+        EXPECT_FALSE(ElementFingerprint::fromString(bad).isValid()) << bad;
+    }
+
+    //   a version-1 circle parses, without a location
+    auto old = ElementFingerprint::fromString("1|E|Circle|5|0,0,0|0,0,1|5");
+    ASSERT_TRUE(old.isValid());
+    EXPECT_FALSE(old.location.has_value());
 }

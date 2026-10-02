@@ -891,6 +891,10 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
             //   a full circle's centre of mass is its centre
             EXPECT_NEAR(fp.center->x, 0.0, 1e-9);
             EXPECT_NEAR(fp.center->y, 0.0, 1e-9);
+            //   a circle carries its centre, in version 2 (Task 2 PR 7b)
+            ASSERT_TRUE(fp.location);
+            EXPECT_NEAR(Base::Distance(*fp.location, *fp.center), 0.0, 1e-9);
+            EXPECT_EQ(fp.toString().substr(0, 11), "2|E|Circle|");
         }
         else {
             ++seams;
@@ -901,6 +905,39 @@ TEST_F(FeaturePartTest, fingerprintsOfACylinder)
     EXPECT_EQ(planes, 2);
     EXPECT_EQ(circles, 2);
     EXPECT_EQ(seams, 1);
+}
+
+TEST_F(FeaturePartTest, fingerprintOfAnArcLocatesItsCircle)
+{
+    // Arrange
+    //   a quarter cylinder, radius 2, height 5: its arcs run from 0 to 90 degrees
+    TopoShape quarter(BRepPrimAPI_MakeCylinder(2.0, 5.0, std::numbers::pi / 2).Shape());
+    int arcs = 0;
+
+    // Act and assert
+    for (int index = 1; index <= static_cast<int>(quarter.countSubShapes(TopAbs_EDGE)); ++index) {
+        Data::ElementFingerprint fp;
+        ASSERT_TRUE(
+            Feature::getElementFingerprint(quarter, ("Edge" + std::to_string(index)).c_str(), fp)
+        );
+        if (fp.kind != "Circle") {
+            EXPECT_FALSE(fp.location) << fp.toString();
+            continue;
+        }
+        ++arcs;
+        ASSERT_TRUE(fp.location && fp.center);
+        //   the location is the circle's centre; the centre of mass lies off it, on the bisector
+        EXPECT_NEAR(fp.location->x, 0.0, 1e-9);
+        EXPECT_NEAR(fp.location->y, 0.0, 1e-9);
+        EXPECT_NEAR(fp.location->z, fp.center->z, 1e-9);
+        const double half = std::numbers::pi / 4;
+        const double offset = 2.0 * std::sin(half) / half;
+        EXPECT_NEAR(fp.center->x, offset * std::cos(half), 1e-9);
+        EXPECT_NEAR(fp.center->y, offset * std::sin(half), 1e-9);
+        auto parsed = Data::ElementFingerprint::fromString(fp.toString());
+        EXPECT_EQ(parsed.location.has_value(), true);
+    }
+    EXPECT_EQ(arcs, 2);
 }
 
 TEST_F(FeaturePartTest, fingerprintsIgnoreThePlacement)
