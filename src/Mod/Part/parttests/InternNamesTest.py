@@ -183,6 +183,32 @@ class InternNamesTest(unittest.TestCase):
         self.assertInterned(_names(intoInterned.Shape))
         self.assertEqual(_expanded(_names(intoInterned.Shape)), _names(plainShape))
 
+    def testReadersTakeEitherForm(self):
+        """Task 1 PR 6: a lookup finds an element by its name in either form, and the readers that
+        walk a name's structure (history, the solver's ancestry and pieces) see the plain one."""
+        plainDoc = self._document("ReadPlain", False)
+        internedDoc = self._document("ReadInterned", True)
+        plainShape = self._model(plainDoc).Shape
+        internedShape = self._model(internedDoc).Shape
+        plainNames = _names(plainShape)
+        internedByPlain = {App.expandMappedName(n): n for n in _names(internedShape)}
+        self.assertEqual(set(internedByPlain), set(plainNames))
+        pieces = 0
+        for plain, element in plainNames.items():
+            interned = internedByPlain[plain]
+            self.assertEqual(internedShape.getElementIndexedName(plain), element)
+            self.assertEqual(plainShape.getElementIndexedName(interned), element)
+            self.assertEqual(App.getNameAncestors(interned), App.getNameAncestors(plain))
+            plainHistory = plainShape.getElementHistory(plain)
+            internedHistory = internedShape.getElementHistory(interned)
+            self.assertEqual(internedHistory, plainHistory, plain)
+            if "|" in plain:
+                prefix = plain[: plain.rindex("|")]
+                if App.isPieceOf(plain, prefix):
+                    pieces += 1
+                    self.assertTrue(App.isPieceOf(interned, App.internMappedName(prefix)))
+        self.assertGreater(pieces, 0)
+
     def testShapesBuiltFromInternedShapesAreInterned(self):
         """A shape built in Python from an interned shape interns its names too, and they expand to
         the names of the same shape built from the plain one."""

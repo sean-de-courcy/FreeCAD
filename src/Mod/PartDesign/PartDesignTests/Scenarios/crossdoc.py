@@ -44,6 +44,7 @@ class CrossDocEdit(Scenario):
     REFS = ("binder_right", "binder_top")
     width, height = 20, 10
     closed = False  # edit B with A closed
+    mixed = False  # B's InternNames is the opposite of A's (ops#6)
 
     def rightFace(self):
         return face("plane", normal=X, through=(self.width, 0, 0))
@@ -56,7 +57,7 @@ class CrossDocEdit(Scenario):
 
     def build(self, doc):
         self.folder = tempfile.mkdtemp(prefix="NamingScenario")
-        target = self.newDocument("B")
+        target = self.newDocument("B", interned=(not self.interned) if self.mixed else None)
         target.saveAs(self.path(target))
         body = m.body(target)
         profile = m.sketch(target, "Profile", m.rectangle(0, 0, self.width, 10), body)
@@ -107,6 +108,19 @@ class CrossDocNotch(CrossDocEdit):
 
 class CrossDocNotchClosed(CrossDocNotch):
     """As CrossDocNotch, with A saved and closed while B changes, then opened again."""
+
+    closed = True
+
+
+class CrossDocNotchMixed(CrossDocNotch):
+    """As CrossDocNotch, with B's InternNames the opposite of A's (ops#6): A plain and B interned,
+    or the reverse in V2i. A's binders hold names in B's form; their shapes are stored in A's."""
+
+    mixed = True
+
+
+class CrossDocNotchMixedClosed(CrossDocNotchMixed):
+    """As CrossDocNotchMixed, with A saved and closed while B changes, then opened again."""
 
     closed = True
 

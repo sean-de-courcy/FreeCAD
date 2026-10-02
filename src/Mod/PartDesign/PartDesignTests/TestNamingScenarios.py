@@ -30,6 +30,13 @@ multi-match flags on) for the scenarios whose consumers the flags touch.
 FREECAD_SCENARIO_CONFIGS=V1,V2,V2multi,V2s runs the listed ones for every scenario instead (the
 scorecard's local run). Every verdict is printed as a `SCORE` line.
 
+The interning oracle (ops#6, Task 1): `test_<ref>_V2iOracle` runs the scenario in V2 and in V2i
+(V2 with InternNames on) and requires the same verdict, stored subs and expanded names after every
+step. It asserts equality with V2, not a correct verdict, so V2's known failures need no V2i
+entries. It runs by default, or when FREECAD_SCENARIO_CONFIGS lists V2i.
+`test_<ref>_V2siOracle` does the same for the reference solver (V2s against V2si, the solver's
+tiers included); it runs only when FREECAD_SCENARIO_CONFIGS lists V2si (local runs).
+
 The reference solver's determinism (ops#7): `SolverSeeded` runs the V2s scenarios and random
 sequences in two child processes under two naming hash seeds, and their SCORE records must be equal.
 
@@ -41,6 +48,7 @@ runs one seed.
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import traceback
@@ -49,6 +57,7 @@ import unittest
 from PartDesignTests.Scenarios import harness
 from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, sketch_edits
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, external, internal, issues
+from PartDesignTests.Scenarios import interning
 from PartDesignTests.Scenarios import rlist
 from PartDesignTests.Scenarios import randomized, splits, uptoface
 
@@ -67,14 +76,60 @@ AREAS = (
     consumers,
     issues,
     rlist,
+    interning,
 )
 
 
 def configsFor(scenario):
     listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
     if listed:
-        return [c.strip() for c in listed.split(",") if c.strip()]
+        return [c.strip() for c in listed.split(",") if c.strip() and c.strip() not in ORACLES]
     return ["V2", "V2s", "V2multi"] if scenario.MULTI else ["V2", "V2s"]
+
+
+# The interning oracles (ops#6): {interned configuration: the configuration it must equal}
+ORACLES = {"V2i": "V2", "V2si": "V2s"}
+
+
+def oracles():
+    """The interned configurations whose oracle tests run: V2i by default; those listed in
+    FREECAD_SCENARIO_CONFIGS when it is set."""
+    listed = os.environ.get("FREECAD_SCENARIO_CONFIGS")
+    if not listed:
+        return ["V2i"]
+    return [c.strip() for c in listed.split(",") if c.strip() in ORACLES]
+
+
+# The fields of a SCORE record an interning oracle compares
+ORACLE_FIELDS = (
+    "verdict",
+    "stored",
+    "outcome",
+    "subs",
+    "names",
+    "names_before",
+    "subs_before",
+    "tier",
+)
+
+
+GEOMETRY_ID = re.compile(r"\bg[0-9]+\b")
+
+
+def _oracleValue(record, field):
+    """A record's field as the oracle compares it. Sketch geometry IDs in names are masked: a
+    new geometry's ID comes from a process-wide counter, so it differs between two runs of a
+    scenario (`models.notchDiscCircle`); `subs` still tells the elements apart."""
+    value = record.get(field)
+    if field in ("names", "names_before") and value:
+        return [GEOMETRY_ID.sub("g#", name) if name else name for name in value]
+    return value
+
+
+def _stepRecords(result):
+    """[(step, record)] of a reference's Result or StepResults."""
+    results = getattr(result, "results", [result])
+    return [(r.step, r.record) for r in results]
 
 
 class ScenarioTestCase(unittest.TestCase):
@@ -98,6 +153,26 @@ class ScenarioTestCase(unittest.TestCase):
         if not result.passing:
             self.fail(f"{ref} is {result.verdict}: {result.message()}")
 
+    def checkInterned(self, ref, config):
+        """The interned configuration gives the reference what its plain one gives it, after
+        every step (ops#6)."""
+        base = ORACLES[config]
+        runs = {c: self.results(c) for c in (base, config)}
+        for c, results in runs.items():
+            if isinstance(results, str):
+                raise harness.ScenarioError(f"{self.scenario.__name__} ({c}) failed:\n{results}")
+        plain = _stepRecords(runs[base][ref])
+        interned = _stepRecords(runs[config][ref])
+        self.assertEqual([step for step, _ in interned], [step for step, _ in plain])
+        for (step, a), (_, b) in zip(plain, interned):
+            differ = [f for f in ORACLE_FIELDS if _oracleValue(a, f) != _oracleValue(b, f)]
+            if differ:
+                lines = [f"  {f}: {base} {a.get(f)!r}\n    {config} {b.get(f)!r}" for f in differ]
+                self.fail(
+                    f"{ref} after {step}: {config} differs from {base} in {differ}:\n"
+                    + "\n".join(lines)
+                )
+
 
 def _makeTests():
     classes = {}
@@ -117,6 +192,14 @@ def _makeTests():
                 test.__name__ = f"test_{ref}_{config}"
                 test.__doc__ = f"{scenario.__name__}: {ref} ({config})"
                 attributes[test.__name__] = test
+            for config in oracles():
+
+                def oracle(self, ref=ref, config=config):
+                    self.checkInterned(ref, config)
+
+                oracle.__name__ = f"test_{ref}_{config}Oracle"
+                oracle.__doc__ = f"{scenario.__name__}: {ref} ({config} equals {ORACLES[config]})"
+                attributes[oracle.__name__] = oracle
         classes[scenario.__name__] = type(scenario.__name__, (ScenarioTestCase,), attributes)
     return classes
 
