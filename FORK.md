@@ -104,7 +104,8 @@ names it.
 | `feat/naming-intern-switch` | feat | ops#6 | - | `integration` `4207e545d0` | `0bade44a24` (fork PR 73), 2026-10-02 | never (fork feature) |
 | `feat/naming-intern-readers` | feat | ops#6 | - | `integration` `0bade44a24` | `8951693731` (fork PR 76), 2026-10-02 | never (fork feature) |
 | `feat/naming-intern-save` | feat | ops#6 | - | `integration` `8951693731` (branched at `4401e35c01`, fork PR 76's head) | `1df3c779aa` (fork PR 77), 2026-10-02 | never (fork feature) |
-| `feat/naming-trf-steps` | feat | ops#6 | - | `integration` `8951693731` | (fork PR 75) | never (fork feature) |
+| `feat/naming-trf-steps` | feat | ops#6 | - | `integration` `8951693731` | `fae92bde64` (fork PR 75), 2026-10-02 | never (fork feature) |
+| `fix/92-scenario-lists` | fix | ops#92, ops#94, ops#89 | - | `feat/naming-trf-steps` `4cba1ebdea` (stacked on fork PR 75) | (fork PR 78) | never (fork tests) |
 
 ## Fork-only commits in carried topics
 

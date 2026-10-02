@@ -16,3 +16,9 @@ cli  PartDesignTests.TestNamingScenarios.LinearDirection2Steps.test_sketch_00_30
 
 reason: as LinearDirection2Steps, in Extent mode: Occurrences2 2 -> 1, the sketch on the lost row's block (0, 30) stays on its old index, a coplanar top face of the remaining row (V2)
 cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_00_30_face_V2
+
+reason: the V2 entries above with the multi-match flags on (V2multi): the flags touch only dress-ups and Profile, not these consumers, so the verdict is V2's at every step; CI runs V2multi only for dress-up and Profile scenarios, so these are local all-configuration runs only (ops#92)
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2Steps.test_sketch_00_30_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_00_30_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBox.test_sketch_y3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPad.test_sketch_y3_face_V2multi

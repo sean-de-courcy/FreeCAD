@@ -89,3 +89,23 @@ cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_fac
 reason: an Extent-mode two-step pattern (a MultiTransform, a LinearPattern with Direction2) loses its last X instance and the previous one moves onto its place: the sketch on the lost block (its name is missing) resolves by geometry to the block now there, silently (V2's geometric search; V2s breaks it with the pattern-sibling guard)
 cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_60_30_face_V2
 cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_60_30_face_V2
+
+reason: the V2 entries above with the multi-match flags on (V2multi): the flags touch only dress-ups and Profile, not these consumers, so the verdict is V2's at every step; CI runs V2multi only for dress-up and Profile scenarios, so these are local all-configuration runs only (ops#92)
+cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalArcSplit.test_right_arc_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_60_30_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_60_30_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.PartCutLift.test_base_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.PartFuseDrop.test_base_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.PartFuseLift.test_base_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_a_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.SolverMergeTwo.test_b_top_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_x3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxExtent.test_sketch_y3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_x3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch_y3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_x3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2multi

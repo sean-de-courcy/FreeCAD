@@ -782,10 +782,11 @@ class AddFeature(Edit):
     def apply(self, doc, body, before, after):
         f = after.byId(self.feature.fid)
         if self.insert:
-            tip = body.Tip
             body.Tip = doc.Pad
             create(doc, body, after, f)
-            body.Tip = tip
+            # The spec's last solid feature, not the tip before the insert: when that was the pad
+            # (the later features deleted), the inserted feature is the last one (ops#89)
+            body.Tip = doc.getObject(after.tip())
         else:
             create(doc, body, after, f)
 
@@ -1088,6 +1089,13 @@ class RandomSequence(Scenario):
                     results.append(result)
                     break
                 self.doc.recompute()
+                if body.Tip is None or body.Tip.Name != step.after.tip():
+                    # a feature past the tip would be built on by the next feature added there
+                    # (ops#89): a defect of the edit's replay, not a verdict
+                    raise ScenarioError(
+                        f"step {k} ({step.edit.text}): the body's tip is "
+                        f"{body.Tip.Name if body.Tip else None}, the spec's {step.after.tip()}"
+                    )
                 if step.repaired is None:
                     judged = self.judgeAll(step.after, str(k), step.edit.text)
                 else:
