@@ -227,3 +227,57 @@ class ExternalArcSplit(Scenario):
     def edit(self, doc):
         m.notchDiscArc(doc.Profile)
         self.split = True
+
+
+class ExternalThreadRemoved(Scenario):
+    """A block 0..30 x 0..30 x 10 (a pad) with a threaded hole (M6 by its thread size, 8 deep,
+    a drill point) at (15, 15), its thread modelled; a sketch at z = 0 with one of the thread's
+    edges (a B-spline) as external geometry. The thread stops being modelled: every thread edge
+    is gone, and the sketch should report it. The drill point's circles share the thread edge's
+    sources, so tier 1 found one of them alone, which has another curve (ops#87: the sketch
+    stayed valid on that circle)."""
+
+    area = "external geometry"
+    REFS = ("thread_edge",)
+    gone = False
+
+    def threadEdge(self):
+        return BROKEN if self.gone else self.thread
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 30, 30), body)
+        m.pad(body, profile, 10)
+        circle = m.sketch(doc, "HoleSketch", [m.circle(15, 15, 0.25)], body)
+        doc.recompute()  # the hole's properties read its base's shape
+        hole = body.newObject("PartDesign::Hole", "Hole")
+        hole.Profile = circle
+        hole.Reversed = True
+        hole.Diameter = 6
+        hole.Depth = 8
+        hole.DepthType = 0
+        hole.DrillPoint = 1
+        hole.DrillPointAngle = 118
+        hole.Threaded = 1
+        hole.ThreadType = 1
+        hole.ThreadSize = 16
+        hole.ModelThread = 1
+        doc.recompute()
+        # The thread's first B-spline edge, by index: its place is all the scenario needs.
+        first = next(
+            i
+            for i, e in enumerate(hole.Shape.Edges, 1)
+            if isinstance(e.Curve, Part.BSplineCurve)
+        )
+        where = hole.Shape.Edges[first - 1].CenterOfMass
+        self.thread = edge(
+            where=lambda e: isinstance(e.Curve, Part.BSplineCurve)
+            and (e.CenterOfMass - where).Length < 1e-6
+        )
+        sketch = m.sketch(doc, "OnBottom", [], body)
+        sketch.addExternal(hole.Name, f"Edge{first}")
+        self.ref("thread_edge", sketch, "ExternalGeometry", self.threadEdge, ExternalCoincides())
+
+    def edit(self, doc):
+        doc.Hole.ModelThread = 0
+        self.gone = True

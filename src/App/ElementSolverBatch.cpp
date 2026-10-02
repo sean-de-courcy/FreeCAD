@@ -126,6 +126,30 @@ Data::Tier1Source tier1Source()
     return Data::Tier1Source::Union;
 }
 
+Data::OverlapMeasure overlapMeasure()
+{
+    std::string value = solverParameters()->GetASCII("Tier1Overlap", "plain");
+    if (value == "depth") {
+        return Data::OverlapMeasure::DepthWeighted;
+    }
+    if (value == "refids") {
+        return Data::OverlapMeasure::ReferenceIds;
+    }
+    return Data::OverlapMeasure::Plain;
+}
+
+Data::Tier1Check tier1Check()
+{
+    std::string value = solverParameters()->GetASCII("Tier1Check", "intrinsic");
+    if (value == "kind") {
+        return Data::Tier1Check::Kind;
+    }
+    if (value == "none") {
+        return Data::Tier1Check::None;
+    }
+    return Data::Tier1Check::Intrinsic;
+}
+
 // Tier 1's gap, the tolerances of tiers 2 and 3 and the continuation's distance (fork-only
 // parameters for the tuning runs; a value that isn't positive and finite keeps the default).
 void readTolerances(double& gap, Data::GeometryTolerances& tolerances, double& continuation)
@@ -508,6 +532,8 @@ bool solveElementReferences(DocumentObject* feature,
     const std::string targetName = feature->getFullName();
     bool sourceRead = false;
     Data::Tier1Source source = Data::Tier1Source::Union;
+    Data::OverlapMeasure measure = Data::OverlapMeasure::Plain;
+    Data::Tier1Check check = Data::Tier1Check::Intrinsic;
     double gap = Data::SolveInput().gap;
     Data::GeometryTolerances tolerances;
     double continuationDistance = Data::SolveInput().continuationDistance;
@@ -578,6 +604,8 @@ bool solveElementReferences(DocumentObject* feature,
 
         if (!sourceRead) {
             source = tier1Source();
+            measure = overlapMeasure();
+            check = tier1Check();
             readTolerances(gap, tolerances, continuationDistance);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
@@ -643,6 +671,8 @@ bool solveElementReferences(DocumentObject* feature,
 
         Data::SolveInput input;
         input.source = source;
+        input.measure = measure;
+        input.check = check;
         input.gap = gap;
         input.tolerances = tolerances;
         input.diagonal = diagonal;

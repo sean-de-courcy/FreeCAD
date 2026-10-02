@@ -1610,7 +1610,8 @@ TEST(SolveOwner, geometryBreaksTiesAmongSurvivors)
 TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
 {
     // The outer wire gains an edge: the top face changed size and centre, which is what the
-    // edit did. Tier 1's one survivor resolves; geometry doesn't run.
+    // edit did. Tier 1's one survivor resolves; tiers 2 and 3 don't run. Since Task 2 PR 8 the
+    // partner is measured once, for the tier-1 check (still a plane, the same normal: ops#87).
     Placed p;
     SolveInput input;
     input.diagonal = 30.0;
@@ -1625,7 +1626,7 @@ TEST(SolveOwner, geometryNeverOverridesASingleSurvivor)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
     EXPECT_EQ(outcomes[0].element, "Face2");
     EXPECT_EQ(outcomes[0].tier, 1);
-    EXPECT_EQ(calls, 0);
+    EXPECT_EQ(calls, 1);
 }
 
 TEST(SolveOwner, geometryAloneNeedsBothTiers)
@@ -3299,4 +3300,94 @@ TEST(ReferenceReport, reverseCheckTolerances)
     auto wider = boxed;
     wider.extentMax = Base::Vector3d(10, 15.001, 20);
     EXPECT_FALSE(App::fingerprintsAgree(boxed, wider, 50.0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tier 1's variants (Task 2 PR 8)
+
+TEST(NameAncestry, referenceIdsWidenLeaves)
+{
+    // ops#76: a sketch corner's vertex `g1v2,g2v1` renamed `g12v2,g2v1`. As nodes the two
+    // vertices share nothing; their Reference ID g2v1 of sketch 5 is shared.
+    const auto oldEdge = generated({sketchVertex({"g1v2", "g2v1"})}, 6, "XTR", 'E');
+    const auto renamed = generated({sketchVertex({"g12v2", "g2v1"})}, 6, "XTR", 'E');
+    const auto otherSketch = generated({sketchVertex({"g12v2", "g2v1"}, 7)}, 6, "XTR", 'E');
+    NameAncestry plain;
+    EXPECT_EQ(plain.overlap(oldEdge, renamed), 0.0);
+    NameAncestry widened(Data::OverlapMeasure::ReferenceIds);
+    //   A*(old) = {old, the vertex, g1v2@5, g2v1@5}; the renamed edge shares g2v1@5
+    EXPECT_DOUBLE_EQ(widened.overlap(oldEdge, renamed), 0.25);
+    EXPECT_EQ(widened.overlap(oldEdge, otherSketch), 0.0);
+    //   the leaves widen the overlap, never the ancestry itself
+    EXPECT_TRUE(widened.contains(renamed, sketchVertex({"g12v2", "g2v1"})));
+    EXPECT_FALSE(widened.contains(renamed, sketchVertex({"g1v2", "g2v1"})));
+}
+
+TEST(NameAncestry, depthWeightedOverlap)
+{
+    // old -> its face (depth 1) -> the face's two sketch edges (depth 2): weights 1, 1/2, 1/4,
+    // 1/4, total 2. A candidate embedding one edge shares 1/4 of 2; plainly 1 of 4.
+    const auto face = lowFace({sketchEdge(1), sketchEdge(2)});
+    const auto oldName = generated({face}, 6, "XTR", 'E');
+    const auto oneEdge = generated({sketchEdge(1)}, 7, "XTR", 'E');
+    const auto sameFace = generated({face}, 7, "XTR", 'E');
+    NameAncestry plain;
+    EXPECT_DOUBLE_EQ(plain.overlap(oldName, oneEdge), 0.25);
+    NameAncestry weighted(Data::OverlapMeasure::DepthWeighted);
+    EXPECT_DOUBLE_EQ(weighted.overlap(oldName, oneEdge), 0.125);
+    EXPECT_DOUBLE_EQ(weighted.overlap(oldName, sameFace), 0.5);
+    EXPECT_DOUBLE_EQ(weighted.overlap(oldName, oldName), 1.0);
+    //   the same result whatever was asked first
+    NameAncestry again(Data::OverlapMeasure::DepthWeighted);
+    EXPECT_DOUBLE_EQ(again.overlap(oldName, sameFace), 0.5);
+    EXPECT_DOUBLE_EQ(again.overlap(oldName, oneEdge), 0.125);
+}
+
+TEST(SolveOwner, tier1CheckBreaksAPartnerOfAnotherGeometry)
+{
+    // ops#87: the reference's element (a B-spline edge) is gone; the only tier-1 survivor
+    // shares its sources and its top section, but is a circle.
+    const auto oldName = generated({sketchEdge(1)}, 6, "XTR", 'E');
+    const auto survivor = generated({sketchEdge(1)}, 6, "XTR", 'E', 2);
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Edge"] = {element("Edge4", {survivor})};
+    auto entry = missing(oldName, "Edge");
+    entry.fingerprint = fingerprint('E', "BSpline", 20, Base::Vector3d(0, 0, 5));
+    input.entries = {entry};
+    auto circle = fingerprint('E', "Circle", 6, Base::Vector3d(0, 0, 0), Base::Vector3d(0, 0, 1),
+                              {1});
+    measure(input, {{"Edge4", circle}}, nullptr);
+
+    //   without the check: resolved at tier 1 (the wrong verdict)
+    input.check = Data::Tier1Check::None;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    //   with it, broken, with the survivor as the candidate
+    for (auto check : {Data::Tier1Check::Kind, Data::Tier1Check::Intrinsic}) {
+        input.check = check;
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+                  "broken  -1 [Edge4 ] tier 2 disagrees with Edge4")
+            << static_cast<int>(check);
+    }
+    //   a survivor of the saved kind resolves under Kind; under Intrinsic its direction and
+    //   radii must agree too
+    auto bspline = fingerprint('E', "BSpline", 18, Base::Vector3d(1, 0, 5));
+    measure(input, {{"Edge4", bspline}}, nullptr);
+    for (auto check : {Data::Tier1Check::Kind, Data::Tier1Check::Intrinsic}) {
+        input.check = check;
+        EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved)
+            << static_cast<int>(check);
+    }
+    auto tilted = fingerprint('E', "Line", 20, Base::Vector3d(0, 0, 5), Base::Vector3d(0, 0, 1));
+    entry.fingerprint = tilted;
+    input.entries = {entry};
+    auto line = fingerprint('E', "Line", 20, Base::Vector3d(0, 0, 5), Base::Vector3d(0, 1, 0));
+    measure(input, {{"Edge4", line}}, nullptr);
+    input.check = Data::Tier1Check::Kind;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
+    input.check = Data::Tier1Check::Intrinsic;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+    //   without a saved fingerprint there is nothing to check: resolved
+    input.entries[0].fingerprint = ElementFingerprint();
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
 }

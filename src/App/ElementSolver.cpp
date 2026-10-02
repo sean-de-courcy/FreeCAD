@@ -64,6 +64,7 @@ NameAncestry::Key NameAncestry::intern(std::string_view name)
     auto key = static_cast<Key>(_names.size());
     const std::string& stored = _names.emplace_back(name);
     _sets.emplace_back();
+    _children.emplace_back();
     _done.push_back(0);
     _keys.emplace(std::string_view(stored), key);
     return key;
@@ -106,6 +107,7 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
     // The children: the prefix, and the names embedded in the last section. Copied, since the
     // recursion below interns more nodes.
     std::vector<std::string> children;
+    std::vector<std::pair<std::string, std::string>> referenceIds;  // (ID, tag) of a leaf
     {
         const std::string& node = _names[key];
         auto sections = splitSections(node);
@@ -122,10 +124,18 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
             for (const auto& embedded : last.connectedElements) {
                 children.push_back(embedded);
             }
+            if (_measure == OverlapMeasure::ReferenceIds && sections.size() == 1) {
+                for (const auto& id : last.referenceIDs) {
+                    if (!id.empty() && id != Data::EMPTY_VALUE) {
+                        referenceIds.emplace_back(id, last.iterationTag);
+                    }
+                }
+            }
         }
     }
 
     KeySet result {key};
+    std::vector<Key> childKeys;
     for (const auto& child : children) {
         if (child.empty()) {
             continue;
@@ -134,12 +144,19 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
         if (childKey == key) {
             continue;  // not possible for a well-formed name, which is longer than its parts
         }
+        childKeys.push_back(childKey);
         const KeySet& childSet = ancestorsOf(childKey);
         result.insert(result.end(), childSet.begin(), childSet.end());
+    }
+    for (const auto& [id, tag] : referenceIds) {
+        Key idKey = internReferenceId(id, tag);
+        childKeys.push_back(idKey);
+        result.push_back(idKey);
     }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
 
+    _children[key] = std::move(childKeys);
     _sets[key] = std::move(result);
     _done[key] = 1;
     ++_computed;
@@ -190,6 +207,9 @@ double NameAncestry::overlap(std::string_view oldName, std::string_view candidat
     // Computing the candidate's set may intern nodes; the deques keep oldSet valid.
     const KeySet& oldSet = ancestors(oldName);
     const KeySet& candidateSet = ancestors(candidate);
+    if (_measure == OverlapMeasure::DepthWeighted) {
+        return weightedOverlap(intern(oldName), candidateSet);
+    }
     std::size_t common = 0;
     auto a = oldSet.begin();
     auto b = candidateSet.begin();
@@ -207,6 +227,56 @@ double NameAncestry::overlap(std::string_view oldName, std::string_view candidat
         }
     }
     return static_cast<double>(common) / static_cast<double>(oldSet.size());
+}
+
+NameAncestry::Key NameAncestry::internReferenceId(const std::string& id, const std::string& tag)
+{
+    // A control character starts no mapped name, so no name interns the same string.
+    Key key = intern("\x1f" + id + "@" + tag);
+    if (!_done[key]) {
+        _sets[key] = {key};
+        _done[key] = 1;
+        ++_computed;
+    }
+    return key;
+}
+
+double NameAncestry::weightedOverlap(Key oldKey, const KeySet& candidateSet)
+{
+    auto it = _weights.find(oldKey);
+    if (it == _weights.end()) {
+        // Shortest depths below the old name, breadth first over the children ancestorsOf()
+        // recorded (the old name's set is computed, so every node in it has its children).
+        std::map<Key, int> depth {{oldKey, 0}};
+        std::vector<Key> level {oldKey};
+        for (int d = 1; !level.empty(); ++d) {
+            std::vector<Key> next;
+            for (Key node : level) {
+                for (Key child : _children[node]) {
+                    if (depth.emplace(child, d).second) {
+                        next.push_back(child);
+                    }
+                }
+            }
+            level = std::move(next);
+        }
+        std::vector<std::pair<Key, double>> weights;
+        double total = 0.0;
+        for (const auto& [node, d] : depth) {
+            double weight = std::ldexp(1.0, -d);
+            weights.emplace_back(node, weight);
+            total += weight;
+        }
+        it = _weights.emplace(oldKey, std::make_pair(std::move(weights), total)).first;
+    }
+    const auto& [weights, total] = it->second;
+    double common = 0.0;
+    for (const auto& [node, weight] : weights) {
+        if (std::binary_search(candidateSet.begin(), candidateSet.end(), node)) {
+            common += weight;
+        }
+    }
+    return total > 0.0 ? common / total : 0.0;
 }
 
 bool NameAncestry::topAgrees(std::string_view oldName, std::string_view candidate)
@@ -1401,7 +1471,7 @@ int extrinsicNearest(
 
 std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 {
-    NameAncestry ancestry;
+    NameAncestry ancestry(input.measure);
     std::vector<SolveOutcome> outcomes(input.entries.size());
 
     // Pools in index order, names sorted by bytes, duplicates merged; a dense element ID over
@@ -1862,6 +1932,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // Expand: the pieces that resolve together, the first being the only entry of
         // `candidates`.
         std::vector<int> expanded;
+        // The members' saved fingerprint, if they all hold the same valid one.
+        const ElementFingerprint* saved = nullptr;
     };
 
     // The members' saved fingerprint, if they all hold the same valid one.
@@ -1985,6 +2057,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 
         // Tiers 2 and 3 and the IDX source, for a reference with a saved fingerprint.
         const ElementFingerprint* saved = savedFingerprint(members);
+        state.saved = saved;
         auto intrinsicSurvivors = [&](const std::vector<int>& positions) {
             std::vector<int> agree;
             for (int k : positions) {
@@ -2214,12 +2287,30 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         state.pool->elements[k].names.end(),
                         [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
                     ));
+            // A partner that tier 1 alone found must not contradict the saved geometry (ops#87:
+            // a thread's B-spline edge resolved to a circle with which it shares sources). The
+            // geometric tiers, the IDX source and pieces checked or need no check.
+            bool contradicts = false;
+            if (k >= 0 && state.saved && input.check != Tier1Check::None && !state.geometric
+                && state.geometryTier == 0 && !state.indexed && state.equivalent.empty()
+                && state.expanded.empty()) {
+                const ElementFingerprint& now = fingerprintOf(state.pool->elements[k]);
+                contradicts = input.check == Tier1Check::Kind
+                    ? !(now.isValid() && now.type == state.saved->type
+                        && now.kind == state.saved->kind)
+                    : !intrinsicAgrees(*state.saved, now, input.tolerances);
+            }
             if (status == MatchStatus::Resolved && sibling) {
                 state.outcome.evidence = "pattern sibling";
                 listCandidates(state, state.listed);
             }
             else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
+                listCandidates(state, state.listed);
+            }
+            else if (status == MatchStatus::Resolved && contradicts) {
+                state.outcome.evidence = "tier 2 disagrees with "
+                    + state.pool->elements[k].index;
                 listCandidates(state, state.listed);
             }
             else if (status == MatchStatus::Resolved && !state.expanded.empty()) {
