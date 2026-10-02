@@ -484,7 +484,10 @@ def saved():
     global _saved
     if _saved is not None:
         return _saved
-    folder = tempfile.mkdtemp(prefix="naming-load-")
+    # The canonical path: on macOS the temporary folder is reached through a symlink
+    # (/var -> /private/var), and an XLink's relative path is taken from the owner's canonical
+    # folder, so A would store a path that climbs to the root and still finds B from A's copy.
+    folder = os.path.realpath(tempfile.mkdtemp(prefix="naming-load-"))
     manifest = {
         "folder": folder,
         "models": save._saveModels(folder),
@@ -696,10 +699,15 @@ class TestNamingLoadElementReference(unittest.TestCase):
         """B's file is absent: A's shadows resolve from A's own table, and a new save of A writes
         them as they were."""
         info = saved()["elementRef"]
+        before = save.fileEntries(info["absent"])
+        self.assertEqual(
+            set(re.findall(r'<XLink file="([^"]*)"', before["Document.xml"])),
+            {"ElementRefB.FCStd"},
+            "the premise: A links B by a path relative to A's folder, so B is absent from A's copy",
+        )
         result = checked(self, child(self, "elementRef")["absent"])
         self.assertNotIn("ElementRefB", result["documents"])
         self.assertEqual(result["unresolved"], [])
-        before = save.fileEntries(info["absent"])
         after = save.fileEntries(result["again"])
         xlink = re.compile(r"<XLink .*?/>|<XLink .*?</XLink>", re.S)
         stamp = re.compile(r' stamp="[^"]*"')  # an XLink to an absent file keeps no stamp
