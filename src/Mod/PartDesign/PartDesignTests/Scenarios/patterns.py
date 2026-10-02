@@ -24,7 +24,9 @@
 follow their instances when the pattern's occurrences, spacing or direction change. Two patterns
 of one original: a sketch on one pattern's instance stays there when the other pattern changes
 (ops#55). A two-step pattern (a MultiTransform, a LinearPattern with a second direction): a
-sketch on an instance stays there when an earlier step's count changes (ops#6)."""
+sketch on an instance stays there when an earlier step's count changes (ops#6). Overlapping
+instances: a sketch on the piece of the top over two instances breaks when one of them goes
+(ops#91)."""
 
 import os
 import shutil
@@ -713,3 +715,71 @@ class MultiTransformRecreateStep(MultiTransformSteps):
         linX = self.linear(doc, multi.getParentGeoFeatureGroup(), "LinXAgain", "X_Axis", 3)
         multi.getParentGeoFeatureGroup().addObject(linX)
         multi.Transformations = [linX] + multi.Transformations
+
+
+class OverlappingInstances(Scenario):
+    """A Pad of an 8 x 4 rectangle at the origin, 4 high; a LinearPattern along X, 3
+    occurrences, 5 apart ("Spacing" mode, Refine off), so the blocks overlap: x 0..8, 5..13 and
+    10..18. The top is split where the blocks overlap: x 0..5, 5..8 (the support and instance 2),
+    8..10, 10..13 (instances 2 and 3) and 13..18. Sketches are attached to the pieces over
+    5..8, 10..13 and 13..18. Then the occurrences go 3 -> 2 -> 3. With 2, instance 3 is gone,
+    and so are the pieces over 10..13 and 13..18: their sketches' references break. The piece
+    over 5..8 stays. With 3 again, each sketch is back on its piece.
+
+    An overlap piece is named from the edges that bound it, here an edge of each block: 10..13
+    from instance 2's right edge and instance 3's left edge, 5..8 from the support's right edge
+    and instance 2's left edge. An instance's edge ends in its TRF section after the support's
+    edge's name, so the support's names are ancestors of every instance's (ops#91, N1). Through
+    that step alone, 10..13 shared most of its ancestry with 5..8, and the reference solver
+    moved the lost piece's sketch there at tier 1."""
+
+    area = "patterns"
+    REFS = ("sketch_top_12", "sketch_top_23", "sketch_top_3")
+    steps = ("fewer", "back")
+    length, width, height, spacing = 8, 4, 4, 5
+
+    def topPiece(self, x):
+        point = (x, self.width / 2, self.height)
+        return face("plane", normal=Z, through=point, contains=point)
+
+    def gone(self):
+        return self.stepName == "fewer"
+
+    def top12(self):
+        return self.topPiece(6.5)
+
+    def top23(self):
+        return BROKEN if self.gone() else self.topPiece(11.5)
+
+    def top3(self):
+        return BROKEN if self.gone() else self.topPiece(15.5)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, self.length, self.width), body)
+        pad = m.pad(body, profile, self.height)
+        pattern = doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [pad]
+        pattern.Direction = (m.originFeature(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = self.spacing
+        pattern.Occurrences = 3
+        pattern.Refine = False
+        body.addObject(pattern)
+        doc.recompute()
+        for name, ref, expect in (
+            ("On12", "sketch_top_12", self.top12),
+            ("On23", "sketch_top_23", self.top23),
+            ("On3", "sketch_top_3", self.top3),
+        ):
+            sketch = body.newObject("Sketcher::SketchObject", name)
+            sketch.AttachmentSupport = [(pattern, self.names(pattern, expect())[0])]
+            sketch.MapMode = "FlatFace"
+            # No outcome check: the pieces are coplanar (see TwoPatternsEdit).
+            self.ref(ref, sketch, "AttachmentSupport", expect)
+
+    def fewer(self, doc):
+        doc.LinearPattern.Occurrences = 2
+
+    def back(self, doc):
+        doc.LinearPattern.Occurrences = 3

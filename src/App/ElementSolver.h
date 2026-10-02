@@ -30,6 +30,12 @@ namespace Data
  * sections: the closure over the provenance DAG. A split piece `X|...;MOD;...` therefore has X in
  * its set.
  *
+ * A pattern instance's copy `X|<tag>;TRF;<k>...` is the exception (ops#91): its prefix X stands for
+ * the support's element, and the copy's history is X's history in instance k. So the prefix is
+ * the node X in the context of instance k, and so is every node of A*(X) below it: the support's
+ * elements and their copies share no ancestor, nor do two instances' copies, also where a name
+ * embeds copies (a fusion's face bounded by an edge of each of two overlapping instances).
+ *
  * Names are bare mapped names, as an element map stores them: no `;` prefix and no `.Edge1`
  * suffix. Each distinct node string gets a dense key on first sight, valid for the life of the
  * object (one solve), and each node's set is computed once, on its first query, as a sorted
