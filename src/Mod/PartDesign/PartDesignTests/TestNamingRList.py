@@ -23,7 +23,12 @@
 """Reproducers for the R-list in the ops repo's `notes/naming-v2.md` below the reference level
 (FreeCAD-CH, ops#5). The ones about references are scenarios (`Scenarios/rlist.py`)."""
 
+import os
+import re
+import shutil
+import tempfile
 import unittest
+import zipfile
 
 import FreeCAD as App
 import Part
@@ -64,6 +69,39 @@ class TestNamingRList(unittest.TestCase):
         self.assertEqual(box.getCorrectElementMapVersion(), v1)
         doc.HistoryAlgorithm = "V2"
         self.assertEqual(box.getCorrectElementMapVersion(), v2)
+
+    def testSwitchedDocumentReopensWithoutRecompute(self):
+        """R3: a document whose history algorithm was switched saves its shapes with the new
+        algorithm's element map version, so it reopens with no recompute pending. With the old
+        version kept, the saved string didn't match the reopened document's and every shape was
+        marked for a recompute."""
+        folder = tempfile.mkdtemp(prefix="NamingRList")
+        self.addCleanup(shutil.rmtree, folder, True)
+        for first, second in (("V2", "V1"), ("V1", "V2")):
+            with self.subTest(switch=f"{first} -> {second}"):
+                # Arrange
+                fresh = self.newDocument(second).addObject("Part::Box", "Box")
+                expected = fresh.getCorrectElementMapVersion()
+                doc = self.newDocument(first)
+                doc.addObject("Part::Box", "Box")
+                doc.recompute()
+                doc.HistoryAlgorithm = second
+                doc.recompute()
+                path = os.path.join(folder, f"Switched{first}{second}.FCStd")
+
+                # Act
+                doc.saveAs(path)
+                App.closeDocument(doc.Name)
+                doc = App.openDocument(path)
+                self.documents.append(doc.Name)
+
+                # Assert
+                with zipfile.ZipFile(path) as archive:
+                    xml = archive.read("Document.xml").decode()
+                saved = re.findall(r'ElementMap="([^"]*)"', xml)  # the Box's shape
+                self.assertEqual(saved, [expected])
+                self.assertNotIn("Touched", doc.getObject("Box").State)
+                self.assertFalse(doc.mustExecute())
 
     def testDecodeLastFieldEndingInEscapedCharacter(self):
         """R5: a section whose last field ends in an escaped character decodes back to what was
