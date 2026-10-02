@@ -918,6 +918,8 @@ void Document::onChanged(const Property* prop)
     }
     else if (prop == &HistoryAlgorithm) {
         selectedHistoryAlgorithm = App::getHistoryAlgorithm(HistoryAlgorithm.getValueAsString());
+        // The element map version names the algorithm: computed again on its next use (ops#62).
+        elementMapVersion.clear();
         recomputeSubObjects = true;
     }
     else if (prop == &ReferenceSolver) {
