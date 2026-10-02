@@ -102,7 +102,8 @@ names it.
 | `feat/naming-map` | feat | ops#6, ops#64 | - | `feat/naming-table` `6c2085c074` (fork PR 71) | `4207e545d0` (fork PR 72), 2026-10-02 | a new base's `MappedName::hash` hashes data followed by postfix (ops#64); otherwise never (fork feature) |
 | `feat/solver-fingerprint-cache` | feat | ops#90 | - | `integration` `4207e545d0` | `5987bb8041` (fork PR 74), 2026-10-02 | never (fork feature) |
 | `feat/naming-intern-switch` | feat | ops#6 | - | `integration` `4207e545d0` | `0bade44a24` (fork PR 73), 2026-10-02 | never (fork feature) |
-| `feat/naming-intern-readers` | feat | ops#6 | - | `integration` `0bade44a24` | (fork PR 76) | never (fork feature) |
+| `feat/naming-intern-readers` | feat | ops#6 | - | `integration` `0bade44a24` | `8951693731` (fork PR 76), 2026-10-02 | never (fork feature) |
+| `feat/naming-intern-save` | feat | ops#6 | - | `integration` `8951693731` (branched at `4401e35c01`, fork PR 76's head) | (fork PR 77) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -146,9 +146,22 @@ void ElementMap::beforeSave(const ::App::StringHasherRef& hasherRef) const
     }
     this->_id = id;
 
+    // The references in the names a document saves (ops#6): its file must hold their entries
+    auto* collector = NameRefCollector::active();
+    auto collect = [collector](const MappedName& name) {
+        const QByteArray& data = name.dataBytes();
+        const QByteArray& postfix = name.postfixBytes();
+        if (data.contains(NameTable::Marker) || postfix.contains(NameTable::Marker)) {
+            collector->add(name.toString());  // whole: a reference may span data and postfix
+        }
+    };
+
     for (auto& indexedName : this->indexedNames) {
         for (const MappedNameRef& mappedName : indexedName.second.names) {
             for (const MappedNameRef* ref = &mappedName; ref; ref = ref->next.get()) {
+                if (collector) {
+                    collect(ref->name);
+                }
                 for (const ::App::StringIDRef& sid : ref->sids) {
                     if (sid.isFromSameHasher(hasherRef)) {
                         sid.mark();
@@ -157,6 +170,10 @@ void ElementMap::beforeSave(const ::App::StringHasherRef& hasherRef) const
             }
         }
         for (auto& childPair : indexedName.second.children) {
+            if (collector) {
+                collector->add(std::string_view(childPair.second.postfix.constData(),
+                                                childPair.second.postfix.size()));
+            }
             if (childPair.second.elementMap) {
                 childPair.second.elementMap->beforeSave(hasherRef);
             }

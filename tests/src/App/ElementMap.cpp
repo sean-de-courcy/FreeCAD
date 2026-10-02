@@ -1425,4 +1425,44 @@ TEST_F(ElementMapTest, namesAreFoundInEitherFormV2)
     EXPECT_FALSE(missing);
 }
 
+TEST_F(ElementMapTest, beforeSaveCollectsTheReferencesV2)
+{
+    // ops#6, Task 1 PR 7: while a document saves, its maps hand the references in their names to
+    // the active collector, so the file can hold the entries
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    auto plain = std::make_shared<Data::ElementMap>();
+    plain->hasher = _hasher;
+    auto interned = std::make_shared<Data::ElementMap>();
+    interned->hasher = _hasher;
+    interned->setInterned(true);
+    for (const auto& map : {plain, interned}) {
+        map->setElementName(Data::IndexedName("Face", 1), Data::MappedName(example.piece), 23);
+        map->setElementName(Data::IndexedName("Face", 2), Data::MappedName(example.face), 7);
+        map->setElementName(Data::IndexedName("Edge", 1), Data::MappedName(example.edge), 5);
+    }
+    std::set<Data::NameId> expected;
+    for (const auto& name : {table.toInterned(example.piece), table.toInterned(example.face)}) {
+        for (std::size_t pos = name.find('~'); pos != std::string::npos;
+             pos = name.find('~', pos + 1)) {
+            expected.insert(*Data::NameTable::parseRef(name.substr(pos, Data::NameTable::RefLength)));
+        }
+    }
+    ASSERT_EQ(expected.size(), 3U);  // the piece's prefix (the face), its upper edge, the face's edge
+
+    // Act
+    plain->beforeSave(_hasher);  // no collector: nothing to do
+    Data::NameRefCollector plainCollector;
+    plain->beforeSave(_hasher);
+    Data::NameRefCollector internedCollector;
+    interned->beforeSave(_hasher);
+
+    // Assert
+    EXPECT_TRUE(plainCollector.refs().empty());
+    EXPECT_EQ(internedCollector.refs(), expected);
+    //   and the entries close over them: the upper edge's content refers to the face again
+    EXPECT_EQ(internedCollector.entries(table).size(), 3U);
+}
+
 // NOLINTEND(readability-magic-numbers)

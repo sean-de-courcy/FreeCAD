@@ -13,6 +13,7 @@
 #include <map>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -664,4 +665,198 @@ TEST_F(NameTableTest, parallelInsertsGiveOneEntryPerContent)
     EXPECT_EQ(mismatches, 0);
     EXPECT_EQ(table.size(), reference.size());
     EXPECT_EQ(table.collisions(), 0U);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Saving and loading (Task 1 PR 7)
+
+namespace
+{
+
+// The interned forms of the hand-built names in \a table, and every reference they hold.
+Strings internAll(NameTable& table)
+{
+    Strings forms;
+    for (const auto& name : handBuiltNames()) {
+        forms.push_back(table.toInterned(name));
+    }
+    return forms;
+}
+
+}  // namespace
+
+TEST_F(NameTableTest, savedEntriesAreClosedAndSortedAndLoadElsewhere)
+{
+    // Arrange: a "saved document" that holds the interned names; its collector sees them
+    NameTable source;
+    Strings forms = internAll(source);
+    Data::NameRefCollector collector;
+    for (const auto& form : forms) {
+        collector.add(form);
+    }
+
+    // Act
+    std::size_t unknown = 1;
+    auto entries = collector.entries(source, &unknown);
+    std::stringstream file;
+    NameTable::writeEntries(file, entries);
+    NameTable loaded;  // another process
+    auto summary = loaded.readEntries(file);
+
+    // Assert: every node of the names, and nothing else (the table holds only theirs)
+    EXPECT_EQ(unknown, 0U);
+    EXPECT_EQ(entries.size(), source.size());
+    EXPECT_TRUE(std::is_sorted(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    }));
+    for (const auto& [id, content] : entries) {
+        EXPECT_EQ(source.lookup(id), content);
+    }
+    EXPECT_EQ(summary.inserted, entries.size());
+    EXPECT_EQ(summary.identical, 0U);
+    EXPECT_TRUE(summary.refused.empty());
+    EXPECT_EQ(summary.malformed, 0U);
+    for (std::size_t i = 0; i < forms.size(); ++i) {
+        EXPECT_EQ(loaded.toPlain(forms[i]), handBuiltNames()[i]);
+    }
+}
+
+TEST_F(NameTableTest, savedEntriesOfSomeNamesOnly)
+{
+    // Arrange: the table holds more than the saved names need
+    NameTable table;
+    Example example;
+    std::string piece = table.toInterned(example.piece);
+    std::string edge = table.toInterned(example.edge);  // one section, no embedded names
+    internAll(table);
+    Data::NameRefCollector collector;
+    collector.add(piece);
+    collector.add(edge);
+
+    // Act
+    auto entries = collector.entries(table);
+    std::stringstream file;
+    NameTable::writeEntries(file, entries);
+    NameTable loaded;
+    loaded.readEntries(file);
+
+    // Assert: the piece's prefix (the face), the face's edge, the piece's upper edge, and that
+    // edge's face again: 3 nodes
+    EXPECT_EQ(edge, example.edge);
+    EXPECT_EQ(entries.size(), 3U);
+    EXPECT_LT(entries.size(), table.size());
+    EXPECT_EQ(loaded.toPlain(piece), example.piece);
+}
+
+TEST_F(NameTableTest, savedEntriesCountUnknownReferences)
+{
+    // Arrange
+    NameTable table;
+    std::string face = table.toInterned(Example().face);
+    Data::NameRefCollector collector;
+    collector.add(face);
+    collector.add("Sub.;~vvvvvvvvvvvvu|_;_;3;CUT;0;F;0;MOD;_.Face1");  // valid form, not in the table
+    collector.add("~notanidatall ~0123 ~");                            // not references
+
+    // Act
+    std::size_t unknown = 0;
+    auto entries = collector.entries(table, &unknown);
+
+    // Assert
+    EXPECT_EQ(collector.refs().size(), 2U);
+    EXPECT_EQ(unknown, 1U);
+    EXPECT_EQ(entries.size(), 1U);
+}
+
+TEST_F(NameTableTest, readEntriesRefusesWrongAndMalformedLines)
+{
+    // Arrange
+    NameTable source;
+    std::string face = Example().face;
+    std::string interned = source.toInterned(face);
+    Data::NameRefCollector collector;
+    collector.add(interned);
+    std::stringstream file;
+    auto entries = collector.entries(source);
+    ASSERT_EQ(entries.size(), 1U);
+    std::string other = section({"g2"}, {}, "3", "SKT", "0", 'E', {"SRC"}, {});
+    file << "NameTableStart v1 4\r\n"  // a file with Windows line ends reads the same
+         << entries[0].first.toBase32() << ' ' << entries[0].second << "\r\n"
+         << entries[0].first.toBase32() << ' ' << other << '\n'  // the wrong ID for its content
+         << "nonsense\n"
+         << entries[0].first.toBase32() << '\n';  // no content
+
+    // Act
+    NameTable loaded;
+    auto summary = loaded.readEntries(file);
+
+    // Assert
+    EXPECT_EQ(summary.inserted, 1U);
+    ASSERT_EQ(summary.refused.size(), 1U);
+    EXPECT_EQ(summary.refused[0].second, other);
+    EXPECT_EQ(summary.malformed, 2U);
+    EXPECT_EQ(loaded.toPlain(interned), face);
+}
+
+TEST_F(NameTableTest, readEntriesOfAnotherFormatReadsNothing)
+{
+    NameTable table;
+    std::stringstream file("NameTableStart v2 1\n0123456789abc x\n");
+    auto summary = table.readEntries(file);
+    EXPECT_EQ(summary.inserted, 0U);
+    EXPECT_EQ(table.size(), 0U);
+}
+
+TEST_F(NameTableTest, collectorIsActiveWhileItLives)
+{
+    EXPECT_EQ(Data::NameRefCollector::active(), nullptr);
+    {
+        Data::NameRefCollector outer;
+        EXPECT_EQ(Data::NameRefCollector::active(), &outer);
+        {
+            Data::NameRefCollector inner;
+            EXPECT_EQ(Data::NameRefCollector::active(), &inner);
+        }
+        EXPECT_EQ(Data::NameRefCollector::active(), &outer);
+    }
+    EXPECT_EQ(Data::NameRefCollector::active(), nullptr);
+}
+
+TEST_F(NameTableTest, scanBufferPassesEverythingOnAndFindsSplitReferences)
+{
+    // Arrange: references at the start, in the middle and at the end, written in pieces of
+    // every size, so that each is split at every position across writes
+    NameTable table;
+    Example example;
+    std::string piece = table.toInterned(example.piece);
+    std::string text = "<Sub value=\"Pad.;" + piece + ".Face3\" shadow=\"" + piece + "\"/>"
+        + piece.substr(0, NameTable::RefLength);
+    std::set<NameId> expected;
+    for (std::size_t pos = text.find('~'); pos != std::string::npos; pos = text.find('~', pos + 1)) {
+        expected.insert(*NameTable::parseRef(text.substr(pos, NameTable::RefLength)));
+    }
+    ASSERT_EQ(expected.size(), 2U);
+
+    for (std::size_t chunk = 1; chunk <= text.size(); ++chunk) {
+        Data::NameRefCollector collector;
+        std::stringbuf target;
+        std::ostream stream(&target);
+        Data::NameRefScanBuffer buffer(&target, collector);
+        stream.rdbuf(&buffer);
+
+        // Act
+        for (std::size_t pos = 0; pos < text.size(); pos += chunk) {
+            if (chunk == 1) {
+                stream.put(text[pos]);
+            }
+            else {
+                stream << text.substr(pos, chunk);
+            }
+        }
+        stream.flush();
+
+        // Assert
+        EXPECT_EQ(target.str(), text) << chunk;
+        EXPECT_EQ(collector.refs(), expected) << chunk;
+    }
 }

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <istream>
 #include <mutex>
+#include <ostream>
 #include <vector>
 
 #include <Base/Console.h>
@@ -614,4 +616,179 @@ int NameTable::compareExpanded(std::string_view a, std::string_view b) const
         left.advanceByte();
         right.advanceByte();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Saving and loading (ops#6, Task 1 PR 7)
+// ---------------------------------------------------------------------------------------------
+
+void NameTable::writeEntries(std::ostream& stream, const std::vector<SavedEntry>& entries)
+{
+    stream << "NameTableStart v1 " << entries.size() << '\n';
+    for (const auto& [id, content] : entries) {
+        stream << id.toBase32() << ' ' << content << '\n';
+    }
+}
+
+NameTable::LoadSummary NameTable::readEntries(std::istream& stream)
+{
+    LoadSummary summary;
+    std::string marker;
+    std::string version;
+    std::size_t count = 0;
+    stream >> marker >> version >> count;
+    if (marker != "NameTableStart" || version != "v1") {
+        FC_ERR("Unknown name table format '" << marker << ' ' << version << "'");
+        return summary;
+    }
+    std::string line;
+    std::getline(stream, line);  // the rest of the first line
+    for (std::size_t i = 0; i < count && std::getline(stream, line); ++i) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        auto space = line.find(' ');
+        auto id = space == std::string::npos
+            ? std::nullopt
+            : NameId::fromBase32(std::string_view(line).substr(0, space));
+        if (!id || space + 1 >= line.size()) {
+            ++summary.malformed;
+            continue;
+        }
+        std::string_view content = std::string_view(line).substr(space + 1);
+        switch (insertLoaded(*id, content)) {
+            case LoadResult::Inserted:
+                ++summary.inserted;
+                break;
+            case LoadResult::Identical:
+                ++summary.identical;
+                break;
+            case LoadResult::Collision:
+            case LoadResult::WrongId:
+                summary.refused.emplace_back(*id, std::string(content));
+                break;
+        }
+    }
+    if (summary.malformed != 0) {
+        FC_ERR("Name table: " << summary.malformed << " malformed lines");
+    }
+    return summary;
+}
+
+namespace
+{
+thread_local NameRefCollector* activeCollector = nullptr;
+}
+
+NameRefCollector::NameRefCollector()
+    : _previous(activeCollector)
+{
+    activeCollector = this;
+}
+
+NameRefCollector::~NameRefCollector()
+{
+    activeCollector = _previous;
+}
+
+NameRefCollector* NameRefCollector::active()
+{
+    return activeCollector;
+}
+
+void NameRefCollector::addRefs(std::string_view text, std::set<NameId>& refs)
+{
+    for (std::size_t pos = text.find(NameTable::Marker);
+         pos != std::string_view::npos && pos + NameTable::RefLength <= text.size();
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        if (auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength))) {
+            refs.insert(*id);
+        }
+    }
+}
+
+void NameRefCollector::add(std::string_view text)
+{
+    addRefs(text, _refs);
+}
+
+std::vector<NameTable::SavedEntry> NameRefCollector::entries(const NameTable& table,
+                                                             std::size_t* unknown) const
+{
+    std::vector<NameTable::SavedEntry> result;
+    std::set<NameId> seen;
+    std::vector<NameId> pending(_refs.begin(), _refs.end());
+    std::size_t missing = 0;
+    while (!pending.empty()) {
+        NameId id = pending.back();
+        pending.pop_back();
+        if (!seen.insert(id).second) {
+            continue;
+        }
+        auto content = table.lookup(id);
+        if (!content) {
+            ++missing;
+            continue;
+        }
+        std::set<NameId> inner;
+        addRefs(*content, inner);
+        pending.insert(pending.end(), inner.begin(), inner.end());
+        result.emplace_back(id, std::move(*content));
+    }
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    if (unknown) {
+        *unknown = missing;
+    }
+    return result;
+}
+
+NameRefScanBuffer::NameRefScanBuffer(std::streambuf* target, NameRefCollector& collector)
+    : _target(target)
+    , _collector(collector)
+{}
+
+void NameRefScanBuffer::scan(std::string_view data)
+{
+    constexpr std::size_t keep = NameTable::RefLength - 1;
+    if (!_tail.empty()) {
+        // A reference that starts in the tail ends in data
+        std::string joined = _tail;
+        joined.append(data.substr(0, keep));
+        _collector.add(joined);
+    }
+    _collector.add(data);
+    if (data.size() >= keep) {
+        _tail.assign(data.substr(data.size() - keep));
+    }
+    else {
+        _tail.append(data);
+        if (_tail.size() > keep) {
+            _tail.erase(0, _tail.size() - keep);
+        }
+    }
+}
+
+NameRefScanBuffer::int_type NameRefScanBuffer::overflow(int_type c)
+{
+    if (traits_type::eq_int_type(c, traits_type::eof())) {
+        return traits_type::not_eof(c);
+    }
+    char ch = traits_type::to_char_type(c);
+    scan(std::string_view(&ch, 1));
+    return _target->sputc(ch);
+}
+
+std::streamsize NameRefScanBuffer::xsputn(const char* s, std::streamsize n)
+{
+    if (n > 0) {
+        scan(std::string_view(s, static_cast<std::size_t>(n)));
+    }
+    return _target->sputn(s, n);
+}
+
+int NameRefScanBuffer::sync()
+{
+    return _target->pubsync();
 }

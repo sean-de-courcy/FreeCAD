@@ -65,12 +65,21 @@ class CrossDocEdit(Scenario):
         target.recompute()
         target.save()
         doc.saveAs(self.path(doc))
-        for name, predicate in (("binder_right", self.rightFace), ("binder_top", self.topFace)):
+        for name, predicate in self.binders():
             binder = doc.addObject("PartDesign::SubShapeBinder", name)
             binder.Support = [(pad, tuple(self.names(pad, predicate())))]
-            self.ref(name, binder, "Support", predicate, Bound())
+        self.recordRefs(doc)
         doc.recompute()
         doc.save()
+
+    def binders(self):
+        return (("binder_right", self.rightFace), ("binder_top", self.topFace))
+
+    def recordRefs(self, doc):
+        """Records the binders' references; also for a document saved by build() and opened in
+        another process (ops#6, TestNamingSave)."""
+        for name, predicate in self.binders():
+            self.ref(name, doc.getObject(name), "Support", predicate, Bound())
 
     def change(self, target):
         raise NotImplementedError
