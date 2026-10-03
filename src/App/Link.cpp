@@ -39,6 +39,7 @@
 #include "GeoFeatureGroupExtension.h"
 #include "Link.h"
 #include "LinkBaseExtensionPy.h"
+#include "LinkRetarget.h"
 
 // FIXME: ISO C++11 requires at least one argument for the "..." in a variadic macro
 #if defined(__clang__)
@@ -606,6 +607,7 @@ void LinkBaseExtension::syncCopyOnChange()
     // copyObject() will return copy in order of the same order of the input,
     // so the last object will be the copy of the original linked object
     auto newLinked = copiedObjs.back();
+    std::vector<App::DocumentObjectT> newCopies(copiedObjs.begin(), copiedObjs.end());
 
     // We are copying from the original linked object and we've already mutated
     // it, so we need to copy all CopyOnChange properties from the mutated
@@ -721,6 +723,17 @@ void LinkBaseExtension::syncCopyOnChange()
         auto obj = objT.getObject();
         if (obj && std::binary_search(objs.begin(), objs.end(), obj)) {
             obj->getDocument()->removeObject(obj->getNameInDocument());
+        }
+    }
+
+    // The new copies are made during the link's own recompute, after the document's recompute
+    // has sorted its objects, so it won't reach them. Recompute them here, dependencies first,
+    // or the link shows the source's state (its default variant) until the next recompute
+    // (ops#53).
+    for (const auto& objT : newCopies) {
+        auto obj = objT.getObject();
+        if (obj && obj->mustRecompute() && obj->recomputeFeature()) {
+            obj->purgeTouched();
         }
     }
 }
@@ -2107,6 +2120,15 @@ void LinkBaseExtension::update(App::DocumentObject* parent, const Property* prop
         }
         else {
             setupCopyOnChange(parent, true);
+        }
+
+        // The element references through this link follow its new target (ops#42); not when the
+        // target only comes or goes with its document (opened, attached, closed), as their
+        // shadows still name its elements.
+        auto linkProp = freecad_cast<PropertyLinkBase*>(getLinkedObjectProperty());
+        if (getLinkedObjectValue() && !GetApplication().isRestoring()
+            && !(linkProp && linkProp->testFlag(PropertyLinkBase::LinkRestoring))) {
+            followLinkRetarget(parent);
         }
     }
     else if (prop == getLinkCopyOnChangeProperty()) {
