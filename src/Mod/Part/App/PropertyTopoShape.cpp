@@ -111,6 +111,27 @@ bool anyMappedName(const TopoShape& shape, Visit visit)
     return false;
 }
 
+/** Whether \a visit returns true for a name anyMappedName() visits. First over the map's own
+ * names, unsorted: without child maps they include every name the walk visits, so if none
+ * passes, none of those does. The walk indexes the shape's sub-shapes, which cost V2i most of
+ * setValue's time and V2 a quarter of a file's open time (ops#101); it runs only after a hit, or
+ * for a map with child maps.
+ */
+template<typename Visit>
+bool anyMappedNameChecked(const TopoShape& shape, Visit visit)
+{
+    if (!shape.hasChildElementMap()) {
+        Data::UnsortedElementMapScope unsorted;
+        const auto names = shape.getElementMap();
+        if (std::none_of(names.begin(), names.end(), [&](const auto& element) {
+                return visit(element.name);
+            })) {
+            return false;
+        }
+    }
+    return anyMappedName(shape, visit);
+}
+
 /// The number of names of the shapes' maps: as getElementMap() lists them, or by anyMappedName()
 /// if \a unsorted (for interned maps, which getElementMap() sorts)
 std::size_t mappedNameCount(const TopoShape& shape, bool unsorted)
@@ -160,25 +181,14 @@ bool toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
                 auto known = table.toInternedIfKnown(text);
                 return !known || *known != text;
             };
-            // First the map's own names, unsorted: without child maps they include every name
-            // the walk below visits, so if they are all in form, so are those. The walk indexes
-            // the shape's sub-shapes, which cost V2i most of setValue's time (ops#101).
-            bool maybe = true;
-            if (!shape.hasChildElementMap()) {
-                Data::UnsortedElementMapScope unsorted;
-                const auto names = shape.getElementMap();
-                maybe = std::any_of(names.begin(), names.end(), [&](const auto& element) {
-                    return notInternedForm(element.name);
-                });
-            }
-            inOtherForm = maybe && anyMappedName(shape, notInternedForm);
+            inOtherForm = anyMappedNameChecked(shape, notInternedForm);
         }
         else if (shape.getInternNames()) {
             inOtherForm = true;
         }
         else {
             const std::string marker(1, Data::NameTable::Marker);
-            inOtherForm = anyMappedName(shape, [&marker](const Data::MappedName& name) {
+            inOtherForm = anyMappedNameChecked(shape, [&marker](const Data::MappedName& name) {
                 return name.find(marker) >= 0;
             });
         }
