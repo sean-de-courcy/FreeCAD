@@ -952,11 +952,13 @@ class TestNamingLoadNewerFormat(unittest.TestCase):
             return
         # A feature whose reference is missing fails, reported, rather than taking another element
         # (HelixBinderFace's FaceBinder of a helix face, as a PartDesign Fillet of a Pad's edge
-        # would)
+        # would). In a file saved with the reference solver on (new documents since ops#7's Q7),
+        # the solver finds the element again by the reference's saved fingerprint, and the
+        # feature comes back as it was.
         recomputed, expected = blocks(result["recomputedRaw"]), blocks(info["raw"])
         self.assertEqual(list(recomputed), list(expected))
         for name, block in recomputed.items():
-            if name in broken:
+            if name in broken and not info.get("solver"):
                 self.assertIn(" INVALID]", block.split("\n", 1)[0], f"{name} fails")
             else:
                 self.assertEqual(block, expected[name], f"{name}: names after a recompute")

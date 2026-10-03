@@ -69,10 +69,11 @@ class TestSketchMissingExternal(unittest.TestCase):
         if "BUILD_PART_DESIGN" not in App.__cmake__:
             self.skipTest("needs PartDesign")
         self.doc = App.newDocument("TestSketchMissingExternal")
-        if self.solver:
-            if not hasattr(self.doc, "ReferenceSolver"):
-                self.skipTest("needs the reference solver")
-            self.doc.ReferenceSolver = True
+        if self.solver and not hasattr(self.doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+        if hasattr(self.doc, "ReferenceSolver"):
+            # Explicitly, also when off: new documents start with it on (ops#7 Q7).
+            self.doc.ReferenceSolver = self.solver
         self.body = self.doc.addObject("PartDesign::Body", "Body")
         self.profile = self.body.newObject("Sketcher::SketchObject", "Profile")
         add_lines(self.profile, [(0, 0), (20, 0), (20, 20), (0, 20), (0, 0)])
@@ -211,10 +212,11 @@ class TestSketchMissingExternalReturns(unittest.TestCase):
         if "BUILD_PART_DESIGN" not in App.__cmake__:
             self.skipTest("needs PartDesign")
         self.doc = App.newDocument("TestSketchMissingExternalReturns")
-        if self.solver:
-            if not hasattr(self.doc, "ReferenceSolver"):
-                self.skipTest("needs the reference solver")
-            self.doc.ReferenceSolver = True
+        if self.solver and not hasattr(self.doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+        if hasattr(self.doc, "ReferenceSolver"):
+            # Explicitly, also when off: new documents start with it on (ops#7 Q7).
+            self.doc.ReferenceSolver = self.solver
         body = self.doc.addObject("PartDesign::Body", "Body")
         profile = body.newObject("Sketcher::SketchObject", "Profile")
         add_lines(profile, [(0, 0), (20, 0), (20, 20), (0, 20), (0, 0)])
