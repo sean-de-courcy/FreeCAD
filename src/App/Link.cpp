@@ -147,6 +147,44 @@ void LinkParams::removeCopyOnChangeApplyToAll() {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+namespace
+{
+
+// Each link's target as LinkBaseExtension::update() last saw it, so that a retarget knows the
+// old one (ops#106). Kept by name, keyed by the link's address: an entry whose link is gone (and
+// whose address was reused) doesn't name the link.
+struct LastTarget
+{
+    App::DocumentObjectT link;
+    App::DocumentObjectT target;
+};
+
+// Records target as link's target, and returns the one recorded before (nullptr if none).
+App::DocumentObject* swapLastTarget(App::DocumentObject* link, App::DocumentObject* target)
+{
+    static std::unordered_map<const App::DocumentObject*, LastTarget> lastTargets;
+    auto it = lastTargets.find(link);
+    if (it == lastTargets.end()) {
+        // Entries of links that are gone, swept now and then.
+        if (lastTargets.size() >= 1024) {
+            for (auto entry = lastTargets.begin(); entry != lastTargets.end();) {
+                entry = entry->second.link.getObject() == entry->first ? std::next(entry)
+                                                                        : lastTargets.erase(entry);
+            }
+        }
+        it = lastTargets.emplace(link, LastTarget()).first;
+    }
+    App::DocumentObject* old = nullptr;
+    if (it->second.link.getObject() == link) {
+        old = it->second.target.getObject();
+    }
+    it->second.link = link;
+    it->second.target = target;
+    return old;
+}
+
+}  // namespace
+
 EXTENSION_PROPERTY_SOURCE(App::LinkBaseExtension, App::DocumentObjectExtension)
 
 LinkBaseExtension::LinkBaseExtension()
@@ -2126,9 +2164,10 @@ void LinkBaseExtension::update(App::DocumentObject* parent, const Property* prop
         // target only comes or goes with its document (opened, attached, closed), as their
         // shadows still name its elements.
         auto linkProp = freecad_cast<PropertyLinkBase*>(getLinkedObjectProperty());
+        auto oldTarget = swapLastTarget(parent, getLinkedObjectValue());
         if (getLinkedObjectValue() && !GetApplication().isRestoring()
             && !(linkProp && linkProp->testFlag(PropertyLinkBase::LinkRestoring))) {
-            followLinkRetarget(parent);
+            followLinkRetarget(parent, oldTarget);
         }
     }
     else if (prop == getLinkCopyOnChangeProperty()) {
