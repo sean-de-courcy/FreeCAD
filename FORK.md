@@ -119,7 +119,8 @@ names it.
 | `fix/73-77-74-feature-bundle` | fix | ops#73, ops#77, ops#74 | - | `integration` `26e3ca1638` | `8686684521` (fork PR 89), 2026-10-03 | a two-sided up-to side that lands behind its face errors; the dead BaseFeature reorder removed; Part::Fillet/Chamfer erase UB removed |
 | `feat/101-v2i-insert-speed` | feat | ops#101, ops#6 | - | `integration` `26e3ca1638` | `44592fd8cf` (fork PR 90), 2026-10-03 | never (fork naming) |
 | `fix/42-53-variant-links` | fix | ops#42, ops#53 | - | `integration` `26e3ca1638` | `583b7a429b` (fork PR 91), 2026-10-03 | references through a Link follow its new target (joints on variant or retargeted links reopen); a variant link's sync recomputes its new copies |
-| `fix/67-80-gui-minors` | fix | ops#67, ops#80 | - | `integration` `583b7a429b` | (fork PR 92) | the base's Mass Properties panel removes a row whose subname contains a vertical bar (keep `TestMeasureGui`); its `TestConstraintPreselectionGui` counts axis hits |
+| `fix/67-80-gui-minors` | fix | ops#67, ops#80 | - | `integration` `583b7a429b` | `f4bdbfaa11` (fork PR 92), 2026-10-03 | the base's Mass Properties panel removes a row whose subname contains a vertical bar (keep `TestMeasureGui`); its `TestConstraintPreselectionGui` counts axis hits |
+| `fix/108-bbox-triangulation` | fix | ops#108 | - | `integration` `583b7a429b` | (fork PR 93) | never (fork test harness) |
 
 ## Fork-only commits in carried topics
 

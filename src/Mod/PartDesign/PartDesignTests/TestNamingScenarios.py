@@ -337,10 +337,42 @@ class SolverSeeded(unittest.TestCase):
         )
 
 
+class HarnessSameSolid(unittest.TestCase):
+    """The outcome checks' shape comparison doesn't depend on whether a shape carries a
+    triangulation (ops#108). In the GUI a consumer's view provider meshes its shape and the
+    oracle's shape isn't, and BoundBox uses a triangulation when there is one: a 10 mm block,
+    fillet 1 on its front top edge, then fillet 0.25 on the arc that leaves at x = 0, is bounded
+    to the block with one and 0.08 mm wider without."""
+
+    def testTriangulationDoesNotMatter(self):
+        import Part
+
+        block = Part.makeBox(10, 10, 10)
+        frontTop = [
+            e
+            for e in block.Edges
+            if all(abs(v.Point.y) < 1e-9 and abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+        ]
+        filletA = block.makeFillet(1, frontTop)
+        arc = [
+            e
+            for e in filletA.Edges
+            if isinstance(e.Curve, Part.Circle) and abs(e.Curve.Center.x) < 1e-9
+        ]
+        self.assertEqual(len(arc), 1)
+        meshed = filletA.makeFillet(0.25, arc)
+        meshed.tessellate(0.1)
+        fresh = filletA.makeFillet(0.25, arc)
+        # The trap itself: equal solids, different BoundBox.
+        self.assertGreater(abs(meshed.BoundBox.YMin - fresh.BoundBox.YMin), 0.01)
+        self.assertEqual(harness.sameSolid(meshed, fresh), (True, ""))
+        self.assertEqual(harness.sameSolid(fresh, meshed), (True, ""))
+
+
 __all__ = [
     name
     for name, value in globals().items()
     if isinstance(value, type)
     and issubclass(value, ScenarioTestCase)
     and value is not ScenarioTestCase
-] + ["RandomSequences", "SolverSeeded"]
+] + ["RandomSequences", "SolverSeeded", "HarnessSameSolid"]
