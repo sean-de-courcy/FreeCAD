@@ -2,8 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <iterator>
+
 #include <App/Application.h>
 #include <App/ElementMap.h>
+#include <App/ElementMapOrder.h>
 #include <App/NameTable.h>
 #include <src/App/InitApplication.h>
 
@@ -1325,6 +1329,90 @@ TEST_F(ElementMapTest, internedAndPlainMapsGiveTheSameNamesV2)
     //   a name without embedded names is the same in both maps
     EXPECT_EQ(internedNames[7].toString(), example.edge);
     EXPECT_EQ(interned->getAll().size(), plain->getAll().size());
+}
+
+TEST_F(ElementMapTest, unsortedScopeListsTheSameNamesV2)
+{
+    // ops#101: getAll() sorts an interned map by expansion, except in an UnsortedElementMapScope
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setInterned(true);
+    const std::vector<std::string> names {example.face, example.piece, example.upper, example.edge};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        map->setElementName(Data::IndexedName("Face", static_cast<int>(i + 1)),
+                            Data::MappedName(names[i]),
+                            23);
+    }
+    auto key = [](const Data::MappedElement& element) {
+        return element.name.toString() + " " + element.index.toString();
+    };
+
+    // Act
+    auto sorted = map->getAll();
+    std::vector<Data::MappedElement> unsorted;
+    bool activeInside = false;
+    {
+        Data::UnsortedElementMapScope outer;
+        Data::UnsortedElementMapScope inner;
+        activeInside = Data::UnsortedElementMapScope::active();
+        unsorted = map->getAll();
+    }
+
+    // Assert
+    EXPECT_TRUE(activeInside);
+    EXPECT_FALSE(Data::UnsortedElementMapScope::active());
+    ASSERT_EQ(sorted.size(), names.size());
+    ASSERT_EQ(unsorted.size(), sorted.size());
+    for (std::size_t i = 1; i < sorted.size(); ++i) {
+        EXPECT_LT(table.compareExpanded(sorted[i - 1].name.toString(), sorted[i].name.toString()),
+                  0);
+    }
+    std::vector<std::string> sortedKeys;
+    std::vector<std::string> unsortedKeys;
+    std::transform(sorted.begin(), sorted.end(), std::back_inserter(sortedKeys), key);
+    std::transform(unsorted.begin(), unsorted.end(), std::back_inserter(unsortedKeys), key);
+    //   the scope lists them in the map's own order, which isn't that of the expansions here
+    EXPECT_NE(unsortedKeys, sortedKeys);
+    std::sort(sortedKeys.begin(), sortedKeys.end());
+    std::sort(unsortedKeys.begin(), unsortedKeys.end());
+    EXPECT_EQ(unsortedKeys, sortedKeys);
+}
+
+TEST_F(ElementMapTest, getAllListsLaterNamesUnsortedV2)
+{
+    // ops#101 (fork PR 90's review, N2): toDocumentForm checks an interned map's names through
+    // getAll() in an UnsortedElementMapScope before walking them per element, so that list must
+    // hold an element's later names too, e.g. a plain second name stored before the map was
+    // flagged interned
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    Data::IndexedName face1("Face", 1);
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setElementName(face1, Data::MappedName(example.face), 23);
+    map->setElementName(face1, Data::MappedName(example.upper), 23);
+    map->setInterned(true);  // the flag only: the names stay plain
+
+    // Act
+    std::vector<Data::MappedElement> unsorted;
+    {
+        Data::UnsortedElementMapScope scope;
+        unsorted = map->getAll();
+    }
+
+    // Assert
+    auto names = map->findAll(face1);
+    ASSERT_EQ(names.size(), 2U);
+    std::string later = names[1].first.toString();
+    EXPECT_NE(table.toInterned(later), later);  // out of form
+    ASSERT_EQ(unsorted.size(), 2U);
+    EXPECT_TRUE(std::any_of(unsorted.begin(), unsorted.end(), [&](const auto& element) {
+        return element.name.toString() == later && element.index == face1;
+    }));
 }
 
 TEST_F(ElementMapTest, retagInternedMapKeepsThePrefixV2)

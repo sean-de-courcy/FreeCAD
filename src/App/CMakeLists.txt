@@ -358,6 +358,7 @@ SET(FreeCADApp_HPP_SRCS
     ComplexGeoData.h
     ElementFingerprint.h
     ElementMap.h
+    ElementMapOrder.h
     ElementSolver.h
     ElementSolverBatch.h
     Enumeration.h

@@ -53,6 +53,20 @@ std::vector<std::string_view> splitTopLevel(std::string_view text, char delimite
     return parts;
 }
 
+/// Calls \a visit with each part splitTopLevel() would list, without building the list.
+template<typename Visit>
+void forEachTopLevel(std::string_view text, char delimiter, Visit visit)
+{
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == delimiter && (i == 0 || text[i - 1] != escapeChar)) {
+            visit(text.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    visit(text.substr(start));
+}
+
 /// One level of unescaping, as the decoder does it: the first `^` of each run goes.
 std::string unescapeOnce(std::string_view text)
 {
@@ -344,6 +358,7 @@ std::string NameTable::toInterned(std::string_view name, bool* missing)
     }
     std::string_view prefix = name.substr(0, bar);
     std::string result;
+    result.reserve(name.size());
     if (parseRef(prefix)) {
         result = prefix;
     }
@@ -360,34 +375,44 @@ std::string NameTable::toInterned(std::string_view name, bool* missing)
 
 std::string NameTable::internSection(std::string_view section, bool* missing)
 {
-    auto fields = splitTopLevel(section, fieldDelimiter);
-    std::vector<std::string> result;
-    result.reserve(fields.size());
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-        std::string_view text = fields[field];
-        if (!isNameListField(static_cast<int>(field)) || text.empty() || text == EMPTY_VALUE) {
-            result.emplace_back(text);
-            continue;
+    // Written into one string as the fields are read, with no lists of parts: this runs for
+    // every name a V2i map stores, and its allocations were most of its cost (ops#101)
+    std::string out;
+    out.reserve(section.size());
+    int field = 0;
+    forEachTopLevel(section, fieldDelimiter, [&](std::string_view text) {
+        if (field != 0) {
+            out += fieldDelimiter;
         }
-        std::vector<std::string> entries;
-        for (std::string_view entry : splitTopLevel(text, listDelimiter)) {
-            std::string name = unescapeOnce(entry);
+        if (!isNameListField(field++) || text.empty() || text == EMPTY_VALUE) {
+            out += text;
+            return;
+        }
+        bool first = true;
+        forEachTopLevel(text, listDelimiter, [&](std::string_view entry) {
+            if (!first) {
+                out += listDelimiter;
+            }
+            first = false;
+            // An entry without a caret is its own unescaped form
+            std::string unescaped;
+            std::string_view name = entry;
+            if (entry.find(escapeChar) != std::string_view::npos) {
+                unescaped = unescapeOnce(entry);
+                name = unescaped;
+            }
             if (parseRef(name)) {
-                entries.push_back(std::move(name));
+                out += name;
             }
             else if (auto id = internName(name, missing)) {
-                entries.push_back(makeRef(*id));
+                out += Marker;
+                out += id->toBase32();
             }
             else {
-                entries.push_back(escapeOnce(toPlain(name)));  // collision: inline, full form
+                out += escapeOnce(toPlain(name));  // collision: inline, full form
             }
-        }
-        std::string list;
-        join(list, entries, listDelimiter);
-        result.push_back(std::move(list));
-    }
-    std::string out;
-    join(out, result, fieldDelimiter);
+        });
+    });
     return out;
 }
 

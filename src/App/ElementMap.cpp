@@ -9,6 +9,7 @@
 #endif
 
 #include "ElementMap.h"
+#include "ElementMapOrder.h"
 #include "ElementNamingUtils.h"
 #include "ElementSolver.h"
 #include "NameTable.h"
@@ -36,6 +37,9 @@ namespace Data
 
 namespace
 {
+
+// UnsortedElementMapScope's count on this thread
+thread_local int unsortedScopes = 0;
 
 // A V2 name in a map's form (NameTable.h, ops#6): interned in an interned map, full in a plain
 // one. A full, interned or mixed name of one content gives the same string.
@@ -93,6 +97,21 @@ bool remapName(NameRemap& remap, std::string& text)
 }
 
 }  // namespace
+
+UnsortedElementMapScope::UnsortedElementMapScope()
+{
+    ++unsortedScopes;
+}
+
+UnsortedElementMapScope::~UnsortedElementMapScope()
+{
+    --unsortedScopes;
+}
+
+bool UnsortedElementMapScope::active()
+{
+    return unsortedScopes > 0;
+}
 
 
 // Because the existence of hierarchical element maps, for the same document
@@ -1622,7 +1641,7 @@ std::vector<MappedElement> ElementMap::getAll() const
     for (auto& mappedName : this->mappedNames) {
         ret.emplace_back(mappedName.first, mappedName.second);
     }
-    if (interned && ret.size() > 1) {
+    if (interned && ret.size() > 1 && !UnsortedElementMapScope::active()) {
         // In the byte order of the expansions, as a plain map lists the same names: readers that
         // take the first of several matches pick the same element in both forms (ops#6)
         const auto& table = NameTable::instance();
