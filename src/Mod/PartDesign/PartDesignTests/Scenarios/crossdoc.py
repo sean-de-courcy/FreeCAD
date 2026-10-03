@@ -56,7 +56,10 @@ class CrossDocEdit(Scenario):
         return os.path.join(self.folder, doc.Name + ".FCStd")
 
     def build(self, doc):
-        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        # The canonical path: on macOS the temporary folder is reached through a symlink
+        # (/var -> /private/var), and A's XLink would store a path that climbs to the root, so a
+        # copy of the folder (TestNamingLoad) would still open this B (ops#50)
+        self.folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
         target = self.newDocument("B", interned=(not self.interned) if self.mixed else None)
         target.saveAs(self.path(target))
         body = m.body(target)
