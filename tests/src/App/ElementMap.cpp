@@ -1454,6 +1454,31 @@ TEST_F(ElementMapTest, namesAreFoundInAMixedMapV2)
     EXPECT_FALSE(flaggedPlain->find(Data::MappedName(example.upper)));
 }
 
+TEST_F(ElementMapTest, findInsertsNothingIntoTheTableV2)
+{
+    // ops#97: once some document interns, a miss also tries the query's interned form, but only
+    // with the nodes the table knows: a name with a node the table lacks can't be in any
+    // interned map, and looking it up mustn't add its nodes to the table
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    const std::string internedPiece = table.toInterned(example.piece);  // the table has entries
+    const Data::IndexedName element("Face", 1);
+    auto plain = std::make_shared<Data::ElementMap>();
+    plain->hasher = _hasher;
+    plain->setElementName(element, Data::MappedName(example.piece), 23);
+    // a face generated from an edge that no name in this process has
+    const std::string unknown =
+        "_;Edge9^;_^;9771^;FLT^;0^;E^;0^;IDX^,SRC^;_;9773;FLT;0;F;0;GEN;_";
+    const auto size = table.size();
+
+    // Act and assert
+    EXPECT_FALSE(plain->find(Data::MappedName(unknown)));
+    EXPECT_EQ(table.size(), size);
+    EXPECT_EQ(plain->find(Data::MappedName(internedPiece)), element);
+    EXPECT_EQ(table.size(), size);
+}
+
 TEST_F(ElementMapTest, beforeSaveCollectsTheReferencesV2)
 {
     // ops#6, Task 1 PR 7: while a document saves, its maps hand the references in their names to

@@ -101,11 +101,12 @@ bool remapName(NameRemap& remap, std::string& text)
 // for now.
 //
 // In order to not waste memory space when the file is loaded, we use the
-// following two maps to assign a one-time id for each unique element map.  The
+// following map to assign a one-time id for each unique element map.  The
 // id will be saved together with the element map.
 //
-// When restoring, we'll read back the id and lookup for an existing element map
-// with the same id, and skip loading the current map if one is found.
+// Restoring reads the id back but loads every map: a cache of restored maps by
+// id was never filled, so it is gone (ops#97). Sharing them on restore would
+// need it filled, and cleared per file, as it was meant to be.
 //
 // TODO: Note that the same redundancy can be found when saving OCC shapes,
 // because we currently save shapes for each object separately. After restoring,
@@ -113,7 +114,6 @@ bool remapName(NameRemap& remap, std::string& text)
 // because of partial loading. The same technique used here can be applied to
 // restore shape sharing.
 static std::unordered_map<const ElementMap*, unsigned> _elementMapToId;
-static std::unordered_map<unsigned, ElementMapPtr> _idToElementMap;
 
 
 void ElementMap::init()
@@ -131,12 +131,6 @@ void ElementMap::init()
             [](const ::App::Document&, const std::string&) {
                 _elementMapToId.clear();
             });
-        ::App::GetApplication().signalStartRestoreDocument.connect([](const ::App::Document&) {
-            _idToElementMap.clear();
-        });
-        ::App::GetApplication().signalFinishRestoreDocument.connect([](const ::App::Document&) {
-            _idToElementMap.clear();
-        });
     }
 }
 
@@ -334,11 +328,6 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef, std::istream
         FC_THROWM(Base::RuntimeError, msg);  // NOLINT
     }
 
-    auto& map = _idToElementMap[id];
-    if (map) {
-        return map;
-    }
-
     std::vector<std::string> postfixes;
     postfixes.reserve(count);
     for (int i = 0; i < count; ++i) {
@@ -379,16 +368,6 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
     constexpr int maxTypeCount(1000);
     if (typeCount < 0 || typeCount > maxTypeCount) {
         FC_THROWM(Base::RuntimeError, "Bad type count in element map, ignoring map");  // NOLINT
-    }
-
-    auto& map = _idToElementMap[id];
-    if (map) {
-        while (tmp != "EndMap") {
-            if (!std::getline(stream, tmp)) {
-                FC_THROWM(Base::RuntimeError, "unexpected end of child element map");  // NOLINT
-            }
-        }
-        return map;
     }
 
     const char* hasherWarn = nullptr;
@@ -1048,8 +1027,8 @@ IndexedName ElementMap::find(const MappedName& name, ElementIDRefs* sids) const
     // or into a document with the other setting, is looked up again in this map's form (ops#6).
     // Converting is idempotent, so this recurses at most once per form. A map can hold names in
     // the other form too (a name stored before its flag was set), so the other form is tried
-    // after the map's (ops#97). Interning a name inserts its nodes into the table: that form is
-    // only tried when the table has entries, i.e. when some document interns its names.
+    // after the map's (ops#97). The interned form is looked up without inserting anything, and
+    // only when the table has entries, i.e. when some document interns its names.
     auto inMapForm = [&]() {
         // The map being retried on this thread: a retry looks up each form once, without
         // retrying from there (the two forms would lead back to each other).
@@ -1076,7 +1055,19 @@ IndexedName ElementMap::find(const MappedName& name, ElementIDRefs* sids) const
             if (form && NameTable::instance().size() == 0) {
                 continue;
             }
-            MappedName converted = toMapForm(name, form);
+            MappedName converted;
+            if (form) {
+                // Without inserting: a name whose nodes the table lacks can't be in the map
+                std::string text = name.toString();
+                auto known = NameTable::instance().toInternedIfKnown(text);
+                if (!known) {
+                    continue;
+                }
+                converted = *known == text ? name : MappedName(*known);
+            }
+            else {
+                converted = toMapForm(name, form);
+            }
             if (converted == name) {
                 continue;
             }

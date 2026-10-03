@@ -156,6 +156,14 @@ public:
      */
     std::string toInterned(std::string_view name);
 
+    /** toInterned() without inserting anything: the canonical form of \a name if every node it
+     * would refer to is in the table already, else nothing. A node whose ID is taken by other
+     * content stays inline, as toInterned() leaves it, but isn't counted or logged as a
+     * collision. A stored interned name refers only to nodes in the table, so a name this gives
+     * nothing for can't be in an interned map (ops#97).
+     */
+    std::optional<std::string> toInternedIfKnown(std::string_view name) const;
+
     /** The full V2 form of the name \a name, in any form: every `~<ID>` the table knows is
      * expanded. Unknown references are kept as they are, so the name stays unresolved.
      */
@@ -191,6 +199,7 @@ private:
         const std::string content;
         const bool hasCaret;  // an inline name (collision fallback) in it
         mutable std::atomic<int> depth {0};  // 0: not known yet
+        mutable std::atomic<bool> collisionWarned {false};  // a collision on its ID was logged
 
         explicit Entry(std::string_view text)
             : content(text)
@@ -206,7 +215,12 @@ private:
     /// for the table's life without the lock.
     const Entry* get(const NameId& id) const;
     int depthOfContent(std::string_view content) const;
-    std::string internSection(std::string_view section);
+    // With \a missing set, nothing is inserted: a node the table lacks sets *missing instead
+    // (toInternedIfKnown()), and a collision isn't counted or logged
+    std::optional<NameId> intern(std::string_view content, bool* missing);
+    std::optional<NameId> internName(std::string_view name, bool* missing);
+    std::string toInterned(std::string_view name, bool* missing);
+    std::string internSection(std::string_view section, bool* missing);
     /// toPlain(), with the references \a remap rewrites resolved as its file has them
     std::string toPlain(std::string_view name, const NameRemap* remap) const;
     std::string plainSection(std::string_view section, const NameRemap* remap) const;
