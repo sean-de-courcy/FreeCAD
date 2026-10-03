@@ -111,7 +111,7 @@ bool anyMappedName(const TopoShape& shape, Visit visit)
     return false;
 }
 
-/** Whether  visit returns true for a name anyMappedName() visits. First over the map's own
+/** Whether \a visit returns true for a name anyMappedName() visits. First over the map's own
  * names, unsorted: without child maps they include every name the walk visits, so if none
  * passes, none of those does. The walk indexes the shape's sub-shapes, which cost V2i most of
  * setValue's time and V2 a quarter of a file's open time (ops#101); it runs only after a hit, or
