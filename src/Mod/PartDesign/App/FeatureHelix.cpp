@@ -63,6 +63,43 @@ const char* Helix::ModeEnums[]
 
 PROPERTY_SOURCE(PartDesign::Helix, PartDesign::ProfileBased)
 
+namespace
+{
+// The pipe's history, plus its caps (ops#26): OCCT reports the side faces and edges generated
+// from the profile's edges and vertices, but not the caps. As in a Pad, the start cap is the
+// profile face (modified: it keeps the profile's name), and the end cap is the profile moved
+// to the end of the sweep (projected).
+struct MapperPipeCaps: Part::MapperMaker
+{
+    MapperPipeCaps(BRepOffsetAPI_MakePipe& pipe, const TopoDS_Shape& profile)
+        : MapperMaker(pipe)
+        , pipe(pipe)
+        , profile(profile)
+    {}
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        if (_res.empty() && s.IsSame(profile)) {
+            _res.push_back(pipe.FirstShape());
+        }
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (s.IsSame(profile)) {
+            _res.push_back(pipe.LastShape());
+        }
+        return _res;
+    }
+
+    BRepOffsetAPI_MakePipe& pipe;
+    TopoDS_Shape profile;
+};
+}  // namespace
+
 // we purposely use not FLT_MAX because this would not be computable
 const App::PropertyFloatConstraint::Constraints Helix::floatTurns
     = {Precision::Confusion(), std::numeric_limits<int>::max(), 1.0};
@@ -303,9 +340,19 @@ App::DocumentObjectExecReturn* Helix::execute()
         );
     }
 
+    // V2 builds the helix from the profile face with its element names, so the result is named
+    // (ops#26); V1 keeps upstream's raw build, which has no element map.
+    const bool nameResult = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+    TopoShape profile;
     TopoDS_Shape sketchshape;  // Fixme: Should this be TopoShape here and below?
     try {
-        sketchshape = getVerifiedFace();
+        if (nameResult) {
+            profile = getTopoShapeVerifiedFace();
+            sketchshape = profile.getShape();
+        }
+        else {
+            sketchshape = getVerifiedFace();
+        }
     }
     catch (const Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
@@ -370,6 +417,10 @@ App::DocumentObjectExecReturn* Helix::execute()
 
         TopoDS_Shape face = sketchshape;
         face.Move(invObjLoc);
+        if (nameResult) {
+            profile.move(invObjLoc);
+            face = profile.getShape();
+        }
 
         Bnd_Box bounds;
         BRepBndLib::Add(path, bounds);
@@ -385,11 +436,24 @@ App::DocumentObjectExecReturn* Helix::execute()
         BRepOffsetAPI_MakePipe
             mkPS(TopoDS::Wire(path), face, GeomFill_Trihedron::GeomFill_IsFrenet, Standard_False);
         result = mkPS.Shape();
+        // V2: the side faces are generated from the profile's edges, the caps from its face
+        TopoShape named = makeTopoShape(false);
+        if (nameResult) {
+            named.makeShapeWithElementMap(
+                result,
+                MapperPipeCaps(mkPS, face),
+                {profile},
+                Part::OpCodes::Pipe
+            );
+        }
 
         BRepClass3d_SolidClassifier SC(result);
         SC.PerformInfinitePoint(Precision::Confusion());
         if (SC.State() == TopAbs_IN) {
             result.Reverse();
+            if (nameResult) {
+                named.setShape(result, false);  // the same sub-shapes: the names stay
+            }
         }
 
         fix.LimitTolerance(
@@ -403,9 +467,19 @@ App::DocumentObjectExecReturn* Helix::execute()
         fixer.Init(TopoDS::Solid(result));
         if (fixer.Perform()) {
             result = fixer.Solid();
+            if (nameResult) {
+                TopoShape fixed = makeTopoShape(false);
+                fixed.makeShapeWithElementMap(result, Part::MapperHistory(fixer), {named});
+                named = fixed;
+            }
         }
 
-        AddSubShape.setValue(result);
+        if (nameResult) {
+            AddSubShape.setValue(named);
+        }
+        else {
+            AddSubShape.setValue(result);
+        }
 
         if (base.isNull()) {
 
@@ -423,13 +497,22 @@ App::DocumentObjectExecReturn* Helix::execute()
             }
 
             // store shape before refinement
-            this->rawShape = result;
-            Shape.setValue(getSolid(result));
+            if (nameResult) {
+                this->rawShape = named;
+                Shape.setValue(getSolid(named));
+            }
+            else {
+                this->rawShape = result;
+                Shape.setValue(getSolid(result));
+            }
             return App::DocumentObject::StdReturn;
         }
 
         Part::TopoShape boolOp = makeTopoShape(false);
-        boolOp.makeElementBoolean(getBooleanMaker(), {base, result});
+        boolOp.makeElementBoolean(
+            getBooleanMaker(),
+            {base, nameResult ? named : TopoShape(result)}
+        );
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
             return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(

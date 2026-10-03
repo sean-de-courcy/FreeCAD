@@ -1,3 +1,0 @@
-issue: ops#26
-reason: the helix has no element map, so neither it nor the body names its elements
-cli  PartDesignTests.TestTopologicalNamingProblem.TestTopologicalNamingProblem.testPartDesignElementMapHelix

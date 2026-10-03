@@ -72,11 +72,37 @@ App::DocumentObjectExecReturn* Face::execute()
         this->FaceMakerClass.getValue()
     );
 
+    // V2 gives the face maker the sources' element names, so the face is named (ops#33); V1 keeps
+    // upstream's raw build, which has no element map.
+    const bool nameResult = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+    if (nameResult) {
+        TopoShape result = makeTopoShape();
+        facemaker->MyHasher = result.Hasher;
+        facemaker->MyTag = result.Tag;
+        facemaker->setHistoryAlgorithm(result.getHistoryAlgorithm());
+    }
+
     for (std::vector<App::DocumentObject*>::iterator it = links.begin(); it != links.end(); ++it) {
         if (!(*it)) {
             return new App::DocumentObjectExecReturn(
                 "Linked object is not a Part object (has no Shape)."
             );
+        }
+        if (nameResult) {
+            TopoShape shape = Feature::getTopoShape(
+                *it,
+                ShapeOption::ResolveLink | ShapeOption::Transform
+            );
+            if (shape.isNull()) {
+                return new App::DocumentObjectExecReturn("Linked shape object is empty");
+            }
+            if (links.size() == 1 && shape.getShape().ShapeType() == TopAbs_COMPOUND) {
+                facemaker->useTopoCompound(shape);
+            }
+            else {
+                facemaker->addTopoShape(shape);
+            }
+            continue;
         }
         TopoDS_Shape shape = Feature::getShape(*it, ShapeOption::ResolveLink | ShapeOption::Transform);
         if (shape.IsNull()) {
@@ -102,6 +128,15 @@ App::DocumentObjectExecReturn* Face::execute()
     }
 
     facemaker->Build();
+
+    if (nameResult) {
+        const TopoShape& face = facemaker->getTopoShape();
+        if (face.isNull()) {
+            return new App::DocumentObjectExecReturn("Creating face failed (null shape result)");
+        }
+        this->Shape.setValue(face);
+        return App::DocumentObject::StdReturn;
+    }
 
     TopoDS_Shape aFace = facemaker->Shape();
     if (aFace.IsNull()) {
