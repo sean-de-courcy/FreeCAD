@@ -1381,6 +1381,40 @@ TEST_F(ElementMapTest, unsortedScopeListsTheSameNamesV2)
     EXPECT_EQ(unsortedKeys, sortedKeys);
 }
 
+TEST_F(ElementMapTest, getAllListsLaterNamesUnsortedV2)
+{
+    // ops#101 (fork PR 90's review, N2): toDocumentForm checks an interned map's names through
+    // getAll() in an UnsortedElementMapScope before walking them per element, so that list must
+    // hold an element's later names too, e.g. a plain second name stored before the map was
+    // flagged interned
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    Data::IndexedName face1("Face", 1);
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setElementName(face1, Data::MappedName(example.face), 23);
+    map->setElementName(face1, Data::MappedName(example.upper), 23);
+    map->setInterned(true);  // the flag only: the names stay plain
+
+    // Act
+    std::vector<Data::MappedElement> unsorted;
+    {
+        Data::UnsortedElementMapScope scope;
+        unsorted = map->getAll();
+    }
+
+    // Assert
+    auto names = map->findAll(face1);
+    ASSERT_EQ(names.size(), 2U);
+    std::string later = names[1].first.toString();
+    EXPECT_NE(table.toInterned(later), later);  // out of form
+    ASSERT_EQ(unsorted.size(), 2U);
+    EXPECT_TRUE(std::any_of(unsorted.begin(), unsorted.end(), [&](const auto& element) {
+        return element.name.toString() == later && element.index == face1;
+    }));
+}
+
 TEST_F(ElementMapTest, retagInternedMapKeepsThePrefixV2)
 {
     // Arrange
