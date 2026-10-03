@@ -113,7 +113,8 @@ names it.
 | `feat/naming-intern-load` | feat | ops#6 | - | `integration` `1df3c779aa` | `488aab941e` (fork PR 80), 2026-10-02 | never (fork feature) |
 | `fix/25-fallback-second-pass` | fix | ops#25 | - | `integration` `0e56d912a2` | `73031cb7fd` (fork PR 86), 2026-10-02 | a new base's V2 fallback names a face whose edges it names in the same pass |
 | `fix/97-interning-load-notes` | fix | ops#97 | - | `integration` `488aab941e` | `c5b3dae032` (fork PR 85), 2026-10-02 | never (fork naming) |
-| `fix/45-49-naming-bundle-b` | fix | ops#45, ops#49 | - | `integration` `73031cb7fd` | (fork PR 87) | a new base names offsets independently of OCCT's face order and checks compound child ranges |
+| `fix/45-49-naming-bundle-b` | fix | ops#45, ops#49 | - | `integration` `73031cb7fd` | `2d10bfb7bc` (fork PR 87), 2026-10-02 | a new base names offsets independently of OCCT's face order and checks compound child ranges |
+| `fix/26-33-maps-upstream-features` | fix | ops#26, ops#29, ops#33 | - | `integration` `0e56d912a2` | (fork PR 84) | a new base builds Helix, ShapeBinder and Part::Face with element maps |
 
 ## Fork-only commits in carried topics
 

@@ -175,6 +175,29 @@ def modelFuseCommon(doc):
     return [fuse, common]
 
 
+def modelHelixBinderFace(doc):
+    """Helix, ShapeBinders and Part::Face, which named nothing before (ops#26, ops#29, ops#33):
+    the helix's faces generated from its profile, binders carrying their source's names, and a
+    face of a sketch with a hole keeping the sketch's edge names."""
+    body = models.body(doc)
+    profile = models.sketch(doc, "Profile", models.rectangle(2, 0, 3, 1), body)
+    helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+    helix.Profile = profile
+    helix.ReferenceAxis = (profile, ["V_Axis"])
+    helix.Pitch = 3
+    helix.Height = 6
+    sketchBinder = body.newObject("PartDesign::ShapeBinder", "SketchBinder")
+    sketchBinder.Support = [profile, ("")]
+    other = doc.addObject("PartDesign::Body", "Other")
+    faceBinder = other.newObject("PartDesign::ShapeBinder", "FaceBinder")
+    faceBinder.Support = [helix, ("Face1",)]
+    hole = models.rectangle(3, 3, 6, 6)
+    holed = models.sketch(doc, "Holed", models.rectangle(0, 0, 10, 10) + hole)
+    face = doc.addObject("Part::Face", "Face")
+    face.Sources = [holed]
+    return [helix, sketchBinder, faceBinder, face]
+
+
 def modelFilletChamfer(doc):
     """Fillet and chamfer of a chain of three top edges of a box (UPP index, list fields)."""
     features = []
@@ -369,6 +392,7 @@ MODELS = {
     "CutSplit": modelCutSplit,
     "CompoundCut": modelCompoundCut,
     "FuseCommon": modelFuseCommon,
+    "HelixBinderFace": modelHelixBinderFace,
     "FilletChamfer": modelFilletChamfer,
     "PipeShell": modelPipeShell,
     "LoftRevolve": modelLoftRevolve,

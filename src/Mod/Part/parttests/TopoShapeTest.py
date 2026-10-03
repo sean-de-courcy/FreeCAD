@@ -1345,6 +1345,66 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
             self.doc.Box1.Shape.Volume + self.doc.Box2.Shape.Volume - 2 * quarterCylinder,
         )
 
+    def testPartFaceOfSketchesNamesV2(self):
+        """Part::Face of a sketch with a hole, and of two sketches: every element is named, the
+        edges and vertices keep the sketches' names, and each face gets a FAC name under the
+        feature's tag (ops#33). Before, Part::Face had no element map."""
+        import Sketcher
+
+        def rectangle(sketch, x0, y0, x1, y1):
+            points = [App.Vector(x0, y0, 0), App.Vector(x1, y0, 0)]
+            points += [App.Vector(x1, y1, 0), App.Vector(x0, y1, 0)]
+            first = sketch.GeometryCount
+            for i in range(4):
+                sketch.addGeometry(Part.LineSegment(points[i], points[(i + 1) % 4]))
+            for i in range(4):
+                sketch.addConstraint(
+                    Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+                )
+
+        def names(shape, kinds=("Face", "Edge", "Vertex")):
+            """{element: [its names]}"""
+            reverse = shape.ElementReverseMap
+            elements = {"Face": shape.Faces, "Edge": shape.Edges, "Vertex": shape.Vertexes}
+            result = {}
+            for kind in kinds:
+                for index in range(1, len(elements[kind]) + 1):
+                    value = reverse.get(f"{kind}{index}", [])
+                    result[f"{kind}{index}"] = [value] if isinstance(value, str) else list(value)
+            return result
+
+        doc = App.newDocument("PartFaceNames")
+        try:
+            doc.HistoryAlgorithm = "V2"
+            holed = doc.addObject("Sketcher::SketchObject", "Holed")
+            rectangle(holed, 0, 0, 10, 10)
+            rectangle(holed, 3, 3, 6, 6)
+            other = doc.addObject("Sketcher::SketchObject", "Other")
+            rectangle(other, 20, 0, 25, 5)
+            face = doc.addObject("Part::Face", "Face")
+            face.Sources = [holed]
+            faces = doc.addObject("Part::Face", "Faces")
+            faces.Sources = [holed, other]
+            doc.recompute()
+            sketchNames = set()
+            for sketch in (holed, other):
+                for elementNames in names(sketch.Shape, ("Edge", "Vertex")).values():
+                    sketchNames.update(elementNames)
+            for feature, count in ((face, 1), (faces, 2)):
+                shape = feature.Shape
+                self.assertEqual(len(shape.Faces), count)
+                self.assertAllElementsMapped(shape)
+                elementNames = names(shape)
+                firsts = [n[0] for n in elementNames.values()]
+                self.assertEqual(len(set(firsts)), len(firsts), "names are distinct")
+                for element, elementList in elementNames.items():
+                    if element.startswith("Face"):
+                        self.assertIn(f";{feature.ID};FAC;", elementList[0], element)
+                    else:
+                        self.assertTrue(set(elementList) & sketchNames, (element, elementList))
+        finally:
+            App.closeDocument(doc.Name)
+
     def testCreateCompound(self):
         box = Part.makeBox(1, 1, 1)
         comp = Part.Compound()

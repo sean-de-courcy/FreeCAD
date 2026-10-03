@@ -109,6 +109,10 @@ Part::TopoShape ShapeBinder::updatedShape() const
     // if we have a link we rebuild the shape, but we change nothing if we are a simple copy
     if (obj) {
         shape = ShapeBinder::buildShapeFromReferences(obj, subs);
+        if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+            // V1 keeps upstream's binder, which drops the source's names (ops#29)
+            shape = Part::TopoShape(shape.getShape());
+        }
         // now, shape is in object's CS, and includes local Placement of obj but nothing else.
 
         if (TraceSupport.getValue()) {
@@ -221,15 +225,16 @@ Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std:
     }
 
     if (obj->isDerivedFrom<Part::Feature>()) {
+        // The source's shapes with their element names (ops#29)
         auto part = static_cast<Part::Feature*>(obj);
         if (subs.empty()) {
-            return part->Shape.getValue();
+            return part->Shape.getShape();
         }
 
-        std::vector<TopoDS_Shape> shapes;
+        std::vector<Part::TopoShape> shapes;
         shapes.reserve(subs.size());
         for (const std::string& sub : subs) {
-            shapes.push_back(part->Shape.getShape().getSubShape(sub.c_str()));
+            shapes.push_back(part->Shape.getShape().getSubTopoShape(sub.c_str()));
         }
 
         if (shapes.size() == 1) {
@@ -237,14 +242,20 @@ Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std:
             return shapes[0];
         }
 
-        // multiple subshapes. Make a compound.
+        // multiple subshapes. Make a compound, and name its elements by shape: the sub-shapes
+        // can share elements (two edges of a sketch share a vertex), which makeElementCompound's
+        // child ranges put on the wrong elements (ops#45).
         BRep_Builder builder;
         TopoDS_Compound cmp;
         builder.MakeCompound(cmp);
-        for (const TopoDS_Shape& sh : shapes) {
-            builder.Add(cmp, sh);
+        for (const Part::TopoShape& sh : shapes) {
+            builder.Add(cmp, sh.getShape());
         }
-        return cmp;
+        Part::TopoShape compound(cmp);
+        for (const Part::TopoShape& sh : shapes) {
+            compound.mapSubElement(sh);
+        }
+        return compound;
     }
     else if (obj->isDerivedFrom<App::Line>()) {
         gp_Lin line;
