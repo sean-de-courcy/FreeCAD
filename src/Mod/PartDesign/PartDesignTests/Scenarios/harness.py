@@ -441,7 +441,10 @@ def sameSolid(a, b):
             return False, f"{label} {x:.6f} != {y:.6f}"
     if (ca - cb).Length > tol:
         return False, f"centre of mass {ca} != {cb}"
-    ba, bb = a.BoundBox, b.BoundBox
+    # The exact boxes: BoundBox uses a shape's triangulation when it has one (in the GUI the
+    # consumer's view provider meshes it, the oracle isn't), and otherwise bounds curved faces
+    # loosely (0.08 off for a 0.25 fillet on an arc), so the two differ for equal solids (ops#108).
+    ba, bb = a.optimalBoundingBox(False, False), b.optimalBoundingBox(False, False)
     corners = [
         (V(ba.XMin, ba.YMin, ba.ZMin), V(bb.XMin, bb.YMin, bb.ZMin)),
         (V(ba.XMax, ba.YMax, ba.ZMax), V(bb.XMax, bb.YMax, bb.ZMax)),
