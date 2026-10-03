@@ -408,11 +408,16 @@ bool TaskMassProperties::eventFilter(QObject* watched, QEvent* event)
         }
 
         for (const auto& userData : toRemove) {
-            QStringList parts = userData.split(QStringLiteral("|"));
-            if (parts.size() == 3) {
-                std::string docName = parts[0].toStdString();
-                std::string objName = parts[1].toStdString();
-                std::string subName = parts[2].toStdString();
+            // The data is "doc|obj|sub". Document and object names never contain '|', but a
+            // mapped subname can (the MOD section of a split piece's name), so split only on the
+            // first two.
+            const auto bar = QLatin1Char('|');
+            const qsizetype first = userData.indexOf(bar);
+            const qsizetype second = first < 0 ? -1 : userData.indexOf(bar, first + 1);
+            if (second >= 0) {
+                std::string docName = userData.left(first).toStdString();
+                std::string objName = userData.mid(first + 1, second - first - 1).toStdString();
+                std::string subName = userData.mid(second + 1).toStdString();
                 Gui::Selection().rmvSelection(
                     docName.empty() ? nullptr : docName.c_str(),
                     objName.empty() ? nullptr : objName.c_str(),

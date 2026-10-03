@@ -13,7 +13,7 @@ set(Measure_Scripts
 )
 
 if(BUILD_GUI)
-    list(APPEND Measure_Scripts InitGui.py)
+    list(APPEND Measure_Scripts InitGui.py TestMeasureGui.py)
     add_subdirectory(Gui)
 endif(BUILD_GUI)
 
