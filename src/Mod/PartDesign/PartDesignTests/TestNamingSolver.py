@@ -622,3 +622,79 @@ class TestNamingSolver(unittest.TestCase):
 
         self.assertEqual(len(fillet.Base[1]), 1)
         self.assertEqual(self.froms(doc), [None])
+
+    def multiMatchOn(self):
+        """Turns the user parameter NamingMultiMatch on for the dress-ups created next (it is
+        read when a feature is created), and back as it was after the test."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        had = "NamingMultiMatch" in group.GetBools()
+        old = group.GetBool("NamingMultiMatch", False)
+        group.SetBool("NamingMultiMatch", True)
+        self.addCleanup(
+            lambda: group.SetBool("NamingMultiMatch", old)
+            if had
+            else group.RemBool("NamingMultiMatch")
+        )
+
+    def testMultiMatchFlagsAreIgnoredInSolverDocuments(self):
+        """With NamingMultiMatch on, a solver document's fillet still follows the solver alone
+        (ops#88): the split expands with `from`, and after a reopen the pieces merge back."""
+        # Arrange
+        self.multiMatchOn()
+        doc = self.newDocument()
+        rib, fillet, name = self.ribAcrossFillet(doc)
+
+        # Act: split, reopen
+        models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+        doc.recompute()
+        report = App.getReferenceReport(fillet)
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "MultiMatch.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        rib, fillet = doc.Rib, doc.Fillet
+
+        # Assert
+        self.assertEqual([(e["status"], e["tier"]) for e in report], [("expanded", 1)])
+        self.assertEqual(sorted(fillet.Base[1]), self.frontPieces(rib))
+        self.assertEqual(self.froms(doc), [name, name])
+
+        # Act: merge
+        models.moveRectangle(doc.RibSketch, 8, 3, 12, 7)
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        front = edge("line", direction=X, through=(0, 0, 10)).one(rib.Shape)
+        self.assertEqual(fillet.Base[1], front)
+        self.assertEqual(self.froms(doc), [None])
+
+    def testMultiMatchExpansionBreaksWhenMergedAfterTheSolverIsTurnedOn(self):
+        """A known limit (ops#88): the multi-match flags expand a split in a solver-off document,
+        which keeps no `from`. With the solver turned on afterwards, the merged pieces can't
+        collapse: each breaks, loudly, with the whole edge among its candidates."""
+        # Arrange
+        self.multiMatchOn()
+        doc = self.newDocument(solver=False)
+        rib, fillet, name = self.ribAcrossFillet(doc)
+        models.moveRectangle(doc.RibSketch, 8, -3, 12, 3)
+        doc.recompute()
+        self.assertEqual(sorted(fillet.Base[1]), self.frontPieces(rib))
+        doc.ReferenceSolver = True
+
+        # Act
+        models.moveRectangle(doc.RibSketch, 8, 3, 12, 7)
+        doc.recompute()
+
+        # Assert
+        self.assertFalse(fillet.isValid())
+        front = edge("line", direction=X, through=(0, 0, 10)).one(rib.Shape)
+        report = App.getReferenceReport(fillet)
+        self.assertEqual(
+            [(e["index"], e["status"]) for e in report], [(0, "broken"), (1, "broken")]
+        )
+        for entry in report:
+            self.assertIn(front[0], entry["candidates"])

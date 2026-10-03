@@ -100,9 +100,7 @@ class CrossDocEdit(Scenario):
         target.recompute()
         target.save()
         App.closeDocument(target.Name)
-        self.doc = App.openDocument(pathA)  # opens B too
-        for obj in self.doc.Objects:
-            obj.touch()
+        self.doc = self.openDocument(pathA)  # opens B too
 
     def cleanup(self):
         super().cleanup()
