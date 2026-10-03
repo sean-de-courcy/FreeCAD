@@ -407,6 +407,8 @@ void SketchObject::buildShape()
 
     const App::HistoryAlgorithm& selectedHistoryVersion = getSelectedHistoryAlgorithm();
 
+    // `vertex` comes without the hasher, as upstream's: in V1, copyElementMap() would otherwise
+    // add an empty tag section after `SKT` (ops#44)
     auto addVertex = [&vertices, &selectedHistoryVersion](auto vertex, auto name, int tag) {
         if (!vertex.hasElementMap()) {
             vertex.resetElementMap(std::make_shared<Data::ElementMap>());
@@ -468,7 +470,7 @@ void SketchObject::buildShape()
         if (geo->isDerivedFrom<Part::GeomPoint>()) {
             int idx = getVertexIndexGeoPos(geoId - 1, Sketcher::PointPos::start);
             addVertex(
-                makeTopoShape(TopoDS::Vertex(geo->toShape())),
+                makeTopoShape(TopoDS::Vertex(geo->toShape()), 0, false),
                 convertSubName(Data::IndexedName::fromConst("Vertex", idx + 1), false),
                 getID()
             );
@@ -494,7 +496,7 @@ void SketchObject::buildShape()
 
         if (geo->isDerivedFrom<Part::GeomPoint>()) {
             addVertex(
-                makeTopoShape(TopoDS::Vertex(geo->toShape())),
+                makeTopoShape(TopoDS::Vertex(geo->toShape()), 0, false),
                 convertSubName(indexedName, false),
                 getID()
             );

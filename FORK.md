@@ -120,7 +120,8 @@ names it.
 | `feat/101-v2i-insert-speed` | feat | ops#101, ops#6 | - | `integration` `26e3ca1638` | `44592fd8cf` (fork PR 90), 2026-10-03 | never (fork naming) |
 | `fix/42-53-variant-links` | fix | ops#42, ops#53 | - | `integration` `26e3ca1638` | `583b7a429b` (fork PR 91), 2026-10-03 | references through a Link follow its new target (joints on variant or retargeted links reopen); a variant link's sync recomputes its new copies |
 | `fix/67-80-gui-minors` | fix | ops#67, ops#80 | - | `integration` `583b7a429b` | `f4bdbfaa11` (fork PR 92), 2026-10-03 | the base's Mass Properties panel removes a row whose subname contains a vertical bar (keep `TestMeasureGui`); its `TestConstraintPreselectionGui` counts axis hits |
-| `fix/108-bbox-triangulation` | fix | ops#108 | - | `integration` `583b7a429b` | (fork PR 93) | never (fork test harness) |
+| `fix/108-bbox-triangulation` | fix | ops#108 | - | `integration` `583b7a429b` | `a4068e7b60` (fork PR 93), 2026-10-03 | never (fork test harness) |
+| `fix/44-v1-sketch-postfix` | fix | ops#44 | - | `integration` `a4068e7b60` | (fork PR 94) | a new base builds V1 sketch edges, points and `makeElementWires`' wires without the document's hasher (upstream's `g1;SKT` names) |
 
 ## Fork-only commits in carried topics
 

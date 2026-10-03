@@ -4668,8 +4668,11 @@ TopoShape& TopoShape::makeElementWires(
         }
         edgeList.pop_front();
 
-        // current new wire
-        TopoShape new_wire {Tag, Hasher, mkWire.Wire(), getHistoryAlgorithm()};
+        // current new wire. V1 starts it bare, as upstream does: with this shape's hasher,
+        // mapSubElement() would add an empty tag section after `op` to every name (ops#44)
+        TopoShape new_wire = getHistoryAlgorithm() == App::HistoryAlgorithm::V1
+            ? TopoShape {0, App::StringHasherRef(), mkWire.Wire(), App::HistoryAlgorithm::V1}
+            : TopoShape {Tag, Hasher, mkWire.Wire(), getHistoryAlgorithm()};
 
         // try to connect each edge to the wire, the wire is complete if no more edges are
         // connectible
