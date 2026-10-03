@@ -123,6 +123,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/FuseCommon.V1.txt
     PartDesignTests/NamingGolden/FuseCommon.V2.txt
     PartDesignTests/NamingGolden/FuseCommon.V2i-ids.txt
+    PartDesignTests/NamingGolden/HelixBinderFace.V1.txt
+    PartDesignTests/NamingGolden/HelixBinderFace.V2.txt
+    PartDesignTests/NamingGolden/HelixBinderFace.V2i-ids.txt
     PartDesignTests/NamingGolden/LinearPattern.V1.txt
     PartDesignTests/NamingGolden/LinearPattern.V2.txt
     PartDesignTests/NamingGolden/LinearPattern.V2i-ids.txt

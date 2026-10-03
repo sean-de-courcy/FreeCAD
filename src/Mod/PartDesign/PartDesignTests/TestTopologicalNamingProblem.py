@@ -845,6 +845,75 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         harness.assertEveryElementNamed(helix.Shape)
         harness.assertEveryElementNamed(body.Shape)
 
+    def allNames(self, shape):
+        """Every mapped name of the shape's elements, an element's later names included."""
+        names = set()
+        for value in shape.ElementReverseMap.values():
+            names.update([value] if isinstance(value, str) else value)
+        return names
+
+    def firstName(self, shape, element):
+        name = shape.ElementReverseMap[element]
+        return name if isinstance(name, str) else name[0]
+
+    def helixSideFacesFromProfile(self, shape, feature, sketch):
+        """Every face of `shape` that isn't planar is named as generated (GEN) under the
+        feature's tag, from names holding the profile sketch's edges."""
+        sides = [i for i, f in enumerate(shape.Faces, 1) if not isinstance(f.Surface, Part.Plane)]
+        self.assertTrue(sides)
+        for index in sides:
+            name = self.firstName(shape, f"Face{index}")
+            last = App.getDecodedMappedName(name)[-1]
+            self.assertEqual(last["iterationTag"], str(feature.ID), name)
+            self.assertIn("GEN", last["mapperFlags"], name)
+            self.assertIn(f"^;{sketch.ID}^;SKT^;", name)
+
+    def testHelixFacesGeneratedFromProfileV2(self):
+        """A helix that is the body's first feature names its side faces as generated from the
+        profile's edges, under its own tag (ops#26). Before, it had no element map."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        TestSketcherApp.CreateRectangleSketch(sketch, (2, 0), (1, 1))
+        helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+        helix.Profile = sketch
+        helix.ReferenceAxis = (sketch, ["V_Axis"])
+        helix.Pitch = 3
+        helix.Height = 6
+        doc.recompute()
+        self.assertTrue(helix.Shape.isValid())
+        self.assertNamesDistinct(helix.Shape)
+        self.assertNamesDistinct(helix.AddSubShape)
+        self.assertNamesDistinct(body.Shape)
+        self.helixSideFacesFromProfile(helix.Shape, helix, sketch)
+
+    def testSubtractiveHelixOnPadV2(self):
+        """A subtractive helix cut into a pad: every element named, and the faces the helix cut
+        are named from the profile sketch's edges (ops#26)."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = doc.addObject("PartDesign::Body", "Body")
+        base = body.newObject("Sketcher::SketchObject", "Base")
+        TestSketcherApp.CreateRectangleSketch(base, (-1, -1), (2, 2))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = base
+        pad.Length = 6
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        sketch.AttachmentSupport = [(doc.getObject("XZ_Plane"), "")]
+        sketch.MapMode = "FlatFace"
+        TestSketcherApp.CreateRectangleSketch(sketch, (0.5, 1), (1, 1))
+        helix = body.newObject("PartDesign::SubtractiveHelix", "Helix")
+        helix.Profile = sketch
+        helix.ReferenceAxis = (sketch, ["V_Axis"])
+        helix.Pitch = 2
+        helix.Height = 4
+        doc.recompute()
+        self.assertTrue(helix.Shape.isValid())
+        self.assertLess(helix.Shape.Volume, pad.Shape.Volume - 1e-3)
+        self.assertNamesDistinct(helix.Shape)
+        self.helixSideFacesFromProfile(helix.AddSubShape, helix, sketch)
+
     def testPartDesignElementMapPocket(self):
         # Arrange
         body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -1131,6 +1200,99 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         self.assertEqual(len(body.Shape.childShapes()), 1)
         self.assertEqual(subshapebinder.Shape.childShapes()[0].ElementMapSize, 9)
+
+    def testShapeBinderOfSketchKeepsNamesV2(self):
+        """A ShapeBinder of a sketch, whole or of two edges, carries the sketch's element names
+        (ops#29). Before, it had no element map."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        TestSketcherApp.CreateRectangleSketch(sketch, (0, 0), (1, 1))
+        binder = body.newObject("PartDesign::ShapeBinder", "ShapeBinder")
+        binder.Support = [sketch, ("")]
+        edgeBinder = body.newObject("PartDesign::ShapeBinder", "EdgeBinder")
+        edgeBinder.Support = [sketch, ("Edge1", "Edge2")]
+        doc.recompute()
+        self.assertNamesDistinct(binder.Shape)
+        self.assertEqual(self.allNames(binder.Shape), self.allNames(sketch.Shape))
+        self.assertNamesDistinct(edgeBinder.Shape)
+        self.assertEqual(
+            {self.firstName(edgeBinder.Shape, e) for e in ("Edge1", "Edge2")},
+            {self.firstName(sketch.Shape, e) for e in ("Edge1", "Edge2")},
+        )
+        # each vertex has the name of the sketch's vertex at its place, also the one the two
+        # edges share (ops#45: a compound's child ranges misname shared elements)
+        self.assertEqual(len(edgeBinder.Shape.Vertexes), 3)
+        for i, vertex in enumerate(edgeBinder.Shape.Vertexes, 1):
+            (j,) = [
+                j
+                for j, other in enumerate(sketch.Shape.Vertexes, 1)
+                if other.Point.isEqual(vertex.Point, 1e-9)
+            ]
+            self.assertEqual(
+                self.firstName(edgeBinder.Shape, f"Vertex{i}"),
+                self.firstName(sketch.Shape, f"Vertex{j}"),
+            )
+
+    def testShapeBinderOfPadKeepsNamesV2(self):
+        """A ShapeBinder in another body, of a Pad's solid and of one of its faces, carries the
+        Pad's element names (ops#29). Before, both had no element map."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        TestSketcherApp.CreateRectangleSketch(sketch, (0, 0), (1, 1))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 1
+        other = doc.addObject("PartDesign::Body", "Other")
+        binder = other.newObject("PartDesign::ShapeBinder", "PadBinder")
+        binder.Support = [pad, ("")]
+        faceBinder = other.newObject("PartDesign::ShapeBinder", "FaceBinder")
+        faceBinder.Support = [pad, ("Face6",)]
+        doc.recompute()
+        self.assertNamesDistinct(binder.Shape)
+        self.assertEqual(self.allNames(binder.Shape), self.allNames(pad.Shape))
+        self.assertNamesDistinct(faceBinder.Shape)
+        self.assertEqual(
+            self.firstName(faceBinder.Shape, "Face1"), self.firstName(pad.Shape, "Face6")
+        )
+        self.assertLessEqual(self.allNames(faceBinder.Shape), self.allNames(pad.Shape))
+
+    def testPadOfShapeBinderFollowsSketchEdgesV2(self):
+        """A Pad of a ShapeBinder of a sketch keeps a side face's name when the sketch's
+        geometry is renumbered (ops#29): the binder's edges carry the sketch's names, which
+        follow geometry IDs. Before, they were the binder's own index names."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        corners = [(0, 0), (10, 0), (10, 5), (0, 5)]
+        for i in range(4):
+            (x0, y0), (x1, y1) = corners[i], corners[(i + 1) % 4]
+            sketch.addGeometry(Part.LineSegment(App.Vector(x0, y0, 0), App.Vector(x1, y1, 0)))
+        binder = body.newObject("PartDesign::ShapeBinder", "ShapeBinder")
+        binder.Support = [sketch, ("")]
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = binder
+        pad.Length = 3
+        doc.recompute()
+        self.assertNamesDistinct(pad.Shape)
+
+        def leftFace():
+            found = [i for i, f in enumerate(pad.Shape.Faces, 1) if abs(f.CenterOfMass.x) < 1e-6]
+            self.assertEqual(len(found), 1)
+            return self.firstName(pad.Shape, f"Face{found[0]}")
+
+        before = leftFace()
+        self.assertIn(f"^;{sketch.ID}^;SKT^;", before)
+        # Act: the bottom line goes to the end of the geometry list, so the left line moves from
+        # index 3 to index 2 and keeps its geometry ID.
+        sketch.delGeometry(0)
+        sketch.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
+        doc.recompute()
+        self.assertEqual(leftFace(), before)
 
     def testSketchElementMap(self):
         body = self.Doc.addObject("PartDesign::Body", "Body")
