@@ -357,6 +357,79 @@ class TestPad(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(self.Pad.Shape.Volume, 1.5)
 
+    def _twoSidedUpToPad(self, side1, side2, taper1=0.0, sideType="Two sides"):
+        """A 5 x 5 square on XY centred on the origin, padded with SideType `sideType`. A side is
+        ("Length", <length>) or ("UpToFace", (<object>, <face>)). Side 1 goes +z, side 2 -z."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        body.addObject(sketch)
+        TestSketcherApp.CreateRectangleSketch(sketch, (-2.5, -2.5), (5, 5))
+        self.Doc.recompute()
+        pad = self.Doc.addObject("PartDesign::Pad", "Pad")
+        body.addObject(pad)
+        pad.Profile = sketch
+        pad.SideType = sideType
+        pad.TaperAngle = taper1
+        for typeProp, lengthProp, faceProp, (kind, arg) in (
+            ("Type", "Length", "UpToFace", side1),
+            ("Type2", "Length2", "UpToFace2", side2),
+        ):
+            setattr(pad, typeProp, kind)
+            if kind == "Length":
+                setattr(pad, lengthProp, arg)
+            else:
+                setattr(pad, faceProp, (arg[0], [arg[1]]))
+        self.Doc.recompute()
+        return pad
+
+    def testTwoSidedPadUpToFaceBehindSide(self):
+        """ops#73: a side of a two-sided Pad whose up-to face lies behind it is an error naming
+        that side. It used to be turned around silently, and the XOR of the sides then cancelled
+        the overlap: an empty valid Pad, or one on the wrong side. One side still pads backwards
+        to such a face, and a plane off to the side is still reached on the side's own side."""
+        # Above: plane z = 10 (Face5, the bottom of a box at z 10..15). Below: plane z = -10
+        # (Face6, the top of a box at z -15..-10). Wall: a box off to the side whose Face6 is
+        # the plane z = -10, outside the profile's projection.
+        top = self.Doc.addObject("Part::Box", "Above")
+        top.Placement.Base = FreeCAD.Vector(-5, -5, 10)
+        bottom = self.Doc.addObject("Part::Box", "Below")
+        bottom.Placement.Base = FreeCAD.Vector(-5, -5, -15)
+        wall = self.Doc.addObject("Part::Box", "Wall")
+        wall.Placement.Base = FreeCAD.Vector(30, 0, -15)
+        for box in (top, bottom, wall):
+            box.Length, box.Width, box.Height = 10, 10, 5
+        wall.Length = wall.Width = 5
+        self.Doc.recompute()
+        above = ("UpToFace", (top, "Face5"))
+        below = ("UpToFace", (bottom, "Face6"))
+
+        def assertBuilt(pad, volume, zmin, zmax):
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            self.assertAlmostEqual(pad.Shape.Volume, volume, places=4)
+            self.assertAlmostEqual(pad.Shape.BoundBox.ZMin, zmin, places=6)
+            self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, zmax, places=6)
+
+        with self.subTest("control: each face ahead of its side"):
+            assertBuilt(self._twoSidedUpToPad(above, below), 25 * 20, -10, 10)
+        with self.subTest("a plane off to the side is reached on side 2's side"):
+            assertBuilt(self._twoSidedUpToPad(above, ("UpToFace", (wall, "Face6"))), 500, -10, 10)
+        with self.subTest("one side pads backwards to a face behind it"):
+            pad = self._twoSidedUpToPad(below, ("Length", 0.0), sideType="One side")
+            assertBuilt(pad, 250, -10, 0)
+        length5 = ("Length", 5.0)
+        cases = (
+            # (name, side 1, side 2, taper 1, the side named in the error)
+            ("both to the face above (two prisms)", above, above, 0.0, "Side 2"),
+            ("length, then to the face above (one prism)", length5, above, 0.0, "Side 2"),
+            ("tapered length, then to the face above (two prisms)", length5, above, 1.0, "Side 2"),
+            ("to the face below, then length (one prism)", below, length5, 0.0, "Side 1"),
+        )
+        for name, side1, side2, taper1, side in cases:
+            with self.subTest(name):
+                pad = self._twoSidedUpToPad(side1, side2, taper1)
+                self.assertFalse(pad.isValid())
+                self.assertIn(side + " can't reach its face", pad.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")
