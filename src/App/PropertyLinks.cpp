@@ -46,6 +46,7 @@
 #include "ObjectIdentifier.h"
 #include "ElementNamingUtils.h"
 #include "GeoFeature.h"
+#include "LinkRetarget.h"
 #include "ComplexGeoData.h"
 #include "NameTable.h"
 
@@ -1850,6 +1851,63 @@ static bool updateLinkReference(App::PropertyLinkBase* prop,
         owner->onUpdateElementReference(prop);
     }
     return true;
+}
+
+// Whether the path of sub, up to its element, leads from obj through link (ops#42).
+static bool passesThrough(App::DocumentObject* obj,
+                          const std::string& sub,
+                          const char* element,
+                          App::DocumentObject* link)
+{
+    std::string path(sub.c_str(), element - sub.c_str());
+    for (auto o : obj->getSubObjectList(path.c_str())) {
+        // A link to a link: the chain of linked objects counts too.
+        for (int depth = 0; o && depth < 64; ++depth) {
+            if (o == link) {
+                return true;
+            }
+            auto next = o->getLinkedObject(false);
+            if (next == o) {
+                break;
+            }
+            o = next;
+        }
+    }
+    return false;
+}
+
+// The shadows of subs (references to objs, or all to obj) after link was pointed at another
+// object (ops#42): a reference through it keeps only its index, for the new target's shape to
+// resolve. Returns whether any reference passes through link; changed tells whether a shadow
+// changed (one already index-only, or missing, stays as it is).
+static bool retargetShadows(App::DocumentObject* link,
+                            App::DocumentObject* obj,
+                            const std::vector<App::DocumentObject*>* objs,
+                            const std::vector<std::string>& subs,
+                            std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                            bool& changed)
+{
+    bool found = false;
+    changed = false;
+    shadows.resize(subs.size());
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
+        const char* element = Data::findElementName(subs[i].c_str());
+        if (!target || !target->isAttachedToDocument() || !element || !element[0]
+            || !passesThrough(target, subs[i], element, link)) {
+            continue;
+        }
+        found = true;
+        auto& shadow = shadows[i];
+        if (shadow.newName.empty() || Data::hasMissingElement(shadow.oldName.c_str())
+            || Data::hasMissingElement(element)) {
+            continue;
+        }
+        shadow.newName.clear();
+        shadow.oldName = Data::oldElementName(subs[i].c_str());
+        changed = true;
+    }
+    return found;
 }
 
 // The reference solver's pass 1 (ops#7) for one property's references: the exact lookup (in a
@@ -4198,6 +4256,26 @@ public:
         return changed;
     }
 
+    /// Lets \a xlink's references through \a link follow its new target (ops#42): see
+    /// App::followLinkRetarget(). Notifies only when a shadow changes.
+    static void followRetarget(PropertyXLink* xlink, App::DocumentObject* link)
+    {
+        auto shadows = xlink->_ShadowSubList;
+        bool changed = false;
+        if (!retargetShadows(link, xlink->_pcLink, nullptr, xlink->_SubList, shadows, changed)) {
+            return;
+        }
+        if (changed) {
+            xlink->aboutToSetValue();
+        }
+        xlink->unregisterElementReference();
+        xlink->_ShadowSubList = std::move(shadows);
+        xlink->onContainerRestored();
+        if (changed) {
+            xlink->hasSetValue();
+        }
+    }
+
     void remove(PropertyXLink* l)
     {
         auto it = links.find(l);
@@ -4386,6 +4464,77 @@ void PropertyLinkBase::breakLinks(App::DocumentObject* link,
         }
     }
     DocInfo::breakLinks(link, clear);
+}
+
+void App::followLinkRetarget(App::DocumentObject* link)
+{
+    if (!link || !link->isAttachedToDocument() || link->isRestoring()
+        || link->getDocument()->isPerformingTransaction()) {
+        return;
+    }
+    // A reference through the link is held by an object that depends on it, directly (a joint
+    // on the link) or through a container (a subname path through an assembly).
+    std::vector<Property*> props;
+    for (auto obj : link->getInListEx(true)) {
+        if (!obj || !obj->isAttachedToDocument() || obj->isRestoring()) {
+            continue;
+        }
+        props.clear();
+        obj->getPropertyList(props);
+        for (auto prop : props) {
+            if (prop->getContainer() != obj) {
+                continue;
+            }
+            bool changed = false;
+            if (auto linkSub = freecad_cast<PropertyLinkSub*>(prop)) {
+                auto shadows = linkSub->getShadowSubs();
+                if (!retargetShadows(link,
+                                     linkSub->getValue(),
+                                     nullptr,
+                                     linkSub->getSubValues(),
+                                     shadows,
+                                     changed)) {
+                    continue;
+                }
+                if (changed) {
+                    linkSub->setValue(linkSub->getValue(),
+                                      linkSub->getSubValues(),
+                                      std::move(shadows));
+                }
+                else {
+                    linkSub->onContainerRestored();  // registers under the new target
+                }
+            }
+            else if (auto linkSubList = freecad_cast<PropertyLinkSubList*>(prop)) {
+                auto shadows = linkSubList->getShadowSubs();
+                if (!retargetShadows(link,
+                                     nullptr,
+                                     &linkSubList->getValues(),
+                                     linkSubList->getSubValues(),
+                                     shadows,
+                                     changed)) {
+                    continue;
+                }
+                if (changed) {
+                    linkSubList->setValues(linkSubList->getValues(),
+                                           linkSubList->getSubValues(),
+                                           std::move(shadows));
+                }
+                else {
+                    linkSubList->onContainerRestored();
+                }
+            }
+            else if (auto xlink = freecad_cast<PropertyXLink*>(prop)) {
+                DocInfo::followRetarget(xlink, link);
+            }
+            else if (auto xlinkSubList = freecad_cast<PropertyXLinkSubList*>(prop)) {
+                // Each child notifies through the list.
+                for (auto& child : xlinkSubList->getSubListValues()) {
+                    DocInfo::followRetarget(const_cast<PropertyXLinkSub*>(&child), link);
+                }
+            }
+        }
+    }
 }
 
 //**************************************************************************

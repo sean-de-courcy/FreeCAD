@@ -290,6 +290,7 @@ SET(Properties_HPP_SRCS
     PropertyFile.h
     PropertyGeo.h
     PropertyLinks.h
+    LinkRetarget.h
     ReferenceReport.h
     PropertyPythonObject.h
     PropertyStandard.h

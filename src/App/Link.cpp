@@ -39,6 +39,7 @@
 #include "GeoFeatureGroupExtension.h"
 #include "Link.h"
 #include "LinkBaseExtensionPy.h"
+#include "LinkRetarget.h"
 
 // FIXME: ISO C++11 requires at least one argument for the "..." in a variadic macro
 #if defined(__clang__)
@@ -2107,6 +2108,15 @@ void LinkBaseExtension::update(App::DocumentObject* parent, const Property* prop
         }
         else {
             setupCopyOnChange(parent, true);
+        }
+
+        // The element references through this link follow its new target (ops#42); not when the
+        // target only comes or goes with its document (opened, attached, closed), as their
+        // shadows still name its elements.
+        auto linkProp = freecad_cast<PropertyLinkBase*>(getLinkedObjectProperty());
+        if (getLinkedObjectValue() && !GetApplication().isRestoring()
+            && !(linkProp && linkProp->testFlag(PropertyLinkBase::LinkRestoring))) {
+            followLinkRetarget(parent);
         }
     }
     else if (prop == getLinkCopyOnChangeProperty()) {
