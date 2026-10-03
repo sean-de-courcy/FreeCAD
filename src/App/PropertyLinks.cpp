@@ -38,6 +38,7 @@
 #include "Application.h"
 #include "Document.h"
 #include "ElementFingerprint.h"
+#include "ElementSolver.h"
 #include "ElementSolverBatch.h"
 #include "ReferenceReport.h"
 #include "DocumentObject.h"
@@ -70,12 +71,36 @@ static std::unordered_map<std::string, std::set<PropertyLinkBase*>> _LabelMap;
 static std::unordered_map<App::DocumentObject*, std::unordered_set<PropertyLinkBase*>> _ElementRefMap;
 // clang-format on
 
+// The element a reference named before a link retarget made it index-only (ops#106): the sub,
+// the object it is a sub of (compared by address only), and the old element's fingerprint. The
+// sub's first resolution on the new target checks the element there against it
+// (_updateElementReference()).
+struct RetargetCheck
+{
+    const App::DocumentObject* obj;
+    std::string sub;
+    Data::ElementFingerprint before;
+};
+static std::unordered_map<const PropertyLinkBase*, std::vector<RetargetCheck>> _RetargetChecks;
+
+// Whether the element an index names on a link's new target agrees with the one the reference
+// named before the retarget (ops#106): the same type and kind, and the same direction (a plane's
+// normal with its sense, an axis or a line either way), each in its feature's own frame. Sizes,
+// centres and radii are left out: variants differ in their dimensions by design.
+static bool retargetAgrees(Data::ElementFingerprint before, Data::ElementFingerprint now)
+{
+    before.radii.clear();
+    now.radii.clear();
+    return Data::intrinsicAgrees(before, now, Data::GeometryTolerances());
+}
+
 PropertyLinkBase::PropertyLinkBase() = default;
 
 PropertyLinkBase::~PropertyLinkBase()
 {
     unregisterLabelReferences();
     unregisterElementReference();
+    _RetargetChecks.erase(this);
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -713,6 +738,38 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
         }
     }
 
+    // The first resolution of a sub that a link retarget made index-only (ops#106): the index
+    // must name an element that agrees with the one the reference named on the old target, or
+    // the reference goes missing, never to another element. The check is used up either way.
+    const char* why = "";
+    if (!reverse && shadow.newName.empty()) {
+        auto checks = _RetargetChecks.find(this);
+        if (checks != _RetargetChecks.end()) {
+            auto& list = checks->second;
+            auto check = std::find_if(list.begin(), list.end(), [&](const auto& entry) {
+                return entry.obj == obj && entry.sub == sub;
+            });
+            if (check != list.end() && !missing) {
+                Data::ElementFingerprint now;
+                const char* newElement = Data::findElementName(elementName.oldName.c_str());
+                if (!newElement || !newElement[0] || !geo->getElementFingerprint(newElement, now)
+                    || !retargetAgrees(check->before, now)) {
+                    missing = true;
+                    why = " (the link's new target has another kind of element at that index)";
+                    std::size_t at = newElement ? newElement - elementName.oldName.c_str() : 0;
+                    elementName.oldName.insert(at, Data::MISSING_PREFIX);
+                    elementName.newName.clear();
+                }
+            }
+            if (check != list.end()) {
+                list.erase(check);
+                if (list.empty()) {
+                    _RetargetChecks.erase(checks);
+                }
+            }
+        }
+    }
+
     if (notify) {
         aboutToSetValue();
     }
@@ -727,7 +784,8 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     if (missing) {
         FC_WARN(propertyName(this)
                 << " missing element reference " << ret->getFullName() << " "
-                << (elementName.newName.size() ? elementName.newName : elementName.oldName));
+                << (elementName.newName.size() ? elementName.newName : elementName.oldName)
+                << why);
         shadow.oldName.swap(elementName.oldName);
     }
     else {
@@ -1853,18 +1911,24 @@ static bool updateLinkReference(App::PropertyLinkBase* prop,
     return true;
 }
 
-// Whether the path of sub, up to its element, leads from obj through link (ops#42).
-static bool passesThrough(App::DocumentObject* obj,
-                          const std::string& sub,
-                          const char* element,
-                          App::DocumentObject* link)
+// Where the path of sub, up to its element, passes through link (ops#42): the offset in sub just
+// after the object on the path that is link or leads to it (a link to a link counts too), or
+// std::string::npos if the offset isn't known; nothing if the path doesn't pass through link.
+static std::optional<std::size_t> pathThrough(App::DocumentObject* obj,
+                                              const std::string& sub,
+                                              const char* element,
+                                              App::DocumentObject* link)
 {
     std::string path(sub.c_str(), element - sub.c_str());
-    for (auto o : obj->getSubObjectList(path.c_str())) {
+    std::vector<int> sizes;
+    auto objects = obj->getSubObjectList(path.c_str(), &sizes);
+    for (std::size_t k = 0; k < objects.size(); ++k) {
         // A link to a link: the chain of linked objects counts too.
+        auto o = objects[k];
         for (int depth = 0; o && depth < 64; ++depth) {
             if (o == link) {
-                return true;
+                return k < sizes.size() && sizes[k] >= 0 ? std::size_t(sizes[k])
+                                                         : std::string::npos;
             }
             auto next = o->getLinkedObject(false);
             if (next == o) {
@@ -1873,19 +1937,54 @@ static bool passesThrough(App::DocumentObject* obj,
             o = next;
         }
     }
-    return false;
+    return std::nullopt;
+}
+
+// The fingerprint of the element that rest (the part of a sub after a link) names on oldTarget,
+// the link's target before a retarget (ops#106); invalid if it can't be taken.
+static Data::ElementFingerprint oldElementFingerprint(App::DocumentObject* oldTarget,
+                                                      const std::string& rest)
+{
+    Data::ElementFingerprint fingerprint;
+    if (!oldTarget || !oldTarget->isAttachedToDocument()) {
+        return fingerprint;
+    }
+    PropertyLinkBase::ShadowSub elementName;
+    GeoFeature* geo = nullptr;
+    const char* element = nullptr;
+    if (!GeoFeature::resolveElement(oldTarget,
+                                    rest.c_str(),
+                                    elementName,
+                                    false,
+                                    GeoFeature::Normal,
+                                    nullptr,
+                                    &element,
+                                    &geo)
+        || !geo || elementName.oldName.empty()
+        || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
+        return fingerprint;
+    }
+    const char* name = Data::findElementName(elementName.oldName.c_str());
+    if (!name || !name[0] || !geo->getElementFingerprint(name, fingerprint)) {
+        return {};
+    }
+    return fingerprint;
 }
 
 // The shadows of subs (references to objs, or all to obj) after link was pointed at another
 // object (ops#42): a reference through it keeps only its index, for the new target's shape to
 // resolve. Returns whether any reference passes through link; changed tells whether a shadow
-// changed (one already index-only, or missing, stays as it is).
+// changed (one already index-only, or missing, stays as it is). checks gets, for each sub made
+// index-only, the fingerprint of the element it named on oldTarget, the link's old target, when
+// one can be taken (ops#106).
 static bool retargetShadows(App::DocumentObject* link,
+                            App::DocumentObject* oldTarget,
                             App::DocumentObject* obj,
                             const std::vector<App::DocumentObject*>* objs,
                             const std::vector<std::string>& subs,
                             std::vector<PropertyLinkBase::ShadowSub>& shadows,
-                            bool& changed)
+                            bool& changed,
+                            std::vector<RetargetCheck>& checks)
 {
     bool found = false;
     changed = false;
@@ -1893,8 +1992,11 @@ static bool retargetShadows(App::DocumentObject* link,
     for (std::size_t i = 0; i < subs.size(); ++i) {
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
         const char* element = Data::findElementName(subs[i].c_str());
-        if (!target || !target->isAttachedToDocument() || !element || !element[0]
-            || !passesThrough(target, subs[i], element, link)) {
+        if (!target || !target->isAttachedToDocument() || !element || !element[0]) {
+            continue;
+        }
+        auto offset = pathThrough(target, subs[i], element, link);
+        if (!offset) {
             continue;
         }
         found = true;
@@ -1903,11 +2005,37 @@ static bool retargetShadows(App::DocumentObject* link,
             || Data::hasMissingElement(element)) {
             continue;
         }
+        if (*offset != std::string::npos && *offset <= subs[i].size()) {
+            auto fingerprint = oldElementFingerprint(oldTarget, subs[i].substr(*offset));
+            if (fingerprint.isValid()) {
+                checks.push_back({target, subs[i], std::move(fingerprint)});
+            }
+        }
         shadow.newName.clear();
         shadow.oldName = Data::oldElementName(subs[i].c_str());
         changed = true;
     }
     return found;
+}
+
+// Holds the checks retargetShadows() took for prop, for the first resolution of its index-only
+// subs (ops#106). A sub's earlier check, from a retarget it hasn't resolved since, stays: it
+// holds what the reference named before either retarget.
+static void holdRetargetChecks(const PropertyLinkBase* prop, std::vector<RetargetCheck>& checks)
+{
+    if (checks.empty()) {
+        return;
+    }
+    auto& held = _RetargetChecks[prop];
+    for (auto& check : checks) {
+        bool known = std::any_of(held.begin(), held.end(), [&](const auto& entry) {
+            return entry.obj == check.obj && entry.sub == check.sub;
+        });
+        if (!known) {
+            held.push_back(std::move(check));
+        }
+    }
+    checks.clear();
 }
 
 // The reference solver's pass 1 (ops#7) for one property's references: the exact lookup (in a
@@ -4258,13 +4386,23 @@ public:
 
     /// Lets \a xlink's references through \a link follow its new target (ops#42): see
     /// App::followLinkRetarget(). Notifies only when a shadow changes.
-    static void followRetarget(PropertyXLink* xlink, App::DocumentObject* link)
+    static void
+    followRetarget(PropertyXLink* xlink, App::DocumentObject* link, App::DocumentObject* oldTarget)
     {
         auto shadows = xlink->_ShadowSubList;
         bool changed = false;
-        if (!retargetShadows(link, xlink->_pcLink, nullptr, xlink->_SubList, shadows, changed)) {
+        std::vector<RetargetCheck> checks;
+        if (!retargetShadows(link,
+                             oldTarget,
+                             xlink->_pcLink,
+                             nullptr,
+                             xlink->_SubList,
+                             shadows,
+                             changed,
+                             checks)) {
             return;
         }
+        holdRetargetChecks(xlink, checks);
         if (changed) {
             xlink->aboutToSetValue();
         }
@@ -4466,7 +4604,7 @@ void PropertyLinkBase::breakLinks(App::DocumentObject* link,
     DocInfo::breakLinks(link, clear);
 }
 
-void App::followLinkRetarget(App::DocumentObject* link)
+void App::followLinkRetarget(App::DocumentObject* link, App::DocumentObject* oldTarget)
 {
     if (!link || !link->isAttachedToDocument() || link->isRestoring()
         || link->getDocument()->isPerformingTransaction()) {
@@ -4475,6 +4613,7 @@ void App::followLinkRetarget(App::DocumentObject* link)
     // A reference through the link is held by an object that depends on it, directly (a joint
     // on the link) or through a container (a subname path through an assembly).
     std::vector<Property*> props;
+    std::vector<RetargetCheck> checks;
     for (auto obj : link->getInListEx(true)) {
         if (!obj || !obj->isAttachedToDocument() || obj->isRestoring()) {
             continue;
@@ -4489,13 +4628,16 @@ void App::followLinkRetarget(App::DocumentObject* link)
             if (auto linkSub = freecad_cast<PropertyLinkSub*>(prop)) {
                 auto shadows = linkSub->getShadowSubs();
                 if (!retargetShadows(link,
+                                     oldTarget,
                                      linkSub->getValue(),
                                      nullptr,
                                      linkSub->getSubValues(),
                                      shadows,
-                                     changed)) {
+                                     changed,
+                                     checks)) {
                     continue;
                 }
+                holdRetargetChecks(linkSub, checks);
                 if (changed) {
                     linkSub->setValue(linkSub->getValue(),
                                       linkSub->getSubValues(),
@@ -4508,13 +4650,16 @@ void App::followLinkRetarget(App::DocumentObject* link)
             else if (auto linkSubList = freecad_cast<PropertyLinkSubList*>(prop)) {
                 auto shadows = linkSubList->getShadowSubs();
                 if (!retargetShadows(link,
+                                     oldTarget,
                                      nullptr,
                                      &linkSubList->getValues(),
                                      linkSubList->getSubValues(),
                                      shadows,
-                                     changed)) {
+                                     changed,
+                                     checks)) {
                     continue;
                 }
+                holdRetargetChecks(linkSubList, checks);
                 if (changed) {
                     linkSubList->setValues(linkSubList->getValues(),
                                            linkSubList->getSubValues(),
@@ -4525,12 +4670,12 @@ void App::followLinkRetarget(App::DocumentObject* link)
                 }
             }
             else if (auto xlink = freecad_cast<PropertyXLink*>(prop)) {
-                DocInfo::followRetarget(xlink, link);
+                DocInfo::followRetarget(xlink, link, oldTarget);
             }
             else if (auto xlinkSubList = freecad_cast<PropertyXLinkSubList*>(prop)) {
                 // Each child notifies through the list.
                 for (auto& child : xlinkSubList->getSubListValues()) {
-                    DocInfo::followRetarget(const_cast<PropertyXLinkSub*>(&child), link);
+                    DocInfo::followRetarget(const_cast<PropertyXLinkSub*>(&child), link, oldTarget);
                 }
             }
         }

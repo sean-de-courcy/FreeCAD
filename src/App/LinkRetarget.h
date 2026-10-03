@@ -19,8 +19,13 @@ class DocumentObject;
  * of the new target, so the saved file reopens as the session shows it, and the old target's
  * names are not looked up in the new one.
  *
+ * \a oldTarget is the link's target before the change, if known. A reference's first resolution
+ * on the new target is then checked against the element it named there: the index is kept only
+ * if the new element has the same type, kind and direction, else the reference is marked
+ * missing, never moved to another element (ops#106).
+ *
  * Defined in PropertyLinks.cpp.
  */
-void followLinkRetarget(DocumentObject* link);
+void followLinkRetarget(DocumentObject* link, DocumentObject* oldTarget);
 
 }  // namespace App
