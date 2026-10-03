@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <sstream>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
@@ -38,6 +39,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ElementMapOrder.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Console.h>
@@ -134,19 +136,19 @@ std::size_t mappedNameCount(const TopoShape& shape, bool unsorted)
  * whatever its flag (ops#97).
  *
  * The shape's map and cache may be shared with the shape it was set from, so they are replaced,
- * not changed in place, when the form changes (ops#97).
+ * not changed in place, when the form changes (ops#97). Returns whether they were.
  */
-void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
+bool toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
 {
     if (shape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2
         || (!interned && !shape.getInternNames() && !restored)) {
-        return;
+        return false;
     }
     bool inOtherForm = false;
     if (shape.getElementMapSize(false) > 0) {
         if (interned) {
             auto& table = Data::NameTable::instance();
-            inOtherForm = anyMappedName(shape, [&table](const Data::MappedName& name) {
+            auto notInternedForm = [&table](const Data::MappedName& name) {
                 std::string text = name.toString();
                 if (isInternedForm(text)) {
                     return false;
@@ -157,7 +159,19 @@ void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
                 // comes back at every setValue (ops#97)
                 auto known = table.toInternedIfKnown(text);
                 return !known || *known != text;
-            });
+            };
+            // First the map's own names, unsorted: without child maps they include every name
+            // the walk below visits, so if they are all in form, so are those. The walk indexes
+            // the shape's sub-shapes, which cost V2i most of setValue's time (ops#101).
+            bool maybe = true;
+            if (!shape.hasChildElementMap()) {
+                Data::UnsortedElementMapScope unsorted;
+                const auto names = shape.getElementMap();
+                maybe = std::any_of(names.begin(), names.end(), [&](const auto& element) {
+                    return notInternedForm(element.name);
+                });
+            }
+            inOtherForm = maybe && anyMappedName(shape, notInternedForm);
         }
         else if (shape.getInternNames()) {
             inOtherForm = true;
@@ -174,7 +188,7 @@ void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
     if (!inOtherForm
         && (shape.getInternNames() == interned || shape.getElementMapSize(false) == 0)) {
         shape.setInternNames(interned);
-        return;
+        return false;
     }
     std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
     for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
@@ -195,6 +209,7 @@ void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
     for (const auto& [element, name, sids] : names) {
         shape.setElementName(element, name, shape.Tag, &sids);
     }
+    return true;
 }
 }  // namespace
 
@@ -208,6 +223,8 @@ void PropertyPartShape::setValue(const TopoShape& sh)
     _Shape = sh;
     auto obj = freecad_cast<App::DocumentObject*>(getContainer());
     if (obj) {
+        // Whether _Shape's map is no longer the one it shares with sh
+        bool newMap = false;
         if (obj->isAttachedToDocument()
             && _Shape.getHistoryAlgorithm() != obj->getSelectedHistoryAlgorithm()
             && !_Shape.getElementMapSize()) {
@@ -216,15 +233,19 @@ void PropertyPartShape::setValue(const TopoShape& sh)
             // document (ops#35). Its empty map may be the given shape's: drop it first.
             _Shape.resetElementMap();
             _Shape.setHistoryAlgorithm(obj->getSelectedHistoryAlgorithm());
+            newMap = true;
         }
         if (obj->isAttachedToDocument()) {
-            toDocumentForm(_Shape, obj->getDocument()->isInternNamesOn());
+            newMap = toDocumentForm(_Shape, obj->getDocument()->isInternNamesOn()) || newMap;
         }
         const App::HistoryAlgorithm& historyAlgorithm = _Shape.getHistoryAlgorithm();
 
-        // Both counted the same way; an interned map is counted without its sort (ops#97)
+        // Both counted the same way; an interned map is counted without its sort (ops#97), and
+        // only if it was replaced: a shared map has the same count, and counting it unsorted
+        // walks every element (ops#101)
         const bool unsorted = _Shape.getInternNames() || sh.getInternNames();
-        if (mappedNameCount(_Shape, unsorted) != mappedNameCount(sh, unsorted)) {
+        if ((newMap || !unsorted)
+            && mappedNameCount(_Shape, unsorted) != mappedNameCount(sh, unsorted)) {
             TopoShape res(obj->getID(), sh.Hasher, _Shape.getShape(), _Shape.getHistoryAlgorithm());
             res.mapSubElement(_Shape);
             _Shape = res;
