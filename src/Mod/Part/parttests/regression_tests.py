@@ -4,6 +4,7 @@ import FreeCAD
 from FreeCAD import Vector, Base, newDocument, closeDocument
 import Part
 
+import itertools
 import math
 import os
 
@@ -281,8 +282,16 @@ class RegressionTests(unittest.TestCase):
                         return i
             return None
 
-        for feature in ("Fillet", "Chamfer"):
-            with self.subTest(feature):
+        # Solver off: Part::Fillet's own check reports the edge. Solver on (ops#7): the solver
+        # finds no candidate and marks the reference broken, so nothing is filleted either.
+        for solver, feature in itertools.product((False, True), ("Fillet", "Chamfer")):
+            with self.subTest(feature=feature, solver=solver):
+                if not hasattr(self.Doc, "ReferenceSolver"):
+                    if solver:
+                        continue
+                else:
+                    # Explicitly, also when off: new documents start with it on.
+                    self.Doc.ReferenceSolver = solver
                 # A 20 x 10 x 10 block from a sketch; the vertical edges at (20, 0), listed
                 # first, and (0, 0) get the fillet or chamfer. Cutting the corner (20, 0) off
                 # the sketch leaves no vertical edge there.
@@ -308,7 +317,15 @@ class RegressionTests(unittest.TestCase):
                 self.Doc.recompute()
                 self.assertIsNone(verticalEdgeAt(block.Shape, 20, 0))
                 self.assertFalse(rounded.isValid())
-                self.assertEqual(rounded.getStatusString().count("Missing edge link"), 1)
+                if solver:
+                    status = rounded.getStatusString()
+                    self.assertEqual(status.count("Missing edge reference"), 1, status)
+                    self.assertIn("EdgeLinks[0]", status)
+                    links = rounded.EdgeLinks[1]
+                    self.assertTrue(links[0].startswith("?"), links)
+                    self.assertFalse(links[1].startswith("?"), links)
+                else:
+                    self.assertEqual(rounded.getStatusString().count("Missing edge link"), 1)
                 self.assertEqual(rounded.Edges, edges)
 
     def tearDown(self):
