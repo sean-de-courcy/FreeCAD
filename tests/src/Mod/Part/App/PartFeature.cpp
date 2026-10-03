@@ -615,6 +615,9 @@ TEST_F(FeaturePartTest, referenceResolvedByOneOfSeveralNameMatchesWarnsV2)
     //   faces are pieces of that face, as when a cut splits it. Both names match strictly, the
     //   old face's shape is gone, so the reference takes the first piece: a guess (ops#20).
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    // The solver-off matcher, as in a file saved before the solver became the default for
+    // new documents (ops#7 Q7): with the solver on, references skip it.
+    _doc->ReferenceSolver.setValue(false);
     auto top = faceName("g1");
     TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
     before.setElementName(Data::IndexedName("Face", 1), top, 7L);
@@ -655,6 +658,9 @@ TEST_F(FeaturePartTest, referenceResolvedByGeometryOverAnotherNameMatchWarnsV2)
     //   another name, and Face2's name matches the old one. The geometric search finds the old
     //   face's shape at Face1 and overrides the name match: a guess (ops#20).
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    // The solver-off matcher, as in a file saved before the solver became the default for
+    // new documents (ops#7 Q7): with the solver on, references skip it.
+    _doc->ReferenceSolver.setValue(false);
     auto top = faceName("g1");
     TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
     before.setElementName(Data::IndexedName("Face", 1), top, 7L);
@@ -686,6 +692,9 @@ TEST_F(FeaturePartTest, referenceWithOneNameMatchDoesNotWarnV2)
     //   control: the moved box has one piece of the old face, so the name match is the only
     //   candidate and nothing overrides it
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    // The solver-off matcher, as in a file saved before the solver became the default for
+    // new documents (ops#7 Q7): with the solver on, references skip it.
+    _doc->ReferenceSolver.setValue(false);
     auto top = faceName("g1");
     TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
     before.setElementName(Data::IndexedName("Face", 1), top, 7L);
@@ -720,6 +729,9 @@ TEST_F(FeaturePartTest, referenceResolvedByOneOfSeveralGeometricMatchesWarnsV2)
     //   of it, with no name like the old one. The geometric search finds the old face's shape
     //   twice and takes the first: a guess (ops#20)
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    // The solver-off matcher, as in a file saved before the solver became the default for
+    // new documents (ops#7 Q7): with the solver on, references skip it.
+    _doc->ReferenceSolver.setValue(false);
     auto top = faceName("g1");
     TopoDS_Shape box = BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape();
     TopoShape before(App::HistoryAlgorithm::V2, box, 7L);
@@ -757,6 +769,9 @@ TEST_F(FeaturePartTest, referenceWhoseNameMatchGeometryConfirmsDoesNotWarnV2)
     //   control: the box stays where it is and its Face1 is now a piece of the old face, so the
     //   name match and the geometric search agree
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    // The solver-off matcher, as in a file saved before the solver became the default for
+    // new documents (ops#7 Q7): with the solver on, references skip it.
+    _doc->ReferenceSolver.setValue(false);
     auto top = faceName("g1");
     TopoShape before(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 7L);
     before.setElementName(Data::IndexedName("Face", 1), top, 7L);

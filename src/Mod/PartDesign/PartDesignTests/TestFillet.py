@@ -106,20 +106,39 @@ class TestFillet(unittest.TestCase):
         self.assertEqual(followup.Base[0].Name, box.Name)
         self.assertEqual(list(followup.Base[1]), [new_edge])
 
-    def testDeletingPreviousFeatureDoesNotRelinkUnsafeBaseEdge(self):
+    def testDeletingPreviousFeatureRelinksTrimmedBaseEdgeToFullEdge(self):
+        # FreeCAD-CH (ops#7 Q7): upstream's testDeletingPreviousFeatureDoesNotRelinkUnsafeBaseEdge
+        # expects no relink. With the reference solver, on in new documents, a dress-up on an
+        # edge that the deleted feature trimmed follows the base's full edge.
         body, box, fillet = self._create_box_with_fillet()
-        old_edge, _new_edge = self._find_edge_with_match_count(fillet.Shape, box.Shape, 0)
+        self.assertTrue(self.Doc.ReferenceSolver)
+        # The fillet on the box's Edge1 shortens the four box edges that meet it by its radius.
+        trimmed = next(
+            index + 1
+            for index, edge in enumerate(fillet.Shape.Edges)
+            if isinstance(edge.Curve, Part.Line) and abs(edge.Length - 9.0) < 1e-6
+        )
+        trimmed_edge = fillet.Shape.Edges[trimmed - 1]
+        full = [
+            "Edge" + str(index + 1)
+            for index, edge in enumerate(box.Shape.Edges)
+            if all(edge.distToShape(vertex)[0] < 1e-6 for vertex in trimmed_edge.Vertexes)
+        ]
+        self.assertEqual(len(full), 1)
 
         followup = self.Doc.addObject("PartDesign::Fillet", "FollowupFillet")
-        followup.Base = (fillet, [old_edge])
+        followup.Base = (fillet, ["Edge" + str(trimmed)])
         followup.Radius = 0.25
         body.addObject(followup)
         self.Doc.recompute()
+        self.assertTrue(followup.isValid())
 
         body.removeObject(fillet)
 
-        if followup.Base[0]:
-            self.assertNotEqual(followup.Base[0].Name, box.Name)
+        self.assertEqual(followup.Base[0].Name, box.Name)
+        self.assertEqual(list(followup.Base[1]), full)
+        self.Doc.recompute()
+        self.assertTrue(followup.isValid())
 
     # Fillets that OCCT makes with tolerances above Precision::Confusion(): the result must be a
     # valid solid with the volume the geometry gives, and the base feature's shape must stay

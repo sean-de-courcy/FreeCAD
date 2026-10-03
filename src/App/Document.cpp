@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <array>
 #include <bitset>
 #include <stack>
 #include <deque>
@@ -268,6 +269,50 @@ void reportNameRemap(const Data::NameRemap& remap, const char* documentName)
     if (remap.droppedCount() != 0) {
         FC_LOG(documentName << ": " << remap.droppedCount()
                             << " interned names of a newer naming format dropped");
+    }
+}
+
+/** A switch that new documents take from a user parameter, while a restored document takes it
+ * from its file (ops#7 Q7). Such a switch is saved only while it is on
+ * (PropertyBoolSavedWhenTrue), so a file saved without it, from before the switch existed or
+ * with it off, comes back off whatever the parameter says.
+ */
+struct NewDocumentSwitch
+{
+    PropertyBoolSavedWhenTrue Document::*property;
+    /// In BaseApp/Preferences/Document.
+    const char* parameter;
+    /// The value for new documents while the parameter isn't set.
+    bool parameterDefault;
+    /// A local test aid, never set in CI: "1" turns the switch on in every document, restored
+    /// ones included, to run whole test suites with it.
+    const char* testAid;
+};
+
+constexpr std::array newDocumentSwitches {
+    NewDocumentSwitch {&Document::ReferenceSolver, "ReferenceSolver", true, "FREECAD_REFERENCE_SOLVER"},
+    // Off for new documents too until ops#6's Q6.
+    NewDocumentSwitch {&Document::InternNames, "InternNames", false, "FREECAD_INTERN_NAMES"},
+};
+
+bool testAidOn(const char* variable)
+{
+    const char* value = std::getenv(variable);
+    return value && std::string(value) == "1";
+}
+
+/// Sets the switches for a new document, or, with `restoring`, to what a file without them means.
+void setNewDocumentSwitches(Document& doc, bool restoring)
+{
+    ParameterGrp::handle hGrp =
+        GetApplication().GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document");
+    for (const auto& entry : newDocumentSwitches) {
+        bool value = testAidOn(entry.testAid)
+            || (!restoring && hGrp->GetBool(entry.parameter, entry.parameterDefault));
+        auto& property = doc.*entry.property;
+        if (property.getValue() != value) {
+            property.setValue(value);
+        }
     }
 }
 
@@ -1239,23 +1284,13 @@ Document::Document(const char* documentName)
                       0,
                       PropertyType(Prop_Hidden),
                       "Whether broken element references go to the reference solver (V2 only).");
-    // A local test aid (ops#7), never set in CI: FREECAD_REFERENCE_SOLVER=1 turns the solver
-    // on in every document, to run whole test suites through it.
-    if (const char* solver = std::getenv("FREECAD_REFERENCE_SOLVER");
-        solver && std::string(solver) == "1") {
-        ReferenceSolver.setValue(true);
-    }
     ADD_PROPERTY_TYPE(InternNames,
                       (false),
                       0,
                       PropertyType(Prop_Hidden),
                       "Whether element names are interned (V2 only).");
-    // A local test aid (ops#6), never set in CI: FREECAD_INTERN_NAMES=1 interns the names of every
-    // document, to run whole test suites with it.
-    if (const char* intern = std::getenv("FREECAD_INTERN_NAMES");
-        intern && std::string(intern) == "1") {
-        InternNames.setValue(true);
-    }
+    // On or off by the user's parameters; Restore() sets them back to what the file holds.
+    setNewDocumentSwitches(*this, false);
 
     // this creates and sets 'TransientDir' in onChanged()
     ADD_PROPERTY_TYPE(TransientDir,
@@ -1443,6 +1478,10 @@ void Document::Restore(Base::XMLReader& reader)
     // that is kept in Application.
     const std::string FilePath = FileName.getValue();
     const std::string DocLabel = Label.getValue();
+
+    // The constructor turned on what new documents start with; a file without such a switch
+    // was saved with it off (ops#7 Q7).
+    setNewDocumentSwitches(*this, true);
 
     // read the Document Properties, when reading in Uid the transient directory gets renamed
     // automatically
