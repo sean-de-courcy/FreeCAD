@@ -1625,7 +1625,9 @@ int SketchObject::getVertexIndexGeoPos(int GeoId, PointPos PosId) const
 Part::TopoShape SketchObject::getEdge(const Part::Geometry *geo, const char *name) const
 {
     const App::HistoryAlgorithm& selectedHistoryVersion = getSelectedHistoryAlgorithm();
-    Part::TopoShape shape = makeTopoShape(geo->toShape());
+    // Without the hasher, as upstream's: in V1 the wires built from these edges would otherwise
+    // take it, and add an empty tag section after `SKT` to every name (ops#44)
+    Part::TopoShape shape = makeTopoShape(geo->toShape(), 0, false);
     Data::MappedName builtName = Data::MappedName();
     Data::MappedName builtVertexName = Data::MappedName();
 

@@ -30,6 +30,7 @@ from SketcherTests.TestSketchExpression import TestSketchExpression
 from SketcherTests.TestSketchValidateCoincidents import TestSketchValidateCoincidents
 from SketcherTests.TestSketchCarbonCopyReverseMapping import TestSketchCarbonCopyReverseMapping
 from SketcherTests.TestSketchInternalFaces import TestSketchInternalFaces
+from SketcherTests.TestSketchNamesV1 import TestSketchNamesV1
 from SketcherTests.TestSketcherEllipse import TestSketcherEllipse
 from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternal,
