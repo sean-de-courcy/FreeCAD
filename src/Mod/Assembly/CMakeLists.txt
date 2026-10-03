@@ -61,6 +61,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestCommandCreateView.py
     AssemblyTests/TestCommandInsertLink.py
     AssemblyTests/TestSimulationExport.py
+    AssemblyTests/TestVariantLinks.py
     AssemblyTests/mocks/__init__.py
     AssemblyTests/mocks/MockGui.py
 )

@@ -27,9 +27,17 @@ from AssemblyTests.TestCore import TestCore
 from AssemblyTests.TestCommandInsertLink import TestCommandInsertLink
 from AssemblyTests.TestCommandCreateView import TestCommandCreateView
 from AssemblyTests.TestSimulationExport import TestSimulationExport
+from AssemblyTests.TestVariantLinks import (
+    TestLinkRetargetJoints,
+    TestLinkRetargetProperties,
+    TestVariantLinkRecompute,
+)
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
 True if TestCommandInsertLink else False
 True if TestCommandCreateView else False
 True if TestSimulationExport else False
+True if TestLinkRetargetJoints else False
+True if TestLinkRetargetProperties else False
+True if TestVariantLinkRecompute else False
