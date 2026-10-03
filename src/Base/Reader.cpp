@@ -41,6 +41,7 @@
 #include "Persistence.h"
 #include "Sequencer.h"
 #include "Stream.h"
+#include "XMLAttributeFilter.h"
 #include "XMLTools.h"
 
 #ifdef _MSC_VER
@@ -51,6 +52,43 @@
 
 using namespace std;
 using namespace XERCES_CPP_NAMESPACE;
+
+
+// ---------------------------------------------------------------------------
+//  Base::XMLAttributeFilter
+// ---------------------------------------------------------------------------
+
+namespace
+{
+thread_local Base::XMLAttributeFilter* activeAttributeFilter = nullptr;
+}
+
+Base::XMLAttributeFilter::XMLAttributeFilter(const XMLReader& reader, Function function)
+    : _reader(&reader)
+    , _function(std::move(function))
+    , _previous(activeAttributeFilter)
+{
+    activeAttributeFilter = this;
+}
+
+Base::XMLAttributeFilter::~XMLAttributeFilter()
+{
+    activeAttributeFilter = _previous;
+}
+
+bool Base::XMLAttributeFilter::anyActive()
+{
+    return activeAttributeFilter != nullptr;
+}
+
+void Base::XMLAttributeFilter::apply(const XMLReader& reader, std::string& value)
+{
+    for (auto* filter = activeAttributeFilter; filter; filter = filter->_previous) {
+        if (filter->_reader == &reader) {
+            filter->_function(value);
+        }
+    }
+}
 
 
 // ---------------------------------------------------------------------------
@@ -582,6 +620,11 @@ void Base::XMLReader::startElement(
     AttrMap.clear();
     for (unsigned int i = 0; i < attrs.getLength(); i++) {
         AttrMap[StrX(attrs.getQName(i)).c_str()] = StrXUTF8(attrs.getValue(i)).c_str();
+    }
+    if (XMLAttributeFilter::anyActive()) {
+        for (auto& attribute : AttrMap) {
+            XMLAttributeFilter::apply(*this, attribute.second);
+        }
     }
 
     ReadType = StartElement;

@@ -36,7 +36,7 @@ from parttests.Geom2d_tests import Geom2dTests
 from parttests.regression_tests import RegressionTests
 from parttests.TopoShapeListTest import TopoShapeListTest
 from parttests.TopoShapeTest import TopoShapeTest
-from parttests.ElementReferenceTest import ElementReferenceTest
+from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenceTestV2i
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest
 from parttests.InternNamesTest import InternNamesTest
 from parttests.TestPartMirror import TestPartMirroringRegression

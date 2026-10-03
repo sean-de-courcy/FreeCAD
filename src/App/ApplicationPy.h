@@ -96,6 +96,7 @@ public:
     static PyObject *sInternMappedName       (PyObject *self,PyObject *args);
     static PyObject *sGetMappedNameId        (PyObject *self,PyObject *args);
     static PyObject *sGetNameTableEntry      (PyObject *self,PyObject *args);
+    static PyObject *sInsertNameTableEntryForTesting(PyObject *self,PyObject *args);
     static PyObject *sGetReferenceReport     (PyObject *self,PyObject *args);
     static PyObject *sRepairReference        (PyObject *self,PyObject *args);
     // clang-format on

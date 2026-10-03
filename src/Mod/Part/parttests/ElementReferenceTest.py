@@ -28,6 +28,9 @@ def _faceAtX(shape, x):
 
 
 class ElementReferenceTest(unittest.TestCase):
+    # Set in subclasses: (HistoryAlgorithm, InternNames) of every document a test makes
+    MODE = None
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="ElementReferenceTest")
         self.docNames = []
@@ -41,6 +44,8 @@ class ElementReferenceTest(unittest.TestCase):
     def _newDocument(self, name):
         doc = App.newDocument(name)
         self.docNames.append(doc.Name)
+        if self.MODE:
+            doc.HistoryAlgorithm, doc.InternNames = self.MODE
         doc.saveAs(os.path.join(self.dir, name + ".FCStd"))
         return doc
 
@@ -366,3 +371,10 @@ class ElementReferenceTest(unittest.TestCase):
                     )
         self.assertEqual(shape.ElementMapSize, 26)
         self.assertEqual(len(set(reverseMap.values())), 26)
+
+
+class ElementReferenceTestV2i(ElementReferenceTest):
+    """The same cases with every document in V2 with interned names (ops#6, Task 1 PR 8): the
+    references are saved, refreshed and reported missing as they are with plain names."""
+
+    MODE = ("V2", True)

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <Base/Console.h>
+#include <Base/XMLAttributeFilter.h>
 
 #include "ElementNamingUtils.h"
 #include "NameTable.h"
@@ -202,6 +203,16 @@ std::optional<NameId> NameTable::intern(std::string_view content)
     return std::nullopt;
 }
 
+bool NameTable::insertForTesting(const NameId& id, std::string_view content)
+{
+    std::unique_lock lock(_mutex);
+    auto [it, inserted] = _entries.try_emplace(id);
+    if (inserted) {
+        it->second = std::make_unique<Entry>(content);  // its depth is found when asked for
+    }
+    return inserted;
+}
+
 NameTable::LoadResult NameTable::insertLoaded(const NameId& id, std::string_view content)
 {
     if (idOf(content) != id) {
@@ -342,12 +353,31 @@ std::string NameTable::internSection(std::string_view section)
 
 std::string NameTable::toPlain(std::string_view name) const
 {
+    return toPlain(name, nullptr);
+}
+
+const std::string* NameTable::contentOf(const NameId& id, const NameRemap* remap) const
+{
+    if (remap) {
+        if (remap->isUnknown(id)) {
+            return nullptr;
+        }
+        if (remap->isInline(id)) {
+            return &remap->_file.at(id);
+        }
+    }
+    const Entry* entry = get(id);
+    return entry ? &entry->content : nullptr;
+}
+
+std::string NameTable::toPlain(std::string_view name, const NameRemap* remap) const
+{
     if (name.find(Marker) == std::string_view::npos) {
         return std::string(name);
     }
     if (auto ref = parseRef(name)) {
-        if (const Entry* entry = get(*ref)) {
-            return toPlain(entry->content);
+        if (const std::string* content = contentOf(*ref, remap)) {
+            return toPlain(*content, remap);
         }
         return std::string(name);
     }
@@ -356,10 +386,10 @@ std::string NameTable::toPlain(std::string_view name) const
     result.reserve(sections.size());
     for (std::size_t i = 0; i < sections.size(); ++i) {
         if (i == 0 && parseRef(sections[0])) {
-            result.push_back(toPlain(sections[0]));  // the prefix of a split piece
+            result.push_back(toPlain(sections[0], remap));  // the prefix of a split piece
         }
         else {
-            result.push_back(plainSection(sections[i]));
+            result.push_back(plainSection(sections[i], remap));
         }
     }
     std::string out;
@@ -367,7 +397,7 @@ std::string NameTable::toPlain(std::string_view name) const
     return out;
 }
 
-std::string NameTable::plainSection(std::string_view section) const
+std::string NameTable::plainSection(std::string_view section, const NameRemap* remap) const
 {
     if (section.find(Marker) == std::string_view::npos) {
         return std::string(section);
@@ -388,7 +418,7 @@ std::string NameTable::plainSection(std::string_view section) const
                 entries.emplace_back(entry);
             }
             else {
-                entries.push_back(escapeOnce(toPlain(unescapeOnce(entry))));
+                entries.push_back(escapeOnce(toPlain(unescapeOnce(entry), remap)));
             }
         }
         std::string list;
@@ -630,7 +660,8 @@ void NameTable::writeEntries(std::ostream& stream, const std::vector<SavedEntry>
     }
 }
 
-NameTable::LoadSummary NameTable::readEntries(std::istream& stream)
+NameTable::LoadSummary NameTable::readEntries(std::istream& stream,
+                                              std::vector<SavedEntry>* entries)
 {
     LoadSummary summary;
     std::string marker;
@@ -656,6 +687,9 @@ NameTable::LoadSummary NameTable::readEntries(std::istream& stream)
             continue;
         }
         std::string_view content = std::string_view(line).substr(space + 1);
+        if (entries) {
+            entries->emplace_back(*id, std::string(content));
+        }
         switch (insertLoaded(*id, content)) {
             case LoadResult::Inserted:
                 ++summary.inserted;
@@ -791,4 +825,263 @@ std::streamsize NameRefScanBuffer::xsputn(const char* s, std::streamsize n)
 int NameRefScanBuffer::sync()
 {
     return _target->pubsync();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Loading (ops#6, Task 1 PR 8)
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+thread_local NameRemap* activeRemap = nullptr;
+
+/// The valid references in \a text, in order.
+std::vector<NameId> refsIn(std::string_view text)
+{
+    std::vector<NameId> refs;
+    for (std::size_t pos = text.find(NameTable::Marker);
+         pos != std::string_view::npos && pos + NameTable::RefLength <= text.size();
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        if (auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength))) {
+            refs.push_back(*id);
+        }
+    }
+    return refs;
+}
+}  // namespace
+
+NameRemap::NameRemap(NameTable& table)
+    : _table(table)
+    , _previous(activeRemap)
+{
+    activeRemap = this;
+}
+
+NameRemap::~NameRemap()
+{
+    _filter.reset();
+    activeRemap = _previous;
+}
+
+NameRemap* NameRemap::active()
+{
+    return activeRemap;
+}
+
+NameTable::LoadSummary NameRemap::load(std::istream& stream)
+{
+    std::vector<NameTable::SavedEntry> entries;
+    auto summary = _table.readEntries(stream, &entries);
+    for (auto& [id, content] : entries) {
+        _file[id] = std::move(content);
+    }
+    std::set<NameId> refused;
+    for (const auto& entry : summary.refused) {
+        refused.insert(entry.first);
+    }
+
+    // Which entries are inline (refused, or referring to an inline one) and which incomplete
+    // (referring to an ID the file lacks, or to an incomplete one): a depth-first walk over the
+    // references, iterative, as histories can be deep. Incomplete wins: such a name can't be
+    // written out in full.
+    enum class State : char
+    {
+        Visiting,
+        Plain,
+        Inline,
+        Incomplete,
+    };
+    struct Frame
+    {
+        NameId id;
+        std::vector<NameId> refs;
+        std::size_t next = 0;
+        bool isInline = false;
+        bool incomplete = false;
+    };
+    std::unordered_map<NameId, State, NameTable::IdHash> state;
+    std::vector<Frame> stack;
+    auto push = [&](const NameId& id, const std::string& content) {
+        state[id] = State::Visiting;
+        stack.push_back({id, refsIn(content), 0, refused.count(id) != 0, false});
+    };
+    for (const auto& [root, rootContent] : _file) {
+        if (state.count(root) != 0) {
+            continue;
+        }
+        push(root, rootContent);
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            if (frame.next < frame.refs.size()) {
+                NameId ref = frame.refs[frame.next++];
+                auto it = state.find(ref);
+                if (it == state.end()) {
+                    auto file = _file.find(ref);
+                    if (file == _file.end()) {
+                        frame.incomplete = true;
+                    }
+                    else {
+                        push(ref, file->second);  // frame is invalid from here
+                    }
+                    continue;
+                }
+                switch (it->second) {
+                    case State::Visiting:  // a cycle: no content can hold its own ID
+                    case State::Incomplete:
+                        frame.incomplete = true;
+                        break;
+                    case State::Inline:
+                        frame.isInline = true;
+                        break;
+                    case State::Plain:
+                        break;
+                }
+                continue;
+            }
+            State result = State::Plain;
+            if (frame.incomplete) {
+                result = State::Incomplete;
+                _incomplete.insert(frame.id);
+            }
+            else if (frame.isInline) {
+                result = State::Inline;
+                _inlineIds.insert(frame.id);
+            }
+            state[frame.id] = result;
+            stack.pop_back();
+            if (!stack.empty()) {
+                stack.back().incomplete |= result == State::Incomplete;
+                stack.back().isInline |= result == State::Inline;
+            }
+        }
+    }
+    return summary;
+}
+
+void NameRemap::setNewerFormat()
+{
+    _newerFormat = true;
+}
+
+void NameRemap::filterAttributes(const Base::XMLReader& reader)
+{
+    if (_inlineIds.empty() || _newerFormat) {
+        return;
+    }
+    _filter = std::make_unique<Base::XMLAttributeFilter>(reader, [this](std::string& value) {
+        remapText(value);
+    });
+}
+
+bool NameRemap::isUnknown(const NameId& id) const
+{
+    return _newerFormat || _file.count(id) == 0 || _incomplete.count(id) != 0;
+}
+
+bool NameRemap::isInline(const NameId& id) const
+{
+    return !_newerFormat && _inlineIds.count(id) != 0;
+}
+
+std::string NameRemap::inlineForm(const NameId& id) const
+{
+    std::string full = _table.toPlain(NameTable::makeRef(id), this);
+    markUnknown(full);
+    return full;
+}
+
+bool NameRemap::markUnknown(std::string& text) const
+{
+    bool changed = false;
+    for (std::size_t pos = text.find(NameTable::Marker);
+         pos != std::string::npos && pos + NameTable::RefLength <= text.size();
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        auto id = NameTable::parseRef(std::string_view(text).substr(pos, NameTable::RefLength));
+        if (id && isUnknown(*id)) {
+            text.insert(pos + 1, 1, UnknownMark);
+            _unknownSeen.insert(*id);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+void NameRemap::scan(std::string_view text, bool& hasInline, bool& hasUnknown) const
+{
+    for (const NameId& id : refsIn(text)) {
+        if (isUnknown(id)) {
+            hasUnknown = true;
+        }
+        else if (isInline(id)) {
+            hasInline = true;
+        }
+    }
+}
+
+bool NameRemap::remapText(std::string& text) const
+{
+    if (_inlineIds.empty() || _newerFormat || text.find(NameTable::Marker) == std::string::npos) {
+        return false;
+    }
+    std::string out;
+    std::size_t done = 0;
+    for (std::size_t pos = text.find(NameTable::Marker);
+         pos != std::string::npos && pos + NameTable::RefLength <= text.size();
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        auto id = NameTable::parseRef(std::string_view(text).substr(pos, NameTable::RefLength));
+        if (!id || !isInline(*id)) {
+            continue;
+        }
+        std::size_t end = pos + NameTable::RefLength;
+        // A prefix is followed by the `|` before its name's last section; any other reference
+        // in a name is an embedded name, one escape level down
+        bool prefix = end < text.size() && text[end] == nameDelimiter;
+        out.append(text, done, pos - done);
+        std::string full = inlineForm(*id);
+        out += prefix ? full : escapeOnce(full);
+        done = end;
+        pos = end - 1;
+    }
+    if (done == 0) {
+        return false;
+    }
+    out.append(text, done, std::string::npos);
+    text = std::move(out);
+    return true;
+}
+
+bool NameRemap::remapSubName(std::string& text)
+{
+    if (text.find(NameTable::Marker) == std::string::npos) {
+        return false;
+    }
+    bool changed = remapText(text);
+    return markUnknown(text) || changed;
+}
+
+NameRemap::MapName NameRemap::remapMapName(std::string& name)
+{
+    if (name.find(NameTable::Marker) == std::string::npos) {
+        return MapName::Unchanged;
+    }
+    if (_newerFormat) {
+        ++_dropped;
+        return MapName::Dropped;
+    }
+    bool hasInline = false;
+    bool hasUnknown = false;
+    scan(name, hasInline, hasUnknown);
+    if (hasInline) {
+        // The file's name in full form, then canonical in this process: its colliding nodes
+        // can't be interned and stay inline
+        std::string plain = _table.toPlain(name, this);
+        markUnknown(plain);
+        name = _table.toInterned(plain);
+        return MapName::Changed;
+    }
+    if (hasUnknown) {
+        markUnknown(name);
+        return MapName::Changed;
+    }
+    return MapName::Unchanged;
 }

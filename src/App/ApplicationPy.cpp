@@ -1365,6 +1365,31 @@ PyObject* ApplicationPy::sGetNameTableEntry(PyObject* /*self*/, PyObject* args)
     PY_CATCH;
 }
 
+PyObject* ApplicationPy::sInsertNameTableEntryForTesting(PyObject* /*self*/, PyObject* args)
+{
+    const char* text {};
+    const char* content {};
+    if (!PyArg_ParseTuple(args, "ss", &text, &content)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        std::string_view idText(text);
+        if (!idText.empty() && idText.front() == Data::NameTable::Marker) {
+            idText.remove_prefix(1);
+        }
+        auto id = Data::NameId::fromBase32(idText);
+        if (!id) {
+            throw Py::ValueError(std::string("Not a name ID: ") + text);
+        }
+        return Py::new_reference_to(
+            Py::Boolean(Data::NameTable::instance().insertForTesting(*id, content))
+        );
+    }
+    PY_CATCH;
+}
+
 PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
 {
     PyObject* pyObj {};

@@ -5,6 +5,7 @@
 #include <App/MappedName.h>
 #include <App/NameId.h>
 #include <App/NameTable.h>
+#include <Base/Reader.h>
 
 #include "InitApplication.h"
 
@@ -859,4 +860,236 @@ TEST_F(NameTableTest, scanBufferPassesEverythingOnAndFindsSplitReferences)
         EXPECT_EQ(target.str(), text) << chunk;
         EXPECT_EQ(collector.refs(), expected) << chunk;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Loading: the remap of a file's names (Task 1 PR 8)
+
+namespace
+{
+
+// A file's entries for the interned forms of \a names in \a source; \a forms gets the forms.
+std::string savedFile(NameTable& source, const Strings& names, Strings& forms)
+{
+    Data::NameRefCollector collector;
+    for (const auto& name : names) {
+        forms.push_back(source.toInterned(name));
+        collector.add(forms.back());
+    }
+    std::stringstream file;
+    NameTable::writeEntries(file, collector.entries(source));
+    return file.str();
+}
+
+// The example's face, its upper edge and its split piece: each embeds the edge.
+Strings exampleNames()
+{
+    Example example;
+    return {example.face, example.upper, example.piece};
+}
+
+// The ID of the example's edge, the node the other names embed.
+NameId edgeId(NameTable& table)
+{
+    return *table.internName(Example().edge);
+}
+
+bool refersTo(const std::string& text, const NameId& id)
+{
+    return text.find(NameTable::makeRef(id)) != std::string::npos;
+}
+
+// The mapped name in a subname `<path>.;<mapped>.<element>`.
+std::string mappedPart(const std::string& subname, const std::string& element)
+{
+    auto start = subname.find(';') + 1;
+    return subname.substr(start, subname.size() - start - element.size() - 1);
+}
+
+}  // namespace
+
+TEST_F(NameTableTest, remapLeavesNamesAloneWithoutCollisions)
+{
+    // Arrange
+    NameTable source;
+    Strings forms;
+    std::stringstream file(savedFile(source, exampleNames(), forms));
+    NameTable process;
+
+    // Act
+    Data::NameRemap remap(process);
+    auto summary = remap.load(file);
+
+    // Assert
+    EXPECT_TRUE(summary.refused.empty());
+    EXPECT_EQ(remap.inlineCount(), 0U);
+    for (std::size_t i = 0; i < forms.size(); ++i) {
+        std::string name = forms[i];
+        std::string subname = "Body.Pad.;" + forms[i] + ".Face1";
+        EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Unchanged);
+        EXPECT_FALSE(remap.remapText(subname));
+        EXPECT_FALSE(remap.remapSubName(subname));
+        EXPECT_EQ(process.toPlain(name), exampleNames()[i]);
+    }
+    EXPECT_EQ(remap.unknownCount(), 0U);
+    EXPECT_EQ(Data::NameRemap::active(), &remap);
+}
+
+TEST_F(NameTableTest, remapKeepsCollidingNamesInlineAsTheFileMeansThem)
+{
+    // Arrange: this process holds other content under the ID of the file's edge
+    NameTable source;
+    Strings forms;
+    std::stringstream file(savedFile(source, exampleNames(), forms));
+    NameTable process;
+    NameId edge = edgeId(source);
+    ASSERT_TRUE(process.insertForTesting(edge, "Other;_;1;XYZ;0;E;0;_;_"));
+
+    // Act
+    Data::NameRemap remap(process);
+    auto summary = remap.load(file);
+
+    // Assert: the edge is refused, and every entry above it (face, upper edge) is inline
+    ASSERT_EQ(summary.refused.size(), 1U);
+    EXPECT_EQ(summary.refused[0].first, edge);
+    EXPECT_TRUE(remap.isInline(edge));
+    EXPECT_EQ(remap.inlineCount(), 3U);  // edge, face, upper edge
+    NameId face = *source.internName(Example().face);
+    std::string faceName = forms[0];
+    remap.remapMapName(faceName);
+    EXPECT_NE(faceName.find('^'), std::string::npos) << "the edge inline: " << faceName;
+    Strings plains = exampleNames();
+    for (std::size_t i = 0; i < forms.size(); ++i) {
+        const std::string& plain = plains[i];
+        EXPECT_NE(process.toPlain(forms[i]), plain) << "without the remap, another name";
+
+        std::string name = forms[i];
+        EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Changed);
+        EXPECT_EQ(process.toPlain(name), plain);
+        EXPECT_FALSE(refersTo(name, edge)) << name;
+        EXPECT_FALSE(refersTo(name, face)) << name;
+
+        std::string subname = "Body.Pad.;" + forms[i] + ".Face1";
+        EXPECT_TRUE(remap.remapText(subname));
+        EXPECT_EQ(process.toPlain(mappedPart(subname, "Face1")), plain);
+        EXPECT_FALSE(refersTo(subname, edge));
+        EXPECT_FALSE(remap.remapSubName(subname)) << "nothing left to remap";
+    }
+    EXPECT_EQ(remap.unknownCount(), 0U);
+}
+
+TEST_F(NameTableTest, remapMakesReferencesTheFileLacksUnresolvable)
+{
+    // Arrange: the file lacks the edge's entry, which this process knows, with its real content
+    NameTable source;
+    Strings forms;
+    std::string text = savedFile(source, exampleNames(), forms);
+    NameId edge = edgeId(source);
+    std::string edgeLine = edge.toBase32() + ' ' + *source.lookup(edge) + '\n';
+    auto at = text.find(edgeLine);
+    ASSERT_NE(at, std::string::npos);
+    text.erase(at, edgeLine.size());
+    auto lines = std::count(text.begin(), text.end(), '\n');
+    text.replace(0, text.find('\n'), "NameTableStart v1 " + std::to_string(lines - 1));
+    std::stringstream file(text);
+    NameTable process;
+    ASSERT_TRUE(process.insertForTesting(edge, *source.lookup(edge)));
+
+    // Act
+    Data::NameRemap remap(process);
+    remap.load(file);
+
+    // Assert: the edge and the entries above it are unknown; names that use them don't resolve
+    EXPECT_TRUE(remap.isUnknown(edge));
+    NameId face = *source.internName(Example().face);
+    EXPECT_TRUE(remap.isUnknown(face)) << "it refers to the edge";
+    for (std::size_t i = 0; i < forms.size(); ++i) {
+        std::string subname = "Body.Pad.;" + forms[i] + ".Face1";
+        EXPECT_TRUE(remap.remapSubName(subname));
+        EXPECT_NE(subname.find("~!"), std::string::npos);
+        EXPECT_NE(process.toPlain(mappedPart(subname, "Face1")), exampleNames()[i]);
+
+        std::string name = forms[i];
+        EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Changed);
+        EXPECT_NE(process.toPlain(name), exampleNames()[i]);
+        EXPECT_NE(name.find("~!"), std::string::npos);
+    }
+    EXPECT_GE(remap.unknownCount(), 1U);
+    // Text that isn't a name keeps what looks like a reference
+    std::string label = "Note " + NameTable::makeRef(edge);
+    EXPECT_FALSE(remap.remapText(label));
+}
+
+TEST_F(NameTableTest, remapOfANewerFormatDropsMapsAndKnowsNoReference)
+{
+    // Arrange
+    NameTable source;
+    Strings forms;
+    std::stringstream file(savedFile(source, exampleNames(), forms));
+    NameTable process;
+    Data::NameRemap remap(process);
+    remap.load(file);
+
+    // Act
+    remap.setNewerFormat();
+
+    // Assert
+    std::string name = forms[0];
+    EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Dropped);
+    EXPECT_EQ(remap.droppedCount(), 1U);
+    std::string plain = Example().edge;
+    EXPECT_EQ(remap.remapMapName(plain), Data::NameRemap::MapName::Unchanged);
+    std::string subname = "Body.Pad.;" + forms[0] + ".Face1";
+    EXPECT_TRUE(remap.remapSubName(subname));
+    EXPECT_EQ(subname.find(forms[0].substr(2, NameTable::RefLength)), std::string::npos);
+}
+
+TEST_F(NameTableTest, remapIsActiveWhileItLivesAndInnerOnesWin)
+{
+    EXPECT_EQ(Data::NameRemap::active(), nullptr);
+    {
+        Data::NameRemap outer;
+        {
+            Data::NameRemap inner;
+            EXPECT_EQ(Data::NameRemap::active(), &inner);
+        }
+        EXPECT_EQ(Data::NameRemap::active(), &outer);
+    }
+    EXPECT_EQ(Data::NameRemap::active(), nullptr);
+}
+
+TEST_F(NameTableTest, attributeFilterRemapsWhatItsReaderReadsAfterwards)
+{
+    // Arrange: a collision as above, and an XML text holding the face as a subname twice
+    NameTable source;
+    Strings forms;
+    std::stringstream file(savedFile(source, exampleNames(), forms));
+    NameTable process;
+    ASSERT_TRUE(process.insertForTesting(edgeId(source), "Other;_;1;XYZ;0;E;0;_;_"));
+    Data::NameRemap remap(process);
+    remap.load(file);
+    std::string subname = "Body.Pad.;" + forms[0] + ".Face1";
+    std::string xml = "<?xml version='1.0' encoding='utf-8'?>\n<Document><A v=\"" + subname
+        + "\"/><B v=\"" + subname + "\"/></Document>\n";
+    std::istringstream stream(xml);
+    std::istringstream otherStream(xml);
+    Base::XMLReader reader("<memory>", stream);
+    Base::XMLReader other("<memory>", otherStream);
+
+    // Act
+    reader.readElement("A");
+    std::string before = reader.getAttribute<const char*>("v");
+    remap.filterAttributes(reader);
+    reader.readElement("B");
+    std::string after = reader.getAttribute<const char*>("v");
+    other.readElement("B");
+    std::string unfiltered = other.getAttribute<const char*>("v");
+
+    // Assert
+    std::string expected = subname;
+    remap.remapText(expected);
+    EXPECT_EQ(before, subname);
+    EXPECT_EQ(after, expected);
+    EXPECT_NE(after, subname);
+    EXPECT_EQ(unfiltered, subname) << "only the remap's reader is filtered";
 }

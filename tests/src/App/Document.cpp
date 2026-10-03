@@ -5,10 +5,17 @@
 
 #include <cstdio>
 #include <fstream>
+#include <iterator>
+#include <sstream>
+
+#include <zipios++/zipinputstream.h>
 
 #include "App/Application.h"
 #include "App/Document.h"
 #include "App/MergeDocuments.h"
+#include "App/MappedName.h"
+#include "App/NameTable.h"
+#include "App/PropertyStandard.h"
 #include "App/StringHasher.h"
 #include "Base/Writer.h"
 #include <src/App/InitApplication.h>
@@ -132,6 +139,92 @@ TEST_F(DocumentTest, importObjectsRestoresSourceStringHasher)
     EXPECT_GT(restoredStringCount, 0);
     connection.disconnect();
     std::remove(savedPath.c_str());
+}
+
+namespace
+{
+// The Document.xml of an exported or saved zip.
+std::string documentXml(std::istream& zip)
+{
+    zipios::ZipInputStream entry(zip);
+    return {std::istreambuf_iterator<char>(entry), std::istreambuf_iterator<char>()};
+}
+
+App::PropertyString* addNote(App::Document* document, const char* name, const std::string& note)
+{
+    auto* holder = document->addObject("App::DocumentObjectGroup", name);
+    auto* prop = static_cast<App::PropertyString*>(
+        holder->addDynamicProperty("App::PropertyString", "Note")
+    );
+    prop->setValue(note);
+    return prop;
+}
+}  // namespace
+
+TEST_F(DocumentTest, exportObjectsCarriesTheEntriesOfInternedNames)
+{
+    // Arrange: an object whose XML holds an interned name (ops#6), and one whose XML holds none
+    using Strings = std::vector<std::string>;
+    auto& table = Data::NameTable::instance();
+    std::string edge = Data::MappedName::makeEncodedSection(
+        Strings {"Edge1"},
+        Strings {},
+        "5",
+        "FLT",
+        "0",
+        'E',
+        "0",
+        Strings {"IDX"},
+        Strings {}
+    );
+    std::string face = Data::MappedName::makeEncodedSection(
+        Strings {},
+        Strings {edge},
+        "7",
+        "FLT",
+        "0",
+        'F',
+        "0",
+        Strings {"GEN"},
+        Strings {}
+    );
+    std::string interned = table.toInterned(face);
+    auto edgeId = table.internName(edge);
+    ASSERT_TRUE(edgeId);
+    std::string note = "Pad.;" + interned + ".Face1";
+    addNote(doc(), "Holder", note);
+    addNote(doc(), "Plain", "Pad.Face1");
+
+    // Act
+    std::stringstream withName;
+    doc()->exportObjects({doc()->getObject("Holder")}, withName);
+    std::stringstream plain;
+    doc()->exportObjects({doc()->getObject("Plain")}, plain);
+    std::string xml = documentXml(withName);
+    std::string plainXml = documentXml(plain);
+
+    // Assert: the table, before the objects, with the edge's entry; none for the plain one
+    EXPECT_NE(xml.find("NamingFormat=\"1\""), std::string::npos) << xml;
+    auto tableAt = xml.find("<NameTable count=\"1\">");
+    ASSERT_NE(tableAt, std::string::npos) << xml;
+    EXPECT_LT(tableAt, xml.find("<Objects"));
+    EXPECT_NE(xml.find(edgeId->toBase32() + ' ' + *table.lookup(*edgeId)), std::string::npos);
+    EXPECT_EQ(plainXml.find("NamingFormat"), std::string::npos);
+    EXPECT_EQ(plainXml.find("<NameTable"), std::string::npos);
+
+    // and it imports with the name as it was
+    auto& app = App::GetApplication();
+    const std::string targetName = app.getUniqueDocumentName("ImportTarget");
+    App::Document* target = app.newDocument(targetName.c_str(), "testUser");
+    withName.clear();
+    withName.seekg(0);
+    App::MergeDocuments merge(target);
+    auto objects = merge.importObjects(withName);
+    ASSERT_EQ(objects.size(), 1U);
+    auto* imported = dynamic_cast<App::PropertyString*>(objects[0]->getPropertyByName("Note"));
+    ASSERT_NE(imported, nullptr);
+    EXPECT_EQ(imported->getStrValue(), note);
+    app.closeDocument(targetName.c_str());
 }
 
 // NOLINTEND(readability-magic-numbers)

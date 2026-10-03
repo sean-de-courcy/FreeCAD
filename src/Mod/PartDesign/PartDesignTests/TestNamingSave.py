@@ -23,9 +23,10 @@
 """Saving and reopening documents with interned names (ops#6, Task 1 PR 7).
 
 An interned name refers to entries of the process-wide name table (`~<ID>`). A saved file holds
-the entries its names need in a `NameTable` element at the end of Document.xml, so another process
-can expand them. In one process the table would hide a missing entry, so each file is reopened in
-a child `FreeCADCmd` that has built nothing.
+the entries its names need in a `NameTable` element at the start of Document.xml, before the
+objects (`<Document ... NamingFormat="1">`, PR 8), so another process can expand them. In one
+process the table would hide a missing entry, so each file is reopened in a child `FreeCADCmd`
+that has built nothing.
 
 - TestNamingSaveFile: each dump model (TestNamingDump), saved in V2i. Every reference anywhere in
   the file (Document.xml and every map file) has its entry in the file's table, the table refers
@@ -67,7 +68,11 @@ __all__ = [
 ]
 
 REF = re.compile(r"~([0-9a-v]{13})")
-TABLE = re.compile(r'<NameTable NamingFormat="(\d+)" count="(\d+)">\s*<!\[CDATA\[(.*?)\]\]>', re.S)
+TABLE = re.compile(
+    r'<Document [^>]*NamingFormat="(\d+)"[^>]*>\s*'
+    r'<NameTable count="(\d+)">\s*<!\[CDATA\[(.*?)\]\]>\s*</NameTable>\s*',
+    re.S,
+)
 SAVED_DATE = re.compile(r'<Property name="LastModifiedDate".*?</Property>', re.S)
 
 # The cross-document scenarios, each in V2i; the mixed ones also in V2, where the scenario's own

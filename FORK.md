@@ -109,7 +109,8 @@ names it.
 | `fix/91-trf-followups` | fix | ops#91, ops#95 | - | `integration` `37c04b26f1` | `c0d01ea729` (fork PR 79), 2026-10-02 | never (fork naming) |
 | `fix/96-interning-review` | fix | ops#96, ops#97 | - | `integration` `37c04b26f1` | `527461eabb` (fork PR 81), 2026-10-02 | never (fork naming) |
 | `fix/98-macos-about` | fix | ops#98 | - | `integration` `37c04b26f1` | `4cb1cf4671` (fork PR 83), 2026-10-02 | never (fork identity) |
-| `infra/85-release-redraft` | infra | ops#85 | - | `integration` `37c04b26f1` | (fork PR 82) | never |
+| `infra/85-release-redraft` | infra | ops#85 | - | `integration` `37c04b26f1` | `0e56d912a2` (fork PR 82), 2026-10-02 | never |
+| `feat/naming-intern-load` | feat | ops#6 | - | `integration` `1df3c779aa` | (fork PR 80) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
