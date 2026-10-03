@@ -109,6 +109,18 @@ def chooseEntry(table):
     return sorted(table)[0]
 
 
+def chooseUnknown(table, raw):
+    """An entry that a name of the dump `raw` has as its prefix (`~<ID>|`), one other entries
+    refer to if there is one; else chooseEntry(). A prefix marked unknown (`~!<ID>|`) must stay
+    in the map as it is: interned again, its text would become a node of its own, and the mark
+    would show only in the expansion."""
+    prefixes = sorted(set(re.findall(r" : ~([0-9a-v]{13})\|", raw)) & set(table))
+    for id in prefixes:
+        if any(f"~{id}" in content for other, content in table.items() if other != id):
+            return id
+    return prefixes[0] if prefixes else chooseEntry(table)
+
+
 def entryUsedOutsideTheTable(entries):
     """An ID that Document.xml refers to outside its table (a shadow), or None."""
     _, table = save.nameTable(entries)
@@ -436,12 +448,14 @@ def _derive(folder, manifest):
         id = chooseEntry(table)
         manifest["collideOne"][model] = {"id": id, "above": sorted(refsAbove(table, id))}
         unknown = os.path.join(folder, f"{model}-unknown.FCStd")
+        id = chooseUnknown(table, info["raw"])
         rewriteDocumentXml(info["path"], unknown, lambda text, id=id: withoutEntry(text, id))
         manifest["unknown"][model] = {
             "path": unknown,
             "id": id,
             "content": table[id],
             "above": sorted(refsAbove(table, id)),
+            "prefix": f" : ~{id}|" in info["raw"],
         }
         newer = os.path.join(folder, f"{model}-newer.FCStd")
         rewriteDocumentXml(
@@ -616,6 +630,8 @@ class TestNamingLoadUnknown(unittest.TestCase):
         marked = set(UNKNOWN.findall(result["raw"]))
         self.assertTrue(marked, "no reference was marked missing")
         self.assertLessEqual(marked, above)
+        if unknown["prefix"]:
+            self.assertIn(f" : ~!{unknown['id']}|", result["raw"], "the marked prefix is kept")
         self.assertIn(UNKNOWN_WARNING, saved()["logs"]["unknown"])
         # A recompute names everything again, except what holds a copy of a restored shape (a
         # Part::Feature's static shape): that keeps the mark, missing as before (in the

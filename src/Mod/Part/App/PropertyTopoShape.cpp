@@ -62,8 +62,13 @@ TYPESYSTEM_SOURCE(Part::PropertyPartShape, App::PropertyComplexGeoData)
 
 namespace
 {
-/// Whether a name is in canonical interned form: no escaped embedded name, and at most one
-/// section after a reference to its prefix (`~<ID>|<last section>`)
+/** Whether a name is in canonical interned form: no escaped embedded name, and at most one
+ * section after a reference to its prefix (`~<ID>|<last section>`).
+ *
+ * A reference a load marked unknown (`~!<ID>`, NameRemap) is kept as it is, as a prefix too:
+ * interning it again would make its text a node of its own, so the mark would only show in the
+ * expansion, and every setValue would rebuild the map until a recompute names it again.
+ */
 bool isInternedForm(const std::string& name)
 {
     if (name.find('^') != std::string::npos) {
@@ -73,8 +78,12 @@ bool isInternedForm(const std::string& name)
     if (bar == std::string::npos) {
         return true;
     }
-    return name.front() == Data::NameTable::Marker && bar == Data::NameTable::RefLength
-        && name.find(Data::NAME_SECTION_DELIMINATOR, bar + 1) == std::string::npos;
+    if (name.front() != Data::NameTable::Marker
+        || name.find(Data::NAME_SECTION_DELIMINATOR, bar + 1) != std::string::npos) {
+        return false;
+    }
+    return bar == Data::NameTable::RefLength
+        || (bar == Data::NameTable::RefLength + 1 && name[1] == Data::NameRemap::UnknownMark);
 }
 
 /** Puts a V2 shape's names in the form its document's InternNames says (ops#6).
