@@ -112,12 +112,20 @@ std::vector<Base::Vector3d> binderFaceCentres(bool interned)
     doc->recompute();
     const auto& shape = cut->Shape.getShape();
     std::vector<std::string> subs;
+    int withReference = 0;
     for (int i = 1; i <= static_cast<int>(shape.countSubShapes(TopAbs_FACE)); ++i) {
         auto face = Data::IndexedName::fromConst("Face", i);
         App::ElementNamePair elementName;  // as a selection in the GUI resolves it
         App::GeoFeature::resolveElement(cut, face.toString().c_str(), elementName);
+        // The premise: the subs are given in new style, so the stored index names below come
+        // from the link's normalization, not from the input
+        EXPECT_NE(elementName.newName.find(';'), std::string::npos) << elementName.newName;
+        withReference += elementName.newName.find('~') != std::string::npos ? 1 : 0;
         subs.push_back(elementName.newName);
     }
+    // ... and in the interned document some of them hold references, whose bytes would sort
+    // by ID
+    EXPECT_EQ(withReference > 0, interned);
     auto binder = doc->addObject<PartDesign::SubShapeBinder>("Binder");
     binder->setLinks({{cut, subs}}, false);
     for (const auto& link : binder->Support.getSubListValues()) {

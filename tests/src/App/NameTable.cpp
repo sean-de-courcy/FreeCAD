@@ -522,6 +522,66 @@ TEST_F(NameTableTest, forcedCollisionFallsBackToTheFullForm)
     EXPECT_EQ(table.compareExpanded(linkedPiece, plainLinkedPiece), 0);
 }
 
+TEST_F(NameTableTest, toInternedIfKnownInsertsNothing)
+{
+    // Arrange
+    NameTable table;
+    Example example;
+
+    // Act and assert: nothing known yet, so no interned name can hold the face's edge
+    EXPECT_FALSE(table.toInternedIfKnown(example.face));
+    EXPECT_FALSE(table.toInternedIfKnown(example.piece));
+    EXPECT_EQ(table.toInternedIfKnown(example.edge), example.edge);  // no node to refer to
+    EXPECT_EQ(table.size(), 0U);
+
+    // Act and assert: once interned, every form of the name gives the interned form
+    std::string piece = table.toInterned(example.piece);
+    std::string face = table.toInterned(example.face);
+    std::size_t size = table.size();
+    EXPECT_EQ(table.toInternedIfKnown(example.piece), piece);
+    EXPECT_EQ(table.toInternedIfKnown(piece), piece);
+    EXPECT_EQ(table.toInternedIfKnown(face + "|" + piece.substr(piece.find('|') + 1)), piece);
+    // a name with a known prefix but a new embedded name is still unknown
+    std::string other = section({"g7"}, {}, "3", "SKT", "0", 'E', {"SRC"}, {});
+    std::string newer = section({}, {other}, "31", "FLT", "0", 'F', {"GEN"}, {});
+    EXPECT_FALSE(table.toInternedIfKnown(piece.substr(0, piece.find('|') + 1) + newer));
+    EXPECT_EQ(table.size(), size);
+    EXPECT_EQ(table.collisions(), 0U);
+}
+
+TEST_F(NameTableTest, toInternedIfKnownKeepsACollisionInlineWithoutCountingIt)
+{
+    // Arrange: the face's node collides, as in forcedCollisionFallsBackToTheFullForm
+    NameTable table;
+    Example example;
+    std::string other = section({"g7"}, {}, "3", "SKT", "0", 'E', {"SRC"}, {});
+    ASSERT_TRUE(table.intern(other));
+    std::string faceForm = "_;~0baii9v1kj6bk;7;FLT;0;F;0;GEN;_";  // goldenInternedForms
+    table.setIdHookForTesting([&](std::string_view content) -> std::optional<NameId> {
+        if (content == faceForm) {
+            return table.idOf(other);
+        }
+        return std::nullopt;
+    });
+    std::string piece = table.toInterned(example.piece);
+    ASSERT_NE(piece.find('^'), std::string::npos) << piece;  // the face inline
+    std::size_t collisions = table.collisions();
+    std::size_t size = table.size();
+
+    // Act
+    auto known = table.toInternedIfKnown(piece);
+    auto fromPlain = table.toInternedIfKnown(example.piece);
+
+    // Assert: the canonical name of a collision gives itself back, so it isn't "another form"
+    EXPECT_EQ(known, piece);
+    EXPECT_EQ(fromPlain, piece);
+    EXPECT_EQ(table.collisions(), collisions);
+    EXPECT_EQ(table.size(), size);
+    // an insert meets the collision again and counts it (logged once per ID)
+    EXPECT_EQ(table.toInterned(piece), piece);
+    EXPECT_GT(table.collisions(), collisions);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Loaded entries and depth
 

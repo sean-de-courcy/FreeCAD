@@ -86,6 +86,44 @@ bool isInternedForm(const std::string& name)
         || (bar == Data::NameTable::RefLength + 1 && name[1] == Data::NameRemap::UnknownMark);
 }
 
+/** Calls \a visit with each name of the shape's vertexes, edges and faces until it returns true;
+ * returns whether it did. Unlike getElementMap(), which lists an interned map in the order of the
+ * names' expansions (ElementMap::getAll sorts it), this walks the map in no particular order, for
+ * checks that need none (ops#97).
+ */
+template<typename Visit>
+bool anyMappedName(const TopoShape& shape, Visit visit)
+{
+    for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        const auto& typeName = TopoShape::shapeName(type);
+        const auto count = static_cast<int>(shape.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            auto element = Data::IndexedName::fromConst(typeName.c_str(), i);
+            for (const auto& name : shape.getElementMappedNames(element)) {
+                if (visit(name.first)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/// The number of names of the shapes' maps: as getElementMap() lists them, or by anyMappedName()
+/// if \a unsorted (for interned maps, which getElementMap() sorts)
+std::size_t mappedNameCount(const TopoShape& shape, bool unsorted)
+{
+    if (!unsorted) {
+        return shape.getElementMap().size();
+    }
+    std::size_t count = 0;
+    anyMappedName(shape, [&count](const Data::MappedName&) {
+        ++count;
+        return false;
+    });
+    return count;
+}
+
 /** Puts a V2 shape's names in the form its document's InternNames says (ops#6).
  *
  * Builders take the form of their inputs, so a feature's result is mostly in its document's form
@@ -107,24 +145,28 @@ void toDocumentForm(TopoShape& shape, bool interned, bool restored = false)
     bool inOtherForm = false;
     if (shape.getElementMapSize(false) > 0) {
         if (interned) {
-            for (const auto& element : shape.getElementMap()) {
-                if (!isInternedForm(element.name.toString())) {
-                    inOtherForm = true;
-                    break;
+            auto& table = Data::NameTable::instance();
+            inOtherForm = anyMappedName(shape, [&table](const Data::MappedName& name) {
+                std::string text = name.toString();
+                if (isInternedForm(text)) {
+                    return false;
                 }
-            }
+                // A collision's fallback keeps a node inline in full form, so its canonical name
+                // fails the quick check; it is canonical if interning it again gives it back.
+                // Checked without inserting, so neither the rebuild nor the collision's warning
+                // comes back at every setValue (ops#97)
+                auto known = table.toInternedIfKnown(text);
+                return !known || *known != text;
+            });
         }
         else if (shape.getInternNames()) {
             inOtherForm = true;
         }
         else {
             const std::string marker(1, Data::NameTable::Marker);
-            for (const auto& element : shape.getElementMap()) {
-                if (element.name.find(marker) >= 0) {
-                    inOtherForm = true;
-                    break;
-                }
-            }
+            inOtherForm = anyMappedName(shape, [&marker](const Data::MappedName& name) {
+                return name.find(marker) >= 0;
+            });
         }
     }
     // Only the flag differs: an empty map takes it; a map with names is built again below, since
@@ -180,7 +222,9 @@ void PropertyPartShape::setValue(const TopoShape& sh)
         }
         const App::HistoryAlgorithm& historyAlgorithm = _Shape.getHistoryAlgorithm();
 
-        if (_Shape.getElementMap().size() != sh.getElementMap().size()) {
+        // Both counted the same way; an interned map is counted without its sort (ops#97)
+        const bool unsorted = _Shape.getInternNames() || sh.getInternNames();
+        if (mappedNameCount(_Shape, unsorted) != mappedNameCount(sh, unsorted)) {
             TopoShape res(obj->getID(), sh.Hasher, _Shape.getShape(), _Shape.getHistoryAlgorithm());
             res.mapSubElement(_Shape);
             _Shape = res;

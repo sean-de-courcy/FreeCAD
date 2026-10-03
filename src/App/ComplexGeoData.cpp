@@ -59,7 +59,9 @@ namespace
 {
 /** Restores an element map through \a restore. If the load's remap refused names in it (their
  * naming format is newer than this build's, ops#6), the map is dropped and the restore counts as
- * failed, so the owner is recomputed (PropertyComplexGeoData::afterRestore()).
+ * failed, so the owner is recomputed (PropertyComplexGeoData::afterRestore()). The caller drops
+ * it with resetElementMap(): a TopoShape's cache holds the map that was read as well, and would
+ * bring its names back at the next flushElementMap() (ops#97).
  */
 template<class Restore>
 ElementMapPtr restoreRemapped(Restore restore, bool& failed)
@@ -536,13 +538,19 @@ void ComplexGeoData::Restore(Base::XMLReader& reader)
 
     if (newTag) {
         resetElementMap(std::make_shared<ElementMap>());
-        _elementMap = restoreRemapped(
+        auto restored = restoreRemapped(
             [&] {
                 return _elementMap->restore(Hasher,
                                             reader.beginCharStream(Base::CharStreamFormat::Raw));
             },
             _restoreFailed
         );
+        if (restored) {
+            _elementMap = restored;
+        }
+        else {
+            resetElementMap(std::make_shared<ElementMap>());
+        }
         
         if (_elementMap) {
             _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
@@ -697,12 +705,18 @@ void ComplexGeoData::RestoreDocFile(Base::Reader& reader)
         }
         else {
             resetElementMap(std::make_shared<ElementMap>());
-            _elementMap = restoreRemapped(
+            auto restored = restoreRemapped(
                 [&] {
                     return _elementMap->restore(Hasher, reader);
                 },
                 _restoreFailed
             );
+            if (restored) {
+                _elementMap = restored;
+            }
+            else {
+                resetElementMap(std::make_shared<ElementMap>());
+            }
             if (_elementMap) {
                 _elementMap->setHistoryAlgorithm(selectedHistoryAlgorithm);
                 _elementMap->setInterned(internNames);

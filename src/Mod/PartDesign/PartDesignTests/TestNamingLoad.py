@@ -30,14 +30,19 @@ a child `FreeCADCmd` of its own, where an ID means something else or the file la
   file meant them, none refers to the colliding ID, and after a recompute they still do; a new
   save holds no colliding ID. The same with every ID of every file colliding, also for a merge
   (`Document.importObjects`) and for the cross-document scenarios, which must still judge
-  correct after the reopen and as an in-process run after the edit.
+  correct after the reopen and as an in-process run after the edit. Two cases on their own
+  (ops#97): one ID that a model's map holds both as a name's prefix and embedded in another name,
+  linked by those two names from the same file, so a load inlines it both ways (the escape rule
+  of NameRemap::remapText); and, in each mixed cross-document scenario with A plain and B
+  interned, one of B's IDs that only A's shadows carry in A's file.
 - TestNamingLoadUnknown: the file's table lacks one entry, which the child knows with its real
   content: the references to it (and to the entries above it) are made unresolvable (`~!<ID>`)
   instead of resolving to the child's entry, with a warning; a recompute names everything again.
   In a cross-document scenario, no reference resolves wrong.
 - TestNamingLoadNewerFormat: the file's `NamingFormat` is raised by hand: one warning, the maps
   with interned names are dropped and their objects recomputed, and the references go missing;
-  a recompute names everything again.
+  a recompute names everything again. The same for a merge (`Document.mergeProject`) into an
+  interned document (ops#97).
 - TestNamingLoadProxy: a Python proxy whose state holds an interned subname. The state is saved
   base64-encoded, out of the save's scan, so the proxy gives it to the collector itself: the file
   holds its entries, and a load with them colliding remaps it after decoding.
@@ -47,6 +52,7 @@ a child `FreeCADCmd` of its own, where an ID means something else or the file la
   save of A writes them unchanged.
 """
 
+import html
 import json
 import os
 import re
@@ -61,7 +67,7 @@ import FreeCAD as App
 
 from PartDesignTests import TestNamingDump as dump
 from PartDesignTests import TestNamingSave as save
-from PartDesignTests.Scenarios import crossdoc
+from PartDesignTests.Scenarios import crossdoc, models
 
 __all__ = [
     "TestNamingLoadCollision",
@@ -174,6 +180,30 @@ def mappedPart(subname):
     return subname.split(";", 1)[1].rsplit(".", 1)[0]
 
 
+def bothRoles(names):
+    """(ID, name, name): an ID that one of `names` has as its prefix and another embeds, or None.
+    In canonical form only a reference at the start, followed by `|`, is a prefix."""
+    prefixed, embedded = {}, {}
+    for name in sorted(names):
+        for match in save.REF.finditer(name):
+            if match.start() == 0 and name[match.end() : match.end() + 1] == "|":
+                prefixed.setdefault(match.group(1), name)
+            else:
+                embedded.setdefault(match.group(1), name)
+    for id in sorted(prefixed):
+        if id in embedded and embedded[id] != prefixed[id]:
+            return id, prefixed[id], embedded[id]
+    return None
+
+
+def shadowsOf(path):
+    """[(sub, mapped name)] of the links' shadows in a saved file's Document.xml, in order. The
+    link stores its subs as index names; the mapped names are in the shadows."""
+    text = save.fileEntries(path)["Document.xml"]
+    links = re.findall(r'<Link obj="[^"]*" sub="([^"]*)" shadowed="([^"]*)"', text)
+    return [(html.unescape(sub), mappedPart(html.unescape(shadow))) for sub, shadow in links]
+
+
 # ---------------------------------------------------------------------------------------------
 # The child processes
 # ---------------------------------------------------------------------------------------------
@@ -187,12 +217,28 @@ def _raw(model, doc, features):
     return dump._dumpFeatures(model, [doc.getObject(n) for n in features], None, "V2")
 
 
+def hasStaticShape(path):
+    """Whether a saved document has a static shape (`Part::Feature`): a recompute doesn't name it
+    again, so a map dropped on load stays missing there, and what is built on it takes other
+    names."""
+    text = save.fileEntries(path)["Document.xml"]
+    return '<Object type="Part::Feature"' in text
+
+
+def _unresolved(raw):
+    """The references in the dump `raw` that this process's table doesn't know (`~!` marks
+    aren't references)."""
+    return sorted(r for r in refsOf(raw) if App.getNameTableEntry(r) is None)
+
+
 def _openModel(model, path, features, suffix):
     """Opens a model file: its raw and expanded names, then the same after a recompute, and a new
     save of it."""
     doc = App.openDocument(path)
+    raw = _raw(model, doc, features)
     result = {
-        "raw": _raw(model, doc, features),
+        "raw": raw,
+        "unresolved": _unresolved(raw),
         "expanded": _expanded(model, doc, features),
         "touched": sorted(o.Name for o in doc.Objects if "Touched" in o.State),
         "mapSizes": {n: doc.getObject(n).Shape.ElementMapSize for n in features},
@@ -201,6 +247,7 @@ def _openModel(model, path, features, suffix):
         obj.touch()
     doc.recompute()
     result["recomputedRaw"] = _raw(model, doc, features)
+    result["recomputedUnresolved"] = _unresolved(result["recomputedRaw"])
     result["recomputed"] = _expanded(model, doc, features)
     again = path.replace(".FCStd", f"-{suffix}.FCStd")
     doc.saveAs(again)
@@ -290,13 +337,90 @@ def _childUnknown(manifest):
     return out
 
 
+def _mergeNewer(model, path, original, features):
+    """Merges the newer-format file, then the original, each into a new interned document: the
+    first's names right after the merge, and both after a recompute (masked: the merged objects
+    get new IDs)."""
+    out = {}
+    docs = []
+    try:
+        for key, source in (("newer", path), ("original", original)):
+            doc = App.newDocument(f"Merged{key.capitalize()}{model}")
+            docs.append(doc.Name)
+            dump._setMode(doc, "V2i")
+            doc.mergeProject(source)
+            if key == "newer":
+                out["raw"] = _raw(model, doc, features)
+                out["unresolved"] = _unresolved(out["raw"])
+                out["touched"] = sorted(o.Name for o in doc.Objects if "Touched" in o.State)
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+            objects = [doc.getObject(n) for n in features]
+            out[key] = dump._dumpFeatures(model, objects, dump.Masker(doc), "V2i")
+            if key == "newer":
+                out["recomputedUnresolved"] = _unresolved(_raw(model, doc, features))
+    finally:
+        for name in docs:
+            App.closeDocument(name)
+    return out
+
+
 def _childNewer(manifest):
-    out = {"models": {}, "crossdoc": {}}
+    out = {"models": {}, "crossdoc": {}, "merged": {}}
     for model, info in manifest["newer"].items():
         saved = manifest["models"][model]
         out["models"][model] = _guard(_openModel, model, info["path"], saved["features"], "new")
+        out["merged"][model] = _guard(
+            _mergeNewer, model, info["path"], saved["path"], saved["features"]
+        )
     for key, info in manifest["newerCrossDoc"].items():
         out["crossdoc"][key] = _guard(_openCrossDoc, manifest["crossdoc"][key], info["pathA"])
+    return out
+
+
+def _expandedShadows(doc, path):
+    """Saves `doc` as `path`: its links' shadows, raw and expanded here."""
+    doc.saveAs(path)
+    return [(sub, name, App.expandMappedName(name)) for sub, name in shadowsOf(path)]
+
+
+def _openBothRoles(info):
+    doc = App.openDocument(info["path"])
+    try:
+        feature = doc.getObject(info["feature"])
+        out = {
+            "raw": _raw(info["model"], doc, [info["feature"]]),
+            "expanded": _expanded(info["model"], doc, [info["feature"]]),
+            "subs": _expandedShadows(doc, info["path"].replace(".FCStd", "-opened.FCStd")),
+        }
+        feature.touch()
+        doc.getObject("Holder").touch()
+        doc.recompute()
+        out["recomputed"] = _expanded(info["model"], doc, [info["feature"]])
+        again = info["path"].replace(".FCStd", "-recomputed.FCStd")
+        out["recomputedSubs"] = [[s, x] for s, _, x in _expandedShadows(doc, again)]
+        return out
+    finally:
+        App.closeDocument(doc.Name)
+
+
+def _childBothRoles(manifest):
+    info = manifest["bothRoles"]
+    forced = App.insertNameTableEntryForTesting(info["id"], BOGUS)
+    out = _guard(_openBothRoles, info)
+    out["forced"] = forced
+    return out
+
+
+def _childCollideCrossDoc(manifest):
+    cases = manifest["collideCrossDoc"]
+    for info in cases.values():
+        App.insertNameTableEntryForTesting(info["id"], BOGUS)  # two cases may share an ID
+    out = save._childCrossDoc({"crossdoc": {key: info["crossdoc"] for key, info in cases.items()}})
+    for key, info in cases.items():
+        entry = App.getNameTableEntry(info["id"])  # (content, depth)
+        out[key]["forced"] = entry is not None and entry[0] == BOGUS
     return out
 
 
@@ -338,6 +462,8 @@ PARTS = {
     "unknown": _childUnknown,
     "newer": _childNewer,
     "elementRef": _childElementReference,
+    "bothRoles": _childBothRoles,
+    "collideCrossDoc": _childCollideCrossDoc,
 }
 
 
@@ -433,6 +559,68 @@ def _saveProxy(folder):
         App.closeDocument(doc.Name)
 
 
+def _saveBothRoles(folder):
+    """The first dump model with a feature whose map holds an ID both as a name's prefix and
+    embedded in another name, V2i, and a holder that links those two elements by their mapped
+    names: the file's map and its XML each have the ID in both roles."""
+    for model in dump.MODELS:
+        doc = models.newDocument(f"BothRoles{model}")
+        try:
+            dump._setMode(doc, "V2i")
+            features = dump.MODELS[model](doc)
+            doc.recompute()
+            for feature in features:
+                elementMap = feature.Shape.ElementMap
+                found = bothRoles(elementMap)
+                if not found:
+                    continue
+                id, prefixed, embedded = found
+                holder = doc.addObject("App::FeaturePython", "Holder")
+                holder.addProperty("App::PropertyLinkSubListGlobal", "Refs")
+                holder.Refs = [(feature, [f";{n}.{elementMap[n]}" for n in (prefixed, embedded)])]
+                doc.recompute()
+                path = os.path.join(folder, "BothRoles.FCStd")
+                doc.saveAs(path)
+                return {
+                    "path": path,
+                    "model": model,
+                    "feature": feature.Name,
+                    "id": id,
+                    "expanded": _expanded(model, doc, [feature.Name]),
+                    "subs": [[s, App.expandMappedName(n)] for s, n in shadowsOf(path)],
+                    "shadows": [n for _, n in shadowsOf(path)],
+                }
+        finally:
+            App.closeDocument(doc.Name)
+    raise AssertionError("no dump model has an ID both as a prefix and embedded in one map")
+
+
+def _deriveCollideCrossDoc(folder, manifest):
+    """Each mixed cross-document scenario with A plain and B interned (config V2): one of B's IDs
+    that A's file holds outside its table (in a shadow), in a copy of the scenario's folder."""
+    manifest["collideCrossDoc"] = {}
+    for key, info in manifest["crossdoc"].items():
+        if info["config"] != "V2":
+            continue
+        entries = save.fileEntries(info["pathA"])
+        id = entryUsedOutsideTheTable(entries)
+        if id is None:
+            continue
+        copy = os.path.join(folder, f"{key}-collide")
+        shutil.copytree(info["folder"], copy)
+        derived = dict(info, folder=copy)
+        for path in ("pathA", "pathB"):
+            derived[path] = os.path.join(copy, os.path.basename(info[path]))
+        manifest["collideCrossDoc"][key] = {
+            "id": id,
+            "crossdoc": derived,
+            # A's own maps: plain, so the ID reaches A's file through its shadows only
+            "mapsWithRefs": sorted(
+                n for n, text in entries.items() if n.endswith(".Map.txt") and "~" in text
+            ),
+        }
+
+
 def _derive(folder, manifest):
     """The files with a changed table or format, and the IDs the children make collide."""
     manifest["collideOne"] = {}
@@ -487,6 +675,7 @@ def _derive(folder, manifest):
             manifest[f"{kind}CrossDoc"][key] = derived
     collideAll |= set(save.nameTable(save.fileEntries(manifest["proxy"]["path"]))[1])
     manifest["collideAll"] = sorted(collideAll)
+    _deriveCollideCrossDoc(folder, manifest)
 
 
 _saved = None
@@ -508,6 +697,7 @@ def saved():
         "crossdoc": save._saveCrossDoc(),
         "elementRef": _saveElementReference(folder),
         "proxy": _saveProxy(folder),
+        "bothRoles": _saveBothRoles(folder),
     }
     _derive(folder, manifest)
     manifestPath = os.path.join(folder, "manifest.json")
@@ -579,6 +769,7 @@ class TestNamingLoadCollision(unittest.TestCase):
         self.assertEqual(result["expanded"], info["expanded"], "expanded names after the open")
         self.assertEqual(result["recomputed"], info["expanded"], "expanded names after a recompute")
         self.assertEqual(refsOf(result["raw"]) & colliding, set(), "a name refers to a collision")
+        self.assertEqual(result["unresolved"], [], "a reference the table doesn't know")
         entries = save.fileEntries(result["again"])
         _, table = save.nameTable(entries)
         self.assertEqual(set(table) & colliding, set(), "a new save holds a colliding entry")
@@ -602,8 +793,43 @@ class TestNamingLoadCollision(unittest.TestCase):
         self.assertEqual(merged["expanded"], info["expanded"], "expanded names after a merge")
 
     def checkCrossDoc(self, key):
-        info = saved()["crossdoc"][key]
-        result = checked(self, child(self, "collideAll")["crossdoc"][key])
+        self.checkCrossDocResult(
+            saved()["crossdoc"][key], checked(self, child(self, "collideAll")["crossdoc"][key])
+        )
+
+    def checkCrossDocOne(self, key):
+        """One of B's IDs collides, which A's file holds only in A's shadows (A plain)."""
+        case = saved()["collideCrossDoc"][key]
+        self.assertEqual(case["mapsWithRefs"], [], "the premise: A's own maps are plain")
+        result = checked(self, child(self, "collideCrossDoc")[key])
+        self.assertTrue(result["forced"], "the collision wasn't forced")
+        self.checkCrossDocResult(case["crossdoc"], result)
+        self.assertIn("collide with this session's", saved()["logs"]["collideCrossDoc"])
+
+    def testPrefixAndEmbedded(self):
+        """An ID that a map holds as one name's prefix and embedded in another, both names also
+        linked from the file's XML, collides: both stay what the file meant."""
+        info = saved()["bothRoles"]
+        id = info["id"]
+        entries = save.fileEntries(info["path"])
+        rest = save.TABLE.sub("", entries["Document.xml"])
+        self.assertIn(f"~{id}|", rest, "the premise: the XML holds the ID as a prefix")
+        self.assertRegex(rest, rf"~{id}(?!\|)", "the premise: the XML holds the ID embedded")
+        self.assertEqual(bothRoles(info["shadows"])[0], id, "the premise: in the two shadows")
+        # (the map's two roles are how _saveBothRoles chose the ID)
+        result = child(self, "bothRoles")
+        self.assertTrue(result["forced"], "the collision wasn't forced")
+        checked(self, result)
+        self.assertEqual(result["expanded"], info["expanded"], "expanded names after the open")
+        self.assertEqual(result["recomputed"], info["expanded"], "expanded names after a recompute")
+        self.assertNotIn(f"~{id}", result["raw"])
+        self.assertEqual([[s, x] for s, _, x in result["subs"]], info["subs"], "linked names")
+        self.assertEqual(result["recomputedSubs"], info["subs"], "linked names after a recompute")
+        for _, name, _ in result["subs"]:
+            self.assertNotIn(f"~{id}", name)
+        self.assertIn("collide with this session's", saved()["logs"]["bothRoles"])
+
+    def checkCrossDocResult(self, info, result):
         for name, record in result["reopen"].items():
             self.assertEqual(record["verdict"], "correct", f"{name} after the reopen: {record}")
         inProcess = info["inProcess"]
@@ -627,6 +853,7 @@ class TestNamingLoadUnknown(unittest.TestCase):
         result = checked(self, child(self, "unknown")["models"][model])
         above = set(unknown["above"])
         self.assertEqual(refsOf(result["raw"]) & above, set(), "a reference to a missing entry")
+        self.assertEqual(result["unresolved"], [], "an unmarked reference the table doesn't know")
         marked = set(UNKNOWN.findall(result["raw"]))
         self.assertTrue(marked, "no reference was marked missing")
         self.assertLessEqual(marked, above)
@@ -656,9 +883,12 @@ class TestNamingLoadNewerFormat(unittest.TestCase):
         info = saved()["models"][model]
         result = checked(self, child(self, "newer")["models"][model])
         self.assertIn(NEWER_WARNING, saved()["logs"]["newer"])
-        # The maps are dropped, not kept with their references marked missing (a restore that
-        # failed regenerates a map at once, with this build's names)
+        # The maps are dropped, not kept with their references marked missing, and none of the
+        # file's names comes back: this process knows none of its IDs (ops#97: a TopoShape's
+        # cache brought the dropped map back)
         self.assertNotIn("~!", result["raw"])
+        self.assertEqual(result["unresolved"], [], "a reference this process doesn't know")
+        self.assertEqual(result["recomputedUnresolved"], [], "after a recompute")
         interned = {
             line.split()[0].strip("[")
             for line in info["raw"].split("\n[")
@@ -667,7 +897,30 @@ class TestNamingLoadNewerFormat(unittest.TestCase):
         for name in interned:
             if name in result["mapSizes"]:
                 self.assertIn(name, result["touched"], f"{name} is recomputed")
-        self.assertEqual(result["recomputedRaw"], info["raw"], "names after a recompute")
+        # A recompute names everything again, unless a static shape's names are missing
+        if not hasStaticShape(info["path"]):
+            self.assertEqual(result["recomputedRaw"], info["raw"], "names after a recompute")
+
+    def checkMerge(self, model):
+        """Merged into an interned document, as opened: the maps are dropped and their objects
+        recomputed (an import restores its objects as an open does), and a recompute names
+        everything as the original file merged the same way, unless a static shape's names are
+        missing."""
+        info = saved()["models"][model]
+        result = checked(self, child(self, "newer")["merged"][model])
+        self.assertNotIn("~!", result["raw"])
+        self.assertEqual(result["unresolved"], [], "a reference this process doesn't know")
+        self.assertEqual(result["recomputedUnresolved"], [], "after a recompute")
+        interned = {
+            line.split()[0].strip("[")
+            for line in info["raw"].split("\n[")
+            if "~" in line.split("\n", 1)[-1]
+        }
+        self.assertTrue(interned, "the premise: the file has interned maps")
+        for name in interned:
+            self.assertIn(name, result["touched"], f"{name} is recomputed")
+        if not hasStaticShape(info["path"]):
+            self.assertEqual(result["newer"], result["original"], "names after a recompute")
 
     def checkCrossDoc(self, key):
         result = checked(self, child(self, "newer")["crossdoc"][key])
@@ -748,8 +1001,9 @@ def _addTests():
             (TestNamingLoadCollision, "checkAll"),
             (TestNamingLoadUnknown, "checkModel"),
             (TestNamingLoadNewerFormat, "checkModel"),
+            (TestNamingLoadNewerFormat, "checkMerge"),
         ):
-            suffix = {"checkOne": "One", "checkAll": "All"}.get(method, "")
+            suffix = {"checkOne": "One", "checkAll": "All", "checkMerge": "Merged"}.get(method, "")
 
             def test(self, model=model, method=method):
                 if model not in saved()["unknown"]:
@@ -771,6 +1025,16 @@ def _addTests():
             test.__name__ = f"test{name}{config}"
             test.__doc__ = f"{name} ({config})"
             setattr(cls, test.__name__, test)
+        if config == "V2":  # mixed: A plain, B interned
+
+            def test(self, key=key):
+                if key not in saved()["collideCrossDoc"]:
+                    self.skipTest("A's file has no shadow with an interned name")
+                self.checkCrossDocOne(key)
+
+            test.__name__ = f"test{name}{config}One"
+            test.__doc__ = f"{name} ({config}), one of B's IDs colliding"
+            setattr(TestNamingLoadCollision, test.__name__, test)
 
 
 _addTests()

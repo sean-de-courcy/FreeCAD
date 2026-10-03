@@ -180,8 +180,17 @@ std::optional<std::string> NameTable::lookup(const NameId& id) const
 
 std::optional<NameId> NameTable::intern(std::string_view content)
 {
+    return intern(content, nullptr);
+}
+
+std::optional<NameId> NameTable::intern(std::string_view content, bool* missing)
+{
     NameId id = idOf(content);
     const Entry* existing = get(id);
+    if (!existing && missing) {
+        *missing = true;  // a dry run goes on as if it were inserted
+        return id;
+    }
     if (!existing) {
         int depth = depthOfContent(content);  // before the lock: it reads other entries
         std::unique_lock lock(_mutex);
@@ -196,10 +205,20 @@ std::optional<NameId> NameTable::intern(std::string_view content)
     if (existing->content == content) {
         return id;
     }
+    if (missing) {
+        return std::nullopt;
+    }
     ++_collisions;
-    FC_WARN("Name ID collision: " << id.toBase32() << " holds '" << existing->content
-                                  << "'; refused '" << content
-                                  << "', which stays inline in full form");
+    // Once per ID: a name that keeps a colliding node inline meets the collision again at every
+    // conversion (ops#97)
+    if (!existing->collisionWarned.exchange(true)) {
+        FC_WARN("Name ID collision: " << id.toBase32() << " holds '" << existing->content
+                                      << "'; refused '" << content
+                                      << "', which stays inline in full form");
+    }
+    else {
+        FC_LOG("Name ID collision again: " << id.toBase32() << ", refused '" << content << "'");
+    }
     return std::nullopt;
 }
 
@@ -283,13 +302,34 @@ std::optional<std::string> NameTable::expand(const NameId& id) const
 
 std::optional<NameId> NameTable::internName(std::string_view name)
 {
+    return internName(name, nullptr);
+}
+
+std::optional<NameId> NameTable::internName(std::string_view name, bool* missing)
+{
     if (auto ref = parseRef(name)) {
         return ref;
     }
-    return intern(toInterned(name));
+    return intern(toInterned(name, missing), missing);
 }
 
 std::string NameTable::toInterned(std::string_view name)
+{
+    return toInterned(name, nullptr);
+}
+
+std::optional<std::string> NameTable::toInternedIfKnown(std::string_view name) const
+{
+    bool missing = false;
+    // A dry run changes nothing: with `missing` set, intern() doesn't insert
+    std::string form = const_cast<NameTable*>(this)->toInterned(name, &missing);  // NOLINT
+    if (missing) {
+        return std::nullopt;
+    }
+    return form;
+}
+
+std::string NameTable::toInterned(std::string_view name, bool* missing)
 {
     if (auto ref = parseRef(name)) {
         // A whole name that is one reference: its canonical form is the entry's.
@@ -300,25 +340,25 @@ std::string NameTable::toInterned(std::string_view name)
     }
     std::size_t bar = lastTopLevelBar(name);
     if (bar == std::string_view::npos) {
-        return internSection(name);
+        return internSection(name, missing);
     }
     std::string_view prefix = name.substr(0, bar);
     std::string result;
     if (parseRef(prefix)) {
         result = prefix;
     }
-    else if (auto id = internName(prefix)) {
+    else if (auto id = internName(prefix, missing)) {
         result = makeRef(*id);
     }
     else {
         result = toPlain(prefix);  // collision: the prefix stays inline in full form
     }
     result += nameDelimiter;
-    result += internSection(name.substr(bar + 1));
+    result += internSection(name.substr(bar + 1), missing);
     return result;
 }
 
-std::string NameTable::internSection(std::string_view section)
+std::string NameTable::internSection(std::string_view section, bool* missing)
 {
     auto fields = splitTopLevel(section, fieldDelimiter);
     std::vector<std::string> result;
@@ -335,7 +375,7 @@ std::string NameTable::internSection(std::string_view section)
             if (parseRef(name)) {
                 entries.push_back(std::move(name));
             }
-            else if (auto id = internName(name)) {
+            else if (auto id = internName(name, missing)) {
                 entries.push_back(makeRef(*id));
             }
             else {
@@ -1034,7 +1074,11 @@ bool NameRemap::remapText(std::string& text) const
         }
         std::size_t end = pos + NameTable::RefLength;
         // A prefix is followed by the `|` before its name's last section; any other reference
-        // in a name is an embedded name, one escape level down
+        // in a name is an embedded name, one escape level down. This assumes every reference in
+        // a file's text sits at depth 0 or 1, as a canonical name has them. One deeper, inside
+        // an inline collision fallback left at save time (an embedded name in full form) whose
+        // expansion kept an unknown reference, would need two levels; it takes a collision at
+        // save time, an ID unknown under it and a collision on that ID at load (ops#97).
         bool prefix = end < text.size() && text[end] == nameDelimiter;
         out.append(text, done, pos - done);
         std::string full = inlineForm(*id);
