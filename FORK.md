@@ -116,6 +116,7 @@ names it.
 | `fix/45-49-naming-bundle-b` | fix | ops#45, ops#49 | - | `integration` `73031cb7fd` | `2d10bfb7bc` (fork PR 87), 2026-10-02 | a new base names offsets independently of OCCT's face order and checks compound child ranges |
 | `fix/26-33-maps-upstream-features` | fix | ops#26, ops#29, ops#33 | - | `integration` `0e56d912a2` | `27b82b9bbc` (fork PR 84), 2026-10-02 | a new base builds Helix, ShapeBinder and Part::Face with element maps |
 | `feat/7-solver-default` | feat | ops#7 | - | `integration` `27b82b9bbc` | (fork PR 88) | never (fork feature) |
+| `feat/101-v2i-insert-speed` | feat | ops#101, ops#6 | - | `integration` `26e3ca1638` | (fork PR 90) | never (fork naming) |
 
 ## Fork-only commits in carried topics
 
