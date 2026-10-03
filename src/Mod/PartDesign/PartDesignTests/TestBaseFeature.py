@@ -281,6 +281,38 @@ class TestBaseFeature(unittest.TestCase):
         self.assertAlmostEqual(clone_body.Shape.BoundBox.YMin, 0)
         self.assertAlmostEqual(clone_body.Shape.BoundBox.YMax, 10)
 
+    def testFeatureBaseFeatureSetDoesNotReorder(self):
+        """ops#77: setting a feature's BaseFeature to a feature that isn't the one before it
+        keeps the Body's order (and lists nothing twice); the feature builds on the new base."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        # Block: z 0..10. Post: a cylinder standing on it up to z 20. Ball: a sphere on the
+        # block's top centre, z 8..12. On the post it would reach z 20.
+        block = self.Doc.addObject("PartDesign::AdditiveBox", "Block")
+        body.addObject(block)
+        post = self.Doc.addObject("PartDesign::AdditiveCylinder", "Post")
+        body.addObject(post)
+        post.Radius = 1
+        post.Height = 20
+        post.Placement.Base = App.Vector(5, 5, 0)
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        body.addObject(sketch)
+        ball = self.Doc.addObject("PartDesign::AdditiveSphere", "Ball")
+        body.addObject(ball)
+        ball.Radius = 2
+        ball.Placement.Base = App.Vector(5, 5, 10)
+        self.Doc.recompute()
+        order = [obj.Name for obj in body.Group]
+        self.assertEqual(order, ["Block", "Post", "Sketch", "Ball"])
+        self.assertEqual(ball.BaseFeature, post)
+        self.assertAlmostEqual(ball.Shape.BoundBox.ZMax, 20)
+
+        ball.BaseFeature = block
+        self.Doc.recompute()
+        self.assertEqual([obj.Name for obj in body.Group], order)
+        self.assertEqual(ball.BaseFeature, block)
+        self.assertTrue(ball.isValid(), ball.getStatusString())
+        self.assertAlmostEqual(ball.Shape.BoundBox.ZMax, 12)
+
     def tearDown(self):
         if hasattr(App, "KeepTestDoc") and App.KeepTestDoc:
             return
