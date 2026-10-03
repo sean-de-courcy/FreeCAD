@@ -137,6 +137,23 @@ def entryUsedOutsideTheTable(entries):
     return None
 
 
+def linksToInterned(path):
+    """The objects of a saved file with an element reference to an interned name (a link's
+    shadow holds one)."""
+    xml = save.fileEntries(path)["Document.xml"]
+    objects = xml[xml.index("<ObjectData") :].split('<Object name="')[1:]
+    return {
+        block.split('"', 1)[0]
+        for block in objects
+        if re.search(r'<X?Link [^>]*\bshadow(ed)?="[^"]*~', block)
+    }
+
+
+def blocks(raw):
+    """A dump's feature blocks, by feature name."""
+    return {block.split()[0]: block for block in raw.split("\n[")[1:]}
+
+
 def refsAbove(table, id):
     """`id` and every entry of `table` that refers to it, directly or not."""
     above = {id}
@@ -217,6 +234,31 @@ def _raw(model, doc, features):
     return dump._dumpFeatures(model, [doc.getObject(n) for n in features], None, "V2")
 
 
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def _missingReferences(doc):
+    """The objects with an element reference marked missing ("?Face1")."""
+    names = []
+    for obj in doc.Objects:
+        for prop in obj.PropertiesList:
+            if "Link" not in obj.getTypeIdOfProperty(prop):
+                continue
+            try:
+                subs = list(_strings(getattr(obj, prop)))
+            except Exception:
+                continue
+            if any(sub.rsplit(".", 1)[-1].startswith("?") for sub in subs):
+                names.append(obj.Name)
+                break
+    return sorted(names)
+
+
 def hasStaticShape(path):
     """Whether a saved document has a static shape (`Part::Feature`): a recompute doesn't name it
     again, so a map dropped on load stays missing there, and what is built on it takes other
@@ -242,6 +284,7 @@ def _openModel(model, path, features, suffix):
         "expanded": _expanded(model, doc, features),
         "touched": sorted(o.Name for o in doc.Objects if "Touched" in o.State),
         "mapSizes": {n: doc.getObject(n).Shape.ElementMapSize for n in features},
+        "missing": _missingReferences(doc),
     }
     for obj in doc.Objects:
         obj.touch()
@@ -897,9 +940,26 @@ class TestNamingLoadNewerFormat(unittest.TestCase):
         for name in interned:
             if name in result["mapSizes"]:
                 self.assertIn(name, result["touched"], f"{name} is recomputed")
+        # Every element reference to an interned name is missing from the open on (the update
+        # of all references after an open marks it), and only those
+        broken = linksToInterned(info["path"])
+        self.assertEqual(result["missing"], sorted(broken), "the missing element references")
         # A recompute names everything again, unless a static shape's names are missing
-        if not hasStaticShape(info["path"]):
+        if hasStaticShape(info["path"]):
+            return
+        if not broken:
             self.assertEqual(result["recomputedRaw"], info["raw"], "names after a recompute")
+            return
+        # A feature whose reference is missing fails, reported, rather than taking another element
+        # (HelixBinderFace's FaceBinder of a helix face, as a PartDesign Fillet of a Pad's edge
+        # would)
+        recomputed, expected = blocks(result["recomputedRaw"]), blocks(info["raw"])
+        self.assertEqual(list(recomputed), list(expected))
+        for name, block in recomputed.items():
+            if name in broken:
+                self.assertIn(" INVALID]", block.split("\n", 1)[0], f"{name} fails")
+            else:
+                self.assertEqual(block, expected[name], f"{name}: names after a recompute")
 
     def checkMerge(self, model):
         """Merged into an interned document, as opened: the maps are dropped and their objects
