@@ -1,0 +1,16 @@
+issue: ops#106
+
+reason: after a link retarget (ops#42 option A: index only) a reference keeps its index on the new target; when the new target's topology differs it silently names another face (here a side face, not the top), in session and after reopening
+# The ops#105 PR's IndexCarry check (notes/tier0-geometry-check-design.md 2.8) should turn these into "missing": remove the entries then.
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_fillet_V1
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_fillet_V2
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_fillet_V2s
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_pocket_V1
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_pocket_V2
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_variant_pocket_V2s
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_fillet_V1
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_fillet_V2
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_fillet_V2s
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_pocket_V1
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_pocket_V2
+cli  AssemblyTests.TestVariantLinks.TestVariantTopologyChanged.test_retarget_pocket_V2s

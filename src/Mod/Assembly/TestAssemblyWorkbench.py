@@ -31,6 +31,7 @@ from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
     TestVariantLinkRecompute,
+    TestVariantTopologyChanged,
 )
 
 # Use the modules so that code checkers don't complain (flake8)
@@ -41,3 +42,4 @@ True if TestSimulationExport else False
 True if TestLinkRetargetJoints else False
 True if TestLinkRetargetProperties else False
 True if TestVariantLinkRecompute else False
+True if TestVariantTopologyChanged else False

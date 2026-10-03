@@ -405,3 +405,149 @@ class TestVariantLinkRecompute(VariantLinkTestBase):
                     self.assertEqual(
                         _bbox(self.part.getObject("Body").Shape), _box("Small"), msg + ": source"
                     )
+
+
+def _addVariantFeature(doc, body, base, feature, suppressed=None):
+    """Adds `feature` ("fillet" or "pocket") to `body` after `base`, a box. `suppressed`, when
+    given, is an expression for its Suppressed property."""
+    if feature == "fillet":
+        # The vertical edge at x = y = 0, so the top face keeps its z and loses a corner.
+        feat = body.newObject("PartDesign::Fillet", "Fillet")
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(base.Shape.Edges)
+            if e.BoundBox.XMax < TOL and e.BoundBox.YMax < TOL
+        )
+        feat.Base = (base, [edge])
+        feat.Radius = 2
+    else:
+        # A 4 x 4 x 2 pocket down from the top, by a sketch on the top face's plane.
+        import Part
+        import Sketcher  # noqa: F401
+
+        sketch = body.newObject("Sketcher::SketchObject", "PocketSketch")
+        sketch.AttachmentSupport = (base, ["Face6"])
+        sketch.MapMode = "FlatFace"
+        corners = [App.Vector(x, y, 0) for x, y in ((3, 3), (7, 3), (7, 7), (3, 7))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        feat = body.newObject("PartDesign::Pocket", "Pocket")
+        feat.Profile = sketch
+        feat.Length = 2
+    if suppressed:
+        feat.setExpression("Suppressed", suppressed)
+    doc.recompute()
+    return feat
+
+
+def _buildFeaturePart(naming, feature):
+    """The part document of _buildPart(), where the Large configuration also has `feature`
+    (suppressed in Small, by the configuration table's column E), and Body3: a fixed Large box
+    with the feature."""
+    doc = _buildPart(naming)
+    sheet = doc.getObject("Sheet")
+    body = doc.getObject("Body")
+    sheet.set("E2", "1")  # Small: suppressed
+    sheet.set("E3", "0")  # Large: the feature is there
+    sheet.setExpression(
+        ".cells.Bind.E1.E1",
+        "tuple(.cells; <<E>> + str(hiddenref(Body.Config) + 2); "
+        "<<E>> + str(hiddenref(Body.Config) + 2))",
+    )
+    doc.recompute()
+    sheet.setAlias("E1", "Plain")
+    doc.recompute()
+    _addVariantFeature(doc, body, doc.getObject("Box"), feature, "Sheet.Plain")
+    body3 = doc.addObject("PartDesign::Body", "Body3")
+    box3 = body3.newObject("PartDesign::AdditiveBox", "Box3")
+    box3.Length, box3.Width, box3.Height = CONFIGS["Large"]
+    doc.recompute()
+    _addVariantFeature(doc, body3, box3, feature)
+    return doc
+
+
+def _describe(face):
+    b = face.BoundBox
+    return "%s z %.3g..%.3g, x %.3g..%.3g" % (
+        type(face.Surface).__name__,
+        b.ZMin,
+        b.ZMax,
+        b.XMin,
+        b.XMax,
+    )
+
+
+class TestVariantTopologyChanged(VariantLinkTestBase):
+    """A reference to a link's top face, made while the link shows the Small box, after the link
+    moves to a Large box that also has a fillet or a pocket (ops#106): as a variant (Config set to
+    Large, which unsuppresses the feature) and as a plain retarget (to Body3). A retarget keeps
+    only the reference's index (ops#42, option A); the new target's faces are numbered
+    differently. The reference must name the Large box's top face, or be marked missing: never
+    another face. Checked after the recompute and again after saving and reopening."""
+
+    def runCase(self, naming, feature, move):
+        self.closeAll()
+        self.part = _buildFeaturePart(naming, feature)
+        self.part.saveAs(os.path.join(self.dir, "VariantLinkPart.FCStd"))
+        self.doc = _newDocument("VariantLinkAsm", naming)
+        self.doc.saveAs(os.path.join(self.dir, "VariantLinkAsm.FCStd"))
+        self.docs = [self.part.Name, self.doc.Name]
+        link = self.doc.addObject("App::Link", "LinkA")
+        link.LinkedObject = self.part.getObject("Body")
+        self.doc.recompute()
+        if move == "variant":
+            link.LinkCopyOnChange = "Tracking"
+            self.doc.recompute()
+        top, _ = _topFace(link.Shape, CONFIGS["Small"][2])
+        refs = self.doc.addObject("App::FeaturePython", "Refs")
+        refs.addProperty("App::PropertyLinkSub", "Sub")
+        refs.Sub = (link, [top])
+        self.doc.recompute()
+        if move == "variant":
+            link.Config = "Large"
+        else:
+            link.LinkedObject = self.part.getObject("Body3")
+        self.doc.recompute()
+        self.doc.recompute()
+        self.assertEqual(_bbox(link.Shape), _box("Large"), "the link shows the Large box")
+        self.assertTopOrMissing(link, refs.Sub[1][0], "%s, %s %s" % (naming, move, feature))
+        self.reopen()
+        self.doc.recompute()
+        self.doc.recompute()
+        link = self.doc.getObject("LinkA")
+        refs = self.doc.getObject("Refs")
+        self.assertTopOrMissing(
+            link, refs.Sub[1][0], "%s, %s %s, reopened" % (naming, move, feature)
+        )
+
+    def assertTopOrMissing(self, link, sub, msg):
+        if "?" in sub:
+            return
+        face = link.getSubObject(sub)
+        self.assertIsNotNone(face, msg + ": " + sub + " not found")
+        height = CONFIGS["Large"][2]
+        self.assertTrue(
+            abs(face.BoundBox.ZMin - height) < TOL and abs(face.BoundBox.ZMax - height) < TOL,
+            "%s: %s names another face (%s), not the top or missing" % (msg, sub, _describe(face)),
+        )
+
+
+def _addTopologyCases():
+    for naming in NAMINGS:
+        for feature in ("fillet", "pocket"):
+            for move in ("variant", "retarget"):
+
+                def case(self, naming=naming, feature=feature, move=move):
+                    self.runCase(naming, feature, move)
+
+                name = "test_%s_%s_%s" % (move, feature, naming)
+                case.__name__ = name
+                case.__doc__ = "%s: the link moves to Large with a %s by %s." % (
+                    naming,
+                    feature,
+                    "its Config" if move == "variant" else "LinkedObject",
+                )
+                setattr(TestVariantTopologyChanged, name, case)
+
+
+_addTopologyCases()
