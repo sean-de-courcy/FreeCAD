@@ -1,3 +1,0 @@
-issue: ops#25
-reason: cutting a compound, one piece of the tool's split face gets no name
-cli  parttests.TopoShapeTest.TopoShapeTest.testPartCompoundCut2

@@ -1,5 +1,5 @@
 # PatternSteps V2
-[MultiTransform PartDesign::MultiTransform] faces=46 edges=92 vertexes=48 names=182
+[MultiTransform PartDesign::MultiTransform] faces=46 edges=92 vertexes=48 names=186
 Edge c=(0.0000,0.0000,2.0000) m=4.0000 : _;~8p1736l2v05tq;11;XTR;0;E;0;GEN;_
 Edge c=(0.0000,1.5000,0.0000) m=3.0000 : ~580bhi7km08fm|_;_;12;FUS;0;E;0;MOD;~cvm0de1tpgqc6,~8p1736l2v05tq,~m9gohc89bgadu
 Edge c=(0.0000,1.5000,4.0000) m=3.0000 : ~0n32hk0l91mkk|_;_;12;FUS;0;E;0;MOD;~k1e948cfq9mgq,~v6v778ku4md9u,~c0n6ga47t78r4
@@ -98,8 +98,8 @@ Face c=(0.0000,5.5000,2.0000) m=12.0000 : ~g0pq4ia2ia3uc|_;_;12;FUS;0;F;0;MOD;~p
 Face c=(11.5000,0.0000,2.0000) m=12.0000 : _;~gtdk0g4sl1798,~047rtia9v5duq;12;FUS;0;F;0;LOW;_
 Face c=(11.5000,1.5000,0.0000) m=9.0000 : _;~jqt9i7fctajli,~gvlp1oqdjo53g;12;FUS;0;F;0;LOW;_
 Face c=(11.5000,1.5000,4.0000) m=9.0000 : _;~sin78e837n1q0,~degofssvri7p4;12;FUS;0;F;0;LOW;_
-Face c=(11.5000,3.5000,0.0000) m=3.0000 : -
-Face c=(11.5000,3.5000,4.0000) m=3.0000 : -
+Face c=(11.5000,3.5000,0.0000) m=3.0000 : _;~fq1bmo93uk7ik,~cl60tmrhb9nm6,~r2qd5u74pv4c0,~80p9569fj80ru;12;FUS;0;F;0;LOW;_
+Face c=(11.5000,3.5000,4.0000) m=3.0000 : _;~b0vhcvrgdbsc4,~vvdiqh0ql5vli,~1t7i68eoint4k,~oerjhte495040;12;FUS;0;F;0;LOW;_
 Face c=(11.5000,5.5000,0.0000) m=9.0000 : _;~e0j39k6c0vv4q,~cmh016514n0p8;12;FUS;0;F;0;LOW;_
 Face c=(11.5000,5.5000,4.0000) m=9.0000 : _;~q2okhbuk7rao0,~8132pbhnp94uu;12;FUS;0;F;0;LOW;_
 Face c=(11.5000,7.0000,2.0000) m=12.0000 : _;~2qge9srjk55fq,~1v0m3k7macg9e;12;FUS;0;F;0;LOW;_
@@ -125,8 +125,8 @@ Face c=(2.5000,7.0000,2.0000) m=20.0000 : ~ps8aejo798a86|_;_;12;FUS;0;F;0;MOD;~f
 Face c=(6.5000,0.0000,2.0000) m=12.0000 : _;~k0n9sv1bp1kps,~3vb408784fg3o;12;FUS;0;F;0;LOW;_
 Face c=(6.5000,1.5000,0.0000) m=9.0000 : _;~i7mu0r30aaop6,~paih10shd1l1c;12;FUS;0;F;0;LOW;_
 Face c=(6.5000,1.5000,4.0000) m=9.0000 : _;~t2dcf2dg4ige0,~6948e6oqdq6d8;12;FUS;0;F;0;LOW;_
-Face c=(6.5000,3.5000,0.0000) m=3.0000 : -
-Face c=(6.5000,3.5000,4.0000) m=3.0000 : -
+Face c=(6.5000,3.5000,0.0000) m=3.0000 : _;~3tggsd20d4mtc,~oaf5keg0078p4,~a12eaes2oo4lo,~nelkqere8sqpi;12;FUS;0;F;0;LOW;_
+Face c=(6.5000,3.5000,4.0000) m=3.0000 : _;~b1a57gi41i54i,~1pb0hc5e2ig1c,~93j90m5f5fjhi,~d62fmjqfc38g8;12;FUS;0;F;0;LOW;_
 Face c=(6.5000,5.5000,0.0000) m=9.0000 : _;~t61avaalm77eu,~u1hbg115fsuik;12;FUS;0;F;0;LOW;_
 Face c=(6.5000,5.5000,4.0000) m=9.0000 : _;~8h9fbqc0ld83m,~pvhaad94g085e;12;FUS;0;F;0;LOW;_
 Face c=(6.5000,7.0000,2.0000) m=12.0000 : _;~6ednuuofpms5o,~lrrnm2m5spotc;12;FUS;0;F;0;LOW;_
@@ -186,7 +186,7 @@ Vertex c=(8.0000,4.0000,0.0000) m=0.0000 : g2v2,g3v1;_;10;SKT;0;V;0;SRC;_
 Vertex c=(8.0000,4.0000,4.0000) m=0.0000 : _;~7vp3rasglmhrs;11;XTR;0;V;0;PRJ;_
 Vertex c=(8.0000,7.0000,0.0000) m=0.0000 : ~7vp3rasglmhrs|_;_;12;TRF;1:2;V;0;MOD;_
 Vertex c=(8.0000,7.0000,4.0000) m=0.0000 : ~v8t41tug1mvu0|_;_;12;TRF;1:2;V;0;MOD;_
-[LinearPattern PartDesign::LinearPattern] faces=46 edges=92 vertexes=48 names=182
+[LinearPattern PartDesign::LinearPattern] faces=46 edges=92 vertexes=48 names=186
 Edge c=(0.0000,0.0000,2.0000) m=4.0000 : _;~75kt6edq7b0ou;25;XTR;0;E;0;GEN;_
 Edge c=(0.0000,1.5000,0.0000) m=3.0000 : ~9ofn1dji4c25u|_;_;26;FUS;0;E;0;MOD;~uicq6nlolo37k,~75kt6edq7b0ou,~idjnrv2brt0k0
 Edge c=(0.0000,1.5000,4.0000) m=3.0000 : ~3s3vc3vsmsl2c|_;_;26;FUS;0;E;0;MOD;~hsh0bmeinavg6,~l6flvjdch1kek,~ghk50kd9ino9c
@@ -285,8 +285,8 @@ Face c=(0.0000,5.5000,2.0000) m=12.0000 : ~p7c8pf6epumf8|_;_;26;FUS;0;F;0;MOD;~7
 Face c=(11.5000,0.0000,2.0000) m=12.0000 : _;~kvjmvo9n7aa80,~u96vscl8n8gmi;26;FUS;0;F;0;LOW;_
 Face c=(11.5000,1.5000,0.0000) m=9.0000 : _;~hjpeham622a2g,~2ji54nmsvgelq;26;FUS;0;F;0;LOW;_
 Face c=(11.5000,1.5000,4.0000) m=9.0000 : _;~svq3o3hm610ba,~12r9rsa2eh110;26;FUS;0;F;0;LOW;_
-Face c=(11.5000,3.5000,0.0000) m=3.0000 : -
-Face c=(11.5000,3.5000,4.0000) m=3.0000 : -
+Face c=(11.5000,3.5000,0.0000) m=3.0000 : _;~gblmrgbmn4638,~4o7cp9olqajsm,~8aad35ss5at2i,~ufsin8dfjme40;26;FUS;0;F;0;LOW;_
+Face c=(11.5000,3.5000,4.0000) m=3.0000 : _;~sn0dnrim3af2s,~5b2t4kavt3bk4,~6tamd5bsmdrn6,~jc83qmtfrtu5k;26;FUS;0;F;0;LOW;_
 Face c=(11.5000,5.5000,0.0000) m=9.0000 : _;~389q6bh49thva,~nj7v4jfgs1bge;26;FUS;0;F;0;LOW;_
 Face c=(11.5000,5.5000,4.0000) m=9.0000 : _;~j8m9mtidgv70g,~j18phge132rfs;26;FUS;0;F;0;LOW;_
 Face c=(11.5000,7.0000,2.0000) m=12.0000 : _;~sfji3p04and00,~4s70uacandkka;26;FUS;0;F;0;LOW;_
@@ -312,8 +312,8 @@ Face c=(2.5000,7.0000,2.0000) m=20.0000 : ~13i6lp7t0dkcm|_;_;26;FUS;0;F;0;MOD;~r
 Face c=(6.5000,0.0000,2.0000) m=12.0000 : _;~nlt9raadifeja,~d813m0kdjuu1q;26;FUS;0;F;0;LOW;_
 Face c=(6.5000,1.5000,0.0000) m=9.0000 : _;~2f6pp5rlcargg,~jl5bjs1la7d8e;26;FUS;0;F;0;LOW;_
 Face c=(6.5000,1.5000,4.0000) m=9.0000 : _;~l9np9k5hoa1vm,~81ccaugj5ded6;26;FUS;0;F;0;LOW;_
-Face c=(6.5000,3.5000,0.0000) m=3.0000 : -
-Face c=(6.5000,3.5000,4.0000) m=3.0000 : -
+Face c=(6.5000,3.5000,0.0000) m=3.0000 : _;~jcav30iijkn96,~903d00hsi82b4,~rdp1hakn0bv2o,~s2maiieij2nug;26;FUS;0;F;0;LOW;_
+Face c=(6.5000,3.5000,4.0000) m=3.0000 : _;~taneumcf2gq12,~ds8k56uuhc2fe,~4knh763ng4pss,~0o9dp1cn7sbo0;26;FUS;0;F;0;LOW;_
 Face c=(6.5000,5.5000,0.0000) m=9.0000 : _;~kj37reqdc7n4c,~lu1crkejd3kgo;26;FUS;0;F;0;LOW;_
 Face c=(6.5000,5.5000,4.0000) m=9.0000 : _;~1f91j98gtku26,~s8a3g2s0konr0;26;FUS;0;F;0;LOW;_
 Face c=(6.5000,7.0000,2.0000) m=12.0000 : _;~dmp9v45uln2um,~ql3q6j984j2g4;26;FUS;0;F;0;LOW;_

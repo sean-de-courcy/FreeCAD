@@ -110,7 +110,8 @@ names it.
 | `fix/96-interning-review` | fix | ops#96, ops#97 | - | `integration` `37c04b26f1` | `527461eabb` (fork PR 81), 2026-10-02 | never (fork naming) |
 | `fix/98-macos-about` | fix | ops#98 | - | `integration` `37c04b26f1` | `4cb1cf4671` (fork PR 83), 2026-10-02 | never (fork identity) |
 | `infra/85-release-redraft` | infra | ops#85 | - | `integration` `37c04b26f1` | `0e56d912a2` (fork PR 82), 2026-10-02 | never |
-| `feat/naming-intern-load` | feat | ops#6 | - | `integration` `1df3c779aa` | (fork PR 80) | never (fork feature) |
+| `feat/naming-intern-load` | feat | ops#6 | - | `integration` `1df3c779aa` | `488aab941e` (fork PR 80), 2026-10-02 | never (fork feature) |
+| `fix/25-fallback-second-pass` | fix | ops#25 | - | `integration` `0e56d912a2` | (fork PR 86) | a new base's V2 fallback names a face whose edges it names in the same pass |
 
 ## Fork-only commits in carried topics
 

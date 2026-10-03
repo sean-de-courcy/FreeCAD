@@ -111,6 +111,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/CompoundCopies.V1.txt
     PartDesignTests/NamingGolden/CompoundCopies.V2.txt
     PartDesignTests/NamingGolden/CompoundCopies.V2i-ids.txt
+    PartDesignTests/NamingGolden/CompoundCut.V1.txt
+    PartDesignTests/NamingGolden/CompoundCut.V2.txt
+    PartDesignTests/NamingGolden/CompoundCut.V2i-ids.txt
     PartDesignTests/NamingGolden/CutSplit.V1.txt
     PartDesignTests/NamingGolden/CutSplit.V2.txt
     PartDesignTests/NamingGolden/CutSplit.V2i-ids.txt
