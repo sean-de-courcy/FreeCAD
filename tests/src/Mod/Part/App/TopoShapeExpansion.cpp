@@ -3620,4 +3620,39 @@ TEST_F(TopoShapeExpansionTest, appendElementSectionLeavesV1AndUnnamedShapes)
     EXPECT_FALSE(unnamed.hasElementMap());
 }
 
+TEST_F(TopoShapeExpansionTest, makeElementCutNamesBothCoincidentPiecesV2)
+{
+    // Arrange
+    //   a compound of two overlapping boxes, and a cylinder standing on their shared corner. The
+    //   cut leaves a quarter of the cylinder's side in each box's piece, at the same place: two
+    //   faces, of which OCCT's history reports one. The other has no history, and its edges get
+    //   their names only in the fallback (UPP), after the faces (ops#25).
+    TopoShape box1(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 2.0).Shape(), 1L);
+    TopoShape box2(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(2.0, 1.0, 2.0).Shape(), 2L);
+    TopoShape cylinder(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeCylinder(0.5, 2.0).Shape(), 3L);
+    TopoShape compound(4L);
+    compound.makeElementCompound({box1, box2});
+    TopoShape result(5L);
+
+    // Act
+    result.makeElementCut({compound, cylinder});
+
+    // Assert
+    //   each box loses the quarter of the cylinder inside it
+    EXPECT_NEAR(getVolume(result.getShape()), 8.0 - 2 * (std::numbers::pi * 0.25 * 2.0 / 4), 1e-6);
+    EXPECT_TRUE(allElementsNamed(result));
+    std::vector<MappedName> pieces;
+    int index = 0;
+    for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
+        ++index;
+        if (BRepAdaptor_Surface(TopoDS::Face(face.getShape())).GetType() == GeomAbs_Cylinder) {
+            pieces.push_back(result.getMappedName(IndexedName::fromConst("Face", index)));
+        }
+    }
+    ASSERT_EQ(pieces.size(), 2);
+    EXPECT_TRUE(pieces[0]);
+    EXPECT_TRUE(pieces[1]);
+    EXPECT_NE(pieces[0], pieces[1]);
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

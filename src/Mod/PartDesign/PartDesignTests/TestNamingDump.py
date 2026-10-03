@@ -146,6 +146,22 @@ def modelCutSplit(doc):
     return [cut]
 
 
+def modelCompoundCut(doc):
+    """A compound of two overlapping boxes cut by a cylinder on their shared corner: the two
+    quarter faces of the cylinder's side lie at the same place, and OCCT's history reports only
+    one of them (ops#25)."""
+    first = models.box(doc, "First", (1, 2, 2))
+    second = models.box(doc, "Second", (2, 1, 2))
+    cylinder = doc.addObject("Part::Cylinder", "Cylinder")
+    cylinder.Radius = 0.5
+    cylinder.Height = 2
+    compound = doc.addObject("Part::Compound", "Compound")
+    compound.Links = [first, second]
+    cut = doc.addObject("Part::Cut", "Cut")
+    cut.Base, cut.Tool, cut.Refine = compound, cylinder, False
+    return [cut]
+
+
 def modelFuseCommon(doc):
     """Fuse and common of two overlapping boxes (S1, list fields)."""
     a = models.box(doc, "A", (10, 10, 10))
@@ -328,6 +344,7 @@ MODELS = {
     "PadPocket": modelPadPocket,
     "PadCollinear": modelPadCollinear,
     "CutSplit": modelCutSplit,
+    "CompoundCut": modelCompoundCut,
     "FuseCommon": modelFuseCommon,
     "FilletChamfer": modelFilletChamfer,
     "PipeShell": modelPipeShell,
