@@ -21,6 +21,9 @@
 #include <BRepOffsetAPI_MakeEvolved.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <gp_Circ.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <Geom_BezierCurve.hxx>
@@ -3388,6 +3391,64 @@ TEST_F(TopoShapeExpansionTest, makeElementOffset)
             "Vertex8;:G;OFS;:H1:7,F",
         }
     ));
+}
+
+namespace
+{
+// A cylinder (radius 5, height 10) whose side is two half-cylinder faces. They meet at two tangent
+// lines, which an offset with arc joins keeps, so the two lines are named after the same two faces
+// and told apart only by their index; the circles get arc faces (ops#49).
+TopoDS_Shape splitCylinder()
+{
+    gp_Circ circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 5);
+    auto arc1 = BRepBuilderAPI_MakeEdge(circle, 0, std::numbers::pi).Edge();
+    auto arc2 = BRepBuilderAPI_MakeEdge(circle, std::numbers::pi, 2 * std::numbers::pi).Edge();
+    auto face = BRepBuilderAPI_MakeFace(BRepBuilderAPI_MakeWire(arc1, arc2).Wire()).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, 10)).Shape();
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementOffsetAndThickSolidRepeat)
+{
+    // OCCT lists the faces of an offset with arc faces in an order that changes from run to run.
+    // Built again in this process, the result must have the same element names at the same
+    // indexes, in V1 and V2 (ops#49).
+    for (auto algorithm : {App::HistoryAlgorithm::V1, App::HistoryAlgorithm::V2}) {
+        // OCCT's order follows the addresses of the source's sub-shapes: each build gets a new
+        // cylinder, and every shape is kept, so that no build reuses the memory of the one before.
+        std::vector<TopoShape> kept;
+        auto cylinder = [&]() {
+            kept.emplace_back(algorithm, splitCylinder(), 1L);
+            return kept.back();
+        };
+        auto offset = [&]() {
+            TopoShape result {algorithm, 2L};
+            result.makeElementOffset(cylinder(), 1, 1e-07);
+            kept.push_back(result);
+            return elementMap(result);
+        };
+        auto thickSolid = [&]() {
+            TopoShape source = cylinder();
+            TopoShape top;
+            for (const auto& face : source.getSubTopoShapes(TopAbs_FACE)) {
+                if (face.getBoundBox().MinZ > 9.9) {
+                    top = face;
+                }
+            }
+            TopoShape result {algorithm, 3L};
+            result.makeElementThickSolid(source, {top}, 1, 1e-07);
+            kept.push_back(result);
+            return elementMap(result);
+        };
+        const auto firstOffset = offset();
+        const auto firstThickSolid = thickSolid();
+        EXPECT_EQ(firstOffset.size(), 30);  // 8 faces, 14 edges, 8 vertexes, all named
+        EXPECT_EQ(firstThickSolid.size(), 35);
+        for (int run = 2; run <= 5; ++run) {
+            EXPECT_EQ(offset(), firstOffset) << "offset, run " << run;
+            EXPECT_EQ(thickSolid(), firstThickSolid) << "thick solid, run " << run;
+        }
+    }
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementOffsetFace)

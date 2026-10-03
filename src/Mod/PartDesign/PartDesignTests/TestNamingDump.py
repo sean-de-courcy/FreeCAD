@@ -24,7 +24,8 @@
 
 Element names must be the same on every platform and in every run. They can differ when the naming
 code iterates a hash container, whose order differs between standard libraries (MSVC, libc++) and,
-for pointer keys, between runs, or when OCCT's own result order varies (parallel booleans).
+for pointer keys, between runs, or when OCCT's own result order varies (parallel booleans, an
+offset's faces: ops#49).
 
 Each model is built in a V1 and in a V2 document. A dump lists every element of the model's
 features with its names, one line per element and name, sorted. An element is keyed by its type,
@@ -59,6 +60,7 @@ Environment variables:
 
 import difflib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -339,6 +341,27 @@ def modelOffsetThickness(doc):
     return [offset, thickness]
 
 
+def modelOffsetSplitCylinder(doc):
+    """Offset of a cylinder whose side is two half-cylinder faces (ops#49). The two faces meet at
+    two tangent lines, which Join=Arc keeps, so the lines are named after the same two faces and
+    told apart only by their index; the circles get arc faces, whose order OCCT varies between
+    runs. (Thickness takes the same path, makeElementThickSolid; it isn't here because its face
+    reference into the extrusion goes missing in TestNamingLoadNewerFormat, as designed.)"""
+    circle = Part.Circle(V(0, 0, 0), V(0, 0, 1), 5)
+    arcs = [Part.ArcOfCircle(circle, a, a + math.pi) for a in (0, math.pi)]
+    profile = models.sketch(doc, "Profile", arcs)
+    cylinder = doc.addObject("Part::Extrusion", "Cylinder")
+    cylinder.Base = profile
+    cylinder.DirMode = "Custom"
+    cylinder.Dir = V(0, 0, 1)
+    cylinder.LengthFwd = 10
+    cylinder.Solid = True
+    offset = doc.addObject("Part::Offset", "Offset")
+    offset.Source = cylinder
+    offset.Value = 1
+    return [offset]
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -355,6 +378,7 @@ MODELS = {
     "LinearPattern": modelLinearPattern,
     "PatternSteps": modelPatternSteps,
     "OffsetThickness": modelOffsetThickness,
+    "OffsetSplitCylinder": modelOffsetSplitCylinder,
 }
 
 # ---------------------------------------------------------------------------------------------
