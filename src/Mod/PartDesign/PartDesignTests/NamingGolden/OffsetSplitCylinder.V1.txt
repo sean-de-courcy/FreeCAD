@@ -1,0 +1,32 @@
+# OffsetSplitCylinder V1
+[Offset Part::Offset] faces=8 edges=14 vertexes=8 names=30
+Edge c=(-5.6366,0.0000,-0.6366) m=1.5708 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U3;OFS;:H{Cylinder}:L,E
+Edge c=(-5.6366,0.0000,10.6366) m=1.5708 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:U;XTR;:H{Cylinder}:L,E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U3;OFS;:H{Cylinder}:L,E
+Edge c=(-6.0000,0.0000,5.0000) m=10.0000 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:1;:U2;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,-3.1831,-1.0000) m=15.7080 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:2;:U2;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,-3.1831,11.0000) m=15.7080 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:;:G0;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:1;:U;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,-3.8197,0.0000) m=18.8496 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:2;:U;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,-3.8197,10.0000) m=18.8496 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:2;:U4;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,3.1831,-1.0000) m=15.7080 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U2;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,3.1831,11.0000) m=15.7080 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:;:G0;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:1;:U2;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,3.8197,0.0000) m=18.8496 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U;OFS;:H{Cylinder}:L,E
+Edge c=(0.0000,3.8197,10.0000) m=18.8496 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:1;:U4;OFS;:H{Cylinder}:L,E
+Edge c=(5.6366,0.0000,-0.6366) m=1.5708 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U4;OFS;:H{Cylinder}:L,E
+Edge c=(5.6366,0.0000,10.6366) m=1.5708 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:U;XTR;:H{Cylinder}:L,E>:;:G;OFS;:H{Cylinder}:L,F>:1;:U4;OFS;:H{Cylinder}:L,E
+Edge c=(6.0000,0.0000,5.0000) m=10.0000 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:1;:U;OFS;:H{Cylinder}:L,E
+Face c=(0.0000,-3.5991,-0.6212) m=27.8156 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:2;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,-3.5991,10.6212) m=27.8156 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:U;XTR;:H{Cylinder}:L,E>:2;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,-3.8197,5.0000) m=188.4956 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:2;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,0.0000,-1.0000) m=78.5398 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:1;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,0.0000,11.0000) m=78.5398 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:;:G0;XTR;:H{Cylinder}:L,F>:1;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,3.5991,-0.6212) m=27.8156 : <<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:1;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,3.5991,10.6212) m=27.8156 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:U;XTR;:H{Cylinder}:L,E>:1;:G;OFS;:H{Cylinder}:L,F
+Face c=(0.0000,3.8197,5.0000) m=188.4956 : <<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:1;:G;OFS;:H{Cylinder}:L,F
+Vertex c=(-5.0000,0.0000,-1.0000) m=0.0000 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U2;OFS;:H{Cylinder}:L,V
+Vertex c=(-5.0000,0.0000,11.0000) m=0.0000 : <<<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:;:G0;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U2;OFS;:H{Cylinder}:L,V
+Vertex c=(-6.0000,0.0000,0.0000) m=0.0000 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U;OFS;:H{Cylinder}:L,V
+Vertex c=(-6.0000,0.0000,10.0000) m=0.0000 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U2;OFS;:H{Cylinder}:L,V
+Vertex c=(5.0000,0.0000,-1.0000) m=0.0000 : <<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U;OFS;:H{Cylinder}:L,V
+Vertex c=(5.0000,0.0000,11.0000) m=0.0000 : <<<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;FAC;:H{Cylinder}:L,F>:;:G0;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U2;OFS;:H{Cylinder}:L,E>:1;:U;OFS;:H{Cylinder}:L,V
+Vertex c=(6.0000,0.0000,0.0000) m=0.0000 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U;OFS;:H{Cylinder}:L,E>:1;:U;OFS;:H{Cylinder}:L,V
+Vertex c=(6.0000,0.0000,10.0000) m=0.0000 : <<<<<<g;SKT;:H:L,E>:;:H{Profile},E>:;:H{Cylinder},E>:;:G;XTR;:H{Cylinder}:L,F>:;:G;OFS;:H{Cylinder}:L,F>:;:U4;OFS;:H{Cylinder}:L,E>:1;:U;OFS;:H{Cylinder}:L,V

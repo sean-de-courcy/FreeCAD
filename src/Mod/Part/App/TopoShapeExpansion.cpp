@@ -30,6 +30,7 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -85,6 +86,11 @@
 #include <GeomFill_BezierCurves.hxx>
 #include <GeomFill_BSplineCurves.hxx>
 #include <Precision.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_Curve.hxx>
@@ -1245,6 +1251,46 @@ std::vector<Data::ElementMap::MappedChildElements> TopoShape::createChildMap(
     return children;
 }
 
+namespace
+{
+// ops#45: child ranges give each child of a compound the next countSubShapes(type) indexes. When a
+// child shares a sub-shape with an earlier one, TopExp skips it in the compound, so the later
+// indexes are off (e.g. a group of a box and a link to one of its faces). The counts add up
+// exactly when nothing is shared. Otherwise the ranges still fit if every index they reach holds
+// the child's own element; a range that runs past the end (a child wholly shared with earlier
+// ones) only names nothing there.
+bool childRangesFit(const TopoShape& compound, const std::vector<TopoShape>& children)
+{
+    for (auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
+        const int total = compound.countSubShapes(type);
+        int sum = 0;
+        for (const auto& child : children) {
+            if (!child.isNull()) {
+                sum += child.countSubShapes(type);
+            }
+        }
+        if (sum == total) {
+            continue;
+        }
+        int offset = 0;
+        for (const auto& child : children) {
+            if (child.isNull()) {
+                continue;
+            }
+            const int count = child.countSubShapes(type);
+            for (int index = 1; index <= count && offset + index <= total; ++index) {
+                if (!compound.getSubShape(type, offset + index, true)
+                         .IsSame(child.getSubShape(type, index, true))) {
+                    return false;
+                }
+            }
+            offset += count;
+        }
+    }
+    return true;
+}
+}  // namespace
+
 void TopoShape::mapCompoundSubElements(const std::vector<TopoShape>& shapes, const char* op)
 {
     int count = 0;
@@ -1257,6 +1303,10 @@ void TopoShape::mapCompoundSubElements(const std::vector<TopoShape>& shapes, con
         if (!subshape.IsPartner(topoShape._Shape)) {
             return;  // Not a partner shape, don't do any mapping at all
         }
+    }
+    if (!childRangesFit(*this, shapes)) {
+        mapSubElement(shapes, op);  // maps each child by shape
+        return;
     }
     auto children {createChildMap(count, shapes, op)};
     inheritInternNames(*this, shapes);
@@ -1280,6 +1330,9 @@ void TopoShape::mapSubElement(const std::vector<TopoShape>& shapes, const char* 
                 count = 0;
                 break;
             }
+        }
+        if (count && !childRangesFit(*this, shapes)) {
+            count = 0;  // the children share sub-shapes: map each one by shape below
         }
         if (count) {
             std::vector<Data::ElementMap::MappedChildElements> children;
@@ -3748,6 +3801,142 @@ TopoShape& TopoShape::makeElementPipeShell(
     return makeElementShape(mkPipeShell, shapes, op);
 }
 
+namespace
+{
+// ops#49: BRepOffset_MakeOffset (Offset, Thickness) lists the result's faces in an order that
+// changes from run to run when it adds arc faces (Join = Arc), while each face keeps the order of
+// its own edges, vertexes and wires. Element indexes follow the face order, and so does the index
+// that tells apart elements named after the same faces (partner, UPP and LOW names). So the faces
+// are put in a canonical order before naming: by the first source element (faces, then edges,
+// then vertexes, by index) whose history holds them, then by a geometric key. Only the containers
+// are rebuilt: the faces and everything below them stay the same shapes, so the mapper still
+// finds them.
+struct FaceOrderKey
+{
+    int rank = std::numeric_limits<int>::max();
+    std::array<long long, 4> geometry {};
+
+    bool operator<(const FaceOrderKey& other) const
+    {
+        return std::tie(rank, geometry) < std::tie(other.rank, other.geometry);
+    }
+};
+
+class CanonicalFaceOrder
+{
+public:
+    CanonicalFaceOrder(const TopoShape::Mapper& mapper, const TopoShape& source)
+    {
+        int rank = 0;
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            for (const auto& element : source.getSubShapes(type)) {
+                // modified() and generated() share their result vector: read one at a time.
+                for (const auto& image : mapper.modified(element)) {
+                    claim(image, rank);
+                }
+                for (const auto& image : mapper.generated(element)) {
+                    claim(image, rank);
+                }
+                ++rank;
+            }
+        }
+    }
+
+    /// The shape with the faces of each container in canonical order, or the shape itself if
+    /// they already are.
+    TopoDS_Shape apply(const TopoDS_Shape& shape)
+    {
+        return apply(shape, TopLoc_Location()).first;
+    }
+
+private:
+    void claim(const TopoDS_Shape& image, int rank)
+    {
+        for (TopExp_Explorer xp(image, TopAbs_FACE); xp.More(); xp.Next()) {
+            if (!ranks.IsBound(xp.Current())) {
+                ranks.Bind(xp.Current(), rank);
+            }
+        }
+    }
+
+    FaceOrderKey faceKey(const TopoDS_Shape& face) const
+    {
+        FaceOrderKey key;
+        if (const int* rank = ranks.Seek(face)) {
+            key.rank = *rank;
+        }
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        const gp_Pnt center = props.CentreOfMass();
+        const double grid = 10 * Precision::Confusion();
+        const std::array<double, 4> values {center.X(), center.Y(), center.Z(), props.Mass()};
+        for (size_t i = 0; i < values.size(); ++i) {
+            key.geometry[i] = std::llround(values[i] / grid);
+        }
+        return key;
+    }
+
+    /// `above` is the location of the shape's container. Returns the rebuilt shape and the
+    /// smallest key of its faces.
+    std::pair<TopoDS_Shape, FaceOrderKey> apply(const TopoDS_Shape& shape, const TopLoc_Location& above)
+    {
+        if (shape.ShapeType() == TopAbs_FACE) {
+            return {shape, faceKey(shape.Moved(above))};
+        }
+        if (shape.ShapeType() > TopAbs_FACE) {
+            return {shape, FaceOrderKey()};
+        }
+        const TopLoc_Location here = above * shape.Location();
+        std::vector<TopoDS_Shape> original;
+        std::vector<std::pair<TopoDS_Shape, FaceOrderKey>> children;
+        bool changed = false;
+        // The children as stored in the container, without its orientation and location.
+        for (TopoDS_Iterator it(shape, Standard_False, Standard_False); it.More(); it.Next()) {
+            original.push_back(it.Value());
+            children.push_back(apply(it.Value(), here));
+            changed = changed || !children.back().first.IsEqual(it.Value());
+        }
+        std::stable_sort(children.begin(), children.end(), [](const auto& a, const auto& b) {
+            return a.second < b.second;
+        });
+        FaceOrderKey first = children.empty() ? FaceOrderKey() : children.front().second;
+        for (size_t i = 0; !changed && i < children.size(); ++i) {
+            changed = !children[i].first.IsEqual(original[i]);
+        }
+        if (!changed) {
+            return {shape, first};
+        }
+        // Add the children to a copy at the identity, where the builder stores them as given,
+        // then give the copy the container's orientation and location.
+        TopoDS_Shape result = shape.EmptyCopied();
+        result.Orientation(TopAbs_FORWARD);
+        result.Location(TopLoc_Location());
+        BRep_Builder builder;
+        for (const auto& child : children) {
+            builder.Add(result, child.first);
+        }
+        result.Closed(shape.Closed());
+        result.Orientable(shape.Orientable());
+        result.Infinite(shape.Infinite());
+        result.Convex(shape.Convex());
+        result.Orientation(shape.Orientation());
+        result.Location(shape.Location());
+        return {result, first};
+    }
+
+    TopTools_DataMapOfShapeInteger ranks;
+};
+
+TopoDS_Shape canonicalFaceOrder(
+    const TopoDS_Shape& result,
+    const TopoShape::Mapper& mapper,
+    const TopoShape& source
+)
+{
+    return CanonicalFaceOrder(mapper, source).apply(result);
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementOffset(
     const TopoShape& shape,
     double offset,
@@ -3780,7 +3969,8 @@ TopoShape& TopoShape::makeElementOffset(
     }
 
     TopoShape res(Tag, Hasher, getHistoryAlgorithm());
-    res.makeElementShape(mkOffset, shape, op);
+    MapperMaker mapper(mkOffset);
+    res.makeShapeWithElementMap(canonicalFaceOrder(mkOffset.Shape(), mapper, shape), mapper, {shape}, op);
     if (shape.hasSubShape(TopAbs_SOLID) && !res.hasSubShape(TopAbs_SOLID)) {
         try {
             res = res.makeElementSolid();
@@ -4375,7 +4565,13 @@ TopoShape& TopoShape::makeElementThickSolid(
         selfInter ? Standard_True : Standard_False,
         GeomAbs_JoinType(join)
     );
-    return makeElementShape(mkThick, shape, op);
+    MapperMaker mapper(mkThick);
+    return makeShapeWithElementMap(
+        canonicalFaceOrder(mkThick.Shape(), mapper, shape),
+        mapper,
+        {shape},
+        op
+    );
 }
 
 

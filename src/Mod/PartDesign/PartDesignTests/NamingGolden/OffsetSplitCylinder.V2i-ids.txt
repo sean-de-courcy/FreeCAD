@@ -1,0 +1,32 @@
+# OffsetSplitCylinder V2
+[Offset Part::Offset] faces=8 edges=14 vertexes=8 names=30
+Edge c=(-5.6366,0.0000,-0.6366) m=1.5708 : _;~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;E;0;UPP;_
+Edge c=(-5.6366,0.0000,10.6366) m=1.5708 : _;~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;1;E;0;UPP;_
+Edge c=(-6.0000,0.0000,5.0000) m=10.0000 : _;~729o3s3lki15a,~n2eac1h44lbom;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,-3.1831,-1.0000) m=15.7080 : _;~d3u369r6l9ets,~c4hnaefetrd8i;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,-3.1831,11.0000) m=15.7080 : _;~v6qi9a16fqure,~2gvo0vtpbi1lq;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,-3.8197,0.0000) m=18.8496 : _;~n2eac1h44lbom,~c4hnaefetrd8i;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,-3.8197,10.0000) m=18.8496 : _;~2gvo0vtpbi1lq,~n2eac1h44lbom;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,3.1831,-1.0000) m=15.7080 : _;~d3u369r6l9ets,~pk8vsai5l9ckc;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,3.1831,11.0000) m=15.7080 : _;~v6qi9a16fqure,~52pmp6mpenhu0;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,3.8197,0.0000) m=18.8496 : _;~729o3s3lki15a,~pk8vsai5l9ckc;3;OFS;0;E;0;UPP;_
+Edge c=(0.0000,3.8197,10.0000) m=18.8496 : _;~52pmp6mpenhu0,~729o3s3lki15a;3;OFS;0;E;0;UPP;_
+Edge c=(5.6366,0.0000,-0.6366) m=1.5708 : _;~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;E;0;UPP;_
+Edge c=(5.6366,0.0000,10.6366) m=1.5708 : _;~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;0;E;0;UPP;_
+Edge c=(6.0000,0.0000,5.0000) m=10.0000 : _;~729o3s3lki15a,~n2eac1h44lbom;3;OFS;1;E;0;UPP;_
+Face c=(0.0000,-3.5991,-0.6212) m=27.8156 : _;~57jal560451p4;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,-3.5991,10.6212) m=27.8156 : _;~mvskuocg5aikk;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,-3.8197,5.0000) m=188.4956 : _;~dpdaadnvadv46;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,0.0000,-1.0000) m=78.5398 : _;~bqji9bou0pgt6;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,0.0000,11.0000) m=78.5398 : _;~oihgv1gt32p30;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,3.5991,-0.6212) m=27.8156 : _;~50tn5vam225ik;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,3.5991,10.6212) m=27.8156 : _;~qjaq9ii958uaq;3;OFS;0;F;0;GEN;_
+Face c=(0.0000,3.8197,5.0000) m=188.4956 : _;~bpahnd49oo84c;3;OFS;0;F;0;GEN;_
+Vertex c=(-5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;V;0;UPP;_
+Vertex c=(-5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;0;V;0;UPP;_
+Vertex c=(-6.0000,0.0000,0.0000) m=0.0000 : _;~729o3s3lki15a,~n2eac1h44lbom,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;0;V;0;UPP;_
+Vertex c=(-6.0000,0.0000,10.0000) m=0.0000 : _;~52pmp6mpenhu0,~729o3s3lki15a,~2gvo0vtpbi1lq,~n2eac1h44lbom;3;OFS;0;V;0;UPP;_
+Vertex c=(5.0000,0.0000,-1.0000) m=0.0000 : _;~d3u369r6l9ets,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;V;0;UPP;_
+Vertex c=(5.0000,0.0000,11.0000) m=0.0000 : _;~v6qi9a16fqure,~52pmp6mpenhu0,~2gvo0vtpbi1lq;3;OFS;1;V;0;UPP;_
+Vertex c=(6.0000,0.0000,0.0000) m=0.0000 : _;~729o3s3lki15a,~n2eac1h44lbom,~pk8vsai5l9ckc,~c4hnaefetrd8i;3;OFS;1;V;0;UPP;_
+Vertex c=(6.0000,0.0000,10.0000) m=0.0000 : _;~52pmp6mpenhu0,~729o3s3lki15a,~2gvo0vtpbi1lq,~n2eac1h44lbom;3;OFS;1;V;0;UPP;_

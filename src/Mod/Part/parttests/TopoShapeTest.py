@@ -3,6 +3,7 @@
 import FreeCAD as App
 import Part
 
+import re
 import unittest
 
 
@@ -403,6 +404,62 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                             self.assertEqual(reverse_map.get(f"{kind}{offset + index}"), expected)
         finally:
             App.closeDocument(doc.Name)
+
+    @staticmethod
+    def _nameSource(name, algorithm):
+        """The element and object ID a name starts from: its first section's reference and tag."""
+        if algorithm == "V2":
+            section = App.getDecodedMappedName(name)[0]
+            return section["referenceIDs"][0], int(section["iterationTag"])
+        element = re.match(r"(Face|Edge|Vertex)\d+", name)
+        tag = re.search(r";:H(-?[0-9a-f]+)", name)
+        return element.group(0), int(tag.group(1), 16)
+
+    def testGroupOfSharedChildrenNames(self):
+        """A group whose children share sub-shapes: an App::Part of a link to a box's face and the
+        box. The group's shape is a compound of the two, and the face's edges and vertexes are the
+        box's. Every name of the group's shape, and of a Part::Compound of the group, must start
+        from an element with the same geometry (ops#45: the compound's child ranges assumed the
+        children share nothing, so the box's names landed on other elements)."""
+
+        def key(element):
+            point = element.Point if hasattr(element, "Point") else element.CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        for algorithm in ("V1", "V2"):
+            doc = App.newDocument("GroupOfSharedChildren")
+            try:
+                doc.HistoryAlgorithm = algorithm
+                box = doc.addObject("Part::Box", "Box")
+                link = doc.addObject("App::Link", "LinkFace1")
+                link.setLink(box, "Face1")
+                group = doc.addObject("App::Part", "Group")
+                group.addObject(link)
+                group.addObject(box)
+                compound = doc.addObject("Part::Compound", "Compound")
+                compound.Links = [group]
+                doc.recompute()
+                objects = {obj.ID: obj for obj in doc.Objects}
+                for label, shape in (("group", Part.getShape(group)), ("compound", compound.Shape)):
+                    self.assertEqual(len(shape.Edges), 12, label)  # the face's edges are shared
+                    reverse_map = shape.ElementReverseMap
+                    for kind, elements in (
+                        ("Face", shape.Faces),
+                        ("Edge", shape.Edges),
+                        ("Vertex", shape.Vertexes),
+                    ):
+                        for index, element in enumerate(elements, 1):
+                            names = reverse_map.get(f"{kind}{index}")
+                            names = [names] if isinstance(names, str) else names
+                            self.assertTrue(names, f"{algorithm} {label} {kind}{index} unnamed")
+                            for name in names:
+                                with self.subTest(algorithm=algorithm, shape=label, name=name):
+                                    reference, tag = self._nameSource(name, algorithm)
+                                    source = Part.getShape(objects[tag])
+                                    named = source.getElement(reference)
+                                    self.assertEqual(key(named), key(element))
+            finally:
+                App.closeDocument(doc.Name)
 
     def testPartCommon(self):
         # Arrange

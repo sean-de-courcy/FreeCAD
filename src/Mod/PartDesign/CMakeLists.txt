@@ -129,6 +129,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/LoftRevolve.V1.txt
     PartDesignTests/NamingGolden/LoftRevolve.V2.txt
     PartDesignTests/NamingGolden/LoftRevolve.V2i-ids.txt
+    PartDesignTests/NamingGolden/OffsetSplitCylinder.V1.txt
+    PartDesignTests/NamingGolden/OffsetSplitCylinder.V2.txt
+    PartDesignTests/NamingGolden/OffsetSplitCylinder.V2i-ids.txt
     PartDesignTests/NamingGolden/OffsetThickness.V1.txt
     PartDesignTests/NamingGolden/OffsetThickness.V2.txt
     PartDesignTests/NamingGolden/OffsetThickness.V2i-ids.txt
