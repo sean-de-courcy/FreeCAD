@@ -3033,203 +3033,231 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         std::unordered_multiset<Data::MappedName, Data::MappedNameHasher> usedPartnerNames;
         std::array<ShapeInfo*, 3> topologyMapElementOrder = {&faceInfo, &edgeInfo, &vertexInfo};
 
-        // Now let's map any unmapped shapes with the IsPartner and ancestor method.
-        for (const auto& info : topologyMapElementOrder) {
-            std::string stringSubshapeType {info->shapetype};
+        // Now let's map any unmapped shapes with the IsPartner and ancestor method. A pass names
+        // faces, then edges, then vertices, so a face named by nothing but its outer wire's edges
+        // stays unnamed when those edges get their names only in this pass (UPP). A second pass
+        // names what the first left, from the names the first gave; it changes no name (ops#25:
+        // one of two coincident pieces of a split face, which has no history).
+        for (int pass = 0; pass < 2; ++pass) {
+            bool unnamedLeft = false;
+            for (const auto& info : topologyMapElementOrder) {
+                std::string stringSubshapeType {info->shapetype};
 
-            auto upperMapTypeEntry = upperMapTypes.find(stringSubshapeType);
+                auto upperMapTypeEntry = upperMapTypes.find(stringSubshapeType);
 
-            for (int mainI = 1; mainI <= info->count(); mainI++) {
-                bool wasMapped = false;
-                const auto& mainElement = info->find(mainI);
-                Data::IndexedName mainElementIndexedName
-                    = Data::IndexedName::fromConst(info->shapetype, mainI);
+                for (int mainI = 1; mainI <= info->count(); mainI++) {
+                    bool wasMapped = false;
+                    const auto& mainElement = info->find(mainI);
+                    Data::IndexedName mainElementIndexedName
+                        = Data::IndexedName::fromConst(info->shapetype, mainI);
 
-                if (getMappedName(mainElementIndexedName)) {
-                    continue;
-                }
-
-                for (const auto& incomingShape : shapes) {
-                    if (!canMapElement(incomingShape)) {
+                    if (getMappedName(mainElementIndexedName)) {
                         continue;
                     }
-                    auto& otherMap = incomingShape._cache->getAncestry(info->type);
-                    if (otherMap.empty()) {
-                        continue;
-                    }
-                    for (int otherI = 1; otherI <= otherMap.count(); otherI++) {
-                        const auto& incomingElement = otherMap.find(incomingShape._Shape, otherI);
 
-                        if (incomingElement.IsPartner(mainElement)) {
-                            Data::IndexedName incomingShapeIndexedName
-                                = Data::IndexedName::fromConst(info->shapetype, otherI);
+                    for (const auto& incomingShape : shapes) {
+                        if (pass > 0) {
+                            break;  // the second pass finds no new partner
+                        }
+                        if (!canMapElement(incomingShape)) {
+                            continue;
+                        }
+                        auto& otherMap = incomingShape._cache->getAncestry(info->type);
+                        if (otherMap.empty()) {
+                            continue;
+                        }
+                        for (int otherI = 1; otherI <= otherMap.count(); otherI++) {
+                            const auto& incomingElement
+                                = otherMap.find(incomingShape._Shape, otherI);
 
-                            Data::MappedName incomingShapeMapName = incomingShape.getMappedName(
-                                incomingShapeIndexedName
-                            );
+                            if (incomingElement.IsPartner(mainElement)) {
+                                Data::IndexedName incomingShapeIndexedName
+                                    = Data::IndexedName::fromConst(info->shapetype, otherI);
 
-                            // An input without an element map (e.g. a Part::Plane) still
-                            // gives its partner a name, as in the Modified/Generated stage.
-                            if (!incomingShapeMapName) {
-                                incomingShapeMapName = Data::MappedName::makeUnmappedName(
-                                    {incomingShapeIndexedName.toString()},
-                                    incomingShape.Tag,
-                                    op,
-                                    (*incomingShapeIndexedName.getType())
+                                Data::MappedName incomingShapeMapName = incomingShape.getMappedName(
+                                    incomingShapeIndexedName
                                 );
-                            }
 
-                            if (incomingShapeMapName
-                                && incomingShape.getInternNames() != getInternNames()) {
-                                incomingShapeMapName
-                                    = toMapForm(incomingShapeMapName, getInternNames());
-                            }
-
-                            if (incomingShapeMapName) {
-                                Data::MappedName newName = Data::MappedName(
-                                    Data::MappedName::makeEncodedSection(
-                                        {},
-                                        {incomingShapeMapName},
-                                        masterTag,
+                                // An input without an element map (e.g. a Part::Plane) still
+                                // gives its partner a name, as in the Modified/Generated stage.
+                                if (!incomingShapeMapName) {
+                                    incomingShapeMapName = Data::MappedName::makeUnmappedName(
+                                        {incomingShapeIndexedName.toString()},
+                                        incomingShape.Tag,
                                         op,
-                                        usedPartnerNames.count(incomingShapeMapName),
-                                        (*info->shapetype),
-                                        0,
-                                        {Data::MAPPER_FLAG_PROJECTION}
-                                    )
+                                        (*incomingShapeIndexedName.getType())
+                                    );
+                                }
+
+                                if (incomingShapeMapName
+                                    && incomingShape.getInternNames() != getInternNames()) {
+                                    incomingShapeMapName
+                                        = toMapForm(incomingShapeMapName, getInternNames());
+                                }
+
+                                if (incomingShapeMapName) {
+                                    Data::MappedName newName = Data::MappedName(
+                                        Data::MappedName::makeEncodedSection(
+                                            {},
+                                            {incomingShapeMapName},
+                                            masterTag,
+                                            op,
+                                            usedPartnerNames.count(incomingShapeMapName),
+                                            (*info->shapetype),
+                                            0,
+                                            {Data::MAPPER_FLAG_PROJECTION}
+                                        )
+                                    );
+
+                                    usedPartnerNames.insert(incomingShapeMapName);
+
+                                    wasMapped = true;
+                                    ensureElementMap()->setElementName(
+                                    mainElementIndexedName,
+                                    newName,
+                                    masterTag
                                 );
-
-                                usedPartnerNames.insert(incomingShapeMapName);
-
-                                wasMapped = true;
-                                ensureElementMap()
-                                    ->setElementName(mainElementIndexedName, newName, masterTag);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (!wasMapped && upperMapTypeEntry != upperMapTypes.end()) {
-                    std::vector<Data::MappedName> linkedUpperNames;
-                    auto linkAncestorNames = [&](TopAbs_ShapeEnum ancestorType) {
-                        for (const auto& ancestorIndex : findAncestors(mainElement, ancestorType)) {
-                            Data::IndexedName ancestorIndexName = Data::IndexedName::fromConst(
-                                shapeName(ancestorType).c_str(),
-                                ancestorIndex
-                            );
-                            Data::MappedName ancestorMappedName = getMappedName(ancestorIndexName);
-
-                            if (ancestorMappedName
-                                && std::find(
-                                       linkedUpperNames.begin(),
-                                       linkedUpperNames.end(),
-                                       ancestorMappedName
-                                   ) == linkedUpperNames.end()) {
-                                linkedUpperNames.push_back(ancestorMappedName);
-                            }
-                        }
-                    };
-
-                    linkAncestorNames(upperMapTypeEntry->second);
-
-                    // A vertex without a named face (a result without faces, or a free edge's
-                    // end) is named from its edges, as V1 does (ops#21).
-                    auto secondUpperMapTypeEntry = secondUpperMapTypes.find(stringSubshapeType);
-                    if (linkedUpperNames.empty()
-                        && secondUpperMapTypeEntry != secondUpperMapTypes.end()) {
-                        linkAncestorNames(secondUpperMapTypeEntry->second);
-                    }
-
-                    sortNameSet(linkedUpperNames);
-
-                    if (linkedUpperNames.size()) {
-                        Data::MappedName newName = Data::MappedName(
-                            Data::MappedName::makeEncodedSection(
-                                {},
-                                linkedUpperNames,
-                                masterTag,
-                                op,
-                                usedUpperNames.count(linkedUpperNames),
-                                (*info->shapetype),
-                                0,
-                                {Data::MAPPER_FLAG_UPPER}
-                            )
-                        );
-
-                        usedUpperNames.insert(linkedUpperNames);
-                        ensureElementMap()->setElementName(mainElementIndexedName, newName, masterTag);
-
-                        continue;
-                    }
-
-                    auto lowerMapTypeEntry = lowerMapTypes.find(stringSubshapeType);
-
-                    if (lowerMapTypeEntry != lowerMapTypes.end()) {
-                        std::vector<Data::MappedName> linkedLowerNames;
-
-                        TopExp_Explorer xp;
-                        if (stringSubshapeType == "Face") {
-                            // just explore thru the outer wire of a face.
-                            xp.Init(
-                                BRepTools::OuterWire(TopoDS::Face(mainElement)),
-                                lowerMapTypeEntry->second
-                            );
-                        }
-                        else {
-                            xp.Init(mainElement, lowerMapTypeEntry->second);
-                        }
-
-                        for (; xp.More(); xp.Next()) {
-                            Data::IndexedName lowerSubshapeIndexName;
-                            TopoDS_Shape foundLowerSubshape = xp.Current();
-                            ShapeInfo*& lowerSubshapeInfo = infoMap.at(lowerMapTypeEntry->second);
-
-                            if (lowerSubshapeInfo->type == lowerMapTypeEntry->second) {
-                                lowerSubshapeIndexName = Data::IndexedName::fromConst(
-                                    shapeName(lowerMapTypeEntry->second).c_str(),
-                                    lowerSubshapeInfo->find(foundLowerSubshape)
-                                );
-                            }
-
-                            if (lowerSubshapeIndexName) {
-                                Data::MappedName lowerSubshapeName = getMappedName(
-                                    lowerSubshapeIndexName
-                                );
-
-                                if (lowerSubshapeName
-                                    && std::find(
-                                           linkedLowerNames.begin(),
-                                           linkedLowerNames.end(),
-                                           lowerSubshapeName
-                                       ) == linkedLowerNames.end()) {
-                                    linkedLowerNames.push_back(lowerSubshapeName);
+                                    break;
                                 }
                             }
                         }
+                    }
 
-                        sortNameSet(linkedLowerNames);
+                    if (!wasMapped && upperMapTypeEntry != upperMapTypes.end()) {
+                        std::vector<Data::MappedName> linkedUpperNames;
+                        auto linkAncestorNames = [&](TopAbs_ShapeEnum ancestorType) {
+                            for (const auto& ancestorIndex :
+                                 findAncestors(mainElement, ancestorType)) {
+                                Data::IndexedName ancestorIndexName = Data::IndexedName::fromConst(
+                                    shapeName(ancestorType).c_str(),
+                                    ancestorIndex
+                                );
+                                Data::MappedName ancestorMappedName
+                                    = getMappedName(ancestorIndexName);
 
-                        if (linkedLowerNames.size()) {
+                                if (ancestorMappedName
+                                    && std::find(
+                                           linkedUpperNames.begin(),
+                                           linkedUpperNames.end(),
+                                           ancestorMappedName
+                                       ) == linkedUpperNames.end()) {
+                                    linkedUpperNames.push_back(ancestorMappedName);
+                                }
+                            }
+                        };
+
+                        linkAncestorNames(upperMapTypeEntry->second);
+
+                        // A vertex without a named face (a result without faces, or a free edge's
+                        // end) is named from its edges, as V1 does (ops#21).
+                        auto secondUpperMapTypeEntry = secondUpperMapTypes.find(stringSubshapeType);
+                        if (linkedUpperNames.empty()
+                            && secondUpperMapTypeEntry != secondUpperMapTypes.end()) {
+                            linkAncestorNames(secondUpperMapTypeEntry->second);
+                        }
+
+                        sortNameSet(linkedUpperNames);
+
+                        if (linkedUpperNames.size()) {
                             Data::MappedName newName = Data::MappedName(
                                 Data::MappedName::makeEncodedSection(
                                     {},
-                                    linkedLowerNames,
+                                    linkedUpperNames,
                                     masterTag,
                                     op,
-                                    usedLowerNames.count(linkedLowerNames),
+                                    usedUpperNames.count(linkedUpperNames),
                                     (*info->shapetype),
                                     0,
-                                    {Data::MAPPER_FLAG_LOWER}
+                                    {Data::MAPPER_FLAG_UPPER}
                                 )
                             );
 
-                            usedLowerNames.insert(linkedLowerNames);
+                            usedUpperNames.insert(linkedUpperNames);
                             ensureElementMap()->setElementName(mainElementIndexedName, newName, masterTag);
+
                             continue;
                         }
+
+                        auto lowerMapTypeEntry = lowerMapTypes.find(stringSubshapeType);
+
+                        if (lowerMapTypeEntry != lowerMapTypes.end()) {
+                            std::vector<Data::MappedName> linkedLowerNames;
+
+                            TopExp_Explorer xp;
+                            if (stringSubshapeType == "Face") {
+                                // just explore thru the outer wire of a face.
+                                xp.Init(
+                                    BRepTools::OuterWire(TopoDS::Face(mainElement)),
+                                    lowerMapTypeEntry->second
+                                );
+                            }
+                            else {
+                                xp.Init(mainElement, lowerMapTypeEntry->second);
+                            }
+
+                            for (; xp.More(); xp.Next()) {
+                                Data::IndexedName lowerSubshapeIndexName;
+                                TopoDS_Shape foundLowerSubshape = xp.Current();
+                                ShapeInfo*& lowerSubshapeInfo
+                                    = infoMap.at(lowerMapTypeEntry->second);
+
+                                if (lowerSubshapeInfo->type == lowerMapTypeEntry->second) {
+                                    lowerSubshapeIndexName = Data::IndexedName::fromConst(
+                                        shapeName(lowerMapTypeEntry->second).c_str(),
+                                        lowerSubshapeInfo->find(foundLowerSubshape)
+                                    );
+                                }
+
+                                if (lowerSubshapeIndexName) {
+                                    Data::MappedName lowerSubshapeName = getMappedName(
+                                        lowerSubshapeIndexName
+                                    );
+
+                                    if (lowerSubshapeName
+                                        && std::find(
+                                               linkedLowerNames.begin(),
+                                               linkedLowerNames.end(),
+                                               lowerSubshapeName
+                                           ) == linkedLowerNames.end()) {
+                                        linkedLowerNames.push_back(lowerSubshapeName);
+                                    }
+                                }
+                            }
+
+                            sortNameSet(linkedLowerNames);
+
+                            if (linkedLowerNames.size()) {
+                                Data::MappedName newName = Data::MappedName(
+                                    Data::MappedName::makeEncodedSection(
+                                        {},
+                                        linkedLowerNames,
+                                        masterTag,
+                                        op,
+                                        usedLowerNames.count(linkedLowerNames),
+                                        (*info->shapetype),
+                                        0,
+                                        {Data::MAPPER_FLAG_LOWER}
+                                    )
+                                );
+
+                                usedLowerNames.insert(linkedLowerNames);
+                                ensureElementMap()->setElementName(
+                                    mainElementIndexedName,
+                                    newName,
+                                    masterTag
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (!wasMapped) {
+                        unnamedLeft = true;  // named neither by a partner nor by UPP or LOW
                     }
                 }
+            }
+            if (!unnamedLeft) {
+                break;
             }
         }
     }

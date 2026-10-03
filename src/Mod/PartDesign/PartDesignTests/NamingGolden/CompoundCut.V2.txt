@@ -1,5 +1,5 @@
 # CompoundCut V2
-[Cut Part::Cut] faces=14 edges=30 vertexes=20 names=63
+[Cut Part::Cut] faces=14 edges=30 vertexes=20 names=64
 Edge c=(0.0000,0.5000,1.0000) m=2.0000 : _;Face1^;_^;{Cylinder}^;CUT^;0^;F^;0^;IDX^,SRC^;_,Face1^;_^;{Second}^;MKR^;0^;F^;0^;IDX^,SRC^;_;{Cut};CUT;0;E;0;GEN;_
 Edge c=(0.0000,0.5000,1.0000) m=2.0000 : _;_^;Edge3^^;_^^;{First}^^;MKR^^;0^^;E^^;0^^;IDX^^,SRC^^;_^;{Cut}^;CUT^;0^;F^;0^;LOW^;_;{Cut};CUT;0;E;0;UPP;_
 Edge c=(0.0000,0.7500,0.0000) m=0.5000 : Edge4;_;{Second};MKR;0;E;0;IDX,SRC;_
@@ -32,8 +32,8 @@ Edge c=(2.0000,0.5000,2.0000) m=1.0000 : Edge6;_;{Second};MKR;0;E;0;IDX,SRC;_
 Edge c=(2.0000,1.0000,1.0000) m=2.0000 : Edge7;_;{Second};MKR;0;E;0;IDX,SRC;_
 Face c=(0.0000,0.7500,1.0000) m=1.0000 : Face1;_;{Second};MKR;0;F;0;IDX,SRC;_
 Face c=(0.0000,1.2500,1.0000) m=3.0000 : _;Edge3^;_^;{First}^;MKR^;0^;E^;0^;IDX^,SRC^;_;{Cut};CUT;0;F;0;LOW;_
-Face c=(0.3183,0.3183,1.0000) m=1.5708 : -
 Face c=(0.3183,0.3183,1.0000) m=1.5708 : Face1;_;{Cylinder};CUT;0;F;0;IDX,SRC;_
+Face c=(0.3183,0.3183,1.0000) m=1.5708 : _;_^;_^^;Edge11^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^,Edge8^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^;{Cut}^^;CUT^^;0^^;F^^;0^^;LOW^^;_^;{Cut}^;CUT^;0^;E^;0^;UPP^;_,_^;_^^;Edge12^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^,Edge6^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^;{Cut}^^;CUT^^;0^^;F^^;0^^;LOW^^;_^;{Cut}^;CUT^;0^;E^;0^;UPP^;_,_^;_^^;Edge3^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^;{Cut}^^;CUT^^;0^^;F^^;0^^;LOW^^;_^;{Cut}^;CUT^;0^;E^;0^;UPP^;_,_^;_^^;Edge5^^^;_^^^;{First}^^^;MKR^^^;0^^^;E^^^;0^^^;IDX^^^,SRC^^^;_^^;{Cut}^^;CUT^^;0^^;F^^;0^^;LOW^^;_^;{Cut}^;CUT^;0^;E^;0^;UPP^;_;{Cut};CUT;0;F;0;LOW;_
 Face c=(0.5000,2.0000,1.0000) m=2.0000 : Face4;_;{First};MKR;0;F;0;IDX,SRC;_
 Face c=(0.5313,1.0858,0.0000) m=1.8037 : _;Edge11^;_^;{First}^;MKR^;0^;E^;0^;IDX^,SRC^;_,Edge8^;_^;{First}^;MKR^;0^;E^;0^;IDX^,SRC^;_;{Cut};CUT;0;F;0;LOW;_
 Face c=(0.5313,1.0858,2.0000) m=1.8037 : _;Edge12^;_^;{First}^;MKR^;0^;E^;0^;IDX^,SRC^;_,Edge6^;_^;{First}^;MKR^;0^;E^;0^;IDX^,SRC^;_;{Cut};CUT;0;F;0;LOW;_
