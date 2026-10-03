@@ -590,7 +590,6 @@ class LinearDirection2Steps(PatternStepsEdit):
         pattern.Originals = [original]
         pattern.Direction2 = (m.originFeature(body, "Y_Axis"), [""])
         pattern.Mode2 = self.patternMode
-        pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
         if self.patternMode == "Extent":
             pattern.Length2 = self.spacing
         else:

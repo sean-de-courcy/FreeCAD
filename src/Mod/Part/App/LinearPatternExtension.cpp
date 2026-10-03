@@ -165,7 +165,8 @@ LinearPatternExtension::LinearPatternExtension()
     );
     EXTENSION_ADD_PROPERTY_TYPE(
         Spacings2,
-        ({}),
+        // as Spacings: `({})` gives [0.0], a first gap of 0 that overrides Offset2 (ops#93)
+        ({-1.0}),
         "Direction 2",
         App::Prop_None,
         "A list of custom spacings for the second direction. If a value is -1, the global 'Offset' "

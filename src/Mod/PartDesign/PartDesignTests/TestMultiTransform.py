@@ -210,7 +210,6 @@ class TestMultiTransform(unittest.TestCase):
         if axis2 is not None:
             step.Direction2 = (axis2, [""])
             step.Mode2 = "Spacing"
-            step.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
             step.Offset2 = offset2
             step.Occurrences2 = occurrences2
         body.addObject(step)
