@@ -259,6 +259,58 @@ class RegressionTests(unittest.TestCase):
             # cluster should contain all edges
             self.assertEqual(len(clusters[0]), i)
 
+    def test_fillet_chamfer_missing_edge_link(self):
+        """ops#74: a Part::Fillet or Part::Chamfer whose first edge is gone after an edit reports
+        that edge and keeps its edge list (the check used to erase from the list it iterated)."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def verticalEdgeAt(shape, x, y):
+            for i, edge in enumerate(shape.Edges, 1):
+                box = edge.BoundBox
+                if box.XLength < 1e-6 and box.YLength < 1e-6 and box.ZLength > 9:
+                    if abs(box.XMin - x) < 1e-6 and abs(box.YMin - y) < 1e-6:
+                        return i
+            return None
+
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature):
+                # A 20 x 10 x 10 block from a sketch; the vertical edges at (20, 0), listed
+                # first, and (0, 0) get the fillet or chamfer. Cutting the corner (20, 0) off
+                # the sketch leaves no vertical edge there.
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                first = verticalEdgeAt(block.Shape, 20, 0)
+                second = verticalEdgeAt(block.Shape, 0, 0)
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(first, 1.0, 1.0), (second, 1.0, 1.0)]
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                edges = rounded.Edges
+
+                outline(sketch, [(0, 0), (18, 0), (20, 2), (20, 10), (0, 10)])
+                self.Doc.recompute()
+                self.assertIsNone(verticalEdgeAt(block.Shape, 20, 0))
+                self.assertFalse(rounded.isValid())
+                self.assertEqual(rounded.getStatusString().count("Missing edge link"), 1)
+                self.assertEqual(rounded.Edges, edges)
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:
