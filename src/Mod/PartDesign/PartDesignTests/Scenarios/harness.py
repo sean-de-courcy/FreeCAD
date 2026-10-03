@@ -39,8 +39,10 @@ The verdict combines them (`combine`): wrong, partial, broken, equivalent (a dif
 that gives the consumer the same result) or correct. Each verdict is printed as a `SCORE` line
 (JSON) for the ops repo's scorecard, and appended to FREECAD_SCENARIO_SCORE_FILE if it is set.
 
-Configurations: V1, V2, V2multi (V2 with the user parameter NamingMultiMatch on: a dress-up's
-Base and a Profile keep every piece of a split element), V2s (V2 with the document's
+Configurations: V1, V2 (with ReferenceSolver off, though new documents start with it on since
+ops#7's Q7: V2 stands for the files saved before that default), V2multi (V2 with the user
+parameter NamingMultiMatch on: a dress-up's Base and a Profile keep every piece of a split
+element), V2s (V2 with the document's
 ReferenceSolver on, ops#7: a reference that doesn't resolve exactly goes to the solver, and a
 broken one fails its owner) and V2i (V2 with the document's InternNames on, ops#6: names are held
 in the name table; reports show them expanded, so they read and mask as V2's); V2si is V2s with
@@ -806,6 +808,7 @@ class Scenario:
         if hasattr(doc, "HistoryAlgorithm"):
             doc.HistoryAlgorithm = self.mode
         if hasattr(doc, "ReferenceSolver"):
+            # Explicitly, also when off: new documents start with it on (ops#7 Q7).
             doc.ReferenceSolver = self.solver
         if hasattr(doc, "InternNames"):
             # Explicitly, also when off: FREECAD_INTERN_NAMES=1 turns it on in new documents.

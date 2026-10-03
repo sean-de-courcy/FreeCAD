@@ -301,6 +301,8 @@ def _saveModels(folder):
                 "features": [f.Name for f in features],
                 "raw": dump._dumpFeatures(model, features, None, "V2"),
                 "expanded": dump._dumpFeatures(model, features, None, "V2i"),
+                # on in new documents (ops#7 Q7), and saved with the file
+                "solver": bool(getattr(doc, "ReferenceSolver", False)),
             }
         finally:
             App.closeDocument(doc.Name)

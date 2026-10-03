@@ -17,7 +17,6 @@ cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseBox.test_fillet_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseTrimmedBox.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseTrimmedBox.test_fillet_edge_V2multi
-cli  PartDesignTests.TestFillet.TestFillet.testDeletingPreviousFeatureRelinksUniqueMatchingBaseEdge
 
 reason: a dress-up or face profile on a split element keeps one piece; section 8 expects every piece (V2 with the multi-match flags off; V2multi is correct)
 cli  PartDesignTests.TestNamingScenarios.SplitFilletFuse.test_fillet_edge_V2

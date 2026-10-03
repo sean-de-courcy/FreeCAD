@@ -114,7 +114,8 @@ names it.
 | `fix/25-fallback-second-pass` | fix | ops#25 | - | `integration` `0e56d912a2` | `73031cb7fd` (fork PR 86), 2026-10-02 | a new base's V2 fallback names a face whose edges it names in the same pass |
 | `fix/97-interning-load-notes` | fix | ops#97 | - | `integration` `488aab941e` | `c5b3dae032` (fork PR 85), 2026-10-02 | never (fork naming) |
 | `fix/45-49-naming-bundle-b` | fix | ops#45, ops#49 | - | `integration` `73031cb7fd` | `2d10bfb7bc` (fork PR 87), 2026-10-02 | a new base names offsets independently of OCCT's face order and checks compound child ranges |
-| `fix/26-33-maps-upstream-features` | fix | ops#26, ops#29, ops#33 | - | `integration` `0e56d912a2` | (fork PR 84) | a new base builds Helix, ShapeBinder and Part::Face with element maps |
+| `fix/26-33-maps-upstream-features` | fix | ops#26, ops#29, ops#33 | - | `integration` `0e56d912a2` | `27b82b9bbc` (fork PR 84), 2026-10-02 | a new base builds Helix, ShapeBinder and Part::Face with element maps |
+| `feat/7-solver-default` | feat | ops#7 | - | `integration` `27b82b9bbc` | (fork PR 88) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

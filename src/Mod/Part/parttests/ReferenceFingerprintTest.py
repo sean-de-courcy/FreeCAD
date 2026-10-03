@@ -79,7 +79,7 @@ class ReferenceFingerprintTest(unittest.TestCase):
         holder.addProperty("App::PropertyXLinkSub", "XSub")
         holder.addProperty("App::PropertyXLinkSubList", "XSubList")
         doc.recompute()
-        # Explicitly, also when off: FREECAD_REFERENCE_SOLVER=1 turns it on in new documents.
+        # Explicitly, also when off: new documents start with it on (ops#7 Q7).
         doc.ReferenceSolver = solver
         holder.Sub = (box, ["Face1", "Face6"])
         holder.SubList = [(box, "Face2"), (box, "Edge1")]
@@ -177,6 +177,115 @@ class ReferenceFingerprintTest(unittest.TestCase):
         third = _documentXml(self._save(reopened, "third"))
         self.assertEqual(_fingerprints(third), _fingerprints(second))
         self.assertIsNotNone(goneFingerprint)
+
+
+class ReferenceSolverDefaultTest(unittest.TestCase):
+    """The solver is on in new documents and off in files saved without it (ops#7 Q7). The user
+    parameter BaseApp/Preferences/Document/ReferenceSolver (default true) sets it for new
+    documents only."""
+
+    PARAMETER = "User parameter:BaseApp/Preferences/Document"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="ReferenceSolverDefaultTest")
+        self.docNames = []
+        self.param = App.ParamGet(self.PARAMETER)
+        self.savedParameter = (
+            self.param.GetBool("ReferenceSolver")
+            if "ReferenceSolver" in self.param.GetBools()
+            else None
+        )
+        self.param.RemBool("ReferenceSolver")
+
+    def tearDown(self):
+        if self.savedParameter is None:
+            self.param.RemBool("ReferenceSolver")
+        else:
+            self.param.SetBool("ReferenceSolver", self.savedParameter)
+        for name in self.docNames:
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _skipUnderTestAid(self):
+        if os.environ.get("FREECAD_REFERENCE_SOLVER") == "1":
+            self.skipTest("FREECAD_REFERENCE_SOLVER=1 turns the solver on in every document")
+
+    def _new(self, name):
+        doc = App.newDocument(name)
+        self.docNames.append(doc.Name)
+        return doc
+
+    def _model(self, doc):
+        """A box and an element reference to one of its faces."""
+        box = doc.addObject("Part::Box", "Box")
+        holder = doc.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("App::PropertyLinkSub", "Sub")
+        doc.recompute()
+        holder.Sub = (box, ["Face6"])
+        doc.recompute()
+
+    def _saveAndReopen(self, doc, name):
+        path = os.path.join(self.dir, name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        reopened = App.openDocument(path)
+        self.docNames.append(reopened.Name)
+        return path, reopened
+
+    def testNewDocumentIsOn(self):
+        doc = self._new("SolverDefaultNew")
+        self.assertEqual(doc.HistoryAlgorithm, "V2")
+        self.assertTrue(doc.ReferenceSolver)
+
+    def testParameterTurnsItOffForNewDocuments(self):
+        self._skipUnderTestAid()
+        self.param.SetBool("ReferenceSolver", False)
+        self.assertFalse(self._new("SolverDefaultParamOff").ReferenceSolver)
+
+    def testOnRoundTrips(self):
+        """A new document saves the switch and its fingerprints, and opens with it on."""
+        doc = self._new("SolverDefaultOn")
+        self._model(doc)
+        path, reopened = self._saveAndReopen(doc, "on")
+        xml = _documentXml(path)
+        self.assertIn('name="ReferenceSolver"', xml)
+        self.assertEqual(len(_fingerprints(xml)), 1)
+        self.assertTrue(reopened.ReferenceSolver)
+
+    def testFileSavedWithoutTheSwitchOpensOff(self):
+        """A file saved with the solver off has no ReferenceSolver property, like every file
+        saved before the default changed. It opens off although new documents start on, and
+        saves again as it was."""
+        self._skipUnderTestAid()
+        doc = self._new("SolverDefaultOff")
+        doc.ReferenceSolver = False
+        self._model(doc)
+        path, reopened = self._saveAndReopen(doc, "off")
+        first = _documentXml(path)
+        self.assertNotIn("ReferenceSolver", first)
+        self.assertEqual(_fingerprints(first), [])
+        self.assertTrue(self._new("SolverDefaultStillOn").ReferenceSolver)
+        self.assertFalse(reopened.ReferenceSolver)
+
+        reopened.recompute()
+        again = os.path.join(self.dir, "again.FCStd")
+        reopened.saveAs(again)
+        second = _documentXml(again)
+        self.assertNotIn("ReferenceSolver", second)
+        self.assertEqual(_objectData(second), _objectData(first))
+
+    def testOffThenOnRoundTrips(self):
+        """Turned on in a file that was saved off, the switch is saved and opens on."""
+        doc = self._new("SolverDefaultOffOn")
+        doc.ReferenceSolver = False
+        self._model(doc)
+        _, reopened = self._saveAndReopen(doc, "offon1")
+        reopened.ReferenceSolver = True
+        reopened.recompute()
+        path, last = self._saveAndReopen(reopened, "offon2")
+        self.assertIn('name="ReferenceSolver"', _documentXml(path))
+        self.assertTrue(last.ReferenceSolver)
 
 
 if __name__ == "__main__":

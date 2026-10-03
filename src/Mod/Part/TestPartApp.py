@@ -37,7 +37,7 @@ from parttests.regression_tests import RegressionTests
 from parttests.TopoShapeListTest import TopoShapeListTest
 from parttests.TopoShapeTest import TopoShapeTest
 from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenceTestV2i
-from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest
+from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.TestFaceMakerUnifiedPlanar import *
