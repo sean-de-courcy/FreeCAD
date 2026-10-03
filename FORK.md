@@ -115,7 +115,8 @@ names it.
 | `fix/97-interning-load-notes` | fix | ops#97 | - | `integration` `488aab941e` | `c5b3dae032` (fork PR 85), 2026-10-02 | never (fork naming) |
 | `fix/45-49-naming-bundle-b` | fix | ops#45, ops#49 | - | `integration` `73031cb7fd` | `2d10bfb7bc` (fork PR 87), 2026-10-02 | a new base names offsets independently of OCCT's face order and checks compound child ranges |
 | `fix/26-33-maps-upstream-features` | fix | ops#26, ops#29, ops#33 | - | `integration` `0e56d912a2` | `27b82b9bbc` (fork PR 84), 2026-10-02 | a new base builds Helix, ShapeBinder and Part::Face with element maps |
-| `feat/7-solver-default` | feat | ops#7 | - | `integration` `27b82b9bbc` | (fork PR 88) | never (fork feature) |
+| `feat/7-solver-default` | feat | ops#7 | - | `integration` `27b82b9bbc` | `26e3ca1638` (fork PR 88), 2026-10-03 | never (fork feature) |
+| `fix/73-77-74-feature-bundle` | fix | ops#73, ops#77, ops#74 | - | `integration` `26e3ca1638` | (fork PR 89) | a two-sided up-to side that lands behind its face errors; the dead BaseFeature reorder removed; Part::Fillet/Chamfer erase UB removed |
 
 ## Fork-only commits in carried topics
 

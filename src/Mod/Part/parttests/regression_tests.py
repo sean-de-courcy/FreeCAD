@@ -4,6 +4,7 @@ import FreeCAD
 from FreeCAD import Vector, Base, newDocument, closeDocument
 import Part
 
+import itertools
 import math
 import os
 
@@ -258,6 +259,74 @@ class RegressionTests(unittest.TestCase):
 
             # cluster should contain all edges
             self.assertEqual(len(clusters[0]), i)
+
+    def test_fillet_chamfer_missing_edge_link(self):
+        """ops#74: a Part::Fillet or Part::Chamfer whose first edge is gone after an edit reports
+        that edge and keeps its edge list (the check used to erase from the list it iterated)."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def verticalEdgeAt(shape, x, y):
+            for i, edge in enumerate(shape.Edges, 1):
+                box = edge.BoundBox
+                if box.XLength < 1e-6 and box.YLength < 1e-6 and box.ZLength > 9:
+                    if abs(box.XMin - x) < 1e-6 and abs(box.YMin - y) < 1e-6:
+                        return i
+            return None
+
+        # Solver off: Part::Fillet's own check reports the edge. Solver on (ops#7): the solver
+        # finds no candidate and marks the reference broken, so nothing is filleted either.
+        for solver, feature in itertools.product((False, True), ("Fillet", "Chamfer")):
+            with self.subTest(feature=feature, solver=solver):
+                if not hasattr(self.Doc, "ReferenceSolver"):
+                    if solver:
+                        continue
+                else:
+                    # Explicitly, also when off: new documents start with it on.
+                    self.Doc.ReferenceSolver = solver
+                # A 20 x 10 x 10 block from a sketch; the vertical edges at (20, 0), listed
+                # first, and (0, 0) get the fillet or chamfer. Cutting the corner (20, 0) off
+                # the sketch leaves no vertical edge there.
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                first = verticalEdgeAt(block.Shape, 20, 0)
+                second = verticalEdgeAt(block.Shape, 0, 0)
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(first, 1.0, 1.0), (second, 1.0, 1.0)]
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                edges = rounded.Edges
+
+                outline(sketch, [(0, 0), (18, 0), (20, 2), (20, 10), (0, 10)])
+                self.Doc.recompute()
+                self.assertIsNone(verticalEdgeAt(block.Shape, 20, 0))
+                self.assertFalse(rounded.isValid())
+                if solver:
+                    status = rounded.getStatusString()
+                    self.assertEqual(status.count("Missing edge reference"), 1, status)
+                    self.assertIn("EdgeLinks[0]", status)
+                    links = rounded.EdgeLinks[1]
+                    self.assertTrue(links[0].startswith("?"), links)
+                    self.assertFalse(links[1].startswith("?"), links)
+                else:
+                    self.assertEqual(rounded.getStatusString().count("Missing edge link"), 1)
+                self.assertEqual(rounded.Edges, edges)
 
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""

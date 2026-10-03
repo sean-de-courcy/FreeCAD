@@ -77,10 +77,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
                 fullErrMsg.append("Missing edge link: ");
                 fullErrMsg.append(ref);
                 fullErrMsg.append("\n");
-
-                auto removeIt = std::remove(edges.begin(), edges.end(), info);
-                edges.erase(removeIt, edges.end());
-
+                // Report it and go on with the next edge; nothing is erased from `edges`, which
+                // this loop iterates (ops#74), since a missing link returns the error unstored.
                 continue;
             }
             // Toponaming project March 2024:  Replaced this code because it wouldn't work:

@@ -147,6 +147,29 @@ std::optional<Base::Placement> upToFaceReached(TopoShape face, const TopoShape& 
         Base::Rotation(Base::Vector3d(0, 0, 1), Base::Vector3d(normal.X(), normal.Y(), normal.Z()))
     );
 }
+
+// Whether a side extruded up to a face from `profile` (in a plane with normal `normal`) went the
+// way `dir` points (ops#73). getUpToFace() reverses a side whose face it doesn't find ahead, and
+// the prism then goes to the face on whichever side it lies. One side, that pads backwards to
+// the face; but a reversed side of a two-sided extrusion lands on the other side, and the XOR of
+// the sides cancels the overlap. The prism lies on one side of the profile's plane, so the
+// position of its centre of mass decides.
+bool sideGoesAlong(
+    const TopoShape& prism,
+    const TopoShape& profile,
+    const gp_Dir& normal,
+    const gp_Dir& dir
+)
+{
+    Base::Vector3d prismCog;
+    Base::Vector3d profileCog;
+    if (prism.isNull() || !prism.getCenterOfGravity(prismCog)
+        || !profile.getCenterOfGravity(profileCog)) {
+        return true;
+    }
+    double along = (prismCog - profileCog) * Base::Vector3d(normal.X(), normal.Y(), normal.Z());
+    return along * normal.Dot(dir) > -Precision::Confusion();
+}
 }  // namespace
 
 FeatureExtrude::FeatureExtrude()
@@ -813,6 +836,20 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             bool method1LengthBased = method == "Length" || method == "ThroughAll";
             bool method2LengthBased = method2 == "Length" || method2 == "ThroughAll";
             bool hasStartOffset = std::fabs(startOffset) > Precision::Confusion();
+            gp_Dir sketchNormal(SketchVector.x, SketchVector.y, SketchVector.z);
+            sketchNormal.Transform(invTrsf);
+            // An up-to side that had to go the other way overlaps the other side (ops#73).
+            auto reversed = [&](const TopoShape& prism, const TopoShape& profile, const gp_Dir& d) {
+                return !sideGoesAlong(prism, profile, sketchNormal, d);
+            };
+            const char* side1Reversed = QT_TRANSLATE_NOOP(
+                "Exception",
+                "Side 1 can't reach its face: the face lies behind side 1."
+            );
+            const char* side2Reversed = QT_TRANSLATE_NOOP(
+                "Exception",
+                "Side 2 can't reach its face: the face lies behind side 2."
+            );
 
             if (!hasStartOffset && method1LengthBased && method2 != "UpToFirst" && noTaper) {
                 gp_Trsf start_transform;
@@ -833,6 +870,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
+                if (!method2LengthBased && reversed(prism, moved_sketch, dir2)) {
+                    return new App::DocumentObjectExecReturn(side2Reversed);
+                }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
                     prisms.push_back(prism);
                 }
@@ -856,6 +896,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
+                if (!method1LengthBased && reversed(prism, moved_sketch, dir)) {
+                    return new App::DocumentObjectExecReturn(side1Reversed);
+                }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
                     prisms.push_back(prism);
                 }
@@ -874,6 +917,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
+                if (!method1LengthBased && reversed(prism1, startSketch, dir)) {
+                    return new App::DocumentObjectExecReturn(side1Reversed);
+                }
                 if (!prism1.isNull() && !prism1.getShape().IsNull()) {
                     prisms.push_back(prism1);
                 }
@@ -892,6 +938,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
+                if (!method2LengthBased && reversed(prism2, startSketch, dir2)) {
+                    return new App::DocumentObjectExecReturn(side2Reversed);
+                }
                 if (!prism2.isNull() && !prism2.getShape().IsNull()) {
                     prisms.push_back(prism2);
                 }
