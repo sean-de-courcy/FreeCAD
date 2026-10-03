@@ -71,11 +71,15 @@ class SketcherGuiTestCases(unittest.TestCase):
 
     @classmethod
     def scan_preselection_at_viewport(cls, center_coin, expected_constraint_name, span=16, step=2):
+        # One key per kind classify_preselection returns. The scan can reach a sketch axis: in
+        # the tilted view the probe point is about 17 px from the H axis off screen, so the
+        # window's edge plus the pick radius touches it.
         counts = {
             "target_constraint": 0,
             "other_constraint": 0,
             "edge": 0,
             "vertex": 0,
+            "axis": 0,
             "other": 0,
             "none": 0,
         }
@@ -143,6 +147,7 @@ class SketcherGuiTestCases(unittest.TestCase):
             + counts["other_constraint"]
             + counts["edge"]
             + counts["vertex"]
+            + counts["axis"]
             + counts["other"]
         )
         if total_hits == 0:
