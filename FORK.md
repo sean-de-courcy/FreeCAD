@@ -122,7 +122,8 @@ names it.
 | `fix/67-80-gui-minors` | fix | ops#67, ops#80 | - | `integration` `583b7a429b` | `f4bdbfaa11` (fork PR 92), 2026-10-03 | the base's Mass Properties panel removes a row whose subname contains a vertical bar (keep `TestMeasureGui`); its `TestConstraintPreselectionGui` counts axis hits |
 | `fix/108-bbox-triangulation` | fix | ops#108 | - | `integration` `583b7a429b` | `a4068e7b60` (fork PR 93), 2026-10-03 | never (fork test harness) |
 | `fix/44-v1-sketch-postfix` | fix | ops#44 | - | `integration` `a4068e7b60` | `6034a05826` (fork PR 94), 2026-10-03 | a new base builds V1 sketch edges, points and `makeElementWires`' wires without the document's hasher (upstream's `g1;SKT` names) |
-| `fix/101-v2-open-walk` | fix | ops#101 | - | `integration` `a4068e7b60` | (fork PR 95) | never (fork naming) |
+| `fix/101-v2-open-walk` | fix | ops#101 | - | `integration` `a4068e7b60` | `6c82663a0f` (fork PR 95), 2026-10-03 | never (fork naming) |
+| `fix/93-pattern-spacings2` | fix | ops#93 | - | `integration` `6c82663a0f` | (fork PR 96) | upstream's `LinearPatternExtension` gives `Spacings2` a default without the `0.0` entry |
 
 ## Fork-only commits in carried topics
 

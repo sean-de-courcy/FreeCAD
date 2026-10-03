@@ -339,7 +339,6 @@ def modelPatternSteps(doc):
     pattern.Originals = [pad2]
     pattern.Direction2 = (models.originFeature(body2, "Y_Axis"), [""])
     pattern.Mode2 = "Spacing"
-    pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
     pattern.Offset2 = 3
     pattern.Occurrences2 = 2
     pattern.Refine = False

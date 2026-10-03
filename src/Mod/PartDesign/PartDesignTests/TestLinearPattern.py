@@ -21,6 +21,9 @@
 # *                                                                         *
 # ***************************************************************************
 
+import os
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD
@@ -182,7 +185,6 @@ class TestLinearPattern(unittest.TestCase):
         pattern.Offset = 30
         pattern.Direction2 = (self.Doc.Y_Axis, [""])
         pattern.Mode2 = "Spacing"
-        pattern.Spacings2 = []  # a new pattern's is [0.0], a gap of 0 (ops#93)
         pattern.Offset2 = 30
         pattern.Refine = False
         body.addObject(pattern)
@@ -196,7 +198,85 @@ class TestLinearPattern(unittest.TestCase):
                 f"Occurrences {xCount}, Occurrences2 {yCount}",
             )
 
+    def blockGrid(self):
+        """A new pattern of a 10 mm box: 3 occurrences 30 apart along X, and Y as Direction2.
+        Only Direction2's mode and occurrences are left to the caller, nothing else is set."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Width = box.Height = 10
+        pattern = self.Doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [box]
+        pattern.Direction = (self.Doc.X_Axis, [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 30
+        pattern.Occurrences = 3
+        pattern.Direction2 = (self.Doc.Y_Axis, [""])
+        pattern.Refine = False
+        body.addObject(pattern)
+        return pattern
+
+    @staticmethod
+    def blockCorners(shape):
+        """Each solid's lowest corner, sorted."""
+        return sorted(
+            (round(s.BoundBox.XMin, 6), round(s.BoundBox.YMin, 6), round(s.BoundBox.ZMin, 6))
+            for s in shape.Solids
+        )
+
+    @staticmethod
+    def gridCorners(ys):
+        return sorted((x, y, 0.0) for x in (0.0, 30.0, 60.0) for y in ys)
+
+    def testSecondDirectionSpacingDefaults(self):
+        """A new pattern's second direction in Spacing mode puts each row Offset2 after the
+        previous one: its Spacings2 starts as [-1.0] like Spacings, not [0.0] (ops#93)."""
+        pattern = self.blockGrid()
+        self.assertEqual(pattern.Spacings2, [-1.0])  # Occurrences2 is still 1
+        pattern.Mode2 = "Spacing"
+        pattern.Offset2 = 25
+        pattern.Occurrences2 = 2
+        self.Doc.recompute()
+        self.assertEqual(self.blockCorners(pattern.Shape), self.gridCorners((0.0, 25.0)))
+        pattern.Occurrences2 = 3
+        self.Doc.recompute()
+        self.assertEqual(self.blockCorners(pattern.Shape), self.gridCorners((0.0, 25.0, 50.0)))
+        self.assertAlmostEqual(pattern.Shape.Volume, 9000)
+
+    def testSecondDirectionExtentDefaults(self):
+        """In Extent mode a new pattern's rows divide Length2 evenly (ops#93)."""
+        pattern = self.blockGrid()
+        pattern.Mode2 = "Extent"
+        pattern.Length2 = 40
+        pattern.Occurrences2 = 3
+        self.Doc.recompute()
+        self.assertEqual(self.blockCorners(pattern.Shape), self.gridCorners((0.0, 20.0, 40.0)))
+
+    def testSavedSpacings2Kept(self):
+        """A file keeps the Spacings2 it was saved with, a gap of 0 included: the rows stay where
+        they were (ops#93 changes only a new pattern's default)."""
+        pattern = self.blockGrid()
+        pattern.Mode2 = "Spacing"
+        pattern.Offset2 = 25
+        pattern.Occurrences2 = 3
+        pattern.Spacings2 = [0.0, -1.0]  # as a file saved before ops#93 may hold it
+        self.Doc.recompute()
+        before = self.blockCorners(pattern.Shape)
+        self.assertEqual(before, self.gridCorners((0.0, 25.0)))  # rows 1 and 2 coincide
+        tempDir = os.path.realpath(tempfile.mkdtemp())
+        try:
+            path = os.path.join(tempDir, "spacings2.FCStd")
+            self.Doc.saveAs(path)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.openDocument(path)
+            pattern = self.Doc.getObject("LinearPattern")
+            self.assertEqual(pattern.Spacings2, [0.0, -1.0])
+            pattern.touch()
+            self.Doc.recompute()
+            self.assertEqual(self.blockCorners(pattern.Shape), before)
+        finally:
+            shutil.rmtree(tempDir, ignore_errors=True)
+
     def tearDown(self):
         # closing doc
-        FreeCAD.closeDocument("PartDesignTestLinearPattern")
+        FreeCAD.closeDocument(self.Doc.Name)  # testSavedSpacings2Kept reopens it
         # print ("omit closing document for debugging")
