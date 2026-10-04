@@ -788,6 +788,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
                 doc = App.newDocument("ExtrusionOfPlane")
                 try:
                     doc.HistoryAlgorithm = algorithm
+                    doc.InternNames = False  # plain names as text (ops#6 Q6)
                     plane = doc.addObject("Part::Plane", "Plane")
                     plane.Length = plane.Width = 10
                     extrusion = doc.addObject("Part::Extrusion", "Extrusion")
@@ -835,6 +836,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         doc = App.newDocument("SplitPieces")
         try:
             doc.HistoryAlgorithm = "V2"
+            doc.InternNames = False  # plain names as text (ops#6 Q6)
             box = doc.addObject("Part::Box", "Box")
             slot = doc.addObject("Part::Box", "Slot")
             slot.Length = 2
@@ -878,11 +880,13 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
 
     def testInternedNamesExpandToV2(self):
         """The name table (ops#6, Task 1 PR 3): every V2 name of a fillet cut by a slot, interned,
-        expands back to itself byte for byte and decodes to as many sections. Nothing interns
-        names in FreeCAD yet, so the shapes keep their plain names."""
+        expands back to itself byte for byte and decodes to as many sections. The document is
+        plain, so the shapes keep their plain names (new documents are interned since ops#6's
+        Q6)."""
         doc = App.newDocument("InternedNames")
         try:
             doc.HistoryAlgorithm = "V2"
+            doc.InternNames = False
             box = doc.addObject("Part::Box", "Box")
             fillet = doc.addObject("Part::Fillet", "Fillet")
             fillet.Base = box
@@ -1524,6 +1528,7 @@ class TopoShapeTest(unittest.TestCase, TopoShapeAssertions):
         """A Python feature's new elements carry the feature's tag, on every recompute and in
         every feature that makes the same shape (ops#16)."""
         # Arrange
+        self.doc.InternNames = False  # plain names as text (ops#6 Q6)
         features = []
         for name in ("SquareFace1", "SquareFace2"):
             feature = self.doc.addObject("Part::FeaturePython", name)

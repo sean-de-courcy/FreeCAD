@@ -803,6 +803,8 @@ TEST_F(FeaturePartTest, linksKeepTheSourcesNamesV2)
     //   code can store such a shape. Link arrays and their elements take copies of the object's
     //   shape, which share its element map, and retag them (ops#34).
     ASSERT_EQ(_doc->getSelectedHistoryAlgorithm(), App::HistoryAlgorithm::V2);
+    //   plain names, compared as text: new documents are interned since ops#6's Q6
+    _doc->InternNames.setValue(false);
     Data::IndexedName edge1("Edge", 1);
     Data::IndexedName face1("Face", 1);
     auto edgeName = Data::MappedName::makeUnmappedName({"Edge1"}, 7, "RTG", 'E');

@@ -223,6 +223,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         """Test that padding a sketch results in a correct element map.  Note that comprehensive
         testing of the geometric functionality of the Pad is in TestPad.py"""
         # Arrange
+        self.Doc.InternNames = False  # plain names as text (ops#6 Q6)
         body = self.Doc.addObject("PartDesign::Body", "Body")
         padSketch = self.Doc.addObject("Sketcher::SketchObject", "SketchPad")
         pad = self.Doc.addObject("PartDesign::Pad", "Pad")
@@ -873,6 +874,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         profile's edges, under its own tag (ops#26). Before, it had no element map."""
         doc = self.Doc
         doc.HistoryAlgorithm = "V2"
+        doc.InternNames = False  # plain names as text (ops#6 Q6)
         body = doc.addObject("PartDesign::Body", "Body")
         sketch = body.newObject("Sketcher::SketchObject", "Sketch")
         TestSketcherApp.CreateRectangleSketch(sketch, (2, 0), (1, 1))
@@ -893,6 +895,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         are named from the profile sketch's edges (ops#26)."""
         doc = self.Doc
         doc.HistoryAlgorithm = "V2"
+        doc.InternNames = False  # plain names as text (ops#6 Q6)
         body = doc.addObject("PartDesign::Body", "Body")
         base = body.newObject("Sketcher::SketchObject", "Base")
         TestSketcherApp.CreateRectangleSketch(base, (-1, -1), (2, 2))
@@ -1266,6 +1269,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         follow geometry IDs. Before, they were the binder's own index names."""
         doc = self.Doc
         doc.HistoryAlgorithm = "V2"
+        doc.InternNames = False  # plain names as text (ops#6 Q6)
         body = doc.addObject("PartDesign::Body", "Body")
         sketch = body.newObject("Sketcher::SketchObject", "Sketch")
         corners = [(0, 0), (10, 0), (10, 5), (0, 5)]
