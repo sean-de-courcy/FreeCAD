@@ -3,9 +3,11 @@
 #include "ElementSolverBatch.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -240,34 +242,31 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
                                                             : resolution.shadow.oldName;
 }
 
-// Whether an exact reference may be split (Task 2 PR 7): its saved fingerprint is a line edge or
-// an arc that its element now lies strictly within, or a plane its element now lies in, smaller.
-// One fingerprint per exact line, circle or planar face reference.
-bool mayBeSplit(const SolverEntry& entry,
-                GeoFeature* geo,
-                double diagonal,
-                const Data::GeometryTolerances& tolerances,
-                double distance)
+// Whether an exact reference must be solved, from \a saved, its saved fingerprint, and \a now,
+// its element's current one: the element moved (ops#105: another element may sit where it
+// was), or it may be split (Task 2 PR 7: a line edge or an arc that it now lies strictly within,
+// or a plane it now lies in, smaller).
+bool exactNeedsSolving(const SolverEntry& entry,
+                       const Data::ElementFingerprint& saved,
+                       const Data::ElementFingerprint& now,
+                       double diagonal,
+                       const Data::GeometryTolerances& tolerances,
+                       double distance)
 {
-    if (entry.kind != SolverEntry::Kind::Exact) {
+    if (!saved.isValid() || !now.isValid()) {
         return false;
+    }
+    if (!Data::atSamePlace(saved, now, diagonal, tolerances, distance)) {
+        return true;
     }
     const std::string type = indexType(entry.oldIndex);
-    const auto& text = entry.oldFingerprint;
-    const bool line = type == "Edge"
-        && (text.find("|E|Line|") != std::string::npos
-            || text.find("|E|Circle|") != std::string::npos);
-    const bool plane = type == "Face" && text.find("|F|Plane|") != std::string::npos;
-    if (!line && !plane) {
-        return false;
+    if (type == "Edge" && saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle")) {
+        return Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance);
     }
-    auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
-    Data::ElementFingerprint now;
-    if (!saved.isValid() || !geo->getElementFingerprint(entry.oldIndex.c_str(), now)) {
-        return false;
+    if (type == "Face" && saved.type == 'F' && saved.kind == "Plane") {
+        return Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance);
     }
-    return line ? Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance)
-                : Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance);
+    return false;
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -600,6 +599,21 @@ bool solveElementReferences(DocumentObject* feature,
             : std::vector<std::string>(it->second.begin(), it->second.end());
     };
 
+    // The target's elements' current fingerprints, measured once per batch: the shape is the
+    // same for every owner (ops#105).
+    auto measured = std::make_shared<std::map<std::string, Data::ElementFingerprint>>();
+    auto fingerprintOf = [geo, measured](const std::string& index) {
+        auto it = measured->find(index);
+        if (it == measured->end()) {
+            Data::ElementFingerprint fingerprint;
+            if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
+                fingerprint = Data::ElementFingerprint();
+            }
+            it = measured->emplace(index, std::move(fingerprint)).first;
+        }
+        return it->second;
+    };
+
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
             auto na = referenceName(a->prop);
@@ -609,14 +623,13 @@ bool solveElementReferences(DocumentObject* feature,
         bool anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->kind == SolverEntry::Kind::Missing;
         });
-        // An owner with only exact references is solved only if one of them may be split: a
-        // line edge, an arc or a planar face (the text first, then the geometry).
-        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
-                return e->kind == SolverEntry::Kind::Exact
-                    && (e->oldFingerprint.find("|E|Line|") != std::string::npos
-                        || e->oldFingerprint.find("|E|Circle|") != std::string::npos
-                        || e->oldFingerprint.find("|F|Plane|") != std::string::npos);
-            })) {
+        // An owner with only exact references is solved only if one of them has a saved
+        // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
+        // update solves missing references only.
+        if (!anyMissing
+            && (reverse || std::none_of(entries.begin(), entries.end(), [](const auto* e) {
+                    return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty();
+                }))) {
             continue;
         }
 
@@ -644,7 +657,13 @@ bool solveElementReferences(DocumentObject* feature,
             sourceRead = true;
         }
         if (!anyMissing && std::none_of(entries.begin(), entries.end(), [&](const auto* e) {
-                return mayBeSplit(*e, geo, diagonal, tolerances, continuationDistance);
+                return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty()
+                    && exactNeedsSolving(*e,
+                                         Data::ElementFingerprint::fromString(e->oldFingerprint),
+                                         fingerprintOf(e->oldIndex),
+                                         diagonal,
+                                         tolerances,
+                                         continuationDistance);
             })) {
             continue;
         }
@@ -684,6 +703,10 @@ bool solveElementReferences(DocumentObject* feature,
                                                      : "index carry, fingerprint differs";
                     if (exists) {
                         item.candidates.emplace_back(index, mapForm(name));
+                        item.candidateRoles.emplace_back("index");
+                        item.candidateDistances.push_back(
+                            std::numeric_limits<double>::quiet_NaN()
+                        );
                     }
                     FC_WARN(referenceName(entry->prop)
                             << "[" << entry->index << "]: " << entry->oldName << " broken ("
@@ -704,13 +727,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.diagonal = diagonal;
         input.maplessTag = maplessTag;
         input.continuationDistance = continuationDistance;
-        input.fingerprintOf = [geo](const std::string& index) {
-            Data::ElementFingerprint fingerprint;
-            if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
-                return Data::ElementFingerprint();
-            }
-            return fingerprint;
-        };
+        input.fingerprintOf = fingerprintOf;
         // The solver's only topology: the faces an edge bounds, for the continuation.
         input.facesOf = [geo](const std::string& index) {
             std::vector<std::string> faces;
@@ -840,9 +857,26 @@ bool solveElementReferences(DocumentObject* feature,
                     resolutions[entry.prop].push_back(resolution);
                 }
                 item.status = ReferenceReport::Status::Broken;
+                std::string places;  // the elements where a moved one was (ops#105)
                 for (std::size_t c = 0; c < outcome.candidates.size(); ++c) {
                     item.candidates.emplace_back(outcome.candidates[c],
                                                  mapForm(outcome.candidateNames[c]));
+                    if (c < outcome.candidateRoles.size()
+                        && outcome.candidateRoles[c] == "place") {
+                        places += (places.empty() ? "" : " and ") + outcome.candidates[c];
+                    }
+                }
+                item.candidateRoles = outcome.candidateRoles;
+                item.candidateDistances = outcome.candidateDistances;
+                if (!places.empty()) {
+                    std::string type = indexType(entry.oldIndex);
+                    std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
+                        return static_cast<char>(std::tolower(c));
+                    });
+                    item.headline = "Ambiguous " + type + " reference: " + entry.oldIndex
+                        + " moved and " + places
+                        + (places.find(" and ") == std::string::npos ? " sits" : " sit")
+                        + " where it was";
                 }
                 FC_WARN(referenceName(entry.prop)
                         << "[" << entry.index << "]: " << oldName << " broken ("

@@ -55,7 +55,16 @@ public:
         std::vector<std::pair<std::string, std::string>> pieces;
         /// The candidates: (index name, mapped name).
         std::vector<std::pair<std::string, std::string>> candidates;
+        /// Parallel to candidates, or empty: each one's role (`place`, `name`, `piece`,
+        /// `structural`, `geometric`, `index`; Data::SolveOutcome) and its centre's distance
+        /// from the saved centre (NaN where unknown) (ops#105).
+        std::vector<std::string> candidateRoles;
+        std::vector<double> candidateDistances;
         std::string evidence;
+        /// The recompute check's words for a broken reference, if not the default
+        /// `Missing <type> reference: <element>` (ops#105: `Ambiguous edge reference: Edge7
+        /// moved and Edge9 sits where it was`).
+        std::string headline;
         /// The target's full name.
         std::string target;
     };
@@ -104,7 +113,8 @@ public:
 
     /** True if a link property of \a obj holds a missing sub-element reference; \a why then lists
      * them, with their candidates from the report:
-     * `Missing edge reference: Edge3 (Base[0], candidates: Edge7, Edge12)`, as consumers word it.
+     * `Missing edge reference: Edge3 (Base[0], candidates: Edge7, Edge12)`, as consumers word it,
+     * or with the report entry's headline (Entry::headline) in place of `Missing ...: Edge3`.
      */
     static bool describeBroken(const DocumentObject* obj, std::string& why);
 };

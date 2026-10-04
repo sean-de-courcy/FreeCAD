@@ -369,7 +369,10 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken`, `index` or
     `expanded`), `tier` (0-3 for `resolved`; 1, or 4 for a continuation, for `expanded`), `new`
     (the element it resolved to, the first for `expanded`), `pieces` (`expanded`: every element),
-    `candidates` (element names), `candidate_names` (their mapped names), `evidence` and
+    `candidates` (element names), `candidate_names` (their mapped names), `candidate_roles`
+    (why each is one: `place` for an element where a moved one was, `name` for the element the
+    reference's name holds, `piece`, `structural`, `geometric`, `index`, or empty),
+    `candidate_distances` (each one's centre from the saved centre, or None), `evidence` and
     `target`.
     """
     ...
