@@ -41,6 +41,33 @@ def _expanded(names):
     return {App.expandMappedName(name): element for name, element in names.items()}
 
 
+def _filletModel(doc):
+    """A box cut by a cylinder and filleted: names with embedded names and split pieces."""
+    box = doc.addObject("Part::Box", "Box")
+    cylinder = doc.addObject("Part::Cylinder", "Cylinder")
+    cylinder.Radius = 3
+    cylinder.Height = 20
+    cylinder.Placement.Base = App.Vector(10, 5, -5)
+    cut = doc.addObject("Part::Cut", "Cut")
+    cut.Base, cut.Tool = box, cylinder
+    doc.recompute()
+    top = [
+        i + 1
+        for i, edge in enumerate(cut.Shape.Edges)
+        if abs(edge.CenterOfMass.z - 10) < 1e-6 and edge.Curve.TypeId == "Part::GeomLine"
+    ]
+    fillet = doc.addObject("Part::Fillet", "Fillet")
+    fillet.Base = cut
+    fillet.Edges = [(i, 1.0, 1.0) for i in top[:2]]
+    doc.recompute()
+    return fillet
+
+
+def _isInterned(names):
+    text = "".join(names)
+    return "~" in text and "^" not in text  # no embedded name is left inline
+
+
 class InternNamesTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="InternNamesTest")
@@ -57,30 +84,12 @@ class InternNamesTest(unittest.TestCase):
         self.docNames.append(doc.Name)
         doc.clearDocument()  # object IDs from 0: the same tags in every document
         doc.HistoryAlgorithm = algorithm
-        # Explicitly, also when off: FREECAD_INTERN_NAMES=1 turns it on in new documents.
+        # Explicitly, also when off: new documents start with it on (ops#6 Q6).
         doc.InternNames = interned
         return doc
 
     def _model(self, doc):
-        """A box cut by a cylinder and filleted: names with embedded names and split pieces."""
-        box = doc.addObject("Part::Box", "Box")
-        cylinder = doc.addObject("Part::Cylinder", "Cylinder")
-        cylinder.Radius = 3
-        cylinder.Height = 20
-        cylinder.Placement.Base = App.Vector(10, 5, -5)
-        cut = doc.addObject("Part::Cut", "Cut")
-        cut.Base, cut.Tool = box, cylinder
-        doc.recompute()
-        top = [
-            i + 1
-            for i, edge in enumerate(cut.Shape.Edges)
-            if abs(edge.CenterOfMass.z - 10) < 1e-6 and edge.Curve.TypeId == "Part::GeomLine"
-        ]
-        fillet = doc.addObject("Part::Fillet", "Fillet")
-        fillet.Base = cut
-        fillet.Edges = [(i, 1.0, 1.0) for i in top[:2]]
-        doc.recompute()
-        return fillet
+        return _filletModel(doc)
 
     def _save(self, doc, name):
         path = os.path.join(self.dir, name + ".FCStd")
@@ -88,20 +97,15 @@ class InternNamesTest(unittest.TestCase):
         return path
 
     def assertInterned(self, names):
-        text = "".join(names)
-        self.assertIn("~", text)
-        self.assertNotIn("^", text)  # no embedded name is left inline
+        self.assertTrue(_isInterned(names), names)
 
     def assertPlain(self, names):
         self.assertNotIn("~", "".join(names))
 
-    def testOffByDefaultAndNotSaved(self):
-        """A new document has the switch off, and saves without it."""
-        doc = App.newDocument("InternDefault")
-        self.docNames.append(doc.Name)
-        if os.environ.get("FREECAD_INTERN_NAMES") != "1":
-            self.assertFalse(doc.InternNames)
-        doc.InternNames = False
+    def testOffIsNotSaved(self):
+        """A document with the switch off saves without it. (New documents start with it on
+        since ops#6's Q6: InternNamesDefaultTest.)"""
+        doc = self._document("InternOff", False)
         fillet = self._model(doc)
         self.assertPlain(_names(fillet.Shape))
         xml = _documentXml(self._save(doc, "default"))
@@ -337,6 +341,127 @@ class InternNamesTest(unittest.TestCase):
         self.assertGreater(len(results["00"]), 0)
         self.assertEqual(results["10"], results["00"])
         self.assertEqual(results["01"], results["00"])
+
+
+class InternNamesDefaultTest(unittest.TestCase):
+    """InternNames is on in new documents and off in files saved without it (ops#6 Q6), as
+    ReferenceSolver (ReferenceSolverDefaultTest). The user parameter
+    BaseApp/Preferences/Document/InternNames (default true) sets it for new documents only, so an
+    opened file, a FreeCAD 1.1 file included, isn't interned at its first recompute (ops#100)."""
+
+    PARAMETER = "User parameter:BaseApp/Preferences/Document"
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="InternNamesDefaultTest"))
+        self.docNames = []
+        self.param = App.ParamGet(self.PARAMETER)
+        self.savedParameter = (
+            self.param.GetBool("InternNames") if "InternNames" in self.param.GetBools() else None
+        )
+        self.param.RemBool("InternNames")
+
+    def tearDown(self):
+        if self.savedParameter is None:
+            self.param.RemBool("InternNames")
+        else:
+            self.param.SetBool("InternNames", self.savedParameter)
+        for name in self.docNames:
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _skipUnderTestAid(self):
+        if os.environ.get("FREECAD_INTERN_NAMES") == "1":
+            self.skipTest("FREECAD_INTERN_NAMES=1 turns interning on in every document")
+
+    def _new(self, name):
+        doc = App.newDocument(name)
+        self.docNames.append(doc.Name)
+        return doc
+
+    def _saveAndReopen(self, doc, name):
+        path = os.path.join(self.dir, name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        reopened = App.openDocument(path)
+        self.docNames.append(reopened.Name)
+        return path, reopened
+
+    def _recomputeAll(self, doc):
+        """Every feature recomputed, as at a file's first recompute after an edit."""
+        for obj in doc.Objects:
+            obj.touch()
+        doc.recompute()
+        return _names(doc.getObject("Fillet").Shape)
+
+    def testNewDocumentIsOn(self):
+        doc = self._new("InternDefaultNew")
+        self.assertEqual(doc.HistoryAlgorithm, "V2")
+        self.assertTrue(doc.InternNames)
+        fillet = _filletModel(doc)
+        self.assertTrue(_isInterned(_names(fillet.Shape)))
+        self.assertTrue(fillet.getCorrectElementMapVersion().endswith(".N2"))
+
+    def testParameterTurnsItOffForNewDocuments(self):
+        self._skipUnderTestAid()
+        self.param.SetBool("InternNames", False)
+        doc = self._new("InternDefaultParamOff")
+        self.assertFalse(doc.InternNames)
+        self.assertNotIn("~", "".join(_names(_filletModel(doc).Shape)))
+
+    def testOnRoundTrips(self):
+        """A new document saves the switch and the name table, opens with it on, and keeps its
+        names through a recompute."""
+        doc = self._new("InternDefaultOn")
+        names = _names(_filletModel(doc).Shape)
+        path, reopened = self._saveAndReopen(doc, "on")
+        xml = _documentXml(path)
+        self.assertIn('name="InternNames"', xml)
+        self.assertIn("NameTableStart v2", xml)
+        self.assertTrue(reopened.InternNames)
+        self.assertEqual(_names(reopened.getObject("Fillet").Shape), names)
+        self.assertEqual(self._recomputeAll(reopened), names)
+
+    def testFileSavedWithoutTheSwitchOpensOff(self):
+        """A file saved with interning off has no InternNames property and no name table, like
+        every file saved before the default changed and every FreeCAD 1.1 file. It opens off
+        although new documents start on, keeps its plain names at its first recompute, and
+        saves again as it was."""
+        self._skipUnderTestAid()
+        doc = self._new("InternDefaultOff")
+        doc.InternNames = False
+        names = _names(_filletModel(doc).Shape)
+        self.assertNotIn("~", "".join(names))
+        path, reopened = self._saveAndReopen(doc, "off")
+        first = _documentXml(path)
+        self.assertNotIn("InternNames", first)
+        self.assertNotIn("NameTable", first)
+        self.assertTrue(self._new("InternDefaultStillOn").InternNames)
+        self.assertFalse(reopened.InternNames)
+
+        self.assertEqual(self._recomputeAll(reopened), names)
+        self.assertFalse(reopened.InternNames)
+        again = os.path.join(self.dir, "again.FCStd")
+        reopened.saveAs(again)
+        second = _documentXml(again)
+        self.assertNotIn("InternNames", second)
+        self.assertEqual(_objectData(second), _objectData(first))
+
+    def testOffThenOnRoundTrips(self):
+        """Turned on in a file that was saved off, the switch is saved and opens on, with the
+        same names in the interned form."""
+        doc = self._new("InternDefaultOffOn")
+        doc.InternNames = False
+        plain = _names(_filletModel(doc).Shape)
+        _, reopened = self._saveAndReopen(doc, "offon1")
+        reopened.InternNames = True
+        interned = self._recomputeAll(reopened)
+        self.assertTrue(_isInterned(interned))
+        self.assertEqual(_expanded(interned), plain)
+        path, last = self._saveAndReopen(reopened, "offon2")
+        self.assertIn('name="InternNames"', _documentXml(path))
+        self.assertTrue(last.InternNames)
+        self.assertEqual(_names(last.getObject("Fillet").Shape), interned)
 
 
 def _freecadCmd():

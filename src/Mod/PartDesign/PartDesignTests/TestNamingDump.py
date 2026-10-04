@@ -472,7 +472,7 @@ def dumpShape(shape, masker, mode, indexed=False):
 
 def _setMode(doc, mode):
     doc.HistoryAlgorithm = _algorithm(mode)
-    # Explicitly, also when off: FREECAD_INTERN_NAMES=1 turns it on in new documents.
+    # Explicitly, also when off: new documents start with it on (ops#6 Q6).
     doc.InternNames = mode == "V2i"
 
 
@@ -748,7 +748,7 @@ class TestNamingTagCollision(unittest.TestCase):
         doc = App.newDocument("NamingDumpCollision")
         try:
             doc.clearDocument()
-            doc.HistoryAlgorithm = "V2"
+            _setMode(doc, "V2")
             slices = MODELS["Slice"](doc)[0]
             doc.recompute()
             self.assertEqual(slices.ID, 1)

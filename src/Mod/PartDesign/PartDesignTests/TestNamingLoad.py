@@ -337,6 +337,7 @@ def _openModel(model, path, features, suffix):
 
 def _mergeModel(model, path, features):
     doc = App.newDocument(f"Merged{model}")
+    doc.InternNames = False  # into a plain document (new ones start interned: ops#6 Q6)
     doc.mergeProject(path)
     result = {"expanded": _expanded(model, doc, features)}
     App.closeDocument(doc.Name)
