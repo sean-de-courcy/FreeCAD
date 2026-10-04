@@ -430,6 +430,50 @@ class TestPad(unittest.TestCase):
                 self.assertFalse(pad.isValid())
                 self.assertIn(side + " can't reach its face", pad.getStatusString())
 
+    def testTwoSidedPadUpToFaceInsideOtherSide(self):
+        """ops#73 (option B): an up-to face between the sketch plane and the other side's end is
+        an error naming the up-to side, with or without a taper. Without one, the Pad takes a
+        one-prism path that starts the up-to side at the other side's end, and it used to build
+        a cut-down Pad there (z 3..5 instead of an error). A face beyond the sketch plane still
+        builds on both paths."""
+        # Inside: plane z = 3 (Face5, the bottom of a box at z 3..8), within side 1 (Length 5).
+        # InsideBelow: plane z = -3 (Face6, the top of a box at z -8..-3), within side 2.
+        inside = self.Doc.addObject("Part::Box", "Inside")
+        inside.Placement.Base = FreeCAD.Vector(-5, -5, 3)
+        insideBelow = self.Doc.addObject("Part::Box", "InsideBelow")
+        insideBelow.Placement.Base = FreeCAD.Vector(-5, -5, -8)
+        for box in (inside, insideBelow):
+            box.Length, box.Width, box.Height = 10, 10, 5
+        self.Doc.recompute()
+        length5 = ("Length", 5.0)
+        toInside = ("UpToFace", (inside, "Face5"))
+        toInsideBelow = ("UpToFace", (insideBelow, "Face6"))
+        errors = (
+            # (name, side 1, side 2, taper 1, the side named in the error)
+            ("length, then to a face inside side 1 (one prism)", length5, toInside, 0.0, "Side 2"),
+            ("tapered length, then to a face inside side 1 (two prisms)", length5, toInside, 1.0,
+             "Side 2"),
+            ("to a face inside side 2, then length (one prism)", toInsideBelow, length5, 0.0,
+             "Side 1"),
+        )
+        for name, side1, side2, taper1, side in errors:
+            with self.subTest(name):
+                pad = self._twoSidedUpToPad(side1, side2, taper1)
+                self.assertFalse(pad.isValid())
+                self.assertIn(side + " can't reach its face", pad.getStatusString())
+        with self.subTest("control: length, then to a face beyond the sketch plane (one prism)"):
+            pad = self._twoSidedUpToPad(length5, toInsideBelow)
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            self.assertAlmostEqual(pad.Shape.Volume, 25 * 8, places=4)
+            self.assertAlmostEqual(pad.Shape.BoundBox.ZMin, -3, places=6)
+            self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, 5, places=6)
+        with self.subTest("control: tapered length, then to a face beyond the sketch plane"):
+            pad = self._twoSidedUpToPad(length5, toInsideBelow, 1.0)
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            box = pad.Shape.optimalBoundingBox(False, False)
+            self.assertAlmostEqual(box.ZMin, -3, places=6)
+            self.assertAlmostEqual(box.ZMax, 5, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")
