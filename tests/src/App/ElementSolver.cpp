@@ -538,6 +538,91 @@ TEST(NameAncestry, instanceCopiesKeepWhatTheyShare)
     EXPECT_EQ(ancestry.structuralSurvivors(top23, {newTop23}, 0.25), std::vector<int> {0});
 }
 
+TEST(NameAncestry, linkCopiesHaveTheirOwnAncestry)
+{
+    // ops#56: an element brought in from another document through a Link (or a binder) ends in
+    // a boundary section, `X|_;_;<link>;EXT;0;<type>;0;_;_`. X is the other document's name; the
+    // copy is another element, as a pattern instance's is (ops#91): X's history is its ancestry
+    // only in that Link's context, so the copies through two Links share no ancestor.
+    NameAncestry ancestry;
+    auto through = [](const std::string& name, int link, char type = 'F') {
+        return name + "|" + section({}, {}, link, "EXT", 0, type, {});
+    };
+    const auto boxFace = section({"Face6"}, {}, 1, "MKR", 0, 'F', {"IDX", "SRC"});
+    const auto in7 = through(boxFace, 7);
+    const auto in8 = through(boxFace, 8);
+
+    //   a copy is no piece of the element, and holds neither it nor the other Link's copy
+    EXPECT_FALSE(NameAncestry::isPieceOf(in7, boxFace));
+    EXPECT_FALSE(ancestry.contains(in7, boxFace));
+    EXPECT_EQ(ancestry.overlap(in7, in8), 0.0);
+    EXPECT_EQ(ancestry.overlap(boxFace, in7), 0.0);
+    const auto names = ancestry.ancestorNames(in7);
+    EXPECT_EQ(names.size(), 2U);
+    EXPECT_EQ(std::count(names.begin(), names.end(), boxFace), 0);
+    //   tier 1 keeps only the same Link's copies, whatever they share below the boundary
+    const auto cutThere = piece(boxFace, 4, "CUT", 0, 'F');  // a split in the other document
+    const std::vector<std::string> candidates {boxFace, in8, through(cutThere, 7)};
+    EXPECT_EQ(ancestry.structuralSurvivors(in7, candidates, 1.0), std::vector<int> {2});
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(through(boxFace, 9), candidates, 1.0),
+        std::vector<int> {}
+    );
+
+    //   pieces: one made here is a piece of the copy; one made in the other document before
+    //   the boundary (isPieceOf's tail) is a piece of that Link's copy only
+    const auto fusedHere = piece(in7, 10, "FUS", 0, 'F');
+    EXPECT_TRUE(NameAncestry::isPieceOf(fusedHere, in7));
+    EXPECT_TRUE(ancestry.contains(fusedHere, in7));
+    EXPECT_TRUE(NameAncestry::isPieceOf(through(cutThere, 7), in7));
+    EXPECT_FALSE(NameAncestry::isPieceOf(through(cutThere, 8), in7));
+    EXPECT_FALSE(NameAncestry::isPieceOf(through(cutThere, 7), boxFace));
+    EXPECT_FALSE(NameAncestry::isPieceOf(through(cutThere, 7), through(cutThere, 7)));
+
+    //   names made here from the copies: an extrusion of the box's edge through each Link.
+    //   Without the contexts they shared the edge, 1 of 3
+    const auto edge = section({"Edge3"}, {}, 1, "MKR", 0, 'E', {"IDX", "SRC"});
+    const auto from7 = generated({through(edge, 7, 'E')}, 10, "XTR", 'F');
+    const auto from8 = generated({through(edge, 8, 'E')}, 11, "XTR", 'F');
+    EXPECT_EQ(ancestry.overlap(from7, from8), 0.0);
+    EXPECT_FALSE(ancestry.contains(from7, edge));
+    EXPECT_TRUE(ancestry.contains(from7, through(edge, 7, 'E')));
+
+    //   two names of one copy share the copies' ancestors as before: the top face gains an
+    //   edge in the other document
+    const auto oldTop = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    const auto newTop = lowFace(
+        {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), sketchEdge(5)}
+    );
+    EXPECT_DOUBLE_EQ(ancestry.overlap(through(oldTop, 7), through(newTop, 7)), 4.0 / 6.0);
+    EXPECT_EQ(ancestry.overlap(through(oldTop, 7), through(newTop, 8)), 0.0);
+
+    //   two boundaries (a Link 9 to Link 7 in a third document): a copy of the copy, with 7's
+    //   context inside 9's
+    const auto twice = through(in7, 9);
+    EXPECT_FALSE(ancestry.contains(twice, in7));
+    EXPECT_FALSE(ancestry.contains(twice, boxFace));
+    EXPECT_EQ(ancestry.ancestorNames(twice).size(), 3U);
+    EXPECT_EQ(ancestry.overlap(in7, twice), 0.0);
+    EXPECT_DOUBLE_EQ(ancestry.overlap(twice, through(through(boxFace, 7), 9)), 1.0);
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(twice, {in7, through(in8, 9)}, 1.0),
+        std::vector<int> {}
+    );
+
+    //   a pattern instance's copy and a boundary's copy with the same tag are other contexts
+    EXPECT_EQ(ancestry.overlap(in7, piece(boxFace, 7, "TRF", 0, 'F')), 0.0);
+
+    //   Reference IDs as leaves, and depth-weighted: the copies' leaves are their own
+    NameAncestry ids(Data::OverlapMeasure::ReferenceIds);
+    EXPECT_EQ(ids.overlap(in7, in8), 0.0);
+    EXPECT_EQ(ids.overlap(in7, boxFace), 0.0);
+    EXPECT_GT(ids.overlap(through(oldTop, 7), through(newTop, 7)), 0.0);
+    NameAncestry weighted(Data::OverlapMeasure::DepthWeighted);
+    EXPECT_EQ(weighted.overlap(from7, from8), 0.0);
+    EXPECT_GT(weighted.overlap(through(oldTop, 7), through(newTop, 7)), 0.0);
+}
+
 TEST(NameAncestry, unclosedContextMarkIsAName)
 {
     // A string that starts with the context mark and doesn't close it (only a caller, e.g.

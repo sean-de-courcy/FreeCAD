@@ -217,6 +217,19 @@ std::vector<std::pair<std::string, std::string>> patternInstances(
     }
     return instances;
 }
+
+// The document boundaries a V2 name crossed (ops#56): the tag of each of its EXT sections, the
+// local objects (Links, binders) that brought it in, in order.
+std::vector<std::string> boundaries(const Data::DecodedMappedName& name)
+{
+    std::vector<std::string> tags;
+    for (const auto& section : name) {
+        if (section.opCode == OpCodes::External) {
+            tags.push_back(section.iterationTag);
+        }
+    }
+    return tags;
+}
 }  // namespace
 
 // This is the name matching algorithms used for the V2 algorithm.
@@ -239,6 +252,11 @@ bool Feature::doNamesMatch(
     // Copies of an element in other pattern instances, or the original, share its history up to
     // their TRF sections, which the pairing below would skip. They are other elements.
     if (patternInstances(decodedName1) != patternInstances(decodedName2)) {
+        return false;
+    }
+    // So do the copies of an element brought in through another Link or binder, and the element
+    // in its own document, up to their EXT sections (ops#56)
+    if (boundaries(decodedName1) != boundaries(decodedName2)) {
         return false;
     }
 
@@ -1113,10 +1131,11 @@ App::DocumentObject* Feature::getSubObject(
     }
 }
 
-// True if the history step from \a name, in a shape tagged \a shapeTag, goes through a boundary
-// section of the shape's own object (`|_;_;<shapeTag>;EXT;...`, ops#56): the name it reaches
-// came from another document, and its tag is an object ID there
-static bool crossesBoundary(const Data::MappedName& name, long shapeTag)
+// The name before the boundary section if \a name, in a shape tagged \a shapeTag, ends in one of
+// the shape's own object (`<prefix>|_;_;<shapeTag>;EXT;...`, ops#56), in its plain form: the
+// history step from \a name reaches that name, which came from another document, and its tag is
+// an object ID there. Otherwise empty.
+static std::string importedName(const Data::MappedName& name, long shapeTag)
 {
     std::string text = name.toString();
     if (boost::starts_with(text, Data::ELEMENT_MAP_PREFIX)) {
@@ -1127,52 +1146,63 @@ static bool crossesBoundary(const Data::MappedName& name, long shapeTag)
     }
     auto sections = Data::NameAncestry::splitSections(text);
     if (sections.size() < 2) {
-        return false;
+        return {};
     }
     const auto& last = Data::MappedName::getDecodedMappedName(std::string(sections.back()));
-    return last.size() == 1 && last.front().opCode == Part::OpCodes::External
-        && last.front().iterationTag == std::to_string(std::abs(shapeTag));
+    if (last.size() != 1 || last.front().opCode != Part::OpCodes::External
+        || last.front().iterationTag != std::to_string(std::abs(shapeTag))) {
+        return {};
+    }
+    return text.substr(0, static_cast<std::size_t>(sections.back().data() - text.data()) - 1);
 }
 
 // The object with ID \a tag in the other document an imported name came from, for an \a owner
-// that isn't a link to it (a SubShapeBinder of another document's object, a group holding a link,
-// ops#56): the documents of the objects \a owner links to are searched, and an object counts
-// only if its shape has \a original, the name the history step reached. One such object, or null
-// (none, or several: the walk stops rather than guess).
+// that isn't a link to it (a SubShapeBinder of another document's object, a group holding a
+// link, ops#56). \a imported is the name before the boundary section, \a original the name the
+// history step reached. The document is one of those of the objects \a owner links to, and it
+// counts only if the name is one of its: an object there that \a owner links to has \a imported in its shape (the
+// tag may be another object's there, e.g. a Pad's bottom face is named by its sketch), or, for
+// a source without an element map (\a original an index, the name made at the boundary), the
+// object with ID \a tag has that element. One such document, or null (none, or several: the
+// walk stops rather than guess).
 static App::DocumentObject* importedSource(
     App::DocumentObject* owner,
     long tag,
+    const std::string& imported,
     const Data::MappedName& original
 )
 {
-    std::set<App::Document*> docs;
+    std::map<App::Document*, std::vector<App::DocumentObject*>> linkedByDocument;
     for (auto obj : owner->getOutList()) {
         auto linked = obj ? obj->getLinkedObject(true) : nullptr;
         for (auto o : {obj, linked}) {
             if (o && o->getDocument() != owner->getDocument()) {
-                docs.insert(o->getDocument());
+                linkedByDocument[o->getDocument()].push_back(o);
             }
         }
     }
+    auto shapeOf = [](App::DocumentObject* obj) {
+        return Part::Feature::getTopoShape(
+            obj,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
+    };
+    const Data::MappedName importedMapped(imported);
+    const Data::IndexedName index(original.toString().c_str());
     App::DocumentObject* found = nullptr;
-    for (auto doc : docs) {
+    for (const auto& [doc, objects] : linkedByDocument) {
         auto obj = doc->getObjectByID(std::abs(tag));
         if (!obj) {
             continue;
         }
-        auto shape = Part::Feature::getTopoShape(
-            obj,
-            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
-        );
-        bool has = false;
-        Data::IndexedName index(original.toString().c_str());
-        if (index) {
+        bool has = std::any_of(objects.begin(), objects.end(), [&](App::DocumentObject* o) {
+            return static_cast<bool>(shapeOf(o).getIndexedName(importedMapped));
+        });
+        if (!has && index) {
             // An element of a shape without a map, named by its index (an IDX section's source)
             has = index.getIndex() > 0
-                && static_cast<int>(shape.countSubShapes(index.getType())) >= index.getIndex();
-        }
-        else {
-            has = static_cast<bool>(shape.getIndexedName(original));
+                && static_cast<int>(shapeOf(obj).countSubShapes(index.getType()))
+                    >= index.getIndex();
         }
         if (has) {
             if (found) {
@@ -1235,8 +1265,11 @@ static std::vector<std::pair<long, Data::MappedName>> getElementSource(
                     doc = ownerGeoFeature->getDocument();
                 }
             }
-            if (doc == from->getDocument() && crossesBoundary(ret.back().second, shape.Tag)) {
-                obj = importedSource(from, tag, original);
+            auto imported = doc == from->getDocument()
+                ? importedName(ret.back().second, shape.Tag)
+                : std::string();
+            if (!imported.empty()) {
+                obj = importedSource(from, tag, imported, original);
                 doc = obj ? obj->getDocument() : nullptr;
             }
             else {
@@ -1356,8 +1389,10 @@ std::list<Data::HistoryItem> Feature::getElementHistory(
             }
             // A step out of an imported name, where the owner isn't a link that leads to its
             // document (ops#56)
-            if (doc == from->getDocument() && crossesBoundary(element, shape.Tag)) {
-                obj = importedSource(from, tag, original);
+            auto imported = doc == from->getDocument() ? importedName(element, shape.Tag)
+                                                       : std::string();
+            if (!imported.empty()) {
+                obj = importedSource(from, tag, imported, original);
             }
             else {
                 obj = doc->getObjectByID(std::abs(tag));

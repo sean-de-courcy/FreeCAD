@@ -462,6 +462,57 @@ TEST_F(FeaturePartTest, doNamesMatchKeepsPatternInstancesApart)
     EXPECT_TRUE(Feature::doNamesMatch(pieceOfX2y2, x2y2));
 }
 
+TEST_F(FeaturePartTest, doNamesMatchKeepsLinkInstancesApart)
+{
+    // Arrange
+    //   pattern: a face of a box in another document, brought in by Links 7 and 8 (two
+    //   instances of the box), ends in a boundary section with the Link's ID (ops#56); a fusion
+    //   here splits a face by appending a MOD section of its own
+    auto section = [](long tag, const char* op, const std::vector<std::string>& flags) {
+        return std::string("|")
+            + Data::MappedName::makeEncodedSection(
+                   std::vector<std::string> {},
+                   std::vector<Data::MappedName> {},
+                   tag,
+                   op,
+                   0,
+                   'F',
+                   0,
+                   flags,
+                   std::vector<Data::MappedName> {}
+            );
+    };
+    auto through = [&](const Data::MappedName& name, long link) {
+        return Data::MappedName(name.toString() + section(link, OpCodes::External, {}));
+    };
+    auto boxFace = Data::MappedName::makeUnmappedName({"Face6"}, 1, "MKR", 'F');
+    auto inLink7 = through(boxFace, 7);
+    auto inLink8 = through(boxFace, 8);
+    auto sameInLink7 = through(boxFace, 7);
+    auto pieceInLink7
+        = Data::MappedName(inLink7.toString() + section(10, OpCodes::Fuse, {"MOD"}));
+    //   the box's face reached through Link 9, which links to Link 7 in a third document
+    auto throughTwo = through(inLink7, 9);
+
+    // Act and assert
+    //   a copy is neither the box's own face nor the copy through another Link
+    EXPECT_FALSE(Feature::doNamesMatch(inLink7, boxFace));
+    EXPECT_FALSE(Feature::doNamesMatch(boxFace, inLink7));
+    EXPECT_FALSE(Feature::doNamesMatch(inLink7, inLink8));
+    EXPECT_FALSE(Feature::doNamesMatch(inLink7, inLink8, false, true));
+    EXPECT_TRUE(Feature::doNamesMatch(inLink7, sameInLink7));
+    //   a piece still matches the face it was split from, in its own copy only
+    EXPECT_TRUE(Feature::doNamesMatch(pieceInLink7, inLink7));
+    EXPECT_FALSE(Feature::doNamesMatch(pieceInLink7, inLink8));
+    EXPECT_FALSE(Feature::doNamesMatch(pieceInLink7, boxFace));
+    //   two boundaries are another path than either one
+    auto inLink9 = through(boxFace, 9);
+    auto sameThroughTwo = through(sameInLink7, 9);
+    EXPECT_FALSE(Feature::doNamesMatch(throughTwo, inLink7));
+    EXPECT_FALSE(Feature::doNamesMatch(throughTwo, inLink9));
+    EXPECT_TRUE(Feature::doNamesMatch(throughTwo, sameThroughTwo));
+}
+
 TEST_F(FeaturePartTest, matchSimilarNamesSeveralLooseMatchesAreAmbiguous)
 {
     // Arrange

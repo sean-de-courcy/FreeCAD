@@ -57,11 +57,24 @@ bool isCounterOpCode(const std::string& opCode)
 // instance of which pattern the element is in.
 constexpr const char* patternInstanceOpCode = "TRF";
 
-// Starts and ends a pattern instance's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e`
-// before a name (see NameAncestry::ancestorsOf()). A control character starts no mapped name.
+// The op code of a boundary section, `_;_;<object>;EXT;0;<type>;0;_;_` (Part's
+// OpCodes::External, ops#56): the element came from another document through the object (a
+// Link, a binder), and the name before it is that document's. Like an instance, it is a copy.
+constexpr const char* boundaryOpCode = "EXT";
+
+// A section that makes a copy of the element it ends: a pattern instance's or a boundary's.
+bool isCopySection(const DecodedMappedSection& section)
+{
+    return section.opCode == patternInstanceOpCode || section.opCode == boundaryOpCode;
+}
+
+// Starts and ends a copy's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e` for a pattern
+// instance, `\x1e<tag>;EXT\x1e` for a boundary, before a name (see NameAncestry::ancestorsOf()).
+// A control character starts no mapped name.
 constexpr char contextMark = '\x1e';
 
-// The pattern instances a name is in: (pattern, k) of each of its top-level TRF sections.
+// The copies a name is in: (tag, k) of each of its top-level TRF sections, (tag, EXT) of each of
+// its EXT sections, in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
 {
     std::vector<std::pair<std::string, std::string>> instances;
@@ -69,6 +82,9 @@ std::vector<std::pair<std::string, std::string>> patternInstances(std::string_vi
         const auto& decoded = decodeSection(section);
         if (decoded.opCode == patternInstanceOpCode) {
             instances.emplace_back(decoded.iterationTag, decoded.index);
+        }
+        else if (decoded.opCode == boundaryOpCode) {
+            instances.emplace_back(decoded.iterationTag, boundaryOpCode);
         }
     }
     return instances;
@@ -138,6 +154,8 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
     // no ancestor, also where a name embeds an instance's name (a fusion's face bounded by an
     // edge of each of two instances); two names of one instance share the copies' ancestors.
     // A node in a context has the children of the name it stands for, in the same context.
+    // A boundary section's prefix is the same (ops#56): `X|EXT` is X brought in through one Link
+    // or binder, so the copies through two links share no ancestry, nor do X and its copy.
     std::vector<std::string> children;
     std::vector<std::pair<std::string, std::string>> referenceIds;  // (ID, tag) of a leaf
     std::string context;  // the node's contexts, outermost first, for a node in a context
@@ -159,6 +177,10 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
             std::string prefix(node.substr(0, prefixSize));
             if (last.opCode == patternInstanceOpCode) {
                 prefix = contextMark + last.iterationTag + ";" + last.index + contextMark + prefix;
+            }
+            else if (last.opCode == boundaryOpCode) {
+                prefix = contextMark + last.iterationTag + ";" + boundaryOpCode + contextMark
+                    + prefix;
             }
             children.push_back(std::move(prefix));
         }
@@ -341,7 +363,8 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
 {
     // A split made before a pattern instance's section (WholeShape mode, or an edit upstream of
     // the pattern): the instance's piece is `X|<split>|<TRF>`, its element `X|<TRF>`. They are
-    // compared without the chain of TRF sections both end in.
+    // compared without the chain of TRF sections both end in. The same for a split made in
+    // another document, before the boundary sections both end in (ops#56).
     {
         auto nameSections = splitSections(name);
         auto oldSections = splitSections(oldName);
@@ -349,13 +372,13 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
         while (common < nameSections.size() && common < oldSections.size()) {
             auto section = nameSections[nameSections.size() - 1 - common];
             if (section != oldSections[oldSections.size() - 1 - common]
-                || decodeSection(section).opCode != patternInstanceOpCode) {
+                || !isCopySection(decodeSection(section))) {
                 break;
             }
             ++common;
         }
         if (common > 0 && common < nameSections.size() && common < oldSections.size()) {
-            // Each head ends before the delimiter of its first TRF section.
+            // Each head ends before the delimiter of its first copy section.
             auto head = [](std::string_view whole, std::string_view firstStripped) {
                 return whole.substr(0, firstStripped.data() - whole.data() - 1);
             };
@@ -383,7 +406,7 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
     for (auto section : added) {
         const auto& decoded = decodeSection(section);
         if (!decoded.hasMapperFlag(MAPPER_FLAG_MODIFIED) || decoded.elementType != elementType
-            || decoded.opCode == patternInstanceOpCode) {
+            || isCopySection(decoded)) {
             return false;
         }
     }
@@ -461,7 +484,9 @@ std::vector<int> NameAncestry::structuralSurvivors(
     // The top-level TRF sections say which instance an element is in: an element of another
     // instance, or of the original, is another element (ops#55), even where a later section
     // embeds names of the old name's instance (a fusion's piece of instance 3 bounded by an
-    // edge of instance 2, which ancestorsOf()'s contexts alone would relate, ops#91).
+    // edge of instance 2, which ancestorsOf()'s contexts alone would relate, ops#91). So do the
+    // top-level EXT sections: an element brought in through another Link or binder is another
+    // element (ops#56).
     const auto oldInstances = patternInstances(oldName);
     std::vector<double> overlaps;
     overlaps.reserve(candidates.size());

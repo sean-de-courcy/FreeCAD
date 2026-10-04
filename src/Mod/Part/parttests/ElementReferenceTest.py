@@ -523,6 +523,203 @@ class ElementReferenceTest(unittest.TestCase):
         """As testCrossDocumentFuseKeepsReferenceAfterReorder, with the reference solver on."""
         self._checkFuseReorder(solver=True)
 
+    @staticmethod
+    def _paddedSquare(doc, x):
+        """A Body with a sketch of the square x..x+10, 0..10 padded 10 high: the same objects,
+        so the same IDs, in every document numbered from 1. Returns the Pad."""
+        import Sketcher
+
+        body = doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        corners = [
+            App.Vector(x, 0, 0),
+            App.Vector(x + 10, 0, 0),
+            App.Vector(x + 10, 10, 0),
+            App.Vector(x, 10, 0),
+        ]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        return pad
+
+    def _checkBinderReorder(self, solver):
+        # Arrange
+        #   Src56: the padded square at x = 0..10. Asm56: the same objects with the square at
+        #   x = 100..110 (a part made from the same template), then a binder of Src56's Pad and
+        #   a fusion of the binder and the local Pad, which has the source Pad's ID
+        src = self._numberedFromOne("Src56")
+        source = self._paddedSquare(src, 0)
+        src.recompute()
+        src.save()
+        asm = self._numberedFromOne("Asm56")
+        asm.ReferenceSolver = solver
+        local = self._paddedSquare(asm, 100)
+        binder = asm.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(source, ("",))]
+        fuse = asm.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = [binder, local]
+        ref = asm.addObject("App::FeaturePython", "Ref")
+        ref.addProperty("App::PropertyLinkSub", "Face")
+        asm.recompute()
+        self.assertEqual(local.ID, source.ID)
+        self.assertTrue(fuse.isValid())
+        self.assertAlmostEqual(fuse.Shape.Volume, 2000)
+        ref.Face = (fuse, [self._faceFacingX(fuse.Shape, 110)])
+        asm.recompute()
+        #   the binder's names end in a boundary section with its ID; its faces' history goes on
+        #   in Src56 (the Pad, or its sketch for the bottom face the sketch names), never to the
+        #   local copies with the same IDs
+        boundary = f";{binder.ID};EXT;0;F;0;_;_"
+        names = binder.Shape.ElementReverseMap
+        for index in range(1, len(binder.Shape.Faces) + 1):
+            sub = f"Face{index}"
+            history = self._history(binder, sub)
+            with self.subTest(binderFace=sub, history=history):
+                self.assertTrue(App.expandMappedName(names[sub]).endswith(boundary))
+                self.assertEqual(history[0], "Asm56#Binder")
+                self.assertGreater(len(history), 1)
+                for step in history[1:]:
+                    self.assertTrue(step.startswith("Src56#"))
+        #   the fusion's faces from the binder keep the section, the local Pad's have none; no
+        #   duplicate counts
+        names = fuse.Shape.ElementReverseMap
+        for index, face in enumerate(fuse.Shape.Faces, 1):
+            name = App.expandMappedName(names[f"Face{index}"])
+            with self.subTest(face=index, name=name):
+                self.assertEqual(name.endswith(boundary), face.BoundBox.XMax < 50)
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["duplicateCount"], "0")
+
+        # Act
+        fuse.Shapes = [local, binder]
+        asm.recompute()
+
+        # Assert
+        self.assertEqual(ref.Face[1][0], self._faceFacingX(fuse.Shape, 110))
+
+    def testCrossDocumentBinderHistoryAndReference(self):
+        """A SubShapeBinder of a Pad in another document, fused with a local Pad that has the
+        same ID (both documents made the same way), and a reference to the local Pad's +X face:
+        the binder's faces trace back to the source Pad, and the reference keeps its face after
+        the fusion's inputs are reordered (ops#56). Before, the binder's faces and the local
+        Pad's had the same names."""
+        self._checkBinderReorder(solver=False)
+
+    def testCrossDocumentBinderHistoryAndReferenceSolver(self):
+        """As testCrossDocumentBinderHistoryAndReference, with the reference solver on."""
+        self._checkBinderReorder(solver=True)
+
+    def testNestedLinkPathHistory(self):
+        """A Part::Cut in document Top of a Link to an App::Part in document Mid, which holds a
+        Link to a box in document Src56; in each document the first object has ID 1. The Cut's
+        names from the box cross two boundaries (two EXT sections, the inner Link's first), and
+        their history reaches the box in Src56 through both Links, never an object with ID 1 in
+        Top or Mid (ops#56)."""
+        # Arrange
+        box = self._linkedSource()
+        mid = self._numberedFromOne("Mid56")
+        group = mid.addObject("App::Part", "Group")  # ID 1, as the box
+        inner = mid.addObject("App::Link", "Inner")
+        inner.LinkedObject = box
+        group.addObject(inner)
+        mid.recompute()
+        mid.save()
+        top = self._numberedFromOne("Top56")
+        decoy = top.addObject("Part::Box", "Decoy")  # ID 1
+        decoy.Placement.Base = App.Vector(100, 0, 0)
+        outer = top.addObject("App::Link", "Outer")
+        outer.LinkedObject = group
+        tool = top.addObject("Part::Box", "Tool")
+        tool.Length = tool.Width = tool.Height = 4
+        tool.Placement.Base = App.Vector(8, 8, 8)
+        cut = top.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = outer, tool
+
+        # Act
+        top.recompute()
+
+        # Assert
+        self.assertEqual((decoy.ID, group.ID), (box.ID, box.ID))
+        self.assertAlmostEqual(cut.Shape.Volume, 1000 - 8)
+        names = cut.Shape.ElementReverseMap
+        boundaries = f";{inner.ID};EXT;0;F;0;_;_|_;_;{outer.ID};EXT;0;F;0;_;_"
+        for index, face in enumerate(cut.Shape.Faces, 1):
+            sub = f"Face{index}"
+            bound = face.BoundBox
+            fromTool = any(
+                abs(low - 8) < 1e-7 and abs(high - 8) < 1e-7
+                for low, high in (
+                    (bound.XMin, bound.XMax),
+                    (bound.YMin, bound.YMax),
+                    (bound.ZMin, bound.ZMax),
+                )
+            )
+            name = App.expandMappedName(names[sub])
+            history = self._history(cut, sub)
+            with self.subTest(face=sub, name=name, history=history):
+                self.assertEqual(boundaries in name, not fromTool)
+                self.assertNotIn("Top56#Decoy", history)
+                self.assertNotIn("Mid56#Group", history)
+                self.assertEqual(history[-1], "Top56#Tool" if fromTool else "Src56#Src")
+                if not fromTool:
+                    self.assertIn("Top56#Outer", history)
+                    self.assertIn("Mid56#Inner", history)
+
+    def _checkTwoLinks(self, solver):
+        # Arrange
+        #   Asm56: Links L1 (at the box's place) and L2 (moved to x = 100) to the box in Src56,
+        #   and a local box Other (ID 1, as the source box) at y = 100, fused
+        box = self._linkedSource()
+        asm = self._numberedFromOne("Asm56")
+        asm.ReferenceSolver = solver
+        other = asm.addObject("Part::Box", "Other")
+        other.Placement.Base = App.Vector(0, 100, 0)
+        links = []
+        for name, x in (("L1", 0), ("L2", 100)):
+            link = asm.addObject("App::Link", name)
+            link.LinkedObject = box
+            link.Placement.Base = App.Vector(x, 0, 0)
+            links.append(link)
+        fuse = asm.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = links + [other]
+        ref = asm.addObject("App::FeaturePython", "Ref")
+        ref.addProperty("App::PropertyLinkSub", "Face")
+        asm.recompute()
+        self.assertAlmostEqual(fuse.Shape.Volume, 3000)
+        ref.Face = (fuse, [self._faceFacingX(fuse.Shape, 110)])
+        asm.recompute()
+        #   18 faces, 18 distinct names, no duplicate counts
+        names = fuse.Shape.ElementReverseMap
+        faceNames = [App.expandMappedName(names[f"Face{i}"]) for i in range(1, 19)]
+        self.assertEqual(len(fuse.Shape.Faces), 18)
+        self.assertEqual(len(set(faceNames)), 18)
+        for name in faceNames:
+            with self.subTest(name=name):
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["duplicateCount"], "0")
+
+        # Act
+        fuse.Shapes = [links[1], other]
+        asm.recompute()
+
+        # Assert
+        self.assertTrue(fuse.isValid())
+        self.assertAlmostEqual(fuse.Shape.Volume, 2000)
+        self.assertEqual(ref.Face[1][0], self._faceFacingX(fuse.Shape, 110))
+
+    def testTwoLinksToOneSourceStayDistinct(self):
+        """Two App::Links to one box in another document, fused with a local box: the two
+        copies' faces have distinct names, and a reference to the second copy's +X face keeps
+        it when the first Link leaves the fusion (ops#56). Before, the copies had the same
+        names, told apart only by duplicate counts."""
+        self._checkTwoLinks(solver=False)
+
+    def testTwoLinksToOneSourceStayDistinctSolver(self):
+        """As testTwoLinksToOneSourceStayDistinct, with the reference solver on."""
+        self._checkTwoLinks(solver=True)
+
 
 class ElementReferenceTestV2i(ElementReferenceTest):
     """The same cases with every document in V2 with interned names (ops#6, Task 1 PR 8): the
