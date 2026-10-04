@@ -133,6 +133,7 @@ names it.
 | `fix/6-t2-review-followups` | fix | ops#6 | - | `integration` `cafab56b0c` | `31a5177dae` (fork PR 102), 2026-10-04 | never (fork feature) |
 | `feat/6-q6-intern-default` | feat | ops#6 | - | `integration` `31a5177dae` | `475faba478` (fork PR 105), 2026-10-04 | never (fork feature) |
 | `fix/56-cross-doc-marker` | fix | ops#56 | - | `integration` `475faba478` | (fork PR 104) | never (fork naming code) |
+| `fix/112-binder-support-index` | fix | ops#112 | - | `integration` `fd44457837` | (fork PR 106) | never (fork naming code) |
 
 ## Fork-only commits in carried topics
 
