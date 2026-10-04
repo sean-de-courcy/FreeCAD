@@ -179,6 +179,11 @@ class TestLinkRetargetJoints(VariantLinkTestBase):
         JointObject.GroundedJoint(ground, self.links[0])
         self.joint = joints.newObject("App::FeaturePython", "Fixed")
         JointObject.Joint(self.joint, 0)
+        if App.GuiUp:
+            # As the joint commands do: without view providers, a reopened joint fails in
+            # redrawJointPlacements and the solve leaves LinkB where it is (ops#113).
+            JointObject.ViewProviderGroundedJoint(ground.ViewObject)
+            JointObject.ViewProviderJoint(self.joint.ViewObject)
         self.joint.Proxy.setJointConnectors(self.joint, refs)
         self.doc.recompute()
         self.assertEqual(self.assembly.solve(), 0)
