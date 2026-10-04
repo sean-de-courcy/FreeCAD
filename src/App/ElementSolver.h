@@ -364,6 +364,23 @@ AppExport bool planeAgrees(
     double distance
 );
 
+/** "Sits where it was" (ops#105): true if \a now coincides with \a saved, the fingerprint saved
+ * with a reference. The same element type and kind; size, centre, direction and radii present in
+ * both or in neither; the direction within \a tolerances.angle (a plane's normal with its sense,
+ * an axis or a line's direction either way, as intrinsicAgrees()); radii within
+ * \a tolerances.radius relative; the size within 1e-6 relative; the centre, and a circle's centre
+ * and a plane's extent corners when both have them, within ε (\a distance times
+ * max(1, \a diagonal)). These are coincidence tolerances, far tighter than tier 3's: an element
+ * 0.1 mm away isn't at the place. False if either fingerprint is invalid.
+ */
+AppExport bool atSamePlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
 /// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
 enum class ExtentRelation
 {
@@ -498,6 +515,12 @@ struct AppExport SolveOutcome
     /// with their mapped names (parallel).
     std::vector<std::string> candidates;
     std::vector<std::string> candidateNames;
+    /// Parallel to candidates: why each is one (ops#105): `place` (it sits where the element
+    /// was), `name` (the element the reference's name holds), `piece` (a piece of the old
+    /// element), `structural` (tier 1's survivor), `geometric` (tiers 2-3 found it); and its
+    /// centre's distance from the saved centre, NaN where unknown.
+    std::vector<std::string> candidateRoles;
+    std::vector<double> candidateDistances;
     /// The evidence, for the log and the report: overlap and sources, or why it broke.
     std::string evidence;
 };
@@ -507,6 +530,12 @@ struct AppExport SolveOutcome
  * - Exact entries keep their element, and it leaves the other entries' pools unless one of its
  *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
  *   entries never enter the graph.
+ * - Moved (ops#105): an exact entry whose element no longer sits where its saved fingerprint was
+ *   (atSamePlace()), while other elements of its type do, is ambiguous: its name says one
+ *   element, geometry the others. It breaks under One and Expand, with those elements first
+ *   (role `place`) and the named one last (`name`); under Equivalent the hit stands if each of
+ *   them gives the consumer the hit's result. Those elements leave the other entries' pools, as
+ *   tier-0 elements do. An element that moved with nothing at its old place keeps its reference.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element

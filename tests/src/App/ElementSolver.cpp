@@ -3765,3 +3765,352 @@ TEST(SolveOwner, tier1CheckBreaksAPartnerOfAnotherGeometry)
     input.entries[0].fingerprint = ElementFingerprint();
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Resolved);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Moved exact elements (ops#105): another element sits where the named one was
+
+namespace
+{
+
+// A boss's top circle edge of radius \a r, centred at (x, y, 10), as a version-2 fingerprint.
+ElementFingerprint circleAt(double x, double y, double r = 3.0)
+{
+    auto fp = fingerprint('E',
+                          "Circle",
+                          2 * Pi * r,
+                          Base::Vector3d(x, y, 10),
+                          Base::Vector3d(0, 0, 1),
+                          {r});
+    fp.location = Base::Vector3d(x, y, 10);
+    return fp;
+}
+
+// Two bosses' top edges on a 30 x 30 plate, Edge1 at (10, 15) and Edge2 at (20, 15) when the
+// references were saved; Edge3 is a plate edge. `now` sets where they are.
+struct Bosses
+{
+    const double diagonal = std::sqrt(30.0 * 30 + 30 * 30 + 10 * 10);
+    std::map<std::string, ElementFingerprint> now {
+        {"Edge1", circleAt(10, 15)},
+        {"Edge2", circleAt(20, 15)},
+        {"Edge3", lineX(0, 30)},
+    };
+
+    SolveInput input(std::vector<SolveInput::Entry> entries, int* calls = nullptr) const
+    {
+        SolveInput input;
+        input.diagonal = diagonal;
+        input.pool["Edge"] = {
+            element("Edge1", {"a"}),
+            element("Edge2", {"b"}),
+            element("Edge3", {"p"}),
+        };
+        input.entries = std::move(entries);
+        measure(input, now, calls);
+        return input;
+    }
+
+    // The exact reference to the edge \a index named \a name, saved at (x, 15).
+    static SolveInput::Entry boss(const std::string& index, const std::string& name, double x)
+    {
+        auto entry = exact(index, "Edge");
+        entry.exactName = name;
+        entry.fingerprint = circleAt(x, 15);
+        return entry;
+    }
+};
+
+}  // namespace
+
+TEST(Moved, atSamePlace)
+{
+    GeometryTolerances tolerances;
+    const double diagonal = 43.6;
+    const double eps = 1e-7 * diagonal;
+    auto here = [&](const ElementFingerprint& saved, const ElementFingerprint& now) {
+        return Data::atSamePlace(saved, now, diagonal, tolerances, 1e-7);
+    };
+    const auto saved = circleAt(10, 15);
+
+    EXPECT_TRUE(here(saved, saved));
+    //   the size within 1e-6 relative, not 1e-5
+    auto size = saved;
+    *size.size *= 1 + 0.9e-6;
+    EXPECT_TRUE(here(saved, size));
+    *size.size = *saved.size * (1 + 1e-5);
+    EXPECT_FALSE(here(saved, size));
+    //   the centre within eps, not 2 eps
+    auto centre = saved;
+    centre.center = *saved.center + Base::Vector3d(0.5 * eps, 0, 0);
+    EXPECT_TRUE(here(saved, centre));
+    centre.center = *saved.center + Base::Vector3d(2 * eps, 0, 0);
+    EXPECT_FALSE(here(saved, centre));
+    //   a circle's centre (version 2) apart, its centre of mass not
+    auto location = saved;
+    location.location = *saved.location + Base::Vector3d(0, 2 * eps, 0);
+    EXPECT_FALSE(here(saved, location));
+    //   another radius, kind or type
+    EXPECT_FALSE(here(saved, circleAt(10, 15, 3.001)));
+    auto line = saved;
+    line.kind = "Line";
+    line.radii.clear();
+    EXPECT_FALSE(here(saved, line));
+    //   a size on one side only
+    auto noSize = saved;
+    noSize.size.reset();
+    EXPECT_FALSE(here(saved, noSize));
+    EXPECT_FALSE(here(noSize, saved));
+    //   invalid
+    EXPECT_FALSE(here(saved, ElementFingerprint()));
+    EXPECT_FALSE(here(ElementFingerprint(), saved));
+
+    // A plane keeps the sense of its normal, and its extent counts when both have one.
+    auto top = fingerprint('F', "Plane", 200, Base::Vector3d(10, 5, 10), Base::Vector3d(0, 0, 1));
+    top.extentMin = Base::Vector3d(0, 0, 10);
+    top.extentMax = Base::Vector3d(20, 10, 10);
+    EXPECT_TRUE(here(top, top));
+    auto flipped = top;
+    flipped.direction = Base::Vector3d(0, 0, -1);
+    EXPECT_FALSE(here(top, flipped));
+    auto wider = top;
+    wider.extentMax = Base::Vector3d(20, 10 + 2 * eps, 10);
+    EXPECT_FALSE(here(top, wider));
+    auto noExtent = top;
+    noExtent.extentMin.reset();
+    noExtent.extentMax.reset();
+    EXPECT_TRUE(here(top, noExtent));
+    // A vertex: the point.
+    auto vertex = fingerprint('V', "Point", {}, Base::Vector3d(1, 2, 3));
+    EXPECT_TRUE(here(vertex, vertex));
+    auto movedVertex = vertex;
+    movedVertex.center = Base::Vector3d(1, 2, 3 + 2 * eps);
+    EXPECT_FALSE(here(vertex, movedVertex));
+}
+
+TEST(Moved, movedAloneKeepsItsName)
+{
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(10, 25);
+    auto outcomes = Data::solveOwner(bosses.input({Bosses::boss("Edge1", "a", 10)}));
+    EXPECT_EQ(describe(outcomes[0]), "exact Edge1 0 [] ");
+}
+
+TEST(Moved, anotherElementAtTheOldPlaceBreaks)
+{
+    // Boss a moved to (20, 25), boss b to (10, 15), a's old place.
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 25);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto outcome = Data::solveOwner(bosses.input({Bosses::boss("Edge1", "a", 10)}))[0];
+
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge2 Edge1 ] moved 14.142 mm; Edge2 sits where it was");
+    EXPECT_EQ(outcome.candidateNames, (std::vector<std::string> {"b", "a"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "name"}));
+    ASSERT_EQ(outcome.candidateDistances.size(), 2U);
+    EXPECT_NEAR(outcome.candidateDistances[0], 0.0, 1e-12);
+    EXPECT_NEAR(outcome.candidateDistances[1], std::sqrt(200.0), 1e-9);
+}
+
+TEST(Moved, tradingPlacesBreaksBoth)
+{
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 15);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto outcomes = Data::solveOwner(
+        bosses.input({Bosses::boss("Edge1", "a", 10), Bosses::boss("Edge2", "b", 20)})
+    );
+
+    EXPECT_EQ(describe(outcomes[0]),
+              "broken  -1 [Edge2 Edge1 ] moved 10.000 mm; Edge2 sits where it was");
+    EXPECT_EQ(describe(outcomes[1]),
+              "broken  -1 [Edge1 Edge2 ] moved 10.000 mm; Edge1 sits where it was");
+
+    // Traded back: both sit where they were, exact.
+    Bosses back;
+    outcomes = Data::solveOwner(
+        back.input({Bosses::boss("Edge1", "a", 10), Bosses::boss("Edge2", "b", 20)})
+    );
+    EXPECT_EQ(describe(outcomes[0]), "exact Edge1 0 [] ");
+    EXPECT_EQ(describe(outcomes[1]), "exact Edge2 0 [] ");
+}
+
+TEST(Moved, symmetricMoveKeepsBoth)
+{
+    // (10, 15), (20, 15) -> (15, 10), (15, 20): nothing sits at either old place (Q1).
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(15, 10);
+    bosses.now["Edge2"] = circleAt(15, 20);
+    auto outcomes = Data::solveOwner(
+        bosses.input({Bosses::boss("Edge1", "a", 10), Bosses::boss("Edge2", "b", 20)})
+    );
+    EXPECT_EQ(describe(outcomes[0]), "exact Edge1 0 [] ");
+    EXPECT_EQ(describe(outcomes[1]), "exact Edge2 0 [] ");
+}
+
+TEST(Moved, severalElementsAtTheOldPlace)
+{
+    // Overlapping instances: two edges where a's was, listed in index order before a's.
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 25);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    bosses.now["Edge4"] = circleAt(10, 15);
+    auto input = bosses.input({Bosses::boss("Edge1", "a", 10)});
+    input.pool["Edge"].push_back(element("Edge4", {"c"}));
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge2 Edge4 Edge1 ] moved 14.142 mm; Edge2, Edge4 sit where it was");
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"place", "place", "name"}));
+}
+
+TEST(Moved, changedInPlaceIsNotMoved)
+{
+    // The same centre, a larger radius, and another circle at the old place: "changed".
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(10, 15, 4);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto outcome = Data::solveOwner(bosses.input({Bosses::boss("Edge1", "a", 10)}))[0];
+    EXPECT_EQ(describe(outcome), "broken  -1 [Edge2 Edge1 ] changed; Edge2 sits where it was");
+}
+
+TEST(Moved, shortenedHitStillContinues)
+{
+    // Nothing equals the whole old edge: the continuation decides, as before.
+    Notch notch;
+    auto outcome = Data::solveOwner(notch.input(Data::SolvePolicy::One))[0];
+    EXPECT_EQ(outcome.evidence, "split: the old edge continues in Edge2");
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"name", "piece"}));
+}
+
+TEST(Moved, nothingToCompare)
+{
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 25);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    // No saved fingerprint: no check, nothing measured.
+    int calls = 0;
+    auto entry = Bosses::boss("Edge1", "a", 10);
+    entry.fingerprint = ElementFingerprint();
+    EXPECT_EQ(describe(Data::solveOwner(bosses.input({entry}, &calls))[0]), "exact Edge1 0 [] ");
+    EXPECT_EQ(calls, 0);
+    // Unmoved: only the hit is measured.
+    Bosses still;
+    calls = 0;
+    auto outcome = Data::solveOwner(still.input({Bosses::boss("Edge1", "a", 10)}, &calls))[0];
+    EXPECT_EQ(describe(outcome), "exact Edge1 0 [] ");
+    EXPECT_EQ(calls, 1);
+    // A hit that can't be measured stands.
+    bosses.now.erase("Edge1");
+    outcome = Data::solveOwner(bosses.input({Bosses::boss("Edge1", "a", 10)}))[0];
+    EXPECT_EQ(describe(outcome), "exact Edge1 0 [] ");
+}
+
+TEST(Moved, equivalentKeepsTheHitWhenTheProbeAgrees)
+{
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 15);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto entry = Bosses::boss("Edge1", "a", 10);
+    entry.policy = Data::SolvePolicy::Equivalent;
+    entry.equivalent = [](const std::string&, const std::string&) { return true; };
+    EXPECT_EQ(describe(Data::solveOwner(bosses.input({entry}))[0]), "exact Edge1 0 [] ");
+
+    entry.equivalent = [](const std::string&, const std::string&) { return false; };
+    EXPECT_EQ(Data::solveOwner(bosses.input({entry}))[0].status, SolveStatus::Broken);
+    //   no probe is no equivalence
+    entry.equivalent = {};
+    EXPECT_EQ(Data::solveOwner(bosses.input({entry}))[0].status, SolveStatus::Broken);
+    //   Expand breaks as One does
+    entry.policy = Data::SolvePolicy::Expand;
+    EXPECT_EQ(Data::solveOwner(bosses.input({entry}))[0].status, SolveStatus::Broken);
+}
+
+TEST(Moved, ambiguousElementsLeaveTheOtherPools)
+{
+    // A missing reference saved where Edge2 now is would take it by geometry (tiers 2 and 3)...
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 25);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto gone = missing("gone", "Edge");
+    gone.fingerprint = circleAt(10, 15);
+    EXPECT_EQ(Data::solveOwner(bosses.input({gone}))[0].element, "Edge2");
+    // ... but not while a moved exact reference of the owner has it at its old place.
+    auto outcomes = Data::solveOwner(bosses.input({Bosses::boss("Edge1", "a", 10), gone}));
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[1].evidence, "no candidate");
+}
+
+TEST(Moved, patternSiblingAtTheOldPlaceBreaks)
+{
+    // Q3 (a), the uniform rule: a pitch change puts instance 4's copy of the edge where
+    // instance 3's was. The names are siblings, and the reference still breaks.
+    const std::string base = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    SolveInput input;
+    input.diagonal = 60;
+    input.pool["Edge"] = {
+        element("Edge1", {stepInstance(base, 8, "3", 'E')}),
+        element("Edge2", {stepInstance(base, 8, "4", 'E')}),
+    };
+    auto entry = exact("Edge1", "Edge");
+    entry.exactName = stepInstance(base, 8, "3", 'E');
+    entry.fingerprint = circleAt(26, 0);
+    input.entries = {entry};
+    measure(input, {{"Edge1", circleAt(20, 0)}, {"Edge2", circleAt(26, 0)}}, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge2 Edge1 ] moved 6.000 mm; Edge2 sits where it was");
+}
+
+TEST(Moved, independentOfInputOrder)
+{
+    // Two traded bosses, a third moved alone, a missing reference and a plate edge, shuffled.
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 15);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    bosses.now["Edge4"] = circleAt(5, 5);
+    bosses.now["Edge5"] = circleAt(25, 25);
+    auto c = Bosses::boss("Edge4", "c", 0);
+    c.fingerprint = circleAt(5, 25);
+    auto gone = missing("gone", "Edge");
+    gone.fingerprint = circleAt(25, 25);
+    gone.position = 3;
+    auto input = bosses.input(
+        {Bosses::boss("Edge1", "a", 10), Bosses::boss("Edge2", "b", 20), c, gone}
+    );
+    input.pool["Edge"].push_back(element("Edge4", {"c"}));
+    input.pool["Edge"].push_back(element("Edge5", {"d", "d2"}));
+
+    const auto expected = Data::solveOwner(input);
+    std::vector<std::string> expectedText;
+    for (const auto& outcome : expected) {
+        expectedText.push_back(describe(outcome));
+    }
+    EXPECT_EQ(expected[0].status, SolveStatus::Broken);
+    EXPECT_EQ(expected[1].status, SolveStatus::Broken);
+    EXPECT_EQ(expectedText[2], "exact Edge4 0 [] ");
+    EXPECT_EQ(expected[3].element, "Edge5");
+
+    std::mt19937 random(105);
+    for (int round = 0; round < 100; ++round) {
+        SolveInput shuffled = input;
+        std::vector<int> order(input.entries.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::shuffle(order.begin(), order.end(), random);
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            shuffled.entries[i] = input.entries[order[i]];
+        }
+        for (auto& [type, pool] : shuffled.pool) {
+            std::shuffle(pool.begin(), pool.end(), random);
+            for (auto& element : pool) {
+                std::shuffle(element.names.begin(), element.names.end(), random);
+            }
+        }
+        auto outcomes = Data::solveOwner(shuffled);
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            EXPECT_EQ(describe(outcomes[i]), expectedText[order[i]])
+                << "round " << round << ", entry " << order[i];
+            EXPECT_EQ(outcomes[i].candidateRoles, expected[order[i]].candidateRoles);
+        }
+    }
+}

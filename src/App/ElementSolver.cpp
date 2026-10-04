@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <locale>
 #include <map>
 #include <numeric>
@@ -1543,6 +1544,40 @@ bool intrinsicAgrees(
     return true;
 }
 
+bool atSamePlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    // The kind, direction and radii as tier 2 compares them.
+    if (!intrinsicAgrees(saved, now, tolerances)) {
+        return false;
+    }
+    const double eps = distance * std::max(1.0, diagonal);
+    if (saved.size.has_value() != now.size.has_value()
+        || (saved.size
+            && std::abs(*saved.size - *now.size)
+                > 1e-6 * std::max({std::abs(*saved.size), std::abs(*now.size), eps}))) {
+        return false;
+    }
+    if (saved.center.has_value() != now.center.has_value()
+        || (saved.center && Base::Distance(*saved.center, *now.center) > eps)) {
+        return false;
+    }
+    if (saved.location && now.location && Base::Distance(*saved.location, *now.location) > eps) {
+        return false;
+    }
+    if (saved.extentMin && saved.extentMax && now.extentMin && now.extentMax
+        && (Base::Distance(*saved.extentMin, *now.extentMin) > eps
+            || Base::Distance(*saved.extentMax, *now.extentMax) > eps)) {
+        return false;
+    }
+    return true;
+}
+
 int extrinsicNearest(
     const ElementFingerprint& saved,
     const std::vector<ElementFingerprint>& candidates,
@@ -1655,8 +1690,85 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
     }
 
-    // Entries decided before the graph: collapsing groups and continued exact entries.
+    // Entries decided before the graph: moved, collapsing and continued exact entries.
     std::vector<char> decidedEntry(input.entries.size(), 0);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    // Moved (ops#105): an exact element that no longer sits where its saved fingerprint was,
+    // while another element of its type sits there now. The name says one, the geometry the
+    // other: never a pick. Moved alone (nothing at the old place), the name stands.
+    {
+        std::map<std::string, std::set<std::string>> reserved;  // by type: the places taken
+        for (std::size_t i = 0; i < input.entries.size(); ++i) {
+            const auto& entry = input.entries[i];
+            const ElementFingerprint& saved = entry.fingerprint;
+            if (!entry.exact || !saved.isValid()) {
+                continue;
+            }
+            Pool& pool = pools[entry.type];
+            const std::string& hit = entry.exactElement;
+            const int hitPosition = positionOf(pool, hit);
+            auto here = [&](const ElementFingerprint& now) {
+                return atSamePlace(saved,
+                                   now,
+                                   input.diagonal,
+                                   input.tolerances,
+                                   input.continuationDistance);
+            };
+            const ElementFingerprint& now = fingerprintOfIndex(hit);
+            if (hitPosition < 0 || !now.isValid() || here(now)) {
+                continue;  // unmoved, or nothing to compare
+            }
+            std::vector<int> place;
+            for (std::size_t k = 0; k < pool.elements.size(); ++k) {
+                if (static_cast<int>(k) != hitPosition && here(fingerprintOf(pool.elements[k]))) {
+                    place.push_back(static_cast<int>(k));
+                }
+            }
+            if (place.empty()) {
+                continue;  // moved alone
+            }
+            decidedEntry[i] = 1;
+            for (int k : place) {
+                reserved[entry.type].insert(pool.elements[k].index);
+            }
+            if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
+                && std::all_of(place.begin(), place.end(), [&](int k) {
+                       return entry.equivalent(hit, pool.elements[k].index);
+                   })) {
+                continue;  // every element there gives the consumer the hit's result
+            }
+            auto distanceOf = [&](const ElementFingerprint& fp) {
+                return saved.center && fp.center ? Base::Distance(*saved.center, *fp.center) : nan;
+            };
+            auto& outcome = outcomes[i];
+            outcome = SolveOutcome();
+            std::string there;
+            auto list = [&](int k, const char* role) {
+                const auto& element = pool.elements[k];
+                outcome.candidates.push_back(element.index);
+                outcome.candidateNames.push_back(firstName(element));
+                outcome.candidateRoles.emplace_back(role);
+                outcome.candidateDistances.push_back(distanceOf(fingerprintOf(element)));
+            };
+            for (int k : place) {
+                list(k, "place");
+                there += (there.empty() ? "" : ", ") + pool.elements[k].index;
+            }
+            list(hitPosition, "name");
+            const double moved = distanceOf(now);
+            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            outcome.evidence = (std::isnan(moved) || moved <= eps
+                                    ? std::string("changed")
+                                    : "moved " + formatDistance(moved) + " mm")
+                + "; " + there + (place.size() > 1 ? " sit" : " sits") + " where it was";
+        }
+        // The elements at an old place are as ambiguous as the moved one: no other entry of the
+        // owner takes them.
+        for (const auto& [type, indexes] : reserved) {
+            pools[type].exact.insert(indexes.begin(), indexes.end());
+        }
+    }
 
     // Collapse: a group of references expanded from one name (the same scope and `from`) merges
     // back when that name is found exactly and no member holds another element.
@@ -1670,7 +1782,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     for (const auto& [key, members] : fromGroups) {
         const std::string& type = input.entries[members.front()].type;
         if (std::any_of(members.begin(), members.end(), [&](int i) {
-                return input.entries[i].type != type;
+                return input.entries[i].type != type || decidedEntry[i];
             })) {
             continue;
         }
@@ -1823,6 +1935,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 for (int k : listed) {
                     outcome.candidates.push_back(pool.elements[k].index);
                     outcome.candidateNames.push_back(firstName(pool.elements[k]));
+                    outcome.candidateRoles.emplace_back(k == hitPosition ? "name" : "piece");
+                    outcome.candidateDistances.push_back(nan);
                 }
             };
             if (!pastEnd.empty() || overlapping) {
@@ -1971,6 +2085,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             for (int k : listed) {
                 outcome.candidates.push_back(pool.elements[k].index);
                 outcome.candidateNames.push_back(firstName(pool.elements[k]));
+                outcome.candidateRoles.emplace_back(k == hitPosition ? "name" : "piece");
+                outcome.candidateDistances.push_back(nan);
             }
             decidedEntry[i] = 1;
         }
@@ -2036,13 +2152,28 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     std::vector<GroupState> states;
     states.reserve(groups.size());
 
-    auto listCandidates = [](GroupState& state, const std::vector<int>& positions) {
+    // \a role: the candidates' role, or empty for a structural survivor's or a piece's, as the
+    // group shows it.
+    auto listCandidates = [nan](GroupState& state,
+                                const std::vector<int>& positions,
+                                const char* role = nullptr) {
+        auto isPiece = [&](int k) {
+            const auto& names = state.pool->elements[k].names;
+            return std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                return NameAncestry::isPieceOf(n, state.oldName)
+                    || NameAncestry::isIndexPieceOf(n, state.oldName);
+            });
+        };
         for (int k : positions) {
             const auto& element = state.pool->elements[k];
             state.outcome.candidates.push_back(element.index);
             state.outcome.candidateNames.push_back(
                 element.names.empty() ? std::string() : element.names.front()
             );
+            state.outcome.candidateRoles.emplace_back(role ? role
+                                                      : isPiece(k) ? "piece"
+                                                                   : "structural");
+            state.outcome.candidateDistances.push_back(nan);
         }
     };
 
@@ -2281,7 +2412,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.decided = true;
                     state.outcome.evidence = "no structural candidate, tier 3 found none: "
                         + describeNearest(nearest);
-                    listCandidates(state, agree);
+                    listCandidates(state, agree, "geometric");
                     continue;
                 }
             }
@@ -2386,16 +2517,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             if (status == MatchStatus::Resolved && sibling) {
                 state.outcome.evidence = "pattern sibling";
-                listCandidates(state, state.listed);
+                listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
             }
             else if (status == MatchStatus::Resolved && !evidenced) {
                 state.outcome.evidence = "no top agreement";
-                listCandidates(state, state.listed);
+                listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
             }
             else if (status == MatchStatus::Resolved && contradicts) {
                 state.outcome.evidence = "tier 2 disagrees with "
                     + state.pool->elements[k].index;
-                listCandidates(state, state.listed);
+                listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
             }
             else if (status == MatchStatus::Resolved && !state.expanded.empty()) {
                 state.outcome.status = SolveStatus::Resolved;
@@ -2450,7 +2581,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (!state.geometryEvidence.empty()) {
                     state.outcome.evidence += ", " + state.geometryEvidence;
                 }
-                listCandidates(state, state.listed);
+                listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
             }
         }
         for (int member : *state.members) {
