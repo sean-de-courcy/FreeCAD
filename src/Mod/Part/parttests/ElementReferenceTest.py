@@ -720,6 +720,112 @@ class ElementReferenceTest(unittest.TestCase):
         """As testTwoLinksToOneSourceStayDistinct, with the reference solver on."""
         self._checkTwoLinks(solver=True)
 
+    def testCrossDocumentCutOnLinkWithTheSourcesId(self):
+        """A Part::Cut of an App::Link that has the same ID as the box it links to in another
+        document (the Link is object 1 of its document): the box's faces keep the form they have
+        under any other ID, `<face>;_;<box ID>;MKR;...|_;_;<Link ID>;EXT;...`, and trace back
+        through the Link to the box. Before, with equal IDs the Link's shape reached the Cut
+        unnamed and the Cut named those faces with its own op (ops#56, the MKR/CUT flip)."""
+        # Arrange
+        box = self._linkedSource()
+        asm = self._numberedFromOne("Asm56")
+        link = asm.addObject("App::Link", "L")  # ID 1, as the box
+        link.LinkedObject = box
+        tool = asm.addObject("Part::Box", "Tool")
+        tool.Length = tool.Width = tool.Height = 4
+        tool.Placement.Base = App.Vector(8, 8, 8)
+        cut = asm.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = link, tool
+
+        # Act
+        asm.recompute()
+
+        # Assert
+        self.assertEqual(link.ID, box.ID)
+        self.assertAlmostEqual(cut.Shape.Volume, 1000 - 8)
+        names = cut.Shape.ElementReverseMap
+        fromBox = 0
+        for index, face in enumerate(cut.Shape.Faces, 1):
+            bound = face.BoundBox
+            if any(
+                abs(low - 8) < 1e-7 and abs(high - 8) < 1e-7
+                for low, high in (
+                    (bound.XMin, bound.XMax),
+                    (bound.YMin, bound.YMax),
+                    (bound.ZMin, bound.ZMax),
+                )
+            ):
+                continue  # a face of the tool
+            fromBox += 1
+            sub = f"Face{index}"
+            sections = App.getDecodedMappedName(App.expandMappedName(names[sub]))
+            history = self._history(cut, sub)
+            with self.subTest(face=sub, sections=sections, history=history):
+                self.assertEqual(len(sections), 2)
+                self.assertEqual(
+                    (sections[0]["opCode"], sections[0]["iterationTag"]), ("MKR", str(box.ID))
+                )
+                self.assertEqual(
+                    (sections[1]["opCode"], sections[1]["iterationTag"]), ("EXT", str(link.ID))
+                )
+                self.assertEqual(history, ["Asm56#Cut", "Asm56#L", "Src56#Src"])
+        self.assertEqual(fromBox, 6)
+
+    def testLinkInTheSameDocumentKeepsTheNames(self):
+        """An App::Link to a Body in the same document has the Body's names, with no boundary
+        section, and a fusion of the Body and the Link gives the copies the same names told
+        apart by duplicate counts, as in FreeCAD 1.1.3 (ops#104: same-document links are left
+        as they are; ops#56's section is for links across documents only)."""
+        # Arrange
+        doc = self._numberedFromOne("Same56")
+        pad = self._paddedSquare(doc, 0)
+        body = pad.getParentGeoFeatureGroup()
+        link = doc.addObject("App::Link", "L")
+        link.LinkedObject = body
+        link.Placement.Base = App.Vector(100, 0, 0)
+        fuse = doc.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = [body, link]
+
+        # Act
+        doc.recompute()
+
+        # Assert
+        self.assertAlmostEqual(fuse.Shape.Volume, 2000)
+        expand = App.expandMappedName
+        linkNames = sorted(expand(n) for n in link.Shape.ElementMap)
+        self.assertEqual(linkNames, sorted(expand(n) for n in body.Shape.ElementMap))
+        names = [expand(n) for n in fuse.Shape.ElementMap]
+        self.assertTrue(names)
+        self.assertFalse([n for n in names if ";EXT;" in n])
+        counts = {App.getDecodedMappedName(n)[-1]["duplicateCount"] for n in names}
+        self.assertIn("1", counts)
+
+    def testCrossDocumentBinderOfAFace(self):
+        """A SubShapeBinder of one face of a box in another document, where a local box has the
+        box's ID: the bound face's name ends in a boundary section with the binder's ID, and its
+        history reaches the box's Face6, never the local box (ops#56)."""
+        # Arrange
+        box = self._linkedSource()
+        asm = self._numberedFromOne("Asm56")
+        decoy = asm.addObject("Part::Box", "Decoy")  # ID 1, as the box
+        decoy.Placement.Base = App.Vector(100, 0, 0)
+        binder = asm.addObject("PartDesign::SubShapeBinder", "B")
+        binder.Support = [(box, ("Face6",))]
+
+        # Act
+        asm.recompute()
+
+        # Assert
+        self.assertEqual(decoy.ID, box.ID)
+        self.assertEqual(len(binder.Shape.Faces), 1)
+        self.assertAlmostEqual(binder.Shape.Faces[0].BoundBox.ZMin, 10)
+        name = App.expandMappedName(binder.Shape.ElementReverseMap["Face1"])
+        self.assertTrue(name.endswith(f";{binder.ID};EXT;0;F;0;_;_"))
+        history = binder.getElementHistory("Face1", True, False, True)
+        objects = [item[0][0] if isinstance(item[0], tuple) else item[0] for item in history]
+        self.assertEqual(objects, ["Asm56#B", "Src56#Src"])
+        self.assertEqual(history[-1][1], "Face6")
+
 
 class ElementReferenceTestV2i(ElementReferenceTest):
     """The same cases with every document in V2 with interned names (ops#6, Task 1 PR 8): the

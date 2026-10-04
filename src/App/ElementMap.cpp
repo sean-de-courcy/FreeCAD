@@ -1839,7 +1839,8 @@ long getElementHistoryV2(const MappedName& name,
         if (sections.size() > 1) {
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - current.data()) - 1;
             next = current.substr(0, prefixSize);
-            foreign = section->opCode == externalOpCode;
+            // Once past a boundary, everything before it is the other document's
+            foreign = foreign || section->opCode == externalOpCode;
         }
         else if ((section->hasMapperFlag(MAPPER_FLAG_GENERATED)
                   || section->hasMapperFlag(MAPPER_FLAG_PROJECTION))
