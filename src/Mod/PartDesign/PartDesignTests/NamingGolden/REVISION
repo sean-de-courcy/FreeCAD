@@ -1,0 +1,6 @@
+# The fork's naming revision (ForkNamingRevision in src/App/Document.cpp) and the digest of the
+# V2 golden dumps it was recorded with (ops#103). TestNamingDump.TestNamingRevision fails when
+# the dumps change and the revision doesn't: a change of existing names needs a new revision,
+# which makes files saved before it re-derive their references from geometry once.
+revision 1
+digest 6e1b2dcea3fdb8aaf6a3f7c97e2b021327dabfdce5306d3f1bcde7827293b8d4
