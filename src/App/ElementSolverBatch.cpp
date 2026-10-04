@@ -189,6 +189,7 @@ void readTolerances(double& gap, Data::GeometryTolerances& tolerances, double& c
     read("Tier3Distance", tolerances.distance);
     read("Tier3GapFactor", tolerances.gapFactor);
     read("Tier3Size", tolerances.size);
+    read("SamePlaceSize", tolerances.placeSize);
     read("ContinuationDistance", continuation);
 }
 
@@ -242,6 +243,13 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
                                                             : resolution.shadow.oldName;
 }
 
+// An exact reference whose element can't be measured: no geometric check runs for it.
+void logUnmeasured(const SolverEntry& entry)
+{
+    FC_LOG(referenceName(entry.prop) << "[" << entry.index << "]: " << entry.oldIndex
+                                     << " can't be measured; kept by its name unchecked");
+}
+
 // Whether an exact reference must be solved, from \a saved, its saved fingerprint, and \a now,
 // its element's current one: the element moved (ops#105: another element may sit where it
 // was), or it may be split (Task 2 PR 7: a line edge or an arc that it now lies strictly within,
@@ -253,7 +261,11 @@ bool exactNeedsSolving(const SolverEntry& entry,
                        const Data::GeometryTolerances& tolerances,
                        double distance)
 {
-    if (!saved.isValid() || !now.isValid()) {
+    if (!saved.isValid()) {
+        return false;
+    }
+    if (!now.isValid()) {
+        logUnmeasured(entry);
         return false;
     }
     if (!Data::atSamePlace(saved, now, diagonal, tolerances, distance)) {
@@ -656,16 +668,23 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
-        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [&](const auto* e) {
-                return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty()
+        if (!anyMissing) {
+            // Every entry, not up to the first: each unmeasurable one is logged.
+            bool needed = false;
+            for (const auto* e : entries) {
+                if (e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty()
                     && exactNeedsSolving(*e,
                                          Data::ElementFingerprint::fromString(e->oldFingerprint),
                                          fingerprintOf(e->oldIndex),
                                          diagonal,
                                          tolerances,
-                                         continuationDistance);
-            })) {
-            continue;
+                                         continuationDistance)) {
+                    needed = true;
+                }
+            }
+            if (!needed) {
+                continue;
+            }
         }
 
         if (reverse) {
@@ -768,6 +787,10 @@ bool solveElementReferences(DocumentObject* feature,
                 + entry->prefix;
             item.position = entry->index;
             if (entry->kind == SolverEntry::Kind::Exact) {
+                if (anyMissing && item.fingerprint.isValid()
+                    && !fingerprintOf(entry->oldIndex).isValid()) {
+                    logUnmeasured(*entry);  // the owner filter, which logs it, didn't run
+                }
                 item.exact = true;
                 item.exactElement = entry->oldIndex;
                 item.exactName = plainOld(entry->exactName);
@@ -873,8 +896,11 @@ bool solveElementReferences(DocumentObject* feature,
                     std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
                         return static_cast<char>(std::tolower(c));
                     });
-                    item.headline = "Ambiguous " + type + " reference: " + entry.oldIndex
-                        + " moved and " + places
+                    // The evidence's verb: `moved`, or `changed` in place.
+                    const char* verb =
+                        outcome.evidence.rfind("changed", 0) == 0 ? " changed and " : " moved and ";
+                    item.headline = "Ambiguous " + type + " reference: " + entry.oldIndex + verb
+                        + places
                         + (places.find(" and ") == std::string::npos ? " sits" : " sit")
                         + " where it was";
                 }

@@ -4114,3 +4114,79 @@ TEST(Moved, independentOfInputOrder)
         }
     }
 }
+
+TEST(Moved, equivalentKeepReservesNothing)
+{
+    // The review's finding 1: an attachment keeps its moved hit (the probe agrees), so the
+    // element at its old place stays open to the owner's other references: a missing one saved
+    // there resolves to it.
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 15);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto kept = Bosses::boss("Edge1", "a", 10);
+    kept.policy = Data::SolvePolicy::Equivalent;
+    kept.equivalent = [](const std::string&, const std::string&) { return true; };
+    auto gone = missing("gone", "Edge");
+    gone.policy = Data::SolvePolicy::Equivalent;
+    gone.equivalent = kept.equivalent;
+    gone.fingerprint = circleAt(10, 15);
+    auto outcomes = Data::solveOwner(bosses.input({kept, gone}));
+    EXPECT_EQ(describe(outcomes[0]), "exact Edge1 0 [] ");
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[1].element, "Edge2");
+}
+
+TEST(Moved, decidedMemberStopsTheCollapse)
+{
+    // A group expanded from `whole` (Edge1's name): one member exact on Edge1, one missing piece
+    // of it, which would merge back. Edge1 moved and Edge2 sits at the place the exact member
+    // saved: that member breaks, and the group doesn't collapse over it.
+    const std::string whole = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    Bosses bosses;
+    bosses.now["Edge1"] = circleAt(20, 15);
+    bosses.now["Edge2"] = circleAt(10, 15);
+    auto exactMember = Bosses::boss("Edge1", whole, 10);
+    auto pieceMember = missing(piece(whole, 9, "CUT", 0, 'E'), "Edge");
+    auto input = bosses.input(
+        {member(exactMember, whole, "s", 0), member(pieceMember, whole, "s", 1)}
+    );
+    input.pool["Edge"][0].names = {whole};
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"place", "name"}));
+    EXPECT_FALSE(outcomes[0].collapsed);
+    EXPECT_NE(outcomes[1].status, SolveStatus::Removed);
+    EXPECT_FALSE(outcomes[1].collapsed);
+
+    // Unmoved, the same group collapses onto Edge1.
+    Bosses still;
+    input = still.input({member(exactMember, whole, "s", 0), member(pieceMember, whole, "s", 1)});
+    input.pool["Edge"][0].names = {whole};
+    outcomes = Data::solveOwner(input);
+    EXPECT_TRUE(outcomes[0].collapsed);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Removed);
+}
+
+TEST(Moved, faceUnderOneBreaks)
+{
+    // Square bosses' top faces (6 x 6 at z = 10), a at (10, 15) and b at (20, 15), trade places.
+    auto top = [](double x) {
+        auto fp = fingerprint('F', "Plane", 36, Base::Vector3d(x, 15, 10), Base::Vector3d(0, 0, 1));
+        fp.extentMin = Base::Vector3d(x - 3, 12, 10);
+        fp.extentMax = Base::Vector3d(x + 3, 18, 10);
+        return fp;
+    };
+    SolveInput input;
+    input.diagonal = std::sqrt(30.0 * 30 + 30 * 30 + 10 * 10);
+    input.pool["Face"] = {element("Face1", {"a"}), element("Face2", {"b"})};
+    auto entry = exact("Face1", "Face");
+    entry.exactName = "a";
+    entry.fingerprint = top(10);
+    input.entries = {entry};
+    measure(input, {{"Face1", top(20)}, {"Face2", top(10)}}, nullptr);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Face2 Face1 ] moved 10.000 mm; Face2 sits where it was");
+    // Untraded: exact.
+    measure(input, {{"Face1", top(10)}, {"Face2", top(20)}}, nullptr);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ");
+}

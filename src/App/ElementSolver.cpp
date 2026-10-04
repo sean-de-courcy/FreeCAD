@@ -1560,7 +1560,8 @@ bool atSamePlace(
     if (saved.size.has_value() != now.size.has_value()
         || (saved.size
             && std::abs(*saved.size - *now.size)
-                > 1e-6 * std::max({std::abs(*saved.size), std::abs(*now.size), eps}))) {
+                > tolerances.placeSize
+                    * std::max({std::abs(*saved.size), std::abs(*now.size), eps}))) {
         return false;
     }
     if (saved.center.has_value() != now.center.has_value()
@@ -1728,15 +1729,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (place.empty()) {
                 continue;  // moved alone
             }
-            decidedEntry[i] = 1;
-            for (int k : place) {
-                reserved[entry.type].insert(pool.elements[k].index);
-            }
             if (entry.policy == SolvePolicy::Equivalent && entry.equivalent
                 && std::all_of(place.begin(), place.end(), [&](int k) {
                        return entry.equivalent(hit, pool.elements[k].index);
                    })) {
-                continue;  // every element there gives the consumer the hit's result
+                // Every element there gives the consumer the hit's result: the entry is exact,
+                // as if unmoved, and reserves nothing.
+                continue;
+            }
+            decidedEntry[i] = 1;
+            for (int k : place) {
+                reserved[entry.type].insert(pool.elements[k].index);
             }
             auto distanceOf = [&](const ElementFingerprint& fp) {
                 return saved.center && fp.center ? Base::Distance(*saved.center, *fp.center) : nan;

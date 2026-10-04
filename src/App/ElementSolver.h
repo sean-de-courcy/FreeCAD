@@ -297,6 +297,8 @@ struct AppExport GeometryTolerances
     double gapFactor = 3.0;
     /// Tier 3: the largest relative difference of sizes (area or length).
     double size = 0.01;
+    /// atSamePlace(): the largest relative difference of sizes (ops#105).
+    double placeSize = 1e-6;
 };
 
 /** Tier 2, intrinsic geometry: the same element type and surface or curve kind, directions
@@ -368,10 +370,10 @@ AppExport bool planeAgrees(
  * with a reference. The same element type and kind; size, centre, direction and radii present in
  * both or in neither; the direction within \a tolerances.angle (a plane's normal with its sense,
  * an axis or a line's direction either way, as intrinsicAgrees()); radii within
- * \a tolerances.radius relative; the size within 1e-6 relative; the centre, and a circle's centre
- * and a plane's extent corners when both have them, within ε (\a distance times
- * max(1, \a diagonal)). These are coincidence tolerances, far tighter than tier 3's: an element
- * 0.1 mm away isn't at the place. False if either fingerprint is invalid.
+ * \a tolerances.radius relative; the size within \a tolerances.placeSize relative; the centre,
+ * and a circle's centre and a plane's extent corners when both have them, within ε (\a distance
+ * times max(1, \a diagonal)). These are coincidence tolerances, far tighter than tier 3's: an
+ * element 0.1 mm away isn't at the place. False if either fingerprint is invalid.
  */
 AppExport bool atSamePlace(
     const ElementFingerprint& saved,
