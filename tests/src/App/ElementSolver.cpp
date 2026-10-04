@@ -4190,3 +4190,196 @@ TEST(Moved, faceUnderOneBreaks)
     measure(input, {{"Face1", top(10)}, {"Face2", top(20)}}, nullptr);
     EXPECT_EQ(describe(Data::solveOwner(input)[0]), "exact Face1 0 [] ");
 }
+
+namespace
+{
+
+// An element's hint, as Part gives it: its fingerprint without size, centre and extent, and a
+// point of its plane, line or vertex away from its centre.
+struct Hinted
+{
+    ElementFingerprint intrinsic;
+    std::optional<Base::Vector3d> anchor;
+};
+
+Hinted hintOf(const ElementFingerprint& fp)
+{
+    Hinted hint;
+    hint.intrinsic = fp;
+    hint.intrinsic.size.reset();
+    hint.intrinsic.center.reset();
+    hint.intrinsic.extentMin.reset();
+    hint.intrinsic.extentMax.reset();
+    if (fp.type == 'V') {
+        hint.anchor = fp.center;
+    }
+    else if (fp.direction && fp.kind == "Line") {
+        hint.anchor = *fp.center + *fp.direction * 7.0;
+    }
+    else if (fp.direction && fp.kind == "Plane") {
+        // a point of the plane: the centre moved along a direction in it
+        Base::Vector3d inPlane = *fp.direction % Base::Vector3d(0.3, 0.5, 0.7);
+        hint.anchor = *fp.center + inPlane * 5.0;
+    }
+    return hint;
+}
+
+}  // namespace
+
+TEST(Moved, hintRulesOutOnlyWhatIsNotThere)
+{
+    GeometryTolerances tolerances;
+    const double diagonal = 43.6;
+    const double eps = 1e-7 * diagonal;
+    auto top = fingerprint('F', "Plane", 36, Base::Vector3d(10, 15, 10), Base::Vector3d(0, 0, 1));
+    auto side = fingerprint('F', "Plane", 30, Base::Vector3d(13, 15, 7.5), Base::Vector3d(1, 0, 0));
+    auto vertex = fingerprint('V', "Point", {}, Base::Vector3d(13, 12, 10));
+    auto shifted = [](ElementFingerprint fp, Base::Vector3d by) {
+        if (fp.center) {
+            fp.center = *fp.center + by;
+        }
+        if (fp.location) {
+            fp.location = *fp.location + by;
+        }
+        return fp;
+    };
+    const std::vector<ElementFingerprint> saved {
+        circleAt(10, 15), lineX(0, 20), lineX(0, 20, 10, 0), top, side, vertex,
+    };
+    std::vector<ElementFingerprint> elements = saved;
+    for (const auto& fp : saved) {
+        for (Base::Vector3d by : {Base::Vector3d(0.5 * eps, 0, 0),
+                                  Base::Vector3d(0, 0, 0.5 * eps),
+                                  Base::Vector3d(2 * eps, 0, 0),
+                                  Base::Vector3d(0, 0, 3 * eps),
+                                  Base::Vector3d(10, 0, 0),
+                                  Base::Vector3d(0, 0, 1)}) {
+            elements.push_back(shifted(fp, by));
+        }
+    }
+    int ruledOut = 0;
+    for (const auto& s : saved) {
+        for (const auto& element : elements) {
+            const Hinted hint = hintOf(element);
+            const bool maybe = Data::mayBeAtPlace(s, hint.intrinsic, hint.anchor, diagonal,
+                                                  tolerances, 1e-7);
+            // Never ruled out when it is there.
+            if (Data::atSamePlace(s, element, diagonal, tolerances, 1e-7)) {
+                EXPECT_TRUE(maybe);
+            }
+            ruledOut += maybe ? 0 : 1;
+        }
+    }
+    EXPECT_GT(ruledOut, 0);
+
+    // What the hint rules out: another kind, a parallel plane or line, another circle centre,
+    // a vertex elsewhere.
+    auto may = [&](const ElementFingerprint& s, const ElementFingerprint& element) {
+        const Hinted hint = hintOf(element);
+        return Data::mayBeAtPlace(s, hint.intrinsic, hint.anchor, diagonal, tolerances, 1e-7);
+    };
+    EXPECT_FALSE(may(circleAt(10, 15), lineX(0, 20)));
+    EXPECT_FALSE(may(top, shifted(top, Base::Vector3d(0, 0, 1))));
+    EXPECT_FALSE(may(lineX(0, 20), lineX(0, 20, 1)));
+    EXPECT_FALSE(may(circleAt(10, 15), circleAt(20, 15)));
+    EXPECT_FALSE(may(vertex, shifted(vertex, Base::Vector3d(1, 0, 0))));
+    //   in the same plane or on the same line elsewhere: only the fingerprint tells
+    EXPECT_TRUE(may(top, shifted(top, Base::Vector3d(10, 0, 0))));
+    EXPECT_TRUE(may(lineX(0, 20), lineX(30, 50)));
+    //   no anchor: the intrinsic part alone
+    Hinted bare = hintOf(top);
+    bare.anchor.reset();
+    EXPECT_TRUE(Data::mayBeAtPlace(top, bare.intrinsic, bare.anchor, diagonal, tolerances, 1e-7));
+}
+
+TEST(Moved, hintsSaveMeasurements)
+{
+    // The traded bosses with a plate edge: the hint rules out the line edge, so only the hit and
+    // the circle at its place are measured; the outcome is the same.
+    for (bool hinted : {false, true}) {
+        Bosses bosses;
+        bosses.now["Edge1"] = circleAt(20, 15);
+        bosses.now["Edge2"] = circleAt(10, 15);
+        int calls = 0;
+        auto input = bosses.input({Bosses::boss("Edge1", "a", 10)}, &calls);
+        int hints = 0;
+        if (hinted) {
+            input.hintOf = [now = bosses.now, &hints](const std::string& index,
+                                                      ElementFingerprint& intrinsic,
+                                                      std::optional<Base::Vector3d>& anchor) {
+                ++hints;
+                auto it = now.find(index);
+                if (it == now.end()) {
+                    return false;
+                }
+                Hinted hint = hintOf(it->second);
+                intrinsic = hint.intrinsic;
+                anchor = hint.anchor;
+                return true;
+            };
+        }
+        auto outcome = Data::solveOwner(input)[0];
+        EXPECT_EQ(describe(outcome),
+                  "broken  -1 [Edge2 Edge1 ] moved 10.000 mm; Edge2 sits where it was")
+            << hinted;
+        EXPECT_EQ(calls, hinted ? 2 : 3) << hinted;
+        EXPECT_EQ(hints, hinted ? 2 : 0) << hinted;
+    }
+}
+
+TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
+{
+    // Twins as far from the saved element as atSamePlace() allows (just inside every
+    // tolerance), and BSplines (no direction, no anchor): the hint must leave them all to the
+    // fingerprint.
+    GeometryTolerances tolerances;
+    const double diagonal = 43.6;
+    const double eps = 1e-7 * diagonal;
+    const double edge = 0.999;  // a hair inside
+    auto moved = [](ElementFingerprint fp, Base::Vector3d by) {
+        fp.center = *fp.center + by;
+        if (fp.location) {
+            fp.location = *fp.location + by;
+        }
+        return fp;
+    };
+    auto tilt = [](ElementFingerprint fp, double angle) {
+        Base::Vector3d d = *fp.direction;
+        Base::Vector3d side = std::abs(d.x) < 0.9 ? Base::Vector3d(1, 0, 0) : Base::Vector3d(0, 1, 0);
+        side = side - d * (side * d);
+        side.Normalize();
+        fp.direction = d * std::cos(angle) + side * std::sin(angle);
+        return fp;
+    };
+    auto top = fingerprint('F', "Plane", 36, Base::Vector3d(10, 15, 10), Base::Vector3d(0, 0, 1));
+    auto bspline = fingerprint('E', "BSpline", 12, Base::Vector3d(3, 4, 5));
+    auto bsplineFace = fingerprint('F', "BSpline", 40, Base::Vector3d(3, 4, 5));
+    auto vertex = fingerprint('V', "Point", {}, Base::Vector3d(13, 12, 10));
+    struct Case
+    {
+        const char* what;
+        ElementFingerprint saved;
+        ElementFingerprint twin;
+    };
+    const std::vector<Case> cases {
+        {"plane, centre off its plane", top, moved(top, Base::Vector3d(0, 0, edge * eps))},
+        {"plane, centre in its plane", top, moved(top, Base::Vector3d(edge * eps, 0, 0))},
+        {"plane, tilted", top, tilt(top, edge * tolerances.angle)},
+        {"line, off its line", lineX(0, 20), moved(lineX(0, 20), Base::Vector3d(0, edge * eps, 0))},
+        {"line, along it", lineX(0, 20), moved(lineX(0, 20), Base::Vector3d(edge * eps, 0, 0))},
+        {"line, tilted", lineX(0, 20), tilt(lineX(0, 20), edge * tolerances.angle)},
+        {"circle, centre", circleAt(10, 15), moved(circleAt(10, 15), Base::Vector3d(edge * eps, 0, 0))},
+        {"circle, radius", circleAt(10, 15), circleAt(10, 15, 3 * (1 + edge * tolerances.radius))},
+        {"vertex", vertex, moved(vertex, Base::Vector3d(0, 0, edge * eps))},
+        {"bspline edge", bspline, moved(bspline, Base::Vector3d(edge * eps, 0, 0))},
+        {"bspline face", bsplineFace, moved(bsplineFace, Base::Vector3d(0, edge * eps, 0))},
+    };
+    for (const auto& c : cases) {
+        const auto& twin = c.twin;
+        ASSERT_TRUE(Data::atSamePlace(c.saved, twin, diagonal, tolerances, 1e-7)) << c.what;
+        const Hinted hint = hintOf(twin);
+        EXPECT_TRUE(Data::mayBeAtPlace(c.saved, hint.intrinsic, hint.anchor, diagonal, tolerances,
+                                       1e-7))
+            << c.what;
+    }
+}

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -34,6 +35,16 @@ FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
 
 namespace App
 {
+
+namespace
+{
+ElementHintsFunction elementHintsFunction = nullptr;
+}
+
+void setElementHintsFunction(ElementHintsFunction function)
+{
+    elementHintsFunction = function;
+}
 
 std::string bareMappedName(const std::string& newStyleName)
 {
@@ -251,15 +262,16 @@ void logUnmeasured(const SolverEntry& entry)
 }
 
 // Whether an exact reference must be solved, from \a saved, its saved fingerprint, and \a now,
-// its element's current one: the element moved (ops#105: another element may sit where it
-// was), or it may be split (Task 2 PR 7: a line edge or an arc that it now lies strictly within,
-// or a plane it now lies in, smaller).
+// its element's current one: it may be split (Task 2 PR 7: a line edge or an arc that it now
+// lies strictly within, or a plane it now lies in, smaller), or it moved and \a occupied says
+// that another element sits where it was (ops#105). An element that moved alone needs nothing.
 bool exactNeedsSolving(const SolverEntry& entry,
                        const Data::ElementFingerprint& saved,
                        const Data::ElementFingerprint& now,
                        double diagonal,
                        const Data::GeometryTolerances& tolerances,
-                       double distance)
+                       double distance,
+                       const std::function<bool()>& occupied)
 {
     if (!saved.isValid()) {
         return false;
@@ -268,17 +280,16 @@ bool exactNeedsSolving(const SolverEntry& entry,
         logUnmeasured(entry);
         return false;
     }
-    if (!Data::atSamePlace(saved, now, diagonal, tolerances, distance)) {
+    const std::string type = indexType(entry.oldIndex);
+    if (type == "Edge" && saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle")
+        && Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance)) {
         return true;
     }
-    const std::string type = indexType(entry.oldIndex);
-    if (type == "Edge" && saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle")) {
-        return Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance);
+    if (type == "Face" && saved.type == 'F' && saved.kind == "Plane"
+        && Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance)) {
+        return true;
     }
-    if (type == "Face" && saved.type == 'F' && saved.kind == "Plane") {
-        return Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance);
-    }
-    return false;
+    return !Data::atSamePlace(saved, now, diagonal, tolerances, distance) && occupied();
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -625,6 +636,36 @@ bool solveElementReferences(DocumentObject* feature,
         }
         return it->second;
     };
+    // Their cheap descriptions (App::ElementHintsFunction), a type at a time, once per batch.
+    auto hints = std::make_shared<std::map<std::string, std::vector<ElementHint>>>();
+    std::function<bool(const std::string&, Data::ElementFingerprint&, std::optional<Base::Vector3d>&)>
+        hintOf;
+    if (elementHintsFunction) {
+        hintOf = [geo, hints](const std::string& index,
+                              Data::ElementFingerprint& intrinsic,
+                              std::optional<Base::Vector3d>& anchor) {
+            const std::string type = indexType(index);
+            auto it = hints->find(type);
+            if (it == hints->end()) {
+                std::vector<ElementHint> list;
+                if (!elementHintsFunction(geo, type.c_str(), list)) {
+                    list.clear();
+                }
+                it = hints->emplace(type, std::move(list)).first;
+            }
+            const std::size_t k = std::strtoul(index.c_str() + type.size(), nullptr, 10);
+            if (k < 1 || k > it->second.size() || !it->second[k - 1].valid) {
+                return false;
+            }
+            const ElementHint& hint = it->second[k - 1];
+            intrinsic = hint.intrinsic;
+            anchor.reset();
+            if (hint.hasAnchor) {
+                anchor = hint.anchor;
+            }
+            return true;
+        };
+    }
 
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
@@ -672,13 +713,53 @@ bool solveElementReferences(DocumentObject* feature,
             // Every entry, not up to the first: each unmeasurable one is logged.
             bool needed = false;
             for (const auto* e : entries) {
-                if (e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty()
-                    && exactNeedsSolving(*e,
-                                         Data::ElementFingerprint::fromString(e->oldFingerprint),
-                                         fingerprintOf(e->oldIndex),
-                                         diagonal,
-                                         tolerances,
-                                         continuationDistance)) {
+                if (e->kind != SolverEntry::Kind::Exact || e->oldFingerprint.empty()) {
+                    continue;
+                }
+                const auto saved = Data::ElementFingerprint::fromString(e->oldFingerprint);
+                // Another element of its type where it was, by index: the hint rules most out
+                // unmeasured. Solving the owner (its pools) costs more than this scan.
+                auto occupied = [&]() {
+                    const std::string type = indexType(e->oldIndex);
+                    const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+                    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+                    if (!data || type.rfind(InternalPrefix, 0) == 0) {
+                        return true;  // solveOwner() decides
+                    }
+                    const unsigned long count = data->countSubElements(type.c_str());
+                    for (unsigned long k = 1; k <= count; ++k) {
+                        const std::string index = type + std::to_string(k);
+                        if (index == e->oldIndex) {
+                            continue;
+                        }
+                        Data::ElementFingerprint intrinsic;
+                        std::optional<Base::Vector3d> anchor;
+                        if (hintOf && hintOf(index, intrinsic, anchor)
+                            && !Data::mayBeAtPlace(saved,
+                                                   intrinsic,
+                                                   anchor,
+                                                   diagonal,
+                                                   tolerances,
+                                                   continuationDistance)) {
+                            continue;
+                        }
+                        if (Data::atSamePlace(saved,
+                                              fingerprintOf(index),
+                                              diagonal,
+                                              tolerances,
+                                              continuationDistance)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                if (exactNeedsSolving(*e,
+                                      saved,
+                                      fingerprintOf(e->oldIndex),
+                                      diagonal,
+                                      tolerances,
+                                      continuationDistance,
+                                      occupied)) {
                     needed = true;
                 }
             }
@@ -747,6 +828,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.maplessTag = maplessTag;
         input.continuationDistance = continuationDistance;
         input.fingerprintOf = fingerprintOf;
+        input.hintOf = hintOf;
         // The solver's only topology: the faces an edge bounds, for the continuation.
         input.facesOf = [geo](const std::string& index) {
             std::vector<std::string> faces;

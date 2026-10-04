@@ -71,6 +71,7 @@
 #include <App/Link.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/ElementFingerprint.h>
+#include <App/ElementSolverBatch.h>
 #include <App/ElementNamingUtils.h>
 #include <App/NameTable.h>
 #include <App/Placement.h>
@@ -509,9 +510,15 @@ Base::Vector3d unsignedDirection(const gp_Dir& dir)
     return v;
 }
 
-void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+// A face's kind, direction and radii, the cheap part of its fingerprint; \a anchor, if given,
+// gets a point of a plane's plane (ops#105).
+void faceIntrinsic(const TopoDS_Face& face,
+                   Data::ElementFingerprint& fp,
+                   std::optional<Base::Vector3d>* anchor = nullptr)
 {
-    BRepAdaptor_Surface surface(face);
+    // Unrestricted: the surface's kind and axes don't depend on the face's bounds, and computing
+    // them (BRepTools::UVBounds) is most of the adaptor's cost.
+    BRepAdaptor_Surface surface(face, Standard_False);
     switch (surface.GetType()) {
         case GeomAbs_Plane: {
             fp.kind = "Plane";
@@ -523,16 +530,8 @@ void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
                 normal.Reverse();
             }
             fp.direction = toVector(normal.XYZ());
-            // Its extent (fingerprint version 3, Task 2 PR 8): the tight bounding box of the
-            // face's boundary, without tolerances or gaps.
-            Bnd_Box box;
-            BRepBndLib::AddOptimal(face, box, false, false);
-            if (!box.IsVoid()) {
-                box.SetGap(0.0);
-                double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
-                box.Get(x0, y0, z0, x1, y1, z1);
-                fp.extentMin = Base::Vector3d(x0, y0, z0);
-                fp.extentMax = Base::Vector3d(x1, y1, z1);
+            if (anchor) {
+                *anchor = toVector(position.Location().XYZ());
             }
             break;
         }
@@ -575,13 +574,35 @@ void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
             fp.kind = "Other";
             break;
     }
+}
+
+void faceFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
+{
+    faceIntrinsic(face, fp);
+    if (fp.kind == "Plane") {
+        // Its extent (fingerprint version 3, Task 2 PR 8): the tight bounding box of the face's
+        // boundary, without tolerances or gaps.
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(face, box, false, false);
+        if (!box.IsVoid()) {
+            box.SetGap(0.0);
+            double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+            box.Get(x0, y0, z0, x1, y1, z1);
+            fp.extentMin = Base::Vector3d(x0, y0, z0);
+            fp.extentMax = Base::Vector3d(x1, y1, z1);
+        }
+    }
     GProp_GProps props;
     BRepGProp::SurfaceProperties(face, props);
     fp.size = props.Mass();
     fp.center = toVector(props.CentreOfMass().XYZ());
 }
 
-void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
+// An edge's kind, direction, radii and a circle's centre, the cheap part of its fingerprint;
+// \a anchor, if given, gets a point of a line's line (ops#105).
+void edgeIntrinsic(const TopoDS_Edge& edge,
+                   Data::ElementFingerprint& fp,
+                   std::optional<Base::Vector3d>* anchor = nullptr)
 {
     fp.kind = "Other";
     if (!BRep_Tool::Degenerated(edge)) {
@@ -590,6 +611,9 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
             case GeomAbs_Line:
                 fp.kind = "Line";
                 fp.direction = unsignedDirection(curve.Line().Direction());
+                if (anchor) {
+                    *anchor = toVector(curve.Line().Location().XYZ());
+                }
                 break;
             case GeomAbs_Circle:
                 fp.kind = "Circle";
@@ -621,6 +645,11 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
                 break;
         }
     }
+}
+
+void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
+{
+    edgeIntrinsic(edge, fp);
     GProp_GProps props;
     BRepGProp::LinearProperties(edge, props);
     fp.size = props.Mass();
@@ -635,6 +664,68 @@ void edgeFingerprint(const TopoDS_Edge& edge, Data::ElementFingerprint& fp)
         }
     }
 }
+
+// The reference solver's cheap element descriptions (App::ElementHintsFunction, ops#105): for
+// every element of a type of Shape, the intrinsic part of its fingerprint, measured as
+// getElementFingerprint() measures it, and a point of its plane, line or vertex. The shape is
+// explored once. None for a sketch's internal elements (InternalShape).
+bool elementHints(const App::GeoFeature* geo, const char* type, std::vector<App::ElementHint>& hints)
+{
+    auto feature = dynamic_cast<const Feature*>(geo);
+    if (!feature || !type) {
+        return false;
+    }
+    const std::string_view name(type);
+    const TopAbs_ShapeEnum shapeType = name == "Face" ? TopAbs_FACE
+        : name == "Edge"                             ? TopAbs_EDGE
+        : name == "Vertex"                           ? TopAbs_VERTEX
+                                                     : TopAbs_SHAPE;
+    const TopoShape& shape = feature->Shape.getShape();
+    if (shapeType == TopAbs_SHAPE || shape.isNull()) {
+        return false;
+    }
+    // In index order (the shape's cache), all at once: getSubShape() per index copies the shape.
+    const std::vector<TopoDS_Shape> subs =
+        shape.located(TopLoc_Location()).getSubShapes(shapeType);
+    hints.assign(subs.size(), App::ElementHint());
+    for (std::size_t k = 0; k < subs.size(); ++k) {
+        App::ElementHint& hint = hints[k];
+        const TopoDS_Shape& sub = subs[k];
+        if (sub.IsNull()) {
+            continue;
+        }
+        std::optional<Base::Vector3d> point;
+        try {
+            switch (shapeType) {
+                case TopAbs_FACE:
+                    hint.intrinsic.type = 'F';
+                    faceIntrinsic(TopoDS::Face(sub), hint.intrinsic, &point);
+                    break;
+                case TopAbs_EDGE:
+                    hint.intrinsic.type = 'E';
+                    edgeIntrinsic(TopoDS::Edge(sub), hint.intrinsic, &point);
+                    break;
+                default:
+                    hint.intrinsic.type = 'V';
+                    hint.intrinsic.kind = "Point";
+                    point = toVector(BRep_Tool::Pnt(TopoDS::Vertex(sub)).XYZ());
+                    break;
+            }
+        }
+        catch (const Standard_Failure&) {
+            hint = App::ElementHint();
+            continue;
+        }
+        hint.valid = true;
+        if (point) {
+            hint.anchor = *point;
+            hint.hasAnchor = true;
+        }
+    }
+    return true;
+}
+
+const bool elementHintsRegistered = (App::setElementHintsFunction(&elementHints), true);
 
 }  // namespace
 

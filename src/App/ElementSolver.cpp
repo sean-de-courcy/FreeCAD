@@ -1579,6 +1579,47 @@ bool atSamePlace(
     return true;
 }
 
+bool mayBeAtPlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& intrinsic,
+    const std::optional<Base::Vector3d>& anchor,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+)
+{
+    // What atSamePlace() compares first, measured the same way.
+    if (!intrinsicAgrees(saved, intrinsic, tolerances)) {
+        return false;
+    }
+    const double eps = distance * std::max(1.0, diagonal);
+    if (saved.location && intrinsic.location
+        && Base::Distance(*saved.location, *intrinsic.location) > eps) {
+        return false;
+    }
+    if (!anchor || !saved.center) {
+        return true;
+    }
+    // The element's centre lies on its vertex, line or plane, and atSamePlace() wants the saved
+    // centre within eps of it: 2 eps leaves room for the centre's integration.
+    const Base::Vector3d offset = *saved.center - *anchor;
+    if (saved.type == 'V') {
+        return offset.Length() <= 2 * eps;
+    }
+    if (!intrinsic.direction || intrinsic.direction->Length() <= 0.0) {
+        return true;
+    }
+    Base::Vector3d axis = *intrinsic.direction;
+    axis.Normalize();
+    if (saved.type == 'F' && saved.kind == "Plane") {
+        return std::abs(offset * axis) <= 2 * eps;
+    }
+    if (saved.type == 'E' && saved.kind == "Line") {
+        return (offset - axis * (offset * axis)).Length() <= 2 * eps;
+    }
+    return true;
+}
+
 int extrinsicNearest(
     const ElementFingerprint& saved,
     const std::vector<ElementFingerprint>& candidates,
@@ -1700,6 +1741,13 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     // other: never a pick. Moved alone (nothing at the old place), the name stands.
     {
         std::map<std::string, std::set<std::string>> reserved;  // by type: the places taken
+        struct Hint
+        {
+            bool valid = false;
+            ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+        };
+        std::map<std::string, Hint> hints;  // by index, on first use
         for (std::size_t i = 0; i < input.entries.size(); ++i) {
             const auto& entry = input.entries[i];
             const ElementFingerprint& saved = entry.fingerprint;
@@ -1720,9 +1768,32 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (hitPosition < 0 || !now.isValid() || here(now)) {
                 continue;  // unmoved, or nothing to compare
             }
+            // The elements there: a cheap hint first rules most out, so that only the rest are
+            // fingerprinted.
+            auto mayBeHere = [&](const std::string& index) {
+                if (!input.hintOf) {
+                    return true;
+                }
+                auto it = hints.find(index);
+                if (it == hints.end()) {
+                    Hint hint;
+                    hint.valid = input.hintOf(index, hint.intrinsic, hint.anchor);
+                    it = hints.emplace(index, std::move(hint)).first;
+                }
+                const Hint& hint = it->second;
+                return !hint.valid
+                    || mayBeAtPlace(saved,
+                                    hint.intrinsic,
+                                    hint.anchor,
+                                    input.diagonal,
+                                    input.tolerances,
+                                    input.continuationDistance);
+            };
             std::vector<int> place;
             for (std::size_t k = 0; k < pool.elements.size(); ++k) {
-                if (static_cast<int>(k) != hitPosition && here(fingerprintOf(pool.elements[k]))) {
+                const auto& index = pool.elements[k].index;
+                if (static_cast<int>(k) != hitPosition && mayBeHere(index)
+                    && here(fingerprintOfIndex(index))) {
                     place.push_back(static_cast<int>(k));
                 }
             }

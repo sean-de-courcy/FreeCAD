@@ -8,17 +8,16 @@
 #include <utility>
 #include <vector>
 
-#include "PropertyLinks.h"
+#include <Base/Vector3D.h>
 
-namespace Data
-{
-struct ElementFingerprint;
-}
+#include "ElementFingerprint.h"
+#include "PropertyLinks.h"
 
 namespace App
 {
 
 class DocumentObject;
+class GeoFeature;
 
 /** One sub-element reference seen by pass 1 of the reference solver (ops#7, Task 2 PR 3).
  *
@@ -163,6 +162,27 @@ AppExport bool solveElementReferences(DocumentObject* feature,
 AppExport bool fingerprintsAgree(const Data::ElementFingerprint& saved,
                                  const Data::ElementFingerprint& now,
                                  double diagonal);
+
+/** A cheap description of an element (ops#105), for the moved-element check's scan: its type,
+ * kind, direction and radii (and a circle's centre) as its fingerprint has them, without the
+ * size, centre or extent, and a point of a plane face's plane, a line edge's line or a vertex.
+ */
+struct AppExport ElementHint
+{
+    bool valid = false;
+    Data::ElementFingerprint intrinsic;
+    Base::Vector3d anchor;
+    bool hasAnchor = false;
+};
+
+/** Fills \a hints with every element of \a type (`Face`, `Edge`, `Vertex`) of \a geo's shape:
+ * hints[k - 1] for `<type>k`. Returns false when it gives none (another kind of feature, a
+ * sketch's internal elements). Part sets it; without it every element is fingerprinted.
+ */
+using ElementHintsFunction = bool (*)(const GeoFeature* geo,
+                                      const char* type,
+                                      std::vector<ElementHint>& hints);
+AppExport void setElementHintsFunction(ElementHintsFunction function);
 
 /// The bare mapped name in a shadow's new-style name (`Body.;<name>.Face3` -> `<name>`), or an
 /// empty string.

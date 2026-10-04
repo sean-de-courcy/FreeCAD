@@ -383,6 +383,22 @@ AppExport bool atSamePlace(
     double distance
 );
 
+/** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
+ * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
+ * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a
+ * line edge) or the vertex itself. False only if atSamePlace() would be false: the intrinsic parts
+ * disagree (intrinsicAgrees()), the circles' centres are apart by more than ε, or the saved centre
+ * lies farther than 2ε from the plane, the line or the vertex (ε as in atSamePlace()).
+ */
+AppExport bool mayBeAtPlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& intrinsic,
+    const std::optional<Base::Vector3d>& anchor,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
 /// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
 enum class ExtentRelation
 {
@@ -471,6 +487,12 @@ struct AppExport SolveInput
     /// can't be measured. Called at most once per element, only when tiers 2 and 3 run. Unset:
     /// no element has a fingerprint.
     std::function<ElementFingerprint(const std::string& index)> fingerprintOf;
+    /// The element \a index's cheap description for mayBeAtPlace(): false if there is none.
+    /// Unset: none. The moved-element check fingerprints only the elements it doesn't rule out.
+    std::function<bool(const std::string& index,
+                       ElementFingerprint& intrinsic,
+                       std::optional<Base::Vector3d>& anchor)>
+        hintOf;
     /// The faces of the target that the edge \a index bounds (index names). Unset: none, so
     /// no edge continues.
     std::function<std::vector<std::string>(const std::string& index)> facesOf;
