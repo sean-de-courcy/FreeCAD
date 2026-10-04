@@ -37,6 +37,7 @@ import FreeCAD as App
 import Part
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.Scenarios.moves import moveCircles
 from PartDesignTests.Scenarios.harness import X, Z, edge, face
 
 
@@ -581,6 +582,7 @@ class TestNamingSolver(unittest.TestCase):
         )
         self.assertEqual(sorted(entry["candidates"]), pieces)
         self.assertTrue(entry["evidence"].startswith("split: the old edge continues in"))
+        self.assertEqual(sorted(entry["candidate_roles"]), ["name", "piece"])  # ops#105
 
         #   the break is stable
         pad.touch()
@@ -698,3 +700,63 @@ class TestNamingSolver(unittest.TestCase):
         )
         for entry in report:
             self.assertIn(front[0], entry["candidates"])
+
+    def testMovedBossIsAmbiguousAndRepairToItsPlaceHolds(self):
+        """BossesTradePlaces' model with one fillet, on boss a's top circle (ops#105): the
+        circles trade places, so a's circle moved and b's sits where it was. The fillet fails
+        naming both, the element at the old place first; the break is stable; a repair to that
+        element holds, and the fillet then follows that boss."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        plate = models.sketch(doc, "Plate", models.rectangle(0, 0, 30, 30), body)
+        models.pad(body, plate, 5, name="PlatePad")
+        circles = [models.circle(10, 15, 3), models.circle(20, 15, 3)]
+        bosses = models.sketch(doc, "Bosses", circles, body, z=5)
+        bossPad = models.pad(body, bosses, 5, name="BossPad")
+        doc.recompute()
+
+        def topCircle(x, y):
+            return edge("circle", center=(x, y, 10), radius=3)
+
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (bossPad, topCircle(10, 15).one(bossPad.Shape))
+        fillet.Radius = 0.5
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+
+        # Act
+        moveCircles(bosses, {0: (20, 15), 1: (10, 15)})
+        doc.recompute()
+
+        # Assert
+        place = topCircle(10, 15).one(bossPad.Shape)[0]
+        named = topCircle(20, 15).one(bossPad.Shape)[0]
+        self.assertFalse(fillet.isValid())
+        report = App.getReferenceReport(fillet)
+        self.assertEqual(len(report), 1)
+        entry = report[0]
+        self.assertEqual(entry["status"], "broken")
+        self.assertEqual(entry["candidates"], [place, named])
+        self.assertEqual(entry["candidate_roles"], ["place", "name"])
+        self.assertAlmostEqual(entry["candidate_distances"][0], 0.0, places=6)
+        self.assertAlmostEqual(entry["candidate_distances"][1], 10.0, places=6)
+        self.assertEqual(entry["evidence"], f"moved 10.000 mm; {place} sits where it was")
+        self.assertIn(
+            f"Ambiguous edge reference: {named} moved and {place} sits where it was",
+            fillet.getStatusString(),
+        )
+
+        #   the break is stable
+        bossPad.touch()
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+
+        #   a repair to the element at the old place holds, and later edits follow it
+        App.repairReference(fillet, "Base", 0, place)
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        moveCircles(bosses, {1: (10, 22)})
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], topCircle(10, 22).one(bossPad.Shape))

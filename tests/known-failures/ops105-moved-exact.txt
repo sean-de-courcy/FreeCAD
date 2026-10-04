@@ -1,0 +1,34 @@
+# Moved elements (ops#105): a sketch edit moves a referenced element while its name stays (the
+# geometry ID is kept), and another element now sits where it was. The reference is ambiguous;
+# the reference solver (V2s) breaks it, naming both. Without the solver the name decides: the
+# reference follows the moved element silently, a candidate of the expected break (`partial`).
+# Plain V2 keeps this behaviour by design (ops#105 Q5: solver documents only; an old file gets
+# the check with ReferenceSolver = True). Remove an entry if plain V2 ever gets the check.
+
+issue: ops#105
+
+reason: the reference follows the moved element (its name) where the solver breaks it as ambiguous; V2multi as V2 (the multi-match flags don't change an exact name's hit)
+cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V2
+cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V2
+cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_b_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_b_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_a_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_b_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_b_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesOneFillet.test_edges_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesOneFillet.test_edges_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_a_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_b_V2
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_b_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalBossTradePlaces.test_external_a_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalBossTradePlaces.test_external_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubled.test_instance3_edge_V2
+cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubled.test_instance3_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.RectangleShiftedByWidth.test_right_top_edge_V2
+cli  PartDesignTests.TestNamingScenarios.RectangleShiftedByWidth.test_right_top_edge_V2multi
