@@ -502,7 +502,10 @@ void ComplexGeoData::Save(Base::Writer& writer) const
         return;
     }
     writer.Stream() << " count=\"" << _elementMap->size() << "\">\n";
-    _elementMap->save(writer.beginCharStream(Base::CharStreamFormat::Raw) << '\n');
+    {
+        NameRefCollector::FileFormScope fileForm(&writer);  // ops#6 T2
+        _elementMap->save(writer.beginCharStream(Base::CharStreamFormat::Raw) << '\n');
+    }
     writer.endCharStream() << '\n';
     writer.Stream() << writer.ind() << "</ElementMap2>\n";
 }
@@ -688,6 +691,8 @@ void ComplexGeoData::SaveDocFile(Base::Writer& writer) const
     flushElementMap();
     if (_elementMap) {
         writer.Stream() << "BeginElementMap v1\n";
+        // References as indices into the file's name table, if its save made one (ops#6 T2)
+        NameRefCollector::FileFormScope fileForm(&writer);
         _elementMap->save(writer.Stream());
     }
 }

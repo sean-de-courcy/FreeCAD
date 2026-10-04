@@ -30,6 +30,7 @@
 
 #include "Application.h"
 #include "Document.h"
+#include "NameTable.h"
 #include "RecoverySnapshot.h"
 
 namespace
@@ -90,6 +91,9 @@ template<typename WriterT>
 void writeRecoverySnapshotContents(const App::Document& doc, WriterT& writer)
 {
     writer.putNextEntry("Document.xml");
+    // Save() numbers the file's name table entries; the maps, written by writeFiles(), refer to
+    // them by index (ops#6 T2)
+    Data::NameRefCollector collector;
     doc.Save(writer);
 
     // Special handling for Gui document state.

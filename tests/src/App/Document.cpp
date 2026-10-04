@@ -203,12 +203,16 @@ TEST_F(DocumentTest, exportObjectsCarriesTheEntriesOfInternedNames)
     std::string xml = documentXml(withName);
     std::string plainXml = documentXml(plain);
 
-    // Assert: the table, before the objects, with the edge's entry; none for the plain one
-    EXPECT_NE(xml.find("NamingFormat=\"1\""), std::string::npos) << xml;
+    // Assert: the table, before the objects, with the edge's entry (its content, at index 0: the
+    // file has no IDs, ops#6 T2); none for the plain one. The XML keeps the hash form.
+    EXPECT_NE(xml.find("NamingFormat=\"2\""), std::string::npos) << xml;
     auto tableAt = xml.find("<NameTable count=\"1\">");
     ASSERT_NE(tableAt, std::string::npos) << xml;
     EXPECT_LT(tableAt, xml.find("<Objects"));
-    EXPECT_NE(xml.find(edgeId->toBase32() + ' ' + *table.lookup(*edgeId)), std::string::npos);
+    EXPECT_NE(xml.find("NameTableStart v2 1\n" + *table.lookup(*edgeId) + '\n'), std::string::npos)
+        << xml;
+    EXPECT_EQ(xml.find(edgeId->toBase32() + ' '), std::string::npos) << xml;
+    EXPECT_NE(xml.find(interned), std::string::npos) << xml;
     EXPECT_EQ(plainXml.find("NamingFormat"), std::string::npos);
     EXPECT_EQ(plainXml.find("<NameTable"), std::string::npos);
 
