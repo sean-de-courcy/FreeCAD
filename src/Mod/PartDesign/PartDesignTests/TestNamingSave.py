@@ -41,7 +41,8 @@ in a child `FreeCADCmd` that has built nothing.
   project, `Document.importObjects`): every reference resolves and the names are the saved ones.
 - TestNamingSavePlain: plain V2 and V1 files don't change by a byte once the process has interned
   names: the child saves each model before and after it has opened an interned file. And the
-  V2i file is no bigger than the V2 one: its Document.xml and maps, deflated, within 2 %.
+  V2i file is no bigger than the V2 one: its Document.xml and maps, deflated, within 2 % and
+  a fixed frame.
 - TestNamingSaveCrossDoc: the cross-document scenarios (Scenarios/crossdoc.py) in V2i, and the
   mixed ones in V2 too (a plain document whose binders hold an interned document's names): built
   and saved here, opened, judged, edited and judged again in the child. The references are
@@ -77,7 +78,11 @@ REF = re.compile(r"~([0-9a-v]{13})")
 # character, so no part of a 13-character ID is one
 INDEX = re.compile(r"~([0-9]{1,12})(?![0-9a-v])")
 INLINE_MAP = re.compile(r'<ElementMap2 count="\d+">.*?</ElementMap2>', re.S)
-SIZE_RATIO = 1.02  # V2i's Document.xml and maps, deflated, against V2's (t2-size-design.md)
+# V2i's Document.xml and maps, deflated, against V2's (t2-size-design.md): within 2 %, plus
+# what any V2i file adds once (the NameTable element's frame and the InternNames property),
+# which decides on the smallest dump models (about 2.5 KB)
+SIZE_RATIO = 1.02
+SIZE_FRAME = 128
 TABLE = re.compile(
     r'<Document [^>]*NamingFormat="(\d+)"[^>]*>\s*'
     r'<NameTable count="(\d+)">\s*<!\[CDATA\[(.*?)\]\]>\s*</NameTable>\s*',
@@ -138,9 +143,11 @@ def nameTable(entries):
         if later:
             raise AssertionError(f"entry {i} refers to entries {later}: {content!r}")
         content = expand(content, ids)
-        id = App.getMappedNameId(content)
-        if id is None or id in table:
-            raise AssertionError(f"entry {i}: {content!r} collides or comes twice")
+        # the content as it is (a content kept in full form after a collision has another ID
+        # once interned)
+        id = App.getNameTableContentId(content)
+        if id in table:
+            raise AssertionError(f"entry {i}: {content!r} comes twice")
         table[id] = content
         ids.append(id)
     return format, table
@@ -559,7 +566,9 @@ class TestNamingSavePlain(unittest.TestCase):
             # the table and the indices cost no more than the names they replace
             interned = deflatedSize(saved()["models"][model]["path"])
             plain = deflatedSize(path + ".before")
-            self.assertLessEqual(interned, plain * SIZE_RATIO, f"V2i {interned} B, V2 {plain} B")
+            self.assertLessEqual(
+                interned, plain * SIZE_RATIO + SIZE_FRAME, f"V2i {interned} B, V2 {plain} B"
+            )
 
 
 class TestNamingSaveCrossDoc(unittest.TestCase):

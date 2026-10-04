@@ -95,6 +95,7 @@ public:
     static PyObject *sExpandMappedName       (PyObject *self,PyObject *args);
     static PyObject *sInternMappedName       (PyObject *self,PyObject *args);
     static PyObject *sGetMappedNameId        (PyObject *self,PyObject *args);
+    static PyObject *sGetNameTableContentId  (PyObject *self,PyObject *args);
     static PyObject *sGetNameTableEntry      (PyObject *self,PyObject *args);
     static PyObject *sInsertNameTableEntryForTesting(PyObject *self,PyObject *args);
     static PyObject *sGetReferenceReport     (PyObject *self,PyObject *args);
