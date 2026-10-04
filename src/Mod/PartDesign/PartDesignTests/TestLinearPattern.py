@@ -231,10 +231,13 @@ class TestLinearPattern(unittest.TestCase):
         """A new pattern's second direction in Spacing mode puts each row Offset2 after the
         previous one: its Spacings2 starts as [-1.0] like Spacings, not [0.0] (ops#93)."""
         pattern = self.blockGrid()
-        self.assertEqual(pattern.Spacings2, [-1.0])  # Occurrences2 is still 1
+        # Occurrences2 is still 1. In the GUI the preview has already computed the pattern, which
+        # resizes Spacings2 to Occurrences2 - 1 = 0 entries (ops#114); either way no gap is 0.
+        self.assertIn(pattern.Spacings2, ([-1.0], []))
         pattern.Mode2 = "Spacing"
         pattern.Offset2 = 25
         pattern.Occurrences2 = 2
+        self.assertEqual(pattern.Spacings2, [-1.0])
         self.Doc.recompute()
         self.assertEqual(self.blockCorners(pattern.Shape), self.gridCorners((0.0, 25.0)))
         pattern.Occurrences2 = 3
