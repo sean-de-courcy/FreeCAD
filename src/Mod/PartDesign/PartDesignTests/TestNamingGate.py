@@ -122,10 +122,14 @@ def subShadow(xml, index):
     return found[0]
 
 
-def stamps(path):
-    """The element map versions the file's shapes are stamped with."""
+def stamps(path, geometryOnly=False):
+    """The element map versions the file's shapes are stamped with: every shape property's, or
+    only the objects' geometry (`Shape`)."""
     xml = readFile(path)["Document.xml"].decode("utf-8")
-    return set(re.findall(r'ElementMap="([^"]*)"', xml))
+    pattern = r'ElementMap="([^"]*)"'
+    if geometryOnly:
+        pattern += r' file="[^"]*\.Shape\.'
+    return set(re.findall(pattern, xml))
 
 
 class NamingGateTestBase(unittest.TestCase):
@@ -343,7 +347,8 @@ def _addConfigTests():
                 getattr(self, method)(config)
 
             test.__name__ = "test%s%s%s" % (method[0].upper(), method[1:], config)
-            test.__doc__ = "%s (%s)" % (getattr(TestNamingGate, method).__doc__.split(".")[0], config)
+            summary = getattr(TestNamingGate, method).__doc__.split(".")[0]
+            test.__doc__ = "%s (%s)" % (summary, config)
             setattr(TestNamingGate, test.__name__, test)
 
 
@@ -359,7 +364,10 @@ class TestNamingGateFile(NamingGateTestBase):
         a plain Part::Feature (which the recompute doesn't rebuild) included."""
         # Arrange
         path, faceC, faceD, shadowD = self.facePads(
-            "V2", extra=lambda doc: models.feature(doc, "Plain", models.closedWire([(0, 0, 0), (1, 0, 0), (0, 1, 0)]))
+            "V2",
+            extra=lambda doc: models.feature(
+                doc, "Plain", models.closedWire([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+            ),
         )
         self.edit(path)
         aged = stamps(path) - {""}
@@ -371,8 +379,9 @@ class TestNamingGateFile(NamingGateTestBase):
         doc.save()
         App.closeDocument(doc.Name)
 
-        # Assert
-        self.assertEqual(stamps(path) - {""}, aged)
+        # Assert: the geometry keeps the old stamps (other shape properties are stamped current
+        # as they are read, review F5)
+        self.assertEqual(stamps(path, geometryOnly=True), aged)
 
         # Act: open, recompute, save
         doc = self.open(path)
@@ -395,7 +404,10 @@ class TestNamingGateFile(NamingGateTestBase):
         interned = self.newDocument("V2i")
         v1 = self.newDocument("V2")
         v1.HistoryAlgorithm = "V1"
-        versions = [doc.addObject("Part::Box", "Box").getCorrectElementMapVersion() for doc in (plain, interned, v1)]
+        versions = [
+            doc.addObject("Part::Box", "Box").getCorrectElementMapVersion()
+            for doc in (plain, interned, v1)
+        ]
         self.assertRegex(versions[0], r"^15\.70200\.1\.5\.F[1-9][0-9]*$")
         self.assertEqual(versions[1], versions[0] + ".N2")
         self.assertNotIn(".F", versions[2])
@@ -448,6 +460,84 @@ class TestNamingGateFile(NamingGateTestBase):
         pad3 = doc.getObject("Pad3")
         self.assertEqual(pad3.Profile[1], [faceD])
         self.assertAlmostEqual(pad3.Shape.BoundBox.XMin, -2, places=6)
+
+    def testShapeOfAnotherOwnerIsStampedCurrent(self):
+        """A shape property no migration rebuilds (on an App::FeaturePython, as add-ons add
+        them) keeps upstream's behaviour (review F5): stamped current as it is read, so the file
+        doesn't ask at every open."""
+        # Arrange
+        doc = self.newDocument("V2")
+        holder = doc.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("Part::PropertyPartShape", "Extra")
+        holder.Extra = models.closedWire([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+        doc.recompute()
+        current = models.box(doc, "Box", (1, 1, 1)).getCorrectElementMapVersion()
+        doc.removeObject("Box")
+        path = self.save(doc, "Holder")
+        files = readFile(path)
+        files["Document.xml"] = ageStamps(files["Document.xml"].decode("utf-8")).encode("utf-8")
+        writeFile(path, files)
+        self.assertNotIn(current, stamps(path), "the setup")
+
+        # Act
+        doc = self.open(path)
+        copy = os.path.join(self.folder, "HolderCopy.FCStd")
+        doc.saveCopy(copy)
+
+        # Assert
+        self.assertEqual(stamps(copy) - {""}, {current})
+
+    def testRepresentationTokenDifferingTooMigrates(self):
+        """The fork's tokens are compared together (review F1): an interned file whose stamps
+        differ in the representation token as well as the revision (`.F<n-1>` against
+        `.F<n>.N2`) still migrates, since its maps are readable: Pad3 goes back to FaceC."""
+        # Arrange
+        path, faceC, faceD, shadowD = self.facePads("V2i")
+        self.edit(path, move=(faceC, faceD, shadowD))
+        files = readFile(path)
+        xml = files["Document.xml"].decode("utf-8")
+        files["Document.xml"] = re.sub(
+            r'(ElementMap="[^"]*)\.N2"', r'\1"', xml
+        ).encode("utf-8")
+        writeFile(path, files)
+        self.assertNotIn(".N2", "".join(stamps(path)), "the setup")
+
+        # Act
+        doc = self.open(path)
+        doc.recompute()
+
+        # Assert
+        pad3 = doc.getObject("Pad3")
+        self.assertTrue(pad3.isValid(), pad3.getStatusString())
+        self.assertEqual(pad3.Profile[1], [faceC])
+        self.assertAlmostEqual(pad3.Shape.BoundBox.XMax, 22, places=6)
+
+    def movedAloneIsKept(self, config):
+        """A file of the previous revision edited before its migration recompute (review F4):
+        the profile moves 5 mm along x, so FaceC moves alone (nothing sits where it was) and its
+        name didn't move. Kept, as ops#105 keeps an element that moved alone: Pad3 follows it."""
+        # Arrange
+        path, faceC, faceD, shadowD = self.facePads(config)
+        self.edit(path)
+        doc = self.open(path)
+
+        # Act
+        models.moveRectangle(doc.getObject("Profile"), 5, 0, 25, 10)
+        doc.recompute()
+
+        # Assert
+        pad3 = doc.getObject("Pad3")
+        self.assertTrue(pad3.isValid(), pad3.getStatusString())
+        self.assertEqual(pad3.Profile[1], [faceC])
+        self.assertAlmostEqual(pad3.Shape.BoundBox.XMax, 27, places=6)
+
+    def testMovedAloneIsKept(self):
+        """Review F4, solver off (V2)"""
+        self.movedAloneIsKept("V2")
+
+    def testMovedAloneIsKeptSolver(self):
+        """Review F4, solver on (V2s)"""
+        self.movedAloneIsKept("V2s")
 
     def coincidentCompound(self, config):
         """A compound of two equal boxes in one place (12 faces, each in a coincident pair) and a

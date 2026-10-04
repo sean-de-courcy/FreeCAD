@@ -647,16 +647,16 @@ class TestNamingGolden(unittest.TestCase):
             )
 
 
-def goldenDigest():
-    """The SHA-256 of the V2 golden dumps, by file name. The V1 dumps are FreeCAD's names (V1
+def goldenDigests():
+    """The SHA-256 of each V2 golden dump, by file name. The V1 dumps are FreeCAD's names (V1
     files aren't migrated), and the interned IDs are a representation (`.N2`): neither needs a
     new naming revision."""
-    digest = hashlib.sha256()
+    digests = {}
     for name in sorted(n for n in os.listdir(GOLDEN_DIR) if n.endswith(".V2.txt")):
         with open(os.path.join(GOLDEN_DIR, name), "rb") as fh:
             text = fh.read().replace(b"\r\n", b"\n")
-        digest.update(name.encode("utf-8") + b"\n" + text + b"\n")
-    return digest.hexdigest()
+        digests[name] = hashlib.sha256(text).hexdigest()
+    return digests
 
 
 def buildRevision():
@@ -672,33 +672,39 @@ def buildRevision():
 
 
 class TestNamingRevision(unittest.TestCase):
-    """The V2 golden dumps change only with a new naming revision (ops#103, Q5).
+    """Existing V2 golden dumps change only with a new naming revision (ops#103, Q5).
 
-    `NamingGolden/REVISION` records the revision and the digest of the V2 golden files. When a
-    change regenerates them (`FREECAD_NAMING_GOLDEN_UPDATE`), existing names changed: the build's
-    revision (`ForkNamingRevision`, src/App/Document.cpp) must go up, so that files saved before
-    re-derive their references from geometry, and REVISION is recorded again. The failure message
-    gives the lines to record. A name change the dump models don't reach still needs the
+    `NamingGolden/REVISION` records the revision and a digest of each V2 golden file. When a
+    change regenerates them (`FREECAD_NAMING_GOLDEN_UPDATE`) and an existing file changes,
+    existing names changed: the build's revision (`ForkNamingRevision`, src/App/Document.cpp)
+    must go up, so that files saved before re-derive their references from geometry, and
+    REVISION is recorded again. A new or removed dump model needs only the record. The failure
+    message gives the lines to record. A name change the dump models don't reach still needs the
     author's judgement (the pull request template's checklist)."""
 
     def testGoldenDumpsMatchTheRevision(self):
-        recorded = {}
+        revision, digests = None, {}
         with open(os.path.join(GOLDEN_DIR, "REVISION"), encoding="utf-8") as fh:
             for line in fh:
-                if line.strip() and not line.startswith("#"):
-                    key, value = line.split()
-                    recorded[key] = value
-        revision, digest = buildRevision(), goldenDigest()
-        record = f"revision {revision}\ndigest {digest}"
-        if recorded.get("digest") != digest and recorded.get("revision") == str(revision):
+                fields = line.split()
+                if fields and fields[0] == "revision":
+                    revision = int(fields[1])
+                elif fields and fields[0] == "digest":
+                    digests[fields[1]] = fields[2]
+        build, current = buildRevision(), goldenDigests()
+        record = "\n".join(
+            [f"revision {build}"] + [f"digest {name} {digest}" for name, digest in current.items()]
+        )
+        changed = sorted(n for n in digests.keys() & current.keys() if digests[n] != current[n])
+        if changed and revision == build:
             self.fail(
-                "The V2 golden dumps changed, and the naming revision didn't: bump "
-                "ForkNamingRevision in src/App/Document.cpp, then record in "
+                "Existing V2 golden dumps changed (" + ", ".join(changed) + "), and the naming "
+                "revision didn't: bump ForkNamingRevision in src/App/Document.cpp, then record in "
                 "NamingGolden/REVISION:\n" + record
             )
         self.assertEqual(
-            (recorded.get("revision"), recorded.get("digest")),
-            (str(revision), digest),
+            (revision, digests),
+            (build, current),
             "NamingGolden/REVISION doesn't match this build; record:\n" + record,
         )
 

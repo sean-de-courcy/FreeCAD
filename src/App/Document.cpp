@@ -3431,7 +3431,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     tracker.checkpoint("Recompute total");
 
     // References re-derived from geometry in this recompute (a naming migration, ops#103)
-    reportReferenceMigration(this);
+    reportReferenceMigration();
 
     if (!d->_RecomputeLog.empty()) {
         if (!testStatus(Status::IgnoreErrorOnRecompute)) {

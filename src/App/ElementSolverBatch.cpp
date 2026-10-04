@@ -47,7 +47,8 @@ struct MigrationCounts
     int moved = 0;
     int broken = 0;
 };
-std::map<const Document*, MigrationCounts> migrationCounts;
+// By the owner document's name: a document may be closed before the counts are reported.
+std::map<std::string, MigrationCounts> migrationCounts;
 }  // namespace
 
 void setElementHintsFunction(ElementHintsFunction function)
@@ -61,7 +62,7 @@ void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outco
     if (!doc) {
         return;
     }
-    auto& counts = migrationCounts[doc];
+    auto& counts = migrationCounts[doc->getName()];
     switch (outcome) {
         case MigrationOutcome::Kept:
             ++counts.kept;
@@ -75,20 +76,18 @@ void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outco
     }
 }
 
-void reportReferenceMigration(const Document* doc)
+void reportReferenceMigration()
 {
-    auto it = migrationCounts.find(doc);
-    if (it == migrationCounts.end()) {
-        return;
+    // Every document's: a recompute re-derives the references other documents hold into it
+    auto counts = std::move(migrationCounts);
+    migrationCounts.clear();
+    for (const auto& [name, count] : counts) {
+        FC_WARN("Document '" << name << "': " << count.kept + count.moved + count.broken
+                             << " element references re-derived from their geometry after a "
+                                "naming change: "
+                             << count.moved << " moved back to their element, " << count.broken
+                             << " broken (listed above)");
     }
-    const MigrationCounts counts = it->second;
-    migrationCounts.erase(it);
-    FC_WARN("Document '" << doc->getName() << "': "
-                         << counts.kept + counts.moved + counts.broken
-                         << " element references re-derived from their geometry after a naming "
-                            "change: "
-                         << counts.moved << " moved back to their element, " << counts.broken
-                         << " broken (listed above)");
 }
 
 std::string bareMappedName(const std::string& newStyleName)
@@ -896,6 +895,12 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 const std::string& stored = entry->storedIndex;
                 auto places = elementsAt(saved, hit, false);
+                if (hit == stored && (!places || places->empty())) {
+                    // The name didn't move and nothing sits where its element was: it moved
+                    // alone (an edit before the migration), kept as ops#105 and rule 1 keep it
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
                 std::string pick;
                 if (places && places->size() == 1) {
                     pick = places->front();

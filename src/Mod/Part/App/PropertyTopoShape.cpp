@@ -65,9 +65,10 @@ TYPESYSTEM_SOURCE(Part::PropertyPartShape, App::PropertyComplexGeoData)
 
 namespace
 {
-/// An element map version without the fork's naming revision (`.F<n>`, or ops#56's `.X1`
-/// before it, ops#103).
-std::string withoutNamingRevision(const std::string& version)
+/// An element map version without the fork's tokens: its naming revision (`.F<n>`, or ops#56's
+/// `.X1` before it, ops#103) and its name representation (`.N<n>`, ops#6). What remains are
+/// FreeCAD's fields: encoding, OCCT, history algorithm, map version.
+std::string withoutForkTokens(const std::string& version)
 {
     std::string result;
     std::size_t start = 0;
@@ -77,10 +78,10 @@ std::string withoutNamingRevision(const std::string& version)
             end = version.size();
         }
         const std::string token = version.substr(start, end - start);
-        const bool revision = token == "X1"
-            || (token.size() > 1 && token[0] == 'F'
+        const bool forkToken = token == "X1"
+            || (token.size() > 1 && (token[0] == 'F' || token[0] == 'N')
                 && token.find_first_not_of("0123456789", 1) == std::string::npos);
-        if (!revision) {
+        if (!forkToken) {
             result += (start == 0 ? "" : ".") + token;
         }
         start = end + 1;
@@ -88,10 +89,13 @@ std::string withoutNamingRevision(const std::string& version)
     return result;
 }
 
-/// Whether two element map versions differ only in the fork's naming revision.
-bool onlyNamingRevisionDiffers(const std::string& a, const std::string& b)
+/// Whether two element map versions differ only in the fork's tokens. Names then still resolve
+/// (a representation the build can't read drops the maps, which leaves the references missing),
+/// so a migration re-derives them; FreeCAD's own version changes make old names unresolvable and
+/// go by name.
+bool onlyForkTokensDiffer(const std::string& a, const std::string& b)
 {
-    return withoutNamingRevision(a) == withoutNamingRevision(b);
+    return withoutForkTokens(a) == withoutForkTokens(b);
 }
 
 /** Whether a name is in canonical interned form: no escaped embedded name, and at most one
@@ -752,7 +756,7 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
                         FC_WARN(
                             "Recomputation required for document '"
                             << warnedDoc << "' on "
-                            << (onlyNamingRevisionDiffers(_Ver, correctVersion)
+                            << (onlyForkTokensDiffer(_Ver, correctVersion)
                                     ? "naming revision"
                                     : "geo element version")
                             << " change in " << getFullName() << ": " << _Ver << " -> "
@@ -761,21 +765,23 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
                     }
                     owner->getDocument()->addRecomputeObject(owner);
 
+                    auto feature = freecad_cast<Part::Feature*>(owner);
                     if (owner->getDocument()->testStatus(App::Document::Importing)
-                        || !onlyNamingRevisionDiffers(_Ver, correctVersion)) {
-                        // Pasted or merged objects (ops#103, Q7), and files of another encoding,
+                        || !onlyForkTokensDiffer(_Ver, correctVersion) || !feature
+                        || feature->getPropertyOfGeometry() != this) {
+                        // Pasted or merged objects (ops#103, Q7), files of another encoding,
                         // algorithm or OCCT (FreeCAD's own version changes, whose old names don't
-                        // resolve): their references resolve by name. Marked current.
+                        // resolve), and shapes no migration rebuilds (another kind of owner, or
+                        // not its geometry): their references resolve by name. Marked current.
                         _Ver = correctVersion;
                     }
-                    else if (auto geo = freecad_cast<App::GeoFeature*>(owner);
-                             geo && geo->getPropertyOfGeometry() == this) {
+                    else {
                         // A naming migration (ops#103): the first rebuild of the shape re-derives
                         // the references into it from their geometry
                         // (GeoFeature::updateElementReference()), and the stamp follows the names:
                         // it stays the file's until the shape is rebuilt (setValue() clears it),
                         // so a file saved before that asks again at the next open (Q2).
-                        geo->_ElementMapVersion.setValue(_Ver);
+                        feature->_ElementMapVersion.setValue(_Ver);
                     }
                 }
             }

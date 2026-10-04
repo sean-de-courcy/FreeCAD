@@ -1,6 +1,23 @@
-# The fork's naming revision (ForkNamingRevision in src/App/Document.cpp) and the digest of the
-# V2 golden dumps it was recorded with (ops#103). TestNamingDump.TestNamingRevision fails when
-# the dumps change and the revision doesn't: a change of existing names needs a new revision,
-# which makes files saved before it re-derive their references from geometry once.
+# The fork's naming revision (ForkNamingRevision in src/App/Document.cpp) and a digest of each
+# V2 golden dump it was recorded with (ops#103). TestNamingDump.TestNamingRevision fails when an
+# existing dump changes and the revision doesn't: a change of existing names needs a new revision,
+# which makes files saved before it re-derive their references from geometry once. A new or
+# removed dump only needs recording again.
 revision 1
-digest 6e1b2dcea3fdb8aaf6a3f7c97e2b021327dabfdce5306d3f1bcde7827293b8d4
+digest CompoundCopies.V2.txt 2a612b3cdc773ce40cf1adec9ec9918bd0ee9dfde45ac8b5f7453cefb04cb585
+digest CompoundCut.V2.txt 92b2428a9b30eb3dd666a37b62cf4ceb4f54546b79089ccf1833733bc828835c
+digest CutSplit.V2.txt 7eefaad2e013a3ff9c7fb6e26dcfa08c33e08276fc3616c41d7d546096fa58f1
+digest FilletChamfer.V2.txt b62326d5ca481323083aaf2e2e4a6905832a3b69b034d62e7c37c8003e64f329
+digest FuseCommon.V2.txt 66ad92ee78d4b5f09817475df42314683b5053f7a3acbfa2f9f7a6cbf1d4cf67
+digest HelixBinderFace.V2.txt 25b25f036bd345c61e9cab86e49e2c5d605b14158bc10b299376a2870d3640fc
+digest LinearPattern.V2.txt 09aed2e4ab8f4444345f473fe5d625fcf353ff2c978dea20fc86129b5dd98f5b
+digest LoftRevolve.V2.txt 1850637b2ae14d8fd79cfeee12c5b1d449bbfcb7fac5edb99fae908be7d5b0d9
+digest OffsetSplitCylinder.V2.txt f0a01e692cc98d2a48d8e1623dfc89b93367fd51b8fc183df9f34373126c07e6
+digest OffsetThickness.V2.txt d2354941776f3b26164fe2c2938e19e59d742cb190bc8e8359c94ca9fd64301f
+digest PadCollinear.V2.txt 34f2ca497da4fbe24fe4e8266d49180180382e1c69c107f4a0e5006770deebaf
+digest PadPocket.V2.txt 8cd00bbb5e4716d9c11651dc3031fd11fb55e3f915c67a3eb2fb85fbfae5ed27
+digest PatternSteps.V2.txt 2c8ab69161187a0035fa8c867abf5ab41f7b28d8b55d6822801f821cc2b97d85
+digest PipeShell.V2.txt 960bc7f222dc10bb63fc075a37174fc49388b1417be51345b6d7f1b0553203e8
+digest Refine.V2.txt 18ed0b25f797163255b25559fd6a2cf70babf619ed10fa9f9e37c21511563f2d
+digest Sketch.V2.txt 20e85d3a45312a3957991f952c91eb29ae35241adc65bc13652e7bc141ef3624
+digest Slice.V2.txt a37e613bb163bd97547577fa1d2d5072bc0fb7999d6ae2c7ef9b7293d0484f75

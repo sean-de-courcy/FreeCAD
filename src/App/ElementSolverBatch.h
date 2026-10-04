@@ -16,7 +16,6 @@
 namespace App
 {
 
-class Document;
 class DocumentObject;
 class GeoFeature;
 
@@ -205,8 +204,8 @@ enum class MigrationOutcome
 /// Counts \a outcome for \a owner's document, for reportReferenceMigration().
 AppExport void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome);
 
-/// One warning with \a doc's counts since the last call, if any; clears them. Called at the end
-/// of each recompute.
-AppExport void reportReferenceMigration(const Document* doc);
+/// One warning per document with its counts since the last call, if any; clears them. Called at
+/// the end of each recompute.
+AppExport void reportReferenceMigration();
 
 }  // namespace App
