@@ -761,18 +761,20 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
                     }
                     owner->getDocument()->addRecomputeObject(owner);
 
-                    if (owner->getDocument()->testStatus(App::Document::Importing)) {
-                        // Pasted or merged objects resolve their references by name, as before
-                        // (ops#103, Q7): marked current.
+                    if (owner->getDocument()->testStatus(App::Document::Importing)
+                        || !onlyNamingRevisionDiffers(_Ver, correctVersion)) {
+                        // Pasted or merged objects (ops#103, Q7), and files of another encoding,
+                        // algorithm or OCCT (FreeCAD's own version changes, whose old names don't
+                        // resolve): their references resolve by name. Marked current.
                         _Ver = correctVersion;
                     }
                     else if (auto geo = freecad_cast<App::GeoFeature*>(owner);
                              geo && geo->getPropertyOfGeometry() == this) {
-                        // The first rebuild of the shape re-derives the references into it from
-                        // their geometry (GeoFeature::updateElementReference()), and the stamp
-                        // follows the names: it stays the file's until the shape is rebuilt
-                        // (setValue() clears it), so a file saved before that asks again at the
-                        // next open (ops#103, Q2).
+                        // A naming migration (ops#103): the first rebuild of the shape re-derives
+                        // the references into it from their geometry
+                        // (GeoFeature::updateElementReference()), and the stamp follows the names:
+                        // it stays the file's until the shape is rebuilt (setValue() clears it),
+                        // so a file saved before that asks again at the next open (Q2).
                         geo->_ElementMapVersion.setValue(_Ver);
                     }
                 }

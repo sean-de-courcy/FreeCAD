@@ -422,6 +422,33 @@ class TestNamingGateFile(NamingGateTestBase):
         doc.saveAs(merged)
         self.assertEqual(stamps(merged) - {""}, {current})
 
+    def testOtherVersionChangeResolvesByName(self):
+        """Only a change of the naming revision migrates: a file whose version differs in another
+        field (here the element map version, `.5` -> `.4`, as FreeCAD's own version changes do)
+        is recomputed by name and stamped current at once, as before the gate."""
+        # Arrange
+        path, faceC, faceD, shadowD = self.facePads("V2")
+        self.edit(path, age=False, move=(faceC, faceD, shadowD))
+        files = readFile(path)
+        xml = files["Document.xml"].decode("utf-8")
+        files["Document.xml"] = re.sub(
+            r'ElementMap="15\.70200\.1\.5\.', 'ElementMap="15.70200.1.4.', xml
+        ).encode("utf-8")
+        writeFile(path, files)
+
+        # Act
+        doc = self.open(path)
+        current = doc.getObject("Pad2").getCorrectElementMapVersion()
+        copy = os.path.join(self.folder, "Copy.FCStd")
+        doc.saveCopy(copy)
+        doc.recompute()
+
+        # Assert
+        self.assertEqual(stamps(copy) - {""}, {current})
+        pad3 = doc.getObject("Pad3")
+        self.assertEqual(pad3.Profile[1], [faceD])
+        self.assertAlmostEqual(pad3.Shape.BoundBox.XMin, -2, places=6)
+
     def coincidentCompound(self, config):
         """A compound of two equal boxes in one place (12 faces, each in a coincident pair) and a
         reference to the second box's face at x = 10 that a naming fix moved to the next face:
