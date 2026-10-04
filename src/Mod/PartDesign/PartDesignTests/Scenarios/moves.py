@@ -12,7 +12,19 @@ import tempfile
 
 import FreeCAD as App
 
-from .harness import Broken, ExternalCoincides, Filleted, Scenario, X, Y, Z, edge, face, pieces
+from .harness import (
+    Broken,
+    ExternalCoincides,
+    Filleted,
+    Scenario,
+    X,
+    Y,
+    Z,
+    edge,
+    face,
+    pieces,
+    vertex,
+)
 from . import models as m
 
 V = App.Vector
@@ -213,6 +225,9 @@ class SquareBossEdit(BossEdit):
         m.sketch(doc, "Bosses", squares, body, z=5)
         bossPad = m.pad(body, doc.Bosses, 5, name="BossPad")
         doc.recompute()
+        self.addConsumers(doc, body, bossPad)
+
+    def addConsumers(self, doc, body, bossPad):
         onBoss = body.newObject("Sketcher::SketchObject", "OnBoss")
         onBoss.AttachmentSupport = [(bossPad, self.names(bossPad, self.faceA())[0])]
         onBoss.MapMode = "FlatFace"
@@ -257,6 +272,30 @@ class BossTopFaceTradePlacesFlatFace(SquareBossEdit):
     def faceA(self):
         x, y = self.centre("a")
         return face("plane", normal=Z, contains=(x, y, 10))
+
+
+class BossVertexTradePlaces(SquareBossEdit):
+    """A datum point on boss a's top front right corner (13, 12, 10); the bosses trade places,
+    so b's corner is there now. The point's placement differs between the two vertices, so the
+    reference is ambiguous (a vertex compares by its point alone)."""
+
+    REFS = ("vertex_a",)
+    moved = {"a": (20, 15), "b": (10, 15)}
+
+    def corner(self, x):
+        return vertex((x + 3, 12, 10))
+
+    def vertexA(self):
+        if self.edited:
+            return Broken(self.corner(10), self.corner(20))
+        return self.corner(10)
+
+    def addConsumers(self, doc, body, bossPad):
+        point = body.newObject("PartDesign::Point", "Corner")
+        point.AttachmentSupport = [(bossPad, self.names(bossPad, self.vertexA())[0])]
+        point.MapMode = "Vertex"
+        self.ref("vertex_a", point, "AttachmentSupport", self.vertexA)
+        doc.recompute()
 
 
 class RectangleEdit(Scenario):

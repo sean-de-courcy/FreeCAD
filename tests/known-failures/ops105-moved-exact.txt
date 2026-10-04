@@ -12,6 +12,8 @@ cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V2
 cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V2multi
 cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V2
 cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V2multi
+cli  PartDesignTests.TestNamingScenarios.BossVertexTradePlaces.test_vertex_a_V2
+cli  PartDesignTests.TestNamingScenarios.BossVertexTradePlaces.test_vertex_a_V2multi
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V2
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V2multi
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_b_V2

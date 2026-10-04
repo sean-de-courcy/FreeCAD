@@ -89,6 +89,7 @@ cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsReopened.test_sketch
 reason: ops#105's moved-element scenarios: V1, like V2, follows the moved element's name where the solver breaks the reference as ambiguous
 cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V1
 cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossVertexTradePlaces.test_vertex_a_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_b_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_a_V1
