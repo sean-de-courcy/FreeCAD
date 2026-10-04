@@ -623,6 +623,40 @@ TEST(NameAncestry, linkCopiesHaveTheirOwnAncestry)
     EXPECT_GT(weighted.overlap(through(oldTop, 7), through(newTop, 7)), 0.0);
 }
 
+TEST(NameAncestry, binderSupportsFromTwinFilesHaveTheirOwnAncestry)
+{
+    // ops#112: a binder's supports from copies of one file (equal IDs, so equal names) end in
+    // boundary sections with the binder's tag and, in the index, the key of each support's file:
+    // `X|_;_;<binder>;EXT;<key>;<type>;0;_;_`. The two are copies of X in two files, so other
+    // elements, as the copies through two Links are.
+    NameAncestry ancestry;
+    auto through = [](const std::string& name, int binder, int key) {
+        return name + "|" + section({}, {}, binder, "EXT", key, 'F', {});
+    };
+    const auto boxFace = section({"Face6"}, {}, 1, "MKR", 0, 'F', {"IDX", "SRC"});
+    const auto fromP1 = through(boxFace, 7, 111);
+    const auto fromP2 = through(boxFace, 7, 222);
+
+    //   no shared ancestry, and neither holds the other
+    EXPECT_EQ(ancestry.overlap(fromP1, fromP2), 0.0);
+    EXPECT_FALSE(ancestry.contains(fromP1, fromP2));
+    EXPECT_FALSE(ancestry.contains(fromP2, fromP1));
+    EXPECT_FALSE(NameAncestry::isPieceOf(fromP2, fromP1));
+    //   a split made in the source document is a piece of that file's copy only
+    const auto cutThere = piece(boxFace, 4, "CUT", 0, 'F');
+    EXPECT_TRUE(NameAncestry::isPieceOf(through(cutThere, 7, 111), fromP1));
+    EXPECT_FALSE(NameAncestry::isPieceOf(through(cutThere, 7, 222), fromP1));
+    //   tier 1 keeps only the same file's copies
+    const std::vector<std::string> candidates {fromP2, through(cutThere, 7, 111)};
+    EXPECT_EQ(ancestry.structuralSurvivors(fromP1, candidates, 1.0), std::vector<int> {1});
+    EXPECT_EQ(
+        ancestry.structuralSurvivors(fromP1, {fromP2, through(cutThere, 7, 222)}, 1.0),
+        std::vector<int> {}
+    );
+    //   the same file's copy is the same element
+    EXPECT_DOUBLE_EQ(ancestry.overlap(fromP1, through(boxFace, 7, 111)), 1.0);
+}
+
 TEST(NameAncestry, unclosedContextMarkIsAName)
 {
     // A string that starts with the context mark and doesn't close it (only a caller, e.g.

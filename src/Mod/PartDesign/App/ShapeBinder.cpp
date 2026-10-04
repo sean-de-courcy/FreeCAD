@@ -610,7 +610,9 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
     std::vector<Part::TopoShape> shapes;
     std::vector<std::pair<int, int>> shapeOwners;
     std::vector<const Base::Matrix4D*> shapeMats;
-    std::vector<bool> shapeExternal;  // the shape's object is in another document
+    // The shape's object is in another document: the key of its support's file for the boundary
+    // section, Part::boundaryIndex() (ops#112); empty if not
+    std::vector<std::string> shapeBoundary;
 
     bool forced = (Shape.getValue().IsNull() || (options & UpdateForced)) ? true : false;
     bool init = (!forced && (options & UpdateForced)) ? true : false;
@@ -813,7 +815,14 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
                     shapes.push_back(shape);
                     shapeOwners.emplace_back(sidx, subidx);
                     shapeMats.push_back(&res.first->second);
-                    shapeExternal.push_back(obj->getDocument() != getDocument());
+                    // Keyed by the support's own document, not a copy-on-change copy's
+                    // temporary one, whose name depends on the session: a support in this
+                    // document gives 0
+                    shapeBoundary.push_back(
+                        obj->getDocument() != getDocument()
+                            ? Part::boundaryIndex(*getDocument(), *l.getValue()->getDocument())
+                            : std::string()
+                    );
                 }
                 else if (const char* element = Data::findElementName(sub.c_str());
                          element && element[0]) {
@@ -899,12 +908,14 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             ++idx;
             if (shape.getHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
                 // A shape from another document, with an element map or without: its names get
-                // a boundary section with the binder's tag (ops#56)
-                if (shapeExternal[idx]) {
+                // a boundary section with the binder's tag (ops#56) and the key of the
+                // support's file, so supports from copies of one file get distinct names, in
+                // any order (ops#112)
+                if (!shapeBoundary[idx].empty()) {
                     shape.reTagElementMap(
                         getID(),
                         getDocument()->getStringHasher(),
-                        Data::POSTFIX_EXTERNAL_TAG
+                        Part::boundaryPostfix(shapeBoundary[idx]).c_str()
                     );
                 }
             }

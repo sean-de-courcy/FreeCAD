@@ -132,7 +132,8 @@ names it.
 | `fix/109-guard-check-saved` | fix | ops#109 | - | `integration` `cafab56b0c` | `70ab701491` (fork PR 103), 2026-10-04 | never (fork code: the ops#42 retarget and ops#106's guard are the fork's) |
 | `fix/6-t2-review-followups` | fix | ops#6 | - | `integration` `cafab56b0c` | `31a5177dae` (fork PR 102), 2026-10-04 | never (fork feature) |
 | `feat/6-q6-intern-default` | feat | ops#6 | - | `integration` `31a5177dae` | `475faba478` (fork PR 105), 2026-10-04 | never (fork feature) |
-| `fix/56-cross-doc-marker` | fix | ops#56 | - | `integration` `475faba478` | (fork PR 104) | never (fork naming code) |
+| `fix/56-cross-doc-marker` | fix | ops#56 | - | `integration` `475faba478` | `fd44457837` (fork PR 104), 2026-10-04 | never (fork naming code) |
+| `fix/112-binder-support-index` | fix | ops#112 | - | `integration` `fd44457837` | (fork PR 106) | never (fork naming code) |
 
 ## Fork-only commits in carried topics
 

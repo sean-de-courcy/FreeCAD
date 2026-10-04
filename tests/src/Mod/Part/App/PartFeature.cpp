@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <numbers>
 #include <set>
@@ -32,6 +34,7 @@
 #include "App/NameTable.h"
 #include <Base/Interpreter.h>
 #include <Base/Console.h>
+#include <Base/FileInfo.h>
 #include <App/PropertyLinks.h>
 #include <BRep_Builder.hxx>
 #include <TopoDS_Compound.hxx>
@@ -511,6 +514,172 @@ TEST_F(FeaturePartTest, doNamesMatchKeepsLinkInstancesApart)
     EXPECT_FALSE(Feature::doNamesMatch(throughTwo, inLink7));
     EXPECT_FALSE(Feature::doNamesMatch(throughTwo, inLink9));
     EXPECT_TRUE(Feature::doNamesMatch(throughTwo, sameThroughTwo));
+}
+
+TEST_F(FeaturePartTest, doNamesMatchKeepsBinderSupportsApart)
+{
+    // Arrange
+    //   ops#112: a face of a box in each of two copies of one file (equal IDs, equal names),
+    //   both bound by binder 7: the boundary sections carry the key of each support's file in
+    //   the index
+    auto through = [](const Data::MappedName& name, long binder, int key) {
+        return Data::MappedName(
+            name.toString() + "|"
+            + Data::MappedName::makeEncodedSection(
+                std::vector<std::string> {},
+                std::vector<Data::MappedName> {},
+                binder,
+                OpCodes::External,
+                key,
+                'F',
+                0,
+                std::vector<std::string> {},
+                std::vector<Data::MappedName> {}
+            )
+        );
+    };
+    auto boxFace = Data::MappedName::makeUnmappedName({"Face6"}, 1, "MKR", 'F');
+    auto fromP1 = through(boxFace, 7, 111);
+    auto fromP2 = through(boxFace, 7, 222);
+    auto sameFromP1 = through(boxFace, 7, 111);
+
+    // Act and assert
+    EXPECT_FALSE(Feature::doNamesMatch(fromP1, fromP2));
+    EXPECT_FALSE(Feature::doNamesMatch(fromP1, fromP2, false, true));
+    EXPECT_TRUE(Feature::doNamesMatch(fromP1, sameFromP1));
+    //   nor is either the copy through a Link with the binder's tag (index 0)
+    auto throughLink = through(boxFace, 7, 0);
+    EXPECT_FALSE(Feature::doNamesMatch(fromP1, throughLink));
+}
+
+TEST_F(FeaturePartTest, boundaryIndexOfDocuments)
+{
+    // ops#112 review: the key of a support's document as SubShapeBinder takes it
+    // Arrange
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "BoundaryIndexDocuments";
+    std::error_code error;
+    fs::remove_all(base, error);
+    fs::create_directories(base / "p1");
+    auto& app = App::GetApplication();
+    const std::string sourceName = app.getUniqueDocumentName("BoundarySource");
+    auto source = app.newDocument(sourceName.c_str(), "testUser");
+    const std::string otherName = app.getUniqueDocumentName("BoundaryOwner");
+    auto otherOwner = app.newDocument(otherName.c_str(), "testUser");
+    const auto sourceFile = Base::FileInfo::pathToString(base / "p1" / "Part.FCStd");
+    const auto ownerFile = Base::FileInfo::pathToString(base / "Asm.FCStd");
+
+    // Act and assert
+    //   the binder's own document (a copy-on-change support): 0, as for a Link
+    EXPECT_EQ(Part::boundaryIndex(*_doc, *_doc), "0");
+    //   a source without a file: by its name, a number other than 0, whatever the owner
+    const auto unsaved = Part::boundaryIndex(*_doc, *source);
+    EXPECT_NE(unsaved, "0");
+    EXPECT_EQ(unsaved, Part::boundaryIndex(*otherOwner, *source));
+    //   a saved source and an owner without a file: by the source's absolute path, whatever
+    //   the owner, and another key than its name gave
+    ASSERT_TRUE(source->saveAs(sourceFile.c_str()));
+    const auto absolute = Part::boundaryIndex(*_doc, *source);
+    EXPECT_NE(absolute, unsaved);
+    EXPECT_EQ(absolute, Part::boundaryIndex(*otherOwner, *source));
+    //   both saved: the relative path, as the file-name form gives it
+    ASSERT_TRUE(otherOwner->saveAs(ownerFile.c_str()));
+    const auto relative = Part::boundaryIndex(*otherOwner, *source);
+    EXPECT_EQ(relative, Part::boundaryIndex(ownerFile, sourceFile));
+    EXPECT_NE(relative, absolute);
+
+    app.closeDocument(sourceName.c_str());
+    app.closeDocument(otherName.c_str());
+    fs::remove_all(base, error);
+}
+
+TEST(BoundaryIndex, oneFileOneKey)
+{
+    // ops#112: Part::boundaryIndex() keys a binder's support by its file's path relative to the
+    // owner's folder: one key for one file however its path is written, another for another
+    // file, the same for the same layout anywhere. Files that don't exist are made canonical as
+    // far as their folders exist.
+    using Part::boundaryIndex;
+#ifdef _WIN32
+    const std::string root = "C:";
+#else
+    const std::string root;
+#endif
+    auto at = [&](const std::string& path) {
+        return root + path;
+    };
+    const auto key = boundaryIndex(at("/a/Asm.FCStd"), at("/a/p1/Part.FCStd"));
+    //   a decimal number
+    ASSERT_FALSE(key.empty());
+    EXPECT_TRUE(std::all_of(key.begin(), key.end(), [](char c) { return c >= '0' && c <= '9'; }));
+    //   twins: one file name in two folders
+    EXPECT_NE(key, boundaryIndex(at("/a/Asm.FCStd"), at("/a/p2/Part.FCStd")));
+    //   the same layout elsewhere (the whole tree moved), up and down too
+    EXPECT_EQ(key, boundaryIndex(at("/b/c/Asm.FCStd"), at("/b/c/p1/Part.FCStd")));
+    EXPECT_EQ(
+        boundaryIndex(at("/a/x/Asm.FCStd"), at("/a/p1/Part.FCStd")),
+        boundaryIndex(at("/b/x/Asm.FCStd"), at("/b/p1/Part.FCStd"))
+    );
+    EXPECT_NE(key, boundaryIndex(at("/a/x/Asm.FCStd"), at("/a/p1/Part.FCStd")));
+    //   the same file written another way
+    EXPECT_EQ(key, boundaryIndex(at("/a/Asm.FCStd"), at("/a/x/../p1/./Part.FCStd")));
+    EXPECT_EQ(key, boundaryIndex(at("/a/./Asm.FCStd"), at("/a//p1/Part.FCStd")));
+    //   any case, on every platform: the same tree gives the same key on Windows and on macOS
+    EXPECT_EQ(key, boundaryIndex(at("/A/asm.fcstd"), at("/a/P1/PART.FCStd")));
+#ifdef _WIN32
+    //   Windows: `\` separators, and the drive in either case
+    EXPECT_EQ(key, boundaryIndex("C:\\a\\Asm.FCStd", "C:\\a\\p1\\Part.FCStd"));
+    EXPECT_EQ(key, boundaryIndex("c:/a/Asm.FCStd", "C:/a/p1/Part.FCStd"));
+    //   a source on another drive has no relative path: its absolute one, whatever the owner
+    const auto other = boundaryIndex("C:/a/Asm.FCStd", "E:/x/Part.FCStd");
+    EXPECT_EQ(other, boundaryIndex("C:/b/c/Asm.FCStd", "e:\\X\\part.FCStd"));
+    EXPECT_NE(other, boundaryIndex("C:/a/Asm.FCStd", "C:/x/Part.FCStd"));
+#endif
+
+    //   links resolved: the owner's folder reached through a link to it (as macOS's /var is a
+    //   link to /private/var), the source through the real folder
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "BoundaryIndexTest";
+    std::error_code error;
+    fs::remove_all(base, error);
+    fs::create_directories(base / "real" / "p1");
+    for (const auto& file : {base / "real" / "Asm.FCStd", base / "real" / "p1" / "Part.FCStd"}) {
+        std::ofstream(file) << "x";
+    }
+    fs::create_directory_symlink(base / "real", base / "alias", error);
+    const bool linked = !error;
+    if (linked) {
+        const auto real = boundaryIndex(
+            Base::FileInfo::pathToString(base / "real" / "Asm.FCStd"),
+            Base::FileInfo::pathToString(base / "real" / "p1" / "Part.FCStd")
+        );
+        EXPECT_EQ(
+            real,
+            boundaryIndex(
+                Base::FileInfo::pathToString(base / "alias" / "Asm.FCStd"),
+                Base::FileInfo::pathToString(base / "real" / "p1" / "Part.FCStd")
+            )
+        );
+        EXPECT_EQ(
+            real,
+            boundaryIndex(
+                Base::FileInfo::pathToString(base / "real" / "Asm.FCStd"),
+                Base::FileInfo::pathToString(base / "alias" / "p1" / "Part.FCStd")
+            )
+        );
+        //   a file not there yet, in a folder reached through the link
+        EXPECT_EQ(
+            boundaryIndex(
+                Base::FileInfo::pathToString(base / "alias" / "New.FCStd"),
+                Base::FileInfo::pathToString(base / "real" / "p1" / "Part.FCStd")
+            ),
+            real
+        );
+    }
+    fs::remove_all(base, error);
+    if (!linked) {
+        GTEST_SKIP() << "no folder link here (Windows without the right to make one)";
+    }
 }
 
 TEST_F(FeaturePartTest, matchSimilarNamesSeveralLooseMatchesAreAmbiguous)

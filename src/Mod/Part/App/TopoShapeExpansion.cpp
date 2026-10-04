@@ -8136,12 +8136,15 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
 
     // A shape that crosses into another document (an App::Link, a path hop or a SubShapeBinder
     // there passes the external postfix): every name gets a boundary section tagged with the
-    // local object that brought it in, `<name>|_;_;<tag>;EXT;0;<type>;0;_;_`. A name keeps no
+    // local object that brought it in, `<name>|_;_;<tag>;EXT;<index>;<type>;0;_;_`. A name keeps no
     // other trace of the other document, and its tags are that document's object IDs, so
     // without it the history walk takes them for local objects, and a local name with the same
-    // tags is the same name (ops#56)
+    // tags is the same name (ops#56). A SubShapeBinder passes the key of the support's file in the
+    // postfix (boundaryPostfix()), which becomes the section's index: its supports from copies of
+    // one file had the same names otherwise (ops#112)
     const bool external = selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && postfix
         && std::string_view(postfix).starts_with(Data::POSTFIX_EXTERNAL_TAG);
+    const std::string boundary = external ? Part::boundaryIndexOf(postfix) : std::string("0");
 
     if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag && (Tag != tag || external)
         && !getElementMapSize()) {
@@ -8154,7 +8157,7 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         res.mapSubElement(*this);
         *this = res;
         if (external) {
-            appendSection(*this, tag, Part::OpCodes::External, "0", {});
+            appendSection(*this, tag, Part::OpCodes::External, boundary, {});
         }
         return;
     }
@@ -8173,7 +8176,7 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         }
         map->retagElementMap(tag);
         if (external) {
-            appendSection(*this, tag, Part::OpCodes::External, "0", {});
+            appendSection(*this, tag, Part::OpCodes::External, boundary, {});
         }
     }
 }

@@ -57,9 +57,11 @@ bool isCounterOpCode(const std::string& opCode)
 // instance of which pattern the element is in.
 constexpr const char* patternInstanceOpCode = "TRF";
 
-// The op code of a boundary section, `_;_;<object>;EXT;0;<type>;0;_;_` (Part's
+// The op code of a boundary section, `_;_;<object>;EXT;<i>;<type>;0;_;_` (Part's
 // OpCodes::External, ops#56): the element came from another document through the object (a
 // Link, a binder), and the name before it is that document's. Like an instance, it is a copy.
+// The index i is 0 for a Link; for a binder it is the key of the support's file, which tells
+// apart the supports from copies of one file (ops#112).
 constexpr const char* boundaryOpCode = "EXT";
 
 // A section that makes a copy of the element it ends: a pattern instance's or a boundary's.
@@ -69,12 +71,13 @@ bool isCopySection(const DecodedMappedSection& section)
 }
 
 // Starts and ends a copy's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e` for a pattern
-// instance, `\x1e<tag>;EXT\x1e` for a boundary, before a name (see NameAncestry::ancestorsOf()).
+// instance, `\x1e<tag>;EXT;<i>\x1e` for a boundary, before a name (see
+// NameAncestry::ancestorsOf()).
 // A control character starts no mapped name.
 constexpr char contextMark = '\x1e';
 
-// The copies a name is in: (tag, k) of each of its top-level TRF sections, (tag, EXT) of each of
-// its EXT sections, in order.
+// The copies a name is in: (tag, k) of each of its top-level TRF sections, (tag, EXT;i) of each
+// of its EXT sections, in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
 {
     std::vector<std::pair<std::string, std::string>> instances;
@@ -84,7 +87,10 @@ std::vector<std::pair<std::string, std::string>> patternInstances(std::string_vi
             instances.emplace_back(decoded.iterationTag, decoded.index);
         }
         else if (decoded.opCode == boundaryOpCode) {
-            instances.emplace_back(decoded.iterationTag, boundaryOpCode);
+            instances.emplace_back(
+                decoded.iterationTag,
+                std::string(boundaryOpCode) + ";" + decoded.index
+            );
         }
     }
     return instances;
@@ -179,8 +185,8 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
                 prefix = contextMark + last.iterationTag + ";" + last.index + contextMark + prefix;
             }
             else if (last.opCode == boundaryOpCode) {
-                prefix = contextMark + last.iterationTag + ";" + boundaryOpCode + contextMark
-                    + prefix;
+                prefix = contextMark + last.iterationTag + ";" + boundaryOpCode + ";" + last.index
+                    + contextMark + prefix;
             }
             children.push_back(std::move(prefix));
         }
