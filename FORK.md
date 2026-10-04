@@ -129,7 +129,8 @@ names it.
 | `feat/105-tier0-geometry-check` | feat | ops#105 | - | `integration` `5d00624adf` | `c518c48fc4` (fork PR 100), 2026-10-04 | never (fork naming: the reference solver is the fork's) |
 | `feat/naming-index-format` | feat | ops#6 | - | `integration` `5d00624adf` | `cafab56b0c` (fork PR 99), 2026-10-04 | never (fork feature) |
 | `fix/73-two-sided-inside-error` | fix | ops#73 | - | `integration` `c518c48fc4` | `c07df17bd7` (fork PR 101), 2026-10-04 | a two-sided up-to side whose face lies inside the other side errors on the one-prism path too |
-| `fix/109-guard-check-saved` | fix | ops#109 | - | `integration` `cafab56b0c` | (fork PR 103) | never (fork code: the ops#42 retarget and ops#106's guard are the fork's) |
+| `fix/109-guard-check-saved` | fix | ops#109 | - | `integration` `cafab56b0c` | `70ab701491` (fork PR 103), 2026-10-04 | never (fork code: the ops#42 retarget and ops#106's guard are the fork's) |
+| `fix/6-t2-review-followups` | fix | ops#6 | - | `integration` `cafab56b0c` | (fork PR 102) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

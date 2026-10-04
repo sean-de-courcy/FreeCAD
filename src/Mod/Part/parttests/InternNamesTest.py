@@ -9,6 +9,7 @@ byte for byte. The models here are built in documents whose object IDs start at 
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,6 +137,37 @@ class InternNamesTest(unittest.TestCase):
         v1 = self._document("InternVersionV1", True, algorithm="V1")
         v1box = v1.addObject("Part::Box", "Box")
         self.assertFalse(v1box.getCorrectElementMapVersion().endswith(".N2"))
+
+    def testRecoverySnapshotWritesIndices(self):
+        """The recovery snapshot, the second writer of interned files (ops#6 T2, review F2):
+        uncompressed, its maps refer to the table by index and Document.xml holds the v2 table;
+        made into a project file as recovery does, it opens with the names as they were."""
+        doc = self._document("InternRecovery", True)
+        fillet = self._model(doc)
+        names = _names(fillet.Shape)
+        self.assertInterned(names)
+        self.assertTrue(App.writeRecoverySnapshotToTransientDir(doc, compressed=False))
+        folder = os.path.join(doc.TransientDir, "fc_recovery_files")
+        files = {}
+        for name in os.listdir(folder):
+            with open(os.path.join(folder, name), "rb") as fh:
+                files[name] = fh.read()
+        xml = files["Document.xml"].decode("utf-8")
+        self.assertIn('NamingFormat="2"', xml)
+        self.assertIn("NameTableStart v2 ", xml)
+        maps = [text.decode("utf-8") for name, text in files.items() if name.endswith(".Map.txt")]
+        self.assertTrue(maps)
+        self.assertTrue(any(re.search(r"~[0-9]{1,12}(?![0-9a-v])", text) for text in maps))
+        for text in maps:
+            self.assertIsNone(re.search(r"~[0-9a-v]{13}", text), "a reference in the hash form")
+        project = os.path.join(self.dir, "recovered.FCStd")
+        with zipfile.ZipFile(project, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("Document.xml", files.pop("Document.xml"))
+            for name, data in files.items():
+                archive.writestr(name, data)
+        recovered = App.openDocument(project)
+        self.docNames.append(recovered.Name)
+        self.assertEqual(_names(recovered.getObject("Fillet").Shape), names)
 
     def testInternedNamesExpandToPlain(self):
         """Every feature of the model has the same names in both forms, element for element."""
