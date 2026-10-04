@@ -1673,6 +1673,62 @@ TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
         EXPECT_EQ(fromHashed->find(element), stored) << element.toString();
         EXPECT_EQ(table.toPlain(fromIndexed->find(element).toString()), name);
     }
+
+    // The `next` rule (review F3): a name whose data ends with a reference and whose postfix
+    // starts with a base32hex character keeps that reference in hash form, since an index
+    // would run into the postfix, and reads back the same. Only a restore keeps a postfix apart
+    // (setElementName() stores whole names), so the map is read from a text that has one.
+    const std::string edgeRef = Data::NameTable::makeRef(*table.internName(example.edge));
+    const std::string postfix = "7;SPL;0;E";
+    const Data::IndexedName splitElement("Edge", 1);
+    auto whole = std::make_shared<Data::ElementMap>();
+    whole->hasher = _hasher;
+    whole->setElementName(splitElement, Data::MappedName("_;" + edgeRef + postfix), ++tag);
+    std::stringstream wholeSaved;
+    whole->save(wholeSaved);
+    std::string text = wholeSaved.str();
+    auto replaceOnce = [&text](const std::string& from, const std::string& to) {
+        auto pos = text.find(from);
+        ASSERT_NE(pos, std::string::npos) << from << " in " << text;
+        text.replace(pos, from.size(), to);
+    };
+    //   one more postfix at the end of the list (`<id> PostfixCount <n>` and n lines), and the
+    //   name's data without it, followed by its index (hex)
+    std::istringstream head(text);
+    std::string id;
+    std::string word;
+    int count = 0;
+    head >> id >> word >> count;
+    ASSERT_EQ(word, "PostfixCount") << text;
+    const std::string countLine = " PostfixCount " + std::to_string(count) + "\n";
+    std::size_t listEnd = text.find(countLine) + countLine.size();
+    for (int i = 0; i < count; ++i) {
+        listEnd = text.find('\n', listEnd) + 1;
+    }
+    text.insert(listEnd, postfix + "\n");
+    replaceOnce(countLine, " PostfixCount " + std::to_string(count + 1) + "\n");
+    std::ostringstream index;
+    index << std::hex << count + 1;
+    replaceOnce(";_;" + edgeRef + postfix + ".0", ";_;" + edgeRef + "." + index.str());
+    std::stringstream withPostfix(text);
+    auto splitMap = std::make_shared<Data::ElementMap>()->restore(_hasher, withPostfix);
+    ASSERT_EQ(splitMap->find(splitElement).postfixBytes(), QByteArray(postfix.c_str()));
+    std::stringstream splitSaved;
+    {
+        Data::NameRefCollector::FileFormScope scope(&writer);
+        splitMap->save(splitSaved);
+    }
+    Data::ElementMapPtr splitRestored;
+    {
+        file.clear();
+        file.seekg(0);
+        Data::NameRemap remap;
+        remap.load(file);
+        splitRestored = std::make_shared<Data::ElementMap>()->restore(_hasher, splitSaved);
+        EXPECT_EQ(remap.unknownCount(), 0U);
+    }
+    EXPECT_NE(splitSaved.str().find(";_;" + edgeRef + "."), std::string::npos) << splitSaved.str();
+    EXPECT_EQ(splitRestored->find(splitElement), splitMap->find(splitElement));
 }
 
 // NOLINTEND(readability-magic-numbers)

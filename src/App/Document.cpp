@@ -1472,7 +1472,10 @@ void Document::Restore(Base::XMLReader& reader)
     const bool hasStringHasher = reader.hasAttribute("StringHasher");
     std::optional<Data::NameRemap> ownRemap;
     Data::NameRemap* remap = Data::NameRemap::active();
-    if (!remap) {
+    // A remap that holds another file's table isn't this file's (its indices would resolve
+    // there). No path restores a document inside another's restore today; one that does must
+    // also give it a remap that lives through its readFiles(), as Document::restore() does.
+    if (!remap || remap->holdsFile()) {
         remap = &ownRemap.emplace();
     }
     restoreNameTable(reader, reader.getAttribute<int>("NamingFormat", 0), *remap, getName());

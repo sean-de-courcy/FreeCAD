@@ -1126,6 +1126,11 @@ NameRemap* NameRemap::active()
 
 NameTable::LoadSummary NameRemap::load(std::istream& stream)
 {
+    if (holdsFile()) {
+        FC_ERR("A second name table for one remap: refused (ops#6)");
+        return {};
+    }
+    _loaded = true;
     std::vector<NameTable::SavedEntry> entries;
     auto summary = _table.readEntries(stream, &entries, &_byIndex);
     for (auto& [id, content] : entries) {

@@ -1324,6 +1324,49 @@ TEST_F(NameTableTest, remapOfANewerFormatDropsMapsAndKnowsNoReference)
     EXPECT_EQ(subname.find(forms[0].substr(2, NameTable::RefLength)), std::string::npos);
 }
 
+TEST_F(NameTableTest, remapLoadsOneTableOnly)
+{
+    // A file's indices refer to its own table: a second table read into the same remap would
+    // make them resolve there, so it is refused, and the first stays as it was (review F1)
+    // Arrange
+    NameTable source;
+    Strings forms;
+    std::stringstream fileA(savedFile(source, exampleNames(), forms));
+    std::stringstream fileB;
+    NameTable::writeEntries(fileB, {"Other;_;1;XYZ;0;F;0;_;_"});
+    NameTable process;
+    std::string fromB = "~0";
+    {
+        Data::NameRemap other(process);
+        other.load(fileB);
+        other.fromFileForm(fromB);
+    }
+    fileB.clear();
+    fileB.seekg(0);
+    Data::NameRemap remap(process);
+    EXPECT_FALSE(remap.holdsFile());
+    remap.load(fileA);
+    std::string fromA = "~0";
+    remap.fromFileForm(fromA);
+    ASSERT_NE(fromA, fromB);
+
+    // Act
+    auto summary = remap.load(fileB);
+
+    // Assert
+    EXPECT_TRUE(remap.holdsFile());
+    EXPECT_EQ(summary.inserted + summary.identical + summary.malformed, 0U);
+    std::string again = "~0";
+    remap.fromFileForm(again);
+    EXPECT_EQ(again, fromA);
+    std::string name = forms[0];
+    EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Unchanged);  // A's, as before
+    //   a remap that found a newer format holds its file too
+    Data::NameRemap newer(process);
+    newer.setNewerFormat();
+    EXPECT_TRUE(newer.holdsFile());
+}
+
 TEST_F(NameTableTest, remapIsActiveWhileItLivesAndInnerOnesWin)
 {
     EXPECT_EQ(Data::NameRemap::active(), nullptr);

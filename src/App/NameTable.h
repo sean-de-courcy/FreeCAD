@@ -425,8 +425,15 @@ public:
     static NameRemap* active();
 
     /// Reads the file's entries into the table (NameTable::readEntries()) and works out which
-    /// IDs are inline and which unknown.
+    /// IDs are inline and which unknown. Once only: the indices of a file's maps refer to its own
+    /// table, so a second table is refused (an error, and an empty summary).
     NameTable::LoadSummary load(std::istream& stream);
+    /// True once a file's table was loaded or its naming format found newer: the remap belongs
+    /// to that file, and another file's restore must make its own.
+    bool holdsFile() const
+    {
+        return _loaded || _newerFormat;
+    }
     /// The file's names are in a newer naming format than this build's.
     void setNewerFormat();
     bool isNewerFormat() const
@@ -493,6 +500,7 @@ private:
     NameTable& _table;
     NameRemap* _previous;
     bool _newerFormat = false;
+    bool _loaded = false;
     /// Every well-formed entry of the file, in hash form
     std::unordered_map<NameId, std::string, NameTable::IdHash> _file;
     /// The ID of each position of the file's table
