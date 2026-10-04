@@ -116,7 +116,7 @@ class InternNamesTest(unittest.TestCase):
         self.assertInterned(_names(fillet.Shape))
         on = _documentXml(self._save(doc, "on"))
         self.assertIn('name="InternNames"', on)
-        self.assertIn('.N1"', on)  # the element map version of interned maps
+        self.assertIn('.N2"', on)  # the element map version of interned maps (ops#6 T2: N2)
         doc.InternNames = False
         doc.recompute()
         self.assertPlain(_names(fillet.Shape))
@@ -130,12 +130,12 @@ class InternNamesTest(unittest.TestCase):
         box = doc.addObject("Part::Box", "Box")
         plain = box.getCorrectElementMapVersion()
         doc.InternNames = True
-        self.assertEqual(box.getCorrectElementMapVersion(), plain + ".N1")
+        self.assertEqual(box.getCorrectElementMapVersion(), plain + ".N2")
         doc.InternNames = False
         self.assertEqual(box.getCorrectElementMapVersion(), plain)
         v1 = self._document("InternVersionV1", True, algorithm="V1")
         v1box = v1.addObject("Part::Box", "Box")
-        self.assertFalse(v1box.getCorrectElementMapVersion().endswith(".N1"))
+        self.assertFalse(v1box.getCorrectElementMapVersion().endswith(".N2"))
 
     def testInternedNamesExpandToPlain(self):
         """Every feature of the model has the same names in both forms, element for element."""

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <istream>
 #include <mutex>
@@ -108,6 +109,94 @@ void join(std::string& out, const std::vector<std::string>& parts, char delimite
     }
 }
 
+/// The valid references in \a text, in order.
+std::vector<NameId> refsIn(std::string_view text)
+{
+    std::vector<NameId> refs;
+    for (std::size_t pos = text.find(NameTable::Marker);
+         pos != std::string_view::npos && pos + NameTable::RefLength <= text.size();
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        if (auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength))) {
+            refs.push_back(*id);
+        }
+    }
+    return refs;
+}
+
+bool isBase32Digit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'v');
+}
+
+/// The end of the run of base32hex characters that starts at \a pos.
+std::size_t base32RunEnd(std::string_view text, std::size_t pos)
+{
+    while (pos < text.size() && isBase32Digit(text[pos])) {
+        ++pos;
+    }
+    return pos;
+}
+
+/** Puts the references `~<index>` of a file's text in hash form (NameRemap::fromFileForm()):
+ * \a byIndex[i] for an index below \a limit, else NameTable::indexStandIn(). Counts those in
+ * \a bad. Returns true if \a text changed.
+ */
+bool indicesToRefs(std::string& text,
+                   const std::vector<NameId>& byIndex,
+                   std::size_t limit,
+                   char next,
+                   std::size_t* bad = nullptr)
+{
+    // An index has at most 12 digits: a run of 13 is an ID (NameTable::RefLength - 1)
+    constexpr std::size_t maxDigits = NameTable::RefLength - 2;
+    std::size_t pos = text.find(NameTable::Marker);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    std::string out;
+    std::size_t done = 0;
+    for (; pos != std::string::npos; pos = text.find(NameTable::Marker, pos + 1)) {
+        std::size_t end = base32RunEnd(text, pos + 1);
+        std::size_t digits = end - pos - 1;
+        if (digits == 0 || digits > maxDigits || (end == text.size() && isBase32Digit(next))) {
+            continue;
+        }
+        std::size_t index = 0;
+        bool decimal = true;
+        for (std::size_t i = pos + 1; i < end; ++i) {
+            if (text[i] < '0' || text[i] > '9') {
+                decimal = false;
+                break;
+            }
+            index = index * 10 + static_cast<std::size_t>(text[i] - '0');
+        }
+        if (!decimal) {
+            continue;
+        }
+        if (out.empty()) {
+            out.reserve(text.size() + 4 * NameTable::RefLength);
+        }
+        out.append(text, done, pos - done);
+        if (index < limit && index < byIndex.size()) {
+            out += NameTable::makeRef(byIndex[index]);
+        }
+        else {
+            out += NameTable::makeRef(NameTable::indexStandIn(index));
+            if (bad) {
+                ++*bad;
+            }
+        }
+        done = end;
+        pos = end - 1;
+    }
+    if (done == 0) {
+        return false;
+    }
+    out.append(text, done, std::string::npos);
+    text = std::move(out);
+    return true;
+}
+
 }  // namespace
 
 std::size_t NameTable::IdHash::operator()(const NameId& id) const
@@ -199,7 +288,11 @@ std::optional<NameId> NameTable::intern(std::string_view content)
 
 std::optional<NameId> NameTable::intern(std::string_view content, bool* missing)
 {
-    NameId id = idOf(content);
+    return intern(idOf(content), content, missing);
+}
+
+std::optional<NameId> NameTable::intern(const NameId& id, std::string_view content, bool* missing)
+{
     const Entry* existing = get(id);
     if (!existing && missing) {
         *missing = true;  // a dry run goes on as if it were inserted
@@ -717,59 +810,68 @@ int NameTable::compareExpanded(std::string_view a, std::string_view b) const
 // Saving and loading (ops#6, Task 1 PR 7)
 // ---------------------------------------------------------------------------------------------
 
-void NameTable::writeEntries(std::ostream& stream, const std::vector<SavedEntry>& entries)
+void NameTable::writeEntries(std::ostream& stream, const std::vector<std::string>& contents)
 {
-    stream << "NameTableStart v1 " << entries.size() << '\n';
-    for (const auto& [id, content] : entries) {
-        stream << id.toBase32() << ' ' << content << '\n';
+    stream << "NameTableStart v2 " << contents.size() << '\n';
+    for (const auto& content : contents) {
+        stream << content << '\n';
     }
 }
 
+NameId NameTable::indexStandIn(std::size_t index)
+{
+    return NameId::compute("no entry " + std::to_string(index), IdBits);
+}
+
 NameTable::LoadSummary NameTable::readEntries(std::istream& stream,
-                                              std::vector<SavedEntry>* entries)
+                                              std::vector<SavedEntry>* entries,
+                                              std::vector<NameId>* byIndex)
 {
     LoadSummary summary;
     std::string marker;
     std::string version;
     std::size_t count = 0;
     stream >> marker >> version >> count;
-    if (marker != "NameTableStart" || version != "v1") {
+    if (marker != "NameTableStart" || version != "v2") {
         FC_ERR("Unknown name table format '" << marker << ' ' << version << "'");
         return summary;
     }
+    std::vector<NameId> ids;
     std::string line;
     std::getline(stream, line);  // the rest of the first line
     for (std::size_t i = 0; i < count && std::getline(stream, line); ++i) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
-        auto space = line.find(' ');
-        auto id = space == std::string::npos
-            ? std::nullopt
-            : NameId::fromBase32(std::string_view(line).substr(0, space));
-        if (!id || space + 1 >= line.size()) {
+        if (line.empty() || line.find_first_of(" \t") != std::string::npos) {
             ++summary.malformed;
+            ids.push_back(indexStandIn(i));
             continue;
         }
-        std::string_view content = std::string_view(line).substr(space + 1);
-        if (entries) {
-            entries->emplace_back(*id, std::string(content));
+        // Dependencies come first: an entry refers only to the ones before it
+        indicesToRefs(line, ids, i, '\0', &summary.malformed);
+        // The ID is computed once: there is nothing to check it against
+        NameId id = idOf(line);
+        ids.push_back(id);
+        bool hadIt = get(id) != nullptr;
+        if (!intern(id, line, nullptr)) {
+            summary.refused.emplace_back(id, line);
         }
-        switch (insertLoaded(*id, content)) {
-            case LoadResult::Inserted:
-                ++summary.inserted;
-                break;
-            case LoadResult::Identical:
-                ++summary.identical;
-                break;
-            case LoadResult::Collision:
-            case LoadResult::WrongId:
-                summary.refused.emplace_back(*id, std::string(content));
-                break;
+        else if (hadIt) {
+            ++summary.identical;
+        }
+        else {
+            ++summary.inserted;
+        }
+        if (entries) {
+            entries->emplace_back(id, std::move(line));
         }
     }
     if (summary.malformed != 0) {
-        FC_ERR("Name table: " << summary.malformed << " malformed lines");
+        FC_ERR("Name table: " << summary.malformed << " malformed lines or references");
+    }
+    if (byIndex) {
+        *byIndex = std::move(ids);
     }
     return summary;
 }
@@ -777,7 +879,8 @@ NameTable::LoadSummary NameTable::readEntries(std::istream& stream,
 namespace
 {
 thread_local NameRefCollector* activeCollector = nullptr;
-}
+thread_local const NameRefCollector* fileFormCollector = nullptr;
+}  // namespace
 
 NameRefCollector::NameRefCollector()
     : _previous(activeCollector)
@@ -795,52 +898,154 @@ NameRefCollector* NameRefCollector::active()
     return activeCollector;
 }
 
-void NameRefCollector::addRefs(std::string_view text, std::set<NameId>& refs)
+void NameRefCollector::add(std::string_view text)
 {
     for (std::size_t pos = text.find(NameTable::Marker);
          pos != std::string_view::npos && pos + NameTable::RefLength <= text.size();
          pos = text.find(NameTable::Marker, pos + 1)) {
         if (auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength))) {
-            refs.insert(*id);
+            if (_refs.insert(*id).second) {
+                _order.push_back(*id);
+            }
         }
     }
 }
 
-void NameRefCollector::add(std::string_view text)
+void NameRefCollector::number(const NameId& root, const NameTable& table)
 {
-    addRefs(text, _refs);
+    // Iterative depth-first post-order: an entry gets its index after the ones it refers to,
+    // so a file lists dependencies first (histories can be deep)
+    struct Frame
+    {
+        NameId id;
+        const std::string* content;
+        std::vector<NameId> refs;
+        std::size_t next = 0;
+    };
+    auto isDone = [this](const NameId& id) {
+        return _index.count(id) != 0 || _unknown.count(id) != 0;
+    };
+    std::vector<Frame> stack;
+    std::set<NameId> visiting;  // no content holds its own ID; a guard all the same
+    auto push = [&](const NameId& id) {
+        const NameTable::Entry* entry = table.get(id);
+        if (!entry) {
+            _unknown.insert(id);
+            return;
+        }
+        visiting.insert(id);
+        stack.push_back({id, &entry->content, refsIn(entry->content), 0});
+    };
+    if (isDone(root)) {
+        return;
+    }
+    push(root);
+    while (!stack.empty()) {
+        Frame& frame = stack.back();
+        if (frame.next < frame.refs.size()) {
+            NameId ref = frame.refs[frame.next++];
+            if (!isDone(ref) && visiting.count(ref) == 0) {
+                push(ref);  // frame is invalid from here
+            }
+            continue;
+        }
+        _index.emplace(frame.id, _entries.size());
+        _entries.emplace_back(frame.id, *frame.content);
+        visiting.erase(frame.id);
+        stack.pop_back();
+    }
 }
 
-std::vector<NameTable::SavedEntry> NameRefCollector::entries(const NameTable& table,
-                                                             std::size_t* unknown) const
+const std::vector<NameTable::SavedEntry>& NameRefCollector::entries(const NameTable& table,
+                                                                    std::size_t* unknown)
 {
-    std::vector<NameTable::SavedEntry> result;
-    std::set<NameId> seen;
-    std::vector<NameId> pending(_refs.begin(), _refs.end());
-    std::size_t missing = 0;
-    while (!pending.empty()) {
-        NameId id = pending.back();
-        pending.pop_back();
-        if (!seen.insert(id).second) {
-            continue;
-        }
-        auto content = table.lookup(id);
-        if (!content) {
-            ++missing;
-            continue;
-        }
-        std::set<NameId> inner;
-        addRefs(*content, inner);
-        pending.insert(pending.end(), inner.begin(), inner.end());
-        result.emplace_back(id, std::move(*content));
+    for (; _numbered < _order.size(); ++_numbered) {
+        number(_order[_numbered], table);
     }
-    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
-        return a.first < b.first;
-    });
     if (unknown) {
-        *unknown = missing;
+        *unknown = _unknown.size();
     }
-    return result;
+    return _entries;
+}
+
+std::vector<std::string> NameRefCollector::fileEntries(const NameTable& table,
+                                                       std::size_t* unknown)
+{
+    entries(table, unknown);
+    std::vector<std::string> contents;
+    contents.reserve(_entries.size());
+    for (const auto& entry : _entries) {
+        contents.emplace_back();
+        appendFileForm(contents.back(), entry.second);
+    }
+    return contents;
+}
+
+std::optional<std::size_t> NameRefCollector::indexOf(const NameId& id) const
+{
+    auto it = _index.find(id);
+    if (it == _index.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+void NameRefCollector::appendFileForm(std::string& out, std::string_view text, char next) const
+{
+    std::size_t done = 0;
+    for (std::size_t pos = text.find(NameTable::Marker); pos != std::string_view::npos;
+         pos = text.find(NameTable::Marker, pos + 1)) {
+        std::size_t end = base32RunEnd(text, pos + 1);
+        if (end - pos != NameTable::RefLength || (end == text.size() && isBase32Digit(next))) {
+            continue;
+        }
+        auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength));
+        if (!id) {
+            continue;
+        }
+        auto it = _index.find(*id);
+        if (it == _index.end()) {
+            continue;  // not in the file's table: the hash form, unknown to a reader
+        }
+        out.append(text, done, pos - done);
+        out += NameTable::Marker;
+        char digits[24];
+        auto [ptr, error] = std::to_chars(std::begin(digits), std::end(digits), it->second);
+        out.append(digits, ptr);
+        done = end;
+        pos = end - 1;
+    }
+    out.append(text, done, std::string_view::npos);
+}
+
+void NameRefCollector::bind(const void* writer, const NameTable& table)
+{
+    entries(table);
+    _writer = writer;
+}
+
+NameRefCollector::FileFormScope::FileFormScope(const void* writer)
+    : _previous(fileFormCollector)
+{
+    const NameRefCollector* found = nullptr;
+    for (const NameRefCollector* collector = activeCollector; collector && writer;
+         collector = collector->_previous) {
+        if (collector->_writer == writer) {
+            found = collector;
+            break;
+        }
+    }
+    fileFormCollector = found;
+}
+
+NameRefCollector::FileFormScope::~FileFormScope()
+{
+    fileFormCollector = _previous;
+}
+
+const NameRefCollector* NameRefCollector::fileForm()
+{
+    return fileFormCollector;
 }
 
 NameRefScanBuffer::NameRefScanBuffer(std::streambuf* target, NameRefCollector& collector)
@@ -899,20 +1104,6 @@ int NameRefScanBuffer::sync()
 namespace
 {
 thread_local NameRemap* activeRemap = nullptr;
-
-/// The valid references in \a text, in order.
-std::vector<NameId> refsIn(std::string_view text)
-{
-    std::vector<NameId> refs;
-    for (std::size_t pos = text.find(NameTable::Marker);
-         pos != std::string_view::npos && pos + NameTable::RefLength <= text.size();
-         pos = text.find(NameTable::Marker, pos + 1)) {
-        if (auto id = NameTable::parseRef(text.substr(pos, NameTable::RefLength))) {
-            refs.push_back(*id);
-        }
-    }
-    return refs;
-}
 }  // namespace
 
 NameRemap::NameRemap(NameTable& table)
@@ -936,7 +1127,7 @@ NameRemap* NameRemap::active()
 NameTable::LoadSummary NameRemap::load(std::istream& stream)
 {
     std::vector<NameTable::SavedEntry> entries;
-    auto summary = _table.readEntries(stream, &entries);
+    auto summary = _table.readEntries(stream, &entries, &_byIndex);
     for (auto& [id, content] : entries) {
         _file[id] = std::move(content);
     }
@@ -1137,6 +1328,7 @@ NameRemap::MapName NameRemap::remapMapName(std::string& name)
         ++_dropped;
         return MapName::Dropped;
     }
+    bool converted = fromFileForm(name);
     bool hasInline = false;
     bool hasUnknown = false;
     scan(name, hasInline, hasUnknown);
@@ -1152,5 +1344,10 @@ NameRemap::MapName NameRemap::remapMapName(std::string& name)
         markUnknown(name);
         return MapName::Changed;
     }
-    return MapName::Unchanged;
+    return converted ? MapName::Changed : MapName::Unchanged;
+}
+
+bool NameRemap::fromFileForm(std::string& text, char next) const
+{
+    return indicesToRefs(text, _byIndex, _byIndex.size(), next);
 }

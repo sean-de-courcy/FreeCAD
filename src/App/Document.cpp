@@ -120,8 +120,9 @@ bool transactionStateBlocksRecoveryWrite(const DocumentP& documentPrivate)
 }
 
 /// The format of the interned names a file holds and of its `NameTable` element (ops#6). A build
-/// reads files up to this format.
-constexpr int namingFormat = 1;
+/// reads files of this format only: 2 writes references in the maps and the table as indices
+/// into the table (T2), and format 1 never shipped.
+constexpr int namingFormat = 2;
 
 /** Collects the references to interned names (ops#6) in everything written to a stream while it
  * lives: its NameRefScanBuffer stands in front of the stream's buffer. release() (or the
@@ -195,7 +196,9 @@ public:
     {
         _scan.release();
         std::size_t unknown = 0;
-        auto entries = _collector.entries(Data::NameTable::instance(), &unknown);
+        // In index order, the maps' entries first (numbered by Document::Save()), then those
+        // only the XML refers to
+        auto entries = _collector.fileEntries(Data::NameTable::instance(), &unknown);
         if (unknown != 0) {
             FC_LOG(documentName << ": " << unknown << " references to no known name table entry");
         }
@@ -236,9 +239,10 @@ void restoreNameTable(Base::XMLReader& reader,
     if (format == 0) {
         return;
     }
-    if (format > namingFormat) {
+    if (format != namingFormat) {
+        // A newer format, or format 1, which never shipped (ops#6 T2)
         FC_WARN(documentName << ": the file's interned names are in naming format " << format
-                             << ", newer than this build's " << namingFormat
+                             << ", which this build doesn't read (it reads " << namingFormat << ')'
                              << ": its element maps with interned names are dropped and "
                                 "recomputed, and the references to interned names are missing");
         remap.setNewerFormat();
@@ -1386,8 +1390,15 @@ void Document::Save(Base::Writer& writer) const
     // Interned names (ops#6): the file must hold the table entries its names refer to, before
     // its objects. They are collected from what this save writes: the element maps it saves
     // (ElementMap::beforeSave(), below) and everything written into the document's XML (links,
-    // shadows, expressions, sketch references, ...), which is held back until then.
-    Data::NameRefCollector collector;
+    // shadows, expressions, sketch references, ...), which is held back until then. The maps
+    // are written after this returns (writer.writeFiles()), with references as indices into the
+    // table (T2): saveToFile() makes the collector, so that it outlives this. Called alone, or
+    // inside another document's save, this makes its own, and the maps keep the hash form.
+    Data::NameRefCollector* collector = Data::NameRefCollector::active();
+    std::optional<Data::NameRefCollector> ownCollector;
+    if (!collector || collector->isBound()) {
+        collector = &ownCollector.emplace();
+    }
 
     writer.incInd();
 
@@ -1404,11 +1415,15 @@ void Document::Save(Base::Writer& writer) const
     }
     beforeSave();
 
+    // The maps' entries are numbered first, in the order of their names, before any map is
+    // written (inline ones in the XML too)
+    collector->bind(&writer, Data::NameTable::instance());
+
     // Decided after beforeSave(), which can put the process's first names into the table: while
     // it is empty, no name refers to it, and the XML is written as it comes
     std::optional<HeldBackXml> heldBack;
     if (Data::NameTable::instance().size() != 0) {
-        heldBack.emplace(writer.Stream(), collector);
+        heldBack.emplace(writer.Stream(), *collector);
     }
     else {
         writer.Stream() << startTag.str() << ">\n";
@@ -2365,6 +2380,9 @@ bool Document::saveToFile(const char* filename) const
                         << " FreeCAD Document, see https://www.freecad.org for more information..."
                         << '\n'
                         << "-->" << '\n';
+        // Save() numbers the file's name table entries; the maps, written by writeFiles(), refer
+        // to them by index (ops#6 T2)
+        Data::NameRefCollector collector;
         Document::Save(writer);
 
         // Special handling for Gui document.
@@ -2460,9 +2478,10 @@ const std::string& Document::getCorrectElementMapVersion() {
         ss << Data::ELEMENT_NAME_ENCODING_VERSION << '.' << std::hex << occ_ver << '.'
            << App::getHistoryAlgorithm(selectedHistoryAlgorithm) << "." << Data::ELEMENT_MAP_VERSION;
         // Interned maps hold names in another form: a build or a document that expects the other
-        // form sees a different version and asks for a recompute (ops#6).
+        // form sees a different version and asks for a recompute (ops#6). N2: their files hold
+        // the references as indices into the file's table (NamingFormat 2).
         if (isInternNamesOn()) {
-            ss << ".N1";
+            ss << ".N2";
         }
         
         elementMapVersion = ss.str();

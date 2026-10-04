@@ -96,6 +96,25 @@ bool remapName(NameRemap& remap, std::string& text)
     return remap.remapMapName(text) == NameRemap::MapName::Changed;
 }
 
+// Writes \a size bytes at \a data of a map's text: through \a fileForm, references in the file's
+// form (`~<index>`, ops#6 T2), \a next being the byte that follows in the name.
+void writeMapText(std::ostream& stream,
+                  const NameRefCollector* fileForm,
+                  const char* data,
+                  qsizetype size,
+                  char next,
+                  std::string& buffer)
+{
+    std::string_view text(data, static_cast<std::size_t>(size));
+    if (!fileForm || text.find(NameTable::Marker) == std::string_view::npos) {
+        stream.write(data, size);
+        return;
+    }
+    buffer.clear();
+    fileForm->appendFileForm(buffer, text, next);
+    stream.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+}
+
 }  // namespace
 
 UnsortedElementMapScope::UnsortedElementMapScope()
@@ -215,6 +234,10 @@ void ElementMap::save(std::ostream& stream,
     stream << "\nElementMap " << index << ' ' << this->_id << ' ' << this->indexedNames.size()
            << '\n';
 
+    // A document's save writes the references in its maps as indices into its table (ops#6 T2)
+    const NameRefCollector* fileForm = NameRefCollector::fileForm();
+    std::string buffer;
+
     for (auto& indexedName : this->indexedNames) {
         stream << '\n' << indexedName.first << '\n';
 
@@ -233,7 +256,12 @@ void ElementMap::save(std::ostream& stream,
             }
             stream << child.indexedName.getIndex() << ' ' << child.offset << ' ' << child.count
                    << ' ' << child.tag << ' ' << mapIndex << ' ';
-            stream.write(child.postfix.constData(), child.postfix.size());
+            writeMapText(stream,
+                         fileForm,
+                         child.postfix.constData(),
+                         child.postfix.size(),
+                         '\0',
+                         buffer);
             stream << ' ' << '0';
             for (auto& sid : child.sids) {
                 if (sid.isMarked()) {
@@ -287,12 +315,17 @@ void ElementMap::save(std::ostream& stream,
                         }
                     }
                 }
+                const QByteArray& postfix = ref->name.postfixBytes();
                 if (printName) {
                     stream << ';';
-                    stream.write(ref->name.dataBytes().constData(), ref->name.dataBytes().size());
+                    writeMapText(stream,
+                                 fileForm,
+                                 ref->name.dataBytes().constData(),
+                                 ref->name.dataBytes().size(),
+                                 postfix.isEmpty() ? '\0' : postfix.front(),
+                                 buffer);
                 }
 
-                const QByteArray& postfix = ref->name.postfixBytes();
                 if (postfix.isEmpty()) {
                     stream << ".0";
                 }
@@ -324,9 +357,11 @@ void ElementMap::save(std::ostream& stream) const
 
     collectChildMaps(childMapSet, childMaps, postfixMap, postfixes);
 
+    const NameRefCollector* fileForm = NameRefCollector::fileForm();
+    std::string buffer;
     stream << this->_id << " PostfixCount " << postfixes.size() << '\n';
     for (auto& postfix : postfixes) {
-        stream.write(postfix.constData(), postfix.size());
+        writeMapText(stream, fileForm, postfix.constData(), postfix.size(), '\0', buffer);
         stream << '\n';
     }
     int index = 0;
@@ -349,9 +384,13 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef, std::istream
 
     std::vector<std::string> postfixes;
     postfixes.reserve(count);
+    NameRemap* remap = NameRemap::active();
     for (int i = 0; i < count; ++i) {
         postfixes.emplace_back();
         stream >> postfixes.back();
+        if (remap) {
+            remap->fromFileForm(postfixes.back());  // a postfix ends its name (ops#6 T2)
+        }
     }
 
     std::vector<ElementMapPtr> childMaps;
@@ -396,6 +435,15 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
     std::vector<std::string> tokens;
     // The references to interned names mean what the file's name table says (ops#6)
     NameRemap* remap = NameRemap::active();
+    // The first byte of the postfix a name token's postfix index gives, or none
+    auto firstOfPostfix = [&postfixes](const std::string& token) {
+        long postfixIndex = strtol(token.c_str(), nullptr, hexBase);
+        if (postfixIndex <= 0 || postfixIndex > static_cast<long>(postfixes.size())
+            || postfixes[postfixIndex - 1].empty()) {
+            return '\0';
+        }
+        return postfixes[postfixIndex - 1].front();
+    };
 
     for (int i = 0; i < typeCount; ++i) {
         int outerCount = 0;
@@ -439,6 +487,7 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
                 child.elementMap = nullptr;
             }
             if (remap) {
+                remap->fromFileForm(tmp);
                 remap->remapSubName(tmp);  // a postfix isn't a name: rewritten as text
             }
             child.postfix = tmp.c_str();
@@ -524,6 +573,10 @@ ElementMapPtr ElementMap::restore(::App::StringHasherRef hasherRef,
                         prefixID = ::App::StringID::fromString(ref->name.dataBytes());
                         break;
                     case ';':
+                        if (remap && tokens[0].find(NameTable::Marker) != std::string::npos) {
+                            // The references in file form (ops#6 T2), followed by the postfix
+                            remap->fromFileForm(tokens[0], firstOfPostfix(tokens[offset]));
+                        }
                         ref->name = MappedName(tokens[0].c_str() + 1);
                         break;
                     default:

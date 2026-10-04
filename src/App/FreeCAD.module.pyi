@@ -348,6 +348,14 @@ def getMappedNameId(name: str, /) -> str | None:
     """
     ...
 
+def getNameTableContentId(content: str, /) -> str:
+    """Return the ID the name table gives entry content `content` as it is (13 base32
+    characters), without interning it or adding anything: what a load computes for a file's
+    entry (ops#6). getMappedNameId() interns the name first, so a content kept in full form
+    gets the ID of its interned form there. For tests.
+    """
+    ...
+
 def getNameTableEntry(id: str, /) -> tuple[str, int] | None:
     """Return the name table's entry for `id` (`<ID>` or `~<ID>`): its interned content and its
     depth. Returns None for an ID the table doesn't have. For tests.

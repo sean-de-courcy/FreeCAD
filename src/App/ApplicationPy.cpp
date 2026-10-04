@@ -1337,6 +1337,22 @@ PyObject* ApplicationPy::sGetMappedNameId(PyObject* /*self*/, PyObject* args)
     PY_CATCH;
 }
 
+PyObject* ApplicationPy::sGetNameTableContentId(PyObject* /*self*/, PyObject* args)
+{
+    const char* content {};
+    if (!PyArg_ParseTuple(args, "s", &content)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        // As a file's entry is read (ops#6 T2): the content as it is, not interned
+        auto id = Data::NameTable::instance().idOf(content);
+        return Py::new_reference_to(Py::String(id.toBase32()));
+    }
+    PY_CATCH;
+}
+
 PyObject* ApplicationPy::sGetNameTableEntry(PyObject* /*self*/, PyObject* args)
 {
     const char* text {};

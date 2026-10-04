@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <sstream>
 
 #include <App/Application.h>
 #include <App/ElementMap.h>
@@ -1605,6 +1606,73 @@ TEST_F(ElementMapTest, beforeSaveCollectsTheReferencesV2)
     EXPECT_EQ(internedCollector.refs(), expected);
     //   and the entries close over them: the upper edge's content refers to the face again
     EXPECT_EQ(internedCollector.entries(table).size(), 3U);
+}
+
+TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
+{
+    // ops#6 T2: a document's save writes the references in its maps as indices into the file's
+    // table, and the load puts them back; a map written outside such a save keeps the hash form
+    // Arrange
+    auto& table = Data::NameTable::instance();
+    InternExample example;
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    map->setInterned(true);
+    const std::vector<std::pair<Data::IndexedName, std::string>> names {
+        {Data::IndexedName("Face", 1), example.piece},
+        {Data::IndexedName("Face", 2), example.face},
+        {Data::IndexedName("Edge", 1), example.edge},
+        {Data::IndexedName("Edge", 2), example.upper},
+    };
+    long tag = 20;
+    for (const auto& [element, name] : names) {
+        map->setElementName(element, Data::MappedName(name), ++tag);
+    }
+    auto hashRefs = [](const std::string& text) {
+        std::size_t count = 0;
+        for (std::size_t pos = text.find('~'); pos != std::string::npos;
+             pos = text.find('~', pos + 1)) {
+            auto ref = Data::NameTable::parseRef(text.substr(pos, Data::NameTable::RefLength));
+            count += ref ? 1 : 0;
+        }
+        return count;
+    };
+    Data::NameRefCollector collector;
+    map->beforeSave(_hasher);
+    int writer = 0;
+    collector.bind(&writer, table);
+    std::stringstream indexed;
+    {
+        Data::NameRefCollector::FileFormScope scope(&writer);
+        map->save(indexed);
+    }
+    std::stringstream hashed;
+    map->save(hashed);  // no scope: no file form
+    std::stringstream file;
+    Data::NameTable::writeEntries(file, collector.fileEntries(table));
+
+    // Act
+    Data::ElementMapPtr fromIndexed;
+    Data::ElementMapPtr fromHashed;
+    {
+        Data::NameRemap remap;
+        remap.load(file);
+        fromIndexed = std::make_shared<Data::ElementMap>()->restore(_hasher, indexed);
+        fromHashed = std::make_shared<Data::ElementMap>()->restore(_hasher, hashed);
+        EXPECT_EQ(remap.unknownCount(), 0U);
+    }
+
+    // Assert
+    EXPECT_EQ(hashRefs(indexed.str()), 0U) << indexed.str();
+    EXPECT_NE(indexed.str().find("~0"), std::string::npos) << indexed.str();
+    EXPECT_GT(hashRefs(hashed.str()), 0U);
+    EXPECT_LT(indexed.str().size(), hashed.str().size());
+    for (const auto& [element, name] : names) {
+        Data::MappedName stored = map->find(element);
+        EXPECT_EQ(fromIndexed->find(element), stored) << element.toString();
+        EXPECT_EQ(fromHashed->find(element), stored) << element.toString();
+        EXPECT_EQ(table.toPlain(fromIndexed->find(element).toString()), name);
+    }
 }
 
 // NOLINTEND(readability-magic-numbers)

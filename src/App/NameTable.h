@@ -107,30 +107,42 @@ public:
     /// Inserts an entry read from a file. The content isn't checked for canonical form.
     LoadResult insertLoaded(const NameId& id, std::string_view content);
 
-    /// An entry as a file holds it: its ID and its canonical string.
+    /// An entry: its ID and its canonical string.
     using SavedEntry = std::pair<NameId, std::string>;
 
-    /** Writes \a entries as text: a line `NameTableStart v1 <count>`, then one line per entry,
-     * `<ID> <content>`, in the order given. A content holds no whitespace (setElementName()
-     * refuses it in a name).
+    /** Writes a file's table (ops#6 T2): a line `NameTableStart v2 <count>`, then one line per
+     * entry, its content in file form (NameRefCollector::appendFileForm()), in index order. An
+     * entry's index is its position; the file has no IDs, its reader computes them. A content
+     * holds no whitespace (setElementName() refuses it in a name).
      */
-    static void writeEntries(std::ostream& stream, const std::vector<SavedEntry>& entries);
+    static void writeEntries(std::ostream& stream, const std::vector<std::string>& contents);
 
     /// What readEntries() did.
     struct LoadSummary
     {
         std::size_t inserted = 0;
         std::size_t identical = 0;
-        /// The entries refused as Collision or WrongId (insertLoaded()), as the file has them.
+        /// The entries refused as Collision (their ID holds other content here).
         std::vector<SavedEntry> refused;
-        /// Lines that aren't an entry (no valid ID, or no content).
+        /// Lines that aren't an entry (empty, or with whitespace), and references to an index
+        /// that isn't an earlier entry's.
         std::size_t malformed = 0;
     };
 
-    /** Reads entries written by writeEntries() into this table, each through insertLoaded().
-     * \a entries, if given, gets every well-formed entry as the file has it, refused ones too.
+    /** Reads a table written by writeEntries() into this table. Each entry's references to
+     * earlier entries (`~<index>`) are put back in hash form, then its ID is computed and it is
+     * inserted (a collision is refused, as insertLoaded() does). A reference to an index that
+     * isn't an earlier entry's becomes a reference to indexStandIn(), which no file holds.
+     * \a entries, if given, gets every entry in hash form, refused ones too; \a byIndex the ID
+     * of each position (indexStandIn() for a malformed line).
      */
-    LoadSummary readEntries(std::istream& stream, std::vector<SavedEntry>* entries = nullptr);
+    LoadSummary readEntries(std::istream& stream,
+                            std::vector<SavedEntry>* entries = nullptr,
+                            std::vector<NameId>* byIndex = nullptr);
+
+    /// The ID a reference to the index \a index of a file stands for when the file has no
+    /// such entry: the ID of no content (it holds a space).
+    static NameId indexStandIn(std::size_t index);
 
     /** Inserts \a content under \a id whatever its real ID, if \a id is free; for tests that
      * force a collision with a file's entry. Returns false if \a id was taken.
@@ -218,6 +230,8 @@ private:
     // With \a missing set, nothing is inserted: a node the table lacks sets *missing instead
     // (toInternedIfKnown()), and a collision isn't counted or logged
     std::optional<NameId> intern(std::string_view content, bool* missing);
+    /// intern() of \a content whose ID \a id is known
+    std::optional<NameId> intern(const NameId& id, std::string_view content, bool* missing);
     std::optional<NameId> internName(std::string_view name, bool* missing);
     std::string toInterned(std::string_view name, bool* missing);
     std::string internSection(std::string_view section, bool* missing);
@@ -229,6 +243,7 @@ private:
     const std::string* contentOf(const NameId& id, const NameRemap* remap) const;
 
     friend class ExpansionCursor;
+    friend class NameRefCollector;
     friend class NameRemap;
 
     mutable std::shared_mutex _mutex;
@@ -248,6 +263,14 @@ private:
  * ElementMap::beforeSave() adds every name of the maps it prepares for saving, and a
  * NameRefScanBuffer adds everything written through it. So a carrier of names needs no code of
  * its own here, as long as it writes into the scanned stream or is an element map.
+ *
+ * **File-local indices** (ops#6 T2). In a file's element maps and in its table, a reference is
+ * written `~<index>`, decimal, the entry's position in the file's table; Document.xml keeps the
+ * hash form. The entries are numbered in the order the references were first added, each after
+ * the entries its content refers to (so an entry refers only to lower indices). A save binds
+ * its collector to its writer once the maps have handed in their names (bind()); the maps are
+ * written afterwards, by the writer's writeFiles(), so the collector lives on until then
+ * (Document::saveToFile() makes it), and the maps find it through a FileFormScope.
  */
 class AppExport NameRefCollector
 {
@@ -270,16 +293,65 @@ public:
     }
 
     /** The entries of \a table reachable from the references added: those referenced, and
-     * recursively the ones their contents refer to. Sorted by ID. References \a table doesn't
-     * know are left out and counted in \a unknown.
+     * recursively the ones their contents refer to, in index order. The ones not numbered yet
+     * are numbered now, after the others. References \a table doesn't know are left out and
+     * counted in \a unknown.
      */
-    std::vector<NameTable::SavedEntry> entries(const NameTable& table,
-                                               std::size_t* unknown = nullptr) const;
+    const std::vector<NameTable::SavedEntry>& entries(const NameTable& table,
+                                                      std::size_t* unknown = nullptr);
+
+    /// The table as a file writes it (NameTable::writeEntries()): entries() with their
+    /// references in file form.
+    std::vector<std::string> fileEntries(const NameTable& table, std::size_t* unknown = nullptr);
+
+    /// The index of \a id in the file, if it is numbered.
+    std::optional<std::size_t> indexOf(const NameId& id) const;
+
+    /** Appends \a text to \a out with every reference to a numbered entry written `~<index>`.
+     * \a next is the character that follows \a text in the file's name (a name's data is
+     * followed by its postfix), `\0` for none: a reference followed by a base32hex character
+     * stays in hash form, so that the reader never takes the digits after an index for its own.
+     */
+    void appendFileForm(std::string& out, std::string_view text, char next = '\0') const;
+
+    /// Numbers the entries of the references added so far (entries()), and makes this the
+    /// collector of the maps that \a writer writes from now on (FileFormScope).
+    void bind(const void* writer, const NameTable& table);
+    bool isBound() const
+    {
+        return _writer != nullptr;
+    }
+
+    /** While it lives, the element maps written on this thread are written in file form if an
+     * active collector is bound to \a writer (ComplexGeoData's Save() and SaveDocFile() make
+     * one around ElementMap::save()). Maps written otherwise keep the hash form, which a
+     * reader accepts too.
+     */
+    class AppExport FileFormScope
+    {
+    public:
+        explicit FileFormScope(const void* writer);
+        ~FileFormScope();
+        FileFormScope(const FileFormScope&) = delete;
+        FileFormScope& operator=(const FileFormScope&) = delete;
+
+    private:
+        const NameRefCollector* _previous;
+    };
+
+    /// The collector of the innermost FileFormScope on this thread, or null.
+    static const NameRefCollector* fileForm();
 
 private:
-    static void addRefs(std::string_view text, std::set<NameId>& refs);
+    void number(const NameId& root, const NameTable& table);
 
     std::set<NameId> _refs;
+    std::vector<NameId> _order;  // _refs in the order they were first added
+    std::size_t _numbered = 0;   // the references of _order numbered so far
+    std::vector<NameTable::SavedEntry> _entries;  // by index
+    std::unordered_map<NameId, std::size_t, NameTable::IdHash> _index;
+    std::set<NameId> _unknown;
+    const void* _writer = nullptr;
     NameRefCollector* _previous;
 };
 
@@ -385,8 +457,17 @@ public:
     /// unresolvable. Returns true if \a text changed.
     bool remapSubName(std::string& text);
     /// A name of an element map: with an inline reference, the file's name in canonical form
-    /// (colliding nodes inline); unknown references unresolvable.
+    /// (colliding nodes inline); unknown references unresolvable. Indices are taken as by
+    /// fromFileForm().
     MapName remapMapName(std::string& name);
+
+    /** Text of the file's element maps (ops#6 T2): each reference `~<index>` (a `~` and up to
+     * 12 decimal digits, followed by no other base32hex character, nor \a next at the end) is put
+     * in hash form, the ID of the file's entry at that index, or of NameTable::indexStandIn() for
+     * an index the table hasn't (unknown, then). References in hash form are kept. Returns true
+     * if \a text changed.
+     */
+    bool fromFileForm(std::string& text, char next = '\0') const;
 
     /// The distinct unknown IDs met in names so far.
     std::size_t unknownCount() const
@@ -412,8 +493,10 @@ private:
     NameTable& _table;
     NameRemap* _previous;
     bool _newerFormat = false;
-    /// Every well-formed entry of the file, as it has it
+    /// Every well-formed entry of the file, in hash form
     std::unordered_map<NameId, std::string, NameTable::IdHash> _file;
+    /// The ID of each position of the file's table
+    std::vector<NameId> _byIndex;
     std::set<NameId> _inlineIds;
     std::set<NameId> _incomplete;  // entries of the file that refer to an ID it lacks
     mutable std::set<NameId> _unknownSeen;
