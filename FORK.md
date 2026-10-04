@@ -124,7 +124,8 @@ names it.
 | `fix/44-v1-sketch-postfix` | fix | ops#44 | - | `integration` `a4068e7b60` | `6034a05826` (fork PR 94), 2026-10-03 | a new base builds V1 sketch edges, points and `makeElementWires`' wires without the document's hasher (upstream's `g1;SKT` names) |
 | `fix/101-v2-open-walk` | fix | ops#101 | - | `integration` `a4068e7b60` | `6c82663a0f` (fork PR 95), 2026-10-03 | never (fork naming) |
 | `fix/93-pattern-spacings2` | fix | ops#93 | - | `integration` `6c82663a0f` | `f152316458` (fork PR 96), 2026-10-03 | upstream's `LinearPatternExtension` gives `Spacings2` a default without the `0.0` entry |
-| `fix/106-variant-topology` | fix | ops#106 | - | `integration` `6c82663a0f` | (fork PR 97) | never (fork code: the ops#42 retarget is the fork's) |
+| `fix/106-variant-topology` | fix | ops#106 | - | `integration` `6c82663a0f` | `3757a5ec6a` (fork PR 97), 2026-10-03 | never (fork code: the ops#42 retarget is the fork's) |
+| `fix/88-solver-multimatch-reopen` | fix | ops#88 | - | `integration` `3757a5ec6a` | (fork PR 98) | never (fork test harness) |
 
 ## Fork-only commits in carried topics
 

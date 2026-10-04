@@ -628,10 +628,7 @@ class MultiTransformStepsReopened(MultiTransformSteps):
         path = os.path.join(self.folder, doc.Name + ".FCStd")
         doc.saveAs(path)
         App.closeDocument(doc.Name)
-        self.doc = App.openDocument(path)
-        self.documents.append(self.doc.Name)
-        for obj in self.doc.Objects:
-            obj.touch()
+        self.doc = self.openDocument(path)
 
     def cleanup(self):
         super().cleanup()

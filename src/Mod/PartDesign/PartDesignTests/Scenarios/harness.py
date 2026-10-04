@@ -819,6 +819,23 @@ class Scenario:
         self.documents.append(doc.Name)
         return doc
 
+    def openDocument(self, path):
+        """Opens a document the scenario saved (and the documents it links to), and touches its
+        objects, as a step that closes and reopens it does. The scenario's open documents get
+        the configuration's ReferenceSolver again: a file saved with it off opens off, but
+        FREECAD_REFERENCE_SOLVER=1 turns it on in opened files, which would switch a solver-off
+        configuration to the solver half way through its steps (ops#88)."""
+        doc = App.openDocument(path)
+        if doc.Name not in self.documents:
+            self.documents.append(doc.Name)
+        for name in self.documents:
+            opened = App.listDocuments().get(name)
+            if opened is not None and hasattr(opened, "ReferenceSolver"):
+                opened.ReferenceSolver = self.solver
+        for obj in doc.Objects:
+            obj.touch()
+        return doc
+
     def build(self, doc):
         raise NotImplementedError
 
