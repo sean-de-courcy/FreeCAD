@@ -4,6 +4,7 @@
 #include "PartTestHelpers.h"
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/NameSetOrder.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 #include "src/App/InitApplication.h"
 
 #include <App/ElementMap.h>
@@ -475,6 +476,50 @@ TEST_F(TopoShapeTest, retagAppendsBoundarySectionV2)
     Part::TopoShape v1(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
     v1.reTagElementMap(7, nullptr, Data::POSTFIX_EXTERNAL_TAG);
     EXPECT_EQ(v1.getMappedName(face1).toString().find("EXT"), std::string::npos);
+}
+
+TEST_F(TopoShapeTest, retagWritesTheBoundaryIndexV2)
+{
+    // ops#112: a SubShapeBinder passes the key of its support's file in the postfix
+    // (Part::boundaryPostfix()), and the boundary section carries it as its index, so supports
+    // from copies of one file get distinct names. An App::Link's postfix gives index 0.
+    auto boundary = [](long tag, const std::string& index, char type) {
+        return std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;" + std::to_string(tag)
+            + ";EXT;" + index + ";" + type + ";0;_;_";
+    };
+    //   the postfix
+    const std::string external(Data::POSTFIX_EXTERNAL_TAG);
+    EXPECT_EQ(Part::boundaryPostfix("123"), external + ":123");
+    EXPECT_EQ(Part::boundaryIndexOf(Part::boundaryPostfix("123").c_str()), "123");
+    EXPECT_EQ(Part::boundaryIndexOf(external.c_str()), "0");
+    EXPECT_EQ(Part::boundaryIndexOf((external + Data::ELEMENT_MAP_PREFIX + ":I2").c_str()), "0");
+    EXPECT_EQ(Part::boundaryIndexOf((external + ":").c_str()), "0");
+    EXPECT_EQ(Part::boundaryIndexOf((external + ":12a").c_str()), "0");
+    EXPECT_EQ(Part::boundaryIndexOf(";:I2"), "0");
+    EXPECT_EQ(Part::boundaryIndexOf(nullptr), "0");
+
+    //   a shape with a map (tag 5), bound from two files
+    const auto cube = BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape();
+    Part::TopoShape mapped(App::HistoryAlgorithm::V2, cube, 5L);
+    auto name = Data::MappedName::makeUnmappedName({"Face1"}, 5, "XTR", 'F');
+    mapped.setElementName(face1, name, 5);
+    Part::TopoShape fromP1(mapped);
+    fromP1.reTagElementMap(7, nullptr, Part::boundaryPostfix("111").c_str());
+    Part::TopoShape fromP2(mapped);
+    fromP2.reTagElementMap(7, nullptr, Part::boundaryPostfix("222").c_str());
+    EXPECT_EQ(fromP1.getMappedName(face1).toString(), name.toString() + boundary(7, "111", 'F'));
+    EXPECT_EQ(fromP2.getMappedName(face1).toString(), name.toString() + boundary(7, "222", 'F'));
+    //   a shape without a map: named first, then the section with the index
+    Part::TopoShape box(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    box.reTagElementMap(7, nullptr, Part::boundaryPostfix("111").c_str());
+    EXPECT_EQ(box.getElementMapSize(), 26);
+    const auto boxName = box.getMappedName(face1).toString();
+    EXPECT_TRUE(boxName.ends_with(boundary(7, "111", 'F'))) << boxName;
+    EXPECT_EQ(box.getIndexedName(Data::MappedName(boxName)), face1);
+    //   the external postfix alone, as a Link passes it: index 0
+    Part::TopoShape linked(mapped);
+    linked.reTagElementMap(7, nullptr, Data::POSTFIX_EXTERNAL_TAG);
+    EXPECT_EQ(linked.getMappedName(face1).toString(), name.toString() + boundary(7, "0", 'F'));
 }
 
 TEST_F(TopoShapeTest, internNamesFollowCopiesAndTheMap)

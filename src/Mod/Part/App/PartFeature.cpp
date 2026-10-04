@@ -23,7 +23,10 @@
  ***************************************************************************/
 
 
+#include <cstdint>
 #include <sstream>
+#include <QDir>
+#include <QFileInfo>
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -218,17 +221,18 @@ std::vector<std::pair<std::string, std::string>> patternInstances(
     return instances;
 }
 
-// The document boundaries a V2 name crossed (ops#56): the tag of each of its EXT sections, the
-// local objects (Links, binders) that brought it in, in order.
-std::vector<std::string> boundaries(const Data::DecodedMappedName& name)
+// The document boundaries a V2 name crossed (ops#56): the tag and the index of each of its EXT
+// sections, in order: the local objects (Links, binders) that brought it in, and for a binder the
+// key of the support's file (ops#112).
+std::vector<std::pair<std::string, std::string>> boundaries(const Data::DecodedMappedName& name)
 {
-    std::vector<std::string> tags;
+    std::vector<std::pair<std::string, std::string>> crossings;
     for (const auto& section : name) {
         if (section.opCode == OpCodes::External) {
-            tags.push_back(section.iterationTag);
+            crossings.emplace_back(section.iterationTag, section.index);
         }
     }
-    return tags;
+    return crossings;
 }
 }  // namespace
 
@@ -255,7 +259,8 @@ bool Feature::doNamesMatch(
         return false;
     }
     // So do the copies of an element brought in through another Link or binder, and the element
-    // in its own document, up to their EXT sections (ops#56)
+    // in its own document, up to their EXT sections (ops#56), and the copies a binder brings in
+    // from copies of one file (ops#112)
     if (boundaries(decodedName1) != boundaries(decodedName2)) {
         return false;
     }
@@ -1131,11 +1136,89 @@ App::DocumentObject* Feature::getSubObject(
     }
 }
 
+namespace
+{
+// A file's path as one string however it was reached: canonical (links resolved, e.g. macOS's
+// /var in /private/var) as far as it exists, `/` separators, case-folded where the file system
+// ignores case (Windows)
+QString normalFilePath(const std::string& file)
+{
+    QFileInfo info(QString::fromUtf8(file.c_str()));
+    QString path = info.canonicalFilePath();
+    if (path.isEmpty()) {
+        // Not there (yet): its folder made canonical, if that is
+        const QString folder = QFileInfo(info.absolutePath()).canonicalFilePath();
+        path = folder.isEmpty() ? QDir::cleanPath(info.absoluteFilePath())
+                                : folder + QLatin1Char('/') + info.fileName();
+    }
+#ifdef _WIN32
+    path = path.toLower();
+#endif
+    return path;
+}
+
+// 32-bit FNV-1a, in decimal: the same on every platform and in every run
+std::string fnv1a(const QByteArray& bytes)
+{
+    std::uint32_t hash = 2166136261U;
+    for (char c : bytes) {
+        hash ^= static_cast<unsigned char>(c);
+        hash *= 16777619U;
+    }
+    return std::to_string(hash);
+}
+}  // namespace
+
+std::string Part::boundaryIndex(const std::string& ownerFile, const std::string& sourceFile)
+{
+    const QString owner = normalFilePath(ownerFile);
+    // QDir gives the absolute path when there is no relative one (another drive)
+    const QString key = QDir(QFileInfo(owner).path()).relativeFilePath(normalFilePath(sourceFile));
+    return fnv1a(key.toUtf8());
+}
+
+std::string Part::boundaryIndex(const App::Document& owner, const App::Document& source)
+{
+    const char* ownerFile = owner.getFileName();
+    const char* sourceFile = source.getFileName();
+    if (!ownerFile || !*ownerFile || !sourceFile || !*sourceFile) {
+        return fnv1a(QByteArray(source.getName()));
+    }
+    return boundaryIndex(ownerFile, sourceFile);
+}
+
+std::string Part::boundaryPostfix(const std::string& index)
+{
+    return std::string(Data::POSTFIX_EXTERNAL_TAG) + ':' + index;
+}
+
+std::string Part::boundaryIndexOf(const char* postfix)
+{
+    std::string_view rest(postfix ? postfix : "");
+    if (!rest.starts_with(Data::POSTFIX_EXTERNAL_TAG)) {
+        return "0";
+    }
+    rest.remove_prefix(std::string_view(Data::POSTFIX_EXTERNAL_TAG).size());
+    if (rest.size() < 2 || rest.front() != ':') {
+        return "0";  // the external postfix alone, or with a link array's `;:I<n>`
+    }
+    rest.remove_prefix(1);
+    if (!std::all_of(rest.begin(), rest.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+        return "0";
+    }
+    return std::string(rest);
+}
+
 // The name before the boundary section if \a name, in a shape tagged \a shapeTag, ends in one of
-// the shape's own object (`<prefix>|_;_;<shapeTag>;EXT;...`, ops#56), in its plain form: the
-// history step from \a name reaches that name, which came from another document, and its tag is
-// an object ID there. Otherwise empty.
-static std::string importedName(const Data::MappedName& name, long shapeTag)
+// the shape's own object (`<prefix>|_;_;<shapeTag>;EXT;<index>;...`, ops#56), in its plain form:
+// the history step from \a name reaches that name, which came from another document, and its tag
+// is an object ID there. Otherwise empty. \a index, if given, gets the section's index (a binder's
+// key of the source's file, boundaryIndex(); 0 for a Link, ops#112).
+static std::string importedName(
+    const Data::MappedName& name,
+    long shapeTag,
+    std::string* index = nullptr
+)
 {
     std::string text = name.toString();
     if (boost::starts_with(text, Data::ELEMENT_MAP_PREFIX)) {
@@ -1153,6 +1236,9 @@ static std::string importedName(const Data::MappedName& name, long shapeTag)
         || last.front().iterationTag != std::to_string(std::abs(shapeTag))) {
         return {};
     }
+    if (index) {
+        *index = last.front().index;
+    }
     return text.substr(0, static_cast<std::size_t>(sections.back().data() - text.data()) - 1);
 }
 
@@ -1164,12 +1250,15 @@ static std::string importedName(const Data::MappedName& name, long shapeTag)
 // tag may be another object's there, e.g. a Pad's bottom face is named by its sketch), or, for
 // a source without an element map (\a original an index, the name made at the boundary), the
 // object with ID \a tag has that element. One such document, or null (none, or several: the
-// walk stops rather than guess).
+// walk stops rather than guess). Several documents have the name when they are copies of one
+// file (a binder of both twins, ops#112): then the one whose file the boundary section's index,
+// \a boundary, names (boundaryIndex()), if there is one.
 static App::DocumentObject* importedSource(
     App::DocumentObject* owner,
     long tag,
     const std::string& imported,
-    const Data::MappedName& original
+    const Data::MappedName& original,
+    const std::string& boundary
 )
 {
     std::map<App::Document*, std::vector<App::DocumentObject*>> linkedByDocument;
@@ -1189,7 +1278,7 @@ static App::DocumentObject* importedSource(
     };
     const Data::MappedName importedMapped(imported);
     const Data::IndexedName index(original.toString().c_str());
-    App::DocumentObject* found = nullptr;
+    std::vector<App::DocumentObject*> found;
     for (const auto& [doc, objects] : linkedByDocument) {
         auto obj = doc->getObjectByID(std::abs(tag));
         if (!obj) {
@@ -1205,13 +1294,15 @@ static App::DocumentObject* importedSource(
                     >= index.getIndex();
         }
         if (has) {
-            if (found) {
-                return nullptr;
-            }
-            found = obj;
+            found.push_back(obj);
         }
     }
-    return found;
+    if (found.size() > 1 && boundary != "0") {
+        std::erase_if(found, [&](App::DocumentObject* obj) {
+            return Part::boundaryIndex(*owner->getDocument(), *obj->getDocument()) != boundary;
+        });
+    }
+    return found.size() == 1 ? found.front() : nullptr;
 }
 
 static std::vector<std::pair<long, Data::MappedName>> getElementSource(
@@ -1265,11 +1356,12 @@ static std::vector<std::pair<long, Data::MappedName>> getElementSource(
                     doc = ownerGeoFeature->getDocument();
                 }
             }
+            std::string index;
             auto imported = doc == from->getDocument()
-                ? importedName(ret.back().second, shape.Tag)
+                ? importedName(ret.back().second, shape.Tag, &index)
                 : std::string();
             if (!imported.empty()) {
-                obj = importedSource(from, tag, imported, original);
+                obj = importedSource(from, tag, imported, original, index);
                 doc = obj ? obj->getDocument() : nullptr;
             }
             else {
@@ -1389,10 +1481,11 @@ std::list<Data::HistoryItem> Feature::getElementHistory(
             }
             // A step out of an imported name, where the owner isn't a link that leads to its
             // document (ops#56)
-            auto imported = doc == from->getDocument() ? importedName(element, shape.Tag)
+            std::string index;
+            auto imported = doc == from->getDocument() ? importedName(element, shape.Tag, &index)
                                                        : std::string();
             if (!imported.empty()) {
-                obj = importedSource(from, tag, imported, original);
+                obj = importedSource(from, tag, imported, original, index);
             }
             else {
                 obj = doc->getObjectByID(std::abs(tag));

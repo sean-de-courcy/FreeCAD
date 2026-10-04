@@ -24,7 +24,14 @@
 
 #pragma once
 
+#include <string>
+
 #include <Mod/Part/PartGlobal.h>
+
+namespace App
+{
+class Document;
+}
 
 /** Definition of commonly used TopoShape operational code
  *
@@ -96,5 +103,26 @@ public:
     // section's object (an App::Link, a SubShapeBinder), ops#56
     static constexpr const char* External = "EXT";
 };
+
+/** The index of a SubShapeBinder's boundary section (OpCodes::External, ops#112)
+ *
+ * A binder's supports can come from documents whose objects have the same IDs and the same
+ * names (copies of one file: Save As, or a template), so the binder's ID alone gives their
+ * elements the same names. The section's index tells them apart by the support's file, the same
+ * key whatever order the supports are in, the documents are opened in, or the machine:
+ * a 32-bit FNV-1a hash, in decimal, of the source file's path relative to the owner's folder
+ * (both made canonical first, `/` separators, case-folded on Windows; the absolute path when no
+ * relative one exists, e.g. on another drive). It changes when the source is renamed or moved
+ * relative to the owner, as the link to it does. A document without a file is keyed by its
+ * name. App::Links and path hops keep index 0: a Link has one source.
+ */
+PartExport std::string boundaryIndex(const std::string& ownerFile, const std::string& sourceFile);
+/// boundaryIndex() of the two documents' files, or of the source's name if either has none
+PartExport std::string boundaryIndex(const App::Document& owner, const App::Document& source);
+/// The postfix for TopoShape::reTagElementMap() that gives a V2 boundary section this index:
+/// the external postfix, `:` and the index (`;:X:<index>`)
+PartExport std::string boundaryPostfix(const std::string& index);
+/// The index a postfix of boundaryPostfix()'s form gives, or "0"
+PartExport std::string boundaryIndexOf(const char* postfix);
 
 }  // namespace Part

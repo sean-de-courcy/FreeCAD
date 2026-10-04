@@ -546,6 +546,13 @@ class ElementReferenceTest(unittest.TestCase):
         pad.Length = 10
         return pad
 
+    def _binderKey(self, name):
+        """The index of a binder's boundary section: the key of its support's file, a number
+        other than 0 (ops#112)."""
+        key = App.getDecodedMappedName(App.expandMappedName(name))[-1]["index"]
+        self.assertTrue(key.isdigit() and key != "0", key)
+        return key
+
     def _checkBinderReorder(self, solver):
         # Arrange
         #   Src56: the padded square at x = 0..10. Asm56: the same objects with the square at
@@ -573,8 +580,8 @@ class ElementReferenceTest(unittest.TestCase):
         #   the binder's names end in a boundary section with its ID; its faces' history goes on
         #   in Src56 (the Pad, or its sketch for the bottom face the sketch names), never to the
         #   local copies with the same IDs
-        boundary = f";{binder.ID};EXT;0;F;0;_;_"
         names = binder.Shape.ElementReverseMap
+        boundary = f";{binder.ID};EXT;{self._binderKey(names['Face1'])};F;0;_;_"
         for index in range(1, len(binder.Shape.Faces) + 1):
             sub = f"Face{index}"
             history = self._history(binder, sub)
@@ -820,11 +827,137 @@ class ElementReferenceTest(unittest.TestCase):
         self.assertEqual(len(binder.Shape.Faces), 1)
         self.assertAlmostEqual(binder.Shape.Faces[0].BoundBox.ZMin, 10)
         name = App.expandMappedName(binder.Shape.ElementReverseMap["Face1"])
-        self.assertTrue(name.endswith(f";{binder.ID};EXT;0;F;0;_;_"))
+        self.assertTrue(name.endswith(f";{binder.ID};EXT;{self._binderKey(name)};F;0;_;_"))
         history = binder.getElementHistory("Face1", True, False, True)
         objects = [item[0][0] if isinstance(item[0], tuple) else item[0] for item in history]
         self.assertEqual(objects, ["Asm56#B", "Src56#Src"])
         self.assertEqual(history[-1][1], "Face6")
+
+    # ops#112: one binder, two supports from twin documents (one a Save As copy of the other,
+    # so their objects have the same IDs and the same names)
+
+    def _twinParts(self):
+        """p1/Part.FCStd: a box "Src" (ID 1) at the origin; p2/Part.FCStd: its Save As copy with
+        the box moved to x = 100. Two files with one name in two folders, so the documents'
+        internal names depend on the order they are opened in. Returns the two boxes."""
+        paths = []
+        for folder in ("p1", "p2"):
+            os.makedirs(os.path.join(self.dir, folder))
+            paths.append(os.path.join(self.dir, folder, "Part.FCStd"))
+        part = App.newDocument("Part")
+        self.docNames.append(part.Name)
+        part.clearDocument()
+        part.HistoryAlgorithm, part.InternNames = self.MODE or ("V2", False)
+        part.addObject("Part::Box", "Src")
+        part.recompute()
+        part.saveAs(paths[0])
+        part.saveAs(paths[1])
+        part.getObject("Src").Placement.Base = App.Vector(100, 0, 0)
+        part.recompute()
+        part.save()
+        first = App.openDocument(paths[0])
+        self.docNames.append(first.Name)
+        return first.getObject("Src"), part.getObject("Src")
+
+    @staticmethod
+    def _file(doc):
+        """The document's file, as one string however it was opened."""
+        return os.path.normcase(os.path.realpath(doc.FileName))
+
+    def _binderFaces(self, binder):
+        """The binder's face names (plain), by the face's centre, and the document file each
+        face's history ends in."""
+        names = binder.Shape.ElementReverseMap
+        faces = {}
+        for index, face in enumerate(binder.Shape.Faces, 1):
+            sub = f"Face{index}"
+            centre = tuple(round(c, 6) for c in face.CenterOfMass)
+            history = self._history(binder, sub)
+            source = self._file(App.getDocument(history[-1].split("#")[0])) if history else None
+            faces[centre] = (App.expandMappedName(names[sub]), len(history), source)
+        return faces
+
+    def _checkBinderTwins(self, solver):
+        # Arrange
+        #   Asm112: a local box (ID 1, as the twins' boxes) at y = 100, a binder of both twins'
+        #   boxes, a fusion of the binder and the local box, and a reference to the second
+        #   twin's +X face (x = 110)
+        box1, box2 = self._twinParts()
+        asm = self._numberedFromOne("Asm112")
+        asm.ReferenceSolver = solver
+        local = asm.addObject("Part::Box", "Local")
+        local.Placement.Base = App.Vector(0, 100, 0)
+        binder = asm.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(box1, ("",)), (box2, ("",))]
+        fuse = asm.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = [binder, local]
+        ref = asm.addObject("App::FeaturePython", "Ref")
+        ref.addProperty("App::PropertyLinkSub", "Face")
+        asm.recompute()
+        self.assertEqual((box1.ID, box2.ID), (local.ID, local.ID))
+        self.assertAlmostEqual(fuse.Shape.Volume, 3000)
+        ref.Face = (fuse, [self._faceFacingX(fuse.Shape, 110)])
+        asm.recompute()
+        asm.save()
+        #   box2's document was opened first (it is the one made here), box1's second
+        paths = (box1.Document.FileName, box2.Document.FileName)
+        #   the twins' faces have distinct names in the binder and in the fusion, with no
+        #   duplicate counts, and each binder face's history ends in its own twin's file
+        before = self._binderFaces(binder)
+        self.assertEqual(len(before), 12)
+        self.assertEqual(len({name for name, _, _ in before.values()}), 12)
+        for centre, (name, steps, source) in before.items():
+            twin = box2 if centre[0] > 50 else box1
+            with self.subTest(binderFace=centre, name=name):
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["opCode"], "EXT")
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["duplicateCount"], "0")
+                self.assertGreater(steps, 1)
+                self.assertEqual(source, self._file(twin.Document))
+        fuseNames = [App.expandMappedName(n) for n in fuse.Shape.ElementReverseMap.values()]
+        self.assertEqual(len(fuseNames), len(set(fuseNames)))
+        for name in fuseNames:
+            with self.subTest(name=name):
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["duplicateCount"], "0")
+
+        # Act 1: the supports reordered
+        binder.Support = [(box2, ("",)), (box1, ("",))]
+        asm.recompute()
+
+        # Assert 1: the same names, and the reference keeps the second twin's face
+        self.assertEqual(self._binderFaces(binder), before)
+        self.assertEqual(ref.Face[1][0], self._faceFacingX(fuse.Shape, 110))
+
+        # Act 2: everything closed, the twins opened in the other order (so their documents'
+        # internal names swap), the assembly opened and the binder recomputed
+        asm.save()
+        for name in list(self.docNames):
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        for path in paths:
+            self.docNames.append(App.openDocument(path).Name)
+        asm = App.openDocument(self._path("Asm112"))
+        self.docNames.append(asm.Name)
+        binder, fuse, ref = (asm.getObject(n) for n in ("Binder", "F", "Ref"))
+        binder.touch()
+        asm.recompute()
+
+        # Assert 2
+        self.assertEqual(self._binderFaces(binder), before)
+        self.assertEqual(ref.Face[1][0], self._faceFacingX(fuse.Shape, 110))
+
+    def testBinderOfTwinDocumentsKeepsItsNames(self):
+        """A SubShapeBinder of a box in each of two documents with one file name in two folders,
+        one a Save As copy of the other (equal IDs, equal names), fused with a local box, and a
+        reference to the second twin's +X face: the twins' faces have distinct names with no
+        duplicate counts, each traces back to its own file, and the names and the reference stay
+        when the supports are reordered, and when the files are opened again in the other order
+        (ops#112). Before, the twins' faces had the same names, told apart by duplicate counts,
+        and their history stopped at the binder."""
+        self._checkBinderTwins(solver=False)
+
+    def testBinderOfTwinDocumentsKeepsItsNamesSolver(self):
+        """As testBinderOfTwinDocumentsKeepsItsNames, with the reference solver on."""
+        self._checkBinderTwins(solver=True)
 
 
 class ElementReferenceTestV2i(ElementReferenceTest):
