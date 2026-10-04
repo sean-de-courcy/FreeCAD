@@ -111,13 +111,16 @@ public:
  * elements the same names. The section's index tells them apart by the support's file, the same
  * key whatever order the supports are in, the documents are opened in, or the machine:
  * a 32-bit FNV-1a hash, in decimal, of the source file's path relative to the owner's folder
- * (both made canonical first, `/` separators, case-folded on Windows; the absolute path when no
- * relative one exists, e.g. on another drive). It changes when the source is renamed or moved
- * relative to the owner, as the link to it does. A document without a file is keyed by its
- * name. App::Links and path hops keep index 0: a Link has one source.
+ * (both made canonical first, `/` separators, case-folded on every platform, so Windows and macOS
+ * agree; the absolute path when no relative one exists, e.g. on another drive). It changes when
+ * the source is renamed or moved relative to the owner, as the link to it does. App::Links and
+ * path hops keep index 0: a Link has one source.
  */
 PartExport std::string boundaryIndex(const std::string& ownerFile, const std::string& sourceFile);
-/// boundaryIndex() of the two documents' files, or of the source's name if either has none
+/** boundaryIndex() of the two documents' files, cached per pair of files. The owner's own
+ * document (a copy-on-change support) gives 0, as it has one file. An owner without a file: the
+ * source's canonical absolute path, until the owner is saved. A source without a file: its name.
+ */
 PartExport std::string boundaryIndex(const App::Document& owner, const App::Document& source);
 /// The postfix for TopoShape::reTagElementMap() that gives a V2 boundary section this index:
 /// the external postfix, `:` and the index (`;:X:<index>`)

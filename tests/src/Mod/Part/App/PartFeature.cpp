@@ -552,6 +552,47 @@ TEST_F(FeaturePartTest, doNamesMatchKeepsBinderSupportsApart)
     EXPECT_FALSE(Feature::doNamesMatch(fromP1, throughLink));
 }
 
+TEST_F(FeaturePartTest, boundaryIndexOfDocuments)
+{
+    // ops#112 review: the key of a support's document as SubShapeBinder takes it
+    // Arrange
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "BoundaryIndexDocuments";
+    std::error_code error;
+    fs::remove_all(base, error);
+    fs::create_directories(base / "p1");
+    auto& app = App::GetApplication();
+    const std::string sourceName = app.getUniqueDocumentName("BoundarySource");
+    auto source = app.newDocument(sourceName.c_str(), "testUser");
+    const std::string otherName = app.getUniqueDocumentName("BoundaryOwner");
+    auto otherOwner = app.newDocument(otherName.c_str(), "testUser");
+    const auto sourceFile = Base::FileInfo::pathToString(base / "p1" / "Part.FCStd");
+    const auto ownerFile = Base::FileInfo::pathToString(base / "Asm.FCStd");
+
+    // Act and assert
+    //   the binder's own document (a copy-on-change support): 0, as for a Link
+    EXPECT_EQ(Part::boundaryIndex(*_doc, *_doc), "0");
+    //   a source without a file: by its name, a number other than 0, whatever the owner
+    const auto unsaved = Part::boundaryIndex(*_doc, *source);
+    EXPECT_NE(unsaved, "0");
+    EXPECT_EQ(unsaved, Part::boundaryIndex(*otherOwner, *source));
+    //   a saved source and an owner without a file: by the source's absolute path, whatever
+    //   the owner, and another key than its name gave
+    ASSERT_TRUE(source->saveAs(sourceFile.c_str()));
+    const auto absolute = Part::boundaryIndex(*_doc, *source);
+    EXPECT_NE(absolute, unsaved);
+    EXPECT_EQ(absolute, Part::boundaryIndex(*otherOwner, *source));
+    //   both saved: the relative path, as the file-name form gives it
+    ASSERT_TRUE(otherOwner->saveAs(ownerFile.c_str()));
+    const auto relative = Part::boundaryIndex(*otherOwner, *source);
+    EXPECT_EQ(relative, Part::boundaryIndex(ownerFile, sourceFile));
+    EXPECT_NE(relative, absolute);
+
+    app.closeDocument(sourceName.c_str());
+    app.closeDocument(otherName.c_str());
+    fs::remove_all(base, error);
+}
+
 TEST(BoundaryIndex, oneFileOneKey)
 {
     // ops#112: Part::boundaryIndex() keys a binder's support by its file's path relative to the
@@ -583,17 +624,16 @@ TEST(BoundaryIndex, oneFileOneKey)
     //   the same file written another way
     EXPECT_EQ(key, boundaryIndex(at("/a/Asm.FCStd"), at("/a/x/../p1/./Part.FCStd")));
     EXPECT_EQ(key, boundaryIndex(at("/a/./Asm.FCStd"), at("/a//p1/Part.FCStd")));
+    //   any case, on every platform: the same tree gives the same key on Windows and on macOS
+    EXPECT_EQ(key, boundaryIndex(at("/A/asm.fcstd"), at("/a/P1/PART.FCStd")));
 #ifdef _WIN32
-    //   Windows: `\` separators, and any case (the file system ignores it)
+    //   Windows: `\` separators, and the drive in either case
     EXPECT_EQ(key, boundaryIndex("C:\\a\\Asm.FCStd", "C:\\a\\p1\\Part.FCStd"));
-    EXPECT_EQ(key, boundaryIndex("c:/A/asm.fcstd", "C:/a/P1/PART.FCStd"));
+    EXPECT_EQ(key, boundaryIndex("c:/a/Asm.FCStd", "C:/a/p1/Part.FCStd"));
     //   a source on another drive has no relative path: its absolute one, whatever the owner
     const auto other = boundaryIndex("C:/a/Asm.FCStd", "E:/x/Part.FCStd");
     EXPECT_EQ(other, boundaryIndex("C:/b/c/Asm.FCStd", "e:\\X\\part.FCStd"));
     EXPECT_NE(other, boundaryIndex("C:/a/Asm.FCStd", "C:/x/Part.FCStd"));
-#else
-    //   elsewhere case makes another file
-    EXPECT_NE(key, boundaryIndex(at("/a/Asm.FCStd"), at("/a/P1/Part.FCStd")));
 #endif
 
     //   links resolved: the owner's folder reached through a link to it (as macOS's /var is a

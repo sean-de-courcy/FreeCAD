@@ -816,7 +816,8 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
                     shapeOwners.emplace_back(sidx, subidx);
                     shapeMats.push_back(&res.first->second);
                     // Keyed by the support's own document, not a copy-on-change copy's
-                    // temporary one, whose name depends on the session
+                    // temporary one, whose name depends on the session: a support in this
+                    // document gives 0
                     shapeBoundary.push_back(
                         obj->getDocument() != getDocument()
                             ? Part::boundaryIndex(*getDocument(), *l.getValue()->getDocument())

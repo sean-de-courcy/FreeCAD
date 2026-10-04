@@ -24,6 +24,8 @@
 
 
 #include <cstdint>
+#include <map>
+#include <mutex>
 #include <sstream>
 #include <QDir>
 #include <QFileInfo>
@@ -1139,8 +1141,10 @@ App::DocumentObject* Feature::getSubObject(
 namespace
 {
 // A file's path as one string however it was reached: canonical (links resolved, e.g. macOS's
-// /var in /private/var) as far as it exists, `/` separators, case-folded where the file system
-// ignores case (Windows)
+// /var in /private/var) as far as it exists, `/` separators, case-folded on every platform. The
+// same tree then gives the same keys on Windows and on macOS (case-insensitive by default), so a
+// file exchanged between them keeps its binders' names. Two files differing only in case in one
+// folder of a case-sensitive file system share a key: PR 104's duplicate counts for that pair.
 QString normalFilePath(const std::string& file)
 {
     QFileInfo info(QString::fromUtf8(file.c_str()));
@@ -1151,10 +1155,7 @@ QString normalFilePath(const std::string& file)
         path = folder.isEmpty() ? QDir::cleanPath(info.absoluteFilePath())
                                 : folder + QLatin1Char('/') + info.fileName();
     }
-#ifdef _WIN32
-    path = path.toLower();
-#endif
-    return path;
+    return path.toCaseFolded();
 }
 
 // 32-bit FNV-1a, in decimal: the same on every platform and in every run
@@ -1179,12 +1180,25 @@ std::string Part::boundaryIndex(const std::string& ownerFile, const std::string&
 
 std::string Part::boundaryIndex(const App::Document& owner, const App::Document& source)
 {
-    const char* ownerFile = owner.getFileName();
-    const char* sourceFile = source.getFileName();
-    if (!ownerFile || !*ownerFile || !sourceFile || !*sourceFile) {
+    if (&owner == &source) {
+        return "0";  // one file, as a Link has one source
+    }
+    const std::string ownerFile = owner.getFileName() ? owner.getFileName() : "";
+    const std::string sourceFile = source.getFileName() ? source.getFileName() : "";
+    if (sourceFile.empty()) {
         return fnv1a(QByteArray(source.getName()));
     }
-    return boundaryIndex(ownerFile, sourceFile);
+    // The paths are made canonical through the file system: once per pair of files
+    static std::mutex mutex;
+    static std::map<std::pair<std::string, std::string>, std::string> keys;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto [it, added] = keys.try_emplace({ownerFile, sourceFile});
+    if (added) {
+        // An unsaved owner: the source's absolute path, until the owner has a file
+        it->second = ownerFile.empty() ? fnv1a(normalFilePath(sourceFile).toUtf8())
+                                       : boundaryIndex(ownerFile, sourceFile);
+    }
+    return it->second;
 }
 
 std::string Part::boundaryPostfix(const std::string& index)
