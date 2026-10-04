@@ -551,3 +551,119 @@ def _addTopologyCases():
 
 
 _addTopologyCases()
+
+
+def _savedProperty(path, prop):
+    """The saved XML of the property `prop` in the document file at `path`."""
+    with zipfile.ZipFile(path) as z:
+        text = z.read("Document.xml").decode("utf-8")
+    match = re.search(r'<Property name="%s" [^>]*>(.*?)</Property>' % prop, text, re.S)
+    return match.group(1)
+
+
+def _stripRetargetChecks(path):
+    """Rewrites the document file at `path` without its saved retarget checks, as a build
+    without ops#109 saves it."""
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info.filename)) for info in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in entries:
+            if info.filename == "Document.xml":
+                data = re.sub(rb' retarget="[^"]*"', b"", data)
+            z.writestr(info, data)
+
+
+# The reference properties of TestRetargetCheckSaved, and how each gives its reference to the
+# link's top face.
+REFERENCE_PROPS = {
+    "Sub": ("App::PropertyLinkSub", lambda refs: refs.Sub[1][0]),
+    "SubList": ("App::PropertyLinkSubList", lambda refs: refs.SubList[0][1][0]),
+    "XSubList": ("App::PropertyXLinkSubList", lambda refs: refs.XSubList[0][1][0]),
+}
+
+
+class TestRetargetCheckSaved(VariantLinkTestBase):
+    """A variant switch saved before the new copy's first recompute (ops#109). The switch makes
+    the references to the link's top face index-only and holds the old top face's fingerprint
+    for the copy's first recompute (ops#106). The file keeps that check, so the reopened file's
+    first recompute runs it: with a fillet or a pocket in the Large variant, the index names a
+    side face there and the reference goes missing; without one, the top face stands."""
+
+    def saveInWindow(self, naming, feature):
+        """References to the top face made on Small, the link switched to Large, and both
+        documents saved and closed without a recompute: the copy has never been recomputed.
+        Returns the assembly's path."""
+        self.closeAll()
+        self.part = _buildFeaturePart(naming, feature) if feature else _buildPart(naming)
+        self.part.saveAs(os.path.join(self.dir, "VariantLinkPart.FCStd"))
+        self.doc = _newDocument("VariantLinkAsm", naming)
+        self.doc.saveAs(os.path.join(self.dir, "VariantLinkAsm.FCStd"))
+        self.docs = [self.part.Name, self.doc.Name]
+        link = self.doc.addObject("App::Link", "LinkA")
+        link.LinkedObject = self.part.getObject("Body")
+        self.doc.recompute()
+        link.LinkCopyOnChange = "Tracking"
+        self.doc.recompute()
+        top, _ = _topFace(link.Shape, CONFIGS["Small"][2])
+        refs = self.doc.addObject("App::FeaturePython", "Refs")
+        for name, (kind, _) in REFERENCE_PROPS.items():
+            refs.addProperty(kind, name)
+        refs.Sub = (link, [top])
+        refs.SubList = [(link, [top])]
+        refs.XSubList = [(link, [top])]
+        self.doc.recompute()
+        link.Config = "Large"
+        self.assertIsNot(link.LinkedObject, self.part.getObject("Body"), "no copy was made")
+        self.part.save()
+        self.doc.save()
+        path = self.doc.FileName
+        self.closeAll()
+        return path
+
+    def openAndRecompute(self, path):
+        """Opens the assembly, recomputes it, and returns the link and the references by
+        property."""
+        self.doc = App.openDocument(path)
+        self.part = App.getDocument("VariantLinkPart")
+        self.docs = [self.part.Name, self.doc.Name]
+        self.doc.recompute()
+        self.doc.recompute()
+        link = self.doc.getObject("LinkA")
+        self.assertEqual(_bbox(link.Shape), _box("Large"), "the link shows the Large box")
+        refs = self.doc.getObject("Refs")
+        return link, {name: get(refs) for name, (_, get) in REFERENCE_PROPS.items()}
+
+    def test_changed_topology_goes_missing(self):
+        for naming in NAMINGS:
+            for feature in ("fillet", "pocket"):
+                with self.subTest(naming=naming, feature=feature):
+                    msg = "%s, %s" % (naming, feature)
+                    path = self.saveInWindow(naming, feature)
+                    for name in REFERENCE_PROPS:
+                        saved = _savedProperty(path, name)
+                        self.assertIn(' retarget="', saved, "%s %s: no check saved" % (msg, name))
+                    link, subs = self.openAndRecompute(path)
+                    for name, sub in subs.items():
+                        self.assertIn(
+                            "?", sub, "%s %s: %s isn't marked missing" % (msg, name, sub)
+                        )
+
+    def test_same_topology_keeps_the_top(self):
+        """Control: the Large variant has the Small one's faces; the check passes and the
+        references name the top face, with the check in the file and without it (a file from a
+        build without ops#109)."""
+        for naming in NAMINGS:
+            for saved in (True, False):
+                with self.subTest(naming=naming, saved=saved):
+                    msg = "%s, check %s" % (naming, "saved" if saved else "stripped")
+                    path = self.saveInWindow(naming, None)
+                    if not saved:
+                        _stripRetargetChecks(path)
+                    link, subs = self.openAndRecompute(path)
+                    for name, sub in subs.items():
+                        self.assertTopFace(link, sub, _box("Large"), msg + " " + name)
+                    # The checks are used up: a save now writes none.
+                    self.doc.save()
+                    for name in REFERENCE_PROPS:
+                        saved = _savedProperty(self.doc.FileName, name)
+                        self.assertNotIn(' retarget="', saved, msg + " " + name)
