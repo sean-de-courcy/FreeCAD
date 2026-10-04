@@ -30,17 +30,21 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <Bnd_Box.hxx>
 #include <gp_Dir.hxx>
 #include <TopoDS.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -169,6 +173,35 @@ bool sideGoesAlong(
     }
     double along = (prismCog - profileCog) * Base::Vector3d(normal.X(), normal.Y(), normal.Z());
     return along * normal.Dot(dir) > -Precision::Confusion();
+}
+
+// Whether `prism` reaches the side of the plane through `profile` (normal `normal`) that `dir`
+// points to, or at least the plane itself (ops#73). The one-prism path of a two-sided extrusion
+// starts the up-to side at the other side's end, so a face between the sketch plane and that end
+// would otherwise give a cut-down result where the two-prism path reports the side as unable to
+// reach its face.
+bool sideReachesPlane(
+    const TopoShape& prism,
+    const TopoShape& profile,
+    const gp_Dir& normal,
+    const gp_Dir& dir
+)
+{
+    Base::Vector3d profileCog;
+    if (prism.isNull() || !profile.getCenterOfGravity(profileCog)) {
+        return true;
+    }
+    gp_Dir sideNormal = normal.Dot(dir) < 0 ? normal.Reversed() : normal;
+    // In a frame whose Z axis is the plane's normal on dir's side, the prism's highest Z is how far
+    // it reaches past the plane.
+    gp_Trsf toPlane;
+    toPlane.SetTransformation(gp_Ax3(gp_Pnt(profileCog.x, profileCog.y, profileCog.z), sideNormal));
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(prism.getShape().Moved(TopLoc_Location(toPlane)), box, false, false);
+    if (box.IsVoid()) {
+        return true;
+    }
+    return box.CornerMax().Z() > -Precision::Confusion();
 }
 }  // namespace
 
@@ -870,7 +903,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
-                if (!method2LengthBased && reversed(prism, moved_sketch, dir2)) {
+                if (!method2LengthBased
+                    && !sideReachesPlane(prism, sketchshape, sketchNormal, dir2)) {
                     return new App::DocumentObjectExecReturn(side2Reversed);
                 }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
@@ -896,7 +930,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
-                if (!method1LengthBased && reversed(prism, moved_sketch, dir)) {
+                if (!method1LengthBased
+                    && !sideReachesPlane(prism, sketchshape, sketchNormal, dir)) {
                     return new App::DocumentObjectExecReturn(side1Reversed);
                 }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
