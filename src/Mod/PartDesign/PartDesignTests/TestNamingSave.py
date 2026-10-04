@@ -24,20 +24,24 @@
 
 An interned name refers to entries of the process-wide name table (`~<ID>`). A saved file holds
 the entries its names need in a `NameTable` element at the start of Document.xml, before the
-objects (`<Document ... NamingFormat="1">`, PR 8), so another process can expand them. In one
-process the table would hide a missing entry, so each file is reopened in a child `FreeCADCmd`
-that has built nothing.
+objects (`<Document ... NamingFormat="2">`, PR 8 and PR 10), so another process can expand them.
+The table lists contents only, one per line; the maps and the table refer to an entry by its
+line (`~<index>`, decimal: PR 10), Document.xml's attributes by its ID, which the loader computes
+from the content. In one process the table would hide a missing entry, so each file is reopened
+in a child `FreeCADCmd` that has built nothing.
 
 - TestNamingSaveFile: each dump model (TestNamingDump), saved in V2i. Every reference anywhere in
-  the file (Document.xml and every map file) has its entry in the file's table, the table refers
-  to nothing outside itself, and each entry's ID is its content's.
+  the file (an index in a map, an ID in Document.xml) has its entry in the file's table, the
+  table refers to nothing outside itself and each entry only to entries before it, and each
+  entry is the process's content for its ID.
 - TestNamingSaveReopen: the child opens each file. Every reference resolves, the names are the
   saved ones and expand to the same plain names; after touching every object and recomputing,
-  the names are the same again, and a new save holds the same table.
+  the names are the same again, and a new save holds the same entries (numbered in save order).
 - TestNamingSaveMerge: another child merges each file into a new document (File > Merge
   project, `Document.importObjects`): every reference resolves and the names are the saved ones.
 - TestNamingSavePlain: plain V2 and V1 files don't change by a byte once the process has interned
-  names: the child saves each model before and after it has opened an interned file.
+  names: the child saves each model before and after it has opened an interned file. And the
+  V2i file is no bigger than the V2 one: its Document.xml and maps, deflated, within 2 %.
 - TestNamingSaveCrossDoc: the cross-document scenarios (Scenarios/crossdoc.py) in V2i, and the
   mixed ones in V2 too (a plain document whose binders hold an interned document's names): built
   and saved here, opened, judged, edited and judged again in the child. The references are
@@ -67,7 +71,13 @@ __all__ = [
     "TestNamingSaveCrossDoc",
 ]
 
+FORMAT = 2  # the NamingFormat of a file with interned names
 REF = re.compile(r"~([0-9a-v]{13})")
+# A file-local index (in the maps and the table): decimal, never followed by another base32hex
+# character, so no part of a 13-character ID is one
+INDEX = re.compile(r"~([0-9]{1,12})(?![0-9a-v])")
+INLINE_MAP = re.compile(r'<ElementMap2 count="\d+">.*?</ElementMap2>', re.S)
+SIZE_RATIO = 1.02  # V2i's Document.xml and maps, deflated, against V2's (t2-size-design.md)
 TABLE = re.compile(
     r'<Document [^>]*NamingFormat="(\d+)"[^>]*>\s*'
     r'<NameTable count="(\d+)">\s*<!\[CDATA\[(.*?)\]\]>\s*</NameTable>\s*',
@@ -93,27 +103,73 @@ def fileEntries(path):
         return {name: z.read(name).decode("utf-8", "replace") for name in z.namelist()}
 
 
-def nameTable(entries):
-    """(format, {ID: content}) of the NameTable element in Document.xml, or (None, {})."""
+def fileTable(entries):
+    """(format, [content]) of the NameTable element in Document.xml as written: line i is the
+    entry of index i, its references to other entries are mostly `~<index>`. (None, []) without
+    one."""
     match = TABLE.search(entries["Document.xml"])
     if not match:
-        return None, {}
+        return None, []
     lines = match.group(3).split("\n")
     lines = [line.rstrip("\r") for line in lines if line.strip()]
     head = lines[0].split()
-    if head[:2] != ["NameTableStart", "v1"] or int(head[2]) != len(lines) - 1:
+    if head[:2] != ["NameTableStart", "v2"] or int(head[2]) != len(lines) - 1:
         raise AssertionError(f"bad table header {lines[0]!r}")
-    table = {}
-    for line in lines[1:]:
-        id, content = line.split(" ", 1)
+    contents = lines[1:]
+    if len(contents) != int(match.group(2)):
+        raise AssertionError(f"count {match.group(2)} for {len(contents)} entries")
+    return int(match.group(1)), contents
+
+
+def expand(text, ids):
+    """`text` with each index replaced by the ID of `ids`' entry: the process's form."""
+    return INDEX.sub(lambda m: "~" + ids[int(m.group(1))], text)
+
+
+def nameTable(entries):
+    """(format, {ID: content}) of the file's table in the process's form, in index order. Each
+    entry may refer only to entries before it; its indices are expanded to their IDs, and its ID
+    is computed from the result, as the loader does (the file stores none). (None, {}) without
+    a table."""
+    format, contents = fileTable(entries)
+    table, ids = {}, []
+    for i, content in enumerate(contents):
+        later = [n for n in INDEX.findall(content) if int(n) >= i]
+        if later:
+            raise AssertionError(f"entry {i} refers to entries {later}: {content!r}")
+        content = expand(content, ids)
+        id = App.getMappedNameId(content)
+        if id is None or id in table:
+            raise AssertionError(f"entry {i}: {content!r} collides or comes twice")
         table[id] = content
-    if len(table) != int(match.group(2)):
-        raise AssertionError(f"count {match.group(2)} for {len(table)} entries")
-    return int(match.group(1)), table
+        ids.append(id)
+    return format, table
 
 
 def refsIn(texts):
+    """The IDs referred to in the hash form."""
     return {m for text in texts for m in REF.findall(text)}
+
+
+def indicesIn(texts):
+    return {int(m) for text in texts for m in INDEX.findall(text)}
+
+
+def mapTexts(entries):
+    """The texts of a saved document's element maps: its map files, and the maps written inline
+    in Document.xml."""
+    texts = [text for name, text in entries.items() if name.endswith(".Map.txt")]
+    return texts + INLINE_MAP.findall(entries["Document.xml"])
+
+
+def deflatedSize(path):
+    """The compressed bytes of a saved document's Document.xml and map files."""
+    with zipfile.ZipFile(path) as z:
+        return sum(
+            item.compress_size
+            for item in z.infolist()
+            if item.filename == "Document.xml" or item.filename.endswith(".Map.txt")
+        )
 
 
 def _maskDate(text):
@@ -413,30 +469,40 @@ class TestNamingSaveFile(unittest.TestCase):
     def check(self, model):
         info = saved()["models"][model]
         entries = fileEntries(info["path"])
-        format, table = nameTable(entries)
+        format, table = nameTable(entries)  # each entry refers only to entries before it
+        contents = fileTable(entries)[1]
+        maps = mapTexts(entries)
         refs = refsIn(entries.values())
-        if not refs:
+        indices = indicesIn(maps)
+        if not refs and not indices:
             self.assertIsNone(format, "a table without references")
             self.assertNotIn("~", info["expanded"])
             return
-        self.assertEqual(format, 1)
-        # every reference in the file, the table's own included, has its entry
-        self.assertEqual(sorted(refs - set(table)), [])
-        # and no entry is there for nothing: each is referenced from outside the table
-        # or from another entry
-        reached = refsIn(text for name, text in entries.items() if name != "Document.xml")
-        reached |= refsIn([TABLE.sub("", entries["Document.xml"])])
+        self.assertEqual(format, FORMAT)
+        ids = list(table)
+        # the maps refer to entries by index, each in the table
+        self.assertEqual(refsIn(maps), set(), "a map holds a reference in the hash form")
+        self.assertEqual(sorted(i for i in indices if i >= len(ids)), [])
+        # every reference in the hash form (Document.xml's), the table's own included, has its
+        # entry
+        self.assertEqual(sorted(refs - set(ids)), [])
+        # and no entry is there for nothing: each is referenced from a map, from Document.xml
+        # outside the table, or from another entry
+        index = {id: i for i, id in enumerate(ids)}
+        reached = set(indices)
+        reached |= {index[r] for r in refsIn([TABLE.sub("", entries["Document.xml"])])}
         pending = list(reached)
         while pending:
-            for ref in REF.findall(table.get(pending.pop(), "")):
-                if ref not in reached:
-                    reached.add(ref)
-                    pending.append(ref)
-        self.assertEqual(set(table), reached)
-        self.assertEqual(list(table), sorted(table), "entries sorted by ID")
+            content = contents[pending.pop()]
+            for i in indicesIn([content]) | {index[r] for r in refsIn([content])}:
+                if i not in reached:
+                    reached.add(i)
+                    pending.append(i)
+        self.assertEqual(reached, set(range(len(ids))))
+        # each entry is this process's content for its ID
         for id, content in table.items():
-            self.assertEqual(App.getMappedNameId(content), id, content)
-        self.assertNotIn("^", "".join(table.values()))
+            self.assertEqual(App.getNameTableEntry(id)[0], content, id)
+        self.assertNotIn("^", "".join(contents))
 
 
 class TestNamingSaveReopen(unittest.TestCase):
@@ -450,6 +516,7 @@ class TestNamingSaveReopen(unittest.TestCase):
         self.assertEqual(result["raw"], info["raw"], "names after the reopen")
         self.assertEqual(result["expanded"], info["expanded"], "expanded names after the reopen")
         self.assertEqual(result["recomputed"], info["raw"], "names after a recompute")
+        # the same entries; their indices follow the save order
         self.assertEqual(
             nameTable(fileEntries(result["again"])),
             nameTable(fileEntries(info["path"])),
@@ -471,7 +538,8 @@ class TestNamingSaveMerge(unittest.TestCase):
 
 class TestNamingSavePlain(unittest.TestCase):
     """A plain V2 or V1 file is the same, byte for byte, whether the process's table is empty or
-    not: no NameTable element, nothing else changed. It reopens with the same names."""
+    not: no NameTable element, nothing else changed. It reopens with the same names. The V2i
+    file of the same model is no bigger than the V2 one."""
 
     def check(self, model, mode):
         result = child(self, "plain", f"{model}.{mode}")
@@ -487,6 +555,11 @@ class TestNamingSavePlain(unittest.TestCase):
                 self.assertEqual(_maskDate(after[name]), _maskDate(before[name]))
             else:
                 self.assertEqual(after[name], before[name], name)
+        if mode == "V2":
+            # the table and the indices cost no more than the names they replace
+            interned = deflatedSize(saved()["models"][model]["path"])
+            plain = deflatedSize(path + ".before")
+            self.assertLessEqual(interned, plain * SIZE_RATIO, f"V2i {interned} B, V2 {plain} B")
 
 
 class TestNamingSaveCrossDoc(unittest.TestCase):
@@ -502,6 +575,7 @@ class TestNamingSaveCrossDoc(unittest.TestCase):
         a = fileEntries(info["pathA"])
         _, table = nameTable(a)
         self.assertEqual(sorted(refsIn(a.values()) - set(table)), [])
+        self.assertEqual(sorted(i for i in indicesIn(mapTexts(a)) if i >= len(table)), [])
         for name, record in result["reopen"].items():
             self.assertEqual(record["verdict"], "correct", f"{name} after the reopen: {record}")
         inProcess = info["inProcess"]

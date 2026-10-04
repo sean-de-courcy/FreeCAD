@@ -38,7 +38,9 @@ a child `FreeCADCmd` of its own, where an ID means something else or the file la
 - TestNamingLoadUnknown: the file's table lacks one entry, which the child knows with its real
   content: the references to it (and to the entries above it) are made unresolvable (`~!<ID>`)
   instead of resolving to the child's entry, with a warning; a recompute names everything again.
-  In a cross-document scenario, no reference resolves wrong.
+  In a cross-document scenario, no reference resolves wrong. (The entry is taken out of the
+  table and the later ones renumbered; the references to it take the hash form, which a map
+  may hold too.)
 - TestNamingLoadNewerFormat: the file's `NamingFormat` is raised by hand: one warning, the maps
   with interned names are dropped and their objects recomputed, and the references go missing;
   a recompute names everything again. The same for a merge (`Document.mergeProject`) into an
@@ -79,32 +81,66 @@ __all__ = [
 
 BOGUS = "Collision;_;1;XYZ;0;F;0;_;_"
 UNKNOWN = re.compile(r"~!([0-9a-v]{13})")
-NEWER_WARNING = "newer than this build's"
+NEWER_WARNING = "which this build doesn't read"
 UNKNOWN_WARNING = "missing from the file's name table"
 
 
-def rewriteDocumentXml(source, target, rewrite):
-    """Copies the zip `source` to `target` with its Document.xml passed through `rewrite`."""
+def rewriteFile(source, target, rewrite):
+    """Copies the zip `source` to `target` with Document.xml and the map files passed through
+    `rewrite(name, text)`."""
     with zipfile.ZipFile(source) as zin, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
-            if item.filename == "Document.xml":
-                data = rewrite(data.decode("utf-8")).encode("utf-8")
+            if item.filename == "Document.xml" or item.filename.endswith(".Map.txt"):
+                data = rewrite(item.filename, data.decode("utf-8")).encode("utf-8")
             zout.writestr(item, data)
 
 
-def withoutEntry(text, id):
-    """Document.xml without the table's entry `id`."""
-    match = save.TABLE.search(text)
-    lines = match.group(3).split("\n")
-    kept = [line for line in lines if not line.startswith(id + " ")]
-    if len(kept) != len(lines) - 1:
-        raise AssertionError(f"no entry {id}")
-    count = int(match.group(2)) - 1
-    kept = [re.sub(r"^(NameTableStart v1 )\d+", rf"\g<1>{count}", line) for line in kept]
-    body = match.group(0).replace(match.group(3), "\n".join(kept))
-    body = body.replace(f'<NameTable count="{count + 1}">', f'<NameTable count="{count}">')
-    return text[: match.start()] + body + text[match.end() :]
+def newerFormat(name, text):
+    """A rewrite for rewriteFile: Document.xml's NamingFormat raised by one."""
+    if name != "Document.xml":
+        return text
+    old = f'NamingFormat="{save.FORMAT}"'
+    if old not in text:
+        raise AssertionError(f"no {old}")
+    return text.replace(old, f'NamingFormat="{save.FORMAT + 1}"', 1)
+
+
+def withoutEntry(ids, id):
+    """A rewrite for rewriteFile: the file without its table's entry `id`, whose IDs by index are
+    `ids`. The later entries move up a line, so every index above it goes down by one, and the
+    references to it (indices in the maps and the table) take the hash form, which the table no
+    longer has."""
+    removed = ids.index(id)
+
+    def renumber(text):
+        def replace(match):
+            n = int(match.group(1))
+            if n == removed:
+                return "~" + id
+            return f"~{n - 1}" if n > removed else match.group(0)
+
+        return save.INDEX.sub(replace, text)
+
+    def rewrite(name, text):
+        if name != "Document.xml":
+            return renumber(text)
+        match = save.TABLE.search(text)
+        _, contents = save.fileTable({"Document.xml": text})
+        kept = [renumber(c) for i, c in enumerate(contents) if i != removed]
+        body = match.group(3)
+        lead, trail = body[: len(body) - len(body.lstrip())], body[len(body.rstrip()) :]
+        body = lead + "\n".join([f"NameTableStart v2 {len(kept)}"] + kept) + trail
+        text = (
+            text[: match.start(2)]
+            + str(len(kept))
+            + text[match.end(2) : match.start(3)]
+            + body
+            + text[match.end(3) :]
+        )
+        return save.INLINE_MAP.sub(lambda m: renumber(m.group(0)), text)
+
+    return rewrite
 
 
 def chooseEntry(table):
@@ -680,7 +716,7 @@ def _derive(folder, manifest):
         manifest["collideOne"][model] = {"id": id, "above": sorted(refsAbove(table, id))}
         unknown = os.path.join(folder, f"{model}-unknown.FCStd")
         id = chooseUnknown(table, info["raw"])
-        rewriteDocumentXml(info["path"], unknown, lambda text, id=id: withoutEntry(text, id))
+        rewriteFile(info["path"], unknown, withoutEntry(list(table), id))
         manifest["unknown"][model] = {
             "path": unknown,
             "id": id,
@@ -689,11 +725,7 @@ def _derive(folder, manifest):
             "prefix": f" : ~{id}|" in info["raw"],
         }
         newer = os.path.join(folder, f"{model}-newer.FCStd")
-        rewriteDocumentXml(
-            info["path"],
-            newer,
-            lambda text: text.replace('NamingFormat="1"', 'NamingFormat="2"', 1),
-        )
+        rewriteFile(info["path"], newer, newerFormat)
         manifest["newer"][model] = {"path": newer}
     manifest["unknownCrossDoc"] = {}
     manifest["newerCrossDoc"] = {}
@@ -701,20 +733,19 @@ def _derive(folder, manifest):
         for path in (info["pathA"], info["pathB"]):
             collideAll |= set(save.nameTable(save.fileEntries(path))[1])
         entries = save.fileEntries(info["pathA"])
+        table = save.nameTable(entries)[1]
         id = entryUsedOutsideTheTable(entries)
-        for kind, rewrite in (
-            ("unknown", lambda text, id=id: withoutEntry(text, id)),
-            ("newer", lambda text: text.replace('NamingFormat="1"', 'NamingFormat="2"', 1)),
-        ):
+        for kind in ("unknown", "newer"):
             if kind == "unknown" and id is None:
                 continue
             copy = os.path.join(folder, f"{key}-{kind}")
             shutil.copytree(info["folder"], copy)
             pathA = os.path.join(copy, os.path.basename(info["pathA"]))
-            rewriteDocumentXml(info["pathA"], pathA, rewrite)
+            rewrite = withoutEntry(list(table), id) if kind == "unknown" else newerFormat
+            rewriteFile(info["pathA"], pathA, rewrite)
             derived = {"pathA": pathA}
             if kind == "unknown":
-                derived.update(id=id, content=save.nameTable(entries)[1][id])
+                derived.update(id=id, content=table[id])
             manifest[f"{kind}CrossDoc"][key] = derived
     collideAll |= set(save.nameTable(save.fileEntries(manifest["proxy"]["path"]))[1])
     manifest["collideAll"] = sorted(collideAll)
@@ -817,6 +848,8 @@ class TestNamingLoadCollision(unittest.TestCase):
         _, table = save.nameTable(entries)
         self.assertEqual(set(table) & colliding, set(), "a new save holds a colliding entry")
         self.assertEqual(sorted(save.refsIn(entries.values()) - set(table)), [])
+        indices = save.indicesIn(save.mapTexts(entries))
+        self.assertEqual(sorted(i for i in indices if i >= len(table)), [])
 
     def checkOne(self, model):
         info = saved()["models"][model]
