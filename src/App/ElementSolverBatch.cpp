@@ -21,6 +21,7 @@
 
 #include "Application.h"
 #include "ComplexGeoData.h"
+#include "Document.h"
 #include "DocumentObject.h"
 #include "ElementFingerprint.h"
 #include "ElementNamingUtils.h"
@@ -39,11 +40,55 @@ namespace App
 namespace
 {
 ElementHintsFunction elementHintsFunction = nullptr;
-}
+
+struct MigrationCounts
+{
+    int kept = 0;
+    int moved = 0;
+    int broken = 0;
+};
+std::map<const Document*, MigrationCounts> migrationCounts;
+}  // namespace
 
 void setElementHintsFunction(ElementHintsFunction function)
 {
     elementHintsFunction = function;
+}
+
+void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome)
+{
+    auto doc = owner ? owner->getDocument() : nullptr;
+    if (!doc) {
+        return;
+    }
+    auto& counts = migrationCounts[doc];
+    switch (outcome) {
+        case MigrationOutcome::Kept:
+            ++counts.kept;
+            break;
+        case MigrationOutcome::Moved:
+            ++counts.moved;
+            break;
+        case MigrationOutcome::Broken:
+            ++counts.broken;
+            break;
+    }
+}
+
+void reportReferenceMigration(const Document* doc)
+{
+    auto it = migrationCounts.find(doc);
+    if (it == migrationCounts.end()) {
+        return;
+    }
+    const MigrationCounts counts = it->second;
+    migrationCounts.erase(it);
+    FC_WARN("Document '" << doc->getName() << "': "
+                         << counts.kept + counts.moved + counts.broken
+                         << " element references re-derived from their geometry after a naming "
+                            "change: "
+                         << counts.moved << " moved back to their element, " << counts.broken
+                         << " broken (listed above)");
 }
 
 std::string bareMappedName(const std::string& newStyleName)
@@ -290,6 +335,40 @@ bool exactNeedsSolving(const SolverEntry& entry,
         return true;
     }
     return !Data::atSamePlace(saved, now, diagonal, tolerances, distance) && occupied();
+}
+
+// Whether an exact hit is still the saved element in a naming migration (ops#103, rule 3): at
+// its place, or within it (a split, as exactNeedsSolving() allows).
+bool hitAgrees(const SolverEntry& entry,
+               const Data::ElementFingerprint& saved,
+               const Data::ElementFingerprint& now,
+               double diagonal,
+               const Data::GeometryTolerances& tolerances,
+               double distance)
+{
+    const std::string type = indexType(entry.oldIndex);
+    if (type == "Edge" && saved.type == 'E' && (saved.kind == "Line" || saved.kind == "Circle")
+        && Data::hitWithinOldEdge(saved, now, diagonal, tolerances, distance)) {
+        return true;
+    }
+    if (type == "Face" && saved.type == 'F' && saved.kind == "Plane"
+        && Data::faceWithinOldPlane(saved, now, diagonal, tolerances, distance)) {
+        return true;
+    }
+    return Data::atSamePlace(saved, now, diagonal, tolerances, distance);
+}
+
+// A naming migration's broken reference (ops#103): missing at its stored index, without the
+// name, which now gives another element and would be followed by the next lookup. It keeps its
+// fingerprint.
+void migrationBrokenFor(const SolverEntry& entry, SolverResolution& resolution)
+{
+    resolution.status = SolverResolution::Status::Broken;
+    resolution.prop = entry.prop;
+    resolution.index = entry.index;
+    const std::string& index = entry.storedIndex.empty() ? entry.oldIndex : entry.storedIndex;
+    resolution.shadow.oldName = entry.prefix + Data::MISSING_PREFIX + index;
+    resolution.sub = resolution.shadow.oldName;
 }
 
 // Two results of an equivalence probe are the same as the attacher compares placements
@@ -667,6 +746,60 @@ bool solveElementReferences(DocumentObject* feature,
         };
     }
 
+    // The elements of `except`'s type, other than it, at the place \a saved records (ops#105), up
+    // to the first if \a first: the hints rule most out unmeasured. None if they can't be
+    // scanned (no shape, a sketch's internal elements).
+    auto elementsAt = [&](const Data::ElementFingerprint& saved,
+                          const std::string& except,
+                          bool first) -> std::optional<std::vector<std::string>> {
+        const std::string type = indexType(except);
+        const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
+        const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
+        if (!data || type.rfind(InternalPrefix, 0) == 0) {
+            return std::nullopt;
+        }
+        std::vector<std::string> places;
+        const unsigned long count = data->countSubElements(type.c_str());
+        for (unsigned long k = 1; k <= count; ++k) {
+            const std::string index = type + std::to_string(k);
+            if (index == except) {
+                continue;
+            }
+            Data::ElementFingerprint intrinsic;
+            std::optional<Base::Vector3d> anchor;
+            if (hintOf && hintOf(index, intrinsic, anchor)
+                && !Data::mayBeAtPlace(saved,
+                                       intrinsic,
+                                       anchor,
+                                       diagonal,
+                                       tolerances,
+                                       continuationDistance)) {
+                continue;
+            }
+            if (Data::atSamePlace(saved,
+                                  fingerprintOf(index),
+                                  diagonal,
+                                  tolerances,
+                                  continuationDistance)) {
+                places.push_back(index);
+                if (first) {
+                    break;
+                }
+            }
+        }
+        return places;
+    };
+    // An element's mapped name for a resolution (the least, as index carry takes it)
+    auto nameAt = [&](const std::string& index) {
+        std::string name;
+        for (const auto& element : pool(indexType(index))) {
+            if (element.index == index && !element.names.empty()) {
+                name = *std::min_element(element.names.begin(), element.names.end());
+            }
+        }
+        return mapForm(name);
+    };
+
     for (auto& [ownerName, entries] : owners) {
         std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
             auto na = referenceName(a->prop);
@@ -678,11 +811,10 @@ bool solveElementReferences(DocumentObject* feature,
         });
         // An owner with only exact references is solved only if one of them has a saved
         // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
-        // update solves missing references only.
-        if (!anyMissing
-            && (reverse || std::none_of(entries.begin(), entries.end(), [](const auto* e) {
-                    return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty();
-                }))) {
+        // update checks every one with a fingerprint (ops#103).
+        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
+                return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty();
+            })) {
             continue;
         }
 
@@ -709,7 +841,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
-        if (!anyMissing) {
+        if (!anyMissing && !reverse) {
             // Every entry, not up to the first: each unmeasurable one is logged.
             bool needed = false;
             for (const auto* e : entries) {
@@ -717,41 +849,11 @@ bool solveElementReferences(DocumentObject* feature,
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(e->oldFingerprint);
-                // Another element of its type where it was, by index: the hint rules most out
-                // unmeasured. Solving the owner (its pools) costs more than this scan.
+                // Another element of its type where it was. Solving the owner (its pools) costs
+                // more than this scan.
                 auto occupied = [&]() {
-                    const std::string type = indexType(e->oldIndex);
-                    const PropertyComplexGeoData* prop = geo->getPropertyOfGeometry();
-                    const Data::ComplexGeoData* data = prop ? prop->getComplexData() : nullptr;
-                    if (!data || type.rfind(InternalPrefix, 0) == 0) {
-                        return true;  // solveOwner() decides
-                    }
-                    const unsigned long count = data->countSubElements(type.c_str());
-                    for (unsigned long k = 1; k <= count; ++k) {
-                        const std::string index = type + std::to_string(k);
-                        if (index == e->oldIndex) {
-                            continue;
-                        }
-                        Data::ElementFingerprint intrinsic;
-                        std::optional<Base::Vector3d> anchor;
-                        if (hintOf && hintOf(index, intrinsic, anchor)
-                            && !Data::mayBeAtPlace(saved,
-                                                   intrinsic,
-                                                   anchor,
-                                                   diagonal,
-                                                   tolerances,
-                                                   continuationDistance)) {
-                            continue;
-                        }
-                        if (Data::atSamePlace(saved,
-                                              fingerprintOf(index),
-                                              diagonal,
-                                              tolerances,
-                                              continuationDistance)) {
-                            return true;
-                        }
-                    }
-                    return false;
+                    auto places = elementsAt(saved, e->oldIndex, true);
+                    return !places || !places->empty();  // unscanned: solveOwner() decides
                 };
                 if (exactNeedsSolving(*e,
                                       saved,
@@ -769,7 +871,105 @@ bool solveElementReferences(DocumentObject* feature,
         }
 
         if (reverse) {
-            // An element-map version change: index carry, verified by the saved fingerprint.
+            // An element-map version change (a naming migration, ops#103). An exact hit must
+            // agree with its saved fingerprint: if its name moved, the element at its saved place
+            // is taken (rule 3).
+            for (const auto* entry : entries) {
+                if (entry->kind != SolverEntry::Kind::Exact) {
+                    continue;
+                }
+                const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                if (!saved.isValid()) {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
+                const std::string& hit = entry->oldIndex;
+                const auto& now = fingerprintOf(hit);
+                if (!now.isValid()) {
+                    logUnmeasured(*entry);
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
+                if (hitAgrees(*entry, saved, now, diagonal, tolerances, continuationDistance)) {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    continue;
+                }
+                const std::string& stored = entry->storedIndex;
+                auto places = elementsAt(saved, hit, false);
+                std::string pick;
+                if (places && places->size() == 1) {
+                    pick = places->front();
+                }
+                else if (places && places->size() > 1
+                         && std::find(places->begin(), places->end(), stored) != places->end()) {
+                    pick = stored;  // rule 2: among coincident elements, the stored index
+                }
+                ReferenceReport::Entry item;
+                const std::string& oldName = entry->exactName;
+                if (!pick.empty()) {
+                    SolverResolution resolution;
+                    resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    item.status = ReferenceReport::Status::Index;
+                    item.newIndex = pick;
+                    item.evidence = "migration: the name moved; " + pick + " sits where it was";
+                    item.candidates.emplace_back(pick, nameAt(pick));
+                    item.candidateRoles.emplace_back("place");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_WARN(referenceName(entry->prop)
+                            << "[" << entry->index << "]: " << oldName << " -> " << pick
+                            << " (" << item.evidence << ", not " << hit << ")");
+                    countReferenceMigration(entry->owner, MigrationOutcome::Moved);
+                }
+                else {
+                    // Rules 1 and 2's counterparts: the old geometry is gone, or several
+                    // elements sit there and none is the stored one. Broken, never the name's.
+                    SolverResolution resolution;
+                    migrationBrokenFor(*entry, resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    item.status = ReferenceReport::Status::Broken;
+                    std::string where;
+                    if (places) {
+                        for (const auto& place : *places) {
+                            item.candidates.emplace_back(place, nameAt(place));
+                            item.candidateRoles.emplace_back("place");
+                            item.candidateDistances.push_back(
+                                std::numeric_limits<double>::quiet_NaN()
+                            );
+                            where += (where.empty() ? "" : " and ") + place;
+                        }
+                    }
+                    item.candidates.emplace_back(hit, nameAt(hit));
+                    item.candidateRoles.emplace_back("name");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    if (!places) {
+                        item.evidence = "migration: the name moved; its place can't be scanned";
+                    }
+                    else if (where.empty()) {
+                        item.evidence = "migration: the name moved; nothing sits where it was";
+                    }
+                    else {
+                        item.evidence = "migration: the name moved; " + where + " sit where it was";
+                        std::string type = indexType(hit);
+                        std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
+                            return static_cast<char>(std::tolower(c));
+                        });
+                        item.headline = "Ambiguous " + type + " reference: " + hit + " moved and "
+                            + where + " sit where it was";
+                    }
+                    std::vector<std::string> candidates;
+                    for (const auto& candidate : item.candidates) {
+                        candidates.push_back(candidate.first);
+                    }
+                    FC_WARN(referenceName(entry->prop)
+                            << "[" << entry->index << "]: " << oldName << " broken ("
+                            << item.evidence << ", candidates: " << joinCandidates(candidates)
+                            << ")");
+                    countReferenceMigration(entry->owner, MigrationOutcome::Broken);
+                }
+                report(*entry, std::move(item));
+            }
+            // Missing references: index carry, verified by the saved fingerprint.
             for (const auto* entry : entries) {
                 if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
@@ -786,6 +986,7 @@ bool solveElementReferences(DocumentObject* feature,
                 }
                 ReferenceReport::Entry item;
                 if (exists && saved.isValid() && fingerprintsAgree(saved, now, diagonal)) {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Moved);
                     SolverResolution resolution;
                     resolutionFor(*entry, index, mapForm(name), resolution);
                     resolutions[entry->prop].push_back(resolution);
@@ -797,6 +998,7 @@ bool solveElementReferences(DocumentObject* feature,
                             << " (tier index, fingerprint equal)");
                 }
                 else {
+                    countReferenceMigration(entry->owner, MigrationOutcome::Broken);
                     item.status = ReferenceReport::Status::Broken;
                     item.evidence = !saved.isValid() ? "index carry, no fingerprint"
                         : !exists                    ? "index carry, no such element"

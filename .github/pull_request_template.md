@@ -15,6 +15,7 @@ Please check the following box:
 -->
 
 - [ ] This PR is not unverified AI output, I take responsibility for it, and all communication from my side in this PR is done by me personally.
+- [ ] FreeCAD-CH: no existing element name changes, or `ForkNamingRevision` (src/App/Document.cpp) goes up and `NamingGolden/REVISION` is recorded again (ops#103).
 
 <!--
 If your work has been assisted by AI, please disclose the used technology in the PR description (in natural language) and with git trailers in the commit messages:

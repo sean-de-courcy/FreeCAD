@@ -40,6 +40,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementMapOrder.h>
+#include <App/GeoFeature.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
 #include <Base/Console.h>
@@ -64,6 +65,35 @@ TYPESYSTEM_SOURCE(Part::PropertyPartShape, App::PropertyComplexGeoData)
 
 namespace
 {
+/// An element map version without the fork's naming revision (`.F<n>`, or ops#56's `.X1`
+/// before it, ops#103).
+std::string withoutNamingRevision(const std::string& version)
+{
+    std::string result;
+    std::size_t start = 0;
+    while (start <= version.size()) {
+        std::size_t end = version.find('.', start);
+        if (end == std::string::npos) {
+            end = version.size();
+        }
+        const std::string token = version.substr(start, end - start);
+        const bool revision = token == "X1"
+            || (token.size() > 1 && token[0] == 'F'
+                && token.find_first_not_of("0123456789", 1) == std::string::npos);
+        if (!revision) {
+            result += (start == 0 ? "" : ".") + token;
+        }
+        start = end + 1;
+    }
+    return result;
+}
+
+/// Whether two element map versions differ only in the fork's naming revision.
+bool onlyNamingRevisionDiffers(const std::string& a, const std::string& b)
+{
+    return withoutNamingRevision(a) == withoutNamingRevision(b);
+}
+
 /** Whether a name is in canonical interned form: no escaped embedded name, and at most one
  * section after a reference to its prefix (`~<ID>|<last section>`).
  *
@@ -721,15 +751,30 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
                         warnedDoc = owner->getDocument()->getName();
                         FC_WARN(
                             "Recomputation required for document '"
-                            << warnedDoc << "' on geo element version change in " << getFullName()
-                            << ": " << _Ver << " -> " << correctVersion
+                            << warnedDoc << "' on "
+                            << (onlyNamingRevisionDiffers(_Ver, correctVersion)
+                                    ? "naming revision"
+                                    : "geo element version")
+                            << " change in " << getFullName() << ": " << _Ver << " -> "
+                            << correctVersion
                         );
                     }
                     owner->getDocument()->addRecomputeObject(owner);
 
-                    // sometimes objects will not update _Ver properly,
-                    // so lets do it here to avoid unnecessary remigration
-                    _Ver = correctVersion;
+                    if (owner->getDocument()->testStatus(App::Document::Importing)) {
+                        // Pasted or merged objects resolve their references by name, as before
+                        // (ops#103, Q7): marked current.
+                        _Ver = correctVersion;
+                    }
+                    else if (auto geo = freecad_cast<App::GeoFeature*>(owner);
+                             geo && geo->getPropertyOfGeometry() == this) {
+                        // The first rebuild of the shape re-derives the references into it from
+                        // their geometry (GeoFeature::updateElementReference()), and the stamp
+                        // follows the names: it stays the file's until the shape is rebuilt
+                        // (setValue() clears it), so a file saved before that asks again at the
+                        // next open (ops#103, Q2).
+                        geo->_ElementMapVersion.setValue(_Ver);
+                    }
                 }
             }
         }
@@ -753,10 +798,14 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
 void PropertyPartShape::afterRestore()
 {
     if (_Shape.isRestoreFailed()) {
-        // this cause GeoFeature::updateElementReference() to call
-        // PropertyLinkBase::updateElementReferences() with reverse = true, in
-        // order to try to regenerate the element map
+        // The references into the shape are re-derived from their geometry when it is rebuilt
+        // (GeoFeature::updateElementReference() with reverse = true), as after a version change
         _Ver = "?";
+        auto geo = freecad_cast<App::GeoFeature*>(getContainer());
+        if (geo && geo->getPropertyOfGeometry() == this && geo->getDocument()
+            && !geo->getDocument()->testStatus(App::Document::Importing)) {
+            geo->_ElementMapVersion.setValue(_Ver);
+        }
     }
     else if (_Shape.getElementMapSize() == 0) {
         if (_Shape.Hasher) {

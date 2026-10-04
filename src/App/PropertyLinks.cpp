@@ -647,6 +647,16 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     }
 
     bool missing = GeoFeature::hasMissingElement(elementName.oldName.c_str());
+    std::string why;
+    // A reverse update (an element map version change: a naming migration, ops#103) re-derives
+    // the reference from its geometry: the element the saved name gives now (nameHit) is
+    // checked against the old element's, found at the stored index (oldElement) in the shape
+    // before the change.
+    const bool migrating = feature == geo && reverse && !inSolverDocument()
+        && !Data::hasMissingElement(shadow.oldName.c_str());
+    const std::string nameHit =
+        migrating && !missing ? Data::findElementName(elementName.oldName.c_str()) : "";
+    bool dropName = false;
     // In a reference solver document (ops#7) this is the exact lookup only: no name match, no
     // geometric search. The solver takes the references that miss.
     if (feature == geo && (missing || reverse) && !inSolverDocument()) {
@@ -712,8 +722,24 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
             }
             if (names.size()) {
                 missing = false;
+                // Among several matches (coincident elements), a migration takes the stored
+                // index, else the name's element (ops#103, rule 2)
+                std::string pick = names.front();
+                const char* taken = "the first";
+                if (migrating && names.size() > 1) {
+                    for (const auto& [preferred, which] :
+                         {std::pair<std::string, const char*>(oldElement, "the stored index"),
+                          std::pair<std::string, const char*>(nameHit, "the name's")}) {
+                        if (!preferred.empty()
+                            && std::find(names.begin(), names.end(), preferred) != names.end()) {
+                            pick = preferred;
+                            taken = which;
+                            break;
+                        }
+                    }
+                }
                 std::string newsub(subname, strlen(subname) - strlen(element));
-                newsub += names.front();
+                newsub += pick;
                 GeoFeature::resolveElement(obj,
                                            newsub.c_str(),
                                            elementName,
@@ -727,7 +753,7 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                     FC_WARN(propertyName(this)
                             << " guessed element reference " << ret->getFullName() << " "
                             << oldName << " -> " << newName << ": " << names.size()
-                            << " elements match the old geometry, the first was taken");
+                            << " elements match the old geometry, " << taken << " was taken");
                 }
                 if (nameMatch.size() && nameMatch != elementName.oldName) {
                     FC_WARN(propertyName(this)
@@ -741,13 +767,26 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                            << oldName << " -> " << newName);
                 }
             }
+            else if (migrating && !missing && oldElement && oldElement[0]
+                     && nameHit != oldElement) {
+                // The old element's geometry is gone and the saved name now gives another
+                // element: broken, not moved (ops#103, rule 1). An index-only missing reference,
+                // so that no later lookup follows the name either.
+                missing = true;
+                dropName = true;
+                why = " (re-derived from geometry: the old element is gone, and its name now gives "
+                    + nameHit + ", not taken)";
+                elementName.oldName = shadow.oldName;
+                std::size_t at = oldElement - shadow.oldName.c_str();
+                elementName.oldName.insert(at, Data::MISSING_PREFIX);
+                elementName.newName = shadow.newName;  // for the warning
+            }
         }
     }
 
     // The first resolution of a sub that a link retarget made index-only (ops#106): the index
     // must name an element that agrees with the one the reference named on the old target, or
     // the reference goes missing, never to another element. The check is used up either way.
-    const char* why = "";
     if (!reverse && shadow.newName.empty()) {
         auto checks = _RetargetChecks.find(this);
         if (checks != _RetargetChecks.end()) {
@@ -793,6 +832,9 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
                 << (elementName.newName.size() ? elementName.newName : elementName.oldName)
                 << why);
         shadow.oldName.swap(elementName.oldName);
+        if (dropName) {
+            shadow.newName.clear();
+        }
     }
     else {
         FC_TRACE(propertyName(this) << " element reference shadow update " << ret->getFullName()
@@ -801,6 +843,17 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
         if (shadow.newName.size() && Data::hasMappedElementName(sub.c_str())) {
             updateSub(shadow.newName);
         }
+    }
+
+    if (migrating) {
+        auto outcome = MigrationOutcome::Kept;
+        if (missing) {
+            outcome = MigrationOutcome::Broken;
+        }
+        else if (nameHit != Data::findElementName(shadow.oldName.c_str())) {
+            outcome = MigrationOutcome::Moved;
+        }
+        countReferenceMigration(freecad_cast<DocumentObject*>(getContainer()), outcome);
     }
 
     if (reverse) {
@@ -2147,6 +2200,9 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
             continue;
         }
         auto& shadow = shadows[i];
+        // The stored index, before the lookup rewrites the shadow to its hit (ops#103)
+        const char* storedElement = Data::findElementName(shadow.oldName.c_str());
+        std::string storedIndex = storedElement ? storedElement : "";
         if (prop->_updateElementReference(feature,
                                           obj,
                                           subs[i],
@@ -2190,6 +2246,10 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         entry.owner = owner;
         entry.sub = subs[i];
         entry.oldFingerprint = i < fingerprints.size() ? fingerprints[i] : std::string();
+        if (entry.kind == App::SolverEntry::Kind::Exact
+            && !Data::hasMissingElement(storedIndex.c_str())) {
+            entry.storedIndex = std::move(storedIndex);
+        }
         entry.policy = prop->getElementPolicy();
         if (froms && i < froms->size()) {
             entry.from = (*froms)[i];

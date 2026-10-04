@@ -122,7 +122,25 @@ short Feature::mustExecute() const
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     try {
-        return App::GeoFeature::recompute();
+        auto ret = App::GeoFeature::recompute();
+        if (!ret) {
+            // A shape restored from another version that the recompute didn't rebuild (a plain
+            // Part::Feature: execute() only touches it) keeps its names, so it is current: its
+            // stamp would otherwise ask for a recompute at every open (ops#103). A rebuilt one
+            // was stamped by setValue() already. The same for the other shape properties.
+            std::vector<App::Property*> props;
+            getPropertyList(props);
+            for (auto prop : props) {
+                if (auto shape = freecad_cast<PropertyPartShape*>(prop)) {
+                    shape->resetElementMapVersion();
+                }
+            }
+            auto version = getCorrectElementMapVersion();
+            if (_ElementMapVersion.getStrValue() != version) {
+                _ElementMapVersion.setValue(version);
+            }
+        }
+        return ret;
     }
     catch (Standard_Failure& e) {
 

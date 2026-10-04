@@ -77,6 +77,7 @@
 #include "Application.h"
 #include "AutoTransaction.h"
 #include "BackupPolicy.h"
+#include "ElementSolverBatch.h"
 #include "ExpressionParser.h"
 #include "GeoFeature.h"
 #include "License.h"
@@ -103,6 +104,19 @@ using Base::Writer;
 using namespace App;
 using namespace boost;
 using namespace zipios;
+
+namespace
+{
+// The fork's naming revision (ops#103), in every V2 element map version. Bump it in any change
+// that can change an existing element name for the same model (a naming fix, a name's sections,
+// the order a builder names elements in, face order): files saved before then re-derive their
+// references from geometry once. Not for names added where there were none, the `.N`
+// representation, solver changes or geometry fixes that keep the names.
+// PartDesignTests/NamingGolden/REVISION records it with a digest of the V2 golden dumps
+// (TestNamingDump.TestNamingRevision). 1: ops#56's boundary section (was `.X1`), and every
+// naming fix before it.
+constexpr int ForkNamingRevision = 1;
+}  // namespace
 
 #if FC_DEBUG
 #define FC_LOGFEATUREUPDATE
@@ -2480,10 +2494,11 @@ const std::string& Document::getCorrectElementMapVersion() {
         unsigned occ_ver {0x070200};
         ss << Data::ELEMENT_NAME_ENCODING_VERSION << '.' << std::hex << occ_ver << '.'
            << App::getHistoryAlgorithm(selectedHistoryAlgorithm) << "." << Data::ELEMENT_MAP_VERSION;
-        // X1: V2 names that crossed from another document end in a boundary section (ops#56), so
-        // a file saved before has other names there, and its references into them re-derive
+        // F<n>: the fork's naming revision (ops#103). A file saved under another one mismatches,
+        // and its first recompute re-derives the references into each rebuilt shape from their
+        // geometry (GeoFeature::updateElementReference()). V2 only: V1 files come from FreeCAD.
         if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
-            ss << ".X1";
+            ss << ".F" << std::dec << ForkNamingRevision;
         }
         // Interned maps hold names in another form: a build or a document that expects the other
         // form sees a different version and asks for a recompute (ops#6). N2: their files hold
@@ -3414,6 +3429,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     signalBecameStable(*this);
 
     tracker.checkpoint("Recompute total");
+
+    // References re-derived from geometry in this recompute (a naming migration, ops#103)
+    reportReferenceMigration(this);
 
     if (!d->_RecomputeLog.empty()) {
         if (!testStatus(Status::IgnoreErrorOnRecompute)) {
