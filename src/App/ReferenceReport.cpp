@@ -239,9 +239,15 @@ bool ReferenceReport::describeBroken(const DocumentObject* obj, std::string& why
         std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
-        ss << (count++ ? "; " : "") << "Missing " << (type.empty() ? "element" : type)
-           << " reference: " << element << " (" << slot.property << '[' << slot.index << "], ";
         auto entry = find(slot.prop, slot.localIndex);
+        ss << (count++ ? "; " : "");
+        if (entry && !entry->headline.empty()) {
+            ss << entry->headline;
+        }
+        else {
+            ss << "Missing " << (type.empty() ? "element" : type) << " reference: " << element;
+        }
+        ss << " (" << slot.property << '[' << slot.index << "], ";
         if (entry && !entry->candidates.empty()) {
             ss << "candidates: ";
             for (std::size_t i = 0; i < entry->candidates.size(); ++i) {

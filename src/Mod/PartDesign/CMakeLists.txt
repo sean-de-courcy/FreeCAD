@@ -98,6 +98,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/interning.py
     PartDesignTests/Scenarios/issues.py
     PartDesignTests/Scenarios/models.py
+    PartDesignTests/Scenarios/moves.py
     PartDesignTests/Scenarios/patterns.py
     PartDesignTests/Scenarios/randomized.py
     PartDesignTests/Scenarios/rlist.py

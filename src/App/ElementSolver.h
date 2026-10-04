@@ -297,6 +297,8 @@ struct AppExport GeometryTolerances
     double gapFactor = 3.0;
     /// Tier 3: the largest relative difference of sizes (area or length).
     double size = 0.01;
+    /// atSamePlace(): the largest relative difference of sizes (ops#105).
+    double placeSize = 1e-6;
 };
 
 /** Tier 2, intrinsic geometry: the same element type and surface or curve kind, directions
@@ -359,6 +361,39 @@ AppExport bool faceWithinOldPlane(
 AppExport bool planeAgrees(
     const ElementFingerprint& saved,
     const ElementFingerprint& face,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
+/** "Sits where it was" (ops#105): true if \a now coincides with \a saved, the fingerprint saved
+ * with a reference. The same element type and kind; size, centre, direction and radii present in
+ * both or in neither; the direction within \a tolerances.angle (a plane's normal with its sense,
+ * an axis or a line's direction either way, as intrinsicAgrees()); radii within
+ * \a tolerances.radius relative; the size within \a tolerances.placeSize relative; the centre,
+ * and a circle's centre and a plane's extent corners when both have them, within ε (\a distance
+ * times max(1, \a diagonal)). These are coincidence tolerances, far tighter than tier 3's: an
+ * element 0.1 mm away isn't at the place. False if either fingerprint is invalid.
+ */
+AppExport bool atSamePlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& now,
+    double diagonal,
+    const GeometryTolerances& tolerances,
+    double distance
+);
+
+/** A cheap necessary condition for atSamePlace(\a saved, the element's fingerprint), from the
+ * element's \a intrinsic part (type, kind, direction, radii and a circle's centre, measured as
+ * its fingerprint measures them) and \a anchor, a point of its plane (a plane face), its line (a
+ * line edge) or the vertex itself. False only if atSamePlace() would be false: the intrinsic parts
+ * disagree (intrinsicAgrees()), the circles' centres are apart by more than ε, or the saved centre
+ * lies farther than 2ε from the plane, the line or the vertex (ε as in atSamePlace()).
+ */
+AppExport bool mayBeAtPlace(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& intrinsic,
+    const std::optional<Base::Vector3d>& anchor,
     double diagonal,
     const GeometryTolerances& tolerances,
     double distance
@@ -452,6 +487,12 @@ struct AppExport SolveInput
     /// can't be measured. Called at most once per element, only when tiers 2 and 3 run. Unset:
     /// no element has a fingerprint.
     std::function<ElementFingerprint(const std::string& index)> fingerprintOf;
+    /// The element \a index's cheap description for mayBeAtPlace(): false if there is none.
+    /// Unset: none. The moved-element check fingerprints only the elements it doesn't rule out.
+    std::function<bool(const std::string& index,
+                       ElementFingerprint& intrinsic,
+                       std::optional<Base::Vector3d>& anchor)>
+        hintOf;
     /// The faces of the target that the edge \a index bounds (index names). Unset: none, so
     /// no edge continues.
     std::function<std::vector<std::string>(const std::string& index)> facesOf;
@@ -498,6 +539,12 @@ struct AppExport SolveOutcome
     /// with their mapped names (parallel).
     std::vector<std::string> candidates;
     std::vector<std::string> candidateNames;
+    /// Parallel to candidates: why each is one (ops#105): `place` (it sits where the element
+    /// was), `name` (the element the reference's name holds), `piece` (a piece of the old
+    /// element), `structural` (tier 1's survivor), `geometric` (tiers 2-3 found it); and its
+    /// centre's distance from the saved centre, NaN where unknown.
+    std::vector<std::string> candidateRoles;
+    std::vector<double> candidateDistances;
     /// The evidence, for the log and the report: overlap and sources, or why it broke.
     std::string evidence;
 };
@@ -507,6 +554,12 @@ struct AppExport SolveOutcome
  * - Exact entries keep their element, and it leaves the other entries' pools unless one of its
  *   names has the entry's old name in its ancestry (a proven merge, an inAncestry edge). Exact
  *   entries never enter the graph.
+ * - Moved (ops#105): an exact entry whose element no longer sits where its saved fingerprint was
+ *   (atSamePlace()), while other elements of its type do, is ambiguous: its name says one
+ *   element, geometry the others. It breaks under One and Expand, with those elements first
+ *   (role `place`) and the named one last (`name`); under Equivalent the hit stands if each of
+ *   them gives the consumer the hit's result. Those elements leave the other entries' pools, as
+ *   tier-0 elements do. An element that moved with nothing at its old place keeps its reference.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element

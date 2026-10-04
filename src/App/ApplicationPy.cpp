@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -1409,14 +1411,28 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             Py::Dict dict;
             Py::List candidates;
             Py::List candidateNames;
+            Py::List candidateRoles;
+            Py::List candidateDistances;
             Py::List pieces;
             dict.setItem("property", Py::String(slot.property));
             dict.setItem("index", Py::Long(slot.index));
             dict.setItem("sub", Py::String(slot.sub));
             if (entry) {
-                for (const auto& [index, name] : entry->candidates) {
-                    candidates.append(Py::String(index));
-                    candidateNames.append(Py::String(name));
+                for (std::size_t c = 0; c < entry->candidates.size(); ++c) {
+                    candidates.append(Py::String(entry->candidates[c].first));
+                    candidateNames.append(Py::String(entry->candidates[c].second));
+                    candidateRoles.append(Py::String(
+                        c < entry->candidateRoles.size() ? entry->candidateRoles[c] : std::string()
+                    ));
+                    const double distance = c < entry->candidateDistances.size()
+                        ? entry->candidateDistances[c]
+                        : std::numeric_limits<double>::quiet_NaN();
+                    if (std::isnan(distance)) {
+                        candidateDistances.append(Py::None());
+                    }
+                    else {
+                        candidateDistances.append(Py::Float(distance));
+                    }
                 }
                 for (const auto& piece : entry->pieces) {
                     pieces.append(Py::String(piece.first));
@@ -1439,6 +1455,8 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             }
             dict.setItem("candidates", candidates);
             dict.setItem("candidate_names", candidateNames);
+            dict.setItem("candidate_roles", candidateRoles);
+            dict.setItem("candidate_distances", candidateDistances);
             dict.setItem("pieces", pieces);
             list.append(dict);
         }

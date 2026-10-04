@@ -852,12 +852,31 @@ def drawFeature(rng, spec, insert=False):
     return Feature(fid, kind, tip, label=rng.choice(labels))
 
 
+def shiftedOntoItself(region, dx, dy):
+    """Whether moving the region by (dx, dy) puts one of its sides where the opposite one was:
+    by its own width along X, or its own depth along Y. The moved side's edges then have another
+    edge at their old place, which the reference solver breaks as ambiguous (ops#105), while the
+    oracle follows the name. The plan is replayed in every configuration, so such a move isn't
+    drawn; RectangleShiftedByWidth (moves.py) tests it."""
+    x0, y0, x1, y1 = region
+    return (dy == 0 and abs(dx) == x1 - x0) or (dx == 0 and abs(dy) == y1 - y0)
+
+
+def raisedByAPocketDepth(spec, height):
+    """Whether the block's new height moves its top by a pocket's depth: the pocket's rim then
+    lies where its floor was, or its floor where its rim was, and the reference solver breaks a
+    reference to either as ambiguous (ops#105; PocketRimRaisedByItsDepth in moves.py)."""
+    return any(f.kind == "pocket" and abs(height - spec.H) == f.size for f in spec.features)
+
+
 def drawEdit(rng, spec):
     kind = weighted(rng, [("block", 3), ("feature", 3), ("notch", 1.5), ("cut", 1),
                           ("insert", 1.5), ("delete", 1.5), ("add", 1.5)])
     if kind == "block":
         key = rng.choice(("W", "D", "H"))
         value = uniform(rng, *LIMITS[key])
+        if key == "H" and raisedByAPocketDepth(spec, value):
+            return None
         return BlockSize(key, value) if value != getattr(spec, key) else None
     if kind == "feature":
         sized = [f for f in spec.features if f.kind != "marker" and f.kind != "external"]
@@ -867,6 +886,8 @@ def drawEdit(rng, spec):
         if f.kind in ("boss", "pocket", "hole") and rng.random() < 0.5:
             dx, dy = uniform(rng, -4, 4), uniform(rng, -4, 4)
             if dx == dy == 0:
+                return None
+            if f.kind != "hole" and shiftedOntoItself(f.region, dx, dy):
                 return None
             return FeatureMove(f.fid, dx, dy, f"move {f.name} by ({dx:g}, {dy:g})")
         if f.kind == "boss":

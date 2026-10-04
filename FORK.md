@@ -125,7 +125,8 @@ names it.
 | `fix/101-v2-open-walk` | fix | ops#101 | - | `integration` `a4068e7b60` | `6c82663a0f` (fork PR 95), 2026-10-03 | never (fork naming) |
 | `fix/93-pattern-spacings2` | fix | ops#93 | - | `integration` `6c82663a0f` | `f152316458` (fork PR 96), 2026-10-03 | upstream's `LinearPatternExtension` gives `Spacings2` a default without the `0.0` entry |
 | `fix/106-variant-topology` | fix | ops#106 | - | `integration` `6c82663a0f` | `3757a5ec6a` (fork PR 97), 2026-10-03 | never (fork code: the ops#42 retarget is the fork's) |
-| `fix/88-solver-multimatch-reopen` | fix | ops#88 | - | `integration` `3757a5ec6a` | (fork PR 98) | never (fork test harness) |
+| `fix/88-solver-multimatch-reopen` | fix | ops#88 | - | `integration` `3757a5ec6a` | `5d00624adf` (fork PR 98), 2026-10-03 | never (fork test harness) |
+| `feat/105-tier0-geometry-check` | feat | ops#105 | - | `integration` `5d00624adf` | (fork PR 100) | never (fork naming: the reference solver is the fork's) |
 
 ## Fork-only commits in carried topics
 

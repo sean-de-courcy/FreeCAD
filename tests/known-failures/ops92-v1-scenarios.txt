@@ -85,3 +85,19 @@ cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_3
 cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_60_30_face_V1
 cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsReopened.test_sketch_00_30_face_V1
 cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsReopened.test_sketch_30_30_face_V1
+
+reason: ops#105's moved-element scenarios: V1, like V2, follows the moved element's name where the solver breaks the reference as ambiguous
+cli  PartDesignTests.TestNamingScenarios.BossMovedOntoOther.test_edge_b_V1
+cli  PartDesignTests.TestNamingScenarios.BossSideFaceTradePlaces.test_face_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossVertexTradePlaces.test_vertex_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlaces.test_edge_b_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_b_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesOneFillet.test_edges_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_a_V1
+cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_b_V1
+cli  PartDesignTests.TestNamingScenarios.ExternalBossTradePlaces.test_external_a_V1
+cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubled.test_instance3_edge_V1
+cli  PartDesignTests.TestNamingScenarios.PocketRimRaisedByItsDepth.test_rim_edge_V1
+cli  PartDesignTests.TestNamingScenarios.RectangleShiftedByWidth.test_right_top_edge_V1
