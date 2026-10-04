@@ -42,7 +42,7 @@ in a child `FreeCADCmd` that has built nothing.
 - TestNamingSavePlain: plain V2 and V1 files don't change by a byte once the process has interned
   names: the child saves each model before and after it has opened an interned file. And the
   V2i file is no bigger than the V2 one: its Document.xml and maps, deflated, within 2 % and
-  a fixed frame.
+  a fixed allowance.
 - TestNamingSaveCrossDoc: the cross-document scenarios (Scenarios/crossdoc.py) in V2i, and the
   mixed ones in V2 too (a plain document whose binders hold an interned document's names): built
   and saved here, opened, judged, edited and judged again in the child. The references are
@@ -78,9 +78,10 @@ REF = re.compile(r"~([0-9a-v]{13})")
 # character, so no part of a 13-character ID is one
 INDEX = re.compile(r"~([0-9]{1,12})(?![0-9a-v])")
 INLINE_MAP = re.compile(r'<ElementMap2 count="\d+">.*?</ElementMap2>', re.S)
-# V2i's Document.xml and maps, deflated, against V2's (t2-size-design.md): within 2 %, plus
-# what any V2i file adds once (the NameTable element's frame and the InternNames property),
-# which decides on the smallest dump models (about 2.5 KB)
+# V2i's Document.xml and maps, deflated, against V2's (t2-size-design.md): within 2 %, plus a
+# fixed allowance. On the smallest dump models (about 2.5 KB, a handful of short V2 names) the
+# table costs up to about 220 bytes and the maps save as little as 60: 6 to 131 bytes over V2,
+# measured 2026-10-04. T2's targets are for files above 1 MB.
 SIZE_RATIO = 1.02
 SIZE_FRAME = 128
 TABLE = re.compile(
