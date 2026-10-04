@@ -82,6 +82,11 @@ struct RetargetCheck
     Data::ElementFingerprint before;
 };
 static std::unordered_map<const PropertyLinkBase*, std::vector<RetargetCheck>> _RetargetChecks;
+// Checks read from a file, by sub index, until onContainerRestored() holds them (ops#109): a file
+// saved before a sub's first resolution on the new target keeps its check.
+static std::unordered_map<const PropertyLinkBase*,
+                          std::vector<std::pair<std::size_t, Data::ElementFingerprint>>>
+    _RestoredRetargetChecks;
 
 // Whether the element an index names on a link's new target agrees with the one the reference
 // named before the retarget (ops#106): the same type and kind, and the same direction (a plane's
@@ -101,6 +106,7 @@ PropertyLinkBase::~PropertyLinkBase()
     unregisterLabelReferences();
     unregisterElementReference();
     _RetargetChecks.erase(this);
+    _RestoredRetargetChecks.erase(this);
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -2038,6 +2044,83 @@ static void holdRetargetChecks(const PropertyLinkBase* prop, std::vector<Retarge
     checks.clear();
 }
 
+#define ATTR_RETARGET "retarget"
+
+// The saved form of a link retarget's held check (ops#106, ops#109): the old element's
+// fingerprint, on an index-only sub that hasn't resolved on the link's new target yet. Written in
+// every document, solver documents included: their saved fingerprint doesn't stop the index from
+// landing on another kind of element.
+static void writeRetargetCheck(Base::Writer& writer,
+                               const PropertyLinkBase* prop,
+                               const App::DocumentObject* obj,
+                               const std::string& sub,
+                               const PropertyLinkBase::ShadowSub& shadow)
+{
+    auto checks = _RetargetChecks.find(prop);
+    if (!shadow.newName.empty() || checks == _RetargetChecks.end()) {
+        return;
+    }
+    for (const auto& check : checks->second) {
+        if (check.obj == obj && check.sub == sub) {
+            writer.Stream() << "\" " ATTR_RETARGET "=\""
+                            << Base::Persistence::encodeAttribute(check.before.toString());
+            return;
+        }
+    }
+}
+
+// Reads the saved check of the sub at index (see writeRetargetCheck()) into restored.
+static void readRetargetCheck(Base::XMLReader& reader,
+                              std::size_t index,
+                              std::vector<std::pair<std::size_t, Data::ElementFingerprint>>& restored)
+{
+    if (!reader.hasAttribute(ATTR_RETARGET)) {
+        return;
+    }
+    auto fingerprint =
+        Data::ElementFingerprint::fromString(reader.getAttribute<const char*>(ATTR_RETARGET));
+    if (fingerprint.isValid()) {
+        restored.emplace_back(index, std::move(fingerprint));
+    }
+}
+
+// Keeps a restored property's checks for its onContainerRestored(), in place of any it held.
+static void keepRestoredRetargetChecks(
+    const PropertyLinkBase* prop,
+    std::vector<std::pair<std::size_t, Data::ElementFingerprint>>&& restored)
+{
+    _RetargetChecks.erase(prop);
+    if (restored.empty()) {
+        _RestoredRetargetChecks.erase(prop);
+    }
+    else {
+        _RestoredRetargetChecks[prop] = std::move(restored);
+    }
+}
+
+// Holds a restored property's checks for its subs (references to objs, or all to obj) before
+// they are registered, so that their first resolution runs them as in the session that saved
+// them. A sub whose object wasn't restored drops its check.
+static void holdRestoredRetargetChecks(const PropertyLinkBase* prop,
+                                       App::DocumentObject* obj,
+                                       const std::vector<App::DocumentObject*>* objs,
+                                       const std::vector<std::string>& subs)
+{
+    auto restored = _RestoredRetargetChecks.find(prop);
+    if (restored == _RestoredRetargetChecks.end()) {
+        return;
+    }
+    std::vector<RetargetCheck> checks;
+    for (auto& [index, fingerprint] : restored->second) {
+        auto target = objs ? (index < objs->size() ? (*objs)[index] : nullptr) : obj;
+        if (target && index < subs.size()) {
+            checks.push_back({target, subs[index], std::move(fingerprint)});
+        }
+    }
+    _RestoredRetargetChecks.erase(restored);
+    holdRetargetChecks(prop, checks);
+}
+
 // The reference solver's pass 1 (ops#7) for one property's references: the exact lookup (in a
 // solver document, _updateElementReference() does nothing more), then an entry for each
 // reference that is missing (just now, or already) or resolved exactly. The references of
@@ -2159,6 +2242,7 @@ void PropertyLinkSub::afterRestore()
 void PropertyLinkSub::onContainerRestored()
 {
     unregisterElementReference();
+    holdRestoredRetargetChecks(this, _pcLinkSub, nullptr, _cSubList);
     if (!_pcLinkSub || !_pcLinkSub->isAttachedToDocument()) {
         return;
     }
@@ -2586,6 +2670,7 @@ void PropertyLinkSub::Save(Base::Writer& writer) const
         if (saveFingerprints && i < _ExpandedFrom.size() && !_ExpandedFrom[i].empty()) {
             writer.Stream() << "\" " ATTR_FROM "=\"" << encodeAttribute(_ExpandedFrom[i]);
         }
+        writeRetargetCheck(writer, this, _pcLinkSub, _cSubList[i], shadow);
         writer.Stream() << "\"/>" << endl;
     }
     writer.decInd();
@@ -2620,6 +2705,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     std::vector<ShadowSub> shadows(count);
     std::vector<std::string> fingerprints(count);
     std::vector<std::string> froms(count);
+    std::vector<std::pair<std::size_t, Data::ElementFingerprint>> checks;
     bool restoreLabel = false;
     // Sub may store '.' separated object names, so be aware of the possible mapping when import
     for (int i = 0; i < count; i++) {
@@ -2627,6 +2713,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         if (reader.hasAttribute(ATTR_FINGERPRINT)) {
             fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
         }
+        readRetargetCheck(reader, i, checks);
         if (reader.hasAttribute(ATTR_FROM)) {
             froms[i] = reader.getAttribute<const char*>(ATTR_FROM);
             if (auto* remap = Data::NameRemap::active()) {
@@ -2652,6 +2739,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     setFlag(LinkRestoreLabel, restoreLabel);
 
     reader.readEndElement("LinkSub");
+    keepRestoredRetargetChecks(this, std::move(checks));
 
     if (pcObject) {
         setValue(pcObject, std::move(values), std::move(shadows));
@@ -3462,6 +3550,7 @@ void PropertyLinkSubList::afterRestore()
 void PropertyLinkSubList::onContainerRestored()
 {
     unregisterElementReference();
+    holdRestoredRetargetChecks(this, nullptr, &_lValueList, _lSubList);
     for (size_t i = 0; i < _lSubList.size(); ++i) {
         _registerElementReference(_lValueList[i], _lSubList[i], _ShadowSubList[i]);
     }
@@ -3651,6 +3740,7 @@ void PropertyLinkSubList::Save(Base::Writer& writer) const
         if (saveFingerprints && i < (int)_Fingerprints.size() && !_Fingerprints[i].empty()) {
             writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
         }
+        writeRetargetCheck(writer, this, obj, _lSubList[i], shadow);
         writer.Stream() << "\"/>" << endl;
     }
 
@@ -3676,6 +3766,7 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
     DocumentObject* father = freecad_cast<DocumentObject*>(getContainer());
     App::Document* document = father ? father->getDocument() : nullptr;
     std::vector<int> mapped;
+    std::vector<std::pair<std::size_t, Data::ElementFingerprint>> checks;
     bool restoreLabel = false;
     for (int i = 0; i < count; i++) {
         reader.readElement("Link");
@@ -3686,6 +3777,7 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
         // Property not in an object!
         DocumentObject* child = document ? document->getObject(name.c_str()) : nullptr;
         if (child) {
+            readRetargetCheck(reader, values.size(), checks);
             values.push_back(child);
             shadows.emplace_back();
             fingerprints.emplace_back(reader.hasAttribute(ATTR_FINGERPRINT)
@@ -3718,6 +3810,7 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
     setFlag(LinkRestoreLabel, restoreLabel);
 
     reader.readEndElement("LinkSubList");
+    keepRestoredRetargetChecks(this, std::move(checks));
 
     // assignment
     setValues(values, SubNames, std::move(shadows));
@@ -5062,6 +5155,7 @@ void PropertyXLink::onContainerRestored()
 {
     // It doesn't unregister first, so drop the solver's report here (ops#7).
     ReferenceReport::clear(this);
+    holdRestoredRetargetChecks(this, _pcLink, nullptr, _SubList);
     if (!_pcLink || !_pcLink->isAttachedToDocument()) {
         return;
     }
@@ -5220,6 +5314,7 @@ void PropertyXLink::Save(Base::Writer& writer) const
         if (saveFingerprints && i < _Fingerprints.size() && !_Fingerprints[i].empty()) {
             writer.Stream() << "\" " ATTR_FINGERPRINT "=\"" << encodeAttribute(_Fingerprints[i]);
         }
+        writeRetargetCheck(writer, this, _pcLink, _SubList[i], _ShadowSubList[i]);
     };
     if (_SubList.empty()) {
         writer.Stream() << "\"/>" << std::endl;
@@ -5328,11 +5423,13 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
     std::vector<ShadowSub> shadows;
     std::vector<std::string> fingerprints;
     std::vector<int> mapped;
+    std::vector<std::pair<std::size_t, Data::ElementFingerprint>> checks;
     bool restoreLabel = false;
     if (reader.hasAttribute("sub")) {
         if (reader.hasAttribute(ATTR_MAPPED)) {
             mapped.push_back(0);
         }
+        readRetargetCheck(reader, 0, checks);
         subs.emplace_back();
         auto& subname = subs.back();
         shadows.emplace_back();
@@ -5363,6 +5460,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
             if (reader.hasAttribute(ATTR_FINGERPRINT)) {
                 fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
             }
+            readRetargetCheck(reader, i, checks);
             shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
                 subs[i] = shadows[i].newName =
@@ -5382,6 +5480,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         reader.readEndElement("XLink");
     }
     setFlag(LinkRestoreLabel, restoreLabel);
+    keepRestoredRetargetChecks(this, std::move(checks));
 
     if (name.empty()) {
         setValue(nullptr);
