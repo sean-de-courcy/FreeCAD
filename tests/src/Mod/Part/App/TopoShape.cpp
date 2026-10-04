@@ -400,6 +400,83 @@ TEST_F(TopoShapeTest, retagNamesAShapeWithoutMapV2)
     EXPECT_EQ(names.size(), 26);
 }
 
+TEST_F(TopoShapeTest, retagAppendsBoundarySectionV2)
+{
+    // ops#56: a shape that crosses into another document (the external postfix, as an App::Link,
+    // a path hop or a SubShapeBinder there passes it) gets a boundary section on every name,
+    // tagged with the local object: `<name>|_;_;<tag>;EXT;0;<type>;0;_;_`
+    auto boundary = [](long tag, char type) {
+        return std::string(Data::NAME_SECTION_DELIMINATOR) + "_;_;" + std::to_string(tag)
+            + ";EXT;0;" + type + ";0;_;_";
+    };
+    auto unmapped = [](const Data::IndexedName& element, long tag) {
+        return Data::MappedName::makeEncodedSection(
+            {element.toString()}, std::vector<Data::MappedName> {}, static_cast<int>(tag), "MKR",
+            0, element.getType()[0], 0, {"IDX", "SRC"});
+    };
+    //   a shape with a map (tag 5): its face's name, and a second name of the same face
+    Part::TopoShape mapped(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 5L);
+    auto name = Data::MappedName::makeUnmappedName({"Face1"}, 5, "XTR", 'F');
+    auto second = Data::MappedName::makeUnmappedName({"Face1"}, 5, "PSM", 'F');
+    mapped.setElementName(face1, name, 5);
+    mapped.setElementName(face1, second, 5);
+
+    // Act and assert
+    //   across documents: every name gets the section, in the element's order
+    Part::TopoShape linked(mapped);
+    linked.reTagElementMap(7, nullptr, Data::POSTFIX_EXTERNAL_TAG);
+    EXPECT_EQ(linked.Tag, 7);
+    auto names = linked.getElementMappedNames(face1);
+    ASSERT_EQ(names.size(), 2);
+    EXPECT_EQ(names[0].first.toString(), name.toString() + boundary(7, 'F'));
+    EXPECT_EQ(names[1].first.toString(), second.toString() + boundary(7, 'F'));
+    //   the shape it was copied from keeps its names
+    EXPECT_EQ(mapped.getMappedName(face1), name);
+    //   with a link array's postfix after the external one, as a Link passes it
+    Part::TopoShape element(mapped);
+    const std::string arrayPostfix =
+        std::string(Data::POSTFIX_EXTERNAL_TAG) + Data::ELEMENT_MAP_PREFIX + ":I2";
+    element.reTagElementMap(7, nullptr, arrayPostfix.c_str());
+    EXPECT_EQ(element.getMappedName(face1).toString(), name.toString() + boundary(7, 'F'));
+    //   within a document, without a postfix or with a link array's: unchanged
+    Part::TopoShape local(mapped);
+    local.reTagElementMap(7, nullptr);
+    EXPECT_EQ(local.getMappedName(face1), name);
+    Part::TopoShape arrayElement(mapped);
+    arrayElement.reTagElementMap(7, nullptr, ";:I2");
+    EXPECT_EQ(arrayElement.getMappedName(face1), name);
+
+    //   a shape without a map (tag 1): named as mapSubElement() names it, then the section
+    for (long linkTag : {7L, 1L}) {
+        // tag 1 to tag 1: the same form, so the names don't depend on the two IDs being equal
+        Part::TopoShape box(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+        ASSERT_EQ(box.getElementMapSize(), 0);
+        box.reTagElementMap(linkTag, nullptr, Data::POSTFIX_EXTERNAL_TAG);
+        EXPECT_EQ(box.Tag, linkTag);
+        std::set<std::string> boxNames;
+        for (const char* type : {"Face", "Edge", "Vertex"}) {
+            const auto count = static_cast<int>(box.countSubElements(type));
+            for (int index = 1; index <= count; ++index) {
+                Data::IndexedName boxElement(type, index);
+                const auto boxName = box.getMappedName(boxElement).toString();
+                EXPECT_EQ(boxName, unmapped(boxElement, 1) + boundary(linkTag, type[0]));
+                EXPECT_EQ(box.getIndexedName(Data::MappedName(boxName)), boxElement);
+                boxNames.insert(boxName);
+            }
+        }
+        EXPECT_EQ(box.getElementMapSize(), 26);
+        EXPECT_EQ(boxNames.size(), 26);
+    }
+    //   within a document, tag 1 to tag 1 names nothing, as before
+    Part::TopoShape own(App::HistoryAlgorithm::V2, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    own.reTagElementMap(1, nullptr);
+    EXPECT_EQ(own.getElementMapSize(), 0);
+    //   V1 keeps its own form: the postfix, no section
+    Part::TopoShape v1(App::HistoryAlgorithm::V1, BRepPrimAPI_MakeBox(1.0, 2.0, 3.0).Shape(), 1L);
+    v1.reTagElementMap(7, nullptr, Data::POSTFIX_EXTERNAL_TAG);
+    EXPECT_EQ(v1.getMappedName(face1).toString().find("EXT"), std::string::npos);
+}
+
 TEST_F(TopoShapeTest, internNamesFollowCopiesAndTheMap)
 {
     // ops#6, Task 1 PR 4: the interned flag sits next to the shape's algorithm. PR 5: taking an

@@ -30,7 +30,7 @@ import tempfile
 
 import FreeCAD as App
 
-from .harness import Bound, Scenario, X, Z, face
+from .harness import Bound, Scenario, ScenarioError, X, Z, face
 from . import models as m
 
 
@@ -133,6 +133,66 @@ class CrossDocNotchMixedClosed(CrossDocNotchMixed):
     """As CrossDocNotchMixed, with A saved and closed while B changes, then opened again."""
 
     closed = True
+
+
+class CrossDocCollision(Scenario):
+    """Document B: a 10 mm box "Src" at the origin. Document A (the scenario's): a 10 mm box
+    "Decoy" at x = 100 with the same object ID as Src (both documents number their objects from
+    1), an App::Link "L" to Src, and "F", a Part::MultiFuse of [L, Decoy] (disjoint: two solids).
+    "Ref" names Decoy's +X face (x = 110) through F. The edit reorders F's inputs, [Decoy, L].
+    Before ops#56 the two boxes' faces had the same V2 names, told apart only by duplicate counts
+    that the reorder swapped: the reference moved to the linked box's +X face (x = 10)."""
+
+    area = "cross-document"
+    REFS = ("decoy_face",)
+    mixed = False  # for TestNamingSave's cross-document cases
+
+    @staticmethod
+    def decoyFace():
+        return face("plane", normal=X, through=(110, 0, 0))
+
+    def path(self, doc):
+        return os.path.join(self.folder, doc.Name + ".FCStd")
+
+    def build(self, doc):
+        self.folder = os.path.realpath(tempfile.mkdtemp(prefix="NamingScenario"))
+        target = self.newDocument("B")
+        # Object IDs from 1 in both documents, so that Src and Decoy get the same one
+        target.clearDocument()
+        doc.clearDocument()
+        target.saveAs(self.path(target))
+        src = target.addObject("Part::Box", "Src")
+        target.recompute()
+        target.save()
+        doc.saveAs(self.path(doc))  # a link to another file needs a saved owner
+        decoy = doc.addObject("Part::Box", "Decoy")
+        decoy.Placement.Base = App.Vector(100, 0, 0)
+        if decoy.ID != src.ID:
+            raise ScenarioError(f"Decoy's ID {decoy.ID} isn't Src's {src.ID}")
+        link = doc.addObject("App::Link", "L")
+        link.LinkedObject = src
+        fuse = doc.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = [link, decoy]
+        ref = doc.addObject("App::FeaturePython", "Ref")
+        ref.addProperty("App::PropertyLinkSub", "Face")
+        doc.recompute()
+        ref.Face = (fuse, tuple(self.names(fuse, self.decoyFace())))
+        self.recordRefs(doc)
+        doc.recompute()
+        doc.save()
+
+    def recordRefs(self, doc):
+        """Records the reference; also for a document saved by build() and opened in another
+        process (TestNamingSave)."""
+        self.ref("decoy_face", doc.getObject("Ref"), "Face", self.decoyFace)
+
+    def edit(self, doc):
+        fuse = doc.getObject("F")
+        fuse.Shapes = [doc.getObject("Decoy"), doc.getObject("L")]
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
 
 
 class CrossDocWidthClosed(CrossDocEdit):

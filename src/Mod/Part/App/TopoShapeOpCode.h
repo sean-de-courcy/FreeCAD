@@ -92,6 +92,9 @@ public:
     static constexpr const char* BSplineFace = "BSF";
     static constexpr const char* Split = "SPT";
     static constexpr const char* Evolve = "EVO";
+    // A V2 name's boundary section: the element came from another document through the
+    // section's object (an App::Link, a SubShapeBinder), ops#56
+    static constexpr const char* External = "EXT";
 };
 
 }  // namespace Part

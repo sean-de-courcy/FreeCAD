@@ -1738,6 +1738,10 @@ std::vector<MappedElement> ElementMap::getAll() const
 namespace
 {
 
+// The op code of a V2 name's boundary section (Part::OpCodes::External, ops#56): the element came
+// from another document through the section's object
+constexpr const char* externalOpCode = "EXT";
+
 // The last top-level section of \a name if it is a V2 section (nine fields and a decimal
 // iteration tag, stored in \a tag), decoded; otherwise null. The decode cache keeps its entries
 // for the whole process, so the pointer stays valid.
@@ -1788,6 +1792,9 @@ const DecodedMappedSection* lastV2Section(std::string_view name, long& tag)
  * If the walk stops at a step of this object, the result is \a masterTag and the last name
  * reached, as in V1; if it stops at once, there is no history (0). Each step makes the name
  * shorter, so the walk ends, and the original is never the name itself under its own tag.
+ * A boundary section of this object (EXT, ops#56) means the element came from another document
+ * through it: the name before it is that document's, and its tags are that document's object
+ * IDs, so its last tag is the source even when it equals \a masterTag.
  */
 long getElementHistoryV2(const MappedName& name,
                          long masterTag,
@@ -1808,13 +1815,14 @@ long getElementHistoryV2(const MappedName& name,
     std::vector<std::string> visited;  // the names after \a name, \a current last
     std::string source;
     long result = 0;
+    bool foreign = false;  // \a current is another document's name (after a boundary section)
     while (true) {
         long tag = 0;
         const DecodedMappedSection* section = lastV2Section(current, tag);
         if (!section) {
             break;
         }
-        if (tag != 0 && std::abs(tag) != std::abs(masterTag)) {
+        if (tag != 0 && (foreign || std::abs(tag) != std::abs(masterTag))) {
             result = tag;
             if (section->hasMapperFlag(MAPPER_FLAG_INDEX) && section->referenceIDs.size() == 1
                 && current.find(*NAME_SECTION_DELIMINATOR) == std::string::npos) {
@@ -1831,6 +1839,8 @@ long getElementHistoryV2(const MappedName& name,
         if (sections.size() > 1) {
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - current.data()) - 1;
             next = current.substr(0, prefixSize);
+            // Once past a boundary, everything before it is the other document's
+            foreign = foreign || section->opCode == externalOpCode;
         }
         else if ((section->hasMapperFlag(MAPPER_FLAG_GENERATED)
                   || section->hasMapperFlag(MAPPER_FLAG_PROJECTION))

@@ -910,15 +910,25 @@ void TopoShape::copyElementMap(const TopoShape& topoShape, const char* op)
     setMappedChildElements(children);
 }
 
-TopoShape& TopoShape::appendElementSection(long tag, const char* op, const std::string& index)
+namespace
 {
-    if (getHistoryAlgorithm() != App::HistoryAlgorithm::V2 || isNull() || !hasElementMap()) {
-        return *this;
+/// appendElementSection() with the section's mapper flags given
+void appendSection(
+    TopoShape& shape,
+    long tag,
+    const char* op,
+    const std::string& index,
+    const std::vector<std::string>& flags
+)
+{
+    if (shape.getHistoryAlgorithm() != App::HistoryAlgorithm::V2 || shape.isNull()
+        || !shape.hasElementMap()) {
+        return;
     }
     const std::vector<Data::MappedName> noNames;
     std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
     for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
-        const auto& typeName = shapeName(type);
+        const auto& typeName = TopoShape::shapeName(type);
         const std::string section = Data::NAME_SECTION_DELIMINATOR
             + Data::MappedName::makeEncodedSection(
                 {},
@@ -928,14 +938,14 @@ TopoShape& TopoShape::appendElementSection(long tag, const char* op, const std::
                 index,
                 typeName[0],
                 std::string("0"),
-                {Data::MAPPER_FLAG_MODIFIED},
+                flags,
                 noNames
             );
-        const auto count = static_cast<int>(countSubShapes(type));
+        const auto count = static_cast<int>(shape.countSubShapes(type));
         for (int i = 1; i <= count; ++i) {
             auto element = Data::IndexedName::fromConst(typeName.c_str(), i);
             // In the element's order, so its first name stays first
-            for (auto& [name, sids] : getElementMappedNames(element)) {
+            for (auto& [name, sids] : shape.getElementMappedNames(element)) {
                 Data::MappedName newName(name);
                 newName.append(section.c_str());
                 names.emplace_back(element, newName, sids);
@@ -943,10 +953,16 @@ TopoShape& TopoShape::appendElementSection(long tag, const char* op, const std::
         }
     }
     // A new map: the old one may be shared, e.g. with the shape this one is a copy of
-    resetElementMap(std::make_shared<Data::ElementMap>());
+    shape.resetElementMap(std::make_shared<Data::ElementMap>());
     for (const auto& [element, name, sids] : names) {
-        setElementName(element, name, Tag, &sids);
+        shape.setElementName(element, name, shape.Tag, &sids);
     }
+}
+}  // namespace
+
+TopoShape& TopoShape::appendElementSection(long tag, const char* op, const std::string& index)
+{
+    appendSection(*this, tag, op, index, {Data::MAPPER_FLAG_MODIFIED});
     return *this;
 }
 
@@ -8118,15 +8134,28 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
         return;
     }
 
-    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag && Tag != tag
+    // A shape that crosses into another document (an App::Link, a path hop or a SubShapeBinder
+    // there passes the external postfix): every name gets a boundary section tagged with the
+    // local object that brought it in, `<name>|_;_;<tag>;EXT;0;<type>;0;_;_`. A name keeps no
+    // other trace of the other document, and its tags are that document's object IDs, so
+    // without it the history walk takes them for local objects, and a local name with the same
+    // tags is the same name (ops#56)
+    const bool external = selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && postfix
+        && std::string_view(postfix).starts_with(Data::POSTFIX_EXTERNAL_TAG);
+
+    if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2 && Tag && (Tag != tag || external)
         && !getElementMapSize()) {
         // Another object's shape without an element map (e.g. a primitive reached through a
         // Link in another document, or a Body's tip): a V2 retag only fills untagged sections,
         // so it would name nothing. Name the elements as mapSubElement() names a single
-        // shape's, as the V1 retag above does (ops#35, ops#41)
+        // shape's, as the V1 retag above does (ops#35, ops#41). Across documents also when the
+        // two objects' IDs are equal, so the names don't depend on that coincidence (ops#56)
         TopoShape res(tag, hasher, _Shape, selectedHistoryAlgorithm);
         res.mapSubElement(*this);
         *this = res;
+        if (external) {
+            appendSection(*this, tag, Part::OpCodes::External, "0", {});
+        }
         return;
     }
 
@@ -8143,6 +8172,9 @@ void TopoShape::reTagElementMap(long tag, App::StringHasherRef hasher, const cha
             resetElementMap(map);
         }
         map->retagElementMap(tag);
+        if (external) {
+            appendSection(*this, tag, Part::OpCodes::External, "0", {});
+        }
     }
 }
 

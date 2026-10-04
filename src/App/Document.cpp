@@ -2480,6 +2480,11 @@ const std::string& Document::getCorrectElementMapVersion() {
         unsigned occ_ver {0x070200};
         ss << Data::ELEMENT_NAME_ENCODING_VERSION << '.' << std::hex << occ_ver << '.'
            << App::getHistoryAlgorithm(selectedHistoryAlgorithm) << "." << Data::ELEMENT_MAP_VERSION;
+        // X1: V2 names that crossed from another document end in a boundary section (ops#56), so
+        // a file saved before has other names there, and its references into them re-derive
+        if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
+            ss << ".X1";
+        }
         // Interned maps hold names in another form: a build or a document that expects the other
         // form sees a different version and asks for a recompute (ops#6). N2: their files hold
         // the references as indices into the file's table (NamingFormat 2).
