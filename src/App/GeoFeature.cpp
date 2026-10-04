@@ -289,7 +289,11 @@ void GeoFeature::onChanged(const Property* prop)
 
 void GeoFeature::onDocumentRestored()
 {
-    if (!getDocument()->testStatus(Document::Status::Importing)) {
+    // A shape restored from another version holds the file's here (PropertyPartShape::Restore()),
+    // so that its first rebuild re-derives the references into it from geometry (ops#103).
+    // Imported objects aren't seeded: they resolve by name.
+    if (!getDocument()->testStatus(Document::Status::Importing)
+        && _ElementMapVersion.getStrValue().empty()) {
         _ElementMapVersion.setValue(getCorrectElementMapVersion());
     }
     DocumentObject::onDocumentRestored();

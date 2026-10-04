@@ -41,6 +41,8 @@ masking, since a new document's object IDs start at a random offset. Three check
   a third child's, run without a seed.
 - TestNamingRepeated: the model is built 5 times in this process, and the dumps with element
   indexes must be identical.
+- TestNamingRevision: NamingGolden/REVISION records the fork's naming revision and a digest of the
+  V2 golden files, so V2 goldens regenerated without a new revision fail (ops#103).
 
 Each check also runs in V2i: a V2 document with InternNames on (ops#6, Task 1). Its names are
 dumped through `App.expandMappedName`, and the dump must equal V2's: TestNamingGolden compares it
@@ -54,14 +56,17 @@ forces that case (ops#52).
 
 Environment variables:
 - FREECAD_NAMING_GOLDEN_UPDATE=<dir>: TestNamingGolden writes the golden files into <dir> (the
-  source tree's NamingGolden folder) instead of comparing.
+  source tree's NamingGolden folder) instead of comparing. When V2 files change, bump the naming
+  revision and record REVISION as TestNamingRevision's message says.
 - FREECAD_NAMING_DUMP_DIR=<dir>: where a failing test writes its dumps (default: the temp dir).
 """
 
 import difflib
+import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -640,6 +645,68 @@ class TestNamingGolden(unittest.TestCase):
                 f"names differ from {fileName} (full dump with indexes: {path}):\n"
                 + _diff(expected, actual, "golden", "actual")
             )
+
+
+def goldenDigests():
+    """The SHA-256 of each V2 golden dump, by file name. The V1 dumps are FreeCAD's names (V1
+    files aren't migrated), and the interned IDs are a representation (`.N2`): neither needs a
+    new naming revision."""
+    digests = {}
+    for name in sorted(n for n in os.listdir(GOLDEN_DIR) if n.endswith(".V2.txt")):
+        with open(os.path.join(GOLDEN_DIR, name), "rb") as fh:
+            text = fh.read().replace(b"\r\n", b"\n")
+        digests[name] = hashlib.sha256(text).hexdigest()
+    return digests
+
+
+def buildRevision():
+    """This build's naming revision, from a new V2 document's element map version (`.F<n>`)."""
+    doc = App.newDocument("NamingDumpRevision")
+    try:
+        doc.HistoryAlgorithm = "V2"
+        version = doc.addObject("Part::Box", "Box").getCorrectElementMapVersion()
+    finally:
+        App.closeDocument(doc.Name)
+    match = re.search(r"\.F([0-9]+)", version)
+    return int(match.group(1)) if match else None
+
+
+class TestNamingRevision(unittest.TestCase):
+    """Existing V2 golden dumps change only with a new naming revision (ops#103, Q5).
+
+    `NamingGolden/REVISION` records the revision and a digest of each V2 golden file. When a
+    change regenerates them (`FREECAD_NAMING_GOLDEN_UPDATE`) and an existing file changes,
+    existing names changed: the build's revision (`ForkNamingRevision`, src/App/Document.cpp)
+    must go up, so that files saved before re-derive their references from geometry, and
+    REVISION is recorded again. A new or removed dump model needs only the record. The failure
+    message gives the lines to record. A name change the dump models don't reach still needs the
+    author's judgement (the pull request template's checklist)."""
+
+    def testGoldenDumpsMatchTheRevision(self):
+        revision, digests = None, {}
+        with open(os.path.join(GOLDEN_DIR, "REVISION"), encoding="utf-8") as fh:
+            for line in fh:
+                fields = line.split()
+                if fields and fields[0] == "revision":
+                    revision = int(fields[1])
+                elif fields and fields[0] == "digest":
+                    digests[fields[1]] = fields[2]
+        build, current = buildRevision(), goldenDigests()
+        record = "\n".join(
+            [f"revision {build}"] + [f"digest {name} {digest}" for name, digest in current.items()]
+        )
+        changed = sorted(n for n in digests.keys() & current.keys() if digests[n] != current[n])
+        if changed and revision == build:
+            self.fail(
+                "Existing V2 golden dumps changed (" + ", ".join(changed) + "), and the naming "
+                "revision didn't: bump ForkNamingRevision in src/App/Document.cpp, then record in "
+                "NamingGolden/REVISION:\n" + record
+            )
+        self.assertEqual(
+            (revision, digests),
+            (build, current),
+            "NamingGolden/REVISION doesn't match this build; record:\n" + record,
+        )
 
 
 class TestNamingSeeded(unittest.TestCase):

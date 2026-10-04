@@ -578,6 +578,29 @@ def _stripRetargetChecks(path):
             z.writestr(info, data)
 
 
+def _ageStamps(path):
+    """Rewrites the document file at `path` as a file of the previous naming revision (ops#103):
+    its shapes' element map versions end in `.F<n-1>` (V2 only; a V1 file has no revision)."""
+    doc = App.newDocument("VariantLinkRevision")
+    try:
+        doc.HistoryAlgorithm = "V2"
+        version = doc.addObject("Part::Box", "Box").getCorrectElementMapVersion()
+    finally:
+        App.closeDocument(doc.Name)
+    previous = ".F%d" % (int(re.search(r"\.F([0-9]+)", version).group(1)) - 1)
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info.filename)) for info in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in entries:
+            if info.filename == "Document.xml":
+                data = re.sub(
+                    rb'ElementMap="[^"]*"',
+                    lambda m: re.sub(rb"\.F[0-9]+", previous.encode(), m.group(0)),
+                    data,
+                )
+            z.writestr(info, data)
+
+
 # The reference properties of TestRetargetCheckSaved, and how each gives its reference to the
 # link's top face.
 REFERENCE_PROPS = {
@@ -652,6 +675,24 @@ class TestRetargetCheckSaved(VariantLinkTestBase):
                         self.assertIn(
                             "?", sub, "%s %s: %s isn't marked missing" % (msg, name, sub)
                         )
+
+    def test_check_survives_a_migration(self):
+        """Both files from the previous naming revision (ops#103): the first recompute
+        re-derives references from geometry, which leaves the check alone (it runs only on a
+        lookup by name); the check runs after it and passes, and the references name the top
+        face."""
+        for naming in NAMINGS:
+            with self.subTest(naming=naming):
+                path = self.saveInWindow(naming, None)
+                _ageStamps(path)
+                _ageStamps(os.path.join(self.dir, "VariantLinkPart.FCStd"))
+                link, subs = self.openAndRecompute(path)
+                for name, sub in subs.items():
+                    self.assertTopFace(link, sub, _box("Large"), naming + " " + name)
+                self.doc.save()
+                for name in REFERENCE_PROPS:
+                    saved = _savedProperty(self.doc.FileName, name)
+                    self.assertNotIn(' retarget="', saved, naming + " " + name)
 
     def test_same_topology_keeps_the_top(self):
         """Control: the Large variant has the Small one's faces; the check passes and the

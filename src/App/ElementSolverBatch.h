@@ -57,6 +57,9 @@ struct AppExport SolverEntry
     PropertyLinkBase::ElementPolicy policy = PropertyLinkBase::ElementPolicy::One;
     /// Exact: the bare mapped name the reference holds.
     std::string exactName;
+    /// Exact: the index the reference was stored at before pass 1's lookup (which writes the
+    /// resolved element's): a naming migration's choice among elements at its place (ops#103).
+    std::string storedIndex;
     /// The bare mapped name the reference was expanded from (Task 2 PR 7); empty if none, and
     /// always in a property that keeps no `from` (only PropertyLinkSub does).
     std::string from;
@@ -187,5 +190,22 @@ AppExport void setElementHintsFunction(ElementHintsFunction function);
 /// The bare mapped name in a shadow's new-style name (`Body.;<name>.Face3` -> `<name>`), or an
 /// empty string.
 AppExport std::string bareMappedName(const std::string& newStyleName);
+
+/// What a reverse update (an element map version change, e.g. a naming migration: ops#103) did
+/// to one reference: kept on its name's element, moved to the element its old geometry gives,
+/// or broken.
+enum class MigrationOutcome
+{
+    Kept,
+    Moved,
+    Broken,
+};
+
+/// Counts \a outcome for \a owner's document, for reportReferenceMigration().
+AppExport void countReferenceMigration(const DocumentObject* owner, MigrationOutcome outcome);
+
+/// One warning per document with its counts since the last call, if any; clears them. Called at
+/// the end of each recompute.
+AppExport void reportReferenceMigration();
 
 }  // namespace App

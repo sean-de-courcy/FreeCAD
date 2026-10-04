@@ -66,6 +66,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingRList.py
     PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestNamingSolver.py
+    PartDesignTests/TestNamingGate.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
 )
@@ -151,6 +152,7 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/PipeShell.V1.txt
     PartDesignTests/NamingGolden/PipeShell.V2.txt
     PartDesignTests/NamingGolden/PipeShell.V2i-ids.txt
+    PartDesignTests/NamingGolden/REVISION
     PartDesignTests/NamingGolden/Refine.V1.txt
     PartDesignTests/NamingGolden/Refine.V2.txt
     PartDesignTests/NamingGolden/Refine.V2i-ids.txt
