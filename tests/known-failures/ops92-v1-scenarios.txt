@@ -98,4 +98,5 @@ cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_a_V
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_b_V1
 cli  PartDesignTests.TestNamingScenarios.ExternalBossTradePlaces.test_external_a_V1
 cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubled.test_instance3_edge_V1
+cli  PartDesignTests.TestNamingScenarios.PocketRimRaisedByItsDepth.test_rim_edge_V1
 cli  PartDesignTests.TestNamingScenarios.RectangleShiftedByWidth.test_right_top_edge_V1

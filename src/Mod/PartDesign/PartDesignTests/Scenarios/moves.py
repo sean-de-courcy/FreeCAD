@@ -350,3 +350,44 @@ class LinearPitchDoubled(Scenario):
     def edit(self, doc):
         doc.LinearPattern.Offset = 20
         self.edited = True
+
+
+class PocketRimRaisedByItsDepth(Scenario):
+    """A block (0..20 x 0..20, 10 high) with a pocket (5..15 x 5..15, 3 deep) from its top, a
+    fillet (0.5) on the pocket's left rim edge (x = 5, z = 10). The block is raised by the
+    pocket's depth (10 -> 13): the rim edge moves up to z = 13 and the floor's left edge now lies
+    where it was (z = 10). By the rule, that is another element at the old place: the solver
+    breaks the reference, naming both (ops#105; the random sequences don't draw this edit)."""
+
+    area = "moves"
+    MULTI = True
+    REFS = ("rim_edge",)
+    edited = False
+
+    def leftEdgeAt(self, z):
+        return edge("line", direction=Y, through=(5, 0, z), contains=(5, 10, z))
+
+    def rimEdge(self):
+        if self.edited:
+            return Broken(self.leftEdgeAt(10), self.leftEdgeAt(13))
+        return self.leftEdgeAt(10)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 20), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        square = m.sketch(doc, "PocketSketch", m.rectangle(5, 5, 15, 15), body)
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        square.AttachmentSupport = [(pad, self.names(pad, top)[0])]
+        square.MapMode = "FlatFace"
+        pocket = m.pocket(body, square, 3)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, self.rimEdge()))
+        fillet.Radius = 0.5
+        self.ref("rim_edge", fillet, "Base", self.rimEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.Length = 13
+        self.edited = True
