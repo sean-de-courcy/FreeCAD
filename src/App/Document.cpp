@@ -295,8 +295,8 @@ struct NewDocumentSwitch
 
 constexpr std::array newDocumentSwitches {
     NewDocumentSwitch {&Document::ReferenceSolver, "ReferenceSolver", true, "FREECAD_REFERENCE_SOLVER"},
-    // Off for new documents too until ops#6's Q6.
-    NewDocumentSwitch {&Document::InternNames, "InternNames", false, "FREECAD_INTERN_NAMES"},
+    // On for new documents since ops#6's Q6; opened files keep what they saved (ops#100).
+    NewDocumentSwitch {&Document::InternNames, "InternNames", true, "FREECAD_INTERN_NAMES"},
 };
 
 bool testAidOn(const char* variable)
