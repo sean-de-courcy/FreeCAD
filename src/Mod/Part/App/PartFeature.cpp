@@ -73,6 +73,7 @@
 #include <App/ElementFingerprint.h>
 #include <App/ElementSolverBatch.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolver.h>
 #include <App/NameTable.h>
 #include <App/Placement.h>
 #include <App/Datums.h>
@@ -1112,6 +1113,77 @@ App::DocumentObject* Feature::getSubObject(
     }
 }
 
+// True if the history step from \a name, in a shape tagged \a shapeTag, goes through a boundary
+// section of the shape's own object (`|_;_;<shapeTag>;EXT;...`, ops#56): the name it reaches
+// came from another document, and its tag is an object ID there
+static bool crossesBoundary(const Data::MappedName& name, long shapeTag)
+{
+    std::string text = name.toString();
+    if (boost::starts_with(text, Data::ELEMENT_MAP_PREFIX)) {
+        text.erase(0, Data::ELEMENT_MAP_PREFIX_SIZE);
+    }
+    if (text.find(Data::NameTable::Marker) != std::string::npos) {
+        text = Data::NameTable::instance().toPlain(text);
+    }
+    auto sections = Data::NameAncestry::splitSections(text);
+    if (sections.size() < 2) {
+        return false;
+    }
+    const auto& last = Data::MappedName::getDecodedMappedName(std::string(sections.back()));
+    return last.size() == 1 && last.front().opCode == Part::OpCodes::External
+        && last.front().iterationTag == std::to_string(std::abs(shapeTag));
+}
+
+// The object with ID \a tag in the other document an imported name came from, for an \a owner
+// that isn't a link to it (a SubShapeBinder of another document's object, a group holding a link,
+// ops#56): the documents of the objects \a owner links to are searched, and an object counts
+// only if its shape has \a original, the name the history step reached. One such object, or null
+// (none, or several: the walk stops rather than guess).
+static App::DocumentObject* importedSource(
+    App::DocumentObject* owner,
+    long tag,
+    const Data::MappedName& original
+)
+{
+    std::set<App::Document*> docs;
+    for (auto obj : owner->getOutList()) {
+        auto linked = obj ? obj->getLinkedObject(true) : nullptr;
+        for (auto o : {obj, linked}) {
+            if (o && o->getDocument() != owner->getDocument()) {
+                docs.insert(o->getDocument());
+            }
+        }
+    }
+    App::DocumentObject* found = nullptr;
+    for (auto doc : docs) {
+        auto obj = doc->getObjectByID(std::abs(tag));
+        if (!obj) {
+            continue;
+        }
+        auto shape = Part::Feature::getTopoShape(
+            obj,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
+        bool has = false;
+        Data::IndexedName index(original.toString().c_str());
+        if (index) {
+            // An element of a shape without a map, named by its index (an IDX section's source)
+            has = index.getIndex() > 0
+                && static_cast<int>(shape.countSubShapes(index.getType())) >= index.getIndex();
+        }
+        else {
+            has = static_cast<bool>(shape.getIndexedName(original));
+        }
+        if (has) {
+            if (found) {
+                return nullptr;
+            }
+            found = obj;
+        }
+    }
+    return found;
+}
+
 static std::vector<std::pair<long, Data::MappedName>> getElementSource(
     App::DocumentObject* owner,
     TopoShape shape,
@@ -1142,6 +1214,7 @@ static std::vector<std::pair<long, Data::MappedName>> getElementSource(
         auto obj = owner;
         App::Document* doc = nullptr;
         if (owner) {
+            auto from = owner;
             doc = owner->getDocument();
             for (;; ++depth) {
                 auto linked = owner->getLinkedObject(false, nullptr, false, depth);
@@ -1162,7 +1235,13 @@ static std::vector<std::pair<long, Data::MappedName>> getElementSource(
                     doc = ownerGeoFeature->getDocument();
                 }
             }
-            obj = doc->getObjectByID(tag < 0 ? -tag : tag);
+            if (doc == from->getDocument() && crossesBoundary(ret.back().second, shape.Tag)) {
+                obj = importedSource(from, tag, original);
+                doc = obj ? obj->getDocument() : nullptr;
+            }
+            else {
+                obj = doc->getObjectByID(tag < 0 ? -tag : tag);
+            }
             if (type) {
                 for (auto& hist : history) {
                     if (shape.elementType(hist) != type) {
@@ -1256,6 +1335,7 @@ std::list<Data::HistoryItem> Feature::getElementHistory(
 
         App::DocumentObject* obj = nullptr;
         if (tag) {
+            auto from = feature;
             App::Document* doc = feature->getDocument();
             for (;; ++depth) {
                 auto linked = feature->getLinkedObject(false, nullptr, false, depth);
@@ -1274,7 +1354,14 @@ std::list<Data::HistoryItem> Feature::getElementHistory(
                     doc = ownerGeoFeature->getDocument();
                 }
             }
-            obj = doc->getObjectByID(std::abs(tag));
+            // A step out of an imported name, where the owner isn't a link that leads to its
+            // document (ops#56)
+            if (doc == from->getDocument() && crossesBoundary(element, shape.Tag)) {
+                obj = importedSource(from, tag, original);
+            }
+            else {
+                obj = doc->getObjectByID(std::abs(tag));
+            }
         }
         if (!recursive) {
             ret.emplace_back(obj, original);
@@ -1590,6 +1677,13 @@ static TopoShape _getTopoShape(
         return !lastLink || (hiddens.empty() && !App::GeoFeatureGroupExtension::isNonGeoGroup(o));
     };
 
+    // The postfix of a retag of a shape made in \a from's document for \a to: across documents,
+    // the external one, which gives every name a boundary section (ops#56)
+    auto boundary = [](const App::DocumentObject* from, const App::DocumentObject* to) {
+        return from && to && from->getDocument() != to->getDocument() ? Data::POSTFIX_EXTERNAL_TAG
+                                                                       : nullptr;
+    };
+
     if (canCache(obj) && PropertyShapeCache::getShape(obj, shape, subname)) {
         if (options.testFlag(ShapeOption::NoElementMap)) {
             shape.resetElementMap();
@@ -1742,7 +1836,11 @@ static TopoShape _getTopoShape(
         if (canCache(owner) && PropertyShapeCache::getShape(owner, shape)) {
             bool scaled = shape.transformShape(mat, false, true);
             if (owner->getDocument() != obj->getDocument()) {
-                shape.reTagElementMap(obj->getID(), obj->getDocument()->getStringHasher());
+                shape.reTagElementMap(
+                    obj->getID(),
+                    obj->getDocument()->getStringHasher(),
+                    Data::POSTFIX_EXTERNAL_TAG
+                );
                 PropertyShapeCache::setShape(obj, shape, subname);
             }
             else if (scaled || (linked != owner && linkMat.hasScale() != Base::ScaleType::NoScaling)) {
@@ -1778,7 +1876,7 @@ static TopoShape _getTopoShape(
         else {
             shape.transformShape(linkMat, false, true);
         }
-        shape.reTagElementMap(tag, hasher);
+        shape.reTagElementMap(tag, hasher, boundary(linked, owner));
     }
     else {
         // Construct a compound of sub objects
@@ -1795,7 +1893,11 @@ static TopoShape _getTopoShape(
             if (linked && linked != owner) {
                 baseShape = Feature::getTopoShape(linked, ShapeOption::NoFlag);
                 if (!link->getShowElementValue()) {
-                    baseShape.reTagElementMap(owner->getID(), owner->getDocument()->getStringHasher());
+                    baseShape.reTagElementMap(
+                        owner->getID(),
+                        owner->getDocument()->getStringHasher(),
+                        boundary(linked, owner)
+                    );
                 }
             }
         }
@@ -1872,7 +1974,11 @@ static TopoShape _getTopoShape(
                 }
                 else {
                     shape = baseShape.makeElementTransform(mat);
-                    shape.reTagElementMap(subObj->getID(), subObj->getDocument()->getStringHasher());
+                    shape.reTagElementMap(
+                        subObj->getID(),
+                        subObj->getDocument()->getStringHasher(),
+                        boundary(linked, subObj)
+                    );
                 }
             }
             shapes.push_back(shape);
@@ -1894,7 +2000,11 @@ static TopoShape _getTopoShape(
     if (owner != obj) {
         bool scaled = shape.transformShape(mat, false, true);
         if (owner->getDocument() != obj->getDocument()) {
-            shape.reTagElementMap(obj->getID(), obj->getDocument()->getStringHasher());
+            shape.reTagElementMap(
+                obj->getID(),
+                obj->getDocument()->getStringHasher(),
+                Data::POSTFIX_EXTERNAL_TAG
+            );
             scaled = true;  // force cache
         }
         if (canCache(obj) && scaled) {

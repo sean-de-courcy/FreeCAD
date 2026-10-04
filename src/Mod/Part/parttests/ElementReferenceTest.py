@@ -328,9 +328,10 @@ class ElementReferenceTest(unittest.TestCase):
 
     def testLinkInAnotherDocumentNamesMaplessSourceV2(self):
         """In V2, an App::Link in another document names every element of a source without an
-        element map (a Part::Box) as mapSubElement names an element of a single shape:
-        '<element>;_;<source ID>;MKR;0;<type>;0;IDX,SRC;_'. The cross-document retag named
-        nothing; FreeCAD 1.1.3's V1 names them all (ops#41)."""
+        element map (a Part::Box) as mapSubElement names an element of a single shape, then adds
+        the boundary section with the Link's ID (ops#56):
+        '<element>;_;<source ID>;MKR;0;<type>;0;IDX,SRC;_|_;_;<Link ID>;EXT;0;<type>;0;_;_'.
+        The cross-document retag named nothing; FreeCAD 1.1.3's V1 names them all (ops#41)."""
         # Arrange
         docB = self._newDocument("ElementRefB")
         docB.HistoryAlgorithm = "V2"
@@ -359,18 +360,168 @@ class ElementReferenceTest(unittest.TestCase):
             for index in range(1, len(elements) + 1):
                 element = f"{kind}{index}"
                 with self.subTest(element=element):
+                    # an interned name in its full form (V2i)
                     self.assertEqual(
-                        reverseMap.get(element),
+                        App.expandMappedName(reverseMap.get(element)),
                         App.makeEncodedSection(
                             referenceIDs=[element],
                             iterationTag=str(box.ID),
                             opCode="MKR",
                             elementType=element[0],
                             mapperFlags=["IDX", "SRC"],
+                        )
+                        + "|"
+                        + App.makeEncodedSection(
+                            iterationTag=str(link.ID),
+                            opCode="EXT",
+                            elementType=element[0],
                         ),
                     )
         self.assertEqual(shape.ElementMapSize, 26)
         self.assertEqual(len(set(reverseMap.values())), 26)
+
+    # ops#56: names that crossed from another document, where an object there and one here have
+    # the same ID. Both documents number their objects from 1 (clearDocument), so the first
+    # object in each gets ID 1.
+
+    def _numberedFromOne(self, name):
+        doc = self._newDocument(name)
+        doc.clearDocument()
+        doc.HistoryAlgorithm, doc.InternNames = self.MODE or ("V2", False)
+        doc.save()
+        return doc
+
+    def _linkedSource(self, size=10):
+        """Document Src56: a box "Src" (ID 1) at the origin, saved."""
+        src = self._numberedFromOne("Src56")
+        box = src.addObject("Part::Box", "Src")
+        box.Length = box.Width = box.Height = size
+        src.recompute()
+        src.save()
+        return box
+
+    @staticmethod
+    def _history(obj, sub):
+        """The objects of the element's history, as 'Document#Object', in order."""
+        chain = []
+        for item in obj.getElementHistory(sub, True, False, True):
+            who = item[0]
+            chain.append(who[0] if isinstance(who, tuple) else f"tag {who}")
+        return chain
+
+    def _checkCutHistory(self, collide):
+        # Arrange
+        box = self._linkedSource()
+        asm = self._numberedFromOne("Asm56")
+        if collide:
+            decoy = asm.addObject("Part::Box", "Decoy")
+        else:
+            # ID 1 used up by a deleted object: no object here has the source box's ID
+            asm.removeObject(asm.addObject("App::FeaturePython", "Filler").Name)
+        link = asm.addObject("App::Link", "L")
+        link.LinkedObject = box
+        tool = asm.addObject("Part::Box", "Tool")
+        tool.Length = tool.Width = tool.Height = 4
+        tool.Placement.Base = App.Vector(8, 8, 8)
+        cut = asm.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = link, tool
+        if not collide:
+            decoy = asm.addObject("Part::Box", "Decoy")
+        decoy.Length = decoy.Width = decoy.Height = 3
+        decoy.Placement.Base = App.Vector(100, 0, 0)
+
+        # Act
+        asm.recompute()
+
+        # Assert
+        self.assertEqual(decoy.ID == box.ID, collide)
+        self.assertAlmostEqual(cut.Shape.Volume, 1000 - 8)
+        self.assertEqual(len(cut.Shape.Faces), 9)
+        for index, face in enumerate(cut.Shape.Faces, 1):
+            sub = f"Face{index}"
+            # the tool's faces lie on the planes x, y or z = 8; the box's on 0 or 10
+            bound = face.BoundBox
+            fromTool = any(
+                abs(low - 8) < 1e-7 and abs(high - 8) < 1e-7
+                for low, high in (
+                    (bound.XMin, bound.XMax),
+                    (bound.YMin, bound.YMax),
+                    (bound.ZMin, bound.ZMax),
+                )
+            )
+            history = self._history(cut, sub)
+            with self.subTest(face=sub, history=history):
+                self.assertNotIn("Asm56#Decoy", history)
+                self.assertEqual(history[0], "Asm56#Cut")
+                self.assertEqual(history[-1], "Asm56#Tool" if fromTool else "Src56#Src")
+
+    def testCrossDocumentHistoryWithCollidingId(self):
+        """A Part::Cut of an App::Link to a box in another document, where a local box has the
+        box's ID: the faces from the linked box trace back through the Link to that box, never
+        to the local one, which shares no geometry with the Cut (ops#56)."""
+        self._checkCutHistory(collide=True)
+
+    def testCrossDocumentHistoryReachesTheSource(self):
+        """As testCrossDocumentHistoryWithCollidingId, with no local object with the box's ID:
+        the history reaches the box in the other document instead of stopping (ops#56)."""
+        self._checkCutHistory(collide=False)
+
+    def _checkFuseReorder(self, solver):
+        # Arrange
+        box = self._linkedSource()
+        asm = self._numberedFromOne("Asm56")
+        asm.ReferenceSolver = solver
+        decoy = asm.addObject("Part::Box", "Decoy")  # ID 1, as the linked box
+        decoy.Placement.Base = App.Vector(100, 0, 0)
+        link = asm.addObject("App::Link", "L")
+        link.LinkedObject = box
+        fuse = asm.addObject("Part::MultiFuse", "F")
+        fuse.Shapes = [link, decoy]
+        ref = asm.addObject("App::FeaturePython", "Ref")
+        ref.addProperty("App::PropertyLinkSub", "Face")
+        asm.recompute()
+        self.assertEqual(decoy.ID, box.ID)
+        ref.Face = (fuse, [self._faceFacingX(fuse.Shape, 110)])
+        asm.recompute()
+        # the two boxes' faces have distinct names, with no duplicate counts: the linked box's
+        # end in a boundary section with the Link's ID, the local box's don't
+        names = fuse.Shape.ElementReverseMap
+        boundary = f";{link.ID};EXT;0;F;0;_;_"
+        for index, face in enumerate(fuse.Shape.Faces, 1):
+            name = App.expandMappedName(names[f"Face{index}"])
+            linked = face.BoundBox.XMax < 50
+            with self.subTest(face=index, name=name):
+                self.assertEqual(name.endswith(boundary), linked)
+                self.assertEqual(App.getDecodedMappedName(name)[-1]["duplicateCount"], "0")
+
+        # Act
+        fuse.Shapes = [decoy, link]
+        asm.recompute()
+
+        # Assert
+        sub = ref.Face[1][0]
+        self.assertEqual(sub, self._faceFacingX(fuse.Shape, 110))
+
+    @staticmethod
+    def _faceFacingX(shape, x):
+        """The name of the face of `shape` on the plane at x that faces +x."""
+        for i, face in enumerate(shape.Faces, 1):
+            bound = face.BoundBox
+            if abs(bound.XMin - x) < 1e-7 and abs(bound.XMax - x) < 1e-7:
+                if face.normalAt(0, 0).x > 0.5:
+                    return f"Face{i}"
+        return None
+
+    def testCrossDocumentFuseKeepsReferenceAfterReorder(self):
+        """A Part::MultiFuse of an App::Link to a box in another document and a local box with
+        the box's ID, and a reference to the local box's +X face: after the fuse's inputs are
+        reordered, the reference still names that face (ops#56). Before, the boxes' faces had
+        the same names, and the reference moved to the linked box's +X face."""
+        self._checkFuseReorder(solver=False)
+
+    def testCrossDocumentFuseKeepsReferenceAfterReorderSolver(self):
+        """As testCrossDocumentFuseKeepsReferenceAfterReorder, with the reference solver on."""
+        self._checkFuseReorder(solver=True)
 
 
 class ElementReferenceTestV2i(ElementReferenceTest):

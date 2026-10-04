@@ -1227,6 +1227,83 @@ TEST_F(ElementMapTest, getElementHistoryV2)
     EXPECT_EQ(result.history, std::vector<std::string> {"Edge1;:H5,E"});
 }
 
+// The history of V2 names that crossed from another document (ops#56): a Link (tag 2) in this
+// document brings in the faces of a map-less box (tag 1 in its own document) and of a fillet
+// there (tag 4); a feature (tag 7) uses them unchanged.
+TEST_F(ElementMapTest, getElementHistoryV2StepsThroughExt)
+{
+    // Arrange
+    auto section = [](const std::vector<std::string>& refs,
+                      const std::vector<Data::MappedName>& linked,
+                      int tag,
+                      const char* op,
+                      char type,
+                      const std::vector<std::string>& flags) {
+        return Data::MappedName(
+            Data::MappedName::makeEncodedSection(refs, linked, tag, op, 0, type, 0, flags, {}));
+    };
+    auto join = [](const Data::MappedName& prefix, const Data::MappedName& last) {
+        return Data::MappedName(prefix.toString() + Data::NAME_SECTION_DELIMINATOR
+                                + last.toString());
+    };
+    Data::ElementMap map;
+    struct Result
+    {
+        long tag;
+        std::string original;
+        std::vector<std::string> history;
+    };
+    auto historyOf = [&](const Data::MappedName& name, long masterTag) {
+        Data::MappedName original;
+        std::vector<Data::MappedName> history;
+        Result result {map.getElementHistory(name, masterTag, &original, &history), "", {}};
+        result.original = original.toString();
+        for (const auto& step : history) {
+            result.history.push_back(step.toString());
+        }
+        return result;
+    };
+    auto boundary = [&](int tag) { return section({}, {}, tag, "EXT", 'F', {}); };
+    auto boxFace = section({"Face6"}, {}, 1, "MKR", 'F', {"IDX", "SRC"});
+    auto filletFace = join(boxFace, section({}, {}, 4, "FLT", 'F', {"MOD"}));
+    auto imported = join(boxFace, boundary(2));
+
+    // Act and assert
+    //   in the feature: the face came unchanged from the Link, under the same name
+    auto result = historyOf(imported, 7);
+    EXPECT_EQ(result.tag, 2);
+    EXPECT_EQ(result.original, imported.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   in the Link: the box face in the other document, by its index there
+    result = historyOf(imported, 2);
+    EXPECT_EQ(result.tag, 1);
+    EXPECT_EQ(result.original, "Face6");
+    EXPECT_EQ(result.history, std::vector<std::string> {boxFace.toString()});
+    //   a modified face of the other document: the fillet there
+    result = historyOf(join(filletFace, boundary(2)), 2);
+    EXPECT_EQ(result.tag, 4);
+    EXPECT_EQ(result.original, filletFace.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   the Link's ID equals the box's: the prefix is still the other document's, so its tag
+    //   is the source, not a step of the Link
+    auto sameId = join(boxFace, boundary(1));
+    result = historyOf(sameId, 1);
+    EXPECT_EQ(result.tag, 1);
+    EXPECT_EQ(result.original, "Face6");
+    EXPECT_EQ(result.history, std::vector<std::string> {boxFace.toString()});
+    //   two boundaries: a Link (tag 9) to the Link in the other document (tag 2) steps to it
+    auto twice = join(imported, boundary(9));
+    result = historyOf(twice, 9);
+    EXPECT_EQ(result.tag, 2);
+    EXPECT_EQ(result.original, imported.toString());
+    EXPECT_TRUE(result.history.empty());
+    //   a split piece this shape made of its own face is still a step of this shape
+    auto piece = join(section({"Face1"}, {}, 2, "XTR", 'F', {"IDX", "SRC"}),
+                      section({}, {}, 2, "CUT", 'F', {"MOD"}));
+    result = historyOf(piece, 2);
+    EXPECT_EQ(result.tag, 2);
+}
+
 // Interned maps (ops#6, Task 1 PR 4). Nothing in FreeCAD sets the flag yet.
 namespace
 {
