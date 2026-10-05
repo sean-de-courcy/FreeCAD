@@ -122,6 +122,14 @@ def subShadow(xml, index):
     return found[0]
 
 
+def savedProfile(path):
+    """Pad3's saved profile: its `<Sub .../>` elements."""
+    xml = readFile(path)["Document.xml"].decode("utf-8")
+    pad3 = xml.index('<Object name="Pad3"')  # in ObjectData
+    at = xml.index('<Property name="Profile"', pad3)
+    return re.findall(r"<Sub [^>]*/>", xml[at : xml.index("</Property>", at)])
+
+
 def stamps(path, geometryOnly=False):
     """The element map versions the file's shapes are stamped with: every shape property's, or
     only the objects' geometry (`Shape`)."""
@@ -311,6 +319,69 @@ class TestNamingGate(NamingGateTestBase):
         doc.recompute()
         self.assertEqual(pad3.Profile[1], ["?" + faceC])
 
+    def brokenByTheGate(self, config):
+        """The geometric miss's file after its migration: Pad3's profile broken at FaceC, index
+        only. Returns (the open document, FaceC, the file's path)."""
+        path, faceC, faceD, shadowD = self.facePads(config)
+        self.edit(path, move=(faceC, faceD, shadowD), length=6)
+        doc = self.open(path)
+        doc.recompute()
+        self.assertEqual(doc.getObject("Pad3").Profile[1], ["?" + faceC], "the setup")
+        return doc, faceC, path
+
+    def assertBrokenInFile(self, path, faceC):
+        """The file holds Pad3's profile broken at FaceC, index only: no shadow."""
+        subs = savedProfile(path)
+        self.assertEqual(len(subs), 1, subs)
+        self.assertIn('value="?%s"' % faceC, subs[0])
+        self.assertNotIn("shadow", subs[0])
+
+    def brokenStaysThroughReverseUpdates(self, config):
+        """A reference the migration broke stays broken at its index through later reverse
+        updates in the session (two InternNames switches) and recomputes (ops#123: the first
+        reverse update emptied the sub)."""
+        # Arrange
+        doc, faceC, path = self.brokenByTheGate(config)
+        pad3 = doc.getObject("Pad3")
+        intern = doc.InternNames
+
+        # Act and assert
+        for step in ("forward", "switch", "switch back"):
+            if step == "forward":
+                doc.getObject("Pad2").touch()
+            else:
+                doc.InternNames = not doc.InternNames
+            doc.recompute()
+            self.assertEqual(pad3.Profile[1], ["?" + faceC], step)
+        self.assertEqual(doc.InternNames, intern)
+        doc.save()
+        self.assertBrokenInFile(path, faceC)
+
+    def brokenStaysAtTheNextMigration(self, config):
+        """A file that holds a reference broken by one migration, met by the next: the reference
+        stays broken at its index, in the session and in the file saved after it (ops#123: the
+        sub was emptied, and saved empty)."""
+        # Arrange
+        doc, faceC, path = self.brokenByTheGate(config)
+        doc.getObject("Pad2").touch()
+        doc.recompute()
+        doc.save()
+        App.closeDocument(doc.Name)
+        files = readFile(path)
+        files["Document.xml"] = ageStamps(files["Document.xml"].decode("utf-8")).encode("utf-8")
+        writeFile(path, files)
+
+        # Act
+        doc = self.open(path)
+        doc.recompute()
+
+        # Assert
+        pad3 = doc.getObject("Pad3")
+        self.assertEqual(pad3.Profile[1], ["?" + faceC])
+        self.assertFalse(pad3.isValid())
+        doc.save()
+        self.assertBrokenInFile(path, faceC)
+
     def unmovedNamesStay(self, config):
         """A migration without a naming change: every reference stays, the model is the same,
         and the file saved after it carries the current stamps."""
@@ -339,6 +410,8 @@ def _addConfigTests():
         "movedNameGoesBackToItsGeometry",
         "movedNameWithoutMigration",
         "geometricMissBreaks",
+        "brokenStaysThroughReverseUpdates",
+        "brokenStaysAtTheNextMigration",
         "unmovedNamesStay",
     ):
         for config in CONFIGS:
