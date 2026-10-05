@@ -54,7 +54,7 @@ a child `FreeCADCmd` of its own, where an ID means something else or the file la
   save of A writes them unchanged.
 - TestNamingLoadViewProxy (ops#97): the same as TestNamingLoadProxy for a Python view provider,
   whose state is saved in GuiDocument.xml after Document.xml has its table. One child saves it,
-  another opens it with its references colliding; both set up the GUI without a main window.
+  another opens it with its references colliding; both start the GUI off screen first.
 - TestNamingSaveHasher (ops#97): no string of the hasher, saved after the table, holds a
   reference (a tripwire: the hasher of a V2i document is empty today).
 """
@@ -1257,8 +1257,9 @@ def guiStates(entries):
 class TestNamingLoadViewProxy(unittest.TestCase):
     """A Python view provider's state holds an interned subname (ops#97). GuiDocument.xml is
     written after Document.xml and its table, so the GUI document hands the state to the save's
-    collector before the table is decided. The children set up the GUI without a main window
-    (FreeCADGui.setupWithoutGUI), so that their documents have view providers."""
+    collector before the table is decided. The children start the GUI off screen
+    (FreeCADGui.showMainWindow(), VIEW_CHILD_SCRIPT), so that their documents have view
+    providers."""
 
     def view(self, key):
         result = viewSaved().get(key)
