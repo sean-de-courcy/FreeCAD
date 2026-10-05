@@ -67,6 +67,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingScenarios.py
     PartDesignTests/TestNamingSolver.py
     PartDesignTests/TestNamingGate.py
+    PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
 )

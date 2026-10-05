@@ -810,9 +810,12 @@ bool solveElementReferences(DocumentObject* feature,
         });
         // An owner with only exact references is solved only if one of them has a saved
         // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
-        // update checks every one with a fingerprint (ops#103).
-        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
-                return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty();
+        // update checks every one with a fingerprint (ops#103), and every one whose name now
+        // gives another element than its stored index (ops#116).
+        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [reverse](const auto* e) {
+                return e->kind == SolverEntry::Kind::Exact
+                    && (!e->oldFingerprint.empty()
+                        || (reverse && !e->storedIndex.empty() && e->storedIndex != e->oldIndex));
             })) {
             continue;
         }
@@ -878,11 +881,30 @@ bool solveElementReferences(DocumentObject* feature,
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                const std::string& hit = entry->oldIndex;
                 if (!saved.isValid()) {
-                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    if (entry->storedIndex.empty() || hit == entry->storedIndex) {
+                        countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                        continue;
+                    }
+                    // No geometry to re-derive it from, and its name now gives another element:
+                    // broken, not moved (rule 1's counterpart, ops#116)
+                    SolverResolution resolution;
+                    migrationBrokenFor(*entry, resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    ReferenceReport::Entry item;
+                    item.status = ReferenceReport::Status::Broken;
+                    item.evidence = "migration: the name moved; no fingerprint to find its place";
+                    item.candidates.emplace_back(hit, nameAt(hit));
+                    item.candidateRoles.emplace_back("name");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_WARN(referenceName(entry->prop)
+                            << "[" << entry->index << "]: " << entry->exactName << " broken ("
+                            << item.evidence << ", candidates: " << hit << ")");
+                    countReferenceMigration(entry->owner, MigrationOutcome::Broken);
+                    report(*entry, std::move(item));
                     continue;
                 }
-                const std::string& hit = entry->oldIndex;
                 const auto& now = fingerprintOf(hit);
                 if (!now.isValid()) {
                     logUnmeasured(*entry);

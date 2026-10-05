@@ -84,6 +84,7 @@
 #include "Link.h"
 #include "MergeDocuments.h"
 #include "NameTable.h"
+#include "NamingRevision.h"
 #include "StringHasher.h"
 #include "Transactions.h"
 
@@ -116,7 +117,51 @@ namespace
 // (TestNamingDump.TestNamingRevision). 1: ops#56's boundary section (was `.X1`), and every
 // naming fix before it.
 constexpr int ForkNamingRevision = 1;
+
+// The naming revision of each document's references (ops#116, NamingRevision.h): read from the
+// file, or written by its last save. `older` until the pass at the end of the open has run.
+struct DocumentNamingRevision
+{
+    int revision = ForkNamingRevision;
+    bool older = false;
+};
+std::map<const Document*, DocumentNamingRevision> documentNamingRevisions;
 }  // namespace
+
+int App::forkNamingRevision()
+{
+    return ForkNamingRevision;
+}
+
+int App::namingRevisionOf(const Document* doc)
+{
+    auto it = documentNamingRevisions.find(doc);
+    return it == documentNamingRevisions.end() ? ForkNamingRevision : it->second.revision;
+}
+
+bool App::openedWithOlderNaming(const Document* doc)
+{
+    auto it = documentNamingRevisions.find(doc);
+    return it != documentNamingRevisions.end() && it->second.older;
+}
+
+bool App::anyOpenedWithOlderNaming()
+{
+    return std::any_of(documentNamingRevisions.begin(),
+                       documentNamingRevisions.end(),
+                       [](const auto& entry) { return entry.second.older; });
+}
+
+void App::endOpenedWithOlderNaming()
+{
+    for (auto& [doc, entry] : documentNamingRevisions) {
+        if (entry.older) {
+            // Its references into current producers are current now (review F2)
+            entry.revision = namingRevisionToSave(doc);
+            entry.older = false;
+        }
+    }
+}
 
 #if FC_DEBUG
 #define FC_LOGFEATUREUPDATE
@@ -1346,6 +1391,7 @@ Document::~Document()
 #endif
 
     d->clearDocument();
+    documentNamingRevisions.erase(this);
 
     // Remark: The API of Py::Object has been changed to set whether the wrapper owns the passed
     // Python object or not. In the constructor we forced the wrapper to own the object so we need
@@ -1400,6 +1446,10 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
              << writer.getFileVersion() << "\" StringHasher=\"1\"";
+    // The naming revision of the names its references hold (ops#116)
+    const int namingRevision = namingRevisionToSave(this);
+    startTag << " NamingRevision=\"" << namingRevision << '"';
+    documentNamingRevisions[this].revision = namingRevision;
 
     // Interned names (ops#6): the file must hold the table entries its names refer to, before
     // its objects. They are collected from what this save writes: the element maps it saves
@@ -1480,6 +1530,10 @@ void Document::Restore(Base::XMLReader& reader)
     else {
         reader.FileVersion = 0;
     }
+    // The naming revision of its references (ops#116): none in files saved before, so 0
+    auto& namingRevision = documentNamingRevisions[this];
+    namingRevision.revision = reader.getAttribute<int>("NamingRevision", 0);
+    namingRevision.older = namingRevision.revision < ForkNamingRevision;
 
     // The file's name table comes first (ops#6): it tells how to read the interned names in
     // everything that follows. Document::restore() keeps the remap until the maps are read.
@@ -1689,7 +1743,8 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
     startTag << R"(<Document SchemaVersion="4" ProgramVersion=")"
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
-             << Application::Config()["BuildRevision"] << R"(" FileVersion="1")";
+             << Application::Config()["BuildRevision"] << R"(" FileVersion="1")"
+             << " NamingRevision=\"" << namingRevisionToSave(this) << '"';  // ops#116
     // The exported objects' references to interned names carry their entries, as in Save()
     // (ops#6)
     Data::NameRefCollector collector;
@@ -2614,6 +2669,9 @@ void Document::restore(const char* filename,
 
     if (!delaySignal) {
         afterRestore(true);
+        // Not an open (Application::openDocuments() delays the signal): no pass follows
+        // (ops#116, review F3)
+        documentNamingRevisions[this].older = false;
     }
 }
 
