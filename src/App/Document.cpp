@@ -84,6 +84,7 @@
 #include "Link.h"
 #include "MergeDocuments.h"
 #include "NameTable.h"
+#include "ElementReferences.h"
 #include "NamingRevision.h"
 #include "StringHasher.h"
 #include "Transactions.h"
@@ -2676,6 +2677,9 @@ void Document::restore(const char* filename,
 
     if (!delaySignal) {
         afterRestore(true);
+        // References through Links into this document that its attach registered again are
+        // resolved now: no end-of-open update follows (ops#120)
+        resolveReregisteredReferences();
         // Not an open (Application::openDocuments() delays the signal): no pass follows
         // (ops#116, review F3)
         documentNamingRevisions[this].older = false;

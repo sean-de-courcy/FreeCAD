@@ -7,7 +7,7 @@ namespace App
 
 class DocumentObject;
 
-/** Drops \a feature from the element reference registry (ops#119).
+/** Drops \a feature from the element reference registry (ops#119, ops#120).
  *
  * Link properties register their element references under the feature that holds the
  * referenced element, which can be an object of another document reached through an App::Link.
@@ -16,5 +16,11 @@ class DocumentObject;
  * the registry outlives its object. Called by ~DocumentObject(); defined in PropertyLinks.cpp.
  */
 void forgetElementReferencesTo(const DocumentObject* feature);
+
+/** Resolves the references that an attach registered again while a document was restored
+ * outside an open (File > Revert): an open resolves them at its end, a revert has no such step
+ * (ops#120). Called by Document::restore(); defined in PropertyLinks.cpp.
+ */
+void resolveReregisteredReferences();
 
 }  // namespace App

@@ -74,11 +74,28 @@ static std::unordered_map<std::string, std::set<PropertyLinkBase*>> _LabelMap;
 static std::unordered_map<App::DocumentObject*, std::unordered_set<PropertyLinkBase*>> _ElementRefMap;
 // clang-format on
 
-// The properties that lost a registration when the feature holding an element they reference
-// was destroyed, e.g. through an App::Link whose target document closed (ops#120). They are
-// registered again whenever a closed document is reattached, and leave the set when they are
-// destroyed, so it holds live properties only.
+// The properties to register at the next attach of a document (ops#120): those that lost a
+// registration when the feature holding an element they reference was destroyed (e.g. through
+// an App::Link whose target document closed), and those whose registration failed because the
+// path to the element didn't resolve (the target document not open: its file missing at an
+// open, or a value set while it is closed). DocInfo::registerLostReferences() takes each out and
+// registers it again; a sub that still doesn't resolve puts it back. A destroyed property
+// leaves the set, so it holds live properties only.
 static std::unordered_set<PropertyLinkBase*> _LostElementRefs;
+
+// A registration of \a sub failed because the path to its element doesn't resolve (ops#120)
+static void registerAtNextAttach(PropertyLinkBase* prop, const char* sub)
+{
+    const char* element = sub ? Data::findElementName(sub) : nullptr;
+    if (element && element[0]) {
+        _LostElementRefs.insert(prop);
+    }
+}
+
+// The properties an attach registered again while a document was restored (ops#120): an open
+// resolves them at its end (updateAllElementReferences()), a restore outside one through
+// resolveReregisteredReferences(). A destroyed property leaves the set.
+static std::unordered_set<PropertyLinkBase*> _ResolveAfterRestore;
 
 // The element a reference named before a link retarget made it index-only (ops#106): the sub,
 // the object it is a sub of (compared by address only), and the old element's fingerprint. The
@@ -189,6 +206,7 @@ PropertyLinkBase::~PropertyLinkBase()
     _RetargetChecks.erase(this);
     _RestoredRetargetChecks.erase(this);
     _LostElementRefs.erase(this);
+    _ResolveAfterRestore.erase(this);
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -463,6 +481,9 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
 
 void PropertyLinkBase::updateAllElementReferences(bool reverse)
 {
+    // The end of an open: the references registered again during it are among those updated
+    // below (ops#120)
+    _ResolveAfterRestore.clear();
     // Updating a reference can register or unregister references, which
     // changes _ElementRefMap. So iterate over a snapshot, and skip the
     // properties that have left the map since it was taken.
@@ -652,6 +673,9 @@ void PropertyLinkBase::_registerElementReference(App::DocumentObject* obj,
                                &element,
                                &geo);
     if (!geo || !element || !element[0]) {
+        if (!geo) {
+            registerAtNextAttach(this, sub.c_str());
+        }
         return;
     }
 
@@ -760,6 +784,10 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
     if (!ret || !geo || !element || !element[0]) {
         if (elementName.oldName.size()) {
             shadow.oldName.swap(elementName.oldName);
+        }
+        if (!feature && !geo) {
+            // A registration (no feature) whose path doesn't resolve
+            registerAtNextAttach(this, subname);
         }
         return false;
     }
@@ -4934,21 +4962,28 @@ public:
 
     /// Registers the references of the properties in _LostElementRefs again (ops#120), so that a
     /// reference through an App::Link follows its target's elements once the target's document
-    /// is back. Registration only: no shadow, fingerprint or report changes; the end of an open
-    /// or the next recompute updates them, as for a reference registered at a restore.
+    /// is back. Each property leaves the set first; a sub whose path still doesn't resolve puts
+    /// it back. The references registered again are then resolved as restoreLink() does for an
+    /// XLink's own, and their owners touched if they moved: at once outside a restore (a
+    /// document saved to the target's path), else after it (_ResolveAfterRestore: the end of an
+    /// open, or Document::restore() for File > Revert).
     static void registerLostReferences()
     {
-        // A copy: registering never changes the set, but stays safe if it did
         const std::vector<PropertyLinkBase*> lost(_LostElementRefs.begin(), _LostElementRefs.end());
+        _LostElementRefs.clear();
+        const bool restoring = App::GetApplication().isRestoring();
         for (auto prop : lost) {
             auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
             if (!owner || !owner->isAttachedToDocument()) {
+                // Removed for undo, or not yet in a document: try again at the next attach
+                _LostElementRefs.insert(prop);
                 continue;
             }
             std::vector<DocumentObject*> objs;
             std::vector<std::string> subs;
             std::vector<PropertyLinkBase::ShadowSub> shadows;
-            if (auto xlink = dynamic_cast<PropertyXLink*>(prop)) {
+            auto xlink = dynamic_cast<PropertyXLink*>(prop);
+            if (xlink) {
                 subs = xlink->getSubValues();
                 shadows = xlink->getShadowSubs();
                 objs.assign(subs.size(), xlink->getValue());
@@ -4967,13 +5002,72 @@ public:
             for (std::size_t i = 0; i < count; ++i) {
                 prop->_registerElementReference(objs[i], subs[i], shadows[i]);
             }
+            if (prop->_ElementRefs.empty()) {
+                continue;
+            }
+            if (restoring) {
+                _ResolveAfterRestore.insert(prop);
+            }
+            else {
+                resolveRegistered(prop);
+            }
         }
+    }
+
+    /// Resolves \a prop's registered references and touches its owner if one moved (ops#120)
+    static void resolveRegistered(PropertyLinkBase* prop)
+    {
+        auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+        if (!owner || !owner->isAttachedToDocument()) {
+            return;
+        }
+        try {
+            if (updateRegisteredReferences(prop)) {
+                owner->touch();
+            }
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+            FC_ERR("Failed to update element reference of " << propertyName(prop));
+        }
+    }
+
+    /// Resolves \a prop's registered references without notifying, through the reference
+    /// solver in a solver document (updateElementReferences() above leaves a missing reference
+    /// there to a solve that doesn't come outside an open). Returns whether a sub changed.
+    static bool updateRegisteredReferences(PropertyLinkBase* prop)
+    {
+        const auto before = referenceState(prop);
+        std::vector<DocumentObject*> features(prop->_ElementRefs.begin(), prop->_ElementRefs.end());
+        for (auto feature : features) {
+            const bool reverse = takesConsumerPass(prop, feature, false);
+            std::optional<ConsumerPassScope> scope;
+            if (reverse) {
+                scope.emplace();
+            }
+            if (prop->inSolverDocument()) {
+                App::solveElementReferences(feature, {prop}, reverse, false);
+            }
+            else {
+                prop->updateElementReference(feature, reverse, false);
+            }
+        }
+        return referenceState(prop) != before;
     }
 };
 
 void App::forgetElementReferencesTo(const DocumentObject* feature)
 {
     DocInfo::forgetFeature(feature);
+}
+
+void App::resolveReregisteredReferences()
+{
+    std::vector<PropertyLinkBase*> props(_ResolveAfterRestore.begin(), _ResolveAfterRestore.end());
+    _ResolveAfterRestore.clear();
+    for (auto prop : props) {
+        DocInfo::resolveRegistered(prop);
+    }
 }
 
 int App::namingRevisionToSave(const Document* doc)
@@ -5245,6 +5339,11 @@ void PropertyXLink::restoreLink(App::DocumentObject* lValue)
         _ConsumerPassLinks.insert(this);
     }
     bool moved = !restoring && DocInfo::updateElementReferences(this);
+    if (restoring) {
+        // isRestoring() holds during a restore outside an open too (File > Revert of the
+        // target), where no end-of-open update follows: Document::restore() resolves it (ops#120)
+        _ResolveAfterRestore.insert(this);
+    }
     hasSetValue();
     setFlag(LinkRestoring, false);
 
