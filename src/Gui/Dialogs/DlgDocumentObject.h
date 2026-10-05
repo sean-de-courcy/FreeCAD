@@ -105,6 +105,10 @@ protected:
     QPushButton* resetButton;
     QPushButton* refreshButton;
 
+    /// Set while a subclass lists the property's current links through onSelectionChanged(): a
+    /// stale element listed then is kept beside the live ones, not replaced (ops#125).
+    bool seedingLinks = false;
+
 private:
     void onObjectTypeToggled(bool);
     void onTypeTreeItemSelectionChanged();

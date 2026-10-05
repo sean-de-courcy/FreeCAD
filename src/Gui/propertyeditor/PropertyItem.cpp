@@ -4786,7 +4786,18 @@ void LinkLabel::onLinkChanged()
 {
     if (dlg) {
         auto links = dlg->currentLinks();
-        if (links != dlg->originalLinks()) {
+        // Compare what the property stores. SubObjectT's == also compares labels, which the
+        // dialog's links (made from names) never have, so an unchanged OK wrote the property
+        // again, and a stale sub written back through its owner's naming can come back as
+        // another element (ops#125).
+        const auto original = dlg->originalLinks();
+        auto sameLink = [](const App::SubObjectT& a, const App::SubObjectT& b) {
+            return a.getDocumentName() == b.getDocumentName()
+                && a.getObjectName() == b.getObjectName() && a.getSubName() == b.getSubName();
+        };
+        const bool same = links.size() == original.size()
+            && std::equal(links.begin(), links.end(), original.begin(), sameLink);
+        if (!same) {
             link = QVariant::fromValue(links);
             Q_EMIT linkChanged(link);
             updatePropertyLink();

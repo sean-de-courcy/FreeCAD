@@ -77,6 +77,7 @@ if(BUILD_GUI)
         PartDesignTests/TestMaterial.py
         PartDesignTests/TestSuppressed.py
         PartDesignTests/TestPreviewPython.py
+        PartDesignTests/TestProfileLinkDialog.py
     )
 endif(BUILD_GUI)
 

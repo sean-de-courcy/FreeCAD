@@ -324,6 +324,8 @@ void DlgPropertyLink::init(const App::DocumentObjectT& prop, bool tryFilter)
     {
         QSignalBlocker blockTree(ui->treeWidget);
         QSignalBlocker blockSelectionModel(ui->treeWidget->selectionModel());
+        // The property's own links, stale ones included, are listed as they are (ops#125).
+        Base::StateLocker seeding(seedingLinks);
         for (auto& link : oldLinks) {
             onSelectionChanged(
                 Gui::SelectionChanges(
