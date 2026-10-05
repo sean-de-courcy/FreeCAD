@@ -437,6 +437,98 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
                     self.assertTopFace(body, refs.Direct[1][0], _box("Small"), msg + ": Direct")
 
 
+def _faceAt(shape, height):
+    """The name of the face at z = height."""
+    return next(
+        "Face%d" % (i + 1)
+        for i, f in enumerate(shape.Faces)
+        if abs(f.BoundBox.ZMin - height) < TOL and abs(f.BoundBox.ZMax - height) < TOL
+    )
+
+
+class TestLinkTargetReopened(VariantLinkTestBase):
+    """A reference through a Link (`Target`), and an XLink straight into the part beside it
+    (`Direct`), follow an edit of the part made after the part document was closed and reopened
+    in the session (ops#120). The part is a 10 x 10 x 5 box; the edit, a fillet on its vertical
+    edge at x = y = 0, renumbers the top face. Each reference then names the top face (z = 5) or
+    is broken loudly; it never names another face. With objects allocated between the close and
+    the reopen, the part's new objects can't take the old ones' addresses, which hid a missing
+    registration before."""
+
+    HEIGHT = 5.0
+
+    def runCase(self, reopen, allocate=False):
+        for naming in ("V2", "V2s"):
+            with self.subTest(naming=naming):
+                self.closeAll()
+                part = _newDocument("LinkTargetPart", naming)
+                body = part.addObject("PartDesign::Body", "Body")
+                box = body.newObject("PartDesign::AdditiveBox", "Box")
+                box.Length, box.Width, box.Height = 10.0, 10.0, self.HEIGHT
+                part.recompute()
+                part.saveAs(os.path.join(self.dir, "LinkTargetPart.FCStd"))
+                doc = _newDocument("LinkTargetAsm", naming)
+                doc.saveAs(os.path.join(self.dir, "LinkTargetAsm.FCStd"))
+                self.docs = [part.Name, doc.Name]
+                link = doc.addObject("App::Link", "LinkA")
+                link.LinkedObject = body
+                doc.recompute()
+                top = _faceAt(link.Shape, self.HEIGHT)
+                refs = doc.addObject("App::FeaturePython", "Refs")
+                refs.addProperty("App::PropertyXLinkSub", "Target")
+                refs.addProperty("App::PropertyXLinkSub", "Direct")
+                refs.Target = (link, [top])
+                refs.Direct = (body, [_faceAt(body.Shape, self.HEIGHT)])
+                doc.recompute()
+                if reopen:
+                    part.save()
+                    path = part.FileName
+                    App.closeDocument(part.Name)
+                    if allocate:
+                        other = App.newDocument("LinkTargetOther")
+                        self.docs.append(other.Name)
+                        for i in range(200):
+                            other.addObject("PartDesign::Body", "Body%d" % i)
+                    part = App.openDocument(path)
+                    self.docs.append(part.Name)
+                    body = part.getObject("Body")
+                    doc.recompute()
+
+                edge = next(
+                    "Edge%d" % (i + 1)
+                    for i, e in enumerate(body.Shape.Edges)
+                    if e.BoundBox.XMax < TOL and e.BoundBox.YMax < TOL and e.BoundBox.ZLength > 1
+                )
+                fillet = body.newObject("PartDesign::Fillet", "Fillet")
+                fillet.Base = (part.getObject("Box"), [edge])
+                fillet.Radius = 2.0
+                part.recompute()
+                doc.recompute()
+                self.assertNotEqual(
+                    _faceAt(link.Shape, self.HEIGHT), top, "the fillet must renumber the top face"
+                )
+                for name, obj in (("Target", link), ("Direct", body)):
+                    msg = "%s %s, reopened %s, allocations %s" % (naming, name, reopen, allocate)
+                    value = getattr(refs, name)
+                    self.assertIs(value[0], obj, msg)
+                    sub = value[1][0]
+                    if "?" in sub:
+                        continue  # broken loudly
+                    face = obj.getSubObject(sub)
+                    self.assertIsNotNone(face, msg + ": " + sub + " not found")
+                    self.assertAlmostEqual(face.BoundBox.ZMin, self.HEIGHT, 6, msg + ": " + sub)
+                    self.assertAlmostEqual(face.BoundBox.ZMax, self.HEIGHT, 6, msg + ": " + sub)
+
+    def test_never_closed(self):
+        self.runCase(False)
+
+    def test_reopened(self):
+        self.runCase(True)
+
+    def test_reopened_after_allocations(self):
+        self.runCase(True, allocate=True)
+
+
 def _withoutNamingRevision(path):
     """Rewrites the file as one saved before ops#116: no `NamingRevision`."""
     with zipfile.ZipFile(path) as z:

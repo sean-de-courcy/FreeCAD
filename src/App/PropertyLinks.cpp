@@ -74,6 +74,12 @@ static std::unordered_map<std::string, std::set<PropertyLinkBase*>> _LabelMap;
 static std::unordered_map<App::DocumentObject*, std::unordered_set<PropertyLinkBase*>> _ElementRefMap;
 // clang-format on
 
+// The properties that lost a registration when the feature holding an element they reference
+// was destroyed, e.g. through an App::Link whose target document closed (ops#120). They are
+// registered again whenever a closed document is reattached, and leave the set when they are
+// destroyed, so it holds live properties only.
+static std::unordered_set<PropertyLinkBase*> _LostElementRefs;
+
 // The element a reference named before a link retarget made it index-only (ops#106): the sub,
 // the object it is a sub of (compared by address only), and the old element's fingerprint. The
 // sub's first resolution on the new target checks the element there against it
@@ -182,6 +188,7 @@ PropertyLinkBase::~PropertyLinkBase()
     unregisterElementReference();
     _RetargetChecks.erase(this);
     _RestoredRetargetChecks.erase(this);
+    _LostElementRefs.erase(this);
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -4641,6 +4648,8 @@ public:
             v.first->hasSetValue();
             v.first->setFlag(PropertyLinkBase::LinkRestoring, false);
         }
+        // References through App::Links of other documents into this one (ops#120)
+        registerLostReferences();
     }
 
     /// Resolves the shadows of \a link's registered references, as
@@ -4918,8 +4927,47 @@ public:
         }
         for (auto prop : it->second) {
             prop->_ElementRefs.erase(it->first);
+            _LostElementRefs.insert(prop);
         }
         _ElementRefMap.erase(it);
+    }
+
+    /// Registers the references of the properties in _LostElementRefs again (ops#120), so that a
+    /// reference through an App::Link follows its target's elements once the target's document
+    /// is back. Registration only: no shadow, fingerprint or report changes; the end of an open
+    /// or the next recompute updates them, as for a reference registered at a restore.
+    static void registerLostReferences()
+    {
+        // A copy: registering never changes the set, but stays safe if it did
+        const std::vector<PropertyLinkBase*> lost(_LostElementRefs.begin(), _LostElementRefs.end());
+        for (auto prop : lost) {
+            auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+            if (!owner || !owner->isAttachedToDocument()) {
+                continue;
+            }
+            std::vector<DocumentObject*> objs;
+            std::vector<std::string> subs;
+            std::vector<PropertyLinkBase::ShadowSub> shadows;
+            if (auto xlink = dynamic_cast<PropertyXLink*>(prop)) {
+                subs = xlink->getSubValues();
+                shadows = xlink->getShadowSubs();
+                objs.assign(subs.size(), xlink->getValue());
+            }
+            else if (auto link = dynamic_cast<PropertyLinkSub*>(prop)) {
+                subs = link->getSubValues();
+                shadows = link->getShadowSubs();
+                objs.assign(subs.size(), link->getValue());
+            }
+            else if (auto list = dynamic_cast<PropertyLinkSubList*>(prop)) {
+                objs = list->getValues();
+                subs = list->getSubValues();
+                shadows = list->getShadowSubs();
+            }
+            const auto count = std::min({objs.size(), subs.size(), shadows.size()});
+            for (std::size_t i = 0; i < count; ++i) {
+                prop->_registerElementReference(objs[i], subs[i], shadows[i]);
+            }
+        }
     }
 };
 
