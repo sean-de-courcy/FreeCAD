@@ -804,6 +804,16 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
         _ElementRefMap[geo].insert(this);
     }
 
+    // The lookup gave neither an index nor a missing marker, e.g. for an index-only missing
+    // reference ('?Face3': a migration's or a retarget's break, ops#103, ops#106), whose marker it
+    // takes for a mapped name. Nothing can resolve such a reference: it stays exactly as it is.
+    // The code below would take it for a resolved one without an index, and in reverse write the
+    // empty index into the sub (ops#123).
+    const char* resolvedElement = Data::findElementName(elementName.oldName.c_str());
+    if (!resolvedElement || !resolvedElement[0]) {
+        return false;
+    }
+
     if (!reverse) {
         if (elementName.newName.empty()) {
             shadow.oldName.swap(elementName.oldName);
@@ -2384,6 +2394,9 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         }
         App::SolverEntry entry;
         if (Data::hasMissingElement(shadow.oldName.c_str())) {
+            if (!Data::hasMappedElementName(shadow.newName.c_str())) {
+                continue;  // an index-only missing reference: no name to solve from (ops#123)
+            }
             entry.kind = App::SolverEntry::Kind::Missing;
         }
         else if (!shadow.newName.empty()) {

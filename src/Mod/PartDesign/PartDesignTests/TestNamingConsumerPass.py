@@ -479,6 +479,33 @@ class ConsumerPassTestBase(NamingGateTestBase):
         else:
             self.assertBroken(b, faceC, faceD)
 
+    def alreadyBroken(self, config):
+        """An old B whose reference to FaceC was already broken (index only) when it was saved:
+        the pass keeps it broken at its index (ops#123: the reverse update emptied the sub), and
+        takes B's other reference as usual."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        b = self.open(pathB)
+        refs = b.getObject("Refs")
+        refs.Ref = (self.documentOf(pathA).getObject("Pad2"), ["?" + faceC])
+        b.recompute()
+        b.save()
+        for doc in list(App.listDocuments().values()):
+            App.closeDocument(doc.Name)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+
+        # Act
+        b = self.open(pathB)
+
+        # Assert
+        self.assertEqual(b.getObject("Refs").Ref[1], ["?" + faceC])
+        other = "%s" if b.ReferenceSolver else "?%s"
+        self.assertEqual(b.getObject("Other").Ref[1], [other % faceD])
+        b.save()
+        self.assertIn('sub="?%s"' % faceC, xmlOf(pathB))
+        self.assertNotIn('sub=""', xmlOf(pathB))
+
     def currentFiles(self, config):
         """Files saved by this build carry the current revision, and opening them changes and
         touches nothing."""
@@ -572,6 +599,7 @@ def _addConfigTests():
         "editedWhileClosed",
         "movedAloneAfterMigration",
         "movedNameAndEditBreak",
+        "alreadyBroken",
         "currentFiles",
     ):
         for config in CONFIGS:
