@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstring>
 #include <istream>
+#include <map>
 #include <mutex>
 #include <ostream>
 #include <vector>
@@ -1046,6 +1047,60 @@ NameRefCollector::FileFormScope::~FileFormScope()
 const NameRefCollector* NameRefCollector::fileForm()
 {
     return fileFormCollector;
+}
+
+namespace
+{
+struct Sources
+{
+    std::mutex mutex;
+    std::size_t lastKey = 0;
+    std::map<std::size_t, NameRefCollector::Source> byKey;  // in the order registered
+};
+
+Sources& sources()
+{
+    static Sources instance;
+    return instance;
+}
+}  // namespace
+
+std::size_t NameRefCollector::addSource(Source source)
+{
+    auto& all = sources();
+    std::lock_guard lock(all.mutex);
+    all.byKey.emplace(++all.lastKey, std::move(source));
+    return all.lastKey;
+}
+
+void NameRefCollector::removeSource(std::size_t key)
+{
+    auto& all = sources();
+    std::lock_guard lock(all.mutex);
+    all.byKey.erase(key);
+}
+
+void NameRefCollector::addFromSources(const std::vector<App::DocumentObject*>& objects)
+{
+    std::vector<Source> current;
+    {
+        auto& all = sources();
+        std::lock_guard lock(all.mutex);
+        for (const auto& [key, source] : all.byKey) {
+            current.push_back(source);
+        }
+    }
+    if (current.empty()) {
+        return;
+    }
+    for (const auto* object : objects) {
+        if (!object) {
+            continue;
+        }
+        for (const auto& source : current) {
+            source(*object, *this);
+        }
+    }
 }
 
 NameRefScanBuffer::NameRefScanBuffer(std::streambuf* target, NameRefCollector& collector)

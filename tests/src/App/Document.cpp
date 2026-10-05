@@ -231,4 +231,74 @@ TEST_F(DocumentTest, exportObjectsCarriesTheEntriesOfInternedNames)
     app.closeDocument(targetName.c_str());
 }
 
+TEST_F(DocumentTest, saveAndExportCarryTheEntriesOfTheSourcesNames)
+{
+    // Arrange: an interned name that only a source gives (as a GUI document gives its view
+    // providers' states, which GuiDocument.xml holds after the table, ops#97), for one object
+    using Strings = std::vector<std::string>;
+    auto& table = Data::NameTable::instance();
+    std::string edge = Data::MappedName::makeEncodedSection(
+        Strings {"Edge2"},
+        Strings {},
+        "5",
+        "SRC",
+        "0",
+        'E',
+        "0",
+        Strings {"IDX"},
+        Strings {}
+    );
+    std::string face = Data::MappedName::makeEncodedSection(
+        Strings {},
+        Strings {edge},
+        "7",
+        "SRC",
+        "0",
+        'F',
+        "0",
+        Strings {"GEN"},
+        Strings {}
+    );
+    std::string interned = table.toInterned(face);
+    auto edgeId = table.internName(edge);
+    ASSERT_TRUE(edgeId);
+    std::string state = "Pad.;" + interned + ".Face1";
+    addNote(doc(), "Holder", "Pad.Face1");
+    addNote(doc(), "Other", "Pad.Face1");
+    Strings asked;
+    auto key = Data::NameRefCollector::addSource(
+        [&](const App::DocumentObject& obj, Data::NameRefCollector& collector) {
+            asked.emplace_back(obj.getNameInDocument());
+            if (asked.back() == "Holder") {
+                collector.add(state);
+            }
+        }
+    );
+
+    // Act
+    std::stringstream exported;
+    doc()->exportObjects({doc()->getObject("Other"), doc()->getObject("Holder")}, exported);
+    const std::string path = App::Application::getTempFileName();
+    bool saved = doc()->saveAs(path.c_str());
+    Data::NameRefCollector::removeSource(key);
+    std::stringstream withoutSource;
+    doc()->exportObjects({doc()->getObject("Holder")}, withoutSource);
+
+    // Assert: both files hold the edge's entry, which nothing in their XML refers to; the
+    // sources are asked object by object, in the order saved
+    ASSERT_TRUE(saved);
+    std::ifstream file(doc()->getFileName(), std::ios::in | std::ios::binary);
+    ASSERT_TRUE(file.is_open());
+    for (const std::string& xml : {documentXml(exported), documentXml(file)}) {
+        EXPECT_NE(xml.find("<NameTable count=\"1\">"), std::string::npos) << xml;
+        std::string entries = "NameTableStart v2 1\n" + *table.lookup(*edgeId) + '\n';
+        EXPECT_NE(xml.find(entries), std::string::npos) << xml;
+        EXPECT_EQ(xml.find(interned), std::string::npos) << xml;
+    }
+    EXPECT_EQ(asked, (Strings {"Other", "Holder", "Holder", "Other"}));
+    EXPECT_EQ(documentXml(withoutSource).find("<NameTable"), std::string::npos);
+    file.close();
+    std::remove(doc()->getFileName());
+}
+
 // NOLINTEND(readability-magic-numbers)

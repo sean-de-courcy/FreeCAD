@@ -21,6 +21,11 @@
 
 #include "NameId.h"
 
+namespace App
+{
+class DocumentObject;
+}
+
 namespace Base
 {
 class XMLAttributeFilter;
@@ -341,6 +346,22 @@ public:
 
     /// The collector of the innermost FileFormScope on this thread, or null.
     static const NameRefCollector* fileForm();
+
+    /** A source of what a save writes where neither the scan nor the maps see it (ops#97): a
+     * GUI document's view providers, whose GuiDocument.xml is written after Document.xml has
+     * its table. Given an object being saved, it adds what it will write for it (add()).
+     */
+    using Source = std::function<void(const App::DocumentObject&, NameRefCollector&)>;
+
+    /// Registers \a source, and returns the key that removeSource() takes.
+    static std::size_t addSource(Source source);
+    static void removeSource(std::size_t key);
+
+    /** Adds what the sources write for \a objects, object by object in their order, so that
+     * the order of the entries doesn't depend on the sources'. Document::Save() and
+     * Document::exportObjects() call it before the table is decided, while it has entries.
+     */
+    void addFromSources(const std::vector<App::DocumentObject*>& objects);
 
 private:
     void number(const NameId& root, const NameTable& table);
