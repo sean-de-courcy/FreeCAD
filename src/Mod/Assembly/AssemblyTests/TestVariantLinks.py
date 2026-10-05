@@ -375,6 +375,296 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
                 self.assertEqual(subs[0][0], top, naming)
                 self.assertTrue(subs[0][1].startswith(";"), naming + ": shadow " + subs[0][1])
 
+    def test_target_document_closed_reopened(self):
+        """The part document closed while the assembly stays open, then the assembly saved and
+        reopened (ops#119). `Target` reaches the box's top face through LinkA, `Direct` (an XLink)
+        straight in the part, beside it. While the part is closed, the assembly is recomputed,
+        saved, and a file without `NamingRevision` is opened, so the consumer pass runs (ops#116):
+        none of them reaches the part's destroyed objects. Reopened, with the part closed until
+        then or reopened in between, each reference names the top face again: the same face,
+        never another one."""
+        height = CONFIGS["Small"][2]
+        for naming in NAMINGS:
+            for reopenPart in (False, True):
+                with self.subTest(naming=naming, reopenPart=reopenPart):
+                    self.start(naming)
+                    body = self.part.getObject("Body")
+                    link = self.doc.addObject("App::Link", "LinkA")
+                    link.LinkedObject = body
+                    self.doc.recompute()
+                    top, _ = _topFace(link.Shape, height)
+                    refs = self.doc.addObject("App::FeaturePython", "Refs")
+                    refs.addProperty("App::PropertyXLinkSub", "Target")
+                    refs.addProperty("App::PropertyXLinkSub", "Direct")
+                    refs.Target = (link, [top])
+                    refs.Direct = (body, [_topFace(body.Shape, height)[0]])
+                    self.doc.recompute()
+                    self.part.save()
+                    partPath = self.part.FileName
+                    App.closeDocument(self.part.Name)
+
+                    # Objects made now can take the closed part's addresses.
+                    other = _newDocument("VariantLinkOther", naming)
+                    self.docs.append(other.Name)
+                    for i in range(20):
+                        other.addObject("Part::Box", "Box%d" % i)
+                    other.recompute()
+                    otherPath = os.path.join(self.dir, "VariantLinkOther.FCStd")
+                    other.saveAs(otherPath)
+                    App.closeDocument(other.Name)
+                    _withoutNamingRevision(otherPath)
+                    self.doc.recompute()
+                    App.openDocument(otherPath)
+                    self.doc.save()
+                    if reopenPart:
+                        App.openDocument(partPath)
+                        self.doc.recompute()
+                        self.doc.save()
+
+                    path = self.doc.FileName
+                    self.closeAll()
+                    self.doc = App.openDocument(path)
+                    self.part = App.getDocument("VariantLinkPart")
+                    self.docs = [self.part.Name, self.doc.Name]
+                    self.doc.recompute()
+                    link = self.doc.getObject("LinkA")
+                    refs = self.doc.getObject("Refs")
+                    msg = "%s, part reopened %s" % (naming, reopenPart)
+                    self.assertIs(refs.Target[0], link, msg)
+                    self.assertTopFace(link, refs.Target[1][0], _box("Small"), msg + ": Target")
+                    body = self.part.getObject("Body")
+                    self.assertIs(refs.Direct[0], body, msg)
+                    self.assertTopFace(body, refs.Direct[1][0], _box("Small"), msg + ": Direct")
+
+
+def _faceAt(shape, height):
+    """The name of the face at z = height."""
+    return next(
+        "Face%d" % (i + 1)
+        for i, f in enumerate(shape.Faces)
+        if abs(f.BoundBox.ZMin - height) < TOL and abs(f.BoundBox.ZMax - height) < TOL
+    )
+
+
+# (history algorithm, reference solver, interned names) for TestLinkTargetReopened
+REOPEN_CONFIGS = {
+    "V1": ("V1", False, False),
+    "V2": ("V2", False, False),
+    "V2s": ("V2", True, False),
+    "V2i": ("V2", False, True),
+}
+
+
+class TestLinkTargetReopened(VariantLinkTestBase):
+    """A reference through a Link (`Target`), and an XLink straight into the part beside it
+    (`Direct`), follow an edit of the part made after the part's document was closed and
+    reopened in the session, or reverted, or was missing when the assembly opened (ops#120). The
+    part is a 10 x 10 x 5 box; the edit, a fillet on its vertical edge at x = y = 0, renumbers
+    the top face. Each reference then names the top face (z = 5) or is broken loudly; it never
+    names another face. With objects allocated between the close and the reopen, the part's new
+    objects can't take the old ones' addresses, which hid a missing registration before. V1
+    follows indices by design: there the cases only have to run."""
+
+    HEIGHT = 5.0
+
+    def newDocument(self, name, config):
+        algorithm, solver, intern = REOPEN_CONFIGS[config]
+        doc = App.newDocument(name)
+        doc.HistoryAlgorithm = algorithm
+        doc.ReferenceSolver = solver
+        doc.InternNames = intern
+        return doc
+
+    def build(self, config):
+        """The part and the assembly, saved; returns (part, assembly, Link, Refs, top face)."""
+        self.closeAll()
+        part = self.newDocument("LinkTargetPart", config)
+        body = part.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length, box.Width, box.Height = 10.0, 10.0, self.HEIGHT
+        part.recompute()
+        part.saveAs(os.path.join(self.dir, "LinkTargetPart.FCStd"))
+        doc = self.newDocument("LinkTargetAsm", config)
+        doc.saveAs(os.path.join(self.dir, "LinkTargetAsm.FCStd"))
+        self.docs = [part.Name, doc.Name]
+        link = doc.addObject("App::Link", "LinkA")
+        link.LinkedObject = body
+        doc.recompute()
+        top = _faceAt(link.Shape, self.HEIGHT)
+        refs = doc.addObject("App::FeaturePython", "Refs")
+        refs.addProperty("App::PropertyXLinkSub", "Target")
+        refs.addProperty("App::PropertyXLinkSub", "Direct")
+        refs.Target = (link, [top])
+        refs.Direct = (body, [_faceAt(body.Shape, self.HEIGHT)])
+        doc.recompute()
+        part.save()
+        doc.save()
+        return part, doc, link, refs, top
+
+    def fillet(self, part, doc):
+        body = part.getObject("Body")
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(body.Shape.Edges)
+            if e.BoundBox.XMax < TOL and e.BoundBox.YMax < TOL and e.BoundBox.ZLength > 1
+        )
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (part.getObject("Box"), [edge])
+        fillet.Radius = 2.0
+        part.recompute()
+        doc.recompute()
+
+    def assertOnTop(self, part, link, refs, msg):
+        """Each reference names the top face or is broken loudly."""
+        for name, obj in (("Target", link), ("Direct", part.getObject("Body"))):
+            value = getattr(refs, name)
+            self.assertIs(value[0], obj, msg + " " + name)
+            sub = value[1][0]
+            if "?" in sub:
+                continue  # broken loudly
+            face = obj.getSubObject(sub)
+            where = "%s %s: %s" % (msg, name, sub)
+            self.assertIsNotNone(face, where + " not found")
+            self.assertAlmostEqual(face.BoundBox.ZMin, self.HEIGHT, 6, where)
+            self.assertAlmostEqual(face.BoundBox.ZMax, self.HEIGHT, 6, where)
+
+    def reopenPart(self, part, allocate=False):
+        path = part.FileName
+        App.closeDocument(part.Name)
+        if allocate:
+            other = App.newDocument("LinkTargetOther")
+            self.docs.append(other.Name)
+            for i in range(200):
+                other.addObject("PartDesign::Body", "Body%d" % i)
+        part = App.openDocument(path)
+        self.docs.append(part.Name)
+        return part
+
+    def runCase(self, change, configs=("V1", "V2", "V2s", "V2i")):
+        """`change(part, doc, link, refs, top)` returns the part document to edit, and the
+        assembly, its Link and its Refs (they change when the assembly is reopened)."""
+        for config in configs:
+            with self.subTest(config=config):
+                part, doc, link, refs, top = self.build(config)
+                part, doc, link, refs = change(part, doc, link, refs, top)
+                doc.recompute()
+                self.fillet(part, doc)
+                if config == "V1":
+                    continue
+                self.assertNotEqual(
+                    _faceAt(link.Shape, self.HEIGHT), top, "the fillet must renumber the top face"
+                )
+                self.assertOnTop(part, link, refs, config)
+
+    def test_never_closed(self):
+        self.runCase(lambda part, doc, link, refs, top: (part, doc, link, refs))
+
+    def test_reopened(self):
+        self.runCase(lambda part, doc, link, refs, top: (self.reopenPart(part), doc, link, refs))
+
+    def test_reopened_after_allocations(self):
+        self.runCase(
+            lambda part, doc, link, refs, top: (self.reopenPart(part, True), doc, link, refs)
+        )
+
+    def test_value_set_while_closed(self):
+        """The reference set while the part is closed: it can't register then (ops#120)."""
+
+        def change(part, doc, link, refs, top):
+            path = part.FileName
+            App.closeDocument(part.Name)
+            refs.Target = (link, [top])
+            part = App.openDocument(path)
+            self.docs.append(part.Name)
+            return part, doc, link, refs
+
+        self.runCase(change)
+
+    def test_part_missing_at_open(self):
+        """The part's file is away when the assembly opens, then back and opened (ops#120)."""
+
+        def change(part, doc, link, refs, top):
+            partPath, asmPath = part.FileName, doc.FileName
+            self.closeAll()
+            away = partPath + ".away"
+            os.rename(partPath, away)
+            try:
+                doc = App.openDocument(asmPath)
+            finally:
+                os.rename(away, partPath)
+            self.docs = [doc.Name]
+            part = App.openDocument(partPath)
+            self.docs.append(part.Name)
+            return part, doc, doc.getObject("LinkA"), doc.getObject("Refs")
+
+        self.runCase(change)
+
+    def test_part_reverted(self):
+        """The fillet made and followed, then the part reverted to its file without the fillet
+        (File > Revert): before any recompute, each reference names the top face of the box
+        again or is broken loudly (ops#120)."""
+        for config in ("V1", "V2", "V2s", "V2i"):
+            with self.subTest(config=config):
+                part, doc, link, refs, top = self.build(config)
+                self.fillet(part, doc)
+                if config != "V1":
+                    self.assertOnTop(part, link, refs, config + " with the fillet")
+                part.restore()
+                self.assertIsNone(part.getObject("Fillet"), config + ": not reverted")
+                if config != "V1":
+                    self.assertOnTop(part, link, refs, config + " reverted")
+
+    def test_pasted(self):
+        """An XLink into the part copied into another assembly (a paste: exportObjects, then
+        importObjects): the copy names the top face at once, before any recompute (ops#120)."""
+        for config in ("V2", "V2s", "V2i"):
+            with self.subTest(config=config):
+                part, doc, link, refs, top = self.build(config)
+                body = part.getObject("Body")
+                source = doc.addObject("App::FeaturePython", "Source")
+                source.addProperty("App::PropertyXLinkSub", "Direct")
+                source.Direct = (body, [_faceAt(body.Shape, self.HEIGHT)])
+                doc.recompute()
+                other = self.newDocument("LinkTargetAsm2", config)
+                other.saveAs(os.path.join(self.dir, "LinkTargetAsm2.FCStd"))
+                self.docs.append(other.Name)
+                copy = other.copyObject(source, False)
+                self.assertIs(copy.Direct[0], body, config)
+                sub = copy.Direct[1][0]
+                self.assertNotIn("?", sub, config + ": " + sub)
+                face = body.getSubObject(sub)
+                self.assertAlmostEqual(face.BoundBox.ZMin, self.HEIGHT, 6, config + ": " + sub)
+                self.assertAlmostEqual(face.BoundBox.ZMax, self.HEIGHT, 6, config + ": " + sub)
+
+    def test_undo_removal(self):
+        """The box removed from the part in a transaction and the removal undone: the
+        references stay registered under the detached and re-attached objects."""
+
+        def change(part, doc, link, refs, top):
+            part.UndoMode = 1
+            part.openTransaction("Remove the box")
+            part.removeObject("Box")
+            part.commitTransaction()
+            part.recompute()
+            part.undo()
+            part.recompute()
+            return part, doc, link, refs
+
+        self.runCase(change)
+
+
+def _withoutNamingRevision(path):
+    """Rewrites the file as one saved before ops#116: no `NamingRevision`."""
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info.filename)) for info in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in entries:
+            if info.filename == "Document.xml":
+                text = data.decode("utf-8")
+                assert "NamingRevision=" in text, "the file has no NamingRevision"
+                data = re.sub(r' NamingRevision="[0-9]+"', "", text).encode("utf-8")
+            z.writestr(info, data)
+
 
 class TestVariantLinkRecompute(VariantLinkTestBase):
     """After an edit of a variant link's source part, one recompute of the assembly shows the

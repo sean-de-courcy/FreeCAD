@@ -30,6 +30,7 @@ from AssemblyTests.TestSimulationExport import TestSimulationExport
 from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
+    TestLinkTargetReopened,
     TestVariantLinkRecompute,
     TestVariantTopologyChanged,
     TestRetargetCheckSaved,
@@ -42,6 +43,7 @@ True if TestCommandCreateView else False
 True if TestSimulationExport else False
 True if TestLinkRetargetJoints else False
 True if TestLinkRetargetProperties else False
+True if TestLinkTargetReopened else False
 True if TestVariantLinkRecompute else False
 True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
