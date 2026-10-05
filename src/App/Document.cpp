@@ -1479,6 +1479,12 @@ void Document::Save(Base::Writer& writer) const
     }
     beforeSave();
 
+    // What is written after the table and not scanned: the view providers' Python states in
+    // GuiDocument.xml (ops#97). While the table is empty, nothing refers to it.
+    if (Data::NameTable::instance().size() != 0) {
+        collector->addFromSources(d->objectArray);
+    }
+
     // The maps' entries are numbered first, in the order of their names, before any map is
     // written (inline ones in the XML too)
     collector->bind(&writer, Data::NameTable::instance());
@@ -1750,6 +1756,7 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
     Data::NameRefCollector collector;
     std::optional<HeldBackXml> heldBack;
     if (Data::NameTable::instance().size() != 0) {
+        collector.addFromSources(obj);  // GuiDocument.xml, written after the table (ops#97)
         heldBack.emplace(writer.Stream(), collector);
     }
     else {

@@ -52,8 +52,14 @@ a child `FreeCADCmd` of its own, where an ID means something else or the file la
   a reference (the ElementReferenceTest pattern, ops#18/#40), V2i. Opened with B closed, the
   reference names that face; with B's file absent, A's own table resolves its shadows, and a new
   save of A writes them unchanged.
+- TestNamingLoadViewProxy (ops#97): the same as TestNamingLoadProxy for a Python view provider,
+  whose state is saved in GuiDocument.xml after Document.xml has its table. One child saves it,
+  another opens it with its references colliding; both start the GUI off screen first.
+- TestNamingSaveHasher (ops#97): no string of the hasher, saved after the table, holds a
+  reference (a tripwire: the hasher of a V2i document is empty today).
 """
 
+import base64
 import html
 import json
 import os
@@ -77,6 +83,8 @@ __all__ = [
     "TestNamingLoadNewerFormat",
     "TestNamingLoadProxy",
     "TestNamingLoadElementReference",
+    "TestNamingLoadViewProxy",
+    "TestNamingSaveHasher",
 ]
 
 BOGUS = "Collision;_;1;XYZ;0;F;0;_;_"
@@ -210,6 +218,24 @@ class HoldsName:
         self.sub = sub
         if obj is not None:
             obj.Proxy = self
+
+    def dumps(self):
+        return {"sub": self.sub}
+
+    def loads(self, state):
+        self.sub = state["sub"]
+
+
+class ViewHoldsName:
+    """A Python view provider whose state holds a subname, as an add-on's may (ops#97)."""
+
+    def __init__(self, vobj=None, sub=""):
+        self.sub = sub
+        if vobj is not None:
+            vobj.Proxy = self
+
+    def attach(self, vobj):
+        pass
 
     def dumps(self):
         return {"sub": self.sub}
@@ -536,6 +562,86 @@ def _childElementReference(manifest):
     return out
 
 
+MIME_OBJECTS = "application/x-documentobject"  # Std_Copy's format for a small selection
+
+
+def _setupGui():
+    """The GUI of this FreeCADCmd child, which VIEW_CHILD_SCRIPT started."""
+    import FreeCADGui
+
+    if not App.GuiUp:
+        raise AssertionError("no GUI")
+    return FreeCADGui
+
+
+def _childViewSave(manifest):
+    """Saves a document whose only interned names are in a view provider's Python state, and
+    exports its holder as Std_Copy does (Document::exportObjects() to the clipboard)."""
+    gui = _setupGui()
+    from PySide import QtGui
+
+    doc = App.newDocument("ViewProxyHolder")
+    try:
+        doc.HistoryAlgorithm, doc.InternNames = "V2", True
+        plain = proxyName()
+        sub = "Box.;" + App.internMappedName(plain) + ".Face1"
+        holder = doc.addObject("App::FeaturePython", "Holder")
+        if holder.ViewObject is None:
+            raise AssertionError("the holder has no view provider")
+        ViewHoldsName(holder.ViewObject, sub)
+        path = os.path.join(manifest["folder"], "ViewProxyHolder.FCStd")
+        doc.saveAs(path)
+        gui.Selection.clearSelection()
+        gui.Selection.addSelection(holder)
+        gui.runCommand("Std_Copy")
+        gui.Selection.clearSelection()
+        mime = QtGui.QGuiApplication.clipboard().mimeData()
+        if not mime or not mime.hasFormat(MIME_OBJECTS):
+            raise AssertionError(f"Std_Copy left no {MIME_OBJECTS}")
+        exported = os.path.join(manifest["folder"], "ViewProxyHolder-copy.FCStd")
+        with open(exported, "wb") as fh:
+            fh.write(bytes(mime.data(MIME_OBJECTS).data()))
+        return {"save": {"path": path, "exported": exported, "plain": plain, "sub": sub}}
+    finally:
+        App.closeDocument(doc.Name)
+
+
+def _childViewLoad(manifest):
+    """Opens the saved document, and merges the exported one into a new document, with their
+    references colliding."""
+    _setupGui()
+    forced = 0
+    for id in manifest["viewCollide"]:
+        forced += App.insertNameTableEntryForTesting(id, BOGUS)
+    info = manifest["view"]["save"]
+    out = {"forced": forced}
+
+    def result(holder):
+        sub = holder.ViewObject.Proxy.sub
+        return {"sub": sub, "expanded": App.expandMappedName(mappedPart(sub))}
+
+    try:
+        doc = App.openDocument(info["path"])
+        out["load"] = result(doc.getObject("Holder"))
+        App.closeDocument(doc.Name)
+    except Exception:
+        out["load"] = {"error": traceback.format_exc()}
+    try:
+        doc = App.newDocument("ViewProxyMerge")
+        doc.mergeProject(info["exported"])
+        holders = [o for o in doc.Objects if o.Name.startswith("Holder")]
+        if len(holders) != 1:
+            raise AssertionError(f"one holder expected: {[o.Name for o in doc.Objects]}")
+        out["merge"] = result(holders[0])
+        App.closeDocument(doc.Name)
+    except Exception:
+        out["merge"] = {"error": traceback.format_exc()}
+    return out
+
+
+VIEW_PARTS = {"viewSave": _childViewSave, "viewLoad": _childViewLoad}
+
+
 PARTS = {
     "collideOne": _childCollideOne,
     "collideAll": _childCollideAll,
@@ -550,7 +656,7 @@ PARTS = {
 def childMain(manifestPath, outPath, part):
     with open(manifestPath, encoding="utf-8") as fh:
         manifest = json.load(fh)
-    result = PARTS[part](manifest)
+    result = PARTS.get(part, VIEW_PARTS.get(part))(manifest)
     with open(outPath, "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=1, sort_keys=True)
 
@@ -567,6 +673,15 @@ except Exception:
         fh.write(traceback.format_exc())
 os._exit(0)
 """
+
+# The view providers' children: the GUI, off screen (the environment sets QT_QPA_PLATFORM),
+# started before anything else, so that documents get view providers and a save writes
+# GuiDocument.xml. FreeCADGui.setupWithoutGUI() makes no view providers, and starting the GUI
+# after the test modules have imported the workbenches' App modules crashed a selection observer
+# (an access violation at the first addSelection).
+VIEW_CHILD_SCRIPT = CHILD_SCRIPT.replace(
+    "try:\n", "try:\n    import FreeCADGui\n    FreeCADGui.showMainWindow()\n", 1
+)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -778,42 +893,85 @@ def saved():
     manifestPath = os.path.join(folder, "manifest.json")
     with open(manifestPath, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1)
-    script = os.path.join(folder, "child.py")
-    with open(script, "w", encoding="utf-8") as fh:
-        fh.write(CHILD_SCRIPT)
-    runs = {}
-    for part in PARTS:
-        out = os.path.join(folder, f"child-{part}.json")
-        env = dict(os.environ)
-        env.pop("FREECAD_INTERN_NAMES", None)
-        env["FREECAD_NAMING_LOAD_MANIFEST"] = manifestPath
-        env["FREECAD_NAMING_LOAD_OUT"] = out
-        env["FREECAD_NAMING_LOAD_PART"] = part
-        logPath = os.path.join(folder, f"child-{part}.log")
-        log = open(logPath, "w")
-        proc = subprocess.Popen(
-            [dump._freecadCmd(), script], env=env, stdout=log, stderr=subprocess.STDOUT, cwd=folder
-        )
-        runs[part] = (proc, out, log, logPath)
+    runs = {part: _startChild(folder, manifestPath, part) for part in PARTS}
     manifest["child"] = {}
     manifest["logs"] = {}
-    for part, (proc, out, log, logPath) in runs.items():
-        try:
-            proc.wait(timeout=900)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log.close()
-        with open(logPath, encoding="utf-8", errors="replace") as fh:
-            manifest["logs"][part] = fh.read()
-        if os.path.isfile(out):
-            with open(out, encoding="utf-8") as fh:
-                manifest["child"][part] = json.load(fh)
-        else:
-            error = out + ".error"
-            reason = open(error).read() if os.path.isfile(error) else f"no output ({folder})"
-            manifest["child"][part] = {"ERROR": reason}
+    for part, run in runs.items():
+        manifest["child"][part], manifest["logs"][part] = _finishChild(folder, run)
     _saved = manifest
     return _saved
+
+
+def _startChild(folder, manifestPath, part):
+    view = part in VIEW_PARTS
+    script = os.path.join(folder, "view-child.py" if view else "child.py")
+    if not os.path.isfile(script):
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(VIEW_CHILD_SCRIPT if view else CHILD_SCRIPT)
+    out = os.path.join(folder, f"child-{part}.json")
+    env = dict(os.environ)
+    env.pop("FREECAD_INTERN_NAMES", None)
+    env["FREECAD_NAMING_LOAD_MANIFEST"] = manifestPath
+    env["FREECAD_NAMING_LOAD_OUT"] = out
+    env["FREECAD_NAMING_LOAD_PART"] = part
+    if view:
+        env["QT_QPA_PLATFORM"] = "offscreen"
+    logPath = os.path.join(folder, f"child-{part}.log")
+    log = open(logPath, "w")
+    proc = subprocess.Popen(
+        [dump._freecadCmd(), script], env=env, stdout=log, stderr=subprocess.STDOUT, cwd=folder
+    )
+    return proc, out, log, logPath
+
+
+def _finishChild(folder, run):
+    """(the child's result, its log)."""
+    proc, out, log, logPath = run
+    try:
+        proc.wait(timeout=900)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    log.close()
+    with open(logPath, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    if os.path.isfile(out):
+        with open(out, encoding="utf-8") as fh:
+            return json.load(fh), text
+    error = out + ".error"
+    reason = open(error).read() if os.path.isfile(error) else f"no output ({folder})"
+    return {"ERROR": reason}, text
+
+
+_viewSaved = None
+
+
+def viewSaved():
+    """The view provider's file, saved by one child and opened by another with its references
+    colliding: {"view": the first's result, "viewLoad": the second's}. Runs once per process."""
+    global _viewSaved
+    if _viewSaved is not None:
+        return _viewSaved
+    folder = os.path.realpath(tempfile.mkdtemp(prefix="naming-view-"))
+    manifest = {"folder": folder}
+    manifestPath = os.path.join(folder, "manifest.json")
+    for part in VIEW_PARTS:
+        with open(manifestPath, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=1)
+        result, _ = _finishChild(folder, _startChild(folder, manifestPath, part))
+        if part == "viewSave":
+            manifest["view"] = result
+            if "ERROR" in result:
+                break
+            # every reference of the subname, and every entry of the files' tables
+            info = result["save"]
+            ids = refsOf(info["sub"])
+            for path in (info["path"], info["exported"]):
+                ids |= set(save.nameTable(save.fileEntries(path))[1])
+            manifest["viewCollide"] = sorted(ids)
+        else:
+            manifest[part] = result
+    _viewSaved = manifest
+    return _viewSaved
 
 
 def child(test, part):
@@ -1087,6 +1245,89 @@ class TestNamingLoadElementReference(unittest.TestCase):
         self.assertEqual(links(after), links(before))
         self.assertEqual(save.nameTable(after), save.nameTable(before))
         self.assertNotIn("~!", after["Document.xml"])
+
+
+def guiStates(entries):
+    """The decoded Python states in a file's GuiDocument.xml."""
+    text = entries.get("GuiDocument.xml", "")
+    values = re.findall(r'<Python value="([^"]*)" encoded="yes"', text)
+    return [base64.b64decode(html.unescape(v)).decode("utf-8") for v in values]
+
+
+class TestNamingLoadViewProxy(unittest.TestCase):
+    """A Python view provider's state holds an interned subname (ops#97). GuiDocument.xml is
+    written after Document.xml and its table, so the GUI document hands the state to the save's
+    collector before the table is decided. The children start the GUI off screen
+    (FreeCADGui.showMainWindow(), VIEW_CHILD_SCRIPT), so that their documents have view
+    providers."""
+
+    def view(self, key):
+        result = viewSaved().get(key)
+        self.assertIsNotNone(result, "the child didn't run")
+        self.assertNotIn("ERROR", result, result.get("ERROR"))
+        return result
+
+    def checkEntries(self, key):
+        info = self.view("view")["save"]
+        entries = save.fileEntries(info[key])
+        refs = refsOf(info["sub"])
+        self.assertTrue(refs, "the premise: the subname is interned")
+        self.assertTrue(
+            any(info["sub"] in state for state in guiStates(entries)),
+            "the premise: GuiDocument.xml holds the state",
+        )
+        rest = save.TABLE.sub("", entries["Document.xml"])
+        self.assertEqual(refsOf(rest), set(), "the premise: Document.xml holds no reference")
+        _, table = save.nameTable(entries)
+        self.assertLessEqual(refs, set(table))
+
+    def checkCollision(self, key):
+        info = self.view("view")["save"]
+        loaded = self.view("viewLoad")
+        result = checked(self, loaded[key])
+        self.assertGreater(loaded["forced"], 0, "the premise: the references collide")
+        self.assertEqual(result["expanded"], info["plain"])
+        self.assertNotEqual(result["sub"], info["sub"], "the subname was remapped")
+        self.assertEqual(refsOf(result["sub"]) & set(viewSaved()["viewCollide"]), set())
+
+    def testFileHoldsTheEntries(self):
+        """The saved file's table holds the entries of the subname's references, which only
+        GuiDocument.xml holds."""
+        self.checkEntries("path")
+
+    def testCollisionOnLoad(self):
+        """With the entries colliding, the opened state's subname means what the file meant."""
+        self.checkCollision("load")
+
+    def testExportHoldsTheEntries(self):
+        """The same for the holder exported by Std_Copy (Document::exportObjects())."""
+        self.checkEntries("exported")
+
+    def testCollisionOnMerge(self):
+        """The exported holder merged into a document with the entries colliding."""
+        self.checkCollision("merge")
+
+
+class TestNamingSaveHasher(unittest.TestCase):
+    """The string hasher's strings hold no reference to the name table (ops#97). The hasher is
+    saved after the table is decided (in StringHasher.Table.txt, by writeFiles()) and isn't
+    scanned, so a reference there would have no entry. A tripwire: V2 and V2i documents save an
+    empty hasher today, so it holds trivially, until something hashes an interned name."""
+
+    def testNoReferenceInTheHasher(self):
+        """A box with a filleted edge (B) and an object in another document (A) linking that
+        fillet's face, both V2i."""
+        folder = os.path.realpath(tempfile.mkdtemp(prefix="naming-hasher-"))
+        info = _saveElementReference(folder)
+        for path in (info["closed"], os.path.join(folder, "ElementRefB.FCStd")):
+            entries = save.fileEntries(path)
+            self.assertTrue(save.nameTable(entries)[1], f"the premise: {path} has a name table")
+            texts = [text for name, text in entries.items() if "StringHasher" in name]
+            inline = re.compile(r"<StringHasher2.*?(?:/>|</StringHasher2>)", re.S)
+            texts += inline.findall(entries["Document.xml"])
+            for text in texts:
+                self.assertNotIn("~", text, path)
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _addTests():

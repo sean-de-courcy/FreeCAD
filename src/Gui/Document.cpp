@@ -46,6 +46,8 @@
 #include <App/DocumentObjectGroup.h>
 #include <App/Transactions.h>
 #include <App/ElementNamingUtils.h>
+#include <App/NameTable.h>
+#include <App/PropertyPythonObject.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Matrix.h>
@@ -143,6 +145,7 @@ struct DocumentP
     Connection connectTransactionAppend;
     Connection connectTransactionRemove;
     Connection connectTouchedObject;
+    std::size_t nameRefSource = 0;  // Data::NameRefCollector::addSource()'s key
     Connection connectChangePropertyEditor;
     AdvancedConnection connectChangeDocument;
 
@@ -559,6 +562,35 @@ Document::Document(App::Document* pcDocument, Application* app)
     );
     // NOLINTEND
 
+    // A view provider's Python state may hold interned names (an add-on's subname), and
+    // GuiDocument.xml is written after Document.xml has its name table: a save or an export of
+    // this document's objects gets the states before it decides the table, as
+    // PropertyPythonObject::Save() gives them in Document.xml (ops#97)
+    d->nameRefSource = Data::NameRefCollector::addSource(
+        [this](const App::DocumentObject& obj, Data::NameRefCollector& collector) {
+            if (obj.getDocument() != getDocument()) {
+                return;
+            }
+            auto vp = getViewProvider(&obj);
+            if (!vp) {
+                return;
+            }
+            std::vector<App::Property*> props;
+            vp->getPropertyList(props);
+            for (auto prop : props) {
+                // what PropertyContainer::Save() writes
+                auto python = freecad_cast<App::PropertyPythonObject*>(prop);
+                if (!python || prop->testStatus(App::Property::PropNoPersist)
+                    || (!prop->testStatus(App::Property::PropDynamic)
+                        && (prop->testStatus(App::Property::Transient)
+                            || (vp->getPropertyType(prop) & App::Prop_Transient) != 0))) {
+                    continue;
+                }
+                collector.add(python->toString());
+            }
+        }
+    );
+
     // pointer to the python class
     // NOTE: As this Python object doesn't get returned to the interpreter we
     // mustn't increment it (Werner Jan-12-2006)
@@ -577,6 +609,7 @@ Document::~Document()
 {
     // disconnect everything to avoid to be double-deleted
     // in case an exception is raised somewhere
+    Data::NameRefCollector::removeSource(d->nameRefSource);
     d->connectNewObject.disconnect();
     d->connectDelObject.disconnect();
     d->connectCngObject.disconnect();
