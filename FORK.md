@@ -136,6 +136,7 @@ names it.
 | `fix/112-binder-support-index` | fix | ops#112 | - | `integration` `fd44457837` | `46b23b4235` (fork PR 106), 2026-10-04 | never (fork naming code) |
 | `fix/113-114-gui-tests` | fix | ops#113, ops#114 | - | `integration` `46b23b4235` | `eb0131f1fa` (fork PR 107), 2026-10-04 | never (fork tests) |
 | `fix/103-naming-revision-gate` | fix | ops#103 | - | `integration` `eb0131f1fa` | (fork PR 108) | never (fork naming code) |
+| `fix/116-consumer-pass` | fix | ops#116 | - | `integration` `4c8a6d7101` | (fork PR 109) | never (fork naming code) |
 
 ## Fork-only commits in carried topics
 
