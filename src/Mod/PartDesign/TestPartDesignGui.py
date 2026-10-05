@@ -40,6 +40,7 @@ from PartDesignTests.TestMaterial import TestMaterial
 from PartDesignTests.TestActiveObject import TestActiveObject
 from PartDesignTests.TestSuppressed import TestSuppressedStrikethrough
 from PartDesignTests.TestPreviewPython import TestPreviewPython
+from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 
 
 # timer runs this class in order to access modal dialog

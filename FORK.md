@@ -139,7 +139,8 @@ names it.
 | `fix/116-consumer-pass` | fix | ops#116 | - | `integration` `4c8a6d7101` | `45e27a79cc` (fork PR 109), 2026-10-05 | never (fork naming code) |
 | `fix/97-save-side-limits` | fix | ops#97 | - | `integration` `45e27a79cc` | `1807cbb5ff` (fork PR 111), 2026-10-05 | never (fork naming code) |
 | `fix/119-link-unregister` | fix | ops#119, ops#120 | - | `integration` `1807cbb5ff` | `e2372ffd85` (fork PR 110), 2026-10-05 | never (fork naming code) |
-| `fix/123-missing-sub-reverse` | fix | ops#123 | - | `integration` `1807cbb5ff` | (fork PR 112) | never (fork naming code) |
+| `fix/123-missing-sub-reverse` | fix | ops#123 | - | `integration` `1807cbb5ff` | `ee0c358393` (fork PR 112), 2026-10-05 | never (fork naming code) |
+| `fix/125-profile-link-dialog` | fix | ops#125 | - | `integration` `ee0c358393` | (fork PR 113) | when upstream's link dialog keeps stale sub-elements apart from new picks |
 
 ## Fork-only commits in carried topics
 

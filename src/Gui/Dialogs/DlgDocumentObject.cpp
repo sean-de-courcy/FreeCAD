@@ -22,12 +22,14 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <algorithm>
 #include <sstream>
 #include <QStyledItemDelegate>
 #include <QTreeWidgetItem>
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ElementNamingUtils.h>
 #include <App/GeoFeature.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyPythonObject.h>
@@ -538,18 +540,38 @@ void DlgDocumentObject::onSelectionChanged(const Gui::SelectionChanges& msg)
 
     ui->treeWidget->scrollToItem(item);
     if (allowSubObject) {
-        QString element = QString::fromUtf8(msg.Object.getOldElementName().c_str());
+        // A stale element (a broken reference, "?Face1") is listed as it is stored: its owner
+        // can't name it (a sketch reads "?InternalFace1" as "1", and "1" as its Edge1), and
+        // an unchanged list must give back the property's own value (ops#125).
+        const bool stale = Data::hasMissingElement(msg.pSubName);
+        QString element = stale
+            ? QString::fromUtf8(Data::findElementName(msg.pSubName))
+            : QString::fromUtf8(msg.Object.getOldElementName().c_str());
         if (element.size()) {
             QStringList list;
             QString text = item->text(1);
             if (text.size()) {
                 list = text.split(QLatin1Char(','));
             }
+            // An element picked anew replaces the item's stale ones: re-selecting is how a
+            // broken reference is repaired (ops#125).
+            if (!stale && !seedingLinks) {
+                list.erase(
+                    std::remove_if(
+                        list.begin(),
+                        list.end(),
+                        [](const QString& name) {
+                            return name.startsWith(QLatin1String(Data::MISSING_PREFIX));
+                        }
+                    ),
+                    list.end()
+                );
+            }
             if (list.indexOf(element) < 0) {
                 list << element;
-                item->setText(1, list.join(QLatin1String(",")));
-                subSelections.insert(item);
             }
+            item->setText(1, list.join(QLatin1String(",")));
+            subSelections.insert(item);
         }
         else if (subSelections.erase(item)) {
             item->setText(1, QString());

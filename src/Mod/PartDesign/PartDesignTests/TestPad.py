@@ -21,12 +21,102 @@
 # *                                                                         *
 # ***************************************************************************
 
+import math
 import unittest
 
 import FreeCAD
 import Part
 from FreeCAD import Base
 import TestSketcherApp
+
+
+# A Pad made from two regions of a sketch (ops#125): a 30 x 20 x 2 plate, and two bosses of
+# radius 2 and height 5 from a sketch at z = 2, each with a 0.5 fillet on its top edge.
+REGIONS = ["InternalFace1", "InternalFace2"]
+BOSS_RADIUS = 2.0
+BOSS_HEIGHT = 5.0
+BOSS_FILLET = 0.5
+REGION_PAD_VOLUME = 30 * 20 * 2 + 2 * math.pi * BOSS_RADIUS**2 * BOSS_HEIGHT
+# Each fillet removes the area between a square of side r and its quarter circle,
+# r^2 (1 - pi/4), turned around the boss's axis at its centroid, r (10 - 3 pi) / (12 - 3 pi)
+# inside the edge (Pappus).
+REGION_FILLET_VOLUME = REGION_PAD_VOLUME - 2 * (
+    2
+    * math.pi
+    * (BOSS_RADIUS - BOSS_FILLET * (10 - 3 * math.pi) / (12 - 3 * math.pi))
+    * BOSS_FILLET**2
+    * (1 - math.pi / 4)
+)
+
+
+def makeRegionPad(doc):
+    """The ops#125 model in doc, with the bosses at (-5, 0) and (5, 0).
+    Returns the boss sketch, the Pad made from its two regions, and the fillet."""
+    body = doc.addObject("PartDesign::Body", "Body")
+    xy = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
+    plateSketch = body.newObject("Sketcher::SketchObject", "PlateSketch")
+    plateSketch.AttachmentSupport = [(xy, "")]
+    plateSketch.MapMode = "FlatFace"
+    corners = [
+        FreeCAD.Vector(-15, -10, 0),
+        FreeCAD.Vector(15, -10, 0),
+        FreeCAD.Vector(15, 10, 0),
+        FreeCAD.Vector(-15, 10, 0),
+    ]
+    for i in range(4):
+        plateSketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    plate = body.newObject("PartDesign::Pad", "Plate")
+    plate.Profile = plateSketch
+    plate.Length = 2
+    sketch = body.newObject("Sketcher::SketchObject", "BossSketch")
+    sketch.AttachmentSupport = [(xy, "")]
+    sketch.MapMode = "FlatFace"
+    sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 2), FreeCAD.Rotation())
+    sketch.MakeInternals = True  # the regions (InternalFaceN)
+    for x in (-5, 5):
+        sketch.addGeometry(
+            Part.Circle(FreeCAD.Vector(x, 0, 0), FreeCAD.Vector(0, 0, 1), BOSS_RADIUS)
+        )
+    doc.recompute()
+    pad = body.newObject("PartDesign::Pad", "Bosses")
+    pad.Profile = (sketch, REGIONS)
+    pad.Length = BOSS_HEIGHT
+    doc.recompute()
+    fillet = body.newObject("PartDesign::Fillet", "Fillet")
+    fillet.Base = (pad, bossTopEdges(pad))
+    fillet.Radius = BOSS_FILLET
+    doc.recompute()
+    return sketch, pad, fillet
+
+
+def redrawBosses(sketch):
+    """Deletes the two circles and draws them again at (0, -5) and (0, 5): new geometry."""
+    sketch.delGeometries([0, 1])
+    for y in (-5, 5):
+        sketch.addGeometry(
+            Part.Circle(FreeCAD.Vector(0, y, 0), FreeCAD.Vector(0, 0, 1), BOSS_RADIUS)
+        )
+
+
+def bossTopEdges(pad):
+    """The index names of the bosses' top circles."""
+    top = 2 + BOSS_HEIGHT
+    return [
+        "Edge%d" % (i + 1)
+        for i, e in enumerate(pad.Shape.Edges)
+        if isinstance(e.Curve, Part.Circle)
+        and abs(e.BoundBox.ZMin - top) < 1e-6
+        and abs(e.BoundBox.ZMax - top) < 1e-6
+    ]
+
+
+def bossCentres(shape):
+    """The (x, y) of each boss's axis, sorted."""
+    return sorted(
+        (round(f.Surface.Center.x, 6) + 0.0, round(f.Surface.Center.y, 6) + 0.0)
+        for f in shape.Faces
+        if isinstance(f.Surface, Part.Cylinder)
+    )
 
 
 class TestPad(unittest.TestCase):
@@ -473,6 +563,38 @@ class TestPad(unittest.TestCase):
             box = pad.Shape.optimalBoundingBox(False, False)
             self.assertAlmostEqual(box.ZMin, -3, places=6)
             self.assertAlmostEqual(box.ZMax, 5, places=6)
+
+    def testReselectedRegionsRepairThePad(self):
+        """ops#125: a Pad made from two sketch regions breaks when the sketch's circles are
+        drawn again elsewhere, and setting its Profile to the new regions repairs it. The fillet
+        on it then breaks loudly. The property editor's link dialog sets the Profile this way
+        (TestProfileLinkDialog checks the dialog)."""
+        for solver in (True, False):
+            with self.subTest(solver=solver):
+                doc = FreeCAD.newDocument("PartDesignTestPadRegions")
+                try:
+                    if hasattr(doc, "ReferenceSolver"):
+                        doc.ReferenceSolver = solver
+                    sketch, pad, fillet = makeRegionPad(doc)
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    self.assertAlmostEqual(pad.Shape.Volume, REGION_PAD_VOLUME, places=4)
+                    self.assertAlmostEqual(fillet.Shape.Volume, REGION_FILLET_VOLUME, places=4)
+
+                    redrawBosses(sketch)
+                    doc.recompute()
+                    self.assertFalse(pad.isValid())
+                    self.assertIn("InternalFace", pad.getStatusString())
+
+                    pad.Profile = (sketch, REGIONS)
+                    doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    self.assertEqual(pad.Profile[1], REGIONS)
+                    self.assertAlmostEqual(pad.Shape.Volume, REGION_PAD_VOLUME, places=4)
+                    self.assertEqual(bossCentres(pad.Shape), [(0.0, -5.0), (0.0, 5.0)])
+                    self.assertFalse(fillet.isValid())
+                    self.assertIn("Edge", fillet.getStatusString())
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def tearDown(self):
         # closing doc
