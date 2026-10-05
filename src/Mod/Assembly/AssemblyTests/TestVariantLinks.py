@@ -375,6 +375,80 @@ class TestLinkRetargetProperties(VariantLinkTestBase):
                 self.assertEqual(subs[0][0], top, naming)
                 self.assertTrue(subs[0][1].startswith(";"), naming + ": shadow " + subs[0][1])
 
+    def test_target_document_closed_reopened(self):
+        """The part document closed while the assembly stays open, then the assembly saved and
+        reopened (ops#119). `Target` reaches the box's top face through LinkA, `Direct` (an XLink)
+        straight in the part, beside it. While the part is closed, the assembly is recomputed,
+        saved, and a file without `NamingRevision` is opened, so the consumer pass runs (ops#116):
+        none of them reaches the part's destroyed objects. Reopened, with the part closed until
+        then or reopened in between, each reference names the top face again: the same face,
+        never another one."""
+        height = CONFIGS["Small"][2]
+        for naming in NAMINGS:
+            for reopenPart in (False, True):
+                with self.subTest(naming=naming, reopenPart=reopenPart):
+                    self.start(naming)
+                    body = self.part.getObject("Body")
+                    link = self.doc.addObject("App::Link", "LinkA")
+                    link.LinkedObject = body
+                    self.doc.recompute()
+                    top, _ = _topFace(link.Shape, height)
+                    refs = self.doc.addObject("App::FeaturePython", "Refs")
+                    refs.addProperty("App::PropertyXLinkSub", "Target")
+                    refs.addProperty("App::PropertyXLinkSub", "Direct")
+                    refs.Target = (link, [top])
+                    refs.Direct = (body, [_topFace(body.Shape, height)[0]])
+                    self.doc.recompute()
+                    self.part.save()
+                    partPath = self.part.FileName
+                    App.closeDocument(self.part.Name)
+
+                    # Objects made now can take the closed part's addresses.
+                    other = _newDocument("VariantLinkOther", naming)
+                    self.docs.append(other.Name)
+                    for i in range(20):
+                        other.addObject("Part::Box", "Box%d" % i)
+                    other.recompute()
+                    otherPath = os.path.join(self.dir, "VariantLinkOther.FCStd")
+                    other.saveAs(otherPath)
+                    App.closeDocument(other.Name)
+                    _withoutNamingRevision(otherPath)
+                    self.doc.recompute()
+                    App.openDocument(otherPath)
+                    self.doc.save()
+                    if reopenPart:
+                        App.openDocument(partPath)
+                        self.doc.recompute()
+                        self.doc.save()
+
+                    path = self.doc.FileName
+                    self.closeAll()
+                    self.doc = App.openDocument(path)
+                    self.part = App.getDocument("VariantLinkPart")
+                    self.docs = [self.part.Name, self.doc.Name]
+                    self.doc.recompute()
+                    link = self.doc.getObject("LinkA")
+                    refs = self.doc.getObject("Refs")
+                    msg = "%s, part reopened %s" % (naming, reopenPart)
+                    self.assertIs(refs.Target[0], link, msg)
+                    self.assertTopFace(link, refs.Target[1][0], _box("Small"), msg + ": Target")
+                    body = self.part.getObject("Body")
+                    self.assertIs(refs.Direct[0], body, msg)
+                    self.assertTopFace(body, refs.Direct[1][0], _box("Small"), msg + ": Direct")
+
+
+def _withoutNamingRevision(path):
+    """Rewrites the file as one saved before ops#116: no `NamingRevision`."""
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info.filename)) for info in z.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for info, data in entries:
+            if info.filename == "Document.xml":
+                text = data.decode("utf-8")
+                assert "NamingRevision=" in text, "the file has no NamingRevision"
+                data = re.sub(r' NamingRevision="[0-9]+"', "", text).encode("utf-8")
+            z.writestr(info, data)
+
 
 class TestVariantLinkRecompute(VariantLinkTestBase):
     """After an edit of a variant link's source part, one recompute of the assembly shows the

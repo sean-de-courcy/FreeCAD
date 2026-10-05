@@ -291,6 +291,7 @@ SET(Properties_HPP_SRCS
     PropertyGeo.h
     PropertyLinks.h
     LinkRetarget.h
+    ElementReferences.h
     NamingRevision.h
     ReferenceReport.h
     PropertyPythonObject.h

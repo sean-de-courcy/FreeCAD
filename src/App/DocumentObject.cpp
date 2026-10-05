@@ -44,6 +44,7 @@
 #include "DocumentObjectPy.h"
 #include "DocumentObjectExtension.h"
 #include "DocumentObjectGroup.h"
+#include "ElementReferences.h"
 #include "GeoFeatureGroupExtension.h"
 #include "Link.h"
 #include "ObjectIdentifier.h"
@@ -86,6 +87,9 @@ DocumentObject::DocumentObject()
 
 DocumentObject::~DocumentObject()
 {
+    // References into this object, e.g. through an App::Link of another document, are registered
+    // under it until here (ops#119)
+    forgetElementReferencesTo(this);
     if (!PythonObject.is(Py::_None())) {
         Base::PyGILStateLocker lock;
         // Remark: The API of Py::Object has been changed to set whether the wrapper owns the passed

@@ -48,6 +48,7 @@
 #include "ObjectIdentifier.h"
 #include "ElementNamingUtils.h"
 #include "GeoFeature.h"
+#include "ElementReferences.h"
 #include "LinkRetarget.h"
 #include "NamingRevision.h"
 #include "ComplexGeoData.h"
@@ -148,19 +149,6 @@ static bool takesConsumerPass(const PropertyLinkBase* prop,
     }
     return App::namingRevisionOf(doc) < App::forkNamingRevision()
         && producerNamingRevision(feature) == App::forkNamingRevision();
-}
-
-// Every object of the open documents. A key of _ElementRefMap can outlive its object: an XLink
-// whose target document was closed stays registered under its objects until it unregisters.
-static std::unordered_set<const DocumentObject*> liveObjects()
-{
-    std::unordered_set<const DocumentObject*> objects;
-    for (auto doc : App::GetApplication().getDocuments()) {
-        for (auto obj : doc->getObjects()) {
-            objects.insert(obj);
-        }
-    }
-    return objects;
 }
 
 // A property's subs, by index and by mapped name: compared before and after the consumer pass
@@ -485,7 +473,6 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
     const bool pass =
         !reverse && (App::anyOpenedWithOlderNaming() || !_ConsumerPassLinks.empty());
     std::unordered_map<PropertyLinkBase*, std::vector<std::string>> passed;  // the state before
-    const auto live = pass ? liveObjects() : std::unordered_set<const DocumentObject*>();
     for (const auto& [feature, props] : references) {
         std::vector<PropertyLinkBase*> solverProps;
         std::vector<PropertyLinkBase*> solverPassProps;
@@ -494,7 +481,7 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
             if (it == _ElementRefMap.end() || it->second.count(prop) == 0) {
                 continue;
             }
-            const bool inPass = pass && prop->getContainer() && live.count(feature) != 0
+            const bool inPass = pass && prop->getContainer() && feature->isAttachedToDocument()
                 && takesConsumerPass(prop, feature, true);
             if (inPass) {
                 passed.emplace(prop, referenceState(prop));
@@ -4921,7 +4908,25 @@ public:
         }
         return false;
     }
+
+    /// Drops \a feature from _ElementRefMap and from its properties' own lists (ops#119)
+    static void forgetFeature(const DocumentObject* feature)
+    {
+        auto it = _ElementRefMap.find(const_cast<DocumentObject*>(feature));
+        if (it == _ElementRefMap.end()) {
+            return;
+        }
+        for (auto prop : it->second) {
+            prop->_ElementRefs.erase(it->first);
+        }
+        _ElementRefMap.erase(it);
+    }
 };
+
+void App::forgetElementReferencesTo(const DocumentObject* feature)
+{
+    DocInfo::forgetFeature(feature);
+}
 
 int App::namingRevisionToSave(const Document* doc)
 {
@@ -4929,9 +4934,9 @@ int App::namingRevisionToSave(const Document* doc)
     // revision, and so do this document's references into it; a reference into a document that
     // isn't open holds this document's own.
     int revision = App::forkNamingRevision();
-    const auto live = liveObjects();
+    // A removed feature kept for undo stays registered; destroyed ones leave the map (ops#119).
     for (const auto& [feature, props] : _ElementRefMap) {
-        if (live.count(feature) == 0 || feature->getDocument() == doc) {
+        if (!feature->isAttachedToDocument() || feature->getDocument() == doc) {
             continue;
         }
         const bool held = std::any_of(props.begin(), props.end(), [doc](PropertyLinkBase* prop) {
