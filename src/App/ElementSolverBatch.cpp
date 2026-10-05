@@ -810,9 +810,12 @@ bool solveElementReferences(DocumentObject* feature,
         });
         // An owner with only exact references is solved only if one of them has a saved
         // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
-        // update checks every one with a fingerprint (ops#103).
-        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [](const auto* e) {
-                return e->kind == SolverEntry::Kind::Exact && !e->oldFingerprint.empty();
+        // update checks every one with a fingerprint (ops#103), and every one whose name now
+        // gives another element than its stored index (ops#116).
+        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [reverse](const auto* e) {
+                return e->kind == SolverEntry::Kind::Exact
+                    && (!e->oldFingerprint.empty()
+                        || (reverse && !e->storedIndex.empty() && e->storedIndex != e->oldIndex));
             })) {
             continue;
         }

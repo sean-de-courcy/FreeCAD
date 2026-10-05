@@ -33,7 +33,8 @@ bool openedWithOlderNaming(const Document* doc);
 /// Whether any document is openedWithOlderNaming(): the pass's whole cost for current files.
 bool anyOpenedWithOlderNaming();
 
-/// Ends openedWithOlderNaming() for every document (the pass has run).
+/// Ends openedWithOlderNaming() for every document (the pass has run), whose revision becomes
+/// namingRevisionToSave()'s.
 void endOpenedWithOlderNaming();
 
 /// The revision \a doc saves: this build's, lowered to the oldest revision among the producers

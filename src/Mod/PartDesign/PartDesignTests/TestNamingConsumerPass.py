@@ -95,8 +95,8 @@ def faceCentre(shape):
     return shape.Faces[0].CenterOfMass
 
 
-class TestNamingConsumerPass(NamingGateTestBase):
-    """Two files, each test in each configuration (`test<Name><Config>`)."""
+class ConsumerPassTestBase(NamingGateTestBase):
+    """Two files, A and B, and the cases on them."""
 
     def twoFiles(self, config, throughLink=False):
         """Saves A (Pad1, Pad2) and B: `Refs.Ref` (an XLinkSub) and a binder on FaceC, and
@@ -238,6 +238,84 @@ class TestNamingConsumerPass(NamingGateTestBase):
         else:
             self.assertBroken(b, faceC, faceD)
 
+    def assertPassed(self, b, faceC, faceD):
+        """The pass's outcome: repaired with the solver on, broken with it off."""
+        if b.ReferenceSolver:
+            self.assertRepaired(b, faceC, faceD)
+        else:
+            self.assertBroken(b, faceC, faceD)
+
+    def targetOpenedLater(self, config):
+        """B opened while A's file was missing, A opened later in the session: B's links attach
+        in A's open, and the pass at its end takes them (B was opened before it)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+        away = os.path.join(self.folder, "away.FCStd")
+        os.rename(pathA, away)
+        b = self.open(pathB)
+        self.assertIsNone(b.getObject("Refs").Ref, "the setup: A missing")
+        os.rename(away, pathA)
+
+        # Act
+        self.open(pathA)
+
+        # Assert
+        self.assertPassed(b, faceC, faceD)
+
+    def targetSavedAtItsPath(self, config):
+        """B opened while A's file was missing, then a copy of A saved at A's path: B's links
+        attach outside an open (restoreLink) and take the pass there."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+        other = os.path.join(self.folder, "Other.FCStd")
+        os.rename(pathA, other)
+        b = self.open(pathB)
+        a = self.open(other)
+
+        # Act
+        a.saveAs(pathA)
+
+        # Assert
+        self.assertPassed(b, faceC, faceD)
+
+    def chain(self, config):
+        """C references B's binder, B references A: opening C loads B and A; B's references into
+        A (migrated alone) take the pass, and C's into B, whose names didn't move, are kept."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        b = self.open(pathB)
+        c = self.newDocument(config)
+        pathC = os.path.join(self.folder, "C.FCStd")
+        c.saveAs(pathC)
+        refs = c.addObject("App::FeaturePython", "Refs")
+        refs.addProperty("App::PropertyXLinkSub", "Ref")
+        refs.Ref = (b.getObject("Binder"), ["Face1"])
+        # B loads partially with C, its objects that C needs: Refs and Other too
+        refs.addProperty("App::PropertyXLinkList", "Keep")
+        refs.Keep = [b.getObject("Refs"), b.getObject("Other")]
+        c.recompute()
+        c.save()
+        for doc in list(App.listDocuments().values()):
+            App.closeDocument(doc.Name)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        files = readFile(pathC)
+        files["Document.xml"] = withoutRevision(xmlOf(pathC)).encode("utf-8")
+        writeFile(pathC, files)
+        self.openAlone(pathA)
+
+        # Act
+        c = self.open(pathC)
+
+        # Assert
+        b = self.documentOf(pathB)
+        self.assertEqual(c.getObject("Refs").Ref[1], ["Face1"])
+        self.assertNotIn("Touched", c.getObject("Refs").State)
+        self.assertPassed(b, faceC, faceD)  # recomputes B (solver on)
+
     def consumerFirst(self, config):
         """B opened first, A loading with it, both old: the pass leaves the references alone (A's
         names aren't current yet), and A's migration recompute re-derives them."""
@@ -378,9 +456,71 @@ class TestNamingConsumerPass(NamingGateTestBase):
         self.assertOnFaces(b, faceC, faceD)
 
 
+class TestNamingConsumerPass(ConsumerPassTestBase):
+    """Each case in each configuration (`test<Name><Config>`)."""
+
+
+class TestNamingConsumerPassSolver(ConsumerPassTestBase):
+    """Cases of the solver alone (`test<Name><Config>`, V2s and V2is)."""
+
+    def withoutFingerprints(self, config):
+        """B saved without fingerprints (Q4, review F1): the open doesn't fill them from the
+        names' elements before the pass, so each reference whose name now gives another element
+        is broken, with that element as the `name` candidate, never followed."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        files = readFile(pathB)
+        files["Document.xml"] = re.sub(r' fp="[^"]*"', "", xmlOf(pathB)).encode("utf-8")
+        writeFile(pathB, files)
+        self.openAlone(pathA)
+
+        # Act
+        b = self.open(pathB)
+
+        # Assert
+        evidence = "migration: the name moved; no fingerprint to find its place"
+        self.assertReport(b.getObject("Refs"), [faceD], ["name"], evidence)
+        self.assertReport(b.getObject("Other"), [faceC], ["name"], evidence)
+        self.assertEqual(b.getObject("Refs").Ref[1], ["?" + faceC])
+        self.assertEqual(b.getObject("Other").Ref[1], ["?" + faceD])
+
+    def missingAtOpen(self, config):
+        """A reference of an old B whose name A no longer has at all (missing at the open) is
+        carried by its stored index, verified by its saved fingerprint, in reverse across the
+        documents."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        self.editFiles(pathA, pathB, faceC, faceD, move=False)
+        files = readFile(pathB)
+        xml = xmlOf(pathB)
+        shadowC = shadowOf(xml, faceC)
+        name = shadowC[: -len(faceC) - 1]
+        gone = name.replace(";F;", ";E;", 1)  # a name of no element of A
+        self.assertNotEqual(gone, name, "the setup")
+        files["Document.xml"] = withShadows(xml, {faceC: gone + "." + faceC}).encode("utf-8")
+        writeFile(pathB, files)
+        self.openAlone(pathA)
+
+        # Act
+        b = self.open(pathB)
+
+        # Assert
+        refs = b.getObject("Refs")
+        self.assertEqual(refs.Ref[1], [faceC])
+        report = App.getReferenceReport(refs)
+        self.assertEqual(
+            [(e["status"], e["new"], e["evidence"]) for e in report],
+            [("index", faceC, "index carry, fingerprint equal")],
+        )
+
+
 def _addConfigTests():
     for method in (
         "producerFirst",
+        "targetOpenedLater",
+        "targetSavedAtItsPath",
+        "chain",
         "consumerFirst",
         "shapeLessConsumer",
         "savedBeforeTheMigration",
@@ -398,6 +538,16 @@ def _addConfigTests():
             summary = getattr(TestNamingConsumerPass, method).__doc__.split(".")[0]
             test.__doc__ = "%s (%s)" % (summary, config)
             setattr(TestNamingConsumerPass, test.__name__, test)
+    for method in ("withoutFingerprints", "missingAtOpen"):
+        for config in ("V2s", "V2is"):
+
+            def test(self, method=method, config=config):
+                getattr(self, method)(config)
+
+            test.__name__ = "test%s%s%s" % (method[0].upper(), method[1:], config)
+            summary = getattr(TestNamingConsumerPassSolver, method).__doc__.split(".")[0]
+            test.__doc__ = "%s (%s)" % (summary, config)
+            setattr(TestNamingConsumerPassSolver, test.__name__, test)
 
 
 _addConfigTests()

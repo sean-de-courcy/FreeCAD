@@ -154,8 +154,12 @@ bool App::anyOpenedWithOlderNaming()
 
 void App::endOpenedWithOlderNaming()
 {
-    for (auto& entry : documentNamingRevisions) {
-        entry.second.older = false;
+    for (auto& [doc, entry] : documentNamingRevisions) {
+        if (entry.older) {
+            // Its references into current producers are current now (review F2)
+            entry.revision = namingRevisionToSave(doc);
+            entry.older = false;
+        }
     }
 }
 
@@ -2665,6 +2669,9 @@ void Document::restore(const char* filename,
 
     if (!delaySignal) {
         afterRestore(true);
+        // Not an open (Application::openDocuments() delays the signal): no pass follows
+        // (ops#116, review F3)
+        documentNamingRevisions[this].older = false;
     }
 }
 

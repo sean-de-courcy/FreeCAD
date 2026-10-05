@@ -608,16 +608,18 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // The list was rebuilt: the old fingerprints can't be matched to the references.
         fingerprints.assign(subs.size(), std::string());
     }
-    // Restored, or attached to a target restored later: a saved fingerprint is kept until a
-    // check has confirmed the element its name gives now (ops#116, the updates after opening),
+    // Restored, or attached to a target restored later: the saved fingerprints are kept until a
+    // check has confirmed the element each name gives now (ops#116, the updates after opening),
     // since the target may have changed while this document was closed. Taken from the name's
-    // element, it would show the check the element where it is as where it was.
+    // element, a fingerprint would show the check the element where it is as where it was. An
+    // empty one stays empty too: the check then knows it has none (rule 3's index test), and the
+    // update after it fills it.
     auto doc = owner ? owner->getDocument() : nullptr;
     const bool keepSaved = !feature
         && ((doc && doc->testStatus(Document::Restoring) && !doc->testStatus(Document::Importing))
             || testFlag(LinkRestoring));
     for (std::size_t i = 0; i < subs.size(); ++i) {
-        if (keepSaved && !fingerprints[i].empty()) {
+        if (keepSaved) {
             continue;
         }
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
