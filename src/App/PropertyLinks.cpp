@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <optional>
 
 #include <QDir>
 #include <QFileInfo>
@@ -48,6 +49,7 @@
 #include "ElementNamingUtils.h"
 #include "GeoFeature.h"
 #include "LinkRetarget.h"
+#include "NamingRevision.h"
 #include "ComplexGeoData.h"
 #include "NameTable.h"
 
@@ -87,6 +89,91 @@ static std::unordered_map<const PropertyLinkBase*, std::vector<RetargetCheck>> _
 static std::unordered_map<const PropertyLinkBase*,
                           std::vector<std::pair<std::size_t, Data::ElementFingerprint>>>
     _RestoredRetargetChecks;
+
+// The consumer pass at open (ops#116): references whose names are of an older naming revision
+// than their producer's, in another document, re-derived from their geometry.
+// While it runs, the solver-off re-derivation has no snapshot of the shape the names were
+// resolved in (a feature's element cache holds its shape before its last change in this session,
+// not the one the reference was saved against): the name decides alone (ops#103's rule 1).
+static bool _InConsumerPass = false;
+struct ConsumerPassScope
+{
+    ConsumerPassScope()
+    {
+        _InConsumerPass = true;
+    }
+    ~ConsumerPassScope()
+    {
+        _InConsumerPass = false;
+    }
+};
+// XLinks attached during an open whose owner documents were opened before it.
+static std::unordered_set<const PropertyLinkBase*> _ConsumerPassLinks;
+
+// The fork's naming revision of \a feature's names: this build's when its element map version is
+// current, else the `.F<n>` of the version it was restored with (0 without one: older than any).
+// -1 when its version holds no revision (V1, no geometry): no pass for references into it.
+static int producerNamingRevision(const DocumentObject* feature)
+{
+    auto geo = freecad_cast<const GeoFeature*>(feature);
+    if (!geo) {
+        return -1;
+    }
+    const std::string correct = geo->getCorrectElementMapVersion();
+    const std::string& version = geo->_ElementMapVersion.getStrValue();
+    if (version.empty() || correct.find(".F") == std::string::npos) {
+        return -1;
+    }
+    if (version == correct) {
+        return App::forkNamingRevision();
+    }
+    auto pos = version.find(".F");
+    return pos == std::string::npos ? 0 : std::atoi(version.c_str() + pos + 2);
+}
+
+// Whether \a prop's references into \a feature take the consumer pass (ops#116): \a feature is in
+// another document, its names are this build's, and \a prop's document holds names of an older
+// revision. At an open (\a opening), only for the documents and links it restored.
+static bool takesConsumerPass(const PropertyLinkBase* prop,
+                              const DocumentObject* feature,
+                              bool opening)
+{
+    auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+    auto doc = owner ? owner->getDocument() : nullptr;
+    if (!doc || !feature || feature->getDocument() == doc) {
+        return false;
+    }
+    if (opening && !App::openedWithOlderNaming(doc) && _ConsumerPassLinks.count(prop) == 0) {
+        return false;
+    }
+    return App::namingRevisionOf(doc) < App::forkNamingRevision()
+        && producerNamingRevision(feature) == App::forkNamingRevision();
+}
+
+// Every object of the open documents. A key of _ElementRefMap can outlive its object: an XLink
+// whose target document was closed stays registered under its objects until it unregisters.
+static std::unordered_set<const DocumentObject*> liveObjects()
+{
+    std::unordered_set<const DocumentObject*> objects;
+    for (auto doc : App::GetApplication().getDocuments()) {
+        for (auto obj : doc->getObjects()) {
+            objects.insert(obj);
+        }
+    }
+    return objects;
+}
+
+// A property's subs, by index and by mapped name: compared before and after the consumer pass
+static std::vector<std::string> referenceState(const PropertyLinkBase* prop)
+{
+    std::vector<DocumentObject*> objs;
+    std::vector<std::string> subs;
+    prop->getLinks(objs, true, &subs, false);
+    std::vector<std::string> mapped;
+    prop->getLinks(objs, true, &mapped, true);
+    subs.insert(subs.end(), mapped.begin(), mapped.end());
+    return subs;
+}
 
 // Whether the element an index names on a link's new target agrees with the one the reference
 // named before the retarget (ops#106): the same type and kind, and the same direction (a plane's
@@ -301,7 +388,8 @@ static std::string propertyName(const Property* prop)
 // references, those still registered under it.
 static void solveReferences(DocumentObject* feature,
                             std::vector<PropertyLinkBase*>& props,
-                            bool reverse)
+                            bool reverse,
+                            bool notify = true)
 {
     auto it = _ElementRefMap.find(feature);
     if (it == _ElementRefMap.end()) {
@@ -317,7 +405,7 @@ static void solveReferences(DocumentObject* feature,
         return;
     }
     try {
-        App::solveElementReferences(feature, props, reverse, true);
+        App::solveElementReferences(feature, props, reverse, notify);
     }
     catch (Base::Exception& e) {
         e.reportException();
@@ -389,20 +477,41 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
         references.emplace_back(feature,
                                 std::vector<PropertyLinkBase*>(props.begin(), props.end()));
     }
+    // The consumer pass (ops#116): at the end of an open, the references of the documents it
+    // opened with an older naming revision into producers in other documents whose names are
+    // already current are re-derived from their geometry (reverse), not followed by name. They
+    // don't notify; the owners whose references changed are touched afterwards, and their
+    // documents ask for a recompute. Current files pay for anyOpenedWithOlderNaming() only.
+    const bool pass =
+        !reverse && (App::anyOpenedWithOlderNaming() || !_ConsumerPassLinks.empty());
+    std::unordered_map<PropertyLinkBase*, std::vector<std::string>> passed;  // the state before
+    const auto live = pass ? liveObjects() : std::unordered_set<const DocumentObject*>();
     for (const auto& [feature, props] : references) {
         std::vector<PropertyLinkBase*> solverProps;
+        std::vector<PropertyLinkBase*> solverPassProps;
         for (auto prop : props) {
             auto it = _ElementRefMap.find(feature);
             if (it == _ElementRefMap.end() || it->second.count(prop) == 0) {
                 continue;
             }
+            const bool inPass = pass && prop->getContainer() && live.count(feature) != 0
+                && takesConsumerPass(prop, feature, true);
+            if (inPass) {
+                passed.emplace(prop, referenceState(prop));
+            }
             if (prop->getContainer() && prop->inSolverDocument()) {
-                solverProps.push_back(prop);
+                (inPass ? solverPassProps : solverProps).push_back(prop);
                 continue;
             }
             if (prop->getContainer()) {
                 try {
-                    prop->updateElementReference(feature, reverse, true);
+                    if (inPass) {
+                        ConsumerPassScope scope;
+                        prop->updateElementReference(feature, true, false);
+                    }
+                    else {
+                        prop->updateElementReference(feature, reverse, true);
+                    }
                 }
                 catch (Base::Exception& e) {
                     e.reportException();
@@ -415,7 +524,23 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
             }
         }
         solveReferences(feature, solverProps, reverse);
+        solveReferences(feature, solverPassProps, true, false);
     }
+    if (!pass) {
+        return;
+    }
+    for (const auto& [prop, before] : passed) {
+        auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+        if (owner && owner->getDocument() && referenceState(prop) != before) {
+            owner->touch();
+            owner->getDocument()->setStatus(Document::RecomputeOnRestore, true);
+        }
+    }
+    if (!passed.empty()) {
+        App::reportReferenceMigration();
+    }
+    App::endOpenedWithOlderNaming();
+    _ConsumerPassLinks.clear();
 }
 
 bool PropertyLinkBase::inSolverDocument() const
@@ -483,7 +608,18 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // The list was rebuilt: the old fingerprints can't be matched to the references.
         fingerprints.assign(subs.size(), std::string());
     }
+    // Restored, or attached to a target restored later: a saved fingerprint is kept until a
+    // check has confirmed the element its name gives now (ops#116, the updates after opening),
+    // since the target may have changed while this document was closed. Taken from the name's
+    // element, it would show the check the element where it is as where it was.
+    auto doc = owner ? owner->getDocument() : nullptr;
+    const bool keepSaved = !feature
+        && ((doc && doc->testStatus(Document::Restoring) && !doc->testStatus(Document::Importing))
+            || testFlag(LinkRestoring));
     for (std::size_t i = 0; i < subs.size(); ++i) {
+        if (keepSaved && !fingerprints[i].empty()) {
+            continue;
+        }
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
         auto text = _getElementFingerprint(feature,
                                            target,
@@ -715,8 +851,11 @@ bool PropertyLinkBase::_updateElementReference(DocumentObject* feature,
         // to version change, i.e. 'reverse', try search by geometry first
         const char* oldElement = Data::findElementName(shadow.oldName.c_str());
         if (!Data::hasMissingElement(oldElement) && !resolvedMissing) {
-            auto names = geo->searchElementCache(oldElement, Data::SearchOption::CheckGeometry);
-            if (names.empty()) {
+            static const std::vector<std::string> noSnapshot;
+            auto names = _InConsumerPass
+                ? noSnapshot
+                : geo->searchElementCache(oldElement, Data::SearchOption::CheckGeometry);
+            if (names.empty() && !_InConsumerPass) {
                 // try floating point tolerance
                 names = geo->searchElementCache(oldElement, Data::SearchOptions());
             }
@@ -4521,18 +4660,38 @@ public:
     static bool updateElementReferences(PropertyXLink* link)
     {
         bool changed = false;
+        std::optional<std::vector<std::string>> passed;  // the state before the pass
         std::vector<DocumentObject*> features(link->_ElementRefs.begin(),
                                               link->_ElementRefs.end());
         for (auto feature : features) {
-            changed = updateLinkReference(link,
-                                          feature,
-                                          false,
-                                          false,
-                                          link->_pcLink,
-                                          link->_SubList,
-                                          link->_mapped,
-                                          link->_ShadowSubList)
-                || changed;
+            // The consumer pass (ops#116), as at the end of an open
+            const bool reverse = takesConsumerPass(link, feature, false);
+            std::optional<ConsumerPassScope> scope;
+            if (reverse) {
+                if (!passed) {
+                    passed = referenceState(link);
+                }
+                scope.emplace();
+            }
+            if (reverse && link->inSolverDocument()) {
+                changed = App::solveElementReferences(feature, {link}, true, false) || changed;
+            }
+            else {
+                changed = updateLinkReference(link,
+                                              feature,
+                                              reverse,
+                                              false,
+                                              link->_pcLink,
+                                              link->_SubList,
+                                              link->_mapped,
+                                              link->_ShadowSubList)
+                    || changed;
+            }
+        }
+        if (passed) {
+            // A reverse update reports every reference as changed
+            changed = referenceState(link) != *passed;
+            App::reportReferenceMigration();
         }
         return changed;
     }
@@ -4737,7 +4896,56 @@ public:
             }
         }
     }
+
+    /// Whether \a doc holds element references into a document that isn't open (ops#116)
+    static bool holdsDetachedReferences(const Document* doc)
+    {
+        for (const auto& [path, info] : _DocInfoMap) {
+            if (info->pcDoc) {
+                continue;
+            }
+            for (auto link : info->links) {
+                auto owner = freecad_cast<DocumentObject*>(link->getContainer());
+                if (!owner || owner->getDocument() != doc) {
+                    continue;
+                }
+                for (const auto& sub : link->_SubList) {
+                    const char* element = Data::findElementName(sub.c_str());
+                    if (element && element[0]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
 };
+
+int App::namingRevisionToSave(const Document* doc)
+{
+    // A producer not yet migrated (the recompute declined) holds the names of its file's
+    // revision, and so do this document's references into it; a reference into a document that
+    // isn't open holds this document's own.
+    int revision = App::forkNamingRevision();
+    const auto live = liveObjects();
+    for (const auto& [feature, props] : _ElementRefMap) {
+        if (live.count(feature) == 0 || feature->getDocument() == doc) {
+            continue;
+        }
+        const bool held = std::any_of(props.begin(), props.end(), [doc](PropertyLinkBase* prop) {
+            auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+            return owner && owner->getDocument() == doc;
+        });
+        const int producer = held ? producerNamingRevision(feature) : -1;
+        if (producer >= 0) {
+            revision = std::min(revision, producer);
+        }
+    }
+    if (DocInfo::holdsDetachedReferences(doc)) {
+        revision = std::min(revision, App::namingRevisionOf(doc));
+    }
+    return revision;
+}
 
 void PropertyLinkBase::breakLinks(App::DocumentObject* link,
                                   const std::vector<App::DocumentObject*>& objs,
@@ -4974,8 +5182,14 @@ void PropertyXLink::restoreLink(App::DocumentObject* lValue)
     unregisterElementReference();
     onContainerRestored();
     // Without a refresh after opening documents to follow (a document was saved to the target's
-    // path), resolve the shadows now.
-    bool moved = !App::GetApplication().isRestoring() && DocInfo::updateElementReferences(this);
+    // path), resolve the shadows now. Within one, an older document opened before it takes the
+    // consumer pass for this link at its end (ops#116).
+    bool restoring = App::GetApplication().isRestoring();
+    if (restoring && !owner->getDocument()->testStatus(Document::Restoring)
+        && App::namingRevisionOf(owner->getDocument()) < App::forkNamingRevision()) {
+        _ConsumerPassLinks.insert(this);
+    }
+    bool moved = !restoring && DocInfo::updateElementReferences(this);
     hasSetValue();
     setFlag(LinkRestoring, false);
 

@@ -878,11 +878,30 @@ bool solveElementReferences(DocumentObject* feature,
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
+                const std::string& hit = entry->oldIndex;
                 if (!saved.isValid()) {
-                    countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                    if (entry->storedIndex.empty() || hit == entry->storedIndex) {
+                        countReferenceMigration(entry->owner, MigrationOutcome::Kept);
+                        continue;
+                    }
+                    // No geometry to re-derive it from, and its name now gives another element:
+                    // broken, not moved (rule 1's counterpart, ops#116)
+                    SolverResolution resolution;
+                    migrationBrokenFor(*entry, resolution);
+                    resolutions[entry->prop].push_back(resolution);
+                    ReferenceReport::Entry item;
+                    item.status = ReferenceReport::Status::Broken;
+                    item.evidence = "migration: the name moved; no fingerprint to find its place";
+                    item.candidates.emplace_back(hit, nameAt(hit));
+                    item.candidateRoles.emplace_back("name");
+                    item.candidateDistances.push_back(std::numeric_limits<double>::quiet_NaN());
+                    FC_WARN(referenceName(entry->prop)
+                            << "[" << entry->index << "]: " << entry->exactName << " broken ("
+                            << item.evidence << ", candidates: " << hit << ")");
+                    countReferenceMigration(entry->owner, MigrationOutcome::Broken);
+                    report(*entry, std::move(item));
                     continue;
                 }
-                const std::string& hit = entry->oldIndex;
                 const auto& now = fingerprintOf(hit);
                 if (!now.isValid()) {
                     logUnmeasured(*entry);

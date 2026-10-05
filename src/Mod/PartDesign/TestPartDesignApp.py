@@ -74,3 +74,4 @@ from PartDesignTests.TestNamingScenarios import *  # one class per scenario (Fre
 from PartDesignTests.TestNamingRList import TestNamingRList  # FreeCAD-CH, ops#5
 from PartDesignTests.TestNamingSolver import TestNamingSolver  # FreeCAD-CH, ops#7
 from PartDesignTests.TestNamingGate import TestNamingGate, TestNamingGateFile  # FreeCAD-CH, ops#103
+from PartDesignTests.TestNamingConsumerPass import TestNamingConsumerPass  # FreeCAD-CH, ops#116
