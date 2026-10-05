@@ -134,6 +134,12 @@ struct ConsumerPassScope
 // XLinks attached during an open whose owner documents were opened before it.
 static std::unordered_set<const PropertyLinkBase*> _ConsumerPassLinks;
 
+// The properties whose references took the consumer pass in this session (ops#120): their names
+// are this build's from then on, also while their document's revision stays older (it holds
+// references into a document that isn't open), so a later attach, revert or open doesn't re-derive
+// them again. A destroyed property leaves the set.
+static std::unordered_set<const PropertyLinkBase*> _PassedRefs;
+
 // The fork's naming revision of \a feature's names: this build's when its element map version is
 // current, else the `.F<n>` of the version it was restored with (0 without one: older than any).
 // -1 when its version holds no revision (V1, no geometry): no pass for references into it.
@@ -164,7 +170,7 @@ static bool takesConsumerPass(const PropertyLinkBase* prop,
 {
     auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
     auto doc = owner ? owner->getDocument() : nullptr;
-    if (!doc || !feature || feature->getDocument() == doc) {
+    if (!doc || !feature || feature->getDocument() == doc || _PassedRefs.count(prop) != 0) {
         return false;
     }
     if (opening && !App::openedWithOlderNaming(doc) && _ConsumerPassLinks.count(prop) == 0) {
@@ -207,6 +213,7 @@ PropertyLinkBase::~PropertyLinkBase()
     _RestoredRetargetChecks.erase(this);
     _LostElementRefs.erase(this);
     _ResolveAfterRestore.erase(this);
+    _PassedRefs.erase(this);
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -545,6 +552,7 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
         return;
     }
     for (const auto& [prop, before] : passed) {
+        _PassedRefs.insert(prop);
         auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
         if (owner && owner->getDocument() && referenceState(prop) != before) {
             owner->touch();
@@ -4715,6 +4723,7 @@ public:
             }
         }
         if (passed) {
+            _PassedRefs.insert(link);
             // A reverse update reports every reference as changed
             changed = referenceState(link) != *passed;
             App::reportReferenceMigration();
@@ -4943,7 +4952,14 @@ public:
                 }
             }
         }
-        return false;
+        // References through a Link whose path doesn't resolve: their target isn't open either
+        // (ops#120)
+        return std::any_of(_LostElementRefs.begin(),
+                           _LostElementRefs.end(),
+                           [doc](const PropertyLinkBase* prop) {
+                               auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+                               return owner && owner->getDocument() == doc;
+                           });
     }
 
     /// Drops \a feature from _ElementRefMap and from its properties' own lists (ops#119)
@@ -5007,10 +5023,20 @@ public:
             }
             if (restoring) {
                 _ResolveAfterRestore.insert(prop);
+                // As restoreLink(): in an open, an older document opened before it takes the
+                // consumer pass for these references at its end (ops#116)
+                auto doc = owner->getDocument();
+                if (!doc->testStatus(Document::Restoring)
+                    && App::namingRevisionOf(doc) < App::forkNamingRevision()) {
+                    _ConsumerPassLinks.insert(prop);
+                }
             }
             else {
                 resolveRegistered(prop);
             }
+        }
+        if (!restoring) {
+            App::reportReferenceMigration();
         }
     }
 
@@ -5039,8 +5065,10 @@ public:
     {
         const auto before = referenceState(prop);
         std::vector<DocumentObject*> features(prop->_ElementRefs.begin(), prop->_ElementRefs.end());
+        bool passed = false;
         for (auto feature : features) {
             const bool reverse = takesConsumerPass(prop, feature, false);
+            passed = passed || reverse;
             std::optional<ConsumerPassScope> scope;
             if (reverse) {
                 scope.emplace();
@@ -5051,6 +5079,9 @@ public:
             else {
                 prop->updateElementReference(feature, reverse, false);
             }
+        }
+        if (passed) {
+            _PassedRefs.insert(prop);
         }
         return referenceState(prop) != before;
     }
@@ -5066,8 +5097,13 @@ void App::resolveReregisteredReferences()
     std::vector<PropertyLinkBase*> props(_ResolveAfterRestore.begin(), _ResolveAfterRestore.end());
     _ResolveAfterRestore.clear();
     for (auto prop : props) {
+        // Resolved here, with the consumer pass if its document is older: not again at an
+        // unrelated later open
+        _ConsumerPassLinks.erase(prop);
         DocInfo::resolveRegistered(prop);
     }
+    // A consumer pass among them (an older document's references) reports as at an open
+    App::reportReferenceMigration();
 }
 
 int App::namingRevisionToSave(const Document* doc)

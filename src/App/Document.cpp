@@ -2246,6 +2246,9 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
         }
     }
 
+    // The XLinks of the imported objects that restoreLink() queued: an import runs with
+    // isRestoring() set and no end-of-open update follows (ops#120)
+    resolveReregisteredReferences();
     d->hashers.clear();
     return objs;
 }

@@ -614,6 +614,28 @@ class TestLinkTargetReopened(VariantLinkTestBase):
                 if config != "V1":
                     self.assertOnTop(part, link, refs, config + " reverted")
 
+    def test_pasted(self):
+        """An XLink into the part copied into another assembly (a paste: exportObjects, then
+        importObjects): the copy names the top face at once, before any recompute (ops#120)."""
+        for config in ("V2", "V2s", "V2i"):
+            with self.subTest(config=config):
+                part, doc, link, refs, top = self.build(config)
+                body = part.getObject("Body")
+                source = doc.addObject("App::FeaturePython", "Source")
+                source.addProperty("App::PropertyXLinkSub", "Direct")
+                source.Direct = (body, [_faceAt(body.Shape, self.HEIGHT)])
+                doc.recompute()
+                other = self.newDocument("LinkTargetAsm2", config)
+                other.saveAs(os.path.join(self.dir, "LinkTargetAsm2.FCStd"))
+                self.docs.append(other.Name)
+                copy = other.copyObject(source, False)
+                self.assertIs(copy.Direct[0], body, config)
+                sub = copy.Direct[1][0]
+                self.assertNotIn("?", sub, config + ": " + sub)
+                face = body.getSubObject(sub)
+                self.assertAlmostEqual(face.BoundBox.ZMin, self.HEIGHT, 6, config + ": " + sub)
+                self.assertAlmostEqual(face.BoundBox.ZMax, self.HEIGHT, 6, config + ": " + sub)
+
     def test_undo_removal(self):
         """The box removed from the part in a transaction and the removal undone: the
         references stay registered under the detached and re-attached objects."""

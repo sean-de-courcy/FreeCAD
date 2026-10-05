@@ -282,6 +282,49 @@ class ConsumerPassTestBase(NamingGateTestBase):
         # Assert
         self.assertPassed(b, faceC, faceD)
 
+    def throughLinkOpenedLater(self, config):
+        """B holds references through a Link and was opened while A's file was missing, A opened
+        later in the session: they register at A's open and take the pass at its end, not the
+        update by name (ops#120)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config, throughLink=True)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+        away = os.path.join(self.folder, "away.FCStd")
+        os.rename(pathA, away)
+        b = self.open(pathB)
+        os.rename(away, pathA)
+
+        # Act
+        self.open(pathA)
+
+        # Assert
+        self.assertPassed(b, faceC, faceD)
+
+    def throughLinkSavedAtItsPath(self, config):
+        """B holds references through a Link and was opened while A's file was missing, then a
+        copy of A saved at A's path: they register outside an open and take the pass there, and
+        again, kept, when A is reverted (ops#120)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config, throughLink=True)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+        other = os.path.join(self.folder, "Other.FCStd")
+        os.rename(pathA, other)
+        b = self.open(pathB)
+        a = self.open(other)
+
+        # Act
+        a.saveAs(pathA)
+
+        # Assert
+        self.assertPassed(b, faceC, faceD)
+        a.restore()
+        if b.ReferenceSolver:
+            self.assertOnFaces(b, faceC, faceD)
+        else:
+            self.assertBroken(b, faceC, faceD)
+
     def chain(self, config):
         """C references B's binder, B references A: opening C loads B and A; B's references into
         A (migrated alone) take the pass, and C's into B, whose names didn't move, are kept."""
@@ -520,6 +563,8 @@ def _addConfigTests():
         "producerFirst",
         "targetOpenedLater",
         "targetSavedAtItsPath",
+        "throughLinkOpenedLater",
+        "throughLinkSavedAtItsPath",
         "chain",
         "consumerFirst",
         "shapeLessConsumer",
