@@ -1056,6 +1056,22 @@ private:
             });
         };
         if (std::any_of(current.begin(), current.end(), [&](Unit* u) { return holds(*u); })) {
+            if (state.kind == Kind::External) {
+                // The user projected the same element again while it was parked: the new
+                // projection stays, and the parked geometries keep no link (ops#131)
+                auto sketch = static_cast<const Sketcher::SketchObject*>(state.owner);
+                auto kept = static_cast<long>(
+                    std::count_if(item.ids.begin(), item.ids.end(), [&](long id) {
+                        auto ref = sketch->externalGeometryRefOf(id);
+                        return ref && ref->empty();
+                    }));
+                Base::Console().warning(
+                    "%s: the projection of '%s' %s set aside by the reorder is not put back, since "
+                    "the sketch projects that element again; %ld set-aside geometr%s stay%s as "
+                    "fixed geometry\n",
+                    sketch->Label.getValue(), target->Label.getValue(), item.sub.c_str(), kept,
+                    kept == 1 ? "y" : "ies", kept == 1 ? "s" : "");
+            }
             return;
         }
         auto insertAt = [&](std::size_t position) {
