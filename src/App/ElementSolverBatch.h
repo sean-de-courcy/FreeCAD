@@ -66,8 +66,11 @@ struct AppExport SolverEntry
     std::string from;
     /// The reference's guess record (ops#127), if it holds one: the entry is the element the
     /// reference holds, and a resolution keeps the record. \a guessed: the original's name gives
-    /// an element again, and the entry is exact on that one instead (the snap-back); then
-    /// \a guessedIndex is the element the sub holds (empty if that is gone).
+    /// another element again, and this entry is a probe, exact on that one, beside the entry of
+    /// the element held (if the reference has one); \a guessedIndex is the element the sub holds
+    /// (empty if that is gone). The probe is never solved: the reference snaps back to its
+    /// element only if that agrees with the record's original fingerprint (ops#133); otherwise
+    /// the probe is dropped and the reference is solved as the element it holds.
     bool guessed = false;
     std::string guessedIndex;
     GuessRecord guess;

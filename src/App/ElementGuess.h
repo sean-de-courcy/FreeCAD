@@ -18,9 +18,11 @@ namespace App
  *
  * The reference's sub and shadow name the element picked, and the reference follows that element
  * as any resolved one does (by name, with its own fingerprint); the record keeps the original
- * reference. When the original's name gives an element again, the reference snaps back to it and
- * the record goes. Accepting it, a repair, marking it broken or any setter clears it too. Saved
- * as the `guess`, `orig` and `alt` attributes of the reference, in solver documents only.
+ * reference. When the original's name gives an element again and that element agrees with the
+ * original's saved fingerprint, the reference snaps back to it and the record goes (ops#133: the
+ * name alone can give a piece of the original). Accepting it, a repair, marking it broken or any
+ * setter clears it too. Saved as the `guess`, `orig`, `alt` and `ofp` attributes of the
+ * reference, in solver documents only.
  */
 struct GuessRecord
 {
@@ -50,6 +52,12 @@ struct GuessRecord
     std::string origIndex;
     /// The other elements, in rank order (the picked one is not among them).
     std::vector<Alternative> alternatives;
+    /// The original's fingerprint text as it was saved when the record was written (empty if it
+    /// had none, and in records saved before ops#133). A snapshot, never refreshed: it only
+    /// tells whether the element the original's name gives is the original again (the
+    /// snap-back), so a stale one can at worst prevent a snap-back. The reference's own
+    /// fingerprint is the picked element's.
+    std::string origFingerprint;
 
     bool empty() const
     {
@@ -59,7 +67,7 @@ struct GuessRecord
     bool operator==(const GuessRecord& other) const
     {
         return kind == other.kind && origName == other.origName && origIndex == other.origIndex
-            && alternatives == other.alternatives;
+            && alternatives == other.alternatives && origFingerprint == other.origFingerprint;
     }
     bool operator!=(const GuessRecord& other) const
     {
@@ -91,16 +99,18 @@ struct GuessRecord
         return text;
     }
 
-    /// The record read back from the three attributes; empty if \a kind is.
+    /// The record read back from its attributes; empty if \a kind is.
     static GuessRecord fromAttributes(const std::string& kind,
                                       const std::string& orig,
-                                      const std::string& alt)
+                                      const std::string& alt,
+                                      const std::string& ofp = std::string())
     {
         GuessRecord record;
         if (kind.empty()) {
             return record;
         }
         record.kind = kind;
+        record.origFingerprint = ofp;
         if (!orig.empty() && orig.front() == ';') {
             auto dot = orig.rfind('.');
             if (dot != std::string::npos && dot > 0) {
