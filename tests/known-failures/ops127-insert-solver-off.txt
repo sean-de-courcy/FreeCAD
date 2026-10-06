@@ -1,0 +1,15 @@
+# Insert at the roll-back bar in a document without the reference solver (ops#127,
+# notes/reorder-rollback-design.md 2.2). The inserted feature has no shape when the next solid is
+# rerouted onto it, and without the solver the relink needs both shapes, so a dress-up's Base stays
+# on the feature before (upstream's behaviour, kept for solver-off documents by design). Where the
+# insert changes the referenced edge, the dress-up then fails instead of following the edge.
+# Solver documents (the fork's default, V2s) follow it. Remove the entries if the solver-off relink
+# ever waits for the new base's first shape.
+
+issue: ops#127
+
+reason: the fillet's Base stays on the block when a pocket is inserted before it with the body rolled back (no solver): the fillet fails where the pocket split or removed its edge
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletSplit.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletSplit.test_fillet_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletGone.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletGone.test_fillet_edge_V2multi

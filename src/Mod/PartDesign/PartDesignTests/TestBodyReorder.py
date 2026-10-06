@@ -29,12 +29,15 @@ and with the reference solver (V2s)."""
 
 import math
 import os
+import re
 import shutil
 import tempfile
 import unittest
+import zipfile
 
 import FreeCAD as App
 import Part
+import Sketcher
 
 from PartDesignTests.Scenarios import models
 
@@ -57,6 +60,25 @@ def edgeWhere(shape, test):
     if len(found) != 1:
         raise AssertionError(f"{len(found)} edges match, expected one")
     return f"Edge{found[0]}"
+
+
+def faceWhere(shape, test):
+    found = [i + 1 for i, f in enumerate(shape.Faces) if test(f)]
+    if len(found) != 1:
+        raise AssertionError(f"{len(found)} faces match, expected one")
+    return f"Face{found[0]}"
+
+
+def isPlaneFacing(face, normal, through):
+    """A planar face with this outward normal whose plane holds the point."""
+    if not isinstance(face.Surface, Part.Plane):
+        return False
+    n = face.normalAt(*face.ParameterRange[::2])
+    return (n - normal).Length < TOL and abs((through - face.Surface.Position).dot(normal)) < TOL
+
+
+PAD2 = 10 * 10 * 5  # a 10 x 10 x 5 pad on the block's top, (5, 5) to (15, 15)
+HOLE2 = math.pi * 2**2 * 2  # radius 2, 2 deep
 
 
 class BodyReorderBase:
@@ -109,6 +131,52 @@ class BodyReorderBase:
 
     def recompute(self):
         return self.doc.recompute()
+
+    def pad2(self):
+        """A 10 x 10 x 5 pad on the block's top, (5, 5) to (15, 15): its top face is at z = 15."""
+        sketch = models.sketch(
+            self.doc, "Pad2Sketch", models.rectangle(5, 5, 15, 15), self.body, z=10
+        )
+        return models.pad(self.body, sketch, 5, "Pad2")
+
+    def sketchOn(self, name, feature, face, centre, radius):
+        """A sketch attached to the feature's face (FlatFace) holding a circle at the global point
+        centre, added at the bar."""
+        sketch = self.doc.addObject("Sketcher::SketchObject", name)
+        self.body.addObject(sketch)
+        sketch.AttachmentSupport = [(feature, face)]
+        sketch.MapMode = "FlatFace"
+        self.recompute()
+        local = sketch.getGlobalPlacement().inverse().multVec(centre)
+        sketch.addGeometry(models.circle(local.x, local.y, radius), False)
+        return sketch
+
+    def onPad2(self):
+        """Block, Pad2, and a 2 deep hole of radius 2 at (10, 10) whose sketch sits on Pad2's top
+        face (N1 3.7, the first case)."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        top = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        sketch = self.sketchOn("OnPad2Sketch", pad2, top, V(10, 10, 15), 2)
+        hole = models.pocket(self.body, sketch, 2, "OnPad2")
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+        return block, pad2, sketch, hole
+
+    def savedRetargets(self):
+        """The `rt` attributes of the document as saved: the re-target records (N1 3.4 a)."""
+        if not self.tempDir:
+            self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "records.FCStd")
+        self.doc.saveCopy(path)
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("Document.xml").decode("utf-8")
+        return re.findall(r'\brt="([^"]*)"', xml)
+
+    def parked(self, obj):
+        return list(obj.ParkedReferences) if "ParkedReferences" in obj.PropertiesList else []
 
     # -- assertions ------------------------------------------------------------------------------
 
@@ -371,32 +439,289 @@ class BodyReorderBase:
         self.assertChain(block, c)
         self.assertIs(self.body.Tip, c)
 
-    def testCycleIsRefusedWithNothingChanged(self):
-        """A hole whose sketch sits on boss A's top face, moved above A: a cycle the rule doesn't
-        break yet is refused, from Python with no transaction open, and nothing changes."""
-        block, a, b, c = self.chain()
-        top = None
-        for i, f in enumerate(a.Shape.Faces):
-            if abs(f.CenterOfMass.z - 15) < TOL:
-                top = f"Face{i + 1}"
-        sketch = models.sketch(self.doc, "OnASketch", [models.circle(3, 3, 1)])
-        self.body.addObject(sketch)
-        sketch.AttachmentSupport = [(a, top)]
-        sketch.MapMode = "FlatFace"
-        onA = models.pocket(self.body, sketch, 1, "OnA")
+    # -- above a dependency: the re-target rule (section 3) --------------------------------------
+
+    def testMoveAboveTheFaceItSitsOn(self):
+        """The hole moved above Pad2, the face its sketch sits on: the sketch's support goes to the
+        hole's new base with a re-target record, the sketch and the hole fail and Pad2 computes;
+        moved back, the support is on Pad2's top face again and the record is gone (RO6)."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([hole], block, True)
+        self.assertChain(block, hole, pad2)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(all(s.startswith("?") for s in subs), subs)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
         self.recompute()
-        self.assertValid(onA)
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertValid(pad2)
+        if self.solver:
+            self.assertIn("it was on 'Pad2'", sketch.getStatusString())
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertChain(block, pad2, hole)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testMoveAboveAFaceTheBaseHolds(self):
+        """The sketch on the block's side face, which Pad2 doesn't touch: moved above Pad2, the
+        support is found on the block (the same face) and everything computes; moved back, it is
+        on Pad2's face again (RO7)."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        side = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(1, 0, 0), V(20, 0, 0)))
+        sketch = self.sketchOn("SideSketch", pad2, side, V(20, 10, 5), 2)
+        hole = models.pocket(self.body, sketch, 2, "SideHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.assertValid(sketch, hole, pad2)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(isPlaneFacing(block.Shape.getElement(subs[0]), V(1, 0, 0), V(20, 0, 0)))
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertEqual(self.savedRetargets(), [])
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testRepickEndsTheRecord(self):
+        """After the move the user picks the block's top face: the record ends, and moving back
+        leaves the pick (RO6c)."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([hole], block, True)
+        top = faceWhere(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        sketch.AttachmentSupport = [(block, top)]
+        self.assertEqual(self.savedRetargets(), [])
+        self.body.reorderObject([hole], pad2, True)
+        self.assertEqual(sketch.AttachmentSupport, [(block, (top,))])
+
+    def testUndoTheMove(self):
+        """One transaction: the move, its re-target and the recompute; undo gives the model as it
+        was (no record), redo the moved one with its record (RO16)."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.doc.UndoMode = 1
+        group = list(self.body.Group)
+        bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
+        support = sketch.AttachmentSupport
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.doc.commitTransaction()
+        self.doc.undo()
+        self.assertEqual(list(self.body.Group), group)
+        self.assertEqual(
+            [o.BaseFeature for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")],
+            bases,
+        )
+        self.assertIs(self.body.Tip, hole)
+        self.assertEqual(sketch.AttachmentSupport, support)
+        self.assertEqual(self.savedRetargets(), [])
+        self.doc.redo()
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+
+    def testSharedSketch(self):
+        """One sketch on Pad2's top face, used by two holes: one moved above Pad2 fails them both;
+        moved back, both compute (RO10, Q1)."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        top = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        sketch = self.sketchOn("SharedSketch", pad2, top, V(10, 10, 15), 2)
+        first = models.pocket(self.body, sketch, 1, "First")
+        second = models.pocket(self.body, sketch, 2, "Second")
+        self.recompute()
+        self.assertValid(first, second)
+        self.body.reorderObject([first], block, True)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(first.isValid())
+        self.assertFalse(second.isValid())
+        self.body.reorderObject([first], sketch, True)
+        self.assertChain(block, pad2, first, second)
+        self.recompute()
+        self.assertValid(sketch, first, second)
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testExternalGeometryComesBack(self):
+        """A sketch projecting Pad2's top edge, with a constraint on the projection: moved above
+        Pad2 the projection goes to the block (broken); moved back it is on Pad2's edge with its
+        constraint (RO11). Moved to the very top, nothing can take the projection: refused."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        edge = edgeWhere(
+            pad2.Shape,
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y - 5) < TOL and abs(v.Point.z - 15) < TOL for v in e.Vertexes),
+        )
+        sketch = models.sketch(self.doc, "Projecting", [models.circle(10, 10, 1)], self.body, z=15)
+        sketch.addExternal(pad2.Name, edge)
+        sketch.addConstraint(Sketcher.Constraint("DistanceY", -3, 1, 0, 3, 5.0))
+        constraints = len(sketch.Constraints)
+        hole = models.pocket(self.body, sketch, 1, "ProjectedHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+
+        with self.assertRaises(ValueError) as refused:
+            self.body.reorderObject([hole], None, True)
+        self.assertIn("projects", str(refused.exception))
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+
+        self.body.reorderObject([hole], block, True)
+        self.assertIs(sketch.ExternalGeometry[0][0], block)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.recompute()
+        self.assertFalse(hole.isValid())
+
+        self.body.reorderObject([hole], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        self.assertEqual(len(sketch.Constraints), constraints)
+        self.assertEqual(len(sketch.ExternalGeo), 3)
+        projected = pad2.Shape.getElement(sketch.ExternalGeometry[0][1][0])
+        self.assertTrue(all(abs(v.Point.y - 5) < TOL for v in projected.Vertexes))
+        self.assertEqual(self.savedRetargets(), [])
+
+    def testPatternAboveItsOriginalIsParked(self):
+        """A pattern moved above its original: the original is parked on the pattern, which fails
+        with the message and passes its base through; moved back, Originals is restored (RO8)."""
+        block, a, b, c = self.chain()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [c]
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 4
+        pattern.Occurrences = 2
+        self.body.Tip = pattern
+        self.recompute()
+        self.assertBody(BLOCK + 2 * BOSS - 2 * HOLE)
+
+        self.body.reorderObject([pattern], b, True)
+        self.assertEqual(pattern.Originals, [])
+        self.assertEqual(len(self.parked(pattern)), 1)
+        # Still a solid feature of the chain, not a MultiTransform step
+        self.assertChain(block, a, b, pattern, c)
+        self.assertIs(self.body.Tip, c)
+        self.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertIn(
+            "Originals refers to 'HoleC', which now comes after 'Pattern'",
+            pattern.getStatusString(),
+        )
+        self.assertValid(c)
+        self.assertBody(BLOCK + 2 * BOSS - HOLE)
+
+        self.body.reorderObject([pattern], c, True)
+        self.assertEqual(pattern.Originals, [c])
+        self.assertChain(block, a, b, c, pattern)
+        self.assertEqual(self.parked(pattern), [])
+        self.recompute()
+        self.assertValid(pattern)
+        self.assertBody(BLOCK + 2 * BOSS - 2 * HOLE)
+
+    def testTwoParkedOriginalsAndAThird(self):
+        """Two originals parked, the user adds a third meanwhile: moved back, all three are there,
+        each once (RO9c, S1)."""
+        block, a, b, c = self.chain()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [b, c]
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 4
+        pattern.Occurrences = 2
+        self.body.Tip = pattern
+        self.recompute()
+        self.body.reorderObject([pattern], a, True)
+        self.assertEqual(pattern.Originals, [])
+        self.assertEqual(len(self.parked(pattern)), 2)
+        pattern.Originals = [a]
+        self.body.reorderObject([pattern], c, True)
+        self.assertEqual(
+            sorted(o.Name for o in pattern.Originals), sorted([a.Name, b.Name, c.Name])
+        )
+        self.assertEqual(self.parked(pattern), [])
+
+    def testExpressionReadingALaterFeature(self):
+        """B's length reads A's: B moved above A has its expression set aside and fails with the
+        message; moved back, the expression is back and follows A (RO9, Q4)."""
+        block, a, b, c = self.chain()
+        b.setExpression("Length", "BossA.Length")
+        self.recompute()
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.recompute()
+        self.assertFalse(b.isValid())
+        self.assertIn(
+            "the expression of 'Length' reads 'BossA', which now comes after 'BossB'",
+            b.getStatusString(),
+        )
+        self.body.reorderObject([b], a, True)
+        self.assertEqual([e[0] for e in b.ExpressionEngine], ["Length"])
+        self.assertEqual(self.parked(b), [])
+        a.Length = 7
+        self.recompute()
+        self.assertAlmostEqual(b.Length.Value, 7)
+        self.assertValid(b)
+
+    def testExpressionReadingAnotherFeaturesSketch(self):
+        """C's length reads a sketch that sits on A's top face and belongs to another pocket: C
+        moved above A has its expression set aside, and that sketch's support is untouched
+        (RO9b, S4)."""
+        block, a, b, c = self.chain()
+        top = faceWhere(a.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        onA = self.sketchOn("OnASketch", a, top, V(3, 3, 15), 1)
+        pocketOnA = models.pocket(self.body, onA, 1, "PocketOnA")
+        self.recompute()
+        c.setExpression("Length", "OnASketch.AttachmentOffset.Base.z + 3 mm")
+        self.recompute()
+        self.assertValid(c, pocketOnA)
+        self.body.reorderObject([c], block, True)
+        self.assertEqual(c.ExpressionEngine, [])
+        self.assertIs(onA.AttachmentSupport[0][0], a)
+        self.recompute()
+        self.assertFalse(c.isValid())
+        self.assertValid(onA, pocketOnA)
+        self.body.reorderObject([c], pocketOnA, True)
+        self.assertEqual([e[0] for e in c.ExpressionEngine], ["Length"])
+
+    def testCycleThroughAnOutsideBinderIsRefused(self):
+        """The hole's sketch sits on a binder outside the Body that binds Pad2's top face: a path
+        that leaves the Body, which the rule doesn't break. Moved above Pad2, from Python with no
+        transaction open, the move is refused and nothing changes (RO12, S2)."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        top = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "Outside")
+        binder.Support = [(pad2, (top,))]
+        self.recompute()
+        sketch = self.sketchOn("ViaBinder", binder, "Face1", V(10, 10, 15), 1)
+        hole = models.pocket(self.body, sketch, 1, "ViaBinderHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
         group = list(self.body.Group)
         bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
         tip = self.body.Tip
         support = sketch.AttachmentSupport
-        try:
-            self.body.reorderObject([onA], block, True)
-        except ValueError as e:
-            self.assertIn("cycle", str(e))
-        else:
-            # Once the re-target rule breaks this cycle, the move succeeds instead
-            return
+        with self.assertRaises(ValueError) as refused:
+            self.body.reorderObject([hole], block, True)
+        self.assertIn("cycle", str(refused.exception))
         self.assertEqual(list(self.body.Group), group)
         self.assertEqual(
             [o.BaseFeature for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")],
@@ -404,6 +729,25 @@ class BodyReorderBase:
         )
         self.assertIs(self.body.Tip, tip)
         self.assertEqual(sketch.AttachmentSupport, support)
+        self.assertEqual(self.savedRetargets(), [])
+
+    def testOtherBodyWaitsWhileRolledBack(self):
+        """A binder in another body bound to this Body: rolled back and edited, the Body keeps its
+        shape and the binder doesn't change; rolled to the end, it follows once (RO14)."""
+        block, a, b, c = self.chain()
+        other = self.doc.addObject("PartDesign::Body", "OtherBody")
+        binder = other.newObject("PartDesign::SubShapeBinder", "Copy")
+        binder.Support = [(self.body, ("",))]
+        self.recompute()
+        volume = binder.Shape.Volume
+        self.body.rollTo(a)
+        a.Length = 7
+        self.recompute()
+        self.assertAlmostEqual(binder.Shape.Volume, volume, delta=1e-4)
+        self.assertNotTouched(binder)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertAlmostEqual(binder.Shape.Volume, BLOCK + 4 * 4 * 7 + BOSS - HOLE, delta=1e-4)
 
 
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
@@ -412,6 +756,41 @@ class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
 
 class TestBodyReorderV2s(BodyReorderBase, unittest.TestCase):
     solver = True
+
+    def testRecordSurvivesTheSolver(self):
+        """The hole's sketch on the block's front face, which a notch (Pad2's place taken by a
+        pocket) trims: moved above the notch, the solver finds the face on the block at tier 1 and
+        the record stays; moved back, the support is the notch's trimmed face again and the record
+        is gone (RO6b, B2)."""
+        block = self.block()
+        notchSketch = models.sketch(
+            self.doc, "NotchSketch", models.rectangle(8, -1, 12, 3), self.body, z=10
+        )
+        notch = models.pocket(self.body, notchSketch, 3, "Notch")
+        self.recompute()
+        front = faceWhere(notch.Shape, lambda f: isPlaneFacing(f, V(0, -1, 0), V(0, 0, 0)))
+        sketch = self.sketchOn("FrontSketch", notch, front, V(4, 0, 4), 1)
+        hole = models.pocket(self.body, sketch, 2, "FrontHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.assertValid(sketch, hole, notch)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(isPlaneFacing(block.Shape.getElement(subs[0]), V(0, -1, 0), V(0, 0, 0)))
+        self.assertEqual(self.savedRetargets(), ["Notch"])
+
+        self.body.reorderObject([hole], notch, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, notch)
+        restored = notch.Shape.getElement(subs[0])
+        self.assertTrue(isPlaneFacing(restored, V(0, -1, 0), V(0, 0, 0)))
+        self.assertAlmostEqual(restored.Area, 20 * 10 - 4 * 3, delta=1e-6)  # trimmed by the notch
+        self.assertEqual(self.savedRetargets(), [])
 
     def testFilletFollowsItsBaseThroughAMove(self):
         """A fillet on a block edge moved below the hole: its Base moves to the hole and finds the
