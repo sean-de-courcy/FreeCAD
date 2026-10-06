@@ -40,7 +40,7 @@ import FreeCADGui as Gui
 from PySide import QtWidgets
 
 from PartDesignTests.Scenarios import models
-from PartDesignTests.Scenarios.harness import Z, edge, face
+from PartDesignTests.Scenarios.harness import X, Y, Z, edge, face
 from PartDesignTests.TestPad import (
     REGIONS,
     REGION_PAD_VOLUME,
@@ -132,25 +132,38 @@ class TestReferencePickerGui(unittest.TestCase):
 
     # -- models ---------------------------------------------------------------------------------
 
-    def redrawnFillet(self):
-        """A pad of a rectangle 0..20 x 0..10, 10 high, a fillet, radius 1, on its vertical edge
-        at (20, 0); the rectangle drawn again the other way round: the edge is found again by
-        geometry (tier 3) and the fillet computes with a warning. Returns (pad, fillet, the
-        reference's index before the redraw, the corner edge's index now)."""
-        doc = self.doc
-        body = models.body(doc)
-        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+    def redrawnPad(self):
+        """A pad of a rectangle 0..20 x 0..10, 10 high. Returns (body, pad)."""
+        body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 20, 10), body)
         pad = models.pad(body, profile, 10)
-        doc.recompute()
+        self.doc.recompute()
+        return body, pad
+
+    def redraw(self):
+        """The pad's rectangle drawn again the other way round: its edges and faces are numbered
+        anew, and references to them are found again by geometry (tier 3), with a warning."""
+        self.doc.Profile.deleteAllGeometry()
+        self.doc.Profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+        self.doc.recompute()
+
+    def redrawnFillet(self, alsoAt=None):
+        """A pad of a rectangle 0..20 x 0..10, 10 high, a fillet, radius 1, on its vertical edge
+        at (20, 0) (and at `alsoAt`); the rectangle drawn again the other way round: the edge is
+        found again by geometry (tier 3) and the fillet computes with a warning. Returns (pad,
+        fillet, the reference's index before the redraw, the corner edge's index now)."""
+        doc = self.doc
+        body, pad = self.redrawnPad()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         corner = edge("line", direction=Z, through=(20, 0, 0))
-        fillet.Base = (pad, corner.one(pad.Shape))
+        edges = corner.one(pad.Shape)
+        if alsoAt:
+            edges += edge("line", direction=Z, through=alsoAt).one(pad.Shape)
+        fillet.Base = (pad, edges)
         fillet.Radius = 1
         doc.recompute()
         original = fillet.Base[1][0]
-        doc.Profile.deleteAllGeometry()
-        doc.Profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
-        doc.recompute()
+        self.redraw()
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertIn("Warning", fillet.State)
         [now] = corner.one(pad.Shape)
@@ -205,6 +218,30 @@ class TestReferencePickerGui(unittest.TestCase):
         self.assertTrue(self.visible(fillet))
         self.assertFalse(self.visible(pad))
         self.assertEqual(fillet.getStatusString(), warning)
+        #   the highlight goes with the panel
+        self.assertEqual(Gui.Selection.getSelectionEx(self.doc.Name), [])
+
+    def testOkLeavesNoHighlight(self):
+        pad, fillet, original, corner = self.redrawnFillet()
+        self.openPanel(fillet)
+        self.assertTrue(Gui.Selection.getSelectionEx(self.doc.Name))
+
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+
+        self.assertEqual(Gui.Selection.getSelectionEx(self.doc.Name), [])
+        self.assertIn("Warning", fillet.State)
+
+    def testPanelClosesWithItsDocument(self):
+        """The dialog of "Repair References…" belongs to the object's document and closes with
+        it."""
+        pad, fillet, original, corner = self.redrawnFillet()
+        self.openPanel(fillet)
+
+        App.closeDocument(self.doc.Name)
+        pump()
+
+        self.assertFalse(Gui.Control.activeDialog())
+        self.doc = models.newDocument("PickerGui")  # for tearDown
 
     def testAcceptIsKeptByOkAndUndone(self):
         """Accept: the warning goes and the row with it; OK keeps it, and Undo brings the
@@ -332,6 +369,108 @@ class TestReferencePickerGui(unittest.TestCase):
         self.assertEqual(fillet.Base[1], [corner])
         self.assertEqual(App.getReferenceReport(fillet), [])
 
+    def testRowClickEndsTheFilletsSelection(self):
+        """Review B2: the fillet's own dialog with Select on. A click on a row highlights the edge
+        it holds; the dialog's selection mode ends first and the dialog doesn't take the edge as
+        its own pick (it would have taken it out of Base)."""
+        pad, fillet, original, corner = self.redrawnFillet(alsoAt=(0, 0, 0))
+        base = sorted(fillet.Base[1])
+        Gui.ActiveDocument.setEdit(fillet)
+        pump()
+        panel = Panel(self)
+        self.assertTrue(panel.rows())
+        select = Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonRefSel")
+        select.click()
+        pump()
+        self.assertTrue(select.isChecked())
+
+        for row in range(panel.tree.topLevelItemCount()):
+            panel.tree.setCurrentItem(None)
+            pump()
+            panel.tree.setCurrentItem(panel.tree.topLevelItem(row))
+            pump()
+            self.assertEqual(sorted(fillet.Base[1]), base)
+            self.assertTrue(Gui.Selection.getSelectionEx(self.doc.Name))
+
+        self.assertFalse(select.isChecked())
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+        self.assertEqual(sorted(fillet.Base[1]), base)
+        self.assertIn("Warning", fillet.State)
+
+    def testPatternKeepsARepickOnOk(self):
+        """Review B1: a linear pattern of a pocket along the pad's edge at y = 0; the rectangle
+        drawn again, the direction is found again by geometry. In the pattern's own dialog the
+        direction is picked again on the edge at y = 10; OK keeps that edge (the dialog's
+        direction box, filled when it opened, isn't written back)."""
+        doc = self.doc
+        body, pad = self.redrawnPad()
+        hole = models.sketch(doc, "HoleSketch", models.rectangle(2, 2, 4, 4), body, z=10)
+        pocket = models.pocket(body, hole, 2, "Pocket")
+        doc.recompute()
+        pattern = body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [pocket]
+        pattern.Direction = (pad, edge("line", direction=X, through=(0, 0, 0)).one(pad.Shape))
+        pattern.Length = 10
+        pattern.Occurrences = 2
+        doc.recompute()
+        self.redraw()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        [back] = edge("line", direction=X, through=(0, 10, 0)).one(pad.Shape)
+
+        Gui.ActiveDocument.setEdit(pattern)
+        pump()
+        panel = Panel(self)
+        self.assertEqual([r[0] for r in panel.rows()], ["Direction[0]"])
+        panel.click(panel.pick)
+        self.assertTrue(panel.pick.isChecked())
+        Gui.Selection.addSelection(doc.Name, "Pad", back)
+        pump()
+        self.assertFalse(panel.pick.isChecked())
+        self.assertEqual(pattern.Direction[1], [back])
+
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+
+        self.assertEqual(pattern.Direction[1], [back])
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+
+    def assertOkKeepsTheWarning(self, obj, prop):
+        """OK on the object's own dialog, untouched, leaves its reference found by geometry as it
+        was: written again with plain names it would lose its report entry and warning."""
+        self.assertIn("Warning", obj.State)
+        [row] = App.getReferenceReport(obj)
+        self.assertEqual(row["property"], prop)
+        Gui.ActiveDocument.setEdit(obj)
+        pump()
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+        self.doc.recompute()
+        self.assertTrue(obj.isValid(), obj.getStatusString())
+        self.assertIn("Warning", obj.State)
+        self.assertEqual([r["property"] for r in App.getReferenceReport(obj)], [prop])
+
+    def testDatumOkKeepsTheWarning(self):
+        """Review B1: the attachment dialog (TaskDlgAttacher, through the datum's dialog) writes
+        AttachmentSupport on OK only when it changed it."""
+        body, pad = self.redrawnPad()
+        point = body.newObject("PartDesign::Point", "Point")
+        point.AttachmentSupport = [(pad, face("plane", normal=-Y, through=(0, 0, 0)).one(pad.Shape)[0])]
+        point.MapMode = "CenterOfMass"
+        self.doc.recompute()
+        self.redraw()
+        self.assertOkKeepsTheWarning(point, "AttachmentSupport")
+
+    def testRevolutionOkKeepsTheWarning(self):
+        """Review M7: P7's guard on Revolution: ReferenceAxis isn't written again on OK."""
+        doc = self.doc
+        body, pad = self.redrawnPad()
+        sketch = models.sketch(doc, "RevSketch", models.rectangle(22, 0, 24, 4), body)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (pad, edge("line", direction=Y, through=(20, 0, 0)).one(pad.Shape))
+        revolution.Angle = 90
+        doc.recompute()
+        self.redraw()
+        self.assertOkKeepsTheWarning(revolution, "ReferenceAxis")
+
     def testFeatureDialogWithoutWarningsHasNoPanel(self):
         doc = self.doc
         body = models.body(doc)
@@ -373,6 +512,8 @@ class TestReferencePickerGui(unittest.TestCase):
 
         self.assertEqual(pad.Profile[1], REGIONS)
         self.assertEqual(line.text(), "%s: %s" % (sketch.Label, ", ".join(REGIONS)))
+        #   the panel lists the rows again after the dialog's own write (review M3)
+        self.assertNotIn("Profile[0]", [r[0] for r in Panel(self).rows()])
         self.close(QtWidgets.QDialogButtonBox.Ok)
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, REGION_PAD_VOLUME, places=4)
