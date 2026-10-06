@@ -258,6 +258,17 @@ public:
     /// attach a link reference to an external geometry
     int attachExternal(const std::vector<int>& geoIds, App::DocumentObject* Obj, const char* SubName);
     int detachExternal(const std::vector<int>& geoIds);
+    /** Writes ExternalGeometry's entries as given (the same count, in the same order) and keeps
+     * each projection with its constraints when its entry's object changed (ops#127, the
+     * reorder's re-target and its restore: an entry moves from one object to another with its
+     * mapped name kept in the shadow). The re-target records stay as they are.
+     */
+    void retargetExternalGeometry(const std::vector<App::DocumentObject*>& objs,
+                                  const std::vector<std::string>& subs,
+                                  std::vector<App::PropertyLinkBase::ShadowSub>&& shadows);
+    /// Whether retargetExternalGeometry() can write the entries: the projections' keys are in
+    /// step with ExternalGeometry (ops#127: a reorder checks it before it writes anything)
+    bool canRetargetExternalGeometry() const;
 
     /** deletes all external geometry */
     int delAllExternal();

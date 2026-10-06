@@ -13,6 +13,7 @@ set(PartDesign_LIBS
     ${OCC_LIBRARIES}
     ${OCC_DEBUG_LIBRARIES}
     Part
+    Sketcher  # the reorder's re-target of a sketch's projections (ops#127)
     FreeCADApp
 )
 
@@ -21,6 +22,8 @@ SET(Features_SRCS
     Feature.h
     FailureContinuation.cpp
     FailureContinuation.h
+    Retarget.cpp
+    Retarget.h
     FeatureSolid.cpp
     FeatureSolid.h
     Body.cpp

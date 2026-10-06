@@ -3054,6 +3054,8 @@ static void buildDependencyList(const std::vector<DocumentObject*>& objectArray,
 {
     std::map<DocumentObject*, std::vector<DocumentObject*>> outLists;
     std::deque<DocumentObject*> objs;
+    // The touch check skips held objects (ops#127)
+    auto continuation = touchCheck ? recomputeContinuation() : nullptr;
 
     if (objectMap) {
         objectMap->clear();
@@ -3102,7 +3104,7 @@ static void buildDependencyList(const std::vector<DocumentObject*>& objectArray,
                 continue;
             }
 
-            if (touchCheck) {
+            if (touchCheck && !(continuation && continuation->holds(objF))) {
                 if (objF->isTouched() || (objF->mustExecute() != 0)) {
                     // early termination on touch check
                     *touchCheck = true;
@@ -3414,6 +3416,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     try {
         std::set<DocumentObject*> filter;
+        // Objects the continuation rule holds (ops#127): not run, left touched
+        std::set<DocumentObject*> held;
         size_t idx = 0;
         // maximum two passes to allow some form of dependency inversion
         for (int passes = 0; passes < 2 && idx < topoSortedObjects.size(); ++passes) {
@@ -3426,6 +3430,15 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
             for (; idx < topoSortedObjects.size(); ++idx) {
                 auto obj = topoSortedObjects[idx];
                 if (!obj->isAttachedToDocument() || filter.find(obj) != filter.end()) {
+                    continue;
+                }
+                if (continuation && continuation->holds(obj)) {
+                    // Held (PartDesign: after a Body's roll-back bar): not run, not purged, and
+                    // its in-list isn't enforced; it runs when the rule lets it go (ops#127)
+                    held.insert(obj);
+                    if (seq) {
+                        seq->next(true);
+                    }
                     continue;
                 }
                 // ask the object if it should be recomputed
@@ -3455,6 +3468,13 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         if (verdict == AfterInputFailure::Fail) {
                             // It doesn't run: its warning from the last recompute goes (ops#127,
                             // N1 4.9)
+                            clearWarning(obj);
+                            d->addRecomputeLog(why, obj);
+                            res = 1;
+                        }
+                        else if (continuation->blocked(obj, why)) {
+                            // A reference set aside by a reorder (ops#127): it doesn't run
+                            // either, so its warning goes too
                             clearWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
@@ -3520,7 +3540,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
             for (size_t i = 0; i < topoSortedObjects.size(); ++i) {
                 auto obj = topoSortedObjects[i];
                 obj->setStatus(ObjectStatus::Recompute2, false);
-                if (!filter.contains(obj) && obj->isTouched()) {
+                if (!filter.contains(obj) && !held.contains(obj) && obj->isTouched()) {
                     if (passes > 0) {
                         FC_ERR(obj->getFullName() << " still touched after recompute");
                     }
@@ -3916,9 +3936,20 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
         recompute({feature}, true, &hasError);
         return !hasError;
     }
-    if (_recomputeFeature(feature) > 0) {
+    auto continuation = recomputeContinuation();
+    std::string why;
+    int res = 0;
+    if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
+        // A reference set aside by a reorder fails it here too (ops#127), without its warning
+        clearWarning(feature);
+        d->addRecomputeLog(why, feature);
+        res = 1;
+    }
+    else {
+        res = _recomputeFeature(feature);
+    }
+    if (res > 0) {
         // A failure the rule continues after writes its output as in a recompute (ops#126)
-        auto continuation = recomputeContinuation();
         if (continuation && continuation->continuesAfter(feature)) {
             continuation->afterFailure(feature);
         }
@@ -4714,7 +4745,12 @@ bool Document::mustExecute() const
         return touched;
     }
 
+    // An object the continuation rule holds doesn't count (ops#127: the recompute wouldn't run it)
+    auto continuation = recomputeContinuation();
     for (const auto It : d->objectArray) {
+        if (continuation && continuation->holds(It)) {
+            continue;
+        }
         if (It->isTouched() || It->mustExecute() == 1) {
             return true;
         }

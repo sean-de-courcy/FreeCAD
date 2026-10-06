@@ -95,6 +95,118 @@ PyObject* BodyPy::insertObject(PyObject* args)
     Py_Return;
 }
 
+namespace
+{
+/// The document object of a Python argument, or null for None; throws for anything else
+App::DocumentObject* objectOrNone(PyObject* arg)
+{
+    if (arg == Py_None) {
+        return nullptr;
+    }
+    if (PyObject_TypeCheck(arg, &(App::DocumentObjectPy::Type))) {
+        return static_cast<App::DocumentObjectPy*>(arg)->getDocumentObjectPtr();
+    }
+    throw Base::TypeError("Expected a document object or None");
+}
+}  // namespace
+
+PyObject* BodyPy::rollTo(PyObject* args)
+{
+    PyObject* featurePy;
+    if (!PyArg_ParseTuple(args, "O", &featurePy)) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        getBodyPtr()->rollTo(objectOrNone(featurePy));
+        Py_Return;
+    }
+    PY_CATCH
+}
+
+PyObject* BodyPy::rollToEnd(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        getBodyPtr()->rollToEnd();
+        Py_Return;
+    }
+    PY_CATCH
+}
+
+PyObject* BodyPy::isRolledBack(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    return Py::new_reference_to(Py::Boolean(getBodyPtr()->isRolledBack()));
+}
+
+PyObject* BodyPy::holds(PyObject* args)
+{
+    PyObject* objPy;
+    if (!PyArg_ParseTuple(args, "O!", &(App::DocumentObjectPy::Type), &objPy)) {
+        return nullptr;
+    }
+    auto obj = static_cast<App::DocumentObjectPy*>(objPy)->getDocumentObjectPtr();
+    return Py::new_reference_to(Py::Boolean(getBodyPtr()->holds(obj)));
+}
+
+PyObject* BodyPy::setEditRollPoint(PyObject* args)
+{
+    PyObject* featurePy;
+    if (!PyArg_ParseTuple(args, "O", &featurePy)) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        auto feature = objectOrNone(featurePy);
+        if (feature && !getBodyPtr()->hasObject(feature)) {
+            throw Base::ValueError("The edit roll-back point must be a member of this body");
+        }
+        getBodyPtr()->setEditRollPoint(feature);
+        Py_Return;
+    }
+    PY_CATCH
+}
+
+PyObject* BodyPy::reorderObject(PyObject* args)
+{
+    PyObject* objectsPy;
+    PyObject* targetPy;
+    PyObject* afterPy = Py_True;
+    if (!PyArg_ParseTuple(args, "OO|O!", &objectsPy, &targetPy, &PyBool_Type, &afterPy)) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        std::vector<App::DocumentObject*> objects;
+        if (PyObject_TypeCheck(objectsPy, &(App::DocumentObjectPy::Type))) {
+            objects.push_back(
+                static_cast<App::DocumentObjectPy*>(objectsPy)->getDocumentObjectPtr()
+            );
+        }
+        else {
+            Py::Sequence sequence(objectsPy);
+            for (Py::Sequence::iterator it = sequence.begin(); it != sequence.end(); ++it) {
+                PyObject* item = (*it).ptr();
+                if (!PyObject_TypeCheck(item, &(App::DocumentObjectPy::Type))) {
+                    throw Base::TypeError("Expected a document object or a sequence of them");
+                }
+                objects.push_back(
+                    static_cast<App::DocumentObjectPy*>(item)->getDocumentObjectPtr()
+                );
+            }
+        }
+        getBodyPtr()->reorderObject(objects, objectOrNone(targetPy), Base::asBoolean(afterPy));
+        Py_Return;
+    }
+    PY_CATCH
+}
+
 Py::Object BodyPy::getVisibleFeature() const
 {
     for (auto obj : getBodyPtr()->Group.getValues()) {

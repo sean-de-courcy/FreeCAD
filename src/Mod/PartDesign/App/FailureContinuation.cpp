@@ -19,6 +19,7 @@
 #include "Body.h"
 #include "Feature.h"
 #include "FeatureBase.h"
+#include "Retarget.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
 
@@ -197,6 +198,23 @@ public:
         catch (std::exception& e) {
             FC_ERR("Pass-through of " << failed->getFullName() << " failed: " << e.what());
         }
+    }
+
+    bool holds(const App::DocumentObject* obj) const override
+    {
+        // The roll-back bar (ops#127): a Body holds itself while rolled back, and what is after
+        // its bar that nothing above uses
+        if (auto body = freecad_cast<const Body*>(obj)) {
+            return body->holds(obj);
+        }
+        auto body = bodyOf(obj);
+        return body && body->holds(obj);
+    }
+
+    bool blocked(const App::DocumentObject* obj, std::string& why) const override
+    {
+        // A reference a reorder set aside (ops#127)
+        return bodyOf(obj) && parkedReason(obj, why);
     }
 };
 

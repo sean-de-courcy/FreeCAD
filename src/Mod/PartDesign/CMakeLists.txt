@@ -69,6 +69,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestNamingGate.py
     PartDesignTests/TestNamingConsumerPass.py
     PartDesignTests/TestFailurePassThrough.py
+    PartDesignTests/TestBodyReorder.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
 )
@@ -105,6 +106,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/moves.py
     PartDesignTests/Scenarios/patterns.py
     PartDesignTests/Scenarios/randomized.py
+    PartDesignTests/Scenarios/reorder.py
     PartDesignTests/Scenarios/rlist.py
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/splits.py

@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream>
 
+#include "Document.h"
 #include "DocumentObject.h"
 #include "ElementNamingUtils.h"
 #include "ElementSolverBatch.h"
@@ -25,6 +26,25 @@ std::map<const PropertyLinkBase*, TargetEntries>& reports()
 {
     static std::map<const PropertyLinkBase*, TargetEntries> map;
     return map;
+}
+
+// The reorder's re-target record of a reference (ops#127), empty if none
+RetargetRecord retargetOf(const PropertyLinkBase* prop, int index)
+{
+    std::vector<RetargetRecord> records;
+    if (auto link = freecad_cast<const PropertyLinkSub*>(prop)) {
+        records = link->getRetargets();
+    }
+    else if (auto list = freecad_cast<const PropertyLinkSubList*>(prop)) {
+        records = list->getRetargets();
+    }
+    else if (auto xlink = freecad_cast<const PropertyXLink*>(prop)) {
+        records = xlink->getRetargets();
+    }
+    if (index < 0 || index >= static_cast<int>(records.size())) {
+        return {};
+    }
+    return records[index];
 }
 
 }  // namespace
@@ -343,6 +363,15 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
         ss << "no candidates";
     }
     ss << ')';
+    // Moved off the object it was on by a reorder (ops#127): say where it came from
+    auto record = retargetOf(slot.prop, slot.localIndex);
+    if (!record.empty()) {
+        auto owner = slot.prop ? freecad_cast<DocumentObject*>(slot.prop->getContainer()) : nullptr;
+        auto doc = owner ? owner->getDocument() : nullptr;
+        auto was = doc ? doc->getObject(record.target.c_str()) : nullptr;
+        ss << "; it was on '" << (was ? was->Label.getValue() : record.target.c_str())
+           << "', which a reorder put after the feature that uses it";
+    }
     return ss.str();
 }
 

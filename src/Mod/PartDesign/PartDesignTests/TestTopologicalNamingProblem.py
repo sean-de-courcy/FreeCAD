@@ -3309,6 +3309,9 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         pattern.Direction = (originFeature(body, "X_Axis"), [""])
         pattern.Length = 10
         pattern.Occurrences = 3
+        # addObject leaves the Tip (the roll-back bar, ops#127) on the box: a pattern becomes a
+        # solid feature only with its Originals
+        body.Tip = pattern
         features.append((pattern, ["FUS"]))
         # the box straddles the mirror plane, so the box and its mirror image overlap
         body, _ = boxBody("MirroredBody", App.Vector(-3, 0, 0))
@@ -3316,6 +3319,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         body.addObject(mirrored)
         mirrored.TransformMode = "Whole shape"
         mirrored.MirrorPlane = (originFeature(body, "YZ_Plane"), [""])
+        body.Tip = mirrored
         features.append((mirrored, ["FUS"]))
         # a circle of radius 2 swept along a vertical line through the box's middle, from
         # z = -2 to z = 15: a rod through the box's bottom and top faces

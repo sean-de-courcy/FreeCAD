@@ -23,6 +23,10 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <functional>
+#include <map>
+
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/VarSet.h>
@@ -35,6 +39,7 @@
 #include "FeatureSketchBased.h"
 #include "FeatureSolid.h"
 #include "FeatureTransformed.h"
+#include "Retarget.h"
 #include "ShapeBinder.h"
 
 using namespace PartDesign;
@@ -48,6 +53,9 @@ Body::Body()
     ADD_PROPERTY_TYPE(AllowCompound, (true), "Base", App::Prop_None, "Allow multiple solids in Body");
 
     _GroupTouched.setStatus(App::Property::Output, true);
+    // The roll-back bar is the Tip: moving it doesn't touch the Body (ops#127, R7); onChanged()
+    // enforces a recompute only when the Body isn't rolled back and the Tip's shape is new
+    Tip.setStatus(App::Property::Output, true);
 }
 
 /*
@@ -95,10 +103,180 @@ features.end(), Tip.getValue()); if (it == features.end()) {
 
 short Body::mustExecute() const
 {
-    if (Tip.isTouched()) {
-        return 1;
-    }
+    // Not on a Tip change alone (ops#127, R7): see onChanged()
     return Part::BodyBase::mustExecute();
+}
+
+namespace
+{
+/// The shape a Body copied from its Tip is the Tip's current one: the same TopoDS shape (TShape,
+/// location, orientation), tag and hasher (TopoShape::isSame), and an element map of the same size
+/// (the map itself isn't public; a recompute that renames makes a new TShape anyway) (ops#127, R7)
+bool sameTipShape(const Part::TopoShape& a, const Part::TopoShape& b)
+{
+    return a.isSame(b) && a.getElementMapSize(false) == b.getElementMapSize(false);
+}
+
+/// The Tip's current shape, before the Body's placement bake
+Part::TopoShape tipShapeOf(const App::DocumentObject* tip)
+{
+    auto feature = freecad_cast<const Part::Feature*>(tip);
+    return feature ? feature->Shape.getShape() : Part::TopoShape();
+}
+}  // namespace
+
+// The roll-back bar (ops#127, notes/reorder-rollback-design.md section 1)
+
+App::DocumentObject* Body::getEditRollPoint() const
+{
+    return editRollPoint && hasObject(editRollPoint) ? editRollPoint : nullptr;
+}
+
+void Body::setEditRollPoint(App::DocumentObject* obj)
+{
+    editRollPoint = obj;
+}
+
+App::DocumentObject* Body::effectiveBar() const
+{
+    if (auto point = getEditRollPoint()) {
+        return point;
+    }
+    return Tip.getValue();
+}
+
+App::DocumentObject* Body::lastSolidFeature() const
+{
+    const auto& features = Group.getValues();
+    auto it = std::find_if(features.rbegin(), features.rend(), isSolidFeature);
+    return it == features.rend() ? nullptr : *it;
+}
+
+namespace
+{
+/// The position in features of the first solid feature after the bar (features.size() if none);
+/// the bar null means the top
+std::size_t firstHeldSolid(const std::vector<App::DocumentObject*>& features,
+                           const App::DocumentObject* bar)
+{
+    std::size_t start = 0;
+    if (bar) {
+        auto it = std::find(features.begin(), features.end(), bar);
+        if (it == features.end()) {
+            // A bar outside the Group (a stale Tip) holds nothing
+            return features.size();
+        }
+        start = static_cast<std::size_t>(it - features.begin()) + 1;
+    }
+    for (std::size_t i = start; i < features.size(); ++i) {
+        if (Body::isSolidFeature(features[i])) {
+            return i;
+        }
+    }
+    return features.size();
+}
+}  // namespace
+
+bool Body::isRolledBack() const
+{
+    // Rolled back when a solid feature follows the bar. A bar outside the Group (a Tip set from
+    // Python, or a stale file) or a non-solid after the last solid is the end: it holds nothing,
+    // so the Body itself mustn't be held either (ops#127, M1)
+    const auto& features = Group.getValues();
+    return firstHeldSolid(features, effectiveBar()) < features.size();
+}
+
+bool Body::holds(const App::DocumentObject* obj) const
+{
+    if (!obj) {
+        return false;
+    }
+    if (obj == this) {
+        return isRolledBack();
+    }
+    if (!isRolledBack()) {
+        return false;
+    }
+    const auto& features = Group.getValues();
+    std::size_t firstHeld = firstHeldSolid(features, effectiveBar());
+    if (firstHeld >= features.size()) {
+        return false;
+    }
+    std::map<const App::DocumentObject*, std::size_t> position;
+    for (std::size_t i = 0; i < features.size(); ++i) {
+        position.emplace(features[i], i);
+    }
+    // Memo per call: 1 held, 0 not, absent unknown; the graph is acyclic
+    std::map<const App::DocumentObject*, bool> memo;
+    std::function<bool(const App::DocumentObject*)> held = [&](const App::DocumentObject* o) {
+        auto known = memo.find(o);
+        if (known != memo.end()) {
+            return known->second;
+        }
+        auto pos = position.find(o);
+        bool result = false;
+        if (pos != position.end() && pos->second >= firstHeld) {
+            if (isSolidFeature(o)) {
+                result = true;
+            }
+            else {
+                // B1: held only when every member that uses it is held
+                memo[o] = true;  // a cycle (shouldn't exist) counts as held
+                result = true;
+                for (auto user : o->getInList()) {
+                    if (user == this || !position.count(user)) {
+                        continue;
+                    }
+                    if (!held(user)) {
+                        result = false;
+                        break;
+                    }
+                }
+            }
+        }
+        memo[o] = result;
+        return result;
+    };
+    return held(obj);
+}
+
+void Body::rollTo(App::DocumentObject* feature)
+{
+    if (feature && (!hasObject(feature) || !isSolidFeature(feature))) {
+        throw Base::ValueError("Body: the roll-back bar goes after a solid feature of this body");
+    }
+    if (!feature) {
+        // The top: after the base feature, if there is one (nothing goes before it)
+        const auto& features = Group.getValues();
+        if (!features.empty() && features.front()->isDerivedFrom<FeatureBase>()) {
+            feature = features.front();
+        }
+    }
+    if (Tip.getValue() != feature) {
+        Tip.setValue(feature);
+    }
+}
+
+void Body::rollToEnd()
+{
+    auto last = lastSolidFeature();
+    if (Tip.getValue() != last) {
+        Tip.setValue(last);
+    }
+}
+
+void Body::rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase)
+{
+    auto pd = freecad_cast<PartDesign::Feature*>(feature);
+    if (!pd) {
+        return;
+    }
+    App::DocumentObject* oldBase = pd->BaseFeature.getValue();
+    if (oldBase == newBase) {
+        return;
+    }
+    pd->BaseFeature.setValue(newBase);
+    pd->onBaseFeatureRerouted(oldBase, newBase);
 }
 
 App::DocumentObject* Body::getPrevSolidFeature(App::DocumentObject* start)
@@ -163,6 +341,12 @@ bool Body::isAfterInsertPoint(App::DocumentObject* feature)
 {
     App::DocumentObject* nextSolid = getNextSolidFeature();
     assert(feature);
+    if (!Tip.getValue()) {
+        // The bar at the top (ops#127): every solid is after it
+        const auto& features = Group.getValues();
+        auto it = std::find_if(features.begin(), features.end(), isSolidFeature);
+        nextSolid = it == features.end() ? nullptr : *it;
+    }
 
     if (feature == nextSolid) {
         return true;
@@ -187,8 +371,9 @@ bool Body::isSolidFeature(const App::DocumentObject* obj)
             return false;
         }
         if (auto transFeature = freecad_cast<PartDesign::Transformed*>(obj)) {
-            // Transformed Features inside a MultiTransform are not solid features
-            return !transFeature->isMultiTransformChild();
+            // Transformed Features inside a MultiTransform are not solid features; a pattern
+            // whose Originals a reorder parked still is (ops#127)
+            return !transFeature->isMultiTransformChild() || hasParkedOriginals(obj);
         }
         return true;
     }
@@ -244,7 +429,17 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
     }
 
 
-    insertObject(feature, getNextSolidFeature(), /*after = */ false);
+    App::DocumentObject* next = nullptr;
+    if (Tip.getValue()) {
+        next = getNextSolidFeature();
+    }
+    else {
+        // The bar at the top (ops#127): before the first solid feature
+        const auto& features = Group.getValues();
+        auto it = std::find_if(features.begin(), features.end(), isSolidFeature);
+        next = it == features.end() ? nullptr : *it;
+    }
+    insertObject(feature, next, /*after = */ false);
     // Move the Tip if we added a solid
     if (isSolidFeature(feature)) {
         Tip.setValue(feature);
@@ -328,13 +523,14 @@ void Body::setBaseProperty(App::DocumentObject* feature)
         // Set BaseFeature property to previous feature (this might be the Tip feature)
         App::DocumentObject* prevSolidFeature = getPrevSolidFeature(feature);
         // NULL is ok here, it just means we made the current one fiature the base solid
-        static_cast<PartDesign::Feature*>(feature)->BaseFeature.setValue(prevSolidFeature);
+        rerouteBase(feature, prevSolidFeature);
 
-        // Reroute the next solid feature's BaseFeature property to this feature
+        // Reroute the next solid feature's BaseFeature property to this feature, with the
+        // references that follow its base (ops#127: insert at the bar)
         App::DocumentObject* nextSolidFeature = getNextSolidFeature(feature);
         if (nextSolidFeature) {
             assert(nextSolidFeature->isDerivedFrom(PartDesign::Feature::getClassTypeId()));
-            static_cast<PartDesign::Feature*>(nextSolidFeature)->BaseFeature.setValue(feature);
+            rerouteBase(nextSolidFeature, feature);
         }
     }
 }
@@ -352,13 +548,16 @@ std::vector<App::DocumentObject*> Body::removeObject(App::DocumentObject* featur
         auto* nextPD = static_cast<PartDesign::Feature*>(nextSolidFeature);
         // Check if the next feature is pointing to the one being deleted
         if (nextPD->BaseFeature.getValue() == feature) {
-            nextPD->BaseFeature.setValue(prevSolidFeature);
-            nextPD->onBaseFeatureRerouted(feature, prevSolidFeature);
+            rerouteBase(nextPD, prevSolidFeature);
         }
     }
 
     std::vector<App::DocumentObject*> model = Group.getValues();
     const auto it = std::ranges::find(model, feature);
+
+    if (editRollPoint == feature) {
+        editRollPoint = nullptr;
+    }
 
     // Adjust Tip feature if it is pointing to the deleted object
     if (Tip.getValue() == feature) {
@@ -377,6 +576,29 @@ std::vector<App::DocumentObject*> Body::removeObject(App::DocumentObject* featur
     }
     std::vector<App::DocumentObject*> result = {feature};
     return result;
+}
+
+std::vector<App::DocumentObject*> Body::removeObjects(std::vector<App::DocumentObject*> objs)
+{
+    // One at a time, so each keeps the chain and the Tip valid (ops#127); the group's own
+    // removeObjects() rewrites Group only
+    std::vector<App::DocumentObject*> removed;
+    for (auto obj : objs) {
+        if (obj && hasObject(obj)) {
+            auto result = removeObject(obj);
+            removed.insert(removed.end(), result.begin(), result.end());
+        }
+    }
+    return removed;
+}
+
+void Body::reorderObject(const std::vector<App::DocumentObject*>& objs,
+                         App::DocumentObject* target,
+                         bool after)
+{
+    reorderBody(*this, objs, target, after, [this](App::DocumentObject* f, App::DocumentObject* b) {
+        rerouteBase(f, b);
+    });
 }
 
 
@@ -416,6 +638,7 @@ App::DocumentObjectExecReturn* Body::execute()
             if (tip->isError()) {
                 // A failed first feature passed an empty base through: the Body is empty and
                 // valid (ops#126)
+                lastTipShape = Part::TopoShape();
                 Shape.setValue(Part::TopoShape());
                 return App::DocumentObject::StdReturn;
             }
@@ -424,8 +647,19 @@ App::DocumentObjectExecReturn* Body::execute()
             );
         }
 
+        // The Tip's shape copied last time: Shape stays as it is, so nothing outside the Body
+        // re-solves a reference into it (ops#127, R7: a roll back and forward with nothing edited)
+        if (!lastTipShape.isNull() && sameTipShape(tipShape, lastTipShape)
+            && !Shape.getShape().isNull()) {
+            return App::DocumentObject::StdReturn;
+        }
+        lastTipShape = tipShape;
+
         // We should hide here the transformation of the baseFeature
         tipShape.transformShape(tipShape.getTransform(), true);
+    }
+    else {
+        lastTipShape = Part::TopoShape();
     }
 
     Shape.setValue(tipShape);
@@ -444,6 +678,14 @@ void Body::onSettingDocument()
 
 void Body::onChanged(const App::Property* prop)
 {
+    if (prop == &Tip && !isRestoring() && getDocument() && !isRolledBack()) {
+        // Tip has Output status (ops#127, R7): a bar move touches the Body only when rolling to
+        // the end gives a shape the Body hasn't copied (also on undo)
+        auto shape = tipShapeOf(Tip.getValue());
+        if (lastTipShape.isNull() || !sameTipShape(shape, lastTipShape)) {
+            enforceRecompute();
+        }
+    }
     // we neither load a project nor perform undo/redo
     if (!this->isRestoring() && this->getDocument()
         && !this->getDocument()->isPerformingTransaction()) {
@@ -618,6 +860,7 @@ void Body::onDocumentRestored()
         }
     }
     _GroupTouched.setStatus(App::Property::Output, true);
+    Tip.setStatus(App::Property::Output, true);
 
     // trigger ViewProviderBody::copyColorsfromTip
     if (Tip.getValue()) {

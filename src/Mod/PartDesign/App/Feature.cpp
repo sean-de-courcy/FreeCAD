@@ -136,6 +136,12 @@ Feature::Feature()
 
 App::DocumentObjectExecReturn* Feature::recompute()
 {
+    // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
+    // stays touched and runs when the bar passes it
+    if (auto body = getFeatureBody(); body && body->holds(this)) {
+        return App::DocumentObject::StdReturn;
+    }
+
     setMaterialToBodyMaterial();
 
     if (Suppressed.getValue()) {
@@ -299,7 +305,12 @@ bool relinkThroughSolver(
         );
     }
     link.setValue(newBase, std::move(subs), std::move(shadows));
-    App::solveElementReferences(newBase, {&link}, false, true);
+    // A new base that hasn't computed yet (insert at the roll-back bar, ops#127): its first shape
+    // solves the references, since a missing reference is solved on every update of its target
+    auto newFeature = freecad_cast<Part::Feature*>(newBase);
+    if (newFeature && !newFeature->Shape.getShape().isNull()) {
+        App::solveElementReferences(newBase, {&link}, false, true);
+    }
     return true;
 }
 
@@ -323,12 +334,15 @@ bool Feature::relinkToMatchingSubelements(
 
     const auto& oldShape = oldFeature->Shape.getShape();
     const auto& newShape = newFeature->Shape.getShape();
-    if (oldShape.isNull() || newShape.isNull()) {
+    if (oldShape.isNull()) {
         return false;
     }
-
     if (link.inSolverDocument()) {
+        // Also onto a new base without a shape yet (ops#127, N1 2.2)
         return relinkThroughSolver(link, oldShape, newBase);
+    }
+    if (newShape.isNull()) {
+        return false;
     }
 
     const auto& oldSubs = link.getSubValues();

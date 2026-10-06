@@ -36,7 +36,7 @@
 
 #include <Base/Placement.h>
 
-#include "ElementGuess.h"
+#include "ElementRecords.h"
 #include "MappedElement.h"
 #include "Property.h"
 
@@ -1091,6 +1091,18 @@ public:
         return _ShadowSubList;
     }
 
+    /// The re-target records of a reorder (ops#127), one per sub (an empty record: none)
+    std::vector<RetargetRecord> getRetargets() const;
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// The records of each sub (ops#127), one per sub
+    std::vector<ElementRecords> getElementRecords() const;
+    /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
+    void setElementRecords(std::vector<ElementRecords>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
+
     std::vector<std::string> getSubValues(bool newStyle) const;
 
     /// return the list of sub elements starts with a special string
@@ -1175,8 +1187,9 @@ protected:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
-    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
-    std::vector<GuessRecord> _Guesses;
+    // The guess and re-target records of each reference (ops#127; saved as `guess`, `orig`,
+    // `alt` and `rt`, `rto`, `rtfp`, `rtguess`, `rtorig`, `rtalt`).
+    std::vector<ElementRecords> _Records;
     bool _restoreLabel {false};
 };
 
@@ -1293,6 +1306,18 @@ public:
         return _ShadowSubList;
     }
 
+    /// The re-target records of a reorder (ops#127), one per sub (an empty record: none)
+    std::vector<RetargetRecord> getRetargets() const;
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// The records of each sub (ops#127), one per sub
+    std::vector<ElementRecords> getElementRecords() const;
+    /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
+    void setElementRecords(std::vector<ElementRecords>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
+
     /**
      * @brief Removes all occurrences of \a lValue in the property
      * together with its sub-elements and returns the number of entries removed.
@@ -1371,8 +1396,9 @@ private:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
-    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
-    std::vector<GuessRecord> _Guesses;
+    // The guess and re-target records of each reference (ops#127; saved as `guess`, `orig`,
+    // `alt` and `rt`, `rto`, `rtfp`, `rtguess`, `rtorig`, `rtalt`).
+    std::vector<ElementRecords> _Records;
 };
 
 /** The general Link Property with Child scope
@@ -1532,6 +1558,18 @@ public:
     {
         return _ShadowSubList;
     }
+
+    /// The re-target records of a reorder (ops#127), one per sub (an empty record: none)
+    std::vector<RetargetRecord> getRetargets() const;
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// The records of each sub (ops#127), one per sub
+    std::vector<ElementRecords> getElementRecords() const;
+    /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
+    void setElementRecords(std::vector<ElementRecords>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
     std::vector<std::string> getSubValues(bool newStyle) const;
     std::vector<std::string> getSubValuesStartsWith(const char*, bool newStyle = false) const;
 
@@ -1575,8 +1613,9 @@ protected:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
-    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
-    std::vector<GuessRecord> _Guesses;
+    // The guess and re-target records of each reference (ops#127; saved as `guess`, `orig`,
+    // `alt` and `rt`, `rto`, `rtfp`, `rtguess`, `rtorig`, `rtalt`).
+    std::vector<ElementRecords> _Records;
     PropertyLinkBase* parentProp;
     mutable std::string tmpShadow;
 };
@@ -1684,6 +1723,11 @@ public:
     {
         return _Links;
     }
+
+    /// Calls \a edit on the link at position \a link inside this property's change
+    /// notification (ops#127: the reorder's re-target writes a link's subs, shadows, fingerprints
+    /// and records)
+    void editLink(std::size_t link, const std::function<void(PropertyXLinkSub&)>& edit);
 
     PyObject* getPyObject() override;
     void setPyObject(PyObject* value) override;
