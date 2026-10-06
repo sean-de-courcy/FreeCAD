@@ -148,8 +148,10 @@ struct AppExport SolverResolution
  * except a Broken one's, which it keeps unless clearFingerprint is set. Guessed (ops#127) replaces
  * a reference as Resolved does, or by its pieces as Expanded does, and sets its record in
  * \a guesses; Broken sets the resolution's record (empty, or the one it carries); every other
- * written reference loses its record. Sets \a firstNew and \a countNew per old index. Returns
- * true if anything was written.
+ * written reference loses its record. \a retargets, if given, are the reorder's re-target records
+ * (ops#127): every resolution keeps its reference's record, and each piece of an expanded
+ * reference carries it. Sets \a firstNew and \a countNew per old index. Returns true if anything
+ * was written.
  */
 AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& subs,
@@ -158,7 +160,8 @@ AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& froms,
                               std::vector<int>& firstNew,
                               std::vector<int>& countNew,
-                              std::vector<GuessRecord>* guesses = nullptr);
+                              std::vector<GuessRecord>* guesses = nullptr,
+                              std::vector<RetargetRecord>* retargets = nullptr);
 
 /// The indices \a mapped (of the old list) in a rebuilt list: each old index m becomes
 /// firstNew[m] .. firstNew[m] + countNew[m] - 1, a removed one disappears.

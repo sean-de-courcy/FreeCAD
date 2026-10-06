@@ -379,6 +379,20 @@ std::vector<App::DocumentObject*> Body::removeObject(App::DocumentObject* featur
     return result;
 }
 
+std::vector<App::DocumentObject*> Body::removeObjects(std::vector<App::DocumentObject*> objs)
+{
+    // One at a time, so each keeps the chain and the Tip valid (ops#127); the group's own
+    // removeObjects() rewrites Group only
+    std::vector<App::DocumentObject*> removed;
+    for (auto obj : objs) {
+        if (obj && hasObject(obj)) {
+            auto result = removeObject(obj);
+            removed.insert(removed.end(), result.begin(), result.end());
+        }
+    }
+    return removed;
+}
+
 
 App::DocumentObjectExecReturn* Body::execute()
 {

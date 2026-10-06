@@ -47,6 +47,25 @@ public:
     /// to see (PartDesign: the pass-through). Called once per failure, before the dependants run.
     /// Must not throw.
     virtual void afterFailure(DocumentObject* failed) const = 0;
+
+    /// 'obj' is held: Document::recompute doesn't run it, leaves it touched, and doesn't count it
+    /// as touched in Document::mustExecute() (ops#127; PartDesign: what a Body's roll-back bar
+    /// holds, and the Body itself while rolled back)
+    virtual bool holds(const DocumentObject* obj) const
+    {
+        (void)obj;
+        return false;
+    }
+
+    /// 'obj' can't run (ops#127; PartDesign: a reference of it is parked by a reorder): it fails
+    /// before running, with 'why' as its error text, and the recompute continues as after any
+    /// failure
+    virtual bool blocked(const DocumentObject* obj, std::string& why) const
+    {
+        (void)obj;
+        (void)why;
+        return false;
+    }
 };
 
 /// Set once at module load (PartDesign's init); null means upstream's behaviour everywhere.

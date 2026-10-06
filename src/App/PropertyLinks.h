@@ -37,6 +37,7 @@
 #include <Base/Placement.h>
 
 #include "ElementGuess.h"
+#include "ElementRetarget.h"
 #include "MappedElement.h"
 #include "Property.h"
 
@@ -1091,6 +1092,17 @@ public:
         return _ShadowSubList;
     }
 
+    /// The re-target records of a reorder (ops#127), parallel to the subs (an empty record: none)
+    const std::vector<RetargetRecord>& getRetargets() const
+    {
+        return _Retargets;
+    }
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
+
     std::vector<std::string> getSubValues(bool newStyle) const;
 
     /// return the list of sub elements starts with a special string
@@ -1177,6 +1189,8 @@ protected:
     std::vector<std::string> _ExpandedFrom;
     // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
     std::vector<GuessRecord> _Guesses;
+    // The reorder's re-target record of each reference (ops#127; saved as `rt`, `rto`, `rtfp`)
+    std::vector<RetargetRecord> _Retargets;
     bool _restoreLabel {false};
 };
 
@@ -1293,6 +1307,17 @@ public:
         return _ShadowSubList;
     }
 
+    /// The re-target records of a reorder (ops#127), parallel to the subs (an empty record: none)
+    const std::vector<RetargetRecord>& getRetargets() const
+    {
+        return _Retargets;
+    }
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
+
     /**
      * @brief Removes all occurrences of \a lValue in the property
      * together with its sub-elements and returns the number of entries removed.
@@ -1373,6 +1398,8 @@ private:
     std::vector<std::string> _ExpandedFrom;
     // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
     std::vector<GuessRecord> _Guesses;
+    // The reorder's re-target record of each reference (ops#127; saved as `rt`, `rto`, `rtfp`)
+    std::vector<RetargetRecord> _Retargets;
 };
 
 /** The general Link Property with Child scope
@@ -1532,6 +1559,17 @@ public:
     {
         return _ShadowSubList;
     }
+
+    /// The re-target records of a reorder (ops#127), parallel to the subs (an empty record: none)
+    const std::vector<RetargetRecord>& getRetargets() const
+    {
+        return _Retargets;
+    }
+    /// Sets every sub's re-target record (padded or cut to the subs' count), keeping the rest
+    void setRetargets(std::vector<RetargetRecord>&& records);
+    /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
+    /// back), keeping the rest
+    void setElementFingerprint(std::size_t index, const std::string& fingerprint);
     std::vector<std::string> getSubValues(bool newStyle) const;
     std::vector<std::string> getSubValuesStartsWith(const char*, bool newStyle = false) const;
 
@@ -1577,6 +1615,8 @@ protected:
     std::vector<std::string> _ExpandedFrom;
     // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
     std::vector<GuessRecord> _Guesses;
+    // The reorder's re-target record of each reference (ops#127; saved as `rt`, `rto`, `rtfp`)
+    std::vector<RetargetRecord> _Retargets;
     PropertyLinkBase* parentProp;
     mutable std::string tmpShadow;
 };
@@ -1684,6 +1724,11 @@ public:
     {
         return _Links;
     }
+
+    /// Calls \a edit on the link at position \a link inside this property's change
+    /// notification (ops#127: the reorder's re-target writes a link's subs, shadows, fingerprints
+    /// and records)
+    void editLink(std::size_t link, const std::function<void(PropertyXLinkSub&)>& edit);
 
     PyObject* getPyObject() override;
     void setPyObject(PyObject* value) override;

@@ -87,6 +87,48 @@ public:
 
     /// Remove the feature from the body
     std::vector<DocumentObject*> removeObject(DocumentObject* obj) override;
+    /// Remove the features from the body, each as removeObject() does (the chain and the Tip are
+    /// kept valid, ops#127)
+    std::vector<DocumentObject*> removeObjects(std::vector<DocumentObject*> objs) override;
+
+    /** @name The roll-back bar (ops#127, notes/reorder-rollback-design.md section 1)
+     *
+     * The bar is the Tip. While the edit roll-back point is set (a feature's dialog is open),
+     * that point is the bar instead (the effective bar). A Body whose effective bar is not its
+     * last solid feature is rolled back: the solid features after the bar, the other members
+     * after it that nothing above it uses, and the Body itself are held, i.e. not recomputed and
+     * left touched, so rolling forward recomputes what changed above.
+     */
+    //@{
+    /// The edit roll-back point if set, else the Tip
+    App::DocumentObject* effectiveBar() const;
+    /// The last solid feature in Group, or null
+    App::DocumentObject* lastSolidFeature() const;
+    /// The effective bar is not the last solid feature (and there is one)
+    bool isRolledBack() const;
+    /// Is obj held by the bar (obj is this Body or one of its members)?
+    bool holds(const App::DocumentObject* obj) const;
+    /// The transient edit roll-back point (not saved, not undone), or null
+    App::DocumentObject* getEditRollPoint() const;
+    /// Sets the edit roll-back point (null clears it); touches nothing
+    void setEditRollPoint(App::DocumentObject* obj);
+    /// Moves the bar after the solid feature (null: to the top)
+    void rollTo(App::DocumentObject* feature);
+    /// Moves the bar to the last solid feature
+    void rollToEnd();
+    //@}
+
+    /** Moves objs (members of this Body) before or after target (a member, or null: the start,
+     * after the base feature) in one step (ops#127, notes/reorder-rollback-design.md 2.1): the
+     * BaseFeature chain is rewired, every solid whose base changed is rerouted, references from
+     * a feature's own inputs into a later solid are re-targeted or parked (and restored when the
+     * order allows), and the Tip keeps its place in the list. Plans first: a refusal (a check, a
+     * dependency cycle) throws Base::ValueError with nothing changed. Opens no transaction and
+     * doesn't recompute.
+     */
+    void reorderObject(const std::vector<App::DocumentObject*>& objs,
+                       App::DocumentObject* target,
+                       bool after);
 
     /**
      * Checks if the given document object lays after the current insert point
@@ -162,8 +204,18 @@ protected:
     void onDocumentRestored() override;
 
 private:
+    /// Sets feature's BaseFeature to newBase (if it differs) and reroutes the references that
+    /// follow the base (onBaseFeatureRerouted()); every change of the chain goes through it
+    /// (ops#127, notes/reorder-rollback-design.md 2.2)
+    void rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase);
+
     fastsignals::scoped_connection connection;
     bool showTip = false;
+    /// The edit roll-back point (ops#127): transient, not saved, not undone
+    App::DocumentObject* editRollPoint = nullptr;
+    /// The Tip's shape that execute() last copied, before the placement bake (ops#127, R7): a
+    /// Tip whose shape is the same doesn't rewrite Shape
+    Part::TopoShape lastTipShape;
 };
 
 }  // namespace PartDesign
