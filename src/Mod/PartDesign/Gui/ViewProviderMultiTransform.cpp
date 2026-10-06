@@ -63,6 +63,10 @@ std::vector<App::DocumentObject*> ViewProviderMultiTransform::claimChildren() co
 
 bool ViewProviderMultiTransform::onDelete(const std::vector<std::string>& svec)
 {
+    if (isEditing()) {  // see ViewProvider::onDelete (ops#143)
+        return false;
+    }
+
     // Delete the transformation features
     PartDesign::MultiTransform* pcMultiTransform = getObject<PartDesign::MultiTransform>();
     std::vector<App::DocumentObject*> transformFeatures = pcMultiTransform->Transformations.getValues();

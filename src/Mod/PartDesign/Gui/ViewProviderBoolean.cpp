@@ -355,6 +355,10 @@ void ViewProviderBoolean::setupContextMenu(QMenu* menu, QObject* receiver, const
 
 bool ViewProviderBoolean::onDelete(const std::vector<std::string>& s)
 {
+    if (isEditing()) {  // see ViewProvider::onDelete (ops#143)
+        return false;
+    }
+
     auto* feature = getObject<PartDesign::Boolean>();
 
     restoreActiveBodyExposure();

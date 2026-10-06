@@ -39,6 +39,8 @@
 #include <App/DocumentObject.h>
 #include <App/Expression.h>
 #include <App/GeoFeature.h>
+#include <App/GeoFeatureGroupExtension.h>
+#include <App/GroupExtension.h>
 #include <Base/Exception.h>
 #include <Base/FileInfo.h>
 #include <Base/Stream.h>
@@ -1648,6 +1650,51 @@ void StdCmdDelete::activated(int iMsg)
             std::set<QString> affectedLabels;
             bool more = false;
             auto sels = Selection().getSelectionEx();
+
+            // Never delete an object in edit, or a group holding it (its Body, its Part): its
+            // task dialog would be left on deleted objects. A dress-up panel's highlight selects
+            // the Body, so a Delete that missed the panel's list deleted the whole Body
+            // (ops#143, upstream issue 29180).
+            std::set<const App::DocumentObject*> editProtected;
+            QString editedLabel;
+            for (auto& editDoc : editDocs) {
+                auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getInEdit());
+                if (!vpedit || vpedit->acceptDeletionsInEdit()) {
+                    continue;
+                }
+                App::DocumentObject* edited = vpedit->getObject();
+                if (editedLabel.isEmpty()) {
+                    editedLabel = QString::fromUtf8(edited->Label.getValue());
+                }
+                // the groups holding it: plain groups, and geo-feature groups (Body, Part)
+                std::vector<const App::DocumentObject*> pending {edited};
+                while (!pending.empty()) {
+                    const App::DocumentObject* obj = pending.back();
+                    pending.pop_back();
+                    if (!obj || !editProtected.insert(obj).second) {
+                        continue;
+                    }
+                    pending.push_back(App::GroupExtension::getGroupOfObject(obj));
+                    pending.push_back(App::GeoFeatureGroupExtension::getGroupOfObject(obj));
+                }
+            }
+            QStringList keptLabels;
+            std::erase_if(sels, [&](const SelectionObject& sel) {
+                const App::DocumentObject* obj = sel.getObject();
+                if (!obj || editProtected.count(obj) == 0) {
+                    return false;
+                }
+                keptLabels << QString::fromUtf8(obj->Label.getValue());
+                return true;
+            });
+            if (!keptLabels.isEmpty()) {
+                const QString message
+                    = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
+                          .arg(editedLabel, keptLabels.join(QStringLiteral(", ")));
+                getMainWindow()->showStatus(MainWindow::Wrn, message);
+                Base::Console().warning("%s\n", message.toUtf8().constData());
+            }
+
             bool autoDeletion = true;
             bool forceDeletion = false;
             for (auto& sel : sels) {
