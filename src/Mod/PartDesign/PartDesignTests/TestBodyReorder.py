@@ -79,6 +79,7 @@ def isPlaneFacing(face, normal, through):
 
 PAD2 = 10 * 10 * 5  # a 10 x 10 x 5 pad on the block's top, (5, 5) to (15, 15)
 HOLE2 = math.pi * 2**2 * 2  # radius 2, 2 deep
+HOLE1 = math.pi * 1**2 * 1  # radius 1, 1 deep (the projecting sketch's hole, ops#131)
 
 
 class BodyReorderBase:
@@ -637,7 +638,7 @@ class BodyReorderBase:
     def testExternalGeometryComesBack(self):
         """A sketch projecting Pad2's top edge, with a constraint on the projection: moved above
         Pad2 the projection goes to the block (broken); moved back it is on Pad2's edge with its
-        constraint (RO11). Moved to the very top, nothing can take the projection: refused."""
+        constraint (RO11). The very top is ops#131's park (testTopDropParksProjection)."""
         block = self.block()
         pad2 = self.pad2()
         self.recompute()
@@ -654,27 +655,6 @@ class BodyReorderBase:
         self.recompute()
         self.assertValid(sketch, hole)
 
-        group = list(self.body.Group)
-        bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
-        tip = self.body.Tip
-        external = sketch.ExternalGeometry
-        with self.assertRaises(ValueError) as refused:
-            self.body.reorderObject([hole], None, True)
-        self.assertIn("projects", str(refused.exception))
-        # Nothing changed (review T2)
-        self.assertEqual(list(self.body.Group), group)
-        self.assertEqual(
-            [o.BaseFeature for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")],
-            bases,
-        )
-        self.assertIs(self.body.Tip, tip)
-        self.assertEqual(sketch.ExternalGeometry, external)
-        self.assertEqual(len(sketch.Constraints), constraints)
-        self.assertEqual(len(sketch.ExternalGeo), 3)
-        self.assertEqual(self.savedRetargets(), [])
-        self.assertEqual(self.parked(sketch), [])
-        self.assertEqual(self.parked(hole), [])
-
         self.body.reorderObject([hole], block, True)
         self.assertIs(sketch.ExternalGeometry[0][0], block)
         self.assertEqual(self.savedRetargets(), ["Pad2"])
@@ -690,6 +670,339 @@ class BodyReorderBase:
         projected = pad2.Shape.getElement(sketch.ExternalGeometry[0][1][0])
         self.assertTrue(all(abs(v.Point.y - 5) < TOL for v in projected.Vertexes))
         self.assertEqual(self.savedRetargets(), [])
+
+    # -- a projection parked in place (ops#131, notes/reorder-park-projections.md section 6) -----
+
+    def frontTopEdge(self, pad2, y=5):
+        """Pad2's top edge at the front (the line at y, z = 15)."""
+        return edgeWhere(
+            pad2.Shape,
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y - y) < TOL and abs(v.Point.z - 15) < TOL for v in e.Vertexes),
+        )
+
+    def projecting(self, construction=False):
+        """RO11's model: Block, Pad2, and the sketch `Projecting` at z = 15 with a circle (centre
+        (10, 10), r = 1) projecting Pad2's front top edge (y = 5), with two constraints from the
+        projection's start to the circle's centre: `gap` (DistanceY, = 10 / 2 by an expression)
+        and a DistanceX; `ProjectedHole` is a 1 deep pocket of it. With `construction`, an unrelated
+        construction line comes before the circle in the geometry list."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        geometry = [models.circle(10, 10, 1)]
+        if construction:
+            geometry.insert(0, Part.LineSegment(V(0, 18, 0), V(3, 18, 0)))
+        sketch = models.sketch(self.doc, "Projecting", geometry, self.body, z=15)
+        circle = len(geometry) - 1
+        if construction:
+            sketch.toggleConstruction(0)
+        sketch.addExternal(pad2.Name, self.frontTopEdge(pad2))
+        self.recompute()
+        start = sketch.ExternalGeo[2].StartPoint
+        gap = sketch.addConstraint(Sketcher.Constraint("DistanceY", -3, 1, circle, 3, 5.0))
+        sketch.renameConstraint(gap, "gap")
+        sketch.setExpression("Constraints.gap", "10 / 2")
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", -3, 1, circle, 3, 10 - start.x))
+        hole = models.pocket(self.body, sketch, 1, "ProjectedHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+        return block, pad2, sketch, hole
+
+    def projection(self, sketch, index=2):
+        """The Id, the reference and the ends of the external geometry at index."""
+        geo = sketch.ExternalGeo[index]
+        facade = Sketcher.ExternalGeometryFacade(geo)
+        return facade.Id, facade.Ref, (geo.StartPoint, geo.EndPoint)
+
+    def assertSameProjection(self, sketch, before, index=2):
+        now = self.projection(sketch, index)
+        self.assertEqual(now[:2], before[:2])
+        for a, b in zip(now[2], before[2]):
+            self.assertLess((a - b).Length, TOL)
+
+    def assertGapBound(self, sketch):
+        """The constraint `gap` still has its name, its expression and its value."""
+        names = [c.Name for c in sketch.Constraints]
+        self.assertIn("gap", names)
+        self.assertIn(".Constraints.gap", [path for path, _ in sketch.ExpressionEngine])
+        self.assertAlmostEqual(sketch.Constraints[names.index("gap")].Value, 5.0)
+
+    def assertCircleAt(self, sketch, x, y):
+        circles = [g for g in sketch.Geometry if isinstance(g, Part.Circle)]
+        self.assertEqual(len(circles), 1)
+        self.assertLess((circles[0].Center - V(x, y, 0)).Length, TOL)
+
+    def assertParkedState(self, block, pad2, sketch, hole, before, counts):
+        """RO11b's oracles: the link set aside, the geometry kept in place with its Id and its
+        constraints, one extgeo line naming Pad2; the hole and its sketch fail, the rest computes."""
+        self.assertChain(hole, block, pad2)
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertEqual(list(sketch.ExternalTypes), [])
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+        self.assertSameProjection(sketch, (before[0], "", before[2]))
+        self.assertEqual(sketch.Constraints[0].Name, "gap")
+        self.assertEqual(sketch.Constraints[0].First, -3)
+        self.assertGapBound(sketch)
+        lines = self.parked(sketch)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("extgeo|ExternalGeometry|Pad2|"), lines[0])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertIn("projects 'Pad2'", sketch.getStatusString())
+        self.assertIn("now comes after 'ProjectedHole'", sketch.getStatusString())
+        self.assertIn("Projecting", hole.getStatusString())
+        self.assertValid(block, pad2)
+        self.assertBody(BLOCK + PAD2)
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+        self.assertSameProjection(sketch, (before[0], "", before[2]))
+
+    def assertRestoredState(self, block, pad2, sketch, hole, before, counts, y=5):
+        """RO11c's oracles: the link back on Pad2's edge, on the same geometry with the same
+        reference, the constraints holding; nothing parked, no re-target record."""
+        self.assertChain(block, pad2, hole)
+        self.assertEqual(self.parked(sketch), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertIs(sketch.ExternalGeometry[-1][0], pad2)
+        self.assertEqual(list(sketch.ExternalTypes), [0])
+        projected = pad2.Shape.getElement(sketch.ExternalGeometry[-1][1][0])
+        self.assertTrue(
+            all(abs(v.Point.y - y) < TOL and abs(v.Point.z - 15) < TOL for v in projected.Vertexes)
+        )
+        geoId, ref, _ = self.projection(sketch)
+        self.assertEqual((geoId, ref), before[:2])
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+        self.assertGapBound(sketch)
+        self.assertCircleAt(sketch, 10, y + 5)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+        self.assertEqual(self.savedRetargets(), [])
+
+    def testTopDropParksProjection(self):
+        """RO11b: the hole moved to the very top while its sketch projects Pad2's edge. Allowed:
+        the projection is parked in place, the hole and the sketch fail, Block and Pad2 compute."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.assertParkedState(block, pad2, sketch, hole, before, counts)
+
+    def testTopDropMoveBackRestores(self):
+        """RO11c: moved back below Pad2, the projection is on Pad2's edge again, on the same
+        geometry, and the hole is where it was."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts)
+
+    def testEditWhileParked(self):
+        """RO11d: while parked the user adds a line with a constraint and deletes a construction
+        line before the circle; moved back, the edits stay and the projection keeps its geometry
+        and constraints. (N4's oracle also adds a projection of Block's edge: at the very top
+        Block comes after the hole, so that is a cycle, not an edit; left out.)"""
+        block, pad2, sketch, hole = self.projecting(construction=True)
+        before = self.projection(sketch)
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        sketch.delGeometry(0)
+        line = sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(3, 0, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", line))
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.assertEqual(counts[1], 3)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts)
+        self.assertEqual(sketch.Constraints[2].Type, "Horizontal")
+        self.assertEqual(sketch.Constraints[2].First, line)
+        self.assertEqual(sketch.Constraints[0].First, -3)
+        self.assertEqual(sketch.Constraints[1].First, -3)
+
+    def testProjectedEdgeMovedWhileParked(self):
+        """RO11e: Pad2 moves 2 in y while the projection is parked; moved back, the projection is
+        on the moved edge (the same name) and the circle followed it: centre y = 12."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        sub = sketch.ExternalGeometry[0][1][0]
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        pad2.Profile[0].Placement = App.Placement(V(0, 2, 10), App.Rotation())
+        self.recompute()
+        self.assertValid(pad2)
+        self.assertSameProjection(sketch, (before[0], "", before[2]))
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts, y=7)
+        self.assertEqual(sketch.ExternalGeometry[-1][1][0], sub)
+
+    def testProjectedSolidDeletedWhileParked(self):
+        """RO11f: Pad2 deleted while the projection is parked; the next move drops the parked
+        line and leaves the geometry as a missing reference naming Pad2, its constraints kept."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        profile = pad2.Profile[0]
+        self.body.removeObject(pad2)
+        self.doc.removeObject(pad2.Name)
+        self.doc.removeObject(profile.Name)
+        self.recompute()
+        self.assertIn("which was deleted", sketch.getStatusString())
+
+        self.body.reorderObject([hole], block, True)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertEqual(sketch.ExternalGeometry, [])
+        geoId, ref, _ = self.projection(sketch)
+        self.assertEqual(geoId, before[0])
+        self.assertEqual(ref, before[1])
+        self.assertTrue(ref.startswith("Pad2."), ref)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertTrue(
+            Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing")
+        )
+        self.assertIn("Pad2", sketch.getStatusString())
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+
+    def testParkUndoRedo(self):
+        """RO11g: one transaction; undo gives the projecting model as it was, redo the parked one."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.doc.commitTransaction()
+        self.doc.undo()
+        self.recompute()
+        self.assertChain(block, pad2, hole)
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        self.assertEqual(list(sketch.ExternalTypes), [0])
+        self.assertSameProjection(sketch, before)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+
+        self.doc.redo()
+        self.assertParkedState(block, pad2, sketch, hole, before, counts)
+
+    def testSaveReopenWhileParked(self):
+        """RO11h: saved and reopened while parked, the geometry keeps its Id without a reference
+        and the line is there; moved back, RO11c."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, f"BodyReorder{type(self).__name__}Parked.FCStd")
+        self.doc.saveAs(path)
+        names = [o.Name for o in (self.body, block, pad2, sketch, hole)]
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body, block, pad2, sketch, hole = (self.doc.getObject(name) for name in names)
+        self.assertParkedState(block, pad2, sketch, hole, before, counts)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts)
+
+    def testParkedGeometryDeletedByUser(self):
+        """RO11i: the user deletes the parked geometry (its constraints go with it); moved back,
+        the projection comes back as new geometry without constraints."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        sketch.delExternal(0)
+        self.assertEqual(len(sketch.ExternalGeo), 2)
+        self.assertEqual(len(sketch.Constraints), 0)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertEqual(self.parked(sketch), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        self.assertEqual(len(sketch.ExternalGeo), 3)
+        geoId, ref, ends = self.projection(sketch)
+        self.assertNotEqual(geoId, before[0])
+        self.assertEqual(ref, before[1])
+        for a, b in zip(ends, before[2]):
+            self.assertLess((a - b).Length, TOL)
+        self.assertEqual(len(sketch.Constraints), 0)
+        self.assertCircleAt(sketch, 10, 10)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+
+    def testFaceProjectionPartlyDeleted(self):
+        """RO11j: the sketch projects Pad2's top face (four edges, constraints on the second and
+        fourth); parked, the first edge's geometry is deleted; moved back, edges 2-4 are on their
+        own Ids with their constraints, each where its edge is, and edge 1 comes back new."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        top = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        sketch = models.sketch(self.doc, "Projecting", [models.circle(10, 10, 1)], self.body, z=15)
+        sketch.addExternal(pad2.Name, top)
+        self.recompute()
+        self.assertEqual(len(sketch.ExternalGeo), 6)
+        before = [self.projection(sketch, i) for i in range(2, 6)]
+        start = sketch.ExternalGeo[3].StartPoint
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", -4, 1, 0, 3, 10 - start.x))
+        start = sketch.ExternalGeo[5].StartPoint
+        sketch.addConstraint(Sketcher.Constraint("DistanceY", -6, 1, 0, 3, 10 - start.y))
+        hole = models.pocket(self.body, sketch, 1, "ProjectedHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.assertEqual([self.projection(sketch, i)[1] for i in range(2, 6)], [""] * 4)
+        sketch.delExternal(0)
+        self.assertEqual([c.First for c in sketch.Constraints], [-3, -5])
+
+        self.body.reorderObject([hole], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertEqual(len(sketch.ExternalGeo), 6)
+        now = {self.projection(sketch, i)[0]: self.projection(sketch, i) for i in range(2, 6)}
+        for old in before[1:]:
+            self.assertIn(old[0], now)
+            self.assertEqual(now[old[0]][1], old[1])
+            for a, b in zip(now[old[0]][2], old[2]):
+                self.assertLess((a - b).Length, TOL)
+        self.assertNotIn(before[0][0], now)
+        self.assertEqual([c.First for c in sketch.Constraints], [-3, -5])
+        self.assertCircleAt(sketch, 10, 10)
+        newest = self.projection(sketch, 5)
+        self.assertEqual(newest[1], before[0][1])
+        for a, b in zip(newest[2], before[0][2]):
+            self.assertLess((a - b).Length, TOL)
+
+    def testStayAboveNotRestored(self):
+        """RO11k: from the top to just below Block, still above Pad2: the projection stays parked
+        and nothing is re-targeted; moved below Pad2, RO11c."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.body.reorderObject([hole], block, True)
+        self.assertChain(block, hole, pad2)
+        self.assertEqual(len(self.parked(sketch)), 1)
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertSameProjection(sketch, (before[0], "", before[2]))
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts)
 
     def testPatternAboveItsOriginalIsParked(self):
         """A pattern moved above its original: the original is parked on the pattern, which fails

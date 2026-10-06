@@ -290,3 +290,20 @@ class MoveProjectionAbovePad(ReorderScenario):
 
     def back(self, doc):
         self.bodyObject.reorderObject([doc.Hole], doc.Pad2, True)
+
+
+class MoveProjectionToTop(MoveProjectionAbovePad):
+    """The hole moved to the very top (RO11b-c, ops#131): nothing before it can take the
+    projection, so it is parked in place (no link: broken, the sketch fails); moved back below
+    Pad2, it is on Pad2's edge again, on the same geometry."""
+
+    steps = ("top", "back")
+
+    def expected(self):
+        return BROKEN if self.stepName == "top" else self.frontEdge()
+
+    def target(self):
+        return None if getattr(self, "stepName", None) == "top" else "Pad2"
+
+    def top(self, doc):
+        self.bodyObject.reorderObject([doc.Hole], None, True)
