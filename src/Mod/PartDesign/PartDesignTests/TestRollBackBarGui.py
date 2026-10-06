@@ -370,6 +370,8 @@ class TestRollBackBarGui(unittest.TestCase):
 
         self.key(QtCore.Qt.Key_Down)
         self.assertIs(self.body.Tip, b)
+        current = tree.currentItem()
+        self.assertEqual(current.type(), BAR, f"current {current.text(0)} focus {tree.hasFocus()}")
 
         self.key(QtCore.Qt.Key_Home)
         self.assertIsNone(self.body.Tip)

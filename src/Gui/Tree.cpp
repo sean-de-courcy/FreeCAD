@@ -2061,6 +2061,15 @@ bool TreeWidget::event(QEvent* e)
             ke->accept();
             return true;
         }
+        // Claim the keys that move the roll-back bar row while it is the current item, before
+        // a global shortcut on them (Home, End) takes them (ops#127)
+        if (auto bar = currentItem(); bar && bar->type() == BarType
+            && ke->modifiers() == Qt::NoModifier
+            && (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down || ke->key() == Qt::Key_Home
+                || ke->key() == Qt::Key_End)) {
+            ke->accept();
+            return true;
+        }
     }
     return QTreeWidget::event(e);
 }

@@ -448,10 +448,11 @@ class TestDatumPlane(unittest.TestCase):
 
 class TestDressUpPanelAfterInsert(unittest.TestCase):
     """ops#84: a boss inserted between a block and a chamfer on the block's back top edge. The
-    chamfer's BaseFeature is the boss and its Base still names the block, while the task panel
-    shows, highlights and selects on the boss. Opening the panel moves Base to the boss, the same
-    edge by its index on the boss's shape; OK used to write the block's index names onto the boss
-    (another edge, silently)."""
+    chamfer's BaseFeature is the boss. Since ops#127 the insert reroutes Base onto the boss with
+    the same edge (TestChamfer); before, Base still named the block and opening the panel moved it.
+    Either way the panel shows, highlights and selects on the boss, and OK used to write the
+    block's index names onto the boss (another edge, silently). A block without an element map
+    keeps Base on the block."""
 
     BACK_TOP = ((0, 10, 10), (20, 10, 10))
 
@@ -509,7 +510,13 @@ class TestDressUpPanelAfterInsert(unittest.TestCase):
         body.Tip = chamfer
         self.Doc.recompute()
         self.assertEqual(chamfer.BaseFeature, boss)
-        self.assertEqual(chamfer.Base[0], block)
+        if mapless:
+            self.assertEqual(chamfer.Base[0], block)
+        else:
+            # The insert reroutes Base onto the boss, with the same edge (ops#127)
+            self.assertEqual(
+                chamfer.Base, (boss, [self.edgeName(boss.Shape, *self.BACK_TOP)])
+            )
         return block, boss, chamfer
 
     def expectedVolume(self, boss):
