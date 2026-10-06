@@ -23,6 +23,9 @@
 
 import unittest
 import functools
+import os
+import shutil
+import tempfile
 
 import FreeCAD
 import Part
@@ -737,3 +740,223 @@ class FineGrainedRecomputeCases(unittest.TestCase):
         self.assertEqual(cube.OutList, [varSet, varSet])
         self.assertDep(varSet.InListProp, depEdges)
         self.assertEqual(varSet.InList, [cube])
+
+
+# FreeCAD-CH (ops#154): expressions on Spreadsheet aliases.  A dependency edge
+# names the alias ("Sheet.L") when it was built before the alias's cell had a
+# property (a restore, or before the Sheet's first recompute), while the Sheet
+# marks the cell's property ("A1") as changed.  The oracle is the Pad's length
+# and its volume, width x 10 x Length.
+
+
+def createRectanglePad(doc):
+    """A Body with a 20 x 10 rectangle at the origin (constraints "width" and
+    "height") padded by 5 mm."""
+    body = doc.addObject("PartDesign::Body", "Body")
+    sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+    sketch.AttachmentSupport = (doc.getObject("XY_Plane"), [""])
+    sketch.MapMode = "FlatFace"
+
+    def lsegment(x1, y1, x2, y2):
+        return Part.LineSegment(FreeCAD.Vector(x1, y1, 0), FreeCAD.Vector(x2, y2, 0))
+
+    sketch.addGeometry(
+        [
+            lsegment(0, 0, 20, 0),
+            lsegment(20, 0, 20, 10),
+            lsegment(20, 10, 0, 10),
+            lsegment(0, 10, 0, 0),
+        ],
+        False,
+    )
+    sketch.addConstraint(
+        [
+            Sketcher.Constraint("Coincident", 0, 2, 1, 1),
+            Sketcher.Constraint("Coincident", 1, 2, 2, 1),
+            Sketcher.Constraint("Coincident", 2, 2, 3, 1),
+            Sketcher.Constraint("Coincident", 3, 2, 0, 1),
+            Sketcher.Constraint("Horizontal", 0),
+            Sketcher.Constraint("Horizontal", 2),
+            Sketcher.Constraint("Vertical", 1),
+            Sketcher.Constraint("Vertical", 3),
+            Sketcher.Constraint("Coincident", 0, 1, -1, 1),
+        ]
+    )
+    width = sketch.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 20.0))
+    sketch.renameConstraint(width, "width")
+    height = sketch.addConstraint(Sketcher.Constraint("DistanceY", 1, 1, 1, 2, 10.0))
+    sketch.renameConstraint(height, "height")
+
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = sketch
+    pad.Length = "5 mm"
+    return pad
+
+
+@parameterize()
+class FineGrainedAliasCases(unittest.TestCase):
+    # The cases run with fine-grained recompute on and off: off is the coarse
+    # recompute, which never had the bug (A6 of the ops#154 test plan).
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument(f"AliasTests_{self._testMethodName}")
+        self.TempDir = tempfile.mkdtemp(prefix="fc_alias_")
+
+        method = getattr(self, self._testMethodName)
+        self.fineGrained = getattr(method, "_fineGrained", None)
+        self.ParamGroup = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General")
+        self.fineGrainedPref = self.ParamGroup.GetBool("FineGrainedRecompute", True)
+        self.ParamGroup.SetBool("FineGrainedRecompute", self.fineGrained)
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.ParamGroup.SetBool("FineGrainedRecompute", self.fineGrainedPref)
+        shutil.rmtree(self.TempDir, ignore_errors=True)
+
+    def reopen(self):
+        path = os.path.join(self.TempDir, f"{self.Doc.Name}.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+
+    def assertPad(self, length, width=20.0):
+        pad = self.Doc.getObject("Pad")
+        self.assertAlmostEqual(pad.Length.Value, length, places=6)
+        self.assertAlmostEqual(pad.Shape.Volume, width * 10.0 * length, places=4)
+
+    def addSheet(self):
+        sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "10")
+        sheet.setAlias("A1", "L")
+        return sheet
+
+    @finegrained((True, False))
+    def testAliasBeforeFirstRecompute(self):
+        # A1: the expression is set before the Sheet's first recompute
+        sheet = self.addSheet()
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet.L")
+        self.Doc.recompute()
+        self.assertPad(10.0)
+
+        sheet.set("A1", "15")
+        self.Doc.recompute()
+        self.assertPad(15.0)
+
+    @finegrained((True, False))
+    def testAliasAfterReopen(self):
+        # A2: a Pad length and a sketch constraint on aliases, through a save
+        # and reopen
+        sheet = self.addSheet()
+        sheet.set("B1", "20")
+        sheet.setAlias("B1", "wid")
+        self.Doc.recompute()
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet.L")
+        self.Doc.getObject("Sketch").setExpression("Constraints.width", "Sheet.wid")
+        self.Doc.recompute()
+        self.assertPad(10.0)
+
+        self.reopen()
+        sheet = self.Doc.getObject("Sheet")
+        sheet.set("A1", "20")
+        self.Doc.recompute()
+        self.assertPad(20.0)
+
+        sheet.set("B1", "30")
+        self.Doc.recompute()
+        self.assertAlmostEqual(self.Doc.getObject("Sketch").Shape.BoundBox.XMax, 30.0, places=6)
+        self.assertPad(20.0, width=30.0)
+
+    @finegrained((True, False))
+    def testMovedAlias(self):
+        # A3: the aliased cell moves (a row inserted above it), before and
+        # after a reopen.  Removing an alias isn't a move: upstream then
+        # rewrites the references to the cell's address.
+        sheet = self.addSheet()
+        self.Doc.recompute()
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet.L")
+        self.Doc.recompute()
+        self.assertPad(10.0)
+
+        sheet.insertRows("1", 1)
+        self.assertEqual(sheet.getAlias("A2"), "L")
+        self.assertEqual(pad.ExpressionEngine, [("Length", "Sheet.L")])
+        sheet.set("A2", "12")
+        self.Doc.recompute()
+        self.assertPad(12.0)
+
+        sheet.set("A1", "99")
+        self.Doc.recompute()
+        self.assertPad(12.0)
+
+        self.reopen()
+        sheet = self.Doc.getObject("Sheet")
+        sheet.insertRows("1", 1)
+        self.assertEqual(sheet.getAlias("A3"), "L")
+        sheet.set("A3", "14")
+        self.Doc.recompute()
+        self.assertPad(14.0)
+
+        sheet.set("A1", "98")
+        self.Doc.recompute()
+        self.assertPad(14.0)
+
+    @finegrained((True, False))
+    def testControls(self):
+        # A4: a cell reference and a VarSet keep working, also after a reopen
+        sheet = self.addSheet()
+        varSet = self.Doc.addObject("App::VarSet", "VarSet")
+        varSet.addProperty("App::PropertyLength", "Width", "Params")
+        varSet.Width = "20 mm"
+        self.Doc.recompute()
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet.A1")
+        self.Doc.getObject("Sketch").setExpression("Constraints.width", "VarSet.Width")
+        self.Doc.recompute()
+        self.assertPad(10.0)
+
+        self.reopen()
+        sheet = self.Doc.getObject("Sheet")
+        sheet.set("A1", "15")
+        self.Doc.getObject("VarSet").Width = "25 mm"
+        self.Doc.recompute()
+        self.assertPad(15.0, width=25.0)
+
+    @finegrained((True,))
+    def testUnrelatedCellSkipsPad(self):
+        # A4: with fine-grained recompute, a change to a cell nothing refers to
+        # recomputes the Sheet alone, also with an alias edge restored from a
+        # file.  Coarse recompute recomputes the Pad here: fine-grained only.
+        sheet = self.addSheet()
+        sheet.set("C1", "1")
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet.L")
+        self.Doc.recompute()
+
+        self.reopen()
+        sheet = self.Doc.getObject("Sheet")
+        sheet.set("C1", "2")
+        self.assertEqual(self.Doc.recompute(), 1)
+        self.assertNotIn("Touched", self.Doc.getObject("Pad").State)
+        self.assertPad(10.0)
+
+    @finegrained((True, False))
+    def testSheetToSheetAlias(self):
+        # A5: a cell of Sheet2 refers to Sheet's alias, through a reopen
+        self.addSheet()
+        sheet2 = self.Doc.addObject("Spreadsheet::Sheet", "Sheet2")
+        sheet2.set("A1", "=Sheet.L * 2")
+        sheet2.setAlias("A1", "len")
+        pad = createRectanglePad(self.Doc)
+        pad.setExpression("Length", "Sheet2.len")
+        self.Doc.recompute()
+        self.assertPad(20.0)
+
+        self.reopen()
+        sheet = self.Doc.getObject("Sheet")
+        sheet.set("A1", "7")
+        self.Doc.recompute()
+        self.assertAlmostEqual(self.Doc.getObject("Sheet2").len, 14.0, places=6)
+        self.assertPad(14.0)

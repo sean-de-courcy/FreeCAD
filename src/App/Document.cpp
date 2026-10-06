@@ -3517,8 +3517,20 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                     if (fineGrained) {
                         // set all dependent objects touched based on properties
                         std::vector<DepEdge> inList = obj->getInListProp();
+                        // FreeCAD-CH (ops#154): an edge may name the property otherwise
+                        // than the change does: a Spreadsheet alias ("L") against its
+                        // cell ("A1"). Match the property the name resolves to now, and
+                        // enforce when it resolves to none.
+                        auto touched = [obj](const std::string& name) {
+                            if (name.empty() || obj->touchedProps.contains(name)) {
+                                return true;
+                            }
+                            auto prop = obj->getPropertyByName(name.c_str());
+                            return !prop || !prop->getName()
+                                || obj->touchedProps.contains(prop->getName());
+                        };
                         for (auto& [objFrom, propFrom, objTo, propTo] : inList) {
-                            if (obj->touchedProps.contains(propTo) || propTo.empty()) {
+                            if (touched(propTo)) {
                                 objFrom->enforceRecompute(propFrom);
                             }
                         }
