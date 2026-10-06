@@ -1217,6 +1217,68 @@ class TestNamingSolver(unittest.TestCase):
         self.redrawShifted(doc)
         self.assertFalse(fillet.isValid())
 
+    def openIndexOnly(self):
+        """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
+        no name to solve from, ops#123), its fingerprint kept; the file opened again with the
+        solver off, which is then turned on. Returns (document, the reference's index name)."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        index = fillet.Base[1][0]
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "IndexOnly.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml = files["Document.xml"].decode("utf-8")
+        found = re.findall(r'<Sub value="%s" shadow="[^"]*"( fp=")' % index, xml)
+        self.assertEqual(len(found), 1)  # the setup: the fillet's reference, with a fingerprint
+        xml = re.sub(
+            r'<Sub value="%s" shadow="[^"]*" fp="' % index, '<Sub value="?%s" fp="' % index, xml
+        )
+        # Opened with the solver off: on, the open itself would find the edge in its place
+        # (strict tier 3), before any edit.
+        xml, solverOff = re.subn(
+            r'(<Property name="ReferenceSolver"[^>]*>\s*<Bool value=")true(")', r"\1false\2", xml
+        )
+        self.assertEqual(solverOff, 1)
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        self.assertEqual(doc.Fillet.Base[1], ["?" + index])
+        doc.ReferenceSolver = True
+        return doc, index
+
+    def testIndexOnlyReferenceIsGuessedByItsFingerprint(self):
+        """N2 5.4: an index-only missing reference has no name, so no structural candidate; in a
+        forward update of its target it is retried by its fingerprint, and only G2 can take it.
+        The rectangle redrawn 0.5 mm over: G2 picks the moved corner edge, kind `geometric`, and
+        the record has no original name (it never snaps back). With
+        NamingSolver/GuessNoStructure off it stays broken (the review of fork PR 117, 4b)."""
+        doc, index = self.openIndexOnly()
+
+        self.redrawShifted(doc)
+
+        corner = edge("line", direction=Z, through=(20.5, 0, 0)).one(doc.Pad.Shape)
+        fillet = doc.Fillet
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], corner)
+        self.assertIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+        self.assertEqual(entry["original"]["name"], "")
+
+        #   the switch off
+        self.guessSwitch("GuessNoStructure", False)
+        doc, index = self.openIndexOnly()
+        self.redrawShifted(doc)
+        self.assertFalse(doc.Fillet.isValid())
+        self.assertEqual(doc.Fillet.Base[1], ["?" + index])
+
     def testSplitIsGuessedByThePieceAtTheSavedCentre(self):
         """G3: ExternalSplitOffCentre's model. A notch at x 4..8 splits the front top edge; the
         piece with its name (x 0..4) misses its old centre (x = 10), the rest (x 8..20) holds

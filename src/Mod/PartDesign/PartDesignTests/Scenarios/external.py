@@ -118,6 +118,31 @@ class ExternalSplitOffCentre(ExternalSplit):
         self.split = True
 
 
+class ExternalSplitNamedPieceKept(ExternalSplit):
+    """ExternalSplit's notch moved right, to x 12..16, in two steps. `notch`: the front top edge
+    splits into x 0..12, which keeps its name and holds the old edge's centre (x = 10), and
+    x 16..20. In solver documents the reference is guessed to the named piece (N2 5.2 G3) and
+    keeps its record. `moveBack`: the back side moves out to y = 12, an edit that leaves the
+    pick alone; the guess stays a guess, its warning too, until the user ends it (A1; the Fable
+    review of fork PR 117, finding 1). Without the solver it breaks, as ExternalSplit's does."""
+
+    steps = ("notch", "moveBack")
+
+    def frontEdge(self):
+        if self.split and self.solver:
+            return Guessed(edge("line", direction=X, contains=(6, 0, self.height)))
+        return super().frontEdge()
+
+    def notch(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (12, 0))})
+        doc.Profile.addGeometry(m.polyline([(12, 0), (12, 2), (16, 2), (16, 0), (20, 0)]), False)
+        self.split = True
+
+    def moveBack(self, doc):
+        m.setLines(doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))})
+        self.depth = 12
+
+
 class ExternalMoveSideIn(ExternalEdit):
     """The right side moves in from x = 20 to x = 16, its lines keeping their geometry IDs: the
     front edge gets shorter, and nothing lies on the rest of its old place. The external edge

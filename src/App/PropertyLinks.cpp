@@ -2507,7 +2507,11 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
                 && geo && element && element[0]) {
                 index = Data::findElementName(found.oldName.c_str());
             }
-            if (index && index[0] && !Data::hasMissingElement(index)) {
+            // The original giving the element held already (a G3 pick of the piece that kept
+            // the name) is no snap-back: the reference is solved as the element it holds, with
+            // its record (the Fable review of fork PR 117, finding 1).
+            if (index && index[0] && !Data::hasMissingElement(index)
+                && !(heldElement && std::strcmp(index, heldElement) == 0)) {
                 entry.kind = App::SolverEntry::Kind::Exact;
                 entry.guessed = true;
                 if (!Data::hasMissingElement(heldElement)) {
@@ -2558,7 +2562,7 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         if (entry.kind == App::SolverEntry::Kind::Missing && !indexOnly) {
             entry.oldName = App::bareMappedName(shadow.newName);
         }
-        else {
+        else if (!indexOnly) {
             entry.exactName = App::bareMappedName(shadow.newName);
         }
         const char* oldElement = Data::findElementName(shadow.oldName.c_str());

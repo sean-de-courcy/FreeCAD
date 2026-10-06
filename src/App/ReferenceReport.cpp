@@ -400,6 +400,11 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     else if (guess.kind == "expanded") {
         ss << capitalized(typeName) << " reference split: " << elements << " for " << original;
     }
+    else if (guess.kind == "piece" && elements == original) {
+        // The pick is the piece that kept the original's name (G3; the Fable review of fork
+        // PR 117, finding 1)
+        ss << "Guessed " << typeName << " reference: kept " << original;
+    }
     else {
         ss << "Guessed " << typeName << " reference: " << elements << " for " << original;
     }
