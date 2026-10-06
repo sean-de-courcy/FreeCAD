@@ -616,6 +616,42 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertIs(self.body.Tip, hole)
         self.assertEqual(self.doc.UndoCount, undo)
 
+    ALONE = "Drag the feature alone"
+
+    def messageShown(self, text):
+        return any(text in label.text() for label in self.statusLabels())
+
+    def testMixedDragIsRefused(self):
+        """A drag of boss B (the Body's own solid) together with a sketch outside any body: the
+        cursor over the Body's row refuses it and the status bar says why (ops#135); a drop that
+        comes anyway is refused and changes nothing. The sketch alone is accepted."""
+        block, a, b, c = self.chain()
+        outside = models.sketch(self.doc, "OutsideSketch", models.rectangle(2, 2, 6, 6), z=20)
+        self.doc.recompute()
+        self.waitForRows(self.END)
+        group = list(self.body.Group)
+        undo = self.doc.UndoCount
+        tree = self.tree()
+        pos = tree.visualItemRect(self.bodyItem()).center()
+
+        self.select(b, outside)
+        for label in self.statusLabels():
+            if self.ALONE in label.text():
+                label.setText("")
+        self.assertFalse(self.dragMoveAccepted(pos))
+        self.assertTrue(self.messageShown(self.ALONE))
+
+        self.closeModalSoon()
+        self.drop(pos)
+        processEvents(0.3)
+        self.assertEqual(list(self.body.Group), group)
+        self.assertNotIn(outside, self.body.Group)
+        self.assertIs(self.body.Tip, c)
+        self.assertEqual(self.doc.UndoCount, undo)
+
+        self.select(outside)
+        self.assertTrue(self.dragMoveAccepted(pos))
+
     # -- the edit roll-back and Final (5.4) ------------------------------------------------------
 
     END = ["Origin", "Block", "BossA", "BossB", "HoleC", "|"]
