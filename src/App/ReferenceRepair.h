@@ -26,7 +26,7 @@ struct AppExport ReferenceRow
     std::string property;
     int index = 0;
     /// Where the calls below find it: the property the report keys it by, and the position there.
-    PropertyLinkBase* prop = nullptr;
+    const PropertyLinkBase* prop = nullptr;
     int localIndex = 0;
     /// The linked object and the stored sub (`?Edge5` when missing).
     DocumentObject* obj = nullptr;

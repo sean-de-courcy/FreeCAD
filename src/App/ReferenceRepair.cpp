@@ -142,7 +142,7 @@ std::vector<ReferenceRow> referenceRows(const DocumentObject* obj)
         ReferenceRow row;
         row.property = slot.property;
         row.index = slot.index;
-        row.prop = const_cast<PropertyLinkBase*>(slot.prop);
+        row.prop = slot.prop;
         row.localIndex = slot.localIndex;
         row.obj = slot.obj;
         row.sub = slot.sub;
