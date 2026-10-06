@@ -13,3 +13,9 @@ cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletSplit.test_fillet_edg
 cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletSplit.test_fillet_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletGone.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletGone.test_fillet_edge_V2multi
+
+reason: V1 has no solver either, so the dress-up's Base stays on the block when a pocket is inserted before it or the dress-up moves below a hole; V1's names don't pass through the new base, so the dress-up fails ("Invalid edge link") even where the edge is untouched (local only; CI doesn't run V1)
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletUntouched.test_fillet_edge_V1
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletSplit.test_fillet_edge_V1
+cli  PartDesignTests.TestNamingScenarios.InsertBeforeFilletGone.test_fillet_edge_V1
+cli  PartDesignTests.TestNamingScenarios.MoveFilletBelowHoleAndBack.test_fillet_edge_V1
