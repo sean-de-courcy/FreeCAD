@@ -738,7 +738,7 @@ void TaskExtrudeParameters::onReferencesRepaired()
     fillDirectionCombo();
 }
 
-void TaskExtrudeParameters::onReferencePickStarted()
+void TaskExtrudeParameters::onReferenceSelectionTaken()
 {
     setSelectionMode(None);
 }

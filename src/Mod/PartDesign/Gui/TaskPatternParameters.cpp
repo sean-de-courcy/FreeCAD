@@ -321,6 +321,18 @@ void TaskPatternParameters::onParameterWidgetParametersChanged()
     kickUpdateViewTimer();  // Debounce recompute
 }
 
+void TaskPatternParameters::onReferencesRepaired()
+{
+    updateUI();
+}
+
+void TaskPatternParameters::onReferenceSelectionTaken()
+{
+    if (selectionMode != SelectionMode::None) {
+        exitReferenceSelectionMode();
+    }
+}
+
 void TaskPatternParameters::onUpdateView(bool on)
 {
     // This might be less relevant now if recomputes are triggered by parametersChanged
@@ -407,8 +419,14 @@ void TaskPatternParameters::apply()
 
     bool isLinear = pattern->isDerivedFrom<PartDesign::LinearPattern>();
     const char* propName = isLinear ? "Direction = " : "Axis = ";
+    auto linkProp = freecad_cast<App::PropertyLinkSub*>(
+        pattern->getPropertyByName(isLinear ? "Direction" : "Axis")
+    );
 
-    FCMD_OBJ_CMD(pattern, propName << direction.c_str());
+    // The links are written only when the panel changed them (ops#127).
+    if (!linkProp || !isSameLink(*linkProp, obj, dirs)) {
+        FCMD_OBJ_CMD(pattern, propName << direction.c_str());
+    }
     FCMD_OBJ_CMD(pattern, "Reversed = " << parametersWidget->getReverse());
     FCMD_OBJ_CMD(pattern, "Mode = " << parametersWidget->getMode());
     parametersWidget->applyQuantitySpinboxes();
@@ -419,7 +437,10 @@ void TaskPatternParameters::apply()
         parametersWidget2->getAxis(obj, dirs);
         direction = buildLinkSingleSubPythonStr(obj, dirs);
 
-        FCMD_OBJ_CMD(pattern, "Direction2 = " << direction.c_str());
+        auto linearPattern = freecad_cast<PartDesign::LinearPattern*>(pattern);
+        if (!linearPattern || !isSameLink(linearPattern->Direction2, obj, dirs)) {
+            FCMD_OBJ_CMD(pattern, "Direction2 = " << direction.c_str());
+        }
         FCMD_OBJ_CMD(pattern, "Reversed2 = " << parametersWidget2->getReverse());
         FCMD_OBJ_CMD(pattern, "Mode2 = " << parametersWidget2->getMode());
         parametersWidget2->applyQuantitySpinboxes();

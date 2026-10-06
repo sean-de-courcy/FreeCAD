@@ -61,7 +61,7 @@ public:
     ~TaskSketchBasedParameters() override;
 
     /// The panel's own selection mode ends (ops#127).
-    void onReferencePickStarted() override;
+    void onReferenceSelectionTaken() override;
 
 protected:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override = 0;

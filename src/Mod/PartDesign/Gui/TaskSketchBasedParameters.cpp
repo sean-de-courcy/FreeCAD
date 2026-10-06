@@ -203,7 +203,7 @@ void TaskSketchBasedParameters::exitSelectionMode()
     onSelectReference(AllowSelection::NONE);
 }
 
-void TaskSketchBasedParameters::onReferencePickStarted()
+void TaskSketchBasedParameters::onReferenceSelectionTaken()
 {
     exitSelectionMode();
 }

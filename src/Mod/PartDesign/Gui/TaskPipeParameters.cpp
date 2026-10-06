@@ -449,6 +449,12 @@ void TaskPipeParameters::clearButtons()
     ui->buttonSpineBase->setChecked(false);
 }
 
+void TaskPipeParameters::onReferenceSelectionTaken()
+{
+    // Unchecking the buttons ends the dialog's selection mode (TaskDlgPipeParameters).
+    clearButtons();
+}
+
 void TaskPipeParameters::exitSelectionMode()
 {
     // commenting because this should be handled by buttonToggled signal
@@ -593,10 +599,8 @@ bool TaskPipeParameters::accept()
     try {
         setVisibilityOfSpineAndProfile();
 
-        App::DocumentObject* spine = pipe->Spine.getValue();
-        std::vector<std::string> subNames = pipe->Spine.getSubValues();
-        App::PropertyLinkT propT(spine, subNames);
-        Gui::cmdAppObjectArgs(pipe, "Spine = %s", propT.getPropertyPython());
+        // Spine isn't written again here: the dialog sets it at selection time, and written
+        // again with plain names it would lose its guess record and warning (ops#127).
 
         Gui::cmdAppDocument(pipe, "recompute()");
         if (!getObject()->isValid()) {
@@ -719,6 +723,11 @@ void TaskPipeOrientation::clearButtons()
     ui->buttonRefAdd->setChecked(false);
     ui->buttonRefRemove->setChecked(false);
     ui->buttonProfileBase->setChecked(false);
+}
+
+void TaskPipeOrientation::onReferenceSelectionTaken()
+{
+    clearButtons();
 }
 
 void TaskPipeOrientation::exitSelectionMode()
@@ -1024,6 +1033,11 @@ void TaskPipeScaling::clearButtons()
 {
     ui->buttonRefRemove->setChecked(false);
     ui->buttonRefAdd->setChecked(false);
+}
+
+void TaskPipeScaling::onReferenceSelectionTaken()
+{
+    clearButtons();
 }
 
 void TaskPipeScaling::exitSelectionMode()

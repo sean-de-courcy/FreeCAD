@@ -486,7 +486,7 @@ void TaskDressUpParameters::onReferencesRepaired()
     }
 }
 
-void TaskDressUpParameters::onReferencePickStarted()
+void TaskDressUpParameters::onReferenceSelectionTaken()
 {
     if (selectionMode != none) {
         setSelectionMode(none);

@@ -20,6 +20,7 @@
  *                                                                         *
  **************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
 
@@ -28,6 +29,7 @@
 #include <QLabel>
 #include <QPointer>
 #include <QPushButton>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -81,6 +83,13 @@ std::string elementType(const std::string& name)
         type += c;
     }
     return type;
+}
+
+// The element type of a stored sub: `Face` for `Pad.?Face3`, `Edge` for `;g3;SKT.Edge3`.
+std::string subElementType(const std::string& sub)
+{
+    const char* element = Data::findElementName(sub.c_str());
+    return elementType(Data::oldElementName(element ? element : sub.c_str()));
 }
 
 // The element a row holds now, or empty if it is missing.
@@ -268,12 +277,16 @@ TaskReferences::TaskReferences(App::DocumentObject* owner, QWidget* parent)
     connect(buttonBroken, &QPushButton::clicked, this, [this]() { markCurrentBroken(); });
     connect(buttonPick, &QPushButton::toggled, this, &TaskReferences::onPickToggled);
 
+    if (owner && owner->getDocument()) {
+        attachDocument(owner->getDocument());
+    }
     refresh();
 }
 
 TaskReferences::~TaskReferences()
 {
     stopPick();
+    clearHighlight();
     restoreVisibility();
 }
 
@@ -282,17 +295,25 @@ bool TaskReferences::hasRows(const App::DocumentObject* obj)
     return obj && obj->isAttachedToDocument() && !App::referenceRows(obj).empty();
 }
 
-void TaskReferences::refresh()
+void TaskReferences::refresh(bool highlightCurrent)
 {
     std::string currentProperty;
     int currentIndex = -1;
+    QString currentCandidate;
     if (auto row = rowOf(tree->currentItem())) {
         currentProperty = row->property;
         currentIndex = row->index;
+        if (tree->currentItem()->parent()) {
+            currentCandidate = tree->currentItem()->data(ReferenceColumn, CandidateRole).toString();
+        }
     }
 
     auto obj = owner.getObject();
     rows = obj ? App::referenceRows(obj) : std::vector<App::ReferenceRow> {};
+    rowObjects.clear();
+    for (const auto& row : rows) {
+        rowObjects.emplace_back(row.obj);
+    }
 
     QTreeWidgetItem* current = nullptr;
     QSignalBlocker block(tree);
@@ -336,6 +357,13 @@ void TaskReferences::refresh()
         item->setExpanded(true);
         if (row.property == currentProperty && row.index == currentIndex) {
             current = item;
+            for (int c = 0; c < item->childCount(); ++c) {
+                if (!currentCandidate.isEmpty()
+                    && item->child(c)->data(ReferenceColumn, CandidateRole).toString()
+                        == currentCandidate) {
+                    current = item->child(c);
+                }
+            }
         }
     }
     for (int c = 0; c < tree->columnCount(); ++c) {
@@ -362,33 +390,100 @@ void TaskReferences::refresh()
     }
     header->setText(text);
     updateButtons();
-    highlight(current);
+    if (highlightCurrent) {
+        highlight(current);
+    }
 }
 
-const App::ReferenceRow* TaskReferences::rowOf(const QTreeWidgetItem* item) const
+void TaskReferences::scheduleRefresh()
+{
+    if (refreshPending) {
+        return;
+    }
+    refreshPending = true;
+    // Not now: the change may be one of many, or the panel's own call still running.
+    QTimer::singleShot(0, this, [this]() {
+        refreshPending = false;
+        refresh(false);
+    });
+}
+
+void TaskReferences::slotChangedObject(const App::DocumentObject& obj, const App::Property& prop)
+{
+    // A link the dialog wrote itself (a profile re-pick, a list edit): the rows' indexes may name
+    // other slots now.
+    if (&obj == owner.getObject() && prop.isDerivedFrom<App::PropertyLinkBase>()) {
+        scheduleRefresh();
+    }
+}
+
+void TaskReferences::slotRecomputedObject(const App::DocumentObject& obj)
+{
+    if (&obj == owner.getObject()) {
+        scheduleRefresh();
+    }
+}
+
+void TaskReferences::slotDeletedObject(const App::DocumentObject& obj)
+{
+    if (&obj == owner.getObject()
+        || std::any_of(rows.begin(), rows.end(), [&obj](const App::ReferenceRow& row) {
+               return row.obj == &obj;
+           })) {
+        scheduleRefresh();
+    }
+}
+
+void TaskReferences::slotDeletedDocument(const App::Document& doc)
+{
+    if (&doc == getDocument()) {
+        stopPick();
+        rows.clear();
+        rowObjects.clear();
+        tree->clear();
+        highlighted = App::SubObjectT();
+        shownTarget = App::DocumentObjectT();
+        hiddenFeature = App::DocumentObjectT();
+        detachDocument();
+        updateButtons();
+    }
+}
+
+int TaskReferences::rowIndexOf(const QTreeWidgetItem* item) const
 {
     if (!item) {
-        return nullptr;
+        return -1;
     }
     bool ok = false;
     int r = item->data(ReferenceColumn, RowRole).toInt(&ok);
     if (!ok || r < 0 || r >= static_cast<int>(rows.size())) {
-        return nullptr;
+        return -1;
     }
-    return &rows[r];
+    return r;
 }
 
-App::DocumentObject* TaskReferences::targetOf(const App::ReferenceRow& row) const
+const App::ReferenceRow* TaskReferences::rowOf(const QTreeWidgetItem* item) const
 {
-    if (!row.obj || !row.obj->isAttachedToDocument()) {
+    int r = rowIndexOf(item);
+    return r < 0 ? nullptr : &rows[r];
+}
+
+App::DocumentObject* TaskReferences::targetOf(int r) const
+{
+    if (r < 0 || r >= static_cast<int>(rowObjects.size())) {
         return nullptr;
     }
-    const char* element = Data::findElementName(row.sub.c_str());
-    std::string path = element ? row.sub.substr(0, element - row.sub.c_str()) : std::string();
-    if (path.empty()) {
-        return row.obj;
+    App::DocumentObject* obj = rowObjects[r].getObject();
+    if (!obj || !obj->isAttachedToDocument()) {
+        return nullptr;
     }
-    return row.obj->getSubObject(path.c_str(), nullptr, nullptr, false);
+    const std::string& sub = rows[r].sub;
+    const char* element = Data::findElementName(sub.c_str());
+    std::string path = element ? sub.substr(0, element - sub.c_str()) : std::string();
+    if (path.empty()) {
+        return obj;
+    }
+    return obj->getSubObject(path.c_str(), nullptr, nullptr, false);
 }
 
 void TaskReferences::updateButtons()
@@ -400,7 +495,7 @@ void TaskReferences::updateButtons()
     buttonAccept->setEnabled(!picking && guess && !heldElement(*row).empty());
     buttonUse->setEnabled(!picking && isCandidate && !item->data(ReferenceColumn, RejectedRole).toBool());
     buttonBroken->setEnabled(!picking && guess);
-    buttonPick->setEnabled(row && targetOf(*row));
+    buttonPick->setEnabled(row && targetOf(rowIndexOf(item)));
     tree->setEnabled(!picking);
 }
 
@@ -417,29 +512,92 @@ void TaskReferences::onCurrentItemChanged()
     highlight(tree->currentItem());
 }
 
+void TaskReferences::changeSelection(const std::function<void()>& change)
+{
+    // The dialog's selection modes end, and its other panels don't hear of the change: they would
+    // take the panel's element for a pick of their own and write their link with it (ops#127).
+    Q_EMIT selectionTaken();
+    std::vector<Gui::SelectionObserver*> blocked;
+    if (Gui::TaskView::TaskDialog* dlg = Gui::Control().activeDialog()) {
+        const auto& content = dlg->getDialogContent();
+        if (std::find(content.begin(), content.end(), this) != content.end()) {
+            auto block = [&](QObject* object) {
+                auto observer = dynamic_cast<Gui::SelectionObserver*>(object);
+                if (observer && observer != this && !observer->isSelectionBlocked()) {
+                    observer->blockSelection(true);
+                    blocked.push_back(observer);
+                }
+            };
+            for (QWidget* wgt : content) {
+                block(wgt);
+                for (QWidget* child : wgt->findChildren<QWidget*>()) {
+                    block(child);
+                }
+            }
+        }
+    }
+    struct Unblock
+    {
+        std::vector<Gui::SelectionObserver*>& observers;
+        ~Unblock()
+        {
+            for (auto observer : observers) {
+                observer->blockSelection(false);
+            }
+        }
+    } unblock {blocked};
+    Base::StateLocker lock(selecting, true);
+    change();
+}
+
 void TaskReferences::highlight(const QTreeWidgetItem* item)
 {
     if (picking) {
         return;
     }
-    Base::StateLocker lock(selecting, true);
-    Gui::Selection().clearSelection();
-    const App::ReferenceRow* row = rowOf(item);
-    App::DocumentObject* target = row ? targetOf(*row) : nullptr;
-    if (!target) {
-        restoreVisibility();  // nothing left to show
+    const int r = rowIndexOf(item);
+    App::DocumentObject* target = targetOf(r);
+    std::string element;
+    if (target) {
+        element = item->parent()
+            ? item->data(ReferenceColumn, CandidateRole).toString().toStdString()
+            : heldElement(rows[r]);
+    }
+    changeSelection([&]() {
+        Gui::Selection().clearSelection();
+        highlighted = App::SubObjectT();
+        if (!target) {
+            restoreVisibility();  // nothing left to show
+            return;
+        }
+        showTarget(target);
+        if (!element.empty()) {
+            Gui::Selection().addSelection(
+                target->getDocument()->getName(),
+                target->getNameInDocument(),
+                element.c_str()
+            );
+            highlighted = App::SubObjectT(target, element.c_str());
+        }
+    });
+}
+
+void TaskReferences::clearHighlight()
+{
+    App::SubObjectT element = highlighted;
+    highlighted = App::SubObjectT();
+    if (!element.getObject()) {
         return;
     }
-    std::string element = item->parent()
-        ? item->data(ReferenceColumn, CandidateRole).toString().toStdString()
-        : heldElement(*row);
-    showTarget(target);
-    if (!element.empty()) {
-        Gui::Selection().addSelection(
-            target->getDocument()->getName(),
-            target->getNameInDocument(),
-            element.c_str()
-        );
+    const std::string& sub = element.getSubName();
+    if (Gui::Selection().isSelected(element.getDocumentName().c_str(),
+                                    element.getObjectName().c_str(),
+                                    sub.c_str(),
+                                    Gui::ResolveMode::NoResolve)) {
+        Base::StateLocker lock(selecting, true);
+        Gui::Selection().rmvSelection(element.getDocumentName().c_str(),
+                                      element.getObjectName().c_str(),
+                                      sub.c_str());
     }
 }
 
@@ -563,26 +721,24 @@ bool TaskReferences::startPick()
         return true;
     }
     const App::ReferenceRow* row = rowOf(tree->currentItem());
-    App::DocumentObject* target = row ? targetOf(*row) : nullptr;
+    App::DocumentObject* target = targetOf(rowIndexOf(tree->currentItem()));
     if (!target) {
         QSignalBlocker block(buttonPick);
         buttonPick->setChecked(false);
         return false;
     }
-    std::string type = elementType(row->originalIndex.empty() ? row->sub : row->originalIndex);
+    std::string type = subElementType(row->originalIndex);
     if (type.empty()) {
-        const char* element = Data::findElementName(row->sub.c_str());
-        type = elementType(element ? element : "");
+        type = subElementType(row->sub);
     }
-    // Other selection modes of the dialog end first: they would remove this one's gate.
-    Q_EMIT pickStarted();
     pickProperty = row->property;
     pickIndex = row->index;
-    showTarget(target);
-    {
-        Base::StateLocker lock(selecting, true);
+    // Other selection modes of the dialog end first: they would remove this one's gate.
+    changeSelection([this, target]() {
+        showTarget(target);
         Gui::Selection().clearSelection();
-    }
+        highlighted = App::SubObjectT();
+    });
     picking = true;
     Gui::Selection().addSelectionGate(new PickGate(this, target, type));
     {
@@ -646,10 +802,13 @@ void TaskReferences::onSelectionChanged(const Gui::SelectionChanges& msg)
     std::string property = pickProperty;
     int index = pickIndex;
     stopPick();
+    highlighted = App::SubObjectT(picked, element.c_str());
     std::ostringstream str;
     str << "App.repairReference(" << Gui::Command::getObjectCmd(obj) << ", " << quoted(property)
         << ", " << index << ", " << quoted(element) << ", True)";
-    run(str.str());
+    // After this notification: selection changes made inside it (the highlight after the call)
+    // reach the observers only once it is over, when the dialog's panels hear them again.
+    QTimer::singleShot(0, this, [this, command = str.str()]() { run(command); });
 }
 
 /*********************************************************************
@@ -660,6 +819,9 @@ TaskDlgReferences::TaskDlgReferences(App::DocumentObject* owner)
     : document(owner->getDocument())
     , references(new TaskReferences(owner))
 {
+    // The dialog belongs to the owner's document and closes with it.
+    setDocumentName(owner->getDocument()->getName());
+    setAutoCloseOnDeletedDocument(true);
     owner->getDocument()->openTransaction(QT_TRANSLATE_NOOP("Command", "Repair references"));
     Content.push_back(references);
 }
@@ -713,7 +875,8 @@ void CmdPartDesignRepairReferences::activated(int iMsg)
     if (selection.size() != 1 || !selection.front().pObject) {
         return;
     }
-    Gui::Control().showDialog(new TaskDlgReferences(selection.front().pObject));
+    App::DocumentObject* obj = selection.front().pObject;
+    Gui::Control().showDialog(new TaskDlgReferences(obj), obj->getDocument());
 }
 
 bool CmdPartDesignRepairReferences::isActive()

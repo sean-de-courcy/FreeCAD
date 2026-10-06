@@ -100,6 +100,13 @@ public:
         return completed;
     }
 
+    /// Whether the dialog changed AttachmentSupport (FreeCAD-CH, ops#127): OK writes it again only
+    /// then, since written with plain names it loses its guess records and warnings.
+    bool isSupportEdited() const
+    {
+        return supportEdited;
+    }
+
 Q_SIGNALS:
     void placementUpdated();
 
@@ -193,6 +200,7 @@ private:
     Attacher::SuggestResult lastSuggestResult;
     bool completed;
     bool userSelectedMode;  // true when the user has explicitly clicked a mode in the list
+    bool supportEdited = false;
 
     using Connection = fastsignals::connection;
     Connection connectDelObject;

@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -51,9 +52,13 @@ namespace PartDesignGui
  * transaction and recomputes the document.
  *
  * Shown on its own (TaskDlgReferences, the tree's "Repair references…") or at the top of the
- * feature's own task panel (TaskDlgFeatureParameters).
+ * feature's own task panel (TaskDlgFeatureParameters). Before it changes the selection, the
+ * dialog's selection modes end (selectionTaken()) and its other panels don't hear of the change.
+ * It lists the rows again when the owner's links change or an object goes.
  */
-class TaskReferences: public Gui::TaskView::TaskBox, public Gui::SelectionObserver
+class TaskReferences: public Gui::TaskView::TaskBox,
+                      public Gui::SelectionObserver,
+                      public App::DocumentObserver
 {
     Q_OBJECT
 
@@ -64,8 +69,9 @@ public:
     /// Whether \a obj has a reference the panel would list.
     static bool hasRows(const App::DocumentObject* obj);
 
-    /// Lists the owner's references again, keeping the current row where it still is.
-    void refresh();
+    /// Lists the owner's references again, keeping the current row where it still is, and
+    /// highlights it if \a highlightCurrent.
+    void refresh(bool highlightCurrent = true);
 
     /// The buttons' actions, on the current row (Use this one: the current candidate). False if
     /// there is nothing to do or the call failed (the reason is shown in the header).
@@ -86,21 +92,35 @@ public:
 Q_SIGNALS:
     /// A reference was written and the document recomputed.
     void referencesChanged();
-    /// A re-pick starts: other selection modes of the dialog end.
-    void pickStarted();
+    /// The panel is about to change the selection (a highlight or a re-pick): other selection
+    /// modes of the dialog end.
+    void selectionTaken();
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
+    void slotChangedObject(const App::DocumentObject& obj, const App::Property& prop) override;
+    void slotRecomputedObject(const App::DocumentObject& obj) override;
+    void slotDeletedObject(const App::DocumentObject& obj) override;
+    void slotDeletedDocument(const App::Document& doc) override;
+    /// Lists the rows again once the current event is done.
+    void scheduleRefresh();
     void onCurrentItemChanged();
     void onPickToggled(bool checked);
     void updateButtons();
     void showMessage(const QString& text, bool error);
 
-    /// The row an item belongs to (a candidate's parent), or null.
+    /// The row an item belongs to (a candidate's parent), or null / -1.
+    int rowIndexOf(const QTreeWidgetItem* item) const;
     const App::ReferenceRow* rowOf(const QTreeWidgetItem* item) const;
-    /// The object a row's element lives on (the linked object, or the sub-object its path names).
-    App::DocumentObject* targetOf(const App::ReferenceRow& row) const;
+    /// The object row \a r's element lives on (the linked object, or the sub-object its path
+    /// names); null when it is gone.
+    App::DocumentObject* targetOf(int r) const;
+    /// Runs \a change on the selection: first selectionTaken(), and the dialog's other panels
+    /// don't hear of it.
+    void changeSelection(const std::function<void()>& change);
     void highlight(const QTreeWidgetItem* item);
+    /// Removes the panel's highlight from the selection, if it is still there.
+    void clearHighlight();
     void showTarget(App::DocumentObject* target);
     void restoreVisibility();
     /// Runs \a command (Python, on the App functions), recomputes, and lists the rows again.
@@ -108,6 +128,9 @@ private:
 
     App::DocumentObjectT owner;
     std::vector<App::ReferenceRow> rows;
+    /// Each row's linked object, by name: rows[r].obj may be gone.
+    std::vector<App::DocumentObjectT> rowObjects;
+    bool refreshPending = false;
 
     QLabel* header = nullptr;
     QLabel* message = nullptr;
@@ -125,6 +148,8 @@ private:
     /// What showTarget() changed: the target it showed, and the feature it hid for it.
     App::DocumentObjectT shownTarget;
     App::DocumentObjectT hiddenFeature;
+    /// The element highlight() selected.
+    App::SubObjectT highlighted;
 };
 
 /// The References panel on its own, in a transaction: OK keeps the repairs, Cancel undoes them.

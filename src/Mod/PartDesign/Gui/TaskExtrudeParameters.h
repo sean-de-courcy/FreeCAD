@@ -152,7 +152,7 @@ public:
 
     /// The widgets that show link properties read them again (ops#127).
     void onReferencesRepaired() override;
-    void onReferencePickStarted() override;
+    void onReferenceSelectionTaken() override;
 
 protected:
     // This struct holds all pointers for one side's UI and properties

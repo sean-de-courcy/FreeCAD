@@ -84,8 +84,9 @@ public:
     /// link property read it again, so that OK doesn't write the old value back.
     virtual void onReferencesRepaired()
     {}
-    /// The References panel starts a re-pick: the panel's own selection mode ends.
-    virtual void onReferencePickStarted()
+    /// The References panel is about to change the selection (a highlight or a re-pick): the
+    /// panel's own selection mode ends, so that it doesn't act on the panel's elements.
+    virtual void onReferenceSelectionTaken()
     {}
 
     void recomputeFeature();
@@ -189,6 +190,12 @@ public:
     }
 
 protected:
+    /// The References panel repaired a reference, or is about to change the selection: the
+    /// parameter panels hear of it (TaskFeatureParameters::onReferencesRepaired and
+    /// onReferenceSelectionTaken). A dialog whose panels aren't TaskFeatureParameters adds its own.
+    virtual void referencesRepaired();
+    virtual void referenceSelectionTaken();
+
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none
     /// (ops#127).

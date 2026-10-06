@@ -192,15 +192,25 @@ TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* 
         references = new TaskReferences(feature);
         Content.push_back(references);
         connect(references, &TaskReferences::referencesChanged, this, [this]() {
-            forEachParameters([](TaskFeatureParameters* param) { param->onReferencesRepaired(); });
+            referencesRepaired();
         });
-        connect(references, &TaskReferences::pickStarted, this, [this]() {
-            forEachParameters([](TaskFeatureParameters* param) { param->onReferencePickStarted(); });
+        connect(references, &TaskReferences::selectionTaken, this, [this]() {
+            referenceSelectionTaken();
         });
     }
 }
 
 TaskDlgFeatureParameters::~TaskDlgFeatureParameters() = default;
+
+void TaskDlgFeatureParameters::referencesRepaired()
+{
+    forEachParameters([](TaskFeatureParameters* param) { param->onReferencesRepaired(); });
+}
+
+void TaskDlgFeatureParameters::referenceSelectionTaken()
+{
+    forEachParameters([](TaskFeatureParameters* param) { param->onReferenceSelectionTaken(); });
+}
 
 void TaskDlgFeatureParameters::forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn)
 {

@@ -60,6 +60,8 @@ public:
     ~TaskHoleParameters() override;
 
     void apply() override;
+    void onReferencesRepaired() override;
+    void onReferenceSelectionTaken() override;
 
     bool getThreaded() const;
     long getThreadType() const;
