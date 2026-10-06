@@ -599,6 +599,46 @@ class TestReferencePickerGui(unittest.TestCase):
         """ops#130 (review M6), a pad along its sketch's normal by name."""
         self.assertProfileSwitchTakesTheNewNormal(True)
 
+    def testProfileSwitchKeepsAnEdgeDirection(self):
+        """ops#130 (PR 120's review): a boss on a block, padded along the block's vertical edge;
+        its profile picked again on another sketch keeps that edge as its direction (only the old
+        sketch's normal follows the profile)."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        block = models.pad(body, profile, 10)
+        boss = models.sketch(doc, "BossSketch", models.rectangle(2, 2, 6, 6), body, z=10)
+        other = models.sketch(doc, "OtherSketch", models.rectangle(12, 2, 16, 6), body, z=10)
+        pad = models.pad(body, boss, 5, "Boss")
+        doc.recompute()
+        [vertical] = edge("line", direction=Z, through=(20, 0, 0)).one(block.Shape)
+        pad.ReferenceAxis = (block, [vertical])
+        doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+
+        Gui.ActiveDocument.setEdit(pad)
+        pump()
+        mainWindow = Gui.getMainWindow()
+        combo = mainWindow.findChild(QtWidgets.QComboBox, "directionCB")
+        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
+        edgeEntry = combo.currentText()
+        self.assertGreater(combo.currentIndex(), 2)
+        button.click()
+        pump()
+        Gui.Selection.addSelection(doc.Name, other.Name)
+        pump()
+        button.click()
+        pump()
+        self.assertEqual(pad.Profile[0], other)
+        self.assertEqual(combo.currentText(), edgeEntry)
+
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(pad.ReferenceAxis, (block, [vertical]))
+        box = pad.Shape.BoundBox
+        self.assertAlmostEqual(box.ZMax, 15, places=6)
+
     def testProfilePickSaysWhatItRefuses(self):
         """ops#130 (the review's ProfileGate nit): picking the profile again, a vertex of the solid
         before or of a sketch is refused with a reason on the status bar."""

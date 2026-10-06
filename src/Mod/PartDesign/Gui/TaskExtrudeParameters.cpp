@@ -759,11 +759,15 @@ bool TaskExtrudeParameters::followProfile()
     bool changed = false;
     const std::vector<std::string> normal {"N_Axis"};
     if (old && propReferenceAxis->getValue() == old && propReferenceAxis->getSubValues() == normal) {
+        // As a command, so a recorded macro moves the direction with the profile
         if (profile && profile->isDerivedFrom<Part::Part2DObject>()) {
-            propReferenceAxis->setValue(profile, normal);
+            FCMD_OBJ_CMD(
+                profileBased,
+                "ReferenceAxis = (" << Gui::Command::getObjectCmd(profile) << ", ['N_Axis'])"
+            );
         }
         else {
-            propReferenceAxis->setValue(nullptr);
+            FCMD_OBJ_CMD(profileBased, "ReferenceAxis = None");
         }
         changed = true;
     }
