@@ -267,6 +267,18 @@ jobs:
         shellCmd: ${{ env.shellCmd }}
         knownFailuresPlatform: ${{ runner.os }}
 
+    # TEMPORARY (ops#127 P8b, fork PR 122; reverted before the merge): N3 9.1 step 8's seeds.
+    - name: Seeds 1-200 standard and gap 1, V2s (temporary, ops#127)
+      if: "!cancelled() && steps.build.outcome == 'success'"
+      timeout-minutes: 150
+      uses: ./.github/workflows/actions/runPythonTests
+      with:
+        testDescription: "Seeds 1-200 standard and gap 1, V2s (temporary, ops#127)"
+        testCommand: bash .github/scripts/ci_seeds.sh "${{ runner.os == 'Windows' && format('{0}/build/release/bin/FreeCADCmd', env.wsdir) || 'FreeCADCmd' }}" "${{ env.wsdir }}/logs"
+        logFile: ${{ env.wsdir }}/logs/TestSeeds.log
+        reportFile: ${{ env.wsdir }}/report/${{ env.reportfilename }}
+        shellCmd: ${{ env.shellCmd }}
+
     - name: FreeCAD GUI tests on install
       # if: runner.os == 'Linux' && !inputs.skipBuild
       # currently broken on Qt6 builds
