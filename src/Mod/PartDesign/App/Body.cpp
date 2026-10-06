@@ -152,12 +152,6 @@ App::DocumentObject* Body::lastSolidFeature() const
     return it == features.rend() ? nullptr : *it;
 }
 
-bool Body::isRolledBack() const
-{
-    auto last = lastSolidFeature();
-    return last && effectiveBar() != last;
-}
-
 namespace
 {
 /// The position in features of the first solid feature after the bar (features.size() if none);
@@ -182,6 +176,15 @@ std::size_t firstHeldSolid(const std::vector<App::DocumentObject*>& features,
     return features.size();
 }
 }  // namespace
+
+bool Body::isRolledBack() const
+{
+    // Rolled back when a solid feature follows the bar. A bar outside the Group (a Tip set from
+    // Python, or a stale file) or a non-solid after the last solid is the end: it holds nothing,
+    // so the Body itself mustn't be held either (ops#127, M1)
+    const auto& features = Group.getValues();
+    return firstHeldSolid(features, effectiveBar()) < features.size();
+}
 
 bool Body::holds(const App::DocumentObject* obj) const
 {

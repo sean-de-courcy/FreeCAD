@@ -7,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -543,6 +544,20 @@ public:
         for (auto owner : group) {
             planExpressions(owner);
         }
+        // Everything apply() writes must succeed, so a refusal stays write-free (S2): the parking
+        // record goes into a ParkedReferences string list, and nothing else may hold that name
+        for (const auto& [owner, ownerPlan] : owners) {
+            if (!ownerPlan.linesChanged && ownerPlan.restoreExprs.empty()) {
+                continue;  // its record isn't written
+            }
+            auto prop = owner->getPropertyByName(ParkedProperty);
+            if (prop && !prop->isDerivedFrom<App::PropertyStringList>()) {
+                std::ostringstream text;
+                text << "'" << nameOf(owner) << "' has a property '" << ParkedProperty
+                     << "' that can't hold the references a reorder sets aside";
+                throw Base::ValueError(text.str());
+            }
+        }
     }
 
     /// The planned objects of owner's property prop; false if the rule leaves it as it is
@@ -975,6 +990,25 @@ private:
         }
     }
 
+    /// An expression text of owner reads an object that readsLater(x) (review S3: an expression
+    /// can read more than the object it was parked for); a text that doesn't parse stays parked
+    bool readsAnyLater(App::DocumentObject* owner, const std::string& text, App::DocumentObject* x)
+        const
+    {
+        try {
+            std::unique_ptr<App::Expression> expr(App::Expression::parse(owner, text));
+            for (const auto& dep : expr->getDepObjects()) {
+                if (dep.first != owner && readsLater(dep.first, x)) {
+                    return true;
+                }
+            }
+        }
+        catch (Base::Exception&) {
+            return true;
+        }
+        return false;
+    }
+
     /// d is, or reaches along input links (as planned), a solid at or after x (N1 3.3, S4)
     bool readsLater(App::DocumentObject* d, App::DocumentObject* x) const
     {
@@ -1049,6 +1083,11 @@ private:
             }
             auto target = doc->getObject(item->target.c_str());
             if (target && x && readsLater(target, x)) {
+                kept.push_back(line);
+                continue;
+            }
+            if (target && x && readsAnyLater(owner, item->text, x)) {
+                // Parked for one later object, but the text reads another that is still later
                 kept.push_back(line);
                 continue;
             }
@@ -1385,28 +1424,34 @@ void reorderBody(Body& body,
             continue;
         }
         std::size_t pos = position(obj);
-        for (std::size_t i = pos; i-- > 0;) {
-            auto member = group[i];
-            if (Body::isSolidFeature(member)) {
-                break;
-            }
-            if (member == target || movedSet.count(member)) {
-                continue;
-            }
-            bool onlyMoved = true;
-            bool used = false;
-            for (auto user : member->getInList()) {
-                if (user == &body || !body.hasObject(user)) {
-                    continue;
-                }
-                used = true;
-                if (!movedSet.count(user)) {
-                    onlyMoved = false;
+        // Until nothing more is carried: a member can sit after the member that uses it (a datum
+        // after its sketch), so one backward pass misses it (review M3)
+        for (bool grew = true; grew;) {
+            grew = false;
+            for (std::size_t i = pos; i-- > 0;) {
+                auto member = group[i];
+                if (Body::isSolidFeature(member)) {
                     break;
                 }
-            }
-            if (used && onlyMoved) {
-                movedSet.insert(member);
+                if (member == target || movedSet.count(member)) {
+                    continue;
+                }
+                bool onlyMoved = true;
+                bool used = false;
+                for (auto user : member->getInList()) {
+                    if (user == &body || !body.hasObject(user)) {
+                        continue;
+                    }
+                    used = true;
+                    if (!movedSet.count(user)) {
+                        onlyMoved = false;
+                        break;
+                    }
+                }
+                if (used && onlyMoved) {
+                    movedSet.insert(member);
+                    grew = true;
+                }
             }
         }
     }
