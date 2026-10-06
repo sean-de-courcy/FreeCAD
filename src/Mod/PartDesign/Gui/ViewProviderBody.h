@@ -100,6 +100,28 @@ public:
         return true;
     };
 
+    /** @name The roll-back bar and reordering in the tree (ops#127) */
+    //@{
+    int treeBarIndex(const std::vector<App::DocumentObject*>& children) const override;
+    bool moveTreeBar(TreeBarMove move, App::DocumentObject* child) override;
+    /// Members dropped among the Body's rows: Body::reorderObject, in the drop's transaction
+    bool reorderObjects(const std::vector<App::DocumentObject*>& objs,
+                        App::DocumentObject* target,
+                        bool after) override;
+    /** Moves the bar after the solid feature (null: to the top) or to the end, in one command
+     * that shows the feature the bar follows; throws Base::Exception (the command aborted)
+     */
+    void rollBar(App::DocumentObject* feature, bool toEnd = false);
+    /** The solid feature that "Roll to here" on member puts the bar after (null: the top): a
+     * solid feature itself; a sketch, datum or other member, the solid feature before the first
+     * solid feature that uses it, else before it (decision 17, Q3)
+     */
+    static App::DocumentObject* barFeatureFor(const PartDesign::Body* body,
+                                              App::DocumentObject* member);
+    /// The features show one at a time, as in "Through" mode: the mode says so, or rolled back
+    bool showsThrough() const;
+    //@}
+
     /// Override to return the color of the tip instead of the body, which doesn't really have color
     std::map<std::string, Base::Color> getElementColors(const char* element) const override;
 
@@ -119,6 +141,9 @@ private:
     void onChangedObject(const Gui::ViewProvider& vp, const App::Property& prop);
     fastsignals::scoped_connection m_ChangedConn;
     void refreshOverlays();
+    /// Applies DisplayModeBody, or "Through" while rolled back (ops#127)
+    void applyBodyDisplay();
+    bool displayedThrough = false;
 };
 
 }  // namespace PartDesignGui

@@ -23,6 +23,10 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <sstream>
+#include <unordered_map>
+
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <QMenu>
 
@@ -168,7 +172,7 @@ void ViewProviderBody::setDisplayMode(const char* ModeName)
     // in going into "tip" mode. When through is chosen the child features are displayed, and all
     // we need to ensure is that the display mode change is propagated to them from within the
     // onChanged() method.
-    if (DisplayModeBody.getValue() == 1) {
+    if (!showsThrough()) {
         PartGui::ViewProviderPartExt::setDisplayMode(ModeName);
     }
 }
@@ -180,7 +184,7 @@ void ViewProviderBody::setOverrideMode(const std::string& mode)
     //(as this would result in "tip" mode), it is enough when the children are set to the correct
     // override mode.
 
-    if (DisplayModeBody.getValue() != 0) {
+    if (!showsThrough()) {
         Gui::ViewProvider::setOverrideMode(mode);
     }
     else {
@@ -334,6 +338,12 @@ void ViewProviderBody::updateData(const App::Property* prop)
         setVisualBodyMode(true);
     }
 
+    // Rolled back, the Body shows the feature its bar follows, as in "Through" mode (ops#127)
+    if ((prop == &body->Tip || prop == &body->Group) && !isRestoring()
+        && showsThrough() != displayedThrough) {
+        applyBodyDisplay();
+    }
+
     if (prop == &body->Tip) {
         // We changed Tip
         App::DocumentObject* tip = body->Tip.getValue();
@@ -356,36 +366,7 @@ void ViewProviderBody::onChanged(const App::Property* prop)
 {
 
     if (prop == &DisplayModeBody) {
-        auto body = getObject<PartDesign::Body>();
-
-        if (DisplayModeBody.getValue() == 0) {
-            // if we are in an override mode we need to make sure to come out, because
-            // otherwise the maskmode is blocked and won't go into "through"
-            if (getOverrideMode() != "As Is") {
-                auto mode = getOverrideMode();
-                ViewProvider::setOverrideMode("As Is");
-                overrideMode = mode;
-            }
-            setDisplayMaskMode("Group");
-            if (body) {
-                body->setShowTip(false);
-            }
-        }
-        else {
-            if (body) {
-                body->setShowTip(true);
-            }
-            if (getOverrideMode() == "As Is") {
-                setDisplayMaskMode(DisplayMode.getValueAsString());
-            }
-            else {
-                Base::Console().message("Set override mode: %s\n", getOverrideMode().c_str());
-                setDisplayMaskMode(getOverrideMode().c_str());
-            }
-        }
-
-        // #0002559: Body becomes visible upon changing DisplayModeBody
-        Visibility.touch();
+        applyBodyDisplay();
     }
     else {
         unifyVisualProperty(prop);
@@ -404,6 +385,262 @@ void ViewProviderBody::onChanged(const App::Property* prop)
     if (prop == &Transparency) {
         ShapeAppearance.enableNotify(true);
     }
+}
+
+void ViewProviderBody::applyBodyDisplay()
+{
+    auto body = getObject<PartDesign::Body>();
+    displayedThrough = showsThrough();
+
+    if (displayedThrough) {
+        // if we are in an override mode we need to make sure to come out, because
+        // otherwise the maskmode is blocked and won't go into "through"
+        if (getOverrideMode() != "As Is") {
+            auto mode = getOverrideMode();
+            ViewProvider::setOverrideMode("As Is");
+            overrideMode = mode;
+        }
+        setDisplayMaskMode("Group");
+        if (body) {
+            body->setShowTip(false);
+        }
+    }
+    else {
+        if (body) {
+            body->setShowTip(true);
+        }
+        if (getOverrideMode() == "As Is") {
+            setDisplayMaskMode(DisplayMode.getValueAsString());
+        }
+        else {
+            Base::Console().message("Set override mode: %s\n", getOverrideMode().c_str());
+            setDisplayMaskMode(getOverrideMode().c_str());
+        }
+    }
+
+    // #0002559: Body becomes visible upon changing DisplayModeBody
+    Visibility.touch();
+}
+
+bool ViewProviderBody::showsThrough() const
+{
+    if (DisplayModeBody.getValue() == 0) {
+        return true;
+    }
+    auto body = getObject<PartDesign::Body>();
+    return body && body->isRolledBack();
+}
+
+int ViewProviderBody::treeBarIndex(const std::vector<App::DocumentObject*>& children) const
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body) {
+        return -1;
+    }
+    // Not rolled back: the bar is at the end, after every row
+    if (!body->isRolledBack()) {
+        return static_cast<int>(children.size());
+    }
+    // Rolled back: the bar sits before the first row after the bar's feature in Group (with no
+    // bar feature, before the first solid feature)
+    const auto& group = body->Group.getValues();
+    std::size_t first = group.size();
+    auto bar = body->effectiveBar();
+    auto it = bar ? std::ranges::find(group, bar) : group.end();
+    if (it != group.end()) {
+        first = static_cast<std::size_t>(it - group.begin()) + 1;
+    }
+    else {
+        auto solid = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+        first = static_cast<std::size_t>(solid - group.begin());
+    }
+    std::unordered_map<const App::DocumentObject*, std::size_t> position;
+    for (std::size_t i = 0; i < group.size(); ++i) {
+        position.emplace(group[i], i);
+    }
+    for (std::size_t i = 0; i < children.size(); ++i) {
+        auto pos = position.find(children[i]);
+        if (pos != position.end() && pos->second >= first) {
+            return static_cast<int>(i);
+        }
+    }
+    return static_cast<int>(children.size());
+}
+
+bool ViewProviderBody::moveTreeBar(TreeBarMove move, App::DocumentObject* child)
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body) {
+        return false;
+    }
+    const auto& group = body->Group.getValues();
+    auto indexOf = [&group](const App::DocumentObject* obj) {
+        return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
+    };
+    // The last solid feature before position end, or null
+    auto lastSolidBefore = [&group](std::size_t end) -> App::DocumentObject* {
+        for (std::size_t i = std::min(end, group.size()); i-- > 0;) {
+            if (PartDesign::Body::isSolidFeature(group[i])) {
+                return group[i];
+            }
+        }
+        return nullptr;
+    };
+
+    App::DocumentObject* tip = body->Tip.getValue();
+    std::size_t tipPos = indexOf(tip);
+    switch (move) {
+        case TreeBarMove::Before:
+        case TreeBarMove::After: {
+            // A row that isn't a member (the Origin) is above every feature: the top
+            std::size_t pos = indexOf(child);
+            if (pos >= group.size()) {
+                rollBar(nullptr);
+            }
+            else {
+                rollBar(lastSolidBefore(move == TreeBarMove::After ? pos + 1 : pos));
+            }
+            break;
+        }
+        case TreeBarMove::Up:
+            if (tip && tipPos < group.size()) {
+                rollBar(lastSolidBefore(tipPos));
+            }
+            break;
+        case TreeBarMove::Down: {
+            std::size_t start = tip && tipPos < group.size() ? tipPos + 1 : 0;
+            for (std::size_t i = start; i < group.size(); ++i) {
+                if (PartDesign::Body::isSolidFeature(group[i])) {
+                    rollBar(group[i]);
+                    break;
+                }
+            }
+            break;
+        }
+        case TreeBarMove::Top:
+            rollBar(nullptr);
+            break;
+        case TreeBarMove::End:
+            rollBar(nullptr, true);
+            break;
+    }
+    return true;
+}
+
+void ViewProviderBody::rollBar(App::DocumentObject* feature, bool toEnd)
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body) {
+        return;
+    }
+    App::DocumentObject* oldTip = body->Tip.getValue();
+    Gui::Command::openCommand(
+        toEnd ? QT_TRANSLATE_NOOP("Command", "Roll to end") : QT_TRANSLATE_NOOP("Command", "Roll to here")
+    );
+    try {
+        if (toEnd) {
+            FCMD_OBJ_CMD(body, "rollToEnd()");
+        }
+        else if (feature) {
+            FCMD_OBJ_CMD(body, "rollTo(" << Gui::Command::getObjectCmd(feature) << ")");
+        }
+        else {
+            FCMD_OBJ_CMD(body, "rollTo(None)");
+        }
+        App::DocumentObject* tip = body->Tip.getValue();
+        if (tip == oldTip) {
+            Gui::Command::abortCommand();
+            return;
+        }
+        // Show the feature the bar follows (which hides the Body's other features), or none at
+        // the very top
+        if (tip) {
+            FCMD_OBJ_SHOW(tip);
+        }
+        else {
+            for (auto obj : body->Group.getValues()) {
+                if (PartDesign::Body::isSolidFeature(obj) && obj->Visibility.getValue()) {
+                    FCMD_OBJ_HIDE(obj);
+                }
+            }
+        }
+        Gui::Command::updateActive();
+        Gui::Command::commitCommand();
+    }
+    catch (const Base::Exception&) {
+        Gui::Command::abortCommand();
+        throw;
+    }
+}
+
+App::DocumentObject* ViewProviderBody::barFeatureFor(const PartDesign::Body* body,
+                                                     App::DocumentObject* member)
+{
+    if (PartDesign::Body::isSolidFeature(member)) {
+        return member;
+    }
+    const auto& group = body->Group.getValues();
+    std::size_t end = static_cast<std::size_t>(std::ranges::find(group, member) - group.begin());
+    // The first solid feature after member that uses it, directly or through other objects
+    auto users = member->getInListRecursive();
+    for (std::size_t i = end + 1; i < group.size(); ++i) {
+        if (PartDesign::Body::isSolidFeature(group[i]) && std::ranges::find(users, group[i]) != users.end()) {
+            end = i;
+            break;
+        }
+    }
+    for (std::size_t i = std::min(end, group.size()); i-- > 0;) {
+        if (PartDesign::Body::isSolidFeature(group[i])) {
+            return group[i];
+        }
+    }
+    return nullptr;
+}
+
+bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& objs,
+                                      App::DocumentObject* target,
+                                      bool after)
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body || objs.empty()) {
+        return false;
+    }
+    for (auto obj : objs) {
+        if (!body->hasObject(obj)) {
+            return false;
+        }
+    }
+    if (!target) {
+        // Dropped on the Body itself: to the end
+        const auto& group = body->Group.getValues();
+        auto last = std::find_if(group.rbegin(), group.rend(), [&objs](App::DocumentObject* obj) {
+            return std::ranges::find(objs, obj) == objs.end();
+        });
+        if (last == group.rend()) {
+            return true;  // nothing else to move past
+        }
+        target = *last;
+        after = true;
+    }
+    else if (!body->hasObject(target)) {
+        // A row that isn't a member (the Origin) is above every feature: the start
+        target = nullptr;
+        after = true;
+    }
+
+    std::ostringstream list;
+    list << "[";
+    for (auto obj : objs) {
+        list << Gui::Command::getObjectCmd(obj) << ", ";
+    }
+    list << "]";
+    FCMD_OBJ_CMD(
+        body,
+        "reorderObject(" << list.str() << ", "
+                         << (target ? Gui::Command::getObjectCmd(target) : std::string("None"))
+                         << ", " << (after ? "True" : "False") << ")"
+    );
+    return true;
 }
 
 void ViewProviderBody::unifyVisualProperty(const App::Property* prop)
@@ -531,6 +768,10 @@ bool ViewProviderBody::canDropObjects() const
 
 bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
 {
+    // The Body's own members are dropped among its rows to reorder them (ops#127)
+    if (getObject<PartDesign::Body>()->hasObject(obj)) {
+        return true;
+    }
     if (obj->isDerivedFrom<App::VarSet>()) {
         return true;
     }
