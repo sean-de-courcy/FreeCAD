@@ -553,3 +553,85 @@ class DefeaturingSomeFacesRemoved(DefeaturingFacesRemoved):
         if self.gone and self.solver:
             return PartialWarned(pieces(self.removed()))
         return super().walls()
+
+
+class FilletEdgesDeleteNearStep(Scenario):
+    """FilletDeleteNearStep's model, the fillet on two edges: the step's front vertical edge
+    (x = 20.5) and the block's front top edge (x 0..20). The step is deleted. Its edge is gone;
+    the block's corner edge, 0.5 mm away, is within G2's wide reach but of another source (the
+    block's sketch, not the step's): policy D doesn't guess it (N3's N11) and lists it for that
+    sub. In solver documents the fillet computes on the front top edge with a warning (Onshape's
+    partial rule, C10); without the solver it fails."""
+
+    area = "dress-ups"
+    REFS = ("fillet_edges",)
+    deleted = False
+
+    def stepEdge(self):
+        return edge("line", direction=Z, through=(20.5, 0, 0))
+
+    def frontTopEdge(self):
+        return edge("line", direction=X, contains=(10, 0, 10))
+
+    def filletEdges(self):
+        if self.deleted:
+            return PartialWarned(self.frontTopEdge()) if self.solver else BROKEN
+        step, top = self.stepEdge(), self.frontTopEdge()
+        return pieces(edge(where=lambda e: step.matches(e, 1e-7) or top.matches(e, 1e-7)))
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        stepSketch = m.sketch(doc, "StepSketch", m.rectangle(20, 0, 20.5, 10), body)
+        step = m.pad(body, stepSketch, 10, name="Step")
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (step, self.filletEdges().select(step.Shape))
+        fillet.Radius = 0.25
+        self.ref("fillet_edges", fillet, "Base", self.filletEdges, Filleted(0.25))
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Step)
+        doc.removeObject("Step")
+        self.deleted = True
+
+
+class StepDeletedFacesMerge(Scenario):
+    """A block (0..20 x 0..10 x 0..10); a step, 0.5 high, padded on the back half of its top
+    (y 5..10), which leaves the front half (y 0..5) as a piece of the block's top face; a
+    thickness, 1 inward, with that piece as its open face. The step is deleted (its Base goes
+    to the block, as FilletDeleteNearStep's): the top is one face again, the front half's
+    ancestor (C3, N3 6.1). The whole top's centre is 2.5 mm from the saved one, beyond every
+    guess's reach. The run (ops#127 P8a): in V2, with or without the solver, pass 1's exact
+    lookup gives the whole top (no solver tier runs), so the reference follows the merge,
+    `correct`; V1 breaks it."""
+
+    area = "dress-ups"
+    REFS = ("thickness_face",)
+    deleted = False
+
+    def topFace(self):
+        if not self.deleted:
+            return face("plane", normal=Z, through=(0, 0, 10), contains=(10, 2.5, 10))
+        return BROKEN if self.mode == "V1" else face("plane", normal=Z, through=(0, 0, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        stepSketch = m.sketch(doc, "StepSketch", m.rectangle(0, 5, 20, 10), body, z=10)
+        step = m.pad(body, stepSketch, 0.5, name="Step")
+        doc.recompute()
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (step, self.names(step, self.topFace()))
+        thickness.Value = 1
+        thickness.Reversed = True
+        self.ref("thickness_face", thickness, "Base", self.topFace)
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Step)
+        doc.removeObject("Step")
+        self.deleted = True

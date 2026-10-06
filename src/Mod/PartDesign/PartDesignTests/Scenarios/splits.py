@@ -45,6 +45,7 @@ from .harness import (
     Extruded,
     Filleted,
     Guessed,
+    Reopens,
     Scenario,
     X,
     Y,
@@ -382,6 +383,26 @@ class DraftFaceNotchOffCentre(DraftFaceNotch):
         self.split = True
 
 
+class DraftFaceNotchOffCentreReopened(Reopens, DraftFaceNotchOffCentre):
+    """DraftFaceNotchOffCentre, then the document saved, closed and opened again: the guess, its
+    record and its warning come back with the file, on the piece at the saved centre, not on the
+    piece that kept the original's name (ops#133)."""
+
+    steps = ("edit", "reopen")
+
+
+class DraftFaceNotchOffCentreRaised(DraftFaceNotchOffCentre):
+    """DraftFaceNotchOffCentre, then the pad made 12 high, an edit that leaves the pick alone:
+    the guess stays on the piece at the saved centre, with its warning. The original's name
+    gives the other piece, which isn't the original (ops#133)."""
+
+    steps = ("edit", "heighten")
+
+    def heighten(self, doc):
+        doc.Pad.Length = 12
+        self.height = 12
+
+
 class DraftFaceNotchNamedPieceKept(DraftFaceNotch):
     """DraftFaceNotch's notch moved right, to x 12..16, in two steps. `notch`: the front face
     keeps its name on x 0..12, which holds the old face's centre (x = 10); the rest is x 16..20.
@@ -403,7 +424,9 @@ class DraftFaceNotchNamedPieceKept(DraftFaceNotch):
         self.split = True
 
     def moveBack(self, doc):
-        m.setLines(doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))})
+        m.setLines(
+            doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))}
+        )
 
 
 class SolverNotchRedrawn(SplitFilletNotch):

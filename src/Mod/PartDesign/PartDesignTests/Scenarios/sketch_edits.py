@@ -22,16 +22,25 @@
 
 """Sketch edits: the profile of a pad changes, and the references downstream follow it."""
 
+import os
+import re
+import shutil
+import tempfile
+import zipfile
+
 import FreeCAD as App
 import Part
 
 from .harness import (
     BROKEN,
     Attached,
+    Broken,
     Filleted,
     Guessed,
     ReachesFace,
+    Reopens,
     Scenario,
+    ScenarioError,
     X,
     Y,
     Z,
@@ -146,6 +155,13 @@ class SolverRedrawShifted(Scenario):
         doc.Profile.deleteAllGeometry()
         doc.Profile.addGeometry(m.polygon([(20.5, 10), (20.5, 0), (0.5, 0), (0.5, 10)]), False)
         self.redrawn = True
+
+
+class SolverRedrawShiftedReopened(Reopens, SolverRedrawShifted):
+    """SolverRedrawShifted, then the document saved, closed and opened again: the guess comes
+    back with its record and warning (ops#133)."""
+
+    steps = ("edit", "reopen")
 
 
 class SketchReaddLine(SketchEdit):
@@ -273,3 +289,167 @@ class SolverTwinRotate(Scenario):
         doc.Bosses.deleteAllGeometry()
         doc.Bosses.addGeometry([m.circle(15, 10, 3), m.circle(15, 20, 3)], False)
         self.replaced = True
+
+
+# Policy D (ops#127, design note N3 6.1): a guess needs a surviving source.
+
+
+class PolicyDCorner(Scenario):
+    """SolverRedrawShifted's model: a rectangle (0..20 x 0..10) padded 10 high, a fillet,
+    radius 1, on its front right vertical edge (x = 20). Subclasses move that edge 0.5 mm in x,
+    beyond tier 3's strict reach (1 % of the diagonal) and within G2's wide one (5 %)."""
+
+    abstract = True
+    area = "sketch edits"
+    REFS = ("corner_edge",)
+    moved = False
+
+    def shiftedCorner(self):
+        return edge("line", direction=Z, through=(20.5, 0, 0))
+
+    def movedExpectation(self):
+        raise NotImplementedError
+
+    def cornerEdge(self):
+        if not self.moved:
+            return edge("line", direction=Z, through=(20, 0, 0))
+        return self.movedExpectation()
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 1
+        self.ref("corner_edge", fillet, "Base", self.cornerEdge, Filleted(1))
+
+
+class SketchLineRedrawnShifted(PolicyDCorner):
+    """The rectangle's right line deleted and drawn again at x = 20.5 in the same sketch, the
+    front and back lines stretched to meet it (they keep their IDs). The corner edge is made
+    from the front line's end and the new line's start, so its name keeps the front line's
+    vertex: V2 follows it by name, and the solver's tier 1 resolves it plainly (its only
+    structural candidate), with no guess and no warning. N3 6.1 expected a guess (G2); the run
+    showed structure decides (ops#127 P8a). V1 breaks it."""
+
+    def movedExpectation(self):
+        return BROKEN if self.mode == "V1" else self.shiftedCorner()
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (20.5, 0)), 2: ((20.5, 10), (0, 10))})
+        doc.Profile.delGeometry(1)
+        doc.Profile.addGeometry(m.polyline([(20.5, 0), (20.5, 10)]), False)
+        self.moved = True
+
+
+class NewSketchShifted(PolicyDCorner):
+    """The rectangle drawn 0.5 mm over in x in a new sketch object, which the pad then takes as
+    its profile: no name relates the new edges to the old ones, and the new sketch isn't the
+    original's source. Policy D: no guess; the reference breaks with the moved corner edge
+    listed first (N3 4.4). Without the solver it breaks too."""
+
+    def movedExpectation(self):
+        return Broken(self.shiftedCorner())
+
+    def edit(self, doc):
+        redrawn = m.sketch(
+            doc,
+            "Redrawn",
+            m.polygon([(20.5, 10), (20.5, 0), (0.5, 0), (0.5, 10)]),
+            self.bodyObject,
+        )
+        doc.Pad.Profile = redrawn
+        self.moved = True
+
+
+class IndexOnlyMoved(PolicyDCorner):
+    """The fillet's reference saved as an index-only missing reference (`?EdgeN`, its
+    fingerprint kept, no name: N2 5.4, the P6 review's 4b), the file opened again, and the
+    rectangle's right side moved to x = 20.5 (its lines keep their IDs) before the first
+    recompute. With no name it has no source: policy D breaks it with the moved edge listed
+    first (N3 Q3). Without the solver it breaks."""
+
+    steps = ("staleAndMoved",)
+
+    def movedExpectation(self):
+        return Broken(self.shiftedCorner())
+
+    def staleAndMoved(self, doc):
+        index = doc.Fillet.Base[1][0]
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml = files["Document.xml"].decode("utf-8")
+        xml, count = re.subn(
+            r'<Sub value="%s" shadow="[^"]*"' % index, '<Sub value="?%s"' % index, xml
+        )
+        if count != 1:
+            raise ScenarioError(f"the fillet's sub {index} isn't saved once: {count}")
+        # Opened with the solver off: on, the open itself would find the edge in its place
+        # (strict tier 3), before the edit. openDocument() puts the configuration's back.
+        xml = re.sub(
+            r'(<Property name="ReferenceSolver"[^>]*>\s*<Bool value=")true(")', r"\1false\2", xml
+        )
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        self.doc = doc = self.openDocument(path)
+        lines = {0: ((0, 0), (20.5, 0)), 1: ((20.5, 0), (20.5, 10)), 2: ((20.5, 10), (0, 10))}
+        m.setLines(doc.Profile, lines)
+        self.moved = True
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
+
+
+class SlotRedrawnShifted(Scenario):
+    """G1 as a scenario (TestNamingSolver's testStructuralCandidatesAreGuessedByTheNearest): a
+    pad (0..20 x 0..10, 10 high) with a slot (x 6..14, y 3..7) pocketed through it, a fillet,
+    radius 0.5, on the slot's bottom edge at y = 3. The slot is drawn again 0.5 mm over in y (new
+    IDs): structure keeps the slot's two bottom edges along x (the pocket's), neither within
+    tier 3's strict reach; the wide one holds the nearer, y = 3.5. In solver documents it is
+    guessed (G1, kind `nearest`); without the solver it breaks with both as candidates."""
+
+    area = "sketch edits"
+    REFS = ("slot_edge",)
+    redrawn = False
+
+    def slotEdge(self):
+        if not self.redrawn:
+            return edge("line", direction=X, through=(0, 3, 0))
+        nearer = edge("line", direction=X, through=(0, 3.5, 0))
+        if self.solver:
+            return Guessed(nearer)
+        return Broken(nearer, edge("line", direction=X, through=(0, 7.5, 0)))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        slot = m.sketch(doc, "SlotSketch", m.rectangle(6, 3, 14, 7), body, z=10)
+        pocket = m.pocketThroughAll(body, slot)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, self.slotEdge()))
+        fillet.Radius = 0.5
+        self.ref("slot_edge", fillet, "Base", self.slotEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.SlotSketch.deleteAllGeometry()
+        doc.SlotSketch.addGeometry(m.polygon([(14, 7.5), (14, 3.5), (6, 3.5), (6, 7.5)]), False)
+        self.redrawn = True
+
+
+class SlotRedrawnShiftedReopened(Reopens, SlotRedrawnShifted):
+    """SlotRedrawnShifted, then the document saved, closed and opened again: the guess comes
+    back with its record and warning (ops#133)."""
+
+    steps = ("edit", "reopen")

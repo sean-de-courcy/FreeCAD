@@ -2169,11 +2169,12 @@ TEST(SolveOwner, geometryAloneNeedsBothTiers)
         "no structural candidate, tier 3: nearest 0.000, second 10.000, d_max 0.245"
     );
 
-    //   redrawn 5 mm over: tier 2 agrees on four edges, tier 3 on none; they're listed
+    //   redrawn 5 mm over: tier 2 agrees on four edges, tier 3 on none; they're listed, the
+    //   nearest the saved centre first (N3 5.3)
     input.entries[0].fingerprint = line(25, 10);
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge2", "Edge3", "Edge4"}));
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge4", "Edge2", "Edge3", "Edge1"}));
     EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
 
     //   the size must agree too
@@ -2186,7 +2187,7 @@ TEST(SolveOwner, geometryAloneNeedsBothTiers)
     input.entries.push_back(exact("Edge4", "Edge"));
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge1", "Edge2", "Edge3"}));
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge2", "Edge3", "Edge1"}));
 }
 
 TEST(SolveOwner, geometryAloneTwinsSwapStaysBroken)
@@ -4687,8 +4688,9 @@ TEST(SolveOwner, guessNearestAmongStructuralSurvivors)
 
 TEST(SolveOwner, guessGeometricWithoutStructure)
 {
-    // G2: SketchRedraw's edges with the edge redrawn 0.5 over: no structural candidate, tier 3's
-    // strict d_max (0.245) misses it, the wide one (1.225) takes it, the next edge is 10 away.
+    // G2: SketchRedraw's edges with the edge redrawn 0.5 over in the same sketch (new geometry
+    // IDs, the same sketch tag): no structural candidate, tier 3's strict d_max (0.245) misses
+    // it, the wide one (1.225) takes it, the next edge is 10 away.
     const auto oldEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
     auto line = [](double x, double z) {
         return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, z), Base::Vector3d(0, 1, 0));
@@ -4696,10 +4698,10 @@ TEST(SolveOwner, guessGeometricWithoutStructure)
     SolveInput input;
     input.diagonal = 24.5;
     input.pool["Edge"] = {
-        element("Edge1", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
-        element("Edge2", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
-        element("Edge3", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
-        element("Edge4", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge1", {section({}, {sketchEdge(12)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge2", {section({}, {sketchEdge(13)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge3", {section({}, {sketchEdge(12)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge4", {section({}, {sketchEdge(13)}, 7, "XTR", 1, 'E', {"PRJ"})}),
     };
     measure(
         input,
@@ -4728,11 +4730,117 @@ TEST(SolveOwner, guessGeometricWithoutStructure)
     EXPECT_EQ(outcomes[0].candidates,
               (std::vector<std::string> {"Edge4", "Edge2", "Edge3", "Edge1"}));
     EXPECT_EQ(outcomes[0].candidateRoles[1], "geometric");
-    EXPECT_EQ(outcomes[0].evidence.rfind("guess: no structural candidate, tier 3 wide", 0), 0U);
+    EXPECT_EQ(
+        outcomes[0].evidence.rfind(
+            "guess: no structural candidate, redrawn in the same source, tier 3 wide",
+            0
+        ),
+        0U
+    );
 
     //   5 over: beyond the wide d_max too (N7/N8)
     input.entries[0].fingerprint = line(25, 10);
     EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, guessGeometricNeedsTheSameSource)
+{
+    // Policy D (ops#127, N3 4.4): guessGeometricWithoutStructure's redraw, but the edges come
+    // from another sketch (tag 6), as when the line is drawn again as a new sketch object or
+    // the original is deleted beside a neighbour: no guess. The reference breaks with the
+    // agreeing edges nearest the saved centre first, with their distances (N3 5.3).
+    // NamingSolver/GuessAnySource (SolveInput::guessAnySource) guesses as before.
+    const auto oldEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto line = [](double x, double z) {
+        return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, z), Base::Vector3d(0, 1, 0));
+    };
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.pool["Edge"] = {
+        element("Edge1", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge2", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge3", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge4", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+    };
+    measure(
+        input,
+        {{"Edge1", line(0, 0)}, {"Edge2", line(20, 0)}, {"Edge3", line(0, 10)}, {"Edge4", line(20, 10)}},
+        nullptr
+    );
+    input.entries = {missing(oldEdge, "Edge")};
+    input.entries[0].fingerprint = line(20.5, 10);
+    input.guess = true;
+    input.guessNoStructure = true;
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
+    EXPECT_NE(outcomes[0].evidence.find("the wide reach's Edge4 has another source"), std::string::npos);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge4", "Edge2", "Edge3", "Edge1"}));
+    ASSERT_EQ(outcomes[0].candidateDistances.size(), 4U);
+    EXPECT_NEAR(outcomes[0].candidateDistances[0], 0.5, 1e-9);
+    EXPECT_NEAR(outcomes[0].candidateDistances[1], std::hypot(0.5, 10.0), 1e-9);
+    EXPECT_NEAR(outcomes[0].candidateDistances[2], 20.5, 1e-9);
+    EXPECT_NEAR(outcomes[0].candidateDistances[3], std::hypot(20.5, 10.0), 1e-9);
+    EXPECT_EQ(
+        outcomes[0].candidateRoles,
+        (std::vector<std::string> {"geometric", "geometric", "geometric", "geometric"})
+    );
+
+    //   any source
+    input.guessAnySource = true;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge4");
+    EXPECT_EQ(outcomes[0].evidence.rfind("guess: no structural candidate, tier 3 wide", 0), 0U);
+
+    //   an index-only reference (no name, no source) breaks, and is guessed with any source
+    input.guessAnySource = false;
+    input.entries[0].oldName.clear();
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates.front(), "Edge4");
+    input.guessAnySource = true;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Guessed);
+}
+
+TEST(NameAncestry, sourceTags)
+{
+    // The innermost sources of V2 names (ops#127, N3 5.1), in the pattern of
+    // NamingGolden/Refine.V2.txt: sketch Profile is tag 5, the pad 7, a second sketch 6.
+    auto padEdge = [](int geoId, int sketchTag) {
+        return section({}, {sketchEdge(geoId, sketchTag)}, 7, "XTR", 0, 'E', {"PRJ"});
+    };
+    const std::vector<std::string> profile {"5"};
+    //   a pad edge from sketch Profile; the same edge redrawn (a new ID, the same sketch)
+    EXPECT_EQ(NameAncestry::sourceTags(padEdge(1, 5)), profile);
+    EXPECT_EQ(NameAncestry::sourceTags(padEdge(9, 5)), profile);
+    //   an edge from a second sketch
+    EXPECT_EQ(NameAncestry::sourceTags(padEdge(1, 6)), (std::vector<std::string> {"6"}));
+    //   a vertical edge, generated from a sketch vertex (two IDs, one sketch)
+    const auto vertical = section({}, {sketchVertex({"g1v1", "g4v2"})}, 7, "XTR", 0, 'E', {"GEN"});
+    EXPECT_EQ(NameAncestry::sourceTags(vertical), profile);
+    //   the sketch's own edge: a section made from no name
+    EXPECT_EQ(NameAncestry::sourceTags(sketchEdge(1)), profile);
+    //   a face made from the edges of two sketches has both
+    EXPECT_EQ(
+        NameAncestry::sourceTags(lowFace({sketchEdge(1, 5), sketchEdge(2, 6)}, 8)),
+        (std::vector<std::string> {"5", "6"})
+    );
+    //   a split piece (MOD) and its connected elements add no source
+    const auto split = piece(padEdge(1, 5), 9, "FUS", 1, 'E', {padEdge(2, 6)});
+    EXPECT_EQ(NameAncestry::sourceTags(split), profile);
+    //   FilletDeleteNearStep's step (StepSketch, tag 8) padded (tag 9) onto the block: its front
+    //   vertical edge keeps its pad's name through the fusion, `_;g1v2^,g2v1^;_^;<StepSketch>^;
+    //   SKT^;0^;V^;0^;SRC^;_;<Step>;XTR;0;E;0;GEN;_` (a FreeCADCmd probe, ops#127 P8a), so its
+    //   source is the step's sketch alone, and the block's corner edge beside it shares none
+    const auto stepEdge = section({}, {sketchVertex({"g1v2", "g2v1"}, 8)}, 9, "XTR", 0, 'E', {"GEN"});
+    EXPECT_EQ(NameAncestry::sourceTags(stepEdge), (std::vector<std::string> {"8"}));
+    const auto blockCorner
+        = section({}, {sketchVertex({"g1v2", "g2v1"}, 5)}, 7, "XTR", 0, 'E', {"GEN"});
+    EXPECT_EQ(NameAncestry::sourceTags(blockCorner), profile);
+    EXPECT_TRUE(NameAncestry::sourceTags("").empty());
 }
 
 TEST(SolveOwner, guessThePieceAtTheSavedCentre)

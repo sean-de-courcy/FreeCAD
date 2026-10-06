@@ -27,7 +27,19 @@ as candidates (the naming design's section 8: the consumer needs exactly one edg
 import FreeCAD as App
 import Part
 
-from .harness import BROKEN, Broken, ExternalCoincides, Guessed, Scenario, X, Y, edge, pieces
+from .harness import (
+    BROKEN,
+    Broken,
+    ExternalCoincides,
+    Guessed,
+    Reopens,
+    Scenario,
+    Settled,
+    X,
+    Y,
+    edge,
+    pieces,
+)
 from . import models as m
 
 
@@ -118,6 +130,33 @@ class ExternalSplitOffCentre(ExternalSplit):
         self.split = True
 
 
+class ExternalSplitOffCentreReopened(Reopens, ExternalSplitOffCentre):
+    """ExternalSplitOffCentre, then the document saved, closed and opened again: the guess comes
+    back on the piece at the saved centre, with its record and warning (ops#133)."""
+
+    steps = ("edit", "reopen")
+
+
+class ExternalSplitOffCentreFilled(ExternalSplitOffCentre):
+    """ExternalSplitOffCentre, then the notch's four lines deleted and the front line put back
+    to x 0..20 (`fill`): the original edge is back as it was saved, and in solver documents the
+    guess snaps back to it, its record and warning gone (A1's snap-back, through ops#133's
+    check of the original's fingerprint)."""
+
+    steps = ("edit", "fill")
+
+    def frontEdge(self):
+        if self.stepName == "fill" and self.solver:
+            return Settled(ExternalEdit.frontEdge(self))
+        return super().frontEdge()
+
+    def fill(self, doc):
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
+        self.split = False
+
+
 class ExternalSplitNamedPieceKept(ExternalSplit):
     """ExternalSplit's notch moved right, to x 12..16, in two steps. `notch`: the front top edge
     splits into x 0..12, which keeps its name and holds the old edge's centre (x = 10), and
@@ -139,7 +178,9 @@ class ExternalSplitNamedPieceKept(ExternalSplit):
         self.split = True
 
     def moveBack(self, doc):
-        m.setLines(doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))})
+        m.setLines(
+            doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))}
+        )
         self.depth = 12
 
 
@@ -296,6 +337,13 @@ class ExternalArcSplitOffCentre(ExternalArcSplit):
         self.split = True
 
 
+class ExternalArcSplitOffCentreReopened(Reopens, ExternalArcSplitOffCentre):
+    """ExternalArcSplitOffCentre, then the document saved, closed and opened again: the guess
+    comes back on the arc at the saved mid-angle, with its record and warning (ops#133)."""
+
+    steps = ("edit", "reopen")
+
+
 class ExternalThreadRemoved(Scenario):
     """A block 0..30 x 0..30 x 10 (a pad) with a threaded hole (M6 by its thread size, 8 deep,
     a drill point) at (15, 15), its thread modelled; a sketch at z = 0 with one of the thread's
@@ -332,9 +380,7 @@ class ExternalThreadRemoved(Scenario):
         doc.recompute()
         # The thread's first B-spline edge, by index: its place is all the scenario needs.
         first = next(
-            i
-            for i, e in enumerate(hole.Shape.Edges, 1)
-            if isinstance(e.Curve, Part.BSplineCurve)
+            i for i, e in enumerate(hole.Shape.Edges, 1) if isinstance(e.Curve, Part.BSplineCurve)
         )
         where = hole.Shape.Edges[first - 1].CenterOfMass
         self.thread = edge(

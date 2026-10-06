@@ -526,9 +526,7 @@ class TestNamingSolver(unittest.TestCase):
         """Cuts a notch (x 8..12, 2 deep) into the front of the profile: the front line ends at
         x = 8, and four new lines follow, the last one the rest of the side (x 12..20)."""
         models.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
-        doc.Profile.addGeometry(
-            models.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False
-        )
+        doc.Profile.addGeometry(models.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         doc.recompute()
 
     def testContinuationReportsTier4(self):
@@ -1217,6 +1215,87 @@ class TestNamingSolver(unittest.TestCase):
         self.redrawShifted(doc)
         self.assertFalse(fillet.isValid())
 
+    def assertBrokenNearest(self, fillet, nearest, distance):
+        """The fillet failed on a reference the solver broke, `nearest` listed first at
+        `distance` from the saved centre, in the report and in the error (N3 5.3)."""
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["status"], "broken")
+        self.assertEqual(entry["candidates"][0], nearest)
+        self.assertAlmostEqual(entry["candidate_distances"][0], distance, places=6)
+        distances = [d for d in entry["candidate_distances"] if d == d]  # NaN last
+        self.assertEqual(distances, sorted(distances))
+        self.assertLessEqual(len(entry["candidates"]), 8)
+        self.assertIn(f"candidates: {nearest} ({distance:.3g} mm)", fillet.getStatusString())
+
+    def testNoStructureFromANewSketchBreaks(self):
+        """Policy D (N3 4.4): the rectangle drawn 0.5 mm over in a new sketch, which the pad
+        then takes as its profile. The corner edge's analogue is within G2's wide reach, but it
+        comes from the new sketch, not the original's (Profile): no guess. The fillet breaks with
+        the moved corner edge listed first, 0.5 mm away. With NamingSolver/GuessAnySource on, G2
+        guesses it as before."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+
+        self.redrawInANewSketch(doc)
+
+        [corner] = edge("line", direction=Z, through=(20.5, 0, 0)).one(pad.Shape)
+        self.assertBrokenNearest(fillet, corner, 0.5)
+
+        #   any source
+        self.guessSwitch("GuessAnySource", True)
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        self.redrawInANewSketch(doc)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], [corner])
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+
+    def redrawInANewSketch(self, doc):
+        """redrawShifted's rectangle, drawn in a new sketch that the pad takes as its profile."""
+        redrawn = models.sketch(
+            doc, "Redrawn", models.polygon([(20.5, 10), (20.5, 0), (0.5, 0), (0.5, 10)]), doc.Body
+        )
+        doc.Pad.Profile = redrawn
+        doc.recompute()
+
+    def testDeletionBesideANeighbourBreaks(self):
+        """Policy D's N11 (N3): FilletDeleteNearStep's model. A step (x 20..20.5) padded onto the
+        block's right side, the fillet on its front vertical edge; the step deleted. The block's
+        front right edge, 0.5 mm away, is within G2's wide reach, but it comes from the block's
+        sketch, not the step's: the fillet breaks with it listed first. With
+        NamingSolver/GuessAnySource on, G2 takes it (the guess N2 7.2 scored guessed-wrong)."""
+        for anySource in (False, True):
+            if anySource:
+                self.guessSwitch("GuessAnySource", True)
+            doc = self.newDocument()
+            body = models.body(doc)
+            profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+            pad = models.pad(body, profile, 10)
+            stepSketch = models.sketch(doc, "StepSketch", models.rectangle(20, 0, 20.5, 10), body)
+            step = models.pad(body, stepSketch, 10, name="Step")
+            doc.recompute()
+            fillet = body.newObject("PartDesign::Fillet", "Fillet")
+            fillet.Base = (step, edge("line", direction=Z, through=(20.5, 0, 0)).one(step.Shape))
+            fillet.Radius = 0.25
+            doc.recompute()
+            self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+            body.removeObject(step)
+            doc.removeObject("Step")
+            doc.recompute()
+
+            [corner] = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
+            if anySource:
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                [entry] = App.getReferenceReport(fillet)
+                self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+                self.assertEqual(fillet.Base[1], [corner])
+            else:
+                self.assertBrokenNearest(fillet, corner, 0.5)
+
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
         no name to solve from, ops#123), its fingerprint kept; the file opened again with the
@@ -1253,17 +1332,27 @@ class TestNamingSolver(unittest.TestCase):
         doc.ReferenceSolver = True
         return doc, index
 
-    def testIndexOnlyReferenceIsGuessedByItsFingerprint(self):
-        """N2 5.4: an index-only missing reference has no name, so no structural candidate; in a
-        forward update of its target it is retried by its fingerprint, and only G2 can take it.
-        The rectangle redrawn 0.5 mm over: G2 picks the moved corner edge, kind `geometric`, and
-        the record has no original name (it never snaps back). With
-        NamingSolver/GuessNoStructure off it stays broken (the review of fork PR 117, 4b)."""
+    def testIndexOnlyReferenceBreaksWithItsCandidates(self):
+        """N2 5.4 under policy D (N3 Q3): an index-only missing reference has no name, so no
+        structural candidate and no source; in a forward update of its target it is solved by its
+        fingerprint, and breaks with the candidates ranked by distance. The rectangle redrawn
+        0.5 mm over: the moved corner edge is listed first, 0.5 mm away. With
+        NamingSolver/GuessAnySource on, G2 picks it, kind `geometric`, and the record has no
+        original name (it never snaps back). With NamingSolver/GuessNoStructure off it stays
+        broken (the review of fork PR 117, 4b)."""
         doc, index = self.openIndexOnly()
 
         self.redrawShifted(doc)
 
-        corner = edge("line", direction=Z, through=(20.5, 0, 0)).one(doc.Pad.Shape)
+        [corner] = edge("line", direction=Z, through=(20.5, 0, 0)).one(doc.Pad.Shape)
+        self.assertEqual(doc.Fillet.Base[1], ["?" + index])
+        self.assertBrokenNearest(doc.Fillet, corner, 0.5)
+
+        #   any source
+        self.guessSwitch("GuessAnySource", True)
+        doc, index = self.openIndexOnly()
+        self.redrawShifted(doc)
+        corner = [corner]
         fillet = doc.Fillet
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(fillet.Base[1], corner)
