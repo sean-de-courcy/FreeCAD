@@ -736,7 +736,8 @@ class BodyReorderBase:
 
     def assertParkedState(self, block, pad2, sketch, hole, before, counts):
         """RO11b's oracles: the link set aside, the geometry kept in place with its Id and its
-        constraints, one extgeo line naming Pad2; the hole and its sketch fail, the rest computes."""
+        constraints, one extgeo line naming Pad2; the hole and its sketch fail, the rest
+        computes."""
         self.assertChain(hole, block, pad2)
         self.assertEqual(sketch.ExternalGeometry, [])
         self.assertEqual(list(sketch.ExternalTypes), [])
@@ -801,16 +802,16 @@ class BodyReorderBase:
         self.assertRestoredState(block, pad2, sketch, hole, before, counts)
 
     def testEditWhileParked(self):
-        """RO11d: while parked the user adds a line with a constraint and deletes a construction
-        line before the circle; moved back, the edits stay and the projection keeps its geometry
-        and constraints. (N4's oracle also adds a projection of Block's edge: at the very top
+        """RO11d: while parked the user adds a construction line with a constraint and deletes the
+        construction line before the circle; moved back, the edits stay and the projection keeps its
+        geometry and constraints. (N4's oracle also adds a projection of Block's edge: at the top
         Block comes after the hole, so that is a cycle, not an edit; left out.)"""
         block, pad2, sketch, hole = self.projecting(construction=True)
         before = self.projection(sketch)
         self.body.reorderObject([hole], None, True)
         self.recompute()
         sketch.delGeometry(0)
-        line = sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(3, 0, 0)), False)
+        line = sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(3, 0, 0)), True)
         sketch.addConstraint(Sketcher.Constraint("Horizontal", line))
         counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
         self.assertEqual(counts[1], 3)
@@ -852,6 +853,9 @@ class BodyReorderBase:
         self.body.removeObject(pad2)
         self.doc.removeObject(pad2.Name)
         self.doc.removeObject(profile.Name)
+        # Nothing links the sketch to Pad2 while parked: its next recompute (here forced) names
+        # the deletion
+        sketch.touch()
         self.recompute()
         self.assertIn("which was deleted", sketch.getStatusString())
 
@@ -864,14 +868,13 @@ class BodyReorderBase:
         self.assertTrue(ref.startswith("Pad2."), ref)
         self.recompute()
         self.assertFalse(sketch.isValid())
-        self.assertTrue(
-            Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing")
-        )
+        self.assertTrue(Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing"))
         self.assertIn("Pad2", sketch.getStatusString())
         self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
 
     def testParkUndoRedo(self):
-        """RO11g: one transaction; undo gives the projecting model as it was, redo the parked one."""
+        """RO11g: one transaction; undo gives the projecting model as it was, redo the parked
+        one."""
         block, pad2, sketch, hole = self.projecting()
         before = self.projection(sketch)
         counts = (len(sketch.ExternalGeo), len(sketch.Constraints))

@@ -141,11 +141,13 @@ std::string unescapeField(const std::string& text)
 }
 
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
-/// <position>`, then `|<guess>|<orig>|<alt>` when it has a guess record) or an expression
-/// (`expr|<path>|<T>|<text>`)
+/// <position>`, then `|<guess>|<orig>|<alt>[|<orig fp>]` when it has a guess record), a sketch's
+/// projection parked in place (`extgeo|`, the same fields, then `|<type>|<ids>` before the guess
+/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`)
 struct ParkedItem
 {
     bool expression = false;
+    bool extgeo = false;  // a projection: its geometries stay in the sketch without the link
     std::string property;  // the property, or the expression's path
     std::string target;    // the name of the object it refers to
     std::string sub;
@@ -155,6 +157,8 @@ struct ParkedItem
     std::size_t position = 0;
     std::string text;  // the expression
     App::GuessRecord guess;  // the entry's guess record (ops#127, N1 3.2), put back with it
+    int type = 0;            // extgeo: the projection's type (ExternalTypes)
+    std::vector<long> ids;   // extgeo: the Ids of its geometries, in projection order
 
     std::string line() const
     {
@@ -164,9 +168,15 @@ struct ParkedItem
                << escapeField(text);
         }
         else {
-            ss << "link|" << escapeField(property) << '|' << escapeField(target) << '|'
-               << escapeField(sub) << '|' << escapeField(shadowNew) << '|'
-               << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
+            ss << (extgeo ? "extgeo|" : "link|") << escapeField(property) << '|'
+               << escapeField(target) << '|' << escapeField(sub) << '|' << escapeField(shadowNew)
+               << '|' << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
+            if (extgeo) {
+                ss << '|' << type << '|';
+                for (std::size_t i = 0; i < ids.size(); ++i) {
+                    ss << (i ? "," : "") << ids[i];
+                }
+            }
             if (!guess.empty()) {
                 ss << '|' << escapeField(guess.kind) << '|' << escapeField(guess.origText()) << '|'
                    << escapeField(guess.altText());
@@ -198,8 +208,12 @@ struct ParkedItem
             item.text = fields[3];
             return item;
         }
-        if ((fields.size() == 8 || fields.size() == 11 || fields.size() == 12)
-            && fields[0] == "link") {
+        // A projection's line has two fields more before the guess fields
+        const std::size_t base = fields[0] == "extgeo" ? 10 : 8;
+        if ((fields[0] == "link" || fields[0] == "extgeo")
+            && (fields.size() == base || fields.size() == base + 3
+                || fields.size() == base + 4)) {
+            item.extgeo = fields[0] == "extgeo";
             item.property = fields[1];
             item.target = fields[2];
             item.sub = fields[3];
@@ -212,12 +226,26 @@ struct ParkedItem
             catch (...) {
                 item.position = 0;
             }
-            if (fields.size() >= 11) {
+            if (item.extgeo) {
+                try {
+                    item.type = std::stoi(fields[8]);
+                    std::size_t start = 0;
+                    while (start < fields[9].size()) {
+                        auto comma = fields[9].find(',', start);
+                        item.ids.push_back(std::stol(fields[9].substr(start, comma - start)));
+                        start = comma == std::string::npos ? fields[9].size() : comma + 1;
+                    }
+                }
+                catch (...) {
+                    return {};
+                }
+            }
+            if (fields.size() >= base + 3) {
                 item.guess = App::GuessRecord::fromAttributes(
-                    fields[8],
-                    fields[9],
-                    fields[10],
-                    fields.size() == 12 ? fields[11] : std::string()
+                    fields[base],
+                    fields[base + 1],
+                    fields[base + 2],
+                    fields.size() == base + 4 ? fields[base + 3] : std::string()
                 );
             }
             return item;
@@ -225,6 +253,14 @@ struct ParkedItem
         return {};
     }
 };
+
+/// The key a parked projection's geometries had: `<object>.<mapped name>`, as the Sketcher builds
+/// it from the link (SketchObject::updateGeometryRefs)
+std::string projectionKey(const ParkedItem& item)
+{
+    const std::string& sub = item.shadowNew.empty() ? item.sub : item.shadowNew;
+    return item.target + "." + Data::newElementName(sub.c_str());
+}
 
 std::vector<std::string> parkedLines(const App::DocumentObject* owner)
 {
@@ -288,6 +324,9 @@ struct Unit
     bool frozen = false;   // a form the rule doesn't write (sub-object paths, mixed subs)
     bool edited = false;
     bool dropped = false;  // parked, or a duplicate of a restored or re-targeted piece
+    // A sketch's projection (ops#131): the Ids of its geometries in projection order, and its type
+    std::vector<long> ids;
+    int type = 0;
 
     /// Every sub carries a re-target record to the same object
     bool allRecorded() const
@@ -404,6 +443,10 @@ std::optional<PropertyState> readState(App::DocumentObject* owner, App::Property
     if (sketch && p == &sketch->ExternalGeometry) {
         state.kind = Kind::External;
         readList(sketch->ExternalGeometry, state.units);
+        for (auto& unit : state.units) {
+            unit.ids = sketch->externalGeometryIds(unit.origin);
+            unit.type = sketch->externalType(unit.origin);
+        }
     }
     else if (auto xlist = freecad_cast<App::PropertyXLinkSubList*>(p)) {
         state.kind = Kind::XLinkSubList;
@@ -688,6 +731,11 @@ public:
             if (plan.linesChanged) {
                 writeParkedLines(owner, plan.lines);
             }
+            if (auto sketch = freecad_cast<Sketcher::SketchObject*>(owner)) {
+                for (const auto& item : plan.missingProjections) {
+                    sketch->markExternalGeometryMissing(item.ids, projectionKey(item));
+                }
+            }
         }
         for (auto state : written) {
             for (auto target : state->solveOn) {
@@ -715,6 +763,9 @@ private:
         bool linesChanged = false;
         std::set<std::string> parkPaths;
         std::vector<RestoredExpression> restoreExprs;
+        // Parked projections whose object was deleted (ops#131): their geometries get the old
+        // reference back, so the sketch shows them as missing instead of as silent fixed geometry
+        std::vector<ParkedItem> missingProjections;
     };
 
     // -- In(X) (N1 3.1): X and the members reachable from it along input links, through no
@@ -778,6 +829,7 @@ private:
         }
         bool linesChanged = false;
         std::vector<std::string> newLines;
+        std::vector<ParkedItem> missingProjections;
 
         std::vector<App::Property*> props;
         owner->getPropertyList(props);
@@ -801,6 +853,9 @@ private:
                 if (target) {
                     putBack(*state, items[i], target);
                 }
+                else if (items[i].extgeo) {
+                    missingProjections.push_back(items[i]);
+                }
                 keep[i] = false;  // put back, or dropped with its object
                 linesChanged = true;
             }
@@ -819,6 +874,7 @@ private:
         }
         plan.lines.insert(plan.lines.end(), newLines.begin(), newLines.end());
         plan.linesChanged = linesChanged;
+        plan.missingProjections = std::move(missingProjections);
     }
 
     /// One property's entries: first the restore, then the re-target or the park (N1 3.2)
@@ -894,14 +950,8 @@ private:
                 }
                 continue;
             }
-            if (state.kind == Kind::External) {
-                std::ostringstream text;
-                text << "'" << nameOf(state.owner) << "' projects geometry of '"
-                     << nameOf(unit.obj) << "', which would come after '" << nameOf(x)
-                     << "', and nothing before '" << nameOf(x)
-                     << "' can take the projection: move it below a feature instead";
-                throw Base::ValueError(text.str());
-            }
+            // A sketch's projection with no base to take it is parked in place (ops#131): its
+            // geometries and their constraints stay, only the link is set aside
             park(state, unit, newLines);
         }
     }
@@ -911,6 +961,11 @@ private:
         ParkedItem item;
         item.property = state.prop->getName();
         item.position = unit.origin < 0 ? 0 : static_cast<std::size_t>(unit.origin);
+        if (state.kind == Kind::External) {
+            item.extgeo = true;
+            item.type = unit.type;
+            item.ids = unit.ids;
+        }
         if (unit.subs.empty()) {
             item.target = unit.obj->getNameInDocument();
             newLines.push_back(item.line());
@@ -963,6 +1018,20 @@ private:
             state.solveOn.insert(target);
         }
         unit.edited = true;
+        if (state.kind == Kind::External) {
+            // A parked projection goes back onto its geometries (ops#131). If every one of them
+            // has a reference again (re-attached from Python), they have a new use: the item ends.
+            unit.ids = item.ids;
+            unit.type = item.type;
+            auto sketch = static_cast<const Sketcher::SketchObject*>(state.owner);
+            if (!item.ids.empty()
+                && std::all_of(item.ids.begin(), item.ids.end(), [&](long id) {
+                       auto ref = sketch->externalGeometryRefOf(id);
+                       return ref && !ref->empty();
+                   })) {
+                return;
+            }
+        }
         auto live = [&]() {
             std::vector<Unit*> out;
             for (auto& u : state.units) {
@@ -1040,7 +1109,10 @@ private:
                 break;
             }
             case Kind::External:
-                break;  // never parked
+                // Appended: the order of the links is invisible, and the geometries keep their
+                // places in any case
+                insertAt(current.size());
+                break;
         }
     }
 
@@ -1215,6 +1287,76 @@ private:
         finish(link, std::move(records), fps);
     }
 
+    /// A sketch's projections: the entries as read are re-targeted in place (their count kept,
+    /// so the projections follow their keys), then the parked ones are set aside with their
+    /// geometries kept, then the ones put back are appended onto their geometries (ops#131)
+    static void writeExternal(PropertyState& state)
+    {
+        auto sketch = static_cast<Sketcher::SketchObject*>(state.owner);
+        std::vector<Unit> asRead;
+        std::vector<int> parked;
+        bool moved = false;
+        for (const auto& u : state.units) {
+            if (u.origin < 0) {
+                continue;
+            }
+            asRead.push_back(u);
+            asRead.back().dropped = false;  // parked units are as read
+            if (u.dropped) {
+                parked.push_back(u.origin);
+            }
+            else if (u.edited) {
+                moved = true;
+            }
+        }
+        std::sort(asRead.begin(), asRead.end(), [](const Unit& a, const Unit& b) {
+            return a.origin < b.origin;
+        });
+        if (moved) {
+            Objects objs;
+            std::vector<std::string> subs;
+            std::vector<ShadowSub> shadows;
+            std::vector<std::string> fps;
+            std::vector<App::ElementRecords> records;
+            flatten(asRead, objs, subs, shadows, fps, records);
+            sketch->retargetExternalGeometry(objs, subs, std::move(shadows));
+        }
+        if (!parked.empty()) {
+            sketch->parkExternalGeometry(parked);
+        }
+        std::vector<Unit> written;
+        for (const auto& u : asRead) {
+            if (std::find(parked.begin(), parked.end(), u.origin) == parked.end()) {
+                written.push_back(u);
+            }
+        }
+        for (const auto& u : state.units) {
+            if (u.origin >= 0 || u.dropped || u.subs.empty()) {
+                continue;
+            }
+            ShadowSub shadow = u.subs.front().shadow;
+            int replaced =
+                sketch->unparkExternalGeometry(u.obj, u.subs.front().sub, std::move(shadow), u.type,
+                                               u.ids);
+            if (replaced > 0) {
+                Base::Console().warning(
+                    "%s: %d geometr%s projected from '%s' had been deleted while the projection "
+                    "was set aside; the projection gives new geometry there, without the deleted "
+                    "constraints\n",
+                    sketch->Label.getValue(), replaced, replaced == 1 ? "y" : "ies",
+                    u.obj->Label.getValue());
+            }
+            written.push_back(u);
+        }
+        Objects objs;
+        std::vector<std::string> subs;
+        std::vector<ShadowSub> shadows;
+        std::vector<std::string> fps;
+        std::vector<App::ElementRecords> records;
+        flatten(written, objs, subs, shadows, fps, records);
+        finish(sketch->ExternalGeometry, std::move(records), fps);
+    }
+
     void write(PropertyState& state)
     {
         Objects objs;
@@ -1258,13 +1400,9 @@ private:
                 finish(prop, std::move(records), fps);
                 break;
             }
-            case Kind::External: {
-                auto sketch = static_cast<Sketcher::SketchObject*>(state.owner);
-                flatten(state.units, objs, subs, shadows, fps, records);
-                sketch->retargetExternalGeometry(objs, subs, std::move(shadows));
-                finish(sketch->ExternalGeometry, std::move(records), fps);
+            case Kind::External:
+                writeExternal(state);
                 break;
-            }
             case Kind::XLink: {
                 auto& prop = *static_cast<App::PropertyXLink*>(state.prop);
                 if (live.empty()) {
@@ -1639,6 +1777,34 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
         }
     }
     std::ostringstream ss;
+    if (item->extgeo) {
+        // A projection parked in place (ops#131)
+        std::string element = Data::oldElementName(item->sub.c_str());
+        if (Data::hasMissingElement(element.c_str())) {
+            element.erase(0, std::strlen(Data::MISSING_PREFIX));
+        }
+        ss << item->property << " projects '" << targetLabel << "'";
+        if (!element.empty()) {
+            ss << " (" << element << ")";
+        }
+        if (!target) {
+            ss << ", which was deleted: the projection is kept as fixed geometry until the next "
+                  "reorder of the Body marks it missing";
+        }
+        else if (!userLabel.empty()) {
+            ss << ", which now comes after '" << userLabel
+               << "': the projection is kept as fixed geometry until '" << userLabel
+               << "' is moved below '" << targetLabel << "'";
+        }
+        else {
+            ss << ", which a reorder put after it: the projection is kept as fixed geometry";
+        }
+        if (lines.size() > 1) {
+            ss << " (and " << lines.size() - 1 << " more set aside)";
+        }
+        why = ss.str();
+        return true;
+    }
     if (item->expression) {
         ss << "the expression of '" << item->property << "' reads '" << targetLabel << "'";
     }
