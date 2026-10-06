@@ -3453,6 +3453,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             continue;
                         }
                         if (verdict == AfterInputFailure::Fail) {
+                            // It doesn't run: its warning from the last recompute goes (ops#127,
+                            // N1 4.9)
+                            clearWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
                         }

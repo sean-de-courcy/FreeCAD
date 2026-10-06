@@ -1007,3 +1007,18 @@ class TestNamingSolver(unittest.TestCase):
         self.assertFalse(fillet.isValid())
         self.assertNotIn("Warning", fillet.State)
         self.assertNotIn("Warning", fillet.getStatusString())
+
+    def testInputFailureDropsTheWarning(self):
+        """A warned fillet whose pad then fails (its Length 0): the fillet fails on its input in
+        error before it runs (the failure pass-through's check, ops#126) and shows that error,
+        not the old warning beside it (N1 4.9)."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        self.assertIn("Warning", fillet.State)
+
+        pad.Length = 0
+        doc.recompute()
+
+        self.assertFalse(pad.isValid())
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertNotIn("Warning", fillet.getStatusString())
