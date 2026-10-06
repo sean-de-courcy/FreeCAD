@@ -25,6 +25,7 @@ when the features before them change, are inserted or are reordered."""
 
 from .harness import (
     BROKEN,
+    Attached,
     Broken,
     Chamfered,
     Defeatured,
@@ -630,6 +631,104 @@ class StepDeletedFacesMerge(Scenario):
         thickness.Value = 1
         thickness.Reversed = True
         self.ref("thickness_face", thickness, "Base", self.topFace)
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Step)
+        doc.removeObject("Step")
+        self.deleted = True
+
+
+class StepTopSplitByGrooveDeleted(Scenario):
+    """The Fable review of fork PR 122, finding 1 (G1 and a deleted feature's split piece): a
+    block (0..20 x 0..10 x 0..10); a step, 0.5 high, padded on its whole top; a groove (x 9..11,
+    across) pocketed 2 deep from the step's top, which splits the step's top into two pieces and
+    cuts 1.5 into the block; a thickness, 1 inward, with the left piece (x 0..9) as its open
+    face. The step is deleted (the groove's Base goes to the block): the piece is gone. The
+    block's left top piece, which the groove also made, lies 0.5 mm below the saved one, within
+    the guess rules' wide reach and of another source (the block's sketch). Policy D: no guess;
+    the reference breaks. Without the solver it breaks. The run (ops#127 P8b): G1 doesn't fire.
+    The piece's structural survivors are the groove's floor and left wall only (the piece's name
+    holds the groove's edges as connected elements; the block's pieces don't descend from it),
+    so the block's piece is never a candidate. Tier 2 keeps the floor alone, 5.9 mm away, and a
+    tier-1 partner must agree with the old name's top section or hold it in its ancestry, which
+    the floor doesn't: the reference breaks (`no top agreement`), listing the floor and the
+    wall."""
+
+    area = "dress-ups"
+    REFS = ("thickness_face",)
+    deleted = False
+
+    def leftPiece(self, z):
+        return face("plane", normal=Z, through=(0, 0, z), contains=(4.5, 5, z))
+
+    def topFace(self):
+        if not self.deleted:
+            return self.leftPiece(10.5)
+        return Broken(self.leftPiece(10)) if self.solver else BROKEN
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        stepSketch = m.sketch(doc, "StepSketch", m.rectangle(0, 0, 20, 10), body, z=10)
+        m.pad(body, stepSketch, 0.5, name="Step")
+        grooveSketch = m.sketch(doc, "GrooveSketch", m.rectangle(9, -1, 11, 11), body, z=10.5)
+        groove = m.pocket(body, grooveSketch, 2, name="Groove")
+        doc.recompute()
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (groove, self.names(groove, self.topFace()))
+        thickness.Value = 1
+        thickness.Reversed = True
+        self.ref("thickness_face", thickness, "Base", self.topFace)
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Step)
+        doc.removeObject("Step")
+        self.deleted = True
+
+
+class StepNarrowPieceGrooveDeleted(Scenario):
+    """StepTopSplitByGrooveDeleted with the groove's floor in the wide reach: a block (0..40 x
+    0..10 x 0..10); a step, 0.5 high, on its whole top; a groove (x 1.5..3, across) 0.75 deep
+    from the step's top, which leaves a narrow left piece (x 0..1.5) of the step's top and cuts
+    0.25 into the block; a sketch attached to that piece. The step is deleted: the piece is
+    gone. The groove's floor (z = 9.75) is a structural survivor of the piece (the piece's name
+    holds the groove's edges as connected elements), parallel, of the same area, and 1.68 mm
+    from the saved centre, within the wide reach (2.12 mm) with no rival: G1's ground. It is of
+    another source (the groove's sketch, not the step's): policy D doesn't guess it, and the
+    reference breaks with the floor listed. Without the solver it breaks. The run (ops#127 P8b):
+    G1 doesn't fire here either. It runs only when tier 2 keeps two or more structural
+    survivors; the floor is the only one that agrees (the wall is vertical), so tier 2 takes it,
+    and the top-agreement check breaks the reference (`no top agreement`), as in
+    StepTopSplitByGrooveDeleted."""
+
+    area = "dress-ups"
+    REFS = ("piece_support",)
+    deleted = False
+
+    def floor(self):
+        return face("plane", normal=Z, through=(0, 0, 9.75), contains=(2.25, 5, 9.75))
+
+    def piece(self):
+        if not self.deleted:
+            return face("plane", normal=Z, through=(0, 0, 10.5), contains=(0.75, 5, 10.5))
+        return Broken(self.floor()) if self.solver else BROKEN
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 40, 10), body)
+        m.pad(body, profile, 10)
+        stepSketch = m.sketch(doc, "StepSketch", m.rectangle(0, 0, 40, 10), body, z=10)
+        m.pad(body, stepSketch, 0.5, name="Step")
+        grooveSketch = m.sketch(doc, "GrooveSketch", m.rectangle(1.5, -1, 3, 11), body, z=10.5)
+        groove = m.pocket(body, grooveSketch, 0.75, name="Groove")
+        doc.recompute()
+        marker = body.newObject("Sketcher::SketchObject", "Marker")
+        marker.AttachmentSupport = [(groove, self.names(groove, self.piece())[0])]
+        marker.MapMode = "FlatFace"
+        self.ref("piece_support", marker, "AttachmentSupport", self.piece, Attached())
 
     def edit(self, doc):
         self.bodyObject.removeObject(doc.Step)

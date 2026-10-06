@@ -159,7 +159,9 @@ class SolverRedrawShifted(Scenario):
 
 class SolverRedrawShiftedReopened(Reopens, SolverRedrawShifted):
     """SolverRedrawShifted, then the document saved, closed and opened again: the guess comes
-    back with its record and warning (ops#133)."""
+    back with its record and warning (ops#133). A regression guard: it passes on `integration`
+    before ops#133's fix too (after a redraw with new IDs the original's name gives nothing, so
+    no snap-back entry was built; the Fable review of fork PR 122, 3a)."""
 
     steps = ("edit", "reopen")
 
@@ -450,6 +452,8 @@ class SlotRedrawnShifted(Scenario):
 
 class SlotRedrawnShiftedReopened(Reopens, SlotRedrawnShifted):
     """SlotRedrawnShifted, then the document saved, closed and opened again: the guess comes
-    back with its record and warning (ops#133)."""
+    back with its record and warning (ops#133). A regression guard: it passes on `integration`
+    before ops#133's fix too (after a redraw with new IDs the original's name gives nothing, so
+    no snap-back entry was built; the Fable review of fork PR 122, 3a)."""
 
     steps = ("edit", "reopen")

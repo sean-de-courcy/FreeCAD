@@ -386,7 +386,8 @@ class DraftFaceNotchOffCentre(DraftFaceNotch):
 class DraftFaceNotchOffCentreReopened(Reopens, DraftFaceNotchOffCentre):
     """DraftFaceNotchOffCentre, then the document saved, closed and opened again: the guess, its
     record and its warning come back with the file, on the piece at the saved centre, not on the
-    piece that kept the original's name (ops#133)."""
+    piece that kept the original's name (ops#133). It fails on `integration` before ops#133's fix (the Fable review of fork PR 122, 3a).
+    """
 
     steps = ("edit", "reopen")
 
@@ -394,7 +395,8 @@ class DraftFaceNotchOffCentreReopened(Reopens, DraftFaceNotchOffCentre):
 class DraftFaceNotchOffCentreRaised(DraftFaceNotchOffCentre):
     """DraftFaceNotchOffCentre, then the pad made 12 high, an edit that leaves the pick alone:
     the guess stays on the piece at the saved centre, with its warning. The original's name
-    gives the other piece, which isn't the original (ops#133)."""
+    gives the other piece, which isn't the original (ops#133). It fails on `integration` before ops#133's fix (the Fable review of fork PR 122, 3a).
+    """
 
     steps = ("edit", "heighten")
 

@@ -132,7 +132,8 @@ class ExternalSplitOffCentre(ExternalSplit):
 
 class ExternalSplitOffCentreReopened(Reopens, ExternalSplitOffCentre):
     """ExternalSplitOffCentre, then the document saved, closed and opened again: the guess comes
-    back on the piece at the saved centre, with its record and warning (ops#133)."""
+    back on the piece at the saved centre, with its record and warning (ops#133). It fails on `integration` before ops#133's fix (the Fable review of fork PR 122, 3a).
+    """
 
     steps = ("edit", "reopen")
 
@@ -141,7 +142,8 @@ class ExternalSplitOffCentreFilled(ExternalSplitOffCentre):
     """ExternalSplitOffCentre, then the notch's four lines deleted and the front line put back
     to x 0..20 (`fill`): the original edge is back as it was saved, and in solver documents the
     guess snaps back to it, its record and warning gone (A1's snap-back, through ops#133's
-    check of the original's fingerprint)."""
+    check of the original's fingerprint). A regression guard: it passes on `integration` before ops#133's fix too (the old snap-back was unconditional; the Fable review of fork PR 122, 3a), so it doesn't show the fix.
+    """
 
     steps = ("edit", "fill")
 
@@ -339,7 +341,8 @@ class ExternalArcSplitOffCentre(ExternalArcSplit):
 
 class ExternalArcSplitOffCentreReopened(Reopens, ExternalArcSplitOffCentre):
     """ExternalArcSplitOffCentre, then the document saved, closed and opened again: the guess
-    comes back on the arc at the saved mid-angle, with its record and warning (ops#133)."""
+    comes back on the arc at the saved mid-angle, with its record and warning (ops#133). It fails on `integration` before ops#133's fix (the Fable review of fork PR 122, 3a).
+    """
 
     steps = ("edit", "reopen")
 
