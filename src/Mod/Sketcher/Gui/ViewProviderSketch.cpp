@@ -51,11 +51,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <numbers>
 
 #include <fmt/format.h>
 
+#include <App/ElementNamingUtils.h>
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -3853,7 +3855,7 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
         ViewProvider2DObject::updateData(prop);
     }
 
-    if (prop == &getSketchObject()->ExternalGeo) {
+    if (prop == &getSketchObject()->ExternalGeo || prop == &getSketchObject()->ExternalGeometry) {
         signalChangeIcon();
     }
 
@@ -5029,14 +5031,44 @@ bool ViewProviderSketch::hasMissingExternalGeometry() const
     return std::ranges::any_of(externalGeometry, [](const Part::Geometry* geometry) {
         return ExternalGeometryFacade::getFacade(geometry)->testFlag(
             ExternalGeometryExtension::Missing);
-    });
+    }) || !brokenExternalLinks().isEmpty();
+}
+
+// FreeCAD-CH (ops#144): a sketch whose external reference is gone fails before its external
+// geometry is rebuilt (ops#72; in solver documents the recompute check), so no geometry is
+// flagged Missing. The link keeps the missing element's name instead ("?Edge2").
+QStringList ViewProviderSketch::brokenExternalLinks() const
+{
+    QStringList broken;
+    const auto& link = getSketchObject()->ExternalGeometry;
+    const auto& objects = link.getValues();
+    const auto subs = link.getSubValues(false);
+    for (std::size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
+        if (!objects[i] || !Data::hasMissingElement(subs[i].c_str())) {
+            continue;
+        }
+        std::string element = subs[i];
+        element.erase(0, element.find_last_of('.') + 1);
+        element.erase(0, std::strlen(Data::MISSING_PREFIX));
+        broken << QStringLiteral("%1.%2").arg(
+            QString::fromUtf8(objects[i]->Label.getValue()),
+            QString::fromStdString(element)
+        );
+    }
+    return broken;
 }
 
 QString ViewProviderSketch::getToolTip() const
 {
-    return hasMissingExternalGeometry()
-        ? tr("Missing external geometry")
-        : QString();
+    if (!hasMissingExternalGeometry()) {
+        return {};
+    }
+    QString tip = tr("Missing external geometry");
+    const QStringList broken = brokenExternalLinks();
+    if (!broken.isEmpty()) {
+        tip += QStringLiteral(": ") + broken.join(QStringLiteral(", "));
+    }
+    return tip;
 }
 
 QIcon ViewProviderSketch::mergeColorfulOverlayIcons(const QIcon& orig) const
