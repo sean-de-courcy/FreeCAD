@@ -121,6 +121,95 @@ std::vector<int> sameRecord(const Reference& reference, int index)
 
 }  // namespace
 
+std::vector<ReferenceRow> referenceRows(const DocumentObject* obj)
+{
+    std::vector<ReferenceRow> rows;
+    const auto slots = ReferenceReport::slotsOf(obj);
+    // A record whose report entry another reference holds: the pieces of an expanded reference,
+    // which its first piece's entry lists.
+    auto coveredGuess = [&slots](const ReferenceReport::Slot& slot) {
+        return std::any_of(slots.begin(), slots.end(), [&](const ReferenceReport::Slot& other) {
+            return other.prop == slot.prop && other.localIndex != slot.localIndex
+                && other.guess == slot.guess && ReferenceReport::find(other.prop, other.localIndex);
+        });
+    };
+    for (const auto& slot : slots) {
+        auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
+        if (!entry && !Data::hasMissingElement(slot.sub.c_str())
+            && (slot.guess.empty() || coveredGuess(slot))) {
+            continue;
+        }
+        ReferenceRow row;
+        row.property = slot.property;
+        row.index = slot.index;
+        row.prop = const_cast<PropertyLinkBase*>(slot.prop);
+        row.localIndex = slot.localIndex;
+        row.obj = slot.obj;
+        row.sub = slot.sub;
+        if (entry) {
+            for (std::size_t c = 0; c < entry->candidates.size(); ++c) {
+                ReferenceRow::Candidate candidate;
+                candidate.index = entry->candidates[c].first;
+                candidate.name = entry->candidates[c].second;
+                if (c < entry->candidateRoles.size()) {
+                    candidate.role = entry->candidateRoles[c];
+                }
+                if (c < entry->candidateDistances.size()) {
+                    candidate.distance = entry->candidateDistances[c];
+                }
+                row.candidates.push_back(std::move(candidate));
+            }
+            for (const auto& piece : entry->pieces) {
+                row.pieces.push_back(piece.first);
+            }
+            row.oldName = entry->oldName;
+            row.status = ReferenceReport::statusName(entry->status);
+            row.tier = entry->tier;
+            row.newIndex = entry->newIndex;
+            row.evidence = entry->evidence;
+            row.target = entry->target;
+            row.headline = entry->headline;
+        }
+        else if (!slot.guess.empty() && !Data::hasMissingElement(slot.sub.c_str())) {
+            // A saved record the solver hasn't solved since (a reopened file, or a pick it kept):
+            // the status and tier its kind gives, as after the resolution.
+            const char* element = Data::findElementName(slot.sub.c_str());
+            const std::string& kind = slot.guess.kind;
+            row.status = kind == "tier2" || kind == "tier3"     ? "resolved"
+                : kind == "continued" || kind == "expanded"     ? "expanded"
+                : kind == "index"                               ? "index"
+                                                                : "guessed";
+            row.tier = kind == "tier2"                                    ? 2
+                : kind == "tier3" || kind == "nearest" || kind == "geometric" ? 3
+                : kind == "continued"                                     ? 4
+                : kind == "expanded" || kind == "piece"                   ? 1
+                                                                          : -1;
+            row.oldName = slot.guess.origName;
+            row.newIndex = element ? element : "";
+            row.evidence = "saved guess";
+        }
+        else {
+            // Missing, and not solved since the report was last cleared.
+            row.oldName = slot.mappedName;
+            row.status = "broken";
+        }
+        row.guessKind = slot.guess.kind;
+        if (!slot.guess.empty()) {
+            row.hasOriginal = true;
+            row.originalIndex = slot.guess.origIndex;
+            row.originalName = slot.guess.origName;
+            row.alternatives = slot.guess.alternatives;
+        }
+        else if (entry) {
+            row.hasOriginal = true;
+            row.originalIndex = entry->oldIndex;
+            row.originalName = entry->oldName;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
 void acceptReference(PropertyLinkBase* prop, int localIndex)
 {
     Reference reference = referenceOf(prop, localIndex);

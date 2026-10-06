@@ -1421,88 +1421,37 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
         auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
         Py::List list;
         const char* warning = obj->getWarningDescription();
-        const auto slots = ReferenceReport::slotsOf(obj);
-        // A record whose report entry another reference holds: the pieces of an expanded
-        // reference, which its first piece's entry lists (ops#127).
-        auto coveredGuess = [&slots](const ReferenceReport::Slot& slot) {
-            return std::any_of(slots.begin(), slots.end(), [&](const ReferenceReport::Slot& other) {
-                return other.prop == slot.prop && other.localIndex != slot.localIndex
-                    && other.guess == slot.guess
-                    && ReferenceReport::find(other.prop, other.localIndex);
-            });
-        };
-        for (const auto& slot : slots) {
-            auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
-            if (!entry && !Data::hasMissingElement(slot.sub.c_str())
-                && (slot.guess.empty() || coveredGuess(slot))) {
-                continue;
+        auto distanceOf = [](double distance) -> Py::Object {
+            if (std::isnan(distance)) {
+                return Py::None();
             }
+            return Py::Float(distance);
+        };
+        for (const auto& row : referenceRows(obj)) {
             Py::Dict dict;
             Py::List candidates;
             Py::List candidateNames;
             Py::List candidateRoles;
             Py::List candidateDistances;
             Py::List pieces;
-            dict.setItem("property", Py::String(slot.property));
-            dict.setItem("index", Py::Long(slot.index));
-            dict.setItem("sub", Py::String(slot.sub));
-            if (entry) {
-                for (std::size_t c = 0; c < entry->candidates.size(); ++c) {
-                    candidates.append(Py::String(entry->candidates[c].first));
-                    candidateNames.append(Py::String(entry->candidates[c].second));
-                    candidateRoles.append(Py::String(
-                        c < entry->candidateRoles.size() ? entry->candidateRoles[c] : std::string()
-                    ));
-                    const double distance = c < entry->candidateDistances.size()
-                        ? entry->candidateDistances[c]
-                        : std::numeric_limits<double>::quiet_NaN();
-                    if (std::isnan(distance)) {
-                        candidateDistances.append(Py::None());
-                    }
-                    else {
-                        candidateDistances.append(Py::Float(distance));
-                    }
-                }
-                for (const auto& piece : entry->pieces) {
-                    pieces.append(Py::String(piece.first));
-                }
-                dict.setItem("old", Py::String(entry->oldName));
-                dict.setItem("status", Py::String(ReferenceReport::statusName(entry->status)));
-                dict.setItem("tier", Py::Long(entry->tier));
-                dict.setItem("new", Py::String(entry->newIndex));
-                dict.setItem("evidence", Py::String(entry->evidence));
-                dict.setItem("target", Py::String(entry->target));
+            dict.setItem("property", Py::String(row.property));
+            dict.setItem("index", Py::Long(row.index));
+            dict.setItem("sub", Py::String(row.sub));
+            for (const auto& candidate : row.candidates) {
+                candidates.append(Py::String(candidate.index));
+                candidateNames.append(Py::String(candidate.name));
+                candidateRoles.append(Py::String(candidate.role));
+                candidateDistances.append(distanceOf(candidate.distance));
             }
-            else if (!slot.guess.empty() && !Data::hasMissingElement(slot.sub.c_str())) {
-                // A saved record the solver hasn't solved since (a reopened file, or a pick it
-                // kept, ops#127): the status and tier its kind gives, as after the resolution
-                const char* element = Data::findElementName(slot.sub.c_str());
-                const std::string& kind = slot.guess.kind;
-                const char* status = kind == "tier2" || kind == "tier3"     ? "resolved"
-                    : kind == "continued" || kind == "expanded"             ? "expanded"
-                    : kind == "index"                                       ? "index"
-                                                                            : "guessed";
-                const int tier = kind == "tier2"                            ? 2
-                    : kind == "tier3" || kind == "nearest" || kind == "geometric" ? 3
-                    : kind == "continued"                                   ? 4
-                    : kind == "expanded" || kind == "piece"                 ? 1
-                                                                            : -1;
-                dict.setItem("old", Py::String(slot.guess.origName));
-                dict.setItem("status", Py::String(status));
-                dict.setItem("tier", Py::Long(tier));
-                dict.setItem("new", Py::String(element ? element : ""));
-                dict.setItem("evidence", Py::String("saved guess"));
-                dict.setItem("target", Py::String(""));
+            for (const auto& piece : row.pieces) {
+                pieces.append(Py::String(piece));
             }
-            else {
-                // Missing, and not solved since the report was last cleared.
-                dict.setItem("old", Py::String(slot.mappedName));
-                dict.setItem("status", Py::String("broken"));
-                dict.setItem("tier", Py::Long(-1));
-                dict.setItem("new", Py::String(""));
-                dict.setItem("evidence", Py::String(""));
-                dict.setItem("target", Py::String(""));
-            }
+            dict.setItem("old", Py::String(row.oldName));
+            dict.setItem("status", Py::String(row.status));
+            dict.setItem("tier", Py::Long(row.tier));
+            dict.setItem("new", Py::String(row.newIndex));
+            dict.setItem("evidence", Py::String(row.evidence));
+            dict.setItem("target", Py::String(row.target));
             dict.setItem("candidates", candidates);
             dict.setItem("candidate_names", candidateNames);
             dict.setItem("candidate_roles", candidateRoles);
@@ -1510,31 +1459,22 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             dict.setItem("pieces", pieces);
             // The guess record (ops#127): its kind, the original and the alternatives.
             Py::Dict original;
+            if (row.hasOriginal) {
+                original.setItem("index", Py::String(row.originalIndex));
+                original.setItem("name", Py::String(row.originalName));
+            }
             Py::List alternatives;
-            if (!slot.guess.empty()) {
-                original.setItem("index", Py::String(slot.guess.origIndex));
-                original.setItem("name", Py::String(slot.guess.origName));
-                for (const auto& alternative : slot.guess.alternatives) {
-                    Py::Dict item;
-                    item.setItem("index", Py::String(alternative.index));
-                    item.setItem("role", Py::String(alternative.role));
-                    if (std::isnan(alternative.distance)) {
-                        item.setItem("distance", Py::None());
-                    }
-                    else {
-                        item.setItem("distance", Py::Float(alternative.distance));
-                    }
-                    alternatives.append(item);
-                }
+            for (const auto& alternative : row.alternatives) {
+                Py::Dict item;
+                item.setItem("index", Py::String(alternative.index));
+                item.setItem("role", Py::String(alternative.role));
+                item.setItem("distance", distanceOf(alternative.distance));
+                alternatives.append(item);
             }
-            else if (entry) {
-                original.setItem("index", Py::String(entry->oldIndex));
-                original.setItem("name", Py::String(entry->oldName));
-            }
-            dict.setItem("guess_kind", Py::String(slot.guess.kind));
+            dict.setItem("guess_kind", Py::String(row.guessKind));
             dict.setItem("original", original);
             dict.setItem("alternatives", alternatives);
-            dict.setItem("headline", Py::String(entry ? entry->headline : std::string()));
+            dict.setItem("headline", Py::String(row.headline));
             dict.setItem("warning", Py::String(warning ? warning : ""));
             list.append(dict);
         }
