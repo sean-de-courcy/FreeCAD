@@ -409,3 +409,34 @@ TEST_F(SketchObjectParkTest, parkRefusesAnUnknownEntry)
     EXPECT_EQ(sketch->ExternalGeometry.getSize(), 1);
     EXPECT_NE(refOf(projection()), "");
 }
+
+TEST_F(SketchObjectParkTest, markMissingFlagsTheParkedGeometry)
+{
+    // Arrange: parked, then its object is gone
+    projectWithConstraints();
+    auto sketch = getObject();
+    const auto ids = sketch->externalGeometryIds(0);
+    const std::string ref = refOf(projection());
+    const int geoCount = sketch->ExternalGeo.getSize();
+    const int constraintCount = sketch->Constraints.getSize();
+    sketch->parkExternalGeometry({0});
+    doc->recompute();
+    ASSERT_TRUE(sketch->isValid());
+
+    // Act
+    int marked = sketch->markExternalGeometryMissing(ids, ref);
+    doc->recompute();
+
+    // Assert: a missing reference, kept with its constraints, and the sketch fails naming it
+    EXPECT_EQ(marked, 1);
+    EXPECT_FALSE(sketch->isValid());
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount);
+    EXPECT_EQ(refOf(projection()), ref);
+    EXPECT_TRUE(ExternalGeometryFacade::getFacade(projection())
+                    ->testFlag(ExternalGeometryExtension::Missing));
+    EXPECT_EQ(sketch->Constraints.getSize(), constraintCount);
+    EXPECT_NE(std::string(sketch->getStatusString()).find("Box"), std::string::npos);
+    // A geometry that has a reference isn't touched
+    EXPECT_EQ(sketch->markExternalGeometryMissing(ids, "Other.Edge1"), 0);
+    EXPECT_EQ(refOf(projection()), ref);
+}

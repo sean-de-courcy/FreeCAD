@@ -3174,6 +3174,31 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     return replaced;
 }
 
+int SketchObject::markExternalGeometryMissing(const std::vector<long>& ids, const std::string& ref)
+{
+    if (ref.empty()) {
+        return 0;
+    }
+    auto geos = ExternalGeo.getValues();
+    int marked = 0;
+    for (long id : ids) {
+        auto it = externalGeoMap.find(id);
+        if (it == externalGeoMap.end()
+            || !ExternalGeometryFacade::getFacade(geos[it->second])->getRef().empty()) {
+            continue;
+        }
+        auto& geo = geos[it->second];
+        geo = geo->clone();
+        ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        ++marked;
+    }
+    if (marked) {
+        ExternalGeo.setValues(std::move(geos));
+        touch();
+    }
+    return marked;
+}
+
 void SketchObject::updateGeometryRefs()
 {
     const auto &objs = ExternalGeometry.getValues();

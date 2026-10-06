@@ -283,6 +283,12 @@ public:
                                App::PropertyLinkBase::ShadowSub&& shadow,
                                int type,
                                const std::vector<long>& ids);
+    /** Gives the parked geometries `ids` (those still without a reference) the reference `ref`
+     * of a link that no longer exists (ops#131: the projected object was deleted while parked),
+     * so the next rebuild flags them missing and names the reference, as for a live projection
+     * whose object was deleted. Returns how many it marked.
+     */
+    int markExternalGeometryMissing(const std::vector<long>& ids, const std::string& ref);
     /** Writes ExternalGeometry's entries as given (the same count, in the same order) and keeps
      * each projection with its constraints when its entry's object changed (ops#127, the
      * reorder's re-target and its restore: an entry moves from one object to another with its
