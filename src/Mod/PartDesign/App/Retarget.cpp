@@ -141,7 +141,8 @@ std::string unescapeField(const std::string& text)
 }
 
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
-/// <position>`) or an expression (`expr|<path>|<T>|<text>`)
+/// <position>`, then `|<guess>|<orig>|<alt>` when it has a guess record) or an expression
+/// (`expr|<path>|<T>|<text>`)
 struct ParkedItem
 {
     bool expression = false;
@@ -153,6 +154,7 @@ struct ParkedItem
     std::string fp;
     std::size_t position = 0;
     std::string text;  // the expression
+    App::GuessRecord guess;  // the entry's guess record (ops#127, N1 3.2), put back with it
 
     std::string line() const
     {
@@ -165,6 +167,10 @@ struct ParkedItem
             ss << "link|" << escapeField(property) << '|' << escapeField(target) << '|'
                << escapeField(sub) << '|' << escapeField(shadowNew) << '|'
                << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
+            if (!guess.empty()) {
+                ss << '|' << escapeField(guess.kind) << '|' << escapeField(guess.origText()) << '|'
+                   << escapeField(guess.altText());
+            }
         }
         return ss.str();
     }
@@ -189,7 +195,7 @@ struct ParkedItem
             item.text = fields[3];
             return item;
         }
-        if (fields.size() == 8 && fields[0] == "link") {
+        if ((fields.size() == 8 || fields.size() == 11) && fields[0] == "link") {
             item.property = fields[1];
             item.target = fields[2];
             item.sub = fields[3];
@@ -201,6 +207,9 @@ struct ParkedItem
             }
             catch (...) {
                 item.position = 0;
+            }
+            if (fields.size() == 11) {
+                item.guess = App::GuessRecord::fromAttributes(fields[8], fields[9], fields[10]);
             }
             return item;
         }
@@ -257,6 +266,7 @@ struct SubEntry
     ShadowSub shadow;
     std::string fp;
     App::RetargetRecord record;
+    App::GuessRecord guess;  // the solver's (ops#127, P5)
 };
 
 /// One object with its references: a PropertyLink(Sub), a PropertyXLink, one link of a
@@ -316,7 +326,7 @@ Unit unitOf(const P& prop, App::DocumentObject* obj)
     const auto& subs = prop.getSubValues();
     const auto& shadows = prop.getShadowSubs();
     auto fps = prop.getElementFingerprints();
-    const auto& records = prop.getRetargets();
+    auto records = prop.getElementRecords();
     bool anyEmpty = false;
     for (std::size_t i = 0; i < subs.size(); ++i) {
         if (subs[i].empty()) {
@@ -330,7 +340,10 @@ Unit unitOf(const P& prop, App::DocumentObject* obj)
         entry.sub = subs[i];
         entry.shadow = i < shadows.size() ? shadows[i] : ShadowSub();
         entry.fp = i < fps.size() ? fps[i] : std::string();
-        entry.record = i < records.size() ? records[i] : App::RetargetRecord();
+        if (i < records.size()) {
+            entry.record = records[i].retarget;
+            entry.guess = records[i].guess;
+        }
         unit.subs.push_back(std::move(entry));
     }
     if (anyEmpty && !unit.subs.empty()) {
@@ -346,7 +359,7 @@ void readList(const App::PropertyLinkSubList& prop, std::vector<Unit>& units)
     const auto& subs = prop.getSubValues();
     const auto& shadows = prop.getShadowSubs();
     auto fps = prop.getElementFingerprints();
-    const auto& records = prop.getRetargets();
+    auto records = prop.getElementRecords();
     for (std::size_t i = 0; i < objs.size(); ++i) {
         Unit unit;
         unit.obj = objs[i];
@@ -360,7 +373,10 @@ void readList(const App::PropertyLinkSubList& prop, std::vector<Unit>& units)
             entry.sub = sub;
             entry.shadow = i < shadows.size() ? shadows[i] : ShadowSub();
             entry.fp = i < fps.size() ? fps[i] : std::string();
-            entry.record = i < records.size() ? records[i] : App::RetargetRecord();
+            if (i < records.size()) {
+                entry.record = records[i].retarget;
+                entry.guess = records[i].guess;
+            }
             unit.subs.push_back(std::move(entry));
         }
         units.push_back(std::move(unit));
@@ -479,10 +495,13 @@ SubEntry missingForm(const std::string& mapped,
     return entry;
 }
 
-/// The original a re-target record keeps, as the reference to put back on its object
+/// The original a re-target record keeps, as the reference to put back on its object, with the
+/// guess record it had (N1 3.2: the elements the user rejected stay rejected)
 SubEntry originalOf(const App::RetargetRecord& record)
 {
-    return missingForm(record.origName, record.origIndex, record.origFp, true);
+    SubEntry entry = missingForm(record.origName, record.origIndex, record.origFp, true);
+    entry.guess = record.guess;
+    return entry;
 }
 
 /// The re-target record for an entry the rule moves off obj (N1 3.2: its saved original)
@@ -493,6 +512,16 @@ App::RetargetRecord recordFor(const SubEntry& entry, App::DocumentObject* obj)
     }
     App::RetargetRecord record;
     record.target = obj->getNameInDocument();
+    record.guess = entry.guess;
+    if (!entry.guess.empty()
+        && (!entry.guess.origName.empty() || !entry.guess.origIndex.empty())) {
+        // A provisional pick (P5): the original is the record's, not the picked element, since
+        // the original's name is the one most likely to exist on the earlier object; it has no
+        // fingerprint of its own (the reference's is the pick's)
+        record.origName = entry.guess.origName;
+        record.origIndex = entry.guess.origIndex;
+        return record;
+    }
     record.origIndex = indexOf(entry);
     record.origName = App::bareMappedName(entry.shadow.newName);
     if (record.origName.empty()) {
@@ -544,8 +573,22 @@ public:
         for (auto owner : group) {
             planExpressions(owner);
         }
-        // Everything apply() writes must succeed, so a refusal stays write-free (S2): the parking
-        // record goes into a ParkedReferences string list, and nothing else may hold that name
+        // Everything apply() writes must succeed, so a refusal stays write-free (S2): a sketch's
+        // projections must be in step with its entries (as the Sketcher itself requires), and the
+        // parking record goes into a ParkedReferences string list, which nothing else may hold
+        for (const auto& [key, state] : states) {
+            if (state.kind != Kind::External || !state.changed) {
+                continue;
+            }
+            auto sketch = static_cast<const Sketcher::SketchObject*>(state.owner);
+            if (!sketch->canRetargetExternalGeometry()) {
+                std::ostringstream text;
+                text << "'" << nameOf(sketch)
+                     << "' has external geometry out of step with its projections: recompute it "
+                        "first";
+                throw Base::ValueError(text.str());
+            }
+        }
         for (const auto& [owner, ownerPlan] : owners) {
             if (!ownerPlan.linesChanged && ownerPlan.restoreExprs.empty()) {
                 continue;  // its record isn't written
@@ -876,6 +919,7 @@ private:
                 item.shadowNew = entry.shadow.newName;
                 item.shadowOld = entry.shadow.oldName;
                 item.fp = entry.fp;
+                item.guess = entry.guess;
                 newLines.push_back(item.line());
             }
         }
@@ -905,6 +949,7 @@ private:
                 entry.sub = item.sub;
                 entry.fp = item.fp;
             }
+            entry.guess = item.guess;
             unit.subs.push_back(std::move(entry));
             state.solveOn.insert(target);
         }
@@ -1106,7 +1151,7 @@ private:
                         std::vector<std::string>& subs,
                         std::vector<ShadowSub>& shadows,
                         std::vector<std::string>& fps,
-                        std::vector<App::RetargetRecord>& records)
+                        std::vector<App::ElementRecords>& records)
     {
         for (const auto& u : units) {
             if (u.dropped) {
@@ -1125,18 +1170,19 @@ private:
                 subs.push_back(s.sub);
                 shadows.push_back(s.shadow);
                 fps.push_back(s.fp);
-                records.push_back(s.record);
+                records.push_back({s.guess, s.record});
             }
         }
     }
 
-    /// The records and fingerprints after a setter that passed the shadows on
+    /// The records and fingerprints after a setter that passed the shadows on: a moved entry has
+    /// no guess record (its original is in the re-target record), a restored one gets its own back
     template<class P>
     static void finish(P& prop,
-                       std::vector<App::RetargetRecord>&& records,
+                       std::vector<App::ElementRecords>&& records,
                        const std::vector<std::string>& fps)
     {
-        prop.setRetargets(std::move(records));
+        prop.setElementRecords(std::move(records));
         for (std::size_t i = 0; i < fps.size(); ++i) {
             if (!fps[i].empty()) {
                 prop.setElementFingerprint(i, fps[i]);
@@ -1150,7 +1196,7 @@ private:
         std::vector<std::string> subs;
         std::vector<ShadowSub> shadows;
         std::vector<std::string> fps;
-        std::vector<App::RetargetRecord> records;
+        std::vector<App::ElementRecords> records;
         if (unit.subs.empty()) {
             link.setValue(unit.obj, std::vector<std::string>(), std::vector<ShadowSub>());
             return;
@@ -1166,7 +1212,7 @@ private:
         std::vector<std::string> subs;
         std::vector<ShadowSub> shadows;
         std::vector<std::string> fps;
-        std::vector<App::RetargetRecord> records;
+        std::vector<App::ElementRecords> records;
         std::vector<const Unit*> live;
         for (const auto& u : state.units) {
             if (!u.dropped) {

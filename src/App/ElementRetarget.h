@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "ElementGuess.h"
+
 namespace App
 {
 
@@ -13,7 +15,8 @@ namespace App
  * the feature back below that solid puts it back. It lives with the reference in its link property
  * (parallel to the subs, as the fingerprints), is carried by every solver write-back and by
  * save, restore, copy, paste and undo, and is cleared by any setter that drops the reference's
- * shadow (a user's re-pick), and by the restore. Saved as `rt`, `rto` and `rtfp` on the sub.
+ * shadow (a user's re-pick, a repair), and by the restore. Saved as `rt`, `rto` and `rtfp` on the
+ * sub, with the guess record it carries as `rtguess`, `rtorig` and `rtalt`.
  */
 struct RetargetRecord
 {
@@ -25,6 +28,10 @@ struct RetargetRecord
     std::string origIndex;
     /// The original's fingerprint text (the `fp` encoding), empty if none
     std::string origFp;
+    /// The reference's guess record when it was moved (N1 3.2), the elements the user rejected
+    /// included: the original above is that record's original, and the restore puts the record
+    /// back with it
+    GuessRecord guess;
 
     bool empty() const
     {

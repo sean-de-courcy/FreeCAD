@@ -297,6 +297,7 @@ SET(Properties_HPP_SRCS
     ElementReferences.h
     ElementGuess.h
     ElementRetarget.h
+    ElementRecords.h
     NamingRevision.h
     ReferenceReport.h
     ReferenceRepair.h

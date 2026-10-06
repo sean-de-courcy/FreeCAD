@@ -205,8 +205,11 @@ void repairReference(PropertyLinkBase* prop,
         ? resolution.shadow.newName
         : resolution.shadow.oldName;
     // The repaired reference loses its `from` and its record (and the other pieces of the same
-    // record go: one element replaces them, in a PropertyLinkSub, the only one with pieces).
+    // record go: one element replaces them, in a PropertyLinkSub, the only one with pieces). A
+    // repair is the user's pick, so a reorder's re-target record ends too: a later move back
+    // mustn't overwrite it (ops#127).
     resolution.clearFrom = true;
+    resolution.clearRetarget = true;
     list.push_back(resolution);
     if (freecad_cast<PropertyLinkSub*>(prop)) {
         auto indices = sameRecord(reference, localIndex);

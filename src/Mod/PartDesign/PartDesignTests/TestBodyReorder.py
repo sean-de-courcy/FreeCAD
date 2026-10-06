@@ -924,6 +924,44 @@ class TestBodyReorderV2s(BodyReorderBase, unittest.TestCase):
         self.assertAlmostEqual(restored.Area, 20 * 10 - 4 * 3, delta=1e-6)  # trimmed by the notch
         self.assertEqual(self.savedRetargets(), [])
 
+    def testRejectedGuessComesBackWithTheRestore(self):
+        """The hole's sketch on the block's right side face, through Pad2: the block's sketch is
+        redrawn, the support is found by geometry (a guess), and the user marks it broken. Moved
+        above Pad2 the support goes to the block, its original carried in the re-target record
+        with the rejection; moved back, it is the original on Pad2 again, still rejected (N1 3.2,
+        P5's decision 18)."""
+        block = self.block()
+        pad2 = self.pad2()
+        self.recompute()
+        side = faceWhere(pad2.Shape, lambda f: isPlaneFacing(f, V(1, 0, 0), V(20, 0, 0)))
+        sketch = self.sketchOn("SideSketch", pad2, side, V(20, 10, 5), 2)
+        hole = models.pocket(self.body, sketch, 2, "SideHole")
+        self.recompute()
+        self.assertValid(sketch, hole)
+        blockSketch = self.doc.getObject("BlockSketch")
+        blockSketch.deleteAllGeometry()
+        blockSketch.addGeometry(models.polygon([(20, 20), (20, 0), (0, 0), (0, 20)]), False)
+        self.recompute()
+        self.assertIn("Warning", sketch.State)
+        rejected = sketch.AttachmentSupport[0][1][0]
+        App.markReferenceBroken(sketch, "AttachmentSupport", 0)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        original = sketch.AttachmentSupport[0][1][0]
+        self.assertTrue(original.startswith("?"), original)
+
+        self.body.reorderObject([hole], block, True)
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.recompute()
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertEqual(sketch.AttachmentSupport, [(pad2, (original,))])
+        self.assertFalse(sketch.isValid())
+        self.assertIn("rejected: " + rejected, sketch.getStatusString())
+
     def testFilletFollowsItsBaseThroughAMove(self):
         """A fillet on a block edge moved below the hole: its Base moves to the hole and finds the
         same edge (geometry), and back again (RO5)."""

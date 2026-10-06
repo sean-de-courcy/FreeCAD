@@ -3027,6 +3027,11 @@ void SketchObject::retargetExternalGeometry(const std::vector<App::DocumentObjec
     updateGeoRef = false;
 }
 
+bool SketchObject::canRetargetExternalGeometry() const
+{
+    return externalGeoRef.size() == ExternalGeometry.getValues().size();
+}
+
 void SketchObject::updateGeometryRefs()
 {
     const auto &objs = ExternalGeometry.getValues();

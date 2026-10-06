@@ -3473,7 +3473,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             res = 1;
                         }
                         else if (continuation->blocked(obj, why)) {
-                            // A reference set aside by a reorder (ops#127)
+                            // A reference set aside by a reorder (ops#127): it doesn't run
+                            // either, so its warning goes too
+                            clearWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
                         }
@@ -3938,7 +3940,8 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
     std::string why;
     int res = 0;
     if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
-        // A reference set aside by a reorder fails it here too (ops#127)
+        // A reference set aside by a reorder fails it here too (ops#127), without its warning
+        clearWarning(feature);
         d->addRecomputeLog(why, feature);
         res = 1;
     }

@@ -7,16 +7,21 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
+#include <sstream>
 #include "src/App/InitApplication.h"
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/ElementRecords.h>
 #include <App/ElementRetarget.h>
 #include <App/ElementSolverBatch.h>
 #include <App/FeatureTest.h>
 #include <App/Origin.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
+#include <Base/Reader.h>
+#include <Base/Writer.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureLinearPattern.h>
@@ -52,11 +57,10 @@ TEST(RetargetRecord, rebuildSubListCarriesTheRecordThroughEveryResolution)
     std::vector<App::PropertyLinkBase::ShadowSub> shadows(subs.size());
     std::vector<std::string> fingerprints(subs.size());
     std::vector<std::string> froms(subs.size());
-    std::vector<App::RetargetRecord> records {record("A"),
-                                              record("B"),
-                                              record("C"),
-                                              record("D"),
-                                              record("E")};
+    std::vector<App::ElementRecords> records(5);
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        records[i].retarget = record(std::string(1, char('A' + i)));
+    }
     std::vector<App::SolverResolution> resolutions(4);
     resolutions[0].status = Status::Resolved;
     resolutions[0].index = 0;
@@ -76,11 +80,39 @@ TEST(RetargetRecord, rebuildSubListCarriesTheRecordThroughEveryResolution)
         resolutions, subs, shadows, fingerprints, froms, firstNew, countNew, &records));
     ASSERT_EQ(subs, (std::vector<std::string> {"Edge11", "Edge12", "Edge13", "?Edge3", "Edge5"}));
     ASSERT_EQ(records.size(), 5U);
-    EXPECT_EQ(records[0], record("A"));
-    EXPECT_EQ(records[1], record("B"));
-    EXPECT_EQ(records[2], record("B"));
-    EXPECT_EQ(records[3], record("C"));
-    EXPECT_EQ(records[4], record("E"));
+    EXPECT_EQ(records[0].retarget, record("A"));
+    EXPECT_EQ(records[1].retarget, record("B"));
+    EXPECT_EQ(records[2].retarget, record("B"));
+    EXPECT_EQ(records[3].retarget, record("C"));
+    EXPECT_EQ(records[4].retarget, record("E"));
+}
+
+TEST(RetargetRecord, aRepairEndsItAndEverythingElseKeepsIt)
+{
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"Edge1", "Edge2"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows(subs.size());
+    std::vector<std::string> fingerprints(subs.size());
+    std::vector<std::string> froms(subs.size());
+    std::vector<App::ElementRecords> records(2);
+    records[0].retarget = record("A");
+    records[1].retarget = record("B");
+    std::vector<App::SolverResolution> resolutions(2);
+    resolutions[0].status = Status::Resolved;
+    resolutions[0].index = 0;
+    resolutions[0].sub = "Edge11";
+    resolutions[0].clearFrom = true;
+    resolutions[0].clearRetarget = true;  // repairReference()
+    resolutions[1].status = Status::Resolved;
+    resolutions[1].index = 1;
+    resolutions[1].sub = "Edge12";
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    ASSERT_TRUE(App::rebuildSubList(
+        resolutions, subs, shadows, fingerprints, froms, firstNew, countNew, &records));
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_TRUE(records[0].retarget.empty());
+    EXPECT_EQ(records[1].retarget, record("B"));
 }
 
 class RetargetRecordProperty: public ::testing::Test
@@ -167,6 +199,34 @@ TEST_F(RetargetRecordProperty, linkSubListKeepsItWithShadowsAndEndsItOnARepick)
 
     link.setValue(_target, std::vector<std::string> {"Face5"});
     EXPECT_TRUE(link.getRetargets().empty() || link.getRetargets()[0].empty());
+}
+
+TEST_F(RetargetRecordProperty, theGuessRecordItCarriesIsSavedAndRestored)
+{
+    auto& link = _owner->LinkSub;
+    link.setValue(_target, {"?Face1"}, shadowsOf(1));
+    App::ElementRecords records;
+    records.retarget = record("A");
+    records.retarget.guess.kind = "rejected";
+    records.retarget.guess.origName = "m";
+    records.retarget.guess.origIndex = "Face3";
+    records.retarget.guess.alternatives = {
+        {"Face4", "rejected", std::numeric_limits<double>::quiet_NaN()}};
+    link.setElementRecords({records});
+
+    Base::StringWriter writer;
+    link.Save(writer);
+    EXPECT_NE(writer.getString().find("rtguess=\"rejected\""), std::string::npos);
+    std::stringstream data("<?xml version='1.0' encoding='utf-8'?>\n<Property name='LinkSub'>\n"
+                           + writer.getString() + "</Property>\n");
+    link.setValue(_other, {"Face2"});
+    ASSERT_TRUE(link.getRetargets()[0].empty());
+
+    Base::XMLReader reader("Document.xml", data);
+    link.Restore(reader);
+    EXPECT_EQ(link.getValue(), _target);
+    ASSERT_EQ(link.getRetargets().size(), 1U);
+    EXPECT_EQ(link.getRetargets()[0], records.retarget);
 }
 
 // Body::reorderObject() on a chain of five pads (N1 7.3): P0 a 20 x 20 x 10 block, P1..P4 2 x 2 x 2

@@ -3747,7 +3747,7 @@ TEST(RebuildSubList, guessedSetsTheRecord)
     old.kind = "tier2";
     old.origName = "y";
     old.origIndex = "Edge1";
-    std::vector<App::GuessRecord> guesses {{}, old, old, kept};
+    std::vector<App::ElementRecords> records {{}, {old, {}}, {old, {}}, {kept, {}}};
 
     //   index 0 is guessed as Edge6
     auto guessed = resolution(Status::Guessed, 0);
@@ -3775,16 +3775,16 @@ TEST(RebuildSubList, guessedSetsTheRecord)
                                     froms,
                                     firstNew,
                                     countNew,
-                                    &guesses));
+                                    &records));
 
     EXPECT_EQ(subs, (std::vector<std::string> {"Edge6", "Edge1", "?Edge1", "Edge9"}));
     //   the broken reference keeps its fingerprint for a retry
     EXPECT_EQ(fingerprints, (std::vector<std::string> {"", "", "f8", "f9"}));
-    ASSERT_EQ(guesses.size(), 4U);
-    EXPECT_EQ(guesses[0], guessed.guess);
-    EXPECT_TRUE(guesses[1].empty());
-    EXPECT_TRUE(guesses[2].empty());
-    EXPECT_EQ(guesses[3], kept);
+    ASSERT_EQ(records.size(), 4U);
+    EXPECT_EQ(records[0].guess, guessed.guess);
+    EXPECT_TRUE(records[1].guess.empty());
+    EXPECT_TRUE(records[2].guess.empty());
+    EXPECT_EQ(records[3].guess, kept);
 }
 
 TEST(RebuildSubList, guessedPiecesCarryTheRecord)
@@ -3799,7 +3799,7 @@ TEST(RebuildSubList, guessedPiecesCarryTheRecord)
     };
     std::vector<std::string> fingerprints {"f3", "f4"};
     std::vector<std::string> froms {"", ""};
-    std::vector<App::GuessRecord> guesses;
+    std::vector<App::ElementRecords> records;
 
     auto expanded = resolution(Status::Guessed, 0);
     expanded.from = "a";
@@ -3821,15 +3821,15 @@ TEST(RebuildSubList, guessedPiecesCarryTheRecord)
                                     froms,
                                     firstNew,
                                     countNew,
-                                    &guesses));
+                                    &records));
 
     EXPECT_EQ(subs, (std::vector<std::string> {"Edge3", "Edge6", "Edge4"}));
     EXPECT_EQ(fingerprints, (std::vector<std::string> {"", "", "f4"}));
     EXPECT_EQ(froms, (std::vector<std::string> {"a", "a", ""}));
-    ASSERT_EQ(guesses.size(), 3U);
-    EXPECT_EQ(guesses[0], expanded.guess);
-    EXPECT_EQ(guesses[1], expanded.guess);
-    EXPECT_TRUE(guesses[2].empty());
+    ASSERT_EQ(records.size(), 3U);
+    EXPECT_EQ(records[0].guess, expanded.guess);
+    EXPECT_EQ(records[1].guess, expanded.guess);
+    EXPECT_TRUE(records[2].guess.empty());
     EXPECT_EQ(countNew, (std::vector<int> {2, 1}));
 }
 

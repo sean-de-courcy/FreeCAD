@@ -266,6 +266,9 @@ public:
     void retargetExternalGeometry(const std::vector<App::DocumentObject*>& objs,
                                   const std::vector<std::string>& subs,
                                   std::vector<App::PropertyLinkBase::ShadowSub>&& shadows);
+    /// Whether retargetExternalGeometry() can write the entries: the projections' keys are in
+    /// step with ExternalGeometry (ops#127: a reorder checks it before it writes anything)
+    bool canRetargetExternalGeometry() const;
 
     /** deletes all external geometry */
     int delAllExternal();

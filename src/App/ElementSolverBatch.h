@@ -11,7 +11,7 @@
 #include <Base/Vector3D.h>
 
 #include "ElementFingerprint.h"
-#include "ElementGuess.h"
+#include "ElementRecords.h"
 #include "PropertyLinks.h"
 
 namespace App
@@ -128,6 +128,9 @@ struct AppExport SolverResolution
     bool clearFingerprint = false;
     /// Guessed: the record. Resolved and Broken always clear a reference's record (ops#127).
     GuessRecord guess;
+    /// Resolved by a repair (the user picked the element): the reorder's re-target record ends
+    /// too (ops#127). Every other resolution keeps it.
+    bool clearRetarget = false;
 
     /// The update's context.
     DocumentObject* feature = nullptr;
@@ -145,12 +148,12 @@ struct AppExport SolverResolution
  * Resolved and Broken replace a reference, Expanded replaces it by its pieces (a piece whose
  * element another reference of the new list or an untouched one already holds is skipped),
  * Removed drops it. Fingerprints of written references are emptied (the caller refreshes them),
- * except a Broken one's, which it keeps unless clearFingerprint is set. Guessed (ops#127) replaces
- * a reference as Resolved does, or by its pieces as Expanded does, and sets its record in
- * \a guesses; Broken sets the resolution's record (empty, or the one it carries); every other
- * written reference loses its record. \a retargets, if given, are the reorder's re-target records
- * (ops#127): every resolution keeps its reference's record, and each piece of an expanded
- * reference carries it. Sets \a firstNew and \a countNew per old index. Returns true if anything
+ * except a Broken one's, which it keeps unless clearFingerprint is set. \a records, if given, are
+ * the references' records (ops#127). Their guess record: Guessed (ops#127) replaces a reference as
+ * Resolved does, or by its pieces as Expanded does, and sets it; Broken sets the resolution's
+ * (empty, or the one it carries); every other written reference loses it. Their re-target record:
+ * every resolution keeps it (each piece of an expanded reference carries it), unless
+ * clearRetarget is set. Sets \a firstNew and \a countNew per old index. Returns true if anything
  * was written.
  */
 AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
@@ -160,8 +163,7 @@ AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& froms,
                               std::vector<int>& firstNew,
                               std::vector<int>& countNew,
-                              std::vector<GuessRecord>* guesses = nullptr,
-                              std::vector<RetargetRecord>* retargets = nullptr);
+                              std::vector<ElementRecords>* records = nullptr);
 
 /// The indices \a mapped (of the old list) in a rebuilt list: each old index m becomes
 /// firstNew[m] .. firstNew[m] + countNew[m] - 1, a removed one disappears.
