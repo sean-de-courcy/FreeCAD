@@ -3179,9 +3179,20 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     // at its place in the projection order, not be appended after the kept ones: a placeholder
     // with the new Id goes right after the entry's previous geometry (or before its next kept one),
     // and the rebuild replaces it with the projection. When none is kept, the rebuild appends all
-    // of them in order, which is that order already.
+    // of them in order, which is that order already. A frozen entry gets none: the rebuild skips
+    // the whole entry while one of its geometries is frozen, so a placeholder would stay a copy of
+    // its neighbour; the deleted projection stays gone, as the freeze says.
+    bool frozen = false;
+    bool defining = true;  // the entry's state, as the rebuild infers it for a new geometry
+    for (std::size_t n = 0; n < refs.size(); ++n) {
+        if (kept[n]) {
+            auto egf = ExternalGeometryFacade::getFacade(geos[externalGeoMap[refs[n]]]);
+            frozen = frozen || egf->testFlag(ExternalGeometryExtension::Frozen);
+            defining = defining && egf->testFlag(ExternalGeometryExtension::Defining);
+        }
+    }
     std::vector<int> inserted;  // the ExternalGeo indexes the placeholders took, in turn
-    if (replaced > 0 && replaced < static_cast<int>(ids.size())) {
+    if (replaced > 0 && replaced < static_cast<int>(ids.size()) && !frozen) {
         auto indexOf = [&geos](long id) {
             for (std::size_t i = 0; i < geos.size(); ++i) {
                 if (GeometryFacade::getId(geos[i]) == id) {
@@ -3196,7 +3207,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
                 previous = indexOf(refs[n]);
                 continue;
             }
-            int model = previous;  // a kept geometry of the entry: the placeholder copies its flags
+            int model = previous;  // a kept geometry of the entry, which the placeholder copies
             if (model < 0) {
                 auto next = std::find(kept.begin() + n, kept.end(), true);
                 model = indexOf(refs[next - kept.begin()]);
@@ -3207,7 +3218,14 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             const int at = previous >= 0 ? previous + 1 : model;
             auto placeholder = geos[model]->copy();
             GeometryFacade::setId(placeholder, refs[n]);
-            ExternalGeometryFacade::getFacade(placeholder)->setRef(key);
+            // The rebuild keeps the placeholder's flags on the projection: give it the entry's
+            auto egf = ExternalGeometryFacade::getFacade(placeholder);
+            egf->setRef(key);
+            egf->setFlag(ExternalGeometryExtension::Defining, defining);
+            egf->setFlag(ExternalGeometryExtension::Frozen, false);
+            egf->setFlag(ExternalGeometryExtension::Sync, false);
+            egf->setFlag(ExternalGeometryExtension::Missing, false);
+            egf->setFlag(ExternalGeometryExtension::Detached, false);
             geos.insert(geos.begin() + at, placeholder);
             inserted.push_back(at);
             previous = at;

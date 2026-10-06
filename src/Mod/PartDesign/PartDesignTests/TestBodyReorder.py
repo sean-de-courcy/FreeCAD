@@ -971,8 +971,11 @@ class BodyReorderBase:
             [c.First for c in sketch.Constraints], [g + (g < -3 - deleted) for g in (-4, -6)]
         )
 
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Move back")
         self.body.reorderObject([hole], pad2, True)
         self.recompute()
+        self.doc.commitTransaction()
         return block, pad2, sketch, hole, before
 
     def assertFaceRestored(self, sketch, hole, before, deleted, new=None):
@@ -1001,11 +1004,23 @@ class BodyReorderBase:
 
     def checkFaceProjectionPartlyDeleted(self, deleted):
         """RO11j: moved back, edge `deleted` comes back new at its own place, the others on their
-        own Ids with their constraints; the order lasts through two more rebuilds and a save and
-        reopen (each rebuilds the Ids' order from ExternalGeo)."""
+        own Ids with their constraints; the order lasts through an undo and redo of the move, two
+        more rebuilds and a save and reopen (each rebuilds the Ids' order from ExternalGeo)."""
         block, pad2, sketch, hole, before = self.faceProjectionPartlyDeleted(deleted)
         self.assertEqual(self.parked(sketch), [])
         new = self.assertFaceRestored(sketch, hole, before, deleted)
+
+        self.doc.undo()
+        self.recompute()
+        self.assertEqual(len(self.parked(sketch)), 1)
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertEqual(len(sketch.ExternalGeo), 5)
+        self.assertEqual([self.projection(sketch, i)[1] for i in range(2, 5)], [""] * 3)
+        self.assertFalse(sketch.isValid())
+        self.doc.redo()
+        self.recompute()
+        self.assertEqual(self.parked(sketch), [])
+        self.assertFaceRestored(sketch, hole, before, deleted, new)
         for _ in range(2):
             sketch.touch()
             self.recompute()

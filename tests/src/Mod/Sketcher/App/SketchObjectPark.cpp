@@ -99,6 +99,20 @@ long idOf(const Part::Geometry* geo)
     return ExternalGeometryFacade::getFacade(geo)->getId();
 }
 
+// Sets `flag` on the external geometries at `indexes` (into ExternalGeo), as the Sketcher's
+// toggles write it
+void setExternalFlag(Sketcher::SketchObject* sketch,
+                     const std::vector<int>& indexes,
+                     ExternalGeometryExtension::Flag flag)
+{
+    auto geos = sketch->ExternalGeo.getValues();
+    for (int index : indexes) {
+        geos[index] = geos[index]->clone();
+        ExternalGeometryFacade::getFacade(geos[index])->setFlag(flag, true);
+    }
+    sketch->ExternalGeo.setValues(std::move(geos));
+}
+
 }  // namespace
 
 class SketchObjectParkTest: public SketchObjectTest
@@ -160,8 +174,38 @@ protected:
     std::string verticalEdge;  // an intersection gives its point
     int lineId {};
 
+    // Projects the box's bottom face (four geometries) and recomputes; returns their ends
+    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> projectFace();
     void unparkReplacesADeletedGeometry(int deleted);
 };
+
+std::vector<std::pair<Base::Vector3d, Base::Vector3d>> SketchObjectParkTest::projectFace()
+{
+    auto sketch = getObject();
+    std::string face;
+    auto shape = Part::Feature::getTopoShape(box, Part::ShapeOption::NoFlag);
+    for (int i = 1; i <= static_cast<int>(shape.countSubShapes(TopAbs_FACE)) && face.empty(); ++i) {
+        std::string name = "Face" + std::to_string(i);
+        Base::BoundBox3d bb = shape.getSubTopoShape(name.c_str()).getBoundBox();
+        if (bb.LengthZ() < tolerance) {
+            face = name;
+        }
+    }
+    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> ends;
+    if (face.empty() || sketch->addExternal(box, face.c_str()) < 0) {
+        return ends;
+    }
+    doc->recompute();
+    for (int i = 0; i < sketch->ExternalGeo.getSize() - 2; ++i) {
+        auto line = dynamic_cast<const Part::GeomLineSegment*>(
+            sketch->getGeometry(GeoEnum::RefExt - i));
+        if (!line) {
+            return {};
+        }
+        ends.emplace_back(line->getStartPoint(), line->getEndPoint());
+    }
+    return ends;
+}
 
 TEST_F(SketchObjectParkTest, parkKeepsGeometryIdAndConstraints)
 {
@@ -320,28 +364,11 @@ void SketchObjectParkTest::unparkReplacesADeletedGeometry(int deleted)
 {
     // Arrange
     auto sketch = getObject();
-    std::string face;
-    auto shape = Part::Feature::getTopoShape(box, Part::ShapeOption::NoFlag);
-    for (int i = 1; i <= static_cast<int>(shape.countSubShapes(TopAbs_FACE)) && face.empty(); ++i) {
-        std::string name = "Face" + std::to_string(i);
-        Base::BoundBox3d bb = shape.getSubTopoShape(name.c_str()).getBoundBox();
-        if (bb.LengthZ() < tolerance) {
-            face = name;
-        }
-    }
-    ASSERT_FALSE(face.empty());
-    ASSERT_GE(sketch->addExternal(box, face.c_str()), 0);
-    doc->recompute();
+    const auto before = projectFace();
+    ASSERT_EQ(before.size(), 4U);
     const auto ids = sketch->externalGeometryIds(0);
     ASSERT_EQ(ids.size(), 4U);
     const std::string ref = refOf(sketch->getGeometry(GeoEnum::RefExt));
-    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> before;
-    for (int i = 0; i < 4; ++i) {
-        auto line = dynamic_cast<const Part::GeomLineSegment*>(
-            sketch->getGeometry(GeoEnum::RefExt - i));
-        ASSERT_NE(line, nullptr);
-        before.emplace_back(line->getStartPoint(), line->getEndPoint());
-    }
     Part::GeomLineSegment segment;
     segment.setPoints(Base::Vector3d(1, 1, 0), Base::Vector3d(4, 6, 0));
     const int line = sketch->addGeometry(&segment);
@@ -425,6 +452,68 @@ TEST_F(SketchObjectParkTest, unparkReplacesADeletedGeometry)
 TEST_F(SketchObjectParkTest, unparkReplacesADeletedMiddleGeometry)
 {
     unparkReplacesADeletedGeometry(2);
+}
+
+TEST_F(SketchObjectParkTest, unparkLeavesAFrozenEntryAlone)
+{
+    // Arrange: the face's projection frozen, parked, its third geometry deleted
+    auto sketch = getObject();
+    const auto before = projectFace();
+    ASSERT_EQ(before.size(), 4U);
+    const auto ids = sketch->externalGeometryIds(0);
+    setExternalFlag(sketch, {2, 3, 4, 5}, ExternalGeometryExtension::Frozen);
+    doc->recompute();
+    const int geoCount = sketch->ExternalGeo.getSize();
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    ASSERT_EQ(sketch->delExternal(2), 0);
+
+    // Act
+    int replaced = sketch->unparkExternalGeometry(box, sub, std::move(shadow), 0, ids);
+    doc->recompute();
+    sketch->touch();
+    doc->recompute();
+
+    // Assert: the rebuild skips a frozen entry, so nothing stands in for the deleted geometry; the
+    // others are where they were, on their Ids, still frozen
+    EXPECT_EQ(replaced, 1);
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount - 1);
+    const int keptAt[] = {0, 1, 3};
+    for (int i = 0; i < 3; ++i) {
+        auto geo = sketch->getGeometry(GeoEnum::RefExt - i);
+        EXPECT_EQ(idOf(geo), ids[keptAt[i]]) << "projection " << keptAt[i];
+        EXPECT_TRUE(hasEnds(geo, before[keptAt[i]])) << "projection " << keptAt[i];
+        EXPECT_TRUE(ExternalGeometryFacade::getFacade(geo)->testFlag(
+            ExternalGeometryExtension::Frozen));
+    }
+}
+
+TEST_F(SketchObjectParkTest, unparkGivesANewGeometryTheEntrysDefiningState)
+{
+    // Arrange: parked, the second geometry alone made defining, the third deleted
+    auto sketch = getObject();
+    const auto before = projectFace();
+    ASSERT_EQ(before.size(), 4U);
+    const auto ids = sketch->externalGeometryIds(0);
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    setExternalFlag(sketch, {3}, ExternalGeometryExtension::Defining);
+    ASSERT_EQ(sketch->delExternal(2), 0);
+
+    // Act
+    sketch->unparkExternalGeometry(box, sub, std::move(shadow), 0, ids);
+    doc->recompute();
+
+    // Assert: the new geometry is in place and not defining, as the entry isn't (one of its
+    // geometries is); the second keeps its own state
+    auto added = sketch->getGeometry(GeoEnum::RefExt - 2);
+    EXPECT_TRUE(hasEnds(added, before[2]));
+    EXPECT_FALSE(ExternalGeometryFacade::getFacade(added)->testFlag(
+        ExternalGeometryExtension::Defining));
+    EXPECT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt - 1))
+                    ->testFlag(ExternalGeometryExtension::Defining));
 }
 
 TEST_F(SketchObjectParkTest, parkUndoesAndRedoes)
