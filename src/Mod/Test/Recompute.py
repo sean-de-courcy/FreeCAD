@@ -891,15 +891,35 @@ class FineGrainedAliasCases(unittest.TestCase):
         self.Doc.recompute()
         self.assertPad(12.0)
 
+        # A1 has a property again, so an edge left naming "A1" would resolve
+        # to the wrong cell: the edge must name the alias
+        sheet.set("A2", "13")
+        self.Doc.recompute()
+        self.assertPad(13.0)
+
+        # A column inserted before the cell, then the alias renamed (upstream
+        # rewrites the references to the new name)
+        sheet.insertColumns("A", 1)
+        self.assertEqual(sheet.getAlias("B2"), "L")
+        sheet.set("B2", "11")
+        self.Doc.recompute()
+        self.assertPad(11.0)
+
+        sheet.setAlias("B2", "len")
+        self.assertEqual(pad.ExpressionEngine, [("Length", "Sheet.len")])
+        sheet.set("B2", "9")
+        self.Doc.recompute()
+        self.assertPad(9.0)
+
         self.reopen()
         sheet = self.Doc.getObject("Sheet")
         sheet.insertRows("1", 1)
-        self.assertEqual(sheet.getAlias("A3"), "L")
-        sheet.set("A3", "14")
+        self.assertEqual(sheet.getAlias("B3"), "len")
+        sheet.set("B3", "14")
         self.Doc.recompute()
         self.assertPad(14.0)
 
-        sheet.set("A1", "98")
+        sheet.set("B1", "98")
         self.Doc.recompute()
         self.assertPad(14.0)
 

@@ -21,14 +21,18 @@
  ***************************************************************************/
 
 #include <limits>
+#include <unordered_map>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionSpinBox>
 #include <QStylePainter>
 
 #include <boost/math/special_functions/round.hpp>
 
+#include <App/Document.h>
+#include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/PropertyUnits.h>
 
@@ -45,6 +49,14 @@ using namespace Base;
 
 namespace SpinBoxPrivate
 {
+// FreeCAD-CH (ops#155): each bound spin box's connection to its document's property changes,
+// kept here so that SpinBox.h (included by every task panel) doesn't change
+std::unordered_map<const ExpressionSpinBox*, fastsignals::scoped_connection>& propertyConnections()
+{
+    static std::unordered_map<const ExpressionSpinBox*, fastsignals::scoped_connection> connections;
+    return connections;
+}
+
 class ExpressionResetDoubleClickFilter: public QObject
 {
 public:
@@ -108,7 +120,10 @@ ExpressionSpinBox::ExpressionSpinBox(QAbstractSpinBox* sb)
     spinbox->installEventFilter(new SpinBoxPrivate::ExpressionFocusOutFilter(*this, spinbox));
 }
 
-ExpressionSpinBox::~ExpressionSpinBox() = default;
+ExpressionSpinBox::~ExpressionSpinBox()
+{
+    SpinBoxPrivate::propertyConnections().erase(this);
+}
 
 void ExpressionSpinBox::stashExpression()
 {
@@ -157,7 +172,30 @@ void ExpressionSpinBox::bind(const App::ObjectIdentifier& _path)
 {
     ExpressionBinding::bind(_path);
 
+    // FreeCAD-CH (ops#155): a field with an expression shows the property's new value when a
+    // recompute changes it while the field is open (the panel's own recompute on open, a Sheet
+    // change). The binding only hears of changes to the expression's text. The refresh blocks the
+    // spin box's signals: a panel writes the property and recomputes on valueChanged, a loop.
+    // A field without an expression is the user's and is left alone.
+    auto& connection = SpinBoxPrivate::propertyConnections()[this];
+    connection.disconnect();
+    const App::Property* prop = getPath().getProperty();
+    App::DocumentObject* obj = getPath().getDocumentObject();
+    if (prop && obj && obj->getDocument()) {
+        connection = obj->getDocument()->signalChangedObject.connect(
+            [this, prop](const App::DocumentObject&, const App::Property& changed) {
+                if (&changed != prop || !hasExpression()) {
+                    return;
+                }
+                QSignalBlocker blocker(spinbox);
+                showValidExpression(Number::SetIfNumber);
+            }
+        );
+    }
+
     showIcon();
+    // Read-only and grey at once, not at the first resize (ops#155)
+    updateExpression();
 }
 
 void ExpressionSpinBox::showIcon()
