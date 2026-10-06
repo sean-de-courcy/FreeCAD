@@ -243,6 +243,42 @@ class FailurePassThroughBase:
         self.assertVolume(pattern, BLOCK)
         self.assertBody(BLOCK)
 
+    def testMultiTransformStepInErrorFailsItsMultiTransform(self):
+        """A MultiTransform's step (added to the Body as the task panel does) in error is claimed
+        like any member: it isn't left touched, the MultiTransform fails naming it and passes the
+        hole through, and the boss after it computes (review M1 of fork PR 114)."""
+        self.block()
+        hole = self.hole()
+        multi = self.doc.addObject("PartDesign::MultiTransform", "HoleMulti")
+        multi.Originals = [hole]
+        multi.Refine = False
+        self.body.addObject(multi)
+        step = self.doc.addObject("PartDesign::LinearPattern", "HoleStep")
+        step.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        step.Mode = "Spacing"
+        step.Offset = 6.5  # the second hole at x = 16.5, clear of the first and of the side
+        step.Occurrences = 2
+        self.body.addObject(step)
+        multi.Transformations = [step]
+        self.assertIs(self.body.Tip, multi)
+        boss = self.boss(multi)
+        self.recompute()
+        self.assertValid(multi, boss)
+        self.assertBody(BLOCK - 2 * HOLE + BOSS)
+
+        step.setExpression("Offset", "Block.NoSuchProperty")
+        self.recompute()
+        self.assertFailed(step)
+        self.assertFailed(multi, "Transformations", step.Label)
+        self.assertVolume(multi, BLOCK - HOLE)
+        self.assertValid(boss)
+        self.assertBody(BLOCK - HOLE + BOSS)
+
+        step.setExpression("Offset", None)
+        self.recompute()
+        self.assertValid(step, multi, boss)
+        self.assertBody(BLOCK - 2 * HOLE + BOSS)
+
     def testSketchOnADatumInErrorFails(self):
         """A datum plane on the hole's floor (a face the hole made) fails with the hole; a sketch
         attached to the datum fails naming it, and so does the boss of that sketch (T3, F4)."""

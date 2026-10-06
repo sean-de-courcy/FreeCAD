@@ -28,8 +28,11 @@ namespace PartDesign
 namespace
 {
 
-/// The Body `obj` belongs to: a PartDesign feature's own (also a MultiTransform's
-/// sub-transformation, which isn't in the Body's Group), else the Body whose Group holds it
+/// The Body `obj` belongs to: a PartDesign feature's own (Feature::getFeatureBody(): its _Body,
+/// else the Body whose Group holds it), else the Body whose Group holds it. A MultiTransform's
+/// sub-transformation is a member too (it is added with body.newObject); it isn't a solid
+/// feature, so it doesn't pass through. The claim (continuesAfter()) and the pass-through
+/// (afterFailure()) both use this one test.
 Body* bodyOf(const App::DocumentObject* obj)
 {
     if (!obj || obj->isDerivedFrom<Part::BodyBase>()) {
@@ -177,7 +180,7 @@ public:
     void afterFailure(App::DocumentObject* failed) const override
     {
         auto feature = freecad_cast<Feature*>(failed);
-        if (!feature || !Body::isSolidFeature(feature) || !feature->getFeatureBody()) {
+        if (!feature || !Body::isSolidFeature(feature) || !bodyOf(feature)) {
             // A non-solid member keeps its old output, which nothing reads as a solid
             return;
         }

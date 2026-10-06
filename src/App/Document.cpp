@@ -3419,7 +3419,6 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 bool doRecompute = false;
                 if (obj->mustRecompute()) {
                     doRecompute = true;
-                    ++objectCount;
                     int res = 0;
                     if (continuation) {
                         // An input that the rule's failure left in error, in this recompute or
@@ -3445,6 +3444,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             res = 1;
                         }
                     }
+                    // Counted when it runs or fails, not when it is skipped
+                    ++objectCount;
                     if (res == 0) {
                         res = _recomputeFeature(obj);
                     }
