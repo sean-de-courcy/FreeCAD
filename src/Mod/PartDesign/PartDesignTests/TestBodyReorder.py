@@ -433,6 +433,47 @@ class BodyReorderBase:
             self.assertEqual(list(self.body.Group), group)
             self.assertChain(block, a, b, c)
 
+    def testDatumAfterItsSketchIsCarried(self):
+        """B's sketch sits on a datum plane that comes after the sketch in the Group: B moved below
+        C carries both its sketch and the datum (review M3)."""
+        block, a, b, c = self.chain()
+        sketch = b.Profile[0]
+        datum = self.doc.addObject("PartDesign::Plane", "BossBLevel")
+        self.body.insertObject(datum, sketch, True)
+        datum.MapMode = "Deactivated"
+        datum.Placement = App.Placement(V(0, 0, 10), App.Rotation())
+        sketch.AttachmentSupport = [(datum, "")]
+        sketch.MapMode = "FlatFace"
+        self.recompute()
+        group = list(self.body.Group)
+        self.assertEqual(group.index(datum), group.index(sketch) + 1)
+        self.body.reorderObject([b], c, True)
+        self.assertChain(block, a, c, b)
+        group = list(self.body.Group)
+        self.assertEqual(group[-3:], [sketch, datum, b])
+        self.recompute()
+        self.assertValid(sketch, b)
+        self.assertBody(BLOCK + 2 * BOSS - HOLE)
+
+    def testTipOutsideTheGroupIsTheEnd(self):
+        """A Tip that isn't a member (set from Python, or a stale file), or a sketch after the last
+        solid: nothing comes after it, so nothing is held, the Body included (review M1)."""
+        block, a, b, c = self.chain()
+        outside = self.doc.addObject("Part::Box", "Outside")
+        self.body.Tip = outside
+        self.assertFalse(self.body.isRolledBack())
+        self.assertFalse(self.body.holds(self.body))
+        self.assertFalse(self.body.holds(c))
+        sketch = models.sketch(self.doc, "Last", models.rectangle(0, 0, 1, 1))
+        self.body.addObject(sketch)
+        self.body.Group = [o for o in self.body.Group if o != sketch] + [sketch]
+        self.body.Tip = sketch
+        self.assertFalse(self.body.isRolledBack())
+        self.assertFalse(self.body.holds(self.body))
+        self.body.Tip = b
+        self.assertTrue(self.body.isRolledBack())
+        self.assertTrue(self.body.holds(c))
+
     def testRemoveObjectsKeepsTheChain(self):
         block, a, b, c = self.chain()
         self.body.removeObjects([a, b])
@@ -497,7 +538,37 @@ class BodyReorderBase:
         self.assertValid(sketch, hole)
         target, subs = sketch.AttachmentSupport[0]
         self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(1, 0, 0), V(20, 0, 0)))
         self.assertEqual(self.savedRetargets(), [])
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testSaveAndReopenWithARecord(self):
+        """The hole moved above Pad2, saved and reopened: the support is still on the block with
+        its re-target record; moved back, it is on Pad2's top face again (N1 3.4 a, review T1)."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, f"BodyReorder{type(self).__name__}Record.FCStd")
+        self.doc.saveAs(path)
+        names = [o.Name for o in (self.body, block, pad2, sketch, hole)]
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        body, block, pad2, sketch, hole = (self.doc.getObject(name) for name in names)
+        self.body = body
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.recompute()
+        self.assertFalse(hole.isValid())
+
+        body.reorderObject([hole], pad2, True)
+        self.assertChain(block, pad2, hole)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
     def testRepickEndsTheRecord(self):
@@ -549,6 +620,7 @@ class BodyReorderBase:
         self.recompute()
         self.assertValid(first, second)
         self.body.reorderObject([first], block, True)
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
         self.recompute()
         self.assertFalse(sketch.isValid())
         self.assertFalse(first.isValid())
@@ -557,6 +629,9 @@ class BodyReorderBase:
         self.assertChain(block, pad2, first, second)
         self.recompute()
         self.assertValid(sketch, first, second)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
     def testExternalGeometryComesBack(self):
@@ -579,10 +654,26 @@ class BodyReorderBase:
         self.recompute()
         self.assertValid(sketch, hole)
 
+        group = list(self.body.Group)
+        bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
+        tip = self.body.Tip
+        external = sketch.ExternalGeometry
         with self.assertRaises(ValueError) as refused:
             self.body.reorderObject([hole], None, True)
         self.assertIn("projects", str(refused.exception))
-        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        # Nothing changed (review T2)
+        self.assertEqual(list(self.body.Group), group)
+        self.assertEqual(
+            [o.BaseFeature for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")],
+            bases,
+        )
+        self.assertIs(self.body.Tip, tip)
+        self.assertEqual(sketch.ExternalGeometry, external)
+        self.assertEqual(len(sketch.Constraints), constraints)
+        self.assertEqual(len(sketch.ExternalGeo), 3)
+        self.assertEqual(self.savedRetargets(), [])
+        self.assertEqual(self.parked(sketch), [])
+        self.assertEqual(self.parked(hole), [])
 
         self.body.reorderObject([hole], block, True)
         self.assertIs(sketch.ExternalGeometry[0][0], block)
@@ -678,6 +769,47 @@ class BodyReorderBase:
         self.recompute()
         self.assertAlmostEqual(b.Length.Value, 7)
         self.assertValid(b)
+
+    def testExpressionReadingTwoLaterFeatures(self):
+        """C's length reads A and B: C moved above both has its expression set aside; moved back
+        between them it stays aside, since B is still later; below B it is back (review S3)."""
+        block, a, b, c = self.chain()
+        c.setExpression("Length", "BossA.Length + BossB.Length - 7 mm")
+        self.recompute()
+        self.assertAlmostEqual(c.Length.Value, 3)
+        self.body.reorderObject([c], block, True)
+        self.assertEqual(c.ExpressionEngine, [])
+        self.assertEqual(len(self.parked(c)), 1)
+        self.body.reorderObject([c], a, True)
+        self.assertChain(block, a, c, b)
+        self.assertEqual(c.ExpressionEngine, [])
+        self.assertEqual(len(self.parked(c)), 1)
+        self.body.reorderObject([c], b, True)
+        self.assertChain(block, a, b, c)
+        self.assertEqual([e[0] for e in c.ExpressionEngine], ["Length"])
+        self.assertEqual(self.parked(c), [])
+        self.recompute()
+        self.assertValid(c)
+        self.assertBody(BLOCK + 2 * BOSS - HOLE)
+
+    def testParkedReferencesOfAnotherTypeRefuses(self):
+        """B owns a property 'ParkedReferences' that isn't a string list: a move that would park
+        its expression is refused before anything is written (review S1)."""
+        block, a, b, c = self.chain()
+        b.setExpression("Length", "BossA.Length")
+        b.addProperty("App::PropertyInteger", "ParkedReferences")
+        self.recompute()
+        group = list(self.body.Group)
+        bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
+        with self.assertRaises(ValueError) as refused:
+            self.body.reorderObject([b], block, True)
+        self.assertIn("ParkedReferences", str(refused.exception))
+        self.assertEqual(list(self.body.Group), group)
+        self.assertEqual(
+            [o.BaseFeature for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")],
+            bases,
+        )
+        self.assertEqual([e[0] for e in b.ExpressionEngine], ["Length"])
 
     def testExpressionReadingAnotherFeaturesSketch(self):
         """C's length reads a sketch that sits on A's top face and belongs to another pocket: C

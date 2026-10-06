@@ -179,6 +179,13 @@ class MoveAboveDependency(ReorderScenario):
             return self.afterUp()
         return self.onFace()[1]
 
+    def target(self):
+        """The object the support must be on: the face's feature, the hole's new base after
+        `up` (so a move back that leaves the support on the block's like face is wrong)."""
+        if getattr(self, "stepName", None) == "up":
+            return self.upTarget
+        return self.onFace()[0]
+
     def build(self, doc):
         body = m.body(doc)
         self.bodyObject = body
@@ -187,13 +194,14 @@ class MoveAboveDependency(ReorderScenario):
         name, predicate, centre = self.onFace()
         sketch = self.sketchOn(doc, body, "HoleSketch", doc.getObject(name), predicate, centre, 1)
         m.pocket(body, sketch, 2, "Hole")
-        self.ref("support", sketch, "AttachmentSupport", self.expected, Attached())
+        self.ref("support", sketch, "AttachmentSupport", self.expected, Attached(), self.target)
 
     def up(self, doc):
         body = self.bodyObject
         previous = body.Group[body.Group.index(self.above) - 1]
         while not previous.isDerivedFrom("PartDesign::Feature"):
             previous = body.Group[body.Group.index(previous) - 1]
+        self.upTarget = previous.Name
         body.reorderObject([doc.Hole], previous, True)
 
     def back(self, doc):
@@ -261,6 +269,9 @@ class MoveProjectionAbovePad(ReorderScenario):
     def expected(self):
         return BROKEN if self.stepName == "up" else self.frontEdge()
 
+    def target(self):
+        return "Block" if getattr(self, "stepName", None) == "up" else "Pad2"
+
     def build(self, doc):
         body = m.body(doc)
         self.bodyObject = body
@@ -270,7 +281,9 @@ class MoveProjectionAbovePad(ReorderScenario):
         sketch = m.sketch(doc, "Projecting", [m.circle(10, 10, 1)], body, z=15)
         sketch.addExternal(pad2.Name, self.names(pad2, self.frontEdge())[0])
         m.pocket(body, sketch, 1, "Hole")
-        self.ref("projection", sketch, "ExternalGeometry", self.expected, ExternalCoincides())
+        self.ref(
+            "projection", sketch, "ExternalGeometry", self.expected, ExternalCoincides(), self.target
+        )
 
     def up(self, doc):
         self.bodyObject.reorderObject([doc.Hole], doc.Block, True)

@@ -707,11 +707,13 @@ class Bound(Outcome):
 class Ref:
     """One reference: the property `prop` of object `owner`, the expected element after each
     step (`expect`, a callable returning a predicate, `pieces(...)` or `BROKEN`), and the
-    consumer's outcome check."""
+    consumer's outcome check. `on`, if given, returns the name of the object the reference must
+    be on after the step (or None): a correct element on another object is wrong (ops#127, a
+    move back that must restore the original object)."""
 
-    def __init__(self, name, owner, prop, expect, outcome=None):
+    def __init__(self, name, owner, prop, expect, outcome=None, on=None):
         self.name, self.owner, self.prop = name, owner, prop
-        self.expect, self.outcome = expect, outcome
+        self.expect, self.outcome, self.on = expect, outcome, on
 
 
 def storedLinks(obj, prop):
@@ -812,10 +814,10 @@ class Scenario:
 
     # For the scenario's author
 
-    def ref(self, name, owner, prop, expect, outcome=None):
+    def ref(self, name, owner, prop, expect, outcome=None, on=None):
         if name not in self.REFS:
             raise ScenarioError(f"reference {name!r} isn't listed in REFS")
-        self.refs[name] = Ref(name, owner.Name, prop, expect, outcome)
+        self.refs[name] = Ref(name, owner.Name, prop, expect, outcome, on)
 
     @staticmethod
     def names(obj, predicate):
@@ -980,6 +982,12 @@ class Scenario:
                     stored = "partial"
                 else:
                     stored = "wrong"
+
+        onName = ref.on() if ref.on else None
+        if onName:
+            record["expected_target"] = onName
+            if stored in ("correct", "partial") and target.Name != onName:
+                stored = "wrong"
 
         # 2. The consumer's result
         outcome, detail = None, ""
