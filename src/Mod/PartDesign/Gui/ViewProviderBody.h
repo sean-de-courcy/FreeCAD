@@ -122,6 +122,24 @@ public:
     bool showsThrough() const;
     //@}
 
+    /** @name The edit roll-back (ops#127, notes/reorder-rollback-design.md 5.4)
+     *
+     * While a member's dialog is open, the Body is rolled back to it through the transient edit
+     * roll point (Body::setEditRollPoint): the saved bar (the Tip) is unchanged. "Final" lifts it.
+     */
+    //@{
+    /** The edit roll point for member: a solid feature itself; for a sketch, datum or other
+     * member, the solid feature before its first user (decision 17, Q3) or, at the top, the
+     * member just before the first solid feature; null when nothing can be held
+     */
+    static App::DocumentObject* editRollPointFor(const PartDesign::Body* body,
+                                                 App::DocumentObject* member);
+    /// Final on: the end result while member's dialog is open; off: the model as member sees it
+    static void setEditFinal(App::DocumentObject* member, bool final);
+    /// After member's dialog recomputed member alone: in Final, the features after it compute
+    static void recomputeEditTail(App::DocumentObject* member);
+    //@}
+
     /// Override to return the color of the tip instead of the body, which doesn't really have color
     std::map<std::string, Base::Color> getElementColors(const char* element) const override;
 
@@ -144,6 +162,18 @@ private:
     /// Applies DisplayModeBody, or "Through" while rolled back (ops#127)
     void applyBodyDisplay();
     bool displayedThrough = false;
+
+    void onInEdit(const Gui::ViewProviderDocumentObject& vp);
+    void onResetEdit(const Gui::ViewProviderDocumentObject& vp);
+    /// Sets the edit roll point and shows it: the Body's display, the tree's bar row and held look
+    void setEditRoll(App::DocumentObject* point);
+    /// The point in Final: none, or member itself when the saved bar holds it (rolled forward)
+    App::DocumentObject* finalPointFor(App::DocumentObject* member) const;
+    fastsignals::scoped_connection m_InEditConn;
+    fastsignals::scoped_connection m_ResetEditConn;
+    /// The member whose dialog holds the edit roll-back, or null
+    App::DocumentObject* editedMember = nullptr;
+    bool editFinal = false;
 };
 
 }  // namespace PartDesignGui

@@ -551,6 +551,228 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertIs(self.body.Tip, hole)
         self.assertEqual(self.doc.UndoCount, undo)
 
+    # -- the edit roll-back and Final (5.4) ------------------------------------------------------
+
+    END = ["Origin", "Block", "BossA", "BossB", "HoleC", "|"]
+    AT_A = ["Origin", "Block", "BossA", "|", "BossB", "HoleC"]
+
+    def openEdit(self, obj):
+        """Opens obj's dialog as a double click on its row does (in an "Edit" transaction)."""
+        Gui.getDocument(self.doc.Name).getObject(obj.Name).doubleClicked()
+        processEvents()
+        self.assertTrue(Gui.Control.activeDialog())
+        return Gui.Control.activeTaskDialog()
+
+    def closeEdit(self, dialog, ok):
+        if ok:
+            dialog.accept()
+        else:
+            dialog.reject()
+        processEvents()
+        self.assertFalse(Gui.Control.activeDialog())
+
+    def panelWidget(self, kind, name):
+        widgets = Gui.getMainWindow().findChildren(kind, name)
+        shown = [w for w in widgets if w.isVisible()]
+        self.assertTrue(shown or widgets, f"no {name} in the task panel")
+        return (shown or widgets)[-1]
+
+    def setLength(self, value):
+        """Types a length into the open Pad dialog (the dialog recomputes the Pad alone)."""
+        self.panelWidget(QtGui.QWidget, "lengthEdit").setProperty("rawValue", value)
+        processEvents()
+
+    def setFinal(self, on):
+        self.panelWidget(QtGui.QCheckBox, "showFinalCheckBox").setChecked(on)
+        processEvents()
+
+    def held(self):
+        """The held solid features' labels."""
+        return {
+            o.Label
+            for o in self.body.Group
+            if o.isDerivedFrom("PartDesign::Feature") and self.body.holds(o)
+        }
+
+    def assertAtTheEnd(self, tip):
+        self.assertIs(self.body.Tip, tip)
+        self.assertFalse(self.body.isRolledBack())
+        self.waitForRows(self.END)
+        waitFor(lambda: not self.italic())
+        self.assertEqual(self.italic(), set())
+
+    def testEditHoldsTheFeaturesAfterIt(self):
+        """Boss A's dialog rolls the Body back to boss A while it is open: boss B and hole C are
+        held (italic, the bar row after boss A) and the Tip doesn't change; Cancel brings the
+        end back."""
+        block, a, b, c = self.chain()
+        self.waitForRows(self.END)
+        dialog = self.openEdit(a)
+        self.assertIs(self.body.Tip, c)
+        self.assertTrue(self.body.isRolledBack())
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.waitForRows(self.AT_A)
+        waitFor(lambda: self.italic() == {"BossB", "HoleC"})
+        self.assertEqual(self.italic(), {"BossB", "HoleC"})
+        # The bar's keys don't move it while the dialog holds it
+        tree = self.tree()
+        tree.setFocus()
+        tree.setCurrentItem(self.barItem(), 0, QtCore.QItemSelectionModel.NoUpdate)
+        processEvents()
+        self.key(QtCore.Qt.Key_Up)
+        self.assertIs(self.body.Tip, c)
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+
+    def testOkComputesTheTailInOneStep(self):
+        """Boss A made 8 high in its dialog: while it is open, boss A follows and the held hole C
+        keeps the old shape (top at 15); OK computes the tail (the Body's top at 18) in one undo
+        step, which undo takes back."""
+        block, a, b, c = self.chain()
+        self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 15, places=6)
+        undo = self.doc.UndoCount
+        dialog = self.openEdit(a)
+        self.setLength(8)
+        self.assertAlmostEqual(a.Shape.BoundBox.ZMax, 18, places=6)
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 15, places=6)
+        self.closeEdit(dialog, ok=True)
+        self.assertAtTheEnd(c)
+        self.assertTrue(c.isValid(), c.getStatusString())
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 18, places=6)
+        self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 18, places=6)
+        self.assertFalse([o.Name for o in self.body.Group if "Touched" in o.State])
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(a.Length.Value, 5, places=6)
+        self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testFinalLiftsTheRollBack(self):
+        """"Show final result" computes the tail with the dialog's value (the Body's end result,
+        nothing held) and shows the Tip; unchecked, the Body is rolled back to boss A again.
+        Cancel restores boss A and the tail."""
+        block, a, b, c = self.chain()
+        dialog = self.openEdit(a)
+        self.setFinal(False)
+        self.setLength(8)
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 15, places=6)
+        self.setFinal(True)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertEqual(self.held(), set())
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 18, places=6)
+        self.assertTrue(c.ViewObject.Visibility)
+        self.waitForRows(self.END)
+        # In Final, the tail follows each change
+        self.setLength(7)
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 17, places=6)
+        self.setFinal(False)
+        self.assertTrue(self.body.isRolledBack())
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.waitForRows(self.AT_A)
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+        self.assertAlmostEqual(a.Length.Value, 5, places=6)
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testEditingASketchRollsToBeforeItsFirstUser(self):
+        """Boss B's sketch in the sketcher: the Body is rolled back to boss A, the solid before
+        boss B (decision 17, Q3); closing the sketch brings the end back."""
+        block, a, b, c = self.chain()
+        sketch = self.doc.getObject("BossBSketch")
+        gdoc = Gui.getDocument(self.doc.Name)
+        gdoc.setEdit(sketch.Name)
+        processEvents()
+        self.assertIs(self.body.Tip, c)
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.waitForRows(self.AT_A)
+        gdoc.resetEdit()
+        processEvents()
+        self.assertAtTheEnd(c)
+
+    def testEditingTheFirstSketchHoldsEverySolid(self):
+        """The block's sketch is used by the first solid: editing it holds every solid (the top)."""
+        block, a, b, c = self.chain()
+        gdoc = Gui.getDocument(self.doc.Name)
+        gdoc.setEdit("BlockSketch")
+        processEvents()
+        self.assertEqual(self.held(), {"Block", "BossA", "BossB", "HoleC"})
+        self.waitForRows(["Origin", "|", "Block", "BossA", "BossB", "HoleC"])
+        gdoc.resetEdit()
+        processEvents()
+        self.assertAtTheEnd(c)
+
+    def testEditingAHeldFeatureRollsForward(self):
+        """Rolled back to boss A, hole C's dialog rolls forward to hole C (nothing held while it
+        is open); Cancel leaves the bar after boss A."""
+        block, a, b, c = self.chain()
+        self.body.rollTo(a)
+        self.doc.recompute()
+        self.waitForRows(self.AT_A)
+        dialog = self.openEdit(c)
+        self.assertIs(self.body.Tip, a)
+        self.assertFalse(self.body.isRolledBack())
+        self.waitForRows(self.END)
+        self.closeEdit(dialog, ok=False)
+        self.assertIs(self.body.Tip, a)
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.waitForRows(self.AT_A)
+
+    def testUndoWithThePanelOpenKeepsTheSavedBar(self):
+        """Rolled to boss B, boss A's dialog open: an undo (which takes back the dialog's own
+        step) leaves the saved bar after boss B and the dialog's roll-back in place; after
+        Cancel, the Body is rolled back to boss B as before."""
+        block, a, b, c = self.chain()
+        self.select(b)
+        Gui.runCommand("PartDesign_RollTo")
+        processEvents()
+        self.assertIs(self.body.Tip, b)
+        dialog = self.openEdit(a)
+        self.doc.undo()
+        processEvents()
+        self.assertIs(self.body.Tip, b)
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.closeEdit(dialog, ok=False)
+        self.assertIs(self.body.Tip, b)
+        self.assertEqual(self.held(), {"HoleC"})
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "|", "HoleC"])
+
+    def testFailedRecomputeInTheDialogLeavesTheBar(self):
+        """Boss A made to fail inside its dialog (length 0) fails boss A alone and holds the
+        rest; Cancel restores it and the Body ends where it was."""
+        block, a, b, c = self.chain()
+        dialog = self.openEdit(a)
+        self.setLength(0)
+        self.assertFalse(a.isValid())
+        self.assertIs(self.body.Tip, c)
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+        self.assertTrue(a.isValid(), a.getStatusString())
+        self.assertTrue(c.isValid(), c.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.BoundBox.ZMax, 15, places=6)
+
+    def testClosingTheDocumentWithThePanelOpen(self):
+        """A document saved rolled back to boss B and closed with boss A's dialog open reopens
+        rolled back to boss B (the edit's point is not saved)."""
+        import os
+        import tempfile
+
+        block, a, b, c = self.chain()
+        self.body.rollTo(b)
+        self.doc.recompute()
+        bodyName, docName = self.body.Name, self.doc.Name
+        path = os.path.join(tempfile.mkdtemp(), "EditRollBack.FCStd")
+        self.doc.saveAs(path)
+        self.openEdit(a)
+        App.closeDocument(docName)
+        processEvents()
+        self.assertFalse(Gui.Control.activeDialog())
+        self.doc = App.openDocument(path)
+        self.body = self.doc.getObject(bodyName)
+        self.assertEqual(self.body.Tip.Name, "BossB")
+        self.assertTrue(self.body.isRolledBack())
+        self.assertEqual(self.held(), {"HoleC"})
+
 
 if __name__ == "__main__":
     unittest.main()

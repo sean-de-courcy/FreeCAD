@@ -113,6 +113,14 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
             this->onChangedObject(vp, prop);
         }
     );
+    // The edit roll-back (ops#127): every edit, of a feature, datum, binder or sketch, starts with
+    // signalInEdit and ends with signalResetEdit
+    m_InEditConn = Gui::Application::Instance->signalInEdit.connect(
+        [this](const Gui::ViewProviderDocumentObject& vp) { this->onInEdit(vp); }
+    );
+    m_ResetEditConn = Gui::Application::Instance->signalResetEdit.connect(
+        [this](const Gui::ViewProviderDocumentObject& vp) { this->onResetEdit(vp); }
+    );
 }
 
 void ViewProviderBody::onChangedObject(const Gui::ViewProvider& vp, const App::Property& prop)
@@ -475,6 +483,11 @@ bool ViewProviderBody::moveTreeBar(TreeBarMove move, App::DocumentObject* child)
     if (!body) {
         return false;
     }
+    // While a dialog holds the edit roll-back, the row shows the edit's point, not the Tip that
+    // these moves step from: the bar stays put until the dialog closes (ops#127, N1 5.4)
+    if (body->getEditRollPoint()) {
+        return true;
+    }
     const auto& group = body->Group.getValues();
     auto indexOf = [&group](const App::DocumentObject* obj) {
         return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
@@ -597,6 +610,158 @@ App::DocumentObject* ViewProviderBody::barFeatureFor(const PartDesign::Body* bod
         }
     }
     return nullptr;
+}
+
+// The edit roll-back (ops#127, notes/reorder-rollback-design.md 5.4)
+
+App::DocumentObject* ViewProviderBody::editRollPointFor(const PartDesign::Body* body,
+                                                        App::DocumentObject* member)
+{
+    if (!body || !member || !body->hasObject(member)) {
+        return nullptr;
+    }
+    if (auto feature = barFeatureFor(body, member)) {
+        return feature;
+    }
+    // The top: the point can't be null (that is no point), so it is the member just before the
+    // first solid feature, which holds every solid feature
+    const auto& group = body->Group.getValues();
+    auto first = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+    if (first == group.begin() || first == group.end()) {
+        return nullptr;
+    }
+    return *(first - 1);
+}
+
+App::DocumentObject* ViewProviderBody::finalPointFor(App::DocumentObject* member) const
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body || !PartDesign::Body::isSolidFeature(member)) {
+        return nullptr;
+    }
+    // Would the saved bar hold member? Then Final rolls forward to it, as the edit does (N1 5.4,
+    // M1 (2)); the point touches nothing, so asking holds() without it is safe
+    auto saved = body->getEditRollPoint();
+    body->setEditRollPoint(nullptr);
+    bool held = body->holds(member);
+    body->setEditRollPoint(saved);
+    return held ? member : nullptr;
+}
+
+void ViewProviderBody::setEditRoll(App::DocumentObject* point)
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body) {
+        return;
+    }
+    auto old = body->getEditRollPoint();
+    body->setEditRollPoint(point);
+    if (old == body->getEditRollPoint()) {
+        return;
+    }
+    if (showsThrough() != displayedThrough) {
+        applyBodyDisplay();
+    }
+    // The point changes no property: tell the tree as for a Tip change, so the bar row moves and
+    // the held look follows (the tree's status pass asks holds())
+    if (auto gdoc = getDocument()) {
+        gdoc->signalChangedObject(*this, body->Tip);
+    }
+}
+
+void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
+{
+    auto body = getObject<PartDesign::Body>();
+    auto obj = vp.getObject();
+    if (!body || !obj || obj == body || !body->hasObject(obj)) {
+        return;
+    }
+    // A dialog's edit, not a transform (forwarded to the Body) or the face colours
+    int mode = -1;
+    if (auto gdoc = vp.getDocument()) {
+        gdoc->getInEdit(nullptr, nullptr, &mode);
+    }
+    if (mode != Gui::ViewProvider::Default) {
+        return;
+    }
+    editedMember = obj;
+    // A feature's dialog starts with its preview group's "Show final result" as this parameter
+    // says (TaskPreviewParameters)
+    editFinal = PartDesign::Body::isSolidFeature(obj)
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+               ->GetBool("ShowFinal", false);
+    setEditRoll(editFinal ? finalPointFor(obj) : editRollPointFor(body, obj));
+}
+
+void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
+{
+    auto body = getObject<PartDesign::Body>();
+    if (!body || !editedMember || vp.getObject() != editedMember) {
+        return;
+    }
+    App::DocumentObject* member = editedMember;
+    editedMember = nullptr;
+    editFinal = false;
+    setEditRoll(nullptr);
+
+    // What the edit touched after the point computes now, in the edit's transaction (_resetEdit
+    // commits after this signal). Not inside an undo or a recompute, nor while the member or the
+    // Body is being removed: then the held features stay touched for the next recompute
+    App::Document* doc = body->getDocument();
+    if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Recomputing)
+        || doc->testStatus(App::Document::Restoring) || member->isRemoving() || body->isRemoving()) {
+        return;
+    }
+    auto touched = [](const App::DocumentObject* obj) {
+        return obj->isTouched() || obj->mustRecompute();
+    };
+    if (touched(body) || std::ranges::any_of(body->Group.getValues(), touched)) {
+        doc->recompute();
+    }
+}
+
+void ViewProviderBody::setEditFinal(App::DocumentObject* member, bool final)
+{
+    auto body = PartDesign::Body::findBodyOf(member);
+    auto vpb = body ? freecad_cast<ViewProviderBody*>(Gui::Application::Instance->getViewProvider(body))
+                    : nullptr;
+    if (!vpb || vpb->editedMember != member || vpb->editFinal == final) {
+        return;
+    }
+    vpb->editFinal = final;
+    vpb->setEditRoll(final ? vpb->finalPointFor(member) : editRollPointFor(body, member));
+    if (!final || body->getEditRollPoint()) {
+        return;
+    }
+    recomputeEditTail(member);
+    // Show the end result: the feature the saved bar follows
+    App::DocumentObject* tip = body->Tip.getValue();
+    if (tip && tip != member) {
+        if (auto vp = Gui::Application::Instance->getViewProvider(tip)) {
+            vp->show();
+        }
+    }
+}
+
+void ViewProviderBody::recomputeEditTail(App::DocumentObject* member)
+{
+    auto body = PartDesign::Body::findBodyOf(member);
+    auto vpb = body ? freecad_cast<ViewProviderBody*>(Gui::Application::Instance->getViewProvider(body))
+                    : nullptr;
+    if (!vpb || vpb->editedMember != member || !vpb->editFinal || body->getEditRollPoint()) {
+        return;
+    }
+    App::Document* doc = member->getDocument();
+    if (!doc || doc->testStatus(App::Document::Recomputing)) {
+        return;
+    }
+    // The dialog recomputed member alone, which touches nothing after it
+    // (Document::recomputeFeature): touch its users, as OK does, and compute the tail
+    for (auto user : member->getInList()) {
+        user->touch();
+    }
+    doc->recompute();
 }
 
 bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& objs,
