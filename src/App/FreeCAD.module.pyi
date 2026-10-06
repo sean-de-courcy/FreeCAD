@@ -382,17 +382,48 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     reference's name holds, `piece`, `structural`, `geometric`, `index`, or empty),
     `candidate_distances` (each one's centre from the saved centre, or None), `evidence` and
     `target`.
+
+    A reference with a guess record (ops#127: resolved by geometry, a continuation or split
+    expanded, a naming migration's index carry) is listed too, even before the solver ran again
+    (a reopened file: `status` `guessed`, `evidence` `saved guess`). Keys for it: `guess_kind`
+    (`tier2`, `tier3`, `continued`, `expanded`, `index`, ...; empty without a record),
+    `original` (`{"index", "name"}`: what the reference stood for), `alternatives` (a list of
+    `{"index", "role", "distance"}`, the other elements it could be), `headline` and `warning`
+    (the owner's warning text, empty if none).
     """
     ...
 
-def repairReference(obj: DocumentObject, property: str, index: int, candidate: str, /) -> None:
+def repairReference(
+    obj: DocumentObject, property: str, index: int, candidate: str, force: bool = False, /
+) -> None:
     """Set reference `index` of `obj`'s link property `property` to `candidate`.
 
-    `candidate` must be one of the candidates that getReferenceReport() lists for it; raises
-    ValueError otherwise. The reference is written as the solver writes a resolution, so the
+    `candidate` must be one of the candidates or alternatives that getReferenceReport() lists
+    for it, or its original; with `force`, any element of the target (a re-pick); raises
+    ValueError otherwise. The reference loses its guess record, the owner its warning, and the
+    owner is touched (ops#127). The reference is written as the solver writes a resolution, so the
     owner follows it (a sketch moves its external geometry to the candidate). In a
     PropertyLinkSub, a candidate that another reference of the property already names is not
     added twice: the repaired reference goes. The property's report is cleared until the next
     update, so a second broken reference of it is repaired after a recompute.
+    """
+    ...
+
+def acceptReference(obj: DocumentObject, property: str, index: int, /) -> None:
+    """Accept the guess that reference `index` of `obj`'s link property `property` holds (ops#127).
+
+    The element it holds becomes the reference: its guess record goes (with the records of the
+    other pieces of the same expanded reference), its fingerprint is measured from that element,
+    the owner's warning is cleared and the owner touched. Raises ValueError for a reference
+    without a record.
+    """
+    ...
+
+def markReferenceBroken(obj: DocumentObject, property: str, index: int, /) -> None:
+    """Mark the guess that reference `index` of `obj`'s link property `property` holds as wrong.
+
+    The reference goes back to its original, missing (`?Edge5`), so the owner fails at its next
+    recompute; its record goes (the other pieces of the same expanded reference go too). Raises
+    ValueError for a reference without a record.
     """
     ...

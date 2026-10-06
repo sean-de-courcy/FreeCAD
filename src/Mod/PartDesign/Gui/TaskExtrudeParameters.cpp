@@ -1383,6 +1383,41 @@ void TaskExtrudeParameters::saveHistory()
 void TaskExtrudeParameters::applyParameters()
 {
     auto obj = getObject();
+    auto extrude = getObject<PartDesign::FeatureExtrude>();
+
+    // A link property is written only when the panel changed it: written again with plain names
+    // it would drop what it keeps per reference, a guess record or a partly resolved reference's
+    // missing elements among them, without a warning (ops#127).
+    auto unchanged = [](const App::PropertyLinkSub& prop,
+                        const App::DocumentObject* linked,
+                        const std::vector<std::string>& subs) {
+        return prop.getValue() == linked
+            && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
+    };
+    // The face a line edit names: its feature (the name before `:`) and the face.
+    auto faceOf = [obj](QLineEdit* lineEdit,
+                        App::DocumentObject*& linked,
+                        std::vector<std::string>& subs) {
+        linked = nullptr;
+        subs.clear();
+        QVariant featureName = lineEdit->property("FeatureName");
+        if (!featureName.isValid()) {
+            return;
+        }
+        QString name = featureName.toString();
+        name = name.left(name.indexOf(QStringLiteral(":")));
+        linked = obj->getDocument()->getObject(name.toUtf8().constData());
+        QString faceName = lineEdit->property("FaceName").toString();
+        if (!faceName.isEmpty()) {
+            subs.push_back(faceName.toStdString());
+        }
+    };
+    auto faceUnchanged = [&](const App::PropertyLinkSub& prop, QLineEdit* lineEdit) {
+        App::DocumentObject* linked = nullptr;
+        std::vector<std::string> subs;
+        faceOf(lineEdit, linked, subs);
+        return unchanged(prop, linked, subs);
+    };
 
     QString facename = QStringLiteral("None");
     QString facename2 = QStringLiteral("None");
@@ -1413,19 +1448,37 @@ void TaskExtrudeParameters::applyParameters()
         obj,
         "Direction = (" << getXDirection() << ", " << getYDirection() << ", " << getZDirection() << ")"
     );
-    FCMD_OBJ_CMD(obj, "ReferenceAxis = " << getReferenceAxis());
+    {
+        App::DocumentObject* axis = nullptr;
+        std::vector<std::string> axisSubs;
+        getReferenceAxis(axis, axisSubs);
+        if (!extrude || !unchanged(extrude->ReferenceAxis, axis, axisSubs)) {
+            FCMD_OBJ_CMD(obj, "ReferenceAxis = " << getReferenceAxis());
+        }
+    }
     FCMD_OBJ_CMD(obj, "AlongSketchNormal = " << (getAlongSketchNormal() ? 1 : 0));
     FCMD_OBJ_CMD(obj, "SideType = " << getSidesMode());
     FCMD_OBJ_CMD(obj, "Type = " << type1);
     FCMD_OBJ_CMD(obj, "Type2 = " << type2);
-    FCMD_OBJ_CMD(obj, "UpToFace = " << facename.toUtf8().data());
-    FCMD_OBJ_CMD(obj, "UpToFace2 = " << facename2.toUtf8().data());
+    if (!extrude || static_cast<Mode>(getMode()) != Mode::ToFace
+        || !faceUnchanged(extrude->UpToFace, ui->lineFaceName)) {
+        FCMD_OBJ_CMD(obj, "UpToFace = " << facename.toUtf8().data());
+    }
+    if (!extrude || static_cast<Mode>(getMode2()) != Mode::ToFace
+        || !faceUnchanged(extrude->UpToFace2, ui->lineFaceName2)) {
+        FCMD_OBJ_CMD(obj, "UpToFace2 = " << facename2.toUtf8().data());
+    }
     FCMD_OBJ_CMD(obj, "Reversed = " << (getReversed() ? 1 : 0));
     FCMD_OBJ_CMD(obj, "Offset = " << getOffset());
     FCMD_OBJ_CMD(obj, "Offset2 = " << getOffset2());
     FCMD_OBJ_CMD(obj, "StartOffset = " << ui->startOffsetEdit->value().getValue());
     FCMD_OBJ_CMD(obj, "StartType = " << ui->startMode->currentIndex());
-    FCMD_OBJ_CMD(obj, "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data());
+    if (!extrude || !faceUnchanged(extrude->StartReference, ui->lineStartReference)) {
+        FCMD_OBJ_CMD(
+            obj,
+            "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data()
+        );
+    }
 }
 
 void TaskExtrudeParameters::onSidesModeChanged(int index)

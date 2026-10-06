@@ -234,6 +234,10 @@ Py::List DocumentObjectPy::getState() const
         uptodate = false;
         list.append(Py::String("Invalid"));
     }
+    if (object->isWarning()) {
+        // Computed, on a guessed or partly resolved element reference (ops#127)
+        list.append(Py::String("Warning"));
+    }
     if (object->isRecomputing()) {
         uptodate = false;
         list.append(Py::String("Recompute"));

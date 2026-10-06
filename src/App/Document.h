@@ -861,6 +861,25 @@ public:
     const char* getErrorDescription(const DocumentObject* Obj) const;
 
     /**
+     * @brief Set the warning of an object (ObjectStatus::Warning, ops#127): it computed on a
+     * guessed, partly resolved or geometry-only element reference.
+     * @param[in] Obj The object.
+     * @param[in] text What the warning says, shown with the object's status.
+     */
+    void setWarning(DocumentObject* Obj, const std::string& text);
+
+    /// Clear the warning of an object, if it has one.
+    void clearWarning(DocumentObject* Obj);
+
+    /**
+     * @brief Get the text of the warning for a specified object.
+     * @param[in] Obj The object to get the warning text for.
+     *
+     * @return The warning text, or `nullptr` if there is no warning.
+     */
+    const char* getWarningDescription(const DocumentObject* Obj) const;
+
+    /**
      * @brief Get the status of this document for a given status bit.
      *
      * @param[in] pos The status bit to check.

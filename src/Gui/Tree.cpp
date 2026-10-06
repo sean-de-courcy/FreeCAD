@@ -6318,7 +6318,8 @@ enum Status
     Error = 1 << 2,
     Hidden = 1 << 3,
     External = 1 << 4,
-    Freezed = 1 << 5
+    Freezed = 1 << 5,
+    Warning = 1 << 6  // computed on a guessed or partly resolved element reference (ops#127)
 };
 }
 
@@ -6374,6 +6375,14 @@ void DocumentObjectItem::generateIcon(int currentStatus, QIcon::Mode mode, QIcon
             pxError = Gui::BitmapFactory().pixmapFromSvg("overlay_error", QSize(10, 10));
         }
         px = pxError;
+    }
+    else if (currentStatus & Status::Warning) {
+        static QPixmap pxWarning;
+        if (pxWarning.isNull()) {
+            // object computed with a warning (ops#127)
+            pxWarning = Gui::BitmapFactory().pixmapFromSvg("overlay_warning", QSize(10, 10));
+        }
+        px = pxWarning;
     }
     else if (currentStatus & Status::Recompute) {
         static QPixmap pxRecompute;
@@ -6507,8 +6516,9 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
         || (linked && linked->getDocument() != obj->getDocument());
     bool freezed = pObject->isFreezed();
 
-    int currentStatus = ((freezed ? 1 : 0) << 5) | ((external ? 1 : 0) << 4)
-        | ((object()->showInTree() ? 0 : 1) << 3) | ((pObject->isError() ? 1 : 0) << 2)
+    int currentStatus = ((pObject->isWarning() ? 1 : 0) << 6) | ((freezed ? 1 : 0) << 5)
+        | ((external ? 1 : 0) << 4) | ((object()->showInTree() ? 0 : 1) << 3)
+        | ((pObject->isError() ? 1 : 0) << 2)
         | ((pObject->isTouched() || pObject->mustExecute() == 1 ? 1 : 0) << 1) | (visible ? 1 : 0);
 
 
@@ -6575,14 +6585,21 @@ void DocumentObjectItem::displayStatusInfo()
     QString status = TreeWidget::tr("%1, Internal name: %2")
                          .arg(info, QString::fromLatin1(Obj->getNameInDocument()));
 
-    if (!Obj->isError()) {
-        getMainWindow()->showMessage(status);
-    }
-    else {
+    if (Obj->isError()) {
         getMainWindow()->showStatus(MainWindow::Err, status);
         QTreeWidget* tree = this->treeWidget();
         QPoint pos = tree->visualItemRect(this).topRight();
         QToolTip::showText(tree->mapToGlobal(pos), info);
+    }
+    else if (Obj->isWarning()) {
+        // The guessed or partly resolved references and their alternatives (ops#127)
+        getMainWindow()->showStatus(MainWindow::Wrn, status);
+        QTreeWidget* tree = this->treeWidget();
+        QPoint pos = tree->visualItemRect(this).topRight();
+        QToolTip::showText(tree->mapToGlobal(pos), info);
+    }
+    else {
+        getMainWindow()->showMessage(status);
     }
 }
 

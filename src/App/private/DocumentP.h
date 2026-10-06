@@ -103,6 +103,15 @@ struct DocumentP
     mutable HasherMap hashers;
     std::multimap<const App::DocumentObject*, std::unique_ptr<App::DocumentObjectExecReturn>>
         _RecomputeLog;
+    // Per object with ObjectStatus::Warning: its warning text, and the status string shown for it
+    // (ops#127).
+    struct WarningText
+    {
+        std::string text;
+        std::string status;
+        bool reported = false;  // printed by the recompute that set it
+    };
+    std::map<const App::DocumentObject*, WarningText> _WarningLog;
     ExportInfo exportInfo;
 
     StringHasherRef Hasher {new StringHasher};

@@ -72,6 +72,9 @@ enum ObjectStatus
     Recompute2 = 9, ///< Whether the object is going to be recomputed in the second pass.
     PartialObject = 10, ///< Whether this is a partially loaded object.
     PendingRecompute = 11, ///< Whether the object is in the recomputation queue, set by Document.
+    /// Whether the last recompute succeeded on a guessed, partly resolved or geometry-only element
+    /// reference (ops#127); Document::getWarningDescription() says which.
+    Warning = 12,
     ObjImporting = 13, ///< Whether the object is being imported.
     NoTouch = 14, ///< Whether the object should be touched on a property change.
     GeoExcluded = 15, ///< Whether the object is a member but not claimed by a GeoFeatureGroup.
@@ -360,6 +363,15 @@ public:
     {
         return StatusBits.test(ObjectStatus::Error);
     }
+
+    /// Check whether this document object is in a warning state (ObjectStatus::Warning).
+    bool isWarning() const
+    {
+        return StatusBits.test(ObjectStatus::Warning);
+    }
+
+    /// The text of the warning, or `nullptr` if there is none.
+    const char* getWarningDescription() const;
 
     /// Check whether this document object is in a valid state.
     bool isValid() const

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+<!-- The tree's overlay for an object in the warning state (ops#127): a yellow triangle with an
+     exclamation mark, the size and weight of overlay_error.svg. -->
+<svg
+   width="64"
+   height="64"
+   id="svg_overlay_warning"
+   version="1.1"
+   viewBox="0 0 64 64"
+   xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient
+       id="warningFill"
+       x1="32"
+       y1="4"
+       x2="32"
+       y2="60"
+       gradientUnits="userSpaceOnUse">
+      <stop
+         style="stop-color:#fce94f;stop-opacity:1;"
+         offset="0" />
+      <stop
+         style="stop-color:#edd400;stop-opacity:1;"
+         offset="1" />
+    </linearGradient>
+  </defs>
+  <path
+     d="M 32,4 61,58 H 3 Z"
+     style="fill:url(#warningFill);stroke:#302b00;stroke-width:4;stroke-linejoin:round" />
+  <path
+     d="M 32,20 V 40"
+     style="fill:none;stroke:#302b00;stroke-width:7;stroke-linecap:round" />
+  <circle
+     cx="32"
+     cy="50"
+     r="4"
+     style="fill:#302b00" />
+</svg>

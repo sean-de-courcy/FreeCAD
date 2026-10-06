@@ -36,6 +36,7 @@
 
 #include <Base/Placement.h>
 
+#include "ElementGuess.h"
 #include "MappedElement.h"
 #include "Property.h"
 
@@ -648,6 +649,7 @@ public:
         LinkSyncSubObject,  // used by DlgPropertyLink
         LinkNewElement,     // return new element name in getPyObject
         LinkSilentRestore,  // do not report error on restore (e.g. missing external link)
+        LinkPartialAllowed, // the owner computes on the references that resolve (ops#127)
     };
     inline bool testFlag(int flag) const
     {
@@ -715,6 +717,20 @@ public:
         return _equivalenceProbe;
     }
 
+    /** Whether the owner can compute on the references of this property that resolve, when
+     * some are missing (ops#127, Onshape's rule: a fillet's edges, a multi-face profile). The
+     * recompute check then warns instead of failing the owner, as long as one resolves; the
+     * consumer skips the missing ones. Set by the owner, in solver documents only.
+     */
+    void setPartialAllowed(bool allowed)
+    {
+        setFlag(LinkPartialAllowed, allowed);
+    }
+    bool isPartialAllowed() const
+    {
+        return testFlag(LinkPartialAllowed);
+    }
+
     /// True if the owner's document has the reference solver on.
     bool inSolverDocument() const;
 
@@ -730,6 +746,12 @@ public:
     /// The fingerprints in their text form (Data::ElementFingerprint), one per sub-element
     /// reference, empty where there is none.
     virtual std::vector<std::string> getElementFingerprints() const
+    {
+        return {};
+    }
+
+    /// The guess records (ops#127), one per sub-element reference, empty where there is none.
+    virtual std::vector<GuessRecord> getElementGuesses() const
     {
         return {};
     }
@@ -1122,6 +1144,7 @@ public:
                                 bool notify = false) override;
     bool updateElementFingerprints() override;
     std::vector<std::string> getElementFingerprints() const override;
+    std::vector<GuessRecord> getElementGuesses() const override;
     void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
     void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
@@ -1152,6 +1175,8 @@ protected:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
+    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
+    std::vector<GuessRecord> _Guesses;
     bool _restoreLabel {false};
 };
 
@@ -1311,6 +1336,7 @@ public:
                                 bool notify = false) override;
     bool updateElementFingerprints() override;
     std::vector<std::string> getElementFingerprints() const override;
+    std::vector<GuessRecord> getElementGuesses() const override;
     void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
     void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
@@ -1345,6 +1371,8 @@ private:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
+    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
+    std::vector<GuessRecord> _Guesses;
 };
 
 /** The general Link Property with Child scope
@@ -1478,6 +1506,7 @@ public:
                                 bool notify = false) override;
     bool updateElementFingerprints() override;
     std::vector<std::string> getElementFingerprints() const override;
+    std::vector<GuessRecord> getElementGuesses() const override;
     void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
     void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 
@@ -1546,6 +1575,8 @@ protected:
     // reference (saved as `fp`), and the old name an expanded reference came from (`from`).
     std::vector<std::string> _Fingerprints;
     std::vector<std::string> _ExpandedFrom;
+    // The guess record of each reference (ops#127; saved as `guess`, `orig`, `alt`).
+    std::vector<GuessRecord> _Guesses;
     PropertyLinkBase* parentProp;
     mutable std::string tmpShadow;
 };
@@ -1686,6 +1717,7 @@ public:
                                 bool notify = false) override;
     bool updateElementFingerprints() override;
     std::vector<std::string> getElementFingerprints() const override;
+    std::vector<GuessRecord> getElementGuesses() const override;
     void collectElementReferences(App::DocumentObject* feature, SolverBatch& batch) override;
     void applyResolutions(const std::vector<SolverResolution>& resolutions) override;
 

@@ -11,6 +11,7 @@
 #include <Base/Vector3D.h>
 
 #include "ElementFingerprint.h"
+#include "ElementGuess.h"
 #include "PropertyLinks.h"
 
 namespace App
@@ -63,6 +64,13 @@ struct AppExport SolverEntry
     /// The bare mapped name the reference was expanded from (Task 2 PR 7); empty if none, and
     /// always in a property that keeps no `from` (only PropertyLinkSub does).
     std::string from;
+    /// The reference's guess record (ops#127), if it holds one: the entry is the element the
+    /// reference holds, and a resolution keeps the record. \a guessed: the original's name gives
+    /// an element again, and the entry is exact on that one instead (the snap-back); then
+    /// \a guessedIndex is the element the sub holds (empty if that is gone).
+    bool guessed = false;
+    std::string guessedIndex;
+    GuessRecord guess;
 };
 
 /// What pass 1 gathers for one update of one feature.
@@ -98,6 +106,10 @@ struct AppExport SolverResolution
         /// The reference goes (a collapsing group's other members). Only PropertyLinkSub
         /// receives it.
         Removed,
+        /// The reference names one element provisionally (ops#127): sub and shadow as for
+        /// Resolved, with \a guess, the record of the original. With \a pieces it becomes one
+        /// per element, as for Expanded, each with the record.
+        Guessed,
     };
 
     Status status = Status::None;
@@ -111,6 +123,8 @@ struct AppExport SolverResolution
     std::string from;
     /// Resolved by a collapse: the reference's `from` is cleared.
     bool clearFrom = false;
+    /// Guessed: the record. Resolved and Broken always clear a reference's record (ops#127).
+    GuessRecord guess;
 
     /// The update's context.
     DocumentObject* feature = nullptr;
@@ -128,8 +142,10 @@ struct AppExport SolverResolution
  * Resolved and Broken replace a reference, Expanded replaces it by its pieces (a piece whose
  * element another reference of the new list or an untouched one already holds is skipped),
  * Removed drops it. Fingerprints of written references are emptied (the caller refreshes them),
- * except a Broken one's, which it keeps. Sets \a firstNew and \a countNew per old index.
- * Returns true if anything was written.
+ * except a Broken one's, which it keeps. Guessed (ops#127) replaces a reference as Resolved does,
+ * or by its pieces as Expanded does, and sets its record in \a guesses; every other written
+ * reference loses its record. Sets \a firstNew and \a countNew per old index. Returns true if
+ * anything was written.
  */
 AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& subs,
@@ -137,7 +153,8 @@ AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& fingerprints,
                               std::vector<std::string>& froms,
                               std::vector<int>& firstNew,
-                              std::vector<int>& countNew);
+                              std::vector<int>& countNew,
+                              std::vector<GuessRecord>* guesses = nullptr);
 
 /// The indices \a mapped (of the old list) in a rebuilt list: each old index m becomes
 /// firstNew[m] .. firstNew[m] + countNew[m] - 1, a removed one disappears.

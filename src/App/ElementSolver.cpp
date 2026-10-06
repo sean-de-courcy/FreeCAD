@@ -2665,6 +2665,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.tier = state.geometric ? 3 : state.geometryTier ? state.geometryTier : 1;
                 state.outcome.element = element.index;
                 state.outcome.name = firstName(element);
+                if (state.geometric || state.geometryTier >= 2) {
+                    // Geometry chose among tier 1's survivors: the others are the alternatives
+                    // the user may prefer (ops#127).
+                    std::vector<int> others;
+                    for (int position : state.listed) {
+                        if (position != k) {
+                            others.push_back(position);
+                        }
+                    }
+                    listCandidates(state, others, state.geometric ? "geometric" : nullptr);
+                }
                 if (state.geometric) {
                     state.outcome.evidence = state.geometryEvidence;
                 }

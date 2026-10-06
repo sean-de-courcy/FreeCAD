@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "ElementGuess.h"
+
 namespace App
 {
 
@@ -36,6 +38,10 @@ public:
         Index,
         /// Resolved to several elements, one reference each (Expand, Task 2 PR 7).
         Expanded,
+        /// Resolved provisionally, with a saved record of the original (ops#127): by geometry
+        /// (tiers 2-3), a continuation or split expanded, a naming migration's index carry, a
+        /// guess. The owner computes with a warning.
+        Guessed,
     };
 
     struct Entry
@@ -46,9 +52,11 @@ public:
         std::string oldName;
         std::string oldIndex;
         Status status = Status::Broken;
-        /// The tier for Resolved (0-3) and Expanded (1, or 4 for a continuation), -1 for Broken;
-        /// Index entries have none (-1).
+        /// The tier for Resolved (0-3), Expanded (1, or 4 for a continuation) and Guessed, -1 for
+        /// Broken; Index entries have none (-1).
         int tier = -1;
+        /// Guessed: the record's kind (GuessRecord::kind).
+        std::string kind;
         /// The element it resolved to (Expanded: the first); empty for Broken.
         std::string newIndex;
         /// Expanded: every element, (index name, mapped name), in order.
@@ -106,6 +114,10 @@ public:
         DocumentObject* obj = nullptr;
         std::string sub;
         std::string mappedName;
+        /// The reference's guess record (ops#127); empty if none.
+        GuessRecord guess;
+        /// Whether the property lets its owner compute on the references that resolve.
+        bool partial = false;
     };
     /// Every reference of \a obj's link-sub properties (PropertyLinkSub, PropertyLinkSubList,
     /// PropertyXLink, PropertyXLinkSubList), properties by name.
@@ -117,6 +129,25 @@ public:
      * or with the report entry's headline (Entry::headline) in place of `Missing ...: Edge3`.
      */
     static bool describeBroken(const DocumentObject* obj, std::string& why);
+
+    /// What the recompute check says about an object's references (ops#127).
+    struct Outcome
+    {
+        /// The owner fails: a missing reference that its property can't do without, or a
+        /// property whose every reference is missing.
+        std::string fatal;
+        /// The owner computes with a warning: guessed references, references resolved by
+        /// geometry, and missing ones of a property that computes on the rest.
+        std::string warning;
+    };
+    /** Describes \a obj's missing, guessed and warned references, one text per reference, joined
+     * by `; `: a missing reference as describeBroken() does, in \a outcome.fatal unless its
+     * property allows partial computation and one of its references resolves (then in
+     * \a outcome.warning, with `computed on <n> of <m> <type>s`); a guessed one in
+     * \a outcome.warning (`Guessed edge reference: Edge7 for Edge5 (Base[0], tier 3;
+     * alternatives: Edge9)`). Returns true if either text is set.
+     */
+    static bool describe(const DocumentObject* obj, Outcome& outcome);
 };
 
 }  // namespace App

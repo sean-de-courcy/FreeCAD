@@ -43,6 +43,7 @@
 #include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/ReferenceReport.h>
+#include <App/ReferenceRepair.h>
 
 #include "Application.h"
 #include "ApplicationPy.h"
@@ -1419,9 +1420,21 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
     {
         auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
         Py::List list;
-        for (const auto& slot : ReferenceReport::slotsOf(obj)) {
+        const char* warning = obj->getWarningDescription();
+        const auto slots = ReferenceReport::slotsOf(obj);
+        // A record whose report entry another reference holds: the pieces of an expanded
+        // reference, which its first piece's entry lists (ops#127).
+        auto coveredGuess = [&slots](const ReferenceReport::Slot& slot) {
+            return std::any_of(slots.begin(), slots.end(), [&](const ReferenceReport::Slot& other) {
+                return other.prop == slot.prop && other.localIndex != slot.localIndex
+                    && other.guess == slot.guess
+                    && ReferenceReport::find(other.prop, other.localIndex);
+            });
+        };
+        for (const auto& slot : slots) {
             auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
-            if (!entry && !Data::hasMissingElement(slot.sub.c_str())) {
+            if (!entry && !Data::hasMissingElement(slot.sub.c_str())
+                && (slot.guess.empty() || coveredGuess(slot))) {
                 continue;
             }
             Py::Dict dict;
@@ -1460,6 +1473,16 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
                 dict.setItem("evidence", Py::String(entry->evidence));
                 dict.setItem("target", Py::String(entry->target));
             }
+            else if (!slot.guess.empty() && !Data::hasMissingElement(slot.sub.c_str())) {
+                // A saved guess the solver hasn't re-derived since (a reopened file, ops#127).
+                const char* element = Data::findElementName(slot.sub.c_str());
+                dict.setItem("old", Py::String(slot.guess.origName));
+                dict.setItem("status", Py::String("guessed"));
+                dict.setItem("tier", Py::Long(-1));
+                dict.setItem("new", Py::String(element ? element : ""));
+                dict.setItem("evidence", Py::String("saved guess"));
+                dict.setItem("target", Py::String(""));
+            }
             else {
                 // Missing, and not solved since the report was last cleared.
                 dict.setItem("old", Py::String(slot.mappedName));
@@ -1474,6 +1497,34 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
             dict.setItem("candidate_roles", candidateRoles);
             dict.setItem("candidate_distances", candidateDistances);
             dict.setItem("pieces", pieces);
+            // The guess record (ops#127): its kind, the original and the alternatives.
+            Py::Dict original;
+            Py::List alternatives;
+            if (!slot.guess.empty()) {
+                original.setItem("index", Py::String(slot.guess.origIndex));
+                original.setItem("name", Py::String(slot.guess.origName));
+                for (const auto& alternative : slot.guess.alternatives) {
+                    Py::Dict item;
+                    item.setItem("index", Py::String(alternative.index));
+                    item.setItem("role", Py::String(alternative.role));
+                    if (std::isnan(alternative.distance)) {
+                        item.setItem("distance", Py::None());
+                    }
+                    else {
+                        item.setItem("distance", Py::Float(alternative.distance));
+                    }
+                    alternatives.append(item);
+                }
+            }
+            else if (entry) {
+                original.setItem("index", Py::String(entry->oldIndex));
+                original.setItem("name", Py::String(entry->oldName));
+            }
+            dict.setItem("guess_kind", Py::String(slot.guess.kind));
+            dict.setItem("original", original);
+            dict.setItem("alternatives", alternatives);
+            dict.setItem("headline", Py::String(entry ? entry->headline : std::string()));
+            dict.setItem("warning", Py::String(warning ? warning : ""));
             list.append(dict);
         }
         return Py::new_reference_to(list);
@@ -1481,98 +1532,90 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
     PY_CATCH;
 }
 
+namespace
+{
+// The property holding reference \a index of \a obj's link property \a property, and the
+// reference's position there (a PropertyXLinkSubList's link for its references).
+std::pair<PropertyLinkBase*, int>
+referenceSlot(DocumentObject* obj, const char* property, int index)
+{
+    for (const auto& slot : ReferenceReport::slotsOf(obj)) {
+        if (slot.property == property && slot.index == index) {
+            return {const_cast<PropertyLinkBase*>(slot.prop), slot.localIndex};
+        }
+    }
+    throw Base::ValueError("No element reference " + std::string(property) + "["
+                           + std::to_string(index) + "]");
+}
+}  // namespace
+
 PyObject* ApplicationPy::sRepairReference(PyObject* /*self*/, PyObject* args)
 {
     PyObject* pyObj {};
     const char* property {};
     int index {};
     const char* candidate {};
+    PyObject* force = Py_False;
     if (!PyArg_ParseTuple(args,
-                          "O!sis",
+                          "O!sis|O!",
                           &DocumentObjectPy::Type,
                           &pyObj,
                           &property,
                           &index,
-                          &candidate)) {
+                          &candidate,
+                          &PyBool_Type,
+                          &force)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        // The repair is written as the solver writes a resolution (applyResolutions()): the sub
+        // keeps its sub-object path and gets the candidate's shadow, and the owner is told
+        // through onUpdateElementReference(), so whatever it keeps per reference follows (a
+        // sketch's external geometry, ops#72). The other references keep theirs. The repaired
+        // reference loses its `from` and its guess record (ops#127).
+        auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
+        auto [prop, localIndex] = referenceSlot(obj, property, index);
+        App::repairReference(prop, localIndex, candidate, PyObject_IsTrue(force) != 0);
+        Py_Return;
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sAcceptReference(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyObj {};
+    const char* property {};
+    int index {};
+    if (!PyArg_ParseTuple(args, "O!si", &DocumentObjectPy::Type, &pyObj, &property, &index)) {
         return nullptr;
     }
 
     PY_TRY
     {
         auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
-        const ReferenceReport::Slot* found = nullptr;
-        auto slots = ReferenceReport::slotsOf(obj);
-        for (const auto& slot : slots) {
-            if (slot.property == property && slot.index == index) {
-                found = &slot;
-                break;
-            }
-        }
-        if (!found) {
-            throw Base::ValueError("No element reference " + std::string(property) + "["
-                                   + std::to_string(index) + "]");
-        }
-        auto entry = ReferenceReport::find(found->prop, found->localIndex);
-        const std::pair<std::string, std::string>* listed = nullptr;
-        if (entry) {
-            for (const auto& c : entry->candidates) {
-                if (c.first == candidate) {
-                    listed = &c;
-                    break;
-                }
-            }
-        }
-        if (!listed) {
-            throw Base::ValueError(std::string(candidate) + " is not a candidate of "
-                                   + property + "[" + std::to_string(index) + "]");
-        }
+        auto [prop, localIndex] = referenceSlot(obj, property, index);
+        App::acceptReference(prop, localIndex);
+        Py_Return;
+    }
+    PY_CATCH;
+}
 
-        // The repair is written as the solver writes a resolution (applyResolutions()): the sub
-        // keeps its sub-object path and gets the candidate's shadow, and the owner is told
-        // through onUpdateElementReference(), so whatever it keeps per reference follows (a
-        // sketch's external geometry, ops#72). The other references keep theirs. The repaired
-        // reference loses its `from`.
-        const char* element = Data::findElementName(found->sub.c_str());
-        const std::string prefix = found->sub.substr(0, element - found->sub.c_str());
-        auto prop = const_cast<PropertyLinkBase*>(found->prop);
-        std::vector<std::string> subs;
-        if (auto link = freecad_cast<PropertyLinkSub*>(prop)) {
-            subs = link->getSubValues();
-        }
-        else if (auto list = freecad_cast<PropertyLinkSubList*>(prop)) {
-            subs = list->getSubValues();
-        }
-        else if (auto xlink = freecad_cast<PropertyXLink*>(prop)) {
-            subs = xlink->getSubValues();
-        }
-        const int i = found->localIndex;
-        if (i < 0 || i >= static_cast<int>(subs.size())) {
-            throw Base::RuntimeError("Inconsistent element reference " + std::string(property));
-        }
-        SolverResolution resolution;
-        resolution.status = SolverResolution::Status::Resolved;
-        resolution.prop = prop;
-        resolution.index = i;
-        resolution.shadow.oldName = prefix + candidate;
-        if (!listed->second.empty()) {
-            resolution.shadow.newName = prefix + Data::ComplexGeoData::elementMapPrefix()
-                + listed->second + "." + candidate;
-        }
-        resolution.sub = !resolution.shadow.newName.empty()
-                && Data::hasMappedElementName(subs[i].c_str())
-            ? resolution.shadow.newName
-            : resolution.shadow.oldName;
-        resolution.clearFrom = true;
-        resolution.feature =
-            prefix.empty() ? found->obj : found->obj->getSubObject(prefix.c_str());
-        if (!resolution.feature) {
-            throw Base::RuntimeError("Cannot find " + prefix + " in "
-                                     + found->obj->getFullName());
-        }
-        resolution.notify = true;
-        prop->applyResolutions({resolution});
-        // As a setter does: the report on the property is stale now.
-        ReferenceReport::clear(prop);
+PyObject* ApplicationPy::sMarkReferenceBroken(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyObj {};
+    const char* property {};
+    int index {};
+    if (!PyArg_ParseTuple(args, "O!si", &DocumentObjectPy::Type, &pyObj, &property, &index)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        auto obj = static_cast<DocumentObjectPy*>(pyObj)->getDocumentObjectPtr();
+        auto [prop, localIndex] = referenceSlot(obj, property, index);
+        App::markReferenceBroken(prop, localIndex);
         Py_Return;
     }
     PY_CATCH;

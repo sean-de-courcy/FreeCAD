@@ -254,7 +254,13 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
             }
             else {
                 std::vector<TopoShape> shapes;
+                // In a reference solver document the elements that are gone are skipped: the
+                // feature computes on the rest, with a warning from the recompute check (ops#127).
+                const bool partial = Profile.isPartialAllowed() && Profile.inSolverDocument();
                 for (auto& sub : subs) {
+                    if (partial && Data::hasMissingElement(sub.c_str())) {
+                        continue;
+                    }
                     auto subshape = Part::Feature::getTopoShape(
                         obj,
                         Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
@@ -523,7 +529,13 @@ TopoShape ProfileBased::getProfileShape(Part::ShapeOptions subShapeOptions) cons
     }
     else {
         std::vector<TopoShape> shapes;
+        // In a reference solver document a sub-element that no longer exists is skipped: the
+        // feature computes on the rest, with a warning from the recompute check (ops#127).
+        const bool partial = Profile.isPartialAllowed() && Profile.inSolverDocument();
         for (auto& sub : subs) {
+            if (partial && Data::hasMissingElement(sub.c_str())) {
+                continue;
+            }
             shapes.push_back(Part::Feature::getTopoShape(profile, subShapeOptions, sub.c_str()));
             // A sub-element that no longer exists ("?Edge2") gives a null shape, which the
             // compound below would drop: fail instead, naming it (ops#70)
@@ -792,6 +804,9 @@ void ProfileBased::onChanged(const App::Property* prop)
             AllowMultiFace.getValue() ? App::PropertyLinkBase::ElementPolicy::Expand
                                       : App::PropertyLinkBase::ElementPolicy::One
         );
+        // Several faces or edges compute on those that resolve when some are gone, with a
+        // warning (ops#127, Onshape's rule).
+        Profile.setPartialAllowed(AllowMultiFace.getValue());
     }
 
     FeatureAddSub::onChanged(prop);

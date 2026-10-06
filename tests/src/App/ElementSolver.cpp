@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -3721,6 +3722,140 @@ TEST(RebuildSubList, collapseBrokenAndDuplicates)
         App::rebuildSubList(resolutions, subs, shadows, fingerprints, froms, firstNew, countNew)
     );
     EXPECT_EQ(countNew, (std::vector<int> {1, 1}));
+}
+
+TEST(RebuildSubList, guessedKeepsTheFingerprintAndSetsTheRecord)
+{
+    // ops#127: a provisional pick writes its sub as Resolved does (its fingerprint is measured
+    // anew) and gets the record; Resolved and Broken clear a record; untouched references keep
+    // theirs.
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"?Edge5", "Edge7", "Edge8", "Edge9"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows {
+        shadowOf("?Edge5", ";e.Edge5"),
+        shadowOf("Edge7", ";g.Edge7"),
+        shadowOf("Edge8", ";k.Edge8"),
+        shadowOf("Edge9", ";m.Edge9"),
+    };
+    std::vector<std::string> fingerprints {"f5", "f7", "f8", "f9"};
+    std::vector<std::string> froms {"", "", "", ""};
+    App::GuessRecord kept;
+    kept.kind = "tier3";
+    kept.origName = "z";
+    kept.origIndex = "Edge2";
+    App::GuessRecord old;
+    old.kind = "tier2";
+    old.origName = "y";
+    old.origIndex = "Edge1";
+    std::vector<App::GuessRecord> guesses {{}, old, old, kept};
+
+    //   index 0 is guessed as Edge6
+    auto guessed = resolution(Status::Guessed, 0);
+    guessed.sub = "Edge6";
+    guessed.shadow = shadowOf("Edge6", ";f.Edge6");
+    guessed.guess.kind = "tier3";
+    guessed.guess.origName = "e";
+    guessed.guess.origIndex = "Edge5";
+    guessed.guess.alternatives = {{"Edge4", "structural", 1.5}};
+    //   index 1 snaps back (Resolved), index 2 breaks
+    auto resolved = resolution(Status::Resolved, 1);
+    resolved.sub = "Edge1";
+    resolved.shadow = shadowOf("Edge1", ";y.Edge1");
+    auto broken = resolution(Status::Broken, 2);
+    broken.sub = "?Edge1";
+    broken.shadow = shadowOf("?Edge1", ";y.Edge1");
+
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    std::vector<App::SolverResolution> resolutions {guessed, resolved, broken};
+    EXPECT_TRUE(App::rebuildSubList(resolutions,
+                                    subs,
+                                    shadows,
+                                    fingerprints,
+                                    froms,
+                                    firstNew,
+                                    countNew,
+                                    &guesses));
+
+    EXPECT_EQ(subs, (std::vector<std::string> {"Edge6", "Edge1", "?Edge1", "Edge9"}));
+    //   the broken reference keeps its fingerprint for a retry
+    EXPECT_EQ(fingerprints, (std::vector<std::string> {"", "", "f8", "f9"}));
+    ASSERT_EQ(guesses.size(), 4U);
+    EXPECT_EQ(guesses[0], guessed.guess);
+    EXPECT_TRUE(guesses[1].empty());
+    EXPECT_TRUE(guesses[2].empty());
+    EXPECT_EQ(guesses[3], kept);
+}
+
+TEST(RebuildSubList, guessedPiecesCarryTheRecord)
+{
+    // ops#127: a split or continuation expanded gives every piece the record; a piece another
+    // reference holds already is skipped.
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"Edge3", "Edge4"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows {
+        shadowOf("Edge3", ";a.Edge3"),
+        shadowOf("Edge4"),
+    };
+    std::vector<std::string> fingerprints {"f3", "f4"};
+    std::vector<std::string> froms {"", ""};
+    std::vector<App::GuessRecord> guesses;
+
+    auto expanded = resolution(Status::Guessed, 0);
+    expanded.from = "a";
+    expanded.guess.kind = "continued";
+    expanded.guess.origName = "a";
+    expanded.guess.origIndex = "Edge3";
+    expanded.pieces = {
+        {"Edge3", shadowOf("Edge3", ";a.Edge3")},
+        {"Edge4", shadowOf("Edge4", ";b.Edge4")},
+        {"Edge6", shadowOf("Edge6", ";c.Edge6")},
+    };
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    std::vector<App::SolverResolution> resolutions {expanded};
+    EXPECT_TRUE(App::rebuildSubList(resolutions,
+                                    subs,
+                                    shadows,
+                                    fingerprints,
+                                    froms,
+                                    firstNew,
+                                    countNew,
+                                    &guesses));
+
+    EXPECT_EQ(subs, (std::vector<std::string> {"Edge3", "Edge6", "Edge4"}));
+    EXPECT_EQ(fingerprints, (std::vector<std::string> {"", "", "f4"}));
+    EXPECT_EQ(froms, (std::vector<std::string> {"a", "a", ""}));
+    ASSERT_EQ(guesses.size(), 3U);
+    EXPECT_EQ(guesses[0], expanded.guess);
+    EXPECT_EQ(guesses[1], expanded.guess);
+    EXPECT_TRUE(guesses[2].empty());
+    EXPECT_EQ(countNew, (std::vector<int> {2, 1}));
+}
+
+TEST(GuessRecord, attributesRoundTrip)
+{
+    App::GuessRecord record;
+    record.kind = "tier3";
+    record.origName = ";g3;SKT;:H1:7,E";
+    record.origIndex = "Edge5";
+    record.alternatives = {{"Edge9", "structural", 1.2},
+                           {"Edge11", "geometric", std::numeric_limits<double>::quiet_NaN()}};
+    EXPECT_EQ(record.origText(), ";;g3;SKT;:H1:7,E.Edge5");
+    EXPECT_EQ(record.altText(), "Edge9|structural|1.2,Edge11|geometric|");
+
+    auto back = App::GuessRecord::fromAttributes(record.kind, record.origText(), record.altText());
+    EXPECT_EQ(back, record);
+
+    //   an original without a name: its index alone
+    App::GuessRecord indexOnly;
+    indexOnly.kind = "index";
+    indexOnly.origIndex = "Face6";
+    EXPECT_EQ(indexOnly.origText(), "Face6");
+    EXPECT_EQ(App::GuessRecord::fromAttributes("index", "Face6", ""), indexOnly);
+
+    //   no kind: no record
+    EXPECT_TRUE(App::GuessRecord::fromAttributes("", "Edge5", "").empty());
 }
 
 TEST(ReferenceReport, remapFollowsTheRebuild)
