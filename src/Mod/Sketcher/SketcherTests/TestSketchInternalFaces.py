@@ -760,3 +760,26 @@ class TestSketchInternalFaces(unittest.TestCase):
         self.assertEqual(len(open_wires), 2)
         for wire in open_wires:
             self.assertAlmostEqual(wire.Length, 3.0, places=6)
+
+    # ==================================================================
+    # Names that are no element of the sketch (ops#128)
+    # ==================================================================
+
+    def testLinkToAStaleOrBareNameLinksNoEdge(self):
+        """A link to the sketch's stale region name ("?InternalFace1") or to a bare index ("1")
+        keeps naming nothing: it isn't turned into the first edge (edge1). The region's own name
+        still links the region."""
+        sk = self._make_sketch()
+        add_rectangle(sk, 0, 0, 10, 10)
+        self.Doc.recompute()
+        user = self.Doc.addObject("App::FeaturePython", "User")
+        user.addProperty("App::PropertyLinkSub", "Link")
+        for name in ("1", "?InternalFace1"):
+            user.Link = (sk, [name])
+            sub = user.Link[1][0]
+            self.assertFalse(sub.lower().endswith("edge1"), f"{name} became {sub}")
+        user.Link = (sk, ["InternalFace1"])
+        sub = user.Link[1][0]
+        face = Part.getShape(sk, sub, needSubElement=True)
+        self.assertEqual(face.ShapeType, "Face")
+        self.assertAlmostEqual(face.Area, 100.0, places=3)
