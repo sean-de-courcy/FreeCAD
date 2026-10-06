@@ -147,7 +147,8 @@ names it.
 | `feat/127-solver-guesses` | feat | ops#127, ops#107 | - | `integration` | `161447e4a0` (fork PR 117), 2026-10-06 | never (fork feature) |
 | `feat/127-picker` | feat | ops#127, ops#125 | - | `feat/127-solver-guesses` `438e976e35` | `2eb8b6ec7a` (fork PR 118), 2026-10-06 | never (fork feature) |
 | `fix/130-picker-followups` | fix | ops#130, ops#127 | - | `integration` `2eb8b6ec7a` | `1a1f9d51a9` (fork PR 120), 2026-10-06 | never (fork feature) |
-| `feat/127-tree-bar` | feat | ops#127 | - | `integration` `4c9c124aeb` | (fork PR 119) | never (fork feature) |
+| `feat/127-tree-bar` | feat | ops#127 | - | `integration` `4c9c124aeb` | `1cad8bead0` (fork PR 119), 2026-10-06 | never (fork feature) |
+| `feat/127-edit-rollback` | feat | ops#127 | - | `integration` `1cad8bead0` | (fork PR 121) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

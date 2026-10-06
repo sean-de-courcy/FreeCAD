@@ -62,6 +62,7 @@
 #include "Tree.h"
 #include "BitmapFactory.h"
 #include "Command.h"
+#include "Control.h"
 #include "Document.h"
 #include "ExpressionCompleter.h"
 #include "Macro.h"
@@ -162,6 +163,29 @@ ViewProviderDocumentObject* treeBarOwner(const QTreeWidgetItem* bar)
     return static_cast<DocumentObjectItem*>(bar->parent())->object();
 }
 
+/** True, with a status bar message, while the bar can't move: an object of its owner's
+ * document is in edit, or a task dialog on it bars other changes. A move opens a transaction,
+ * which commits the open one (App::Document::openTransaction): the edit's changes would leave
+ * its undo step and Cancel couldn't take them back (ops#127)
+ */
+bool treeBarLocked(const QTreeWidgetItem* bar)
+{
+    auto vp = treeBarOwner(bar);
+    if (!vp || !vp->getObject()) {
+        return false;
+    }
+    auto gdoc = vp->getDocument();
+    if ((gdoc && gdoc->getEditViewProvider())
+        || !Control().isAllowedAlterDocument(vp->getObject()->getDocument())) {
+        getMainWindow()->showMessage(
+            TreeWidget::tr("The roll-back bar can't move while a dialog or an edit is open"),
+            5000
+        );
+        return true;
+    }
+    return false;
+}
+
 /// Asks the bar's owner to move the bar; the tree puts the row in its new place on its next
 /// update, and the row stays the current item there, so the keys go on moving it
 void moveTreeBar(
@@ -171,7 +195,7 @@ void moveTreeBar(
 )
 {
     auto vp = treeBarOwner(bar);
-    if (!vp) {
+    if (!vp || treeBarLocked(bar)) {
         return;
     }
     try {
@@ -1328,8 +1352,11 @@ void TreeWidget::_updateStatus(bool delay)
 
 void TreeWidget::contextMenuEvent(QContextMenuEvent* e)
 {
-    // The roll-back bar row has its own menu (ops#127)
+    // The roll-back bar row has its own menu (ops#127), none while the bar is locked
     if (auto bar = itemAt(e->pos()); bar && bar->type() == BarType) {
+        if (treeBarLocked(bar)) {
+            return;
+        }
         using Move = ViewProviderDocumentObject::TreeBarMove;
         QMenu barMenu;
         QAction* toEnd = barMenu.addAction(tr("Roll to end"));
@@ -2217,8 +2244,13 @@ void TreeWidget::mousePressEvent(QMouseEvent* event)
     barDropItem = nullptr;
     if (event->button() == Qt::LeftButton) {
         // A press on the roll-back bar row starts dragging it (ops#127); the base class makes
-        // it the current item and clears the selection (it isn't selectable)
+        // it the current item and clears the selection (it isn't selectable). While the bar is
+        // locked, the press does nothing
         if (auto bar = itemAt(event->pos()); bar && bar->type() == BarType) {
+            if (treeBarLocked(bar)) {
+                event->accept();
+                return;
+            }
             barDragItem = bar;
             viewport()->setCursor(Qt::SizeVerCursor);
             QTreeWidget::mousePressEvent(event);

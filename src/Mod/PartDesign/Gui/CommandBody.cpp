@@ -833,7 +833,8 @@ void CmdPartDesignRollTo::activated(int iMsg)
 
 bool CmdPartDesignRollTo::isActive()
 {
-    return hasActiveDocument();
+    // Not during an edit: the move's transaction would commit the edit's (ops#127)
+    return hasActiveDocument() && !PartDesignGui::ViewProviderBody::isEditLocked(getDocument());
 }
 
 DEF_STD_CMD_A(CmdPartDesignRollToEnd)
@@ -874,7 +875,8 @@ void CmdPartDesignRollToEnd::activated(int iMsg)
 
 bool CmdPartDesignRollToEnd::isActive()
 {
-    return hasActiveDocument();
+    // Not during an edit: the move's transaction would commit the edit's (ops#127)
+    return hasActiveDocument() && !PartDesignGui::ViewProviderBody::isEditLocked(getDocument());
 }
 
 //===========================================================================

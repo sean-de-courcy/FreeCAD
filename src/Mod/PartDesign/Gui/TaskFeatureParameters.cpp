@@ -41,6 +41,7 @@
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
+#include "ViewProviderBody.h"
 
 using namespace PartDesignGui;
 using namespace Gui;
@@ -99,6 +100,9 @@ TaskPreviewParameters::~TaskPreviewParameters() = default;
 void TaskPreviewParameters::onShowFinalChanged(bool show)
 {
     vp->showPreviousFeature(!show);
+    // Final: the Body's end result while the dialog is open, else rolled back to the feature
+    // (ops#127)
+    ViewProviderBody::setEditFinal(vp->getObject(), show);
 }
 
 void TaskPreviewParameters::onShowPreviewChanged(bool show)
@@ -174,6 +178,8 @@ void TaskFeatureParameters::recomputeFeature()
 
         feature->recomputeFeature();
         feature->recomputePreview();
+        // In Final, the features after it follow (ops#127)
+        ViewProviderBody::recomputeEditTail(feature);
     }
 }
 
