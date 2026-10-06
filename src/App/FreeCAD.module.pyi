@@ -385,7 +385,8 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
 
     A reference with a guess record (ops#127: resolved by geometry, a continuation or split
     expanded, a naming migration's index carry) is listed too, even before the solver ran again
-    (a reopened file: `status` `guessed`, `evidence` `saved guess`). Keys for it: `guess_kind`
+    (a reopened file: `evidence` `saved guess`, `status` and `tier` as its kind gives; key on
+    `guess_kind`, not `status`). Keys for it: `guess_kind`
     (`tier2`, `tier3`, `continued`, `expanded`, `index`, ...; empty without a record),
     `original` (`{"index", "name"}`: what the reference stood for), `alternatives` (a list of
     `{"index", "role", "distance"}`, the other elements it could be), `headline` and `warning`
@@ -423,7 +424,9 @@ def markReferenceBroken(obj: DocumentObject, property: str, index: int, /) -> No
     """Mark the guess that reference `index` of `obj`'s link property `property` holds as wrong.
 
     The reference goes back to its original, missing (`?Edge5`), so the owner fails at its next
-    recompute; its record goes (the other pieces of the same expanded reference go too). Raises
-    ValueError for a reference without a record.
+    recompute (the other pieces of the same expanded reference go). Its record becomes a
+    rejection (`guess_kind` `rejected`, the rejected elements in `alternatives`): the solver never
+    offers them for it again, and it snaps back if the original's name gives an element again.
+    Raises ValueError for a reference without a record.
     """
     ...

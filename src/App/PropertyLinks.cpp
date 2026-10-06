@@ -609,12 +609,13 @@ std::string PropertyLinkBase::_getElementFingerprint(App::DocumentObject* featur
 }
 
 // Whether a reference with this record snaps back to its original when the original's name gives
-// an element again (ops#127): a resolution by geometry, a guess. An index carry's record has no
-// name; the pieces of an expansion (a split or a continuation) merge back by the collapse rule.
+// an element again (ops#127): a resolution by geometry, a guess, a rejected pick. Not an index
+// carry (a naming migration moved the name: it gives another element now); the pieces of an
+// expansion (a split or a continuation) merge back by the collapse rule.
 static bool snapsBack(const GuessRecord& guess)
 {
     return !guess.empty() && !guess.origName.empty() && guess.kind != "expanded"
-        && guess.kind != "continued";
+        && guess.kind != "continued" && guess.kind != "index";
 }
 
 bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
@@ -2521,10 +2522,12 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
 // Writes the solver's resolutions into subs and shadows, calling aboutToSet() first if pass 1
 // didn't change the property already. Returns true if the property changed in either pass.
 // Resolved, Broken and Guessed (one element) only: the types that call it keep one sub per
-// reference. Guessed sets the reference's record, the others clear it (ops#127).
+// reference. Guessed and Broken set the reference's record (Broken's may be empty), Resolved
+// clears it; a Broken one with clearFingerprint clears the fingerprint too (ops#127).
 static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resolutions,
                                  std::vector<std::string>& subs,
                                  std::vector<PropertyLinkBase::ShadowSub>& shadows,
+                                 std::vector<std::string>& fingerprints,
                                  std::vector<App::GuessRecord>& guesses,
                                  const std::function<void()>& aboutToSet)
 {
@@ -2533,6 +2536,9 @@ static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resol
     bool changed = context.touched;
     shadows.resize(subs.size());
     guesses.resize(subs.size());
+    if (fingerprints.size() != subs.size()) {
+        fingerprints.resize(subs.size());
+    }
     for (const auto& resolution : resolutions) {
         if ((resolution.status != Status::Resolved && resolution.status != Status::Broken
              && (resolution.status != Status::Guessed || !resolution.pieces.empty()))
@@ -2547,7 +2553,10 @@ static bool writeLinkResolutions(const std::vector<App::SolverResolution>& resol
         subs[resolution.index] = resolution.sub;
         shadows[resolution.index] = resolution.shadow;
         guesses[resolution.index] =
-            resolution.status == Status::Guessed ? resolution.guess : App::GuessRecord();
+            resolution.status == Status::Resolved ? App::GuessRecord() : resolution.guess;
+        if (resolution.status == Status::Broken && resolution.clearFingerprint) {
+            fingerprints[resolution.index].clear();
+        }
     }
     return changed;
 }
@@ -3993,10 +4002,12 @@ void PropertyLinkSubList::applyResolutions(const std::vector<SolverResolution>& 
         return;
     }
     const auto& context = resolutions.front();
-    bool changed =
-        writeLinkResolutions(resolutions, _lSubList, _ShadowSubList, _Guesses, [this]() {
-            aboutToSetValue();
-        });
+    bool changed = writeLinkResolutions(resolutions,
+                                        _lSubList,
+                                        _ShadowSubList,
+                                        _Fingerprints,
+                                        _Guesses,
+                                        [this]() { aboutToSetValue(); });
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     if (changed) {
         // As updateElementReference() does.
@@ -5893,10 +5904,12 @@ void PropertyXLink::applyResolutions(const std::vector<SolverResolution>& resolu
     }
     const auto& context = resolutions.front();
     // A PropertyXLinkSubList's link forwards these to its list.
-    bool changed =
-        writeLinkResolutions(resolutions, _SubList, _ShadowSubList, _Guesses, [this]() {
-            aboutToSetValue();
-        });
+    bool changed = writeLinkResolutions(resolutions,
+                                        _SubList,
+                                        _ShadowSubList,
+                                        _Fingerprints,
+                                        _Guesses,
+                                        [this]() { aboutToSetValue(); });
     auto owner = freecad_cast<DocumentObject*>(getContainer());
     if (changed) {
         // As updateLinkReference() does.

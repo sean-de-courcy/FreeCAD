@@ -1474,11 +1474,22 @@ PyObject* ApplicationPy::sGetReferenceReport(PyObject* /*self*/, PyObject* args)
                 dict.setItem("target", Py::String(entry->target));
             }
             else if (!slot.guess.empty() && !Data::hasMissingElement(slot.sub.c_str())) {
-                // A saved guess the solver hasn't re-derived since (a reopened file, ops#127).
+                // A saved record the solver hasn't solved since (a reopened file, or a pick it
+                // kept, ops#127): the status and tier its kind gives, as after the resolution
                 const char* element = Data::findElementName(slot.sub.c_str());
+                const std::string& kind = slot.guess.kind;
+                const char* status = kind == "tier2" || kind == "tier3"     ? "resolved"
+                    : kind == "continued" || kind == "expanded"             ? "expanded"
+                    : kind == "index"                                       ? "index"
+                                                                            : "guessed";
+                const int tier = kind == "tier2"                            ? 2
+                    : kind == "tier3" || kind == "nearest" || kind == "geometric" ? 3
+                    : kind == "continued"                                   ? 4
+                    : kind == "expanded" || kind == "piece"                 ? 1
+                                                                            : -1;
                 dict.setItem("old", Py::String(slot.guess.origName));
-                dict.setItem("status", Py::String("guessed"));
-                dict.setItem("tier", Py::Long(-1));
+                dict.setItem("status", Py::String(status));
+                dict.setItem("tier", Py::Long(tier));
                 dict.setItem("new", Py::String(element ? element : ""));
                 dict.setItem("evidence", Py::String("saved guess"));
                 dict.setItem("target", Py::String(""));

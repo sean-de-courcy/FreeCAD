@@ -123,6 +123,9 @@ struct AppExport SolverResolution
     std::string from;
     /// Resolved by a collapse: the reference's `from` is cleared.
     bool clearFrom = false;
+    /// Broken: the reference's fingerprint is cleared too (a pick the user rejected: its
+    /// fingerprint is the rejected element's, ops#127).
+    bool clearFingerprint = false;
     /// Guessed: the record. Resolved and Broken always clear a reference's record (ops#127).
     GuessRecord guess;
 
@@ -142,10 +145,11 @@ struct AppExport SolverResolution
  * Resolved and Broken replace a reference, Expanded replaces it by its pieces (a piece whose
  * element another reference of the new list or an untouched one already holds is skipped),
  * Removed drops it. Fingerprints of written references are emptied (the caller refreshes them),
- * except a Broken one's, which it keeps. Guessed (ops#127) replaces a reference as Resolved does,
- * or by its pieces as Expanded does, and sets its record in \a guesses; every other written
- * reference loses its record. Sets \a firstNew and \a countNew per old index. Returns true if
- * anything was written.
+ * except a Broken one's, which it keeps unless clearFingerprint is set. Guessed (ops#127) replaces
+ * a reference as Resolved does, or by its pieces as Expanded does, and sets its record in
+ * \a guesses; Broken sets the resolution's record (empty, or the one it carries); every other
+ * written reference loses its record. Sets \a firstNew and \a countNew per old index. Returns
+ * true if anything was written.
  */
 AppExport bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                               std::vector<std::string>& subs,

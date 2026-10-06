@@ -459,6 +459,9 @@ struct AppExport SolveInput
         std::string scope;
         /// The reference's position in its property; a collapsing group keeps its lowest.
         int position = 0;
+        /// Elements the user rejected for this reference (ops#127, App::markReferenceBroken()):
+        /// never its candidates, at any tier.
+        std::vector<std::string> excluded;
     };
     /// An element of the target with all its mapped names.
     struct Element

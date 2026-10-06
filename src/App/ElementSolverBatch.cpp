@@ -296,6 +296,9 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
     resolution.shadow.oldName = entry.prefix + Data::MISSING_PREFIX + entry.oldIndex;
     resolution.sub = entry.sub == resolution.shadow.newName ? resolution.shadow.newName
                                                             : resolution.shadow.oldName;
+    // A provisional pick keeps its record (ops#127): the original stays known, and it can still
+    // snap back
+    resolution.guess = entry.guess;
 }
 
 // The record of a provisional resolution of \a entry (ops#127): the original is the entry's, or
@@ -532,8 +535,13 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                     }
                     break;
                 case Status::Broken:
-                    // A broken reference keeps its fingerprint for the next retry.
-                    add(resolution->sub, resolution->shadow, fingerprints[i], froms[i]);
+                    // A broken reference keeps its fingerprint for the next retry, and the record
+                    // the resolution carries (ops#127)
+                    add(resolution->sub,
+                        resolution->shadow,
+                        resolution->clearFingerprint ? std::string() : fingerprints[i],
+                        froms[i],
+                        resolution->guess);
                     break;
                 case Status::Guessed:
                     // A provisional pick, with its record (ops#127): one element as Resolved
@@ -983,11 +991,17 @@ bool solveElementReferences(DocumentObject* feature,
                 if (!pick.empty()) {
                     SolverResolution resolution;
                     resolutionFor(*entry, pick, nameAt(pick), resolution);
-                    // Kept by its place, with a warning (ops#127). The record has no name: the
-                    // name gives another element now, and a snap-back to it would undo the pick.
+                    // Kept by its place, with a warning (ops#127). A plain reference's record
+                    // has no name: the name gives another element now. One that holds a record
+                    // keeps its original. An index record never snaps back.
                     resolution.status = SolverResolution::Status::Guessed;
-                    resolution.guess.kind = "index";
-                    resolution.guess.origIndex = stored.empty() ? hit : stored;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = stored.empty() ? hit : stored;
+                    }
                     resolutions[entry->prop].push_back(resolution);
                     item.status = ReferenceReport::Status::Index;
                     item.kind = resolution.guess.kind;
@@ -1070,10 +1084,15 @@ bool solveElementReferences(DocumentObject* feature,
                     SolverResolution resolution;
                     resolutionFor(*entry, index, mapForm(name), resolution);
                     // Kept by its place, with a warning and a record without the name, which
-                    // isn't found (ops#127).
+                    // isn't found, or the original of the record it holds (ops#127).
                     resolution.status = SolverResolution::Status::Guessed;
-                    resolution.guess.kind = "index";
-                    resolution.guess.origIndex = index;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = index;
+                    }
                     resolutions[entry->prop].push_back(resolution);
                     item.status = ReferenceReport::Status::Index;
                     item.kind = resolution.guess.kind;
@@ -1156,6 +1175,14 @@ bool solveElementReferences(DocumentObject* feature,
             item.scope = std::to_string(reinterpret_cast<std::uintptr_t>(entry->prop)) + "|"
                 + entry->prefix;
             item.position = entry->index;
+            if (entry->guess.kind == "rejected") {
+                // The elements the user rejected for it (App::markReferenceBroken(), ops#127)
+                for (const auto& alternative : entry->guess.alternatives) {
+                    if (alternative.role == "rejected") {
+                        item.excluded.push_back(alternative.index);
+                    }
+                }
+            }
             if (entry->kind == SolverEntry::Kind::Exact) {
                 if (anyMissing && item.fingerprint.isValid()
                     && !fingerprintOf(entry->oldIndex).isValid()) {
@@ -1267,9 +1294,11 @@ bool solveElementReferences(DocumentObject* feature,
                     }
                     item.kind = resolution.guess.kind;
                 }
-                else if (!entry.guess.empty() && !outcome.collapsed) {
+                else if (!entry.guess.empty() && !outcome.collapsed
+                         && entry.guess.kind != "rejected") {
                     // A provisional pick followed to its element's next form keeps its record
-                    // and its warning: structure followed the pick, not the original.
+                    // and its warning: structure followed the pick, not the original. (A
+                    // rejected one that structure resolves to another element is resolved.)
                     resolution.status = SolverResolution::Status::Guessed;
                     resolution.guess = entry.guess;
                     item.kind = resolution.guess.kind;

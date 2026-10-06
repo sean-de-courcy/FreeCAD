@@ -316,6 +316,22 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     else {
         ss << "Missing " << (type.empty() ? "element" : type) << " reference: " << element;
     }
+    // A reference with a record (ops#127): the pick that broke, or the picks the user rejected
+    const GuessRecord& guess = slot.guess;
+    if (guess.kind == "rejected") {
+        std::string picks;
+        for (const auto& alternative : guess.alternatives) {
+            if (alternative.role == "rejected") {
+                picks += (picks.empty() ? "" : ", ") + alternative.index;
+            }
+        }
+        if (!picks.empty()) {
+            ss << ", rejected: " << picks;
+        }
+    }
+    else if (!guess.empty() && !guess.origIndex.empty() && guess.origIndex != element) {
+        ss << ", picked for " << guess.origIndex;
+    }
     ss << " (" << slot.property << '[' << slot.index << "], ";
     if (entry && !entry->candidates.empty()) {
         ss << "candidates: ";

@@ -35,7 +35,10 @@ AppExport void repairReference(PropertyLinkBase* prop,
                                bool force = false);
 
 /// The guess is wrong and nothing else is right: the reference goes back to its original, missing
-/// (`?Edge5`), and its owner fails at the next recompute. It keeps its fingerprint for a retry.
+/// (`?Edge5`), and its owner fails at the next recompute. Its record becomes a rejection (kind
+/// `rejected`, the rejected elements as alternatives with role `rejected`): the solver never
+/// offers them for it again, its fingerprint (the rejected element's) goes, and it still snaps
+/// back when the original's name gives an element again.
 AppExport void markReferenceBroken(PropertyLinkBase* prop, int localIndex);
 
 }  // namespace App

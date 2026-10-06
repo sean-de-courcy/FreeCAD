@@ -228,10 +228,31 @@ void markReferenceBroken(PropertyLinkBase* prop, int localIndex)
         throw Base::ValueError("The element reference holds no guess to mark broken");
     }
     std::vector<SolverResolution> list;
-    // The original, missing, as the solver breaks a guess: the owner fails with it.
+    // The original, missing, as the solver breaks a guess: the owner fails with it. The record
+    // becomes a rejection: the solver never offers the rejected elements for it again, and the
+    // fingerprint (the rejected element's) goes, so geometry can't find it either. The original's
+    // name coming back still snaps it back.
+    GuessRecord rejected;
+    rejected.kind = "rejected";
+    rejected.origName = guess.origName;
+    rejected.origIndex = guess.origIndex;
+    if (guess.kind == "rejected") {
+        rejected.alternatives = guess.alternatives;
+    }
+    for (int i : sameRecord(reference, localIndex)) {
+        const char* element = Data::findElementName(reference.subs[i].c_str());
+        if (element && element[0] && !Data::hasMissingElement(element)) {
+            GuessRecord::Alternative alternative;
+            alternative.index = element;
+            alternative.role = "rejected";
+            rejected.alternatives.push_back(std::move(alternative));
+        }
+    }
     SolverResolution resolution;
     resolution.status = SolverResolution::Status::Broken;
     resolution.index = localIndex;
+    resolution.guess = std::move(rejected);
+    resolution.clearFingerprint = true;
     if (!guess.origName.empty()) {
         resolution.shadow.newName = reference.prefix + Data::ComplexGeoData::elementMapPrefix()
             + guess.origName + "." + guess.origIndex;

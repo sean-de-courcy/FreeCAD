@@ -288,11 +288,15 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
     }
     // In a reference solver document the feature computes on the faces that resolve, with a
     // warning from the recompute check (ops#127, Onshape's rule); never on none.
-    bool anyFace = false;
+    bool anyResolving = false;
     for (std::size_t i = 0; i < vals.size(); ++i) {
-        anyFace = anyFace || boost::starts_with(indexedName(i), "Face");
+        const std::string& name = indexedName(i);
+        anyResolving = anyResolving
+            || (boost::starts_with(name, "Face") && !Data::hasMissingElement(name.c_str())
+                && !Data::hasMissingElement(vals[i].c_str()));
     }
-    if (!missing.empty() && !(anyFace && Base.isPartialAllowed() && Base.inSolverDocument())) {
+    if (!missing.empty()
+        && !(anyResolving && Base.isPartialAllowed() && Base.inSolverDocument())) {
         FC_THROWM(Part::NullShapeException, "Missing face reference: " << missing);
     }
 

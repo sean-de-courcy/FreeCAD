@@ -3724,7 +3724,7 @@ TEST(RebuildSubList, collapseBrokenAndDuplicates)
     EXPECT_EQ(countNew, (std::vector<int> {1, 1}));
 }
 
-TEST(RebuildSubList, guessedKeepsTheFingerprintAndSetsTheRecord)
+TEST(RebuildSubList, guessedSetsTheRecord)
 {
     // ops#127: a provisional pick writes its sub as Resolved does (its fingerprint is measured
     // anew) and gets the record; Resolved and Broken clear a record; untouched references keep

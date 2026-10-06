@@ -919,18 +919,86 @@ class TestNamingSolver(unittest.TestCase):
 
     def testMarkBrokenFailsTheOwnerWithTheOriginal(self):
         """Marking the guess broken: the reference goes back to its original, missing, and the
-        fillet fails naming it."""
+        fillet fails naming it and the rejected edge. The next edit upstream doesn't pick the
+        rejected edge again: its record is a rejection, and it keeps no fingerprint (the rejected
+        edge's)."""
         doc, pad, fillet, original = self.redrawnFillet()
+        rejected = fillet.Base[1][0]
 
         App.markReferenceBroken(fillet, "Base", 0)
         doc.recompute()
 
         self.assertFalse(fillet.isValid())
         self.assertEqual(fillet.Base[1], ["?" + original])
-        self.assertIn("Missing edge reference: " + original, fillet.getStatusString())
+        status = fillet.getStatusString()
+        self.assertIn("Missing edge reference: " + original, status)
+        self.assertIn("rejected: " + rejected, status)
         [sub] = self.savedSubs(doc, "Fillet", "Base")
-        self.assertNotIn("guess", sub)
-        self.assertIn("fp", sub)  # for a retry
+        self.assertEqual(sub["guess"], "rejected")
+        self.assertNotIn("fp", sub)
+
+        #   an edit upstream: the rejected edge is still there, and still not taken
+        pad.Length = 12
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.Base[1], ["?" + original])
+
+    def testUndoOfAnAcceptBringsTheRecordBack(self):
+        """Undo restores a property through Paste: an accept undone gives the record back, and
+        the next recompute the warning."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        original = fillet.Base[1][0]
+        self.redraw(doc)
+        self.assertIn("Warning", fillet.State)
+
+        doc.openTransaction("accept")
+        App.acceptReference(fillet, "Base", 0)
+        doc.commitTransaction()
+        self.assertNotIn("guess", self.savedSubs(doc, "Fillet", "Base")[0])
+
+        doc.undo()
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertEqual(sub["guess"], "tier3")
+        self.assertTrue(sub["orig"].endswith("." + original))
+        fillet.touch()
+        doc.recompute()
+        self.assertIn("Warning", fillet.State)
+
+    def testBinderRecordIsReopened(self):
+        """A PropertyXLinkSubList's record (a SubShapeBinder's Support): the pad's right face,
+        found again by geometry after the rectangle is redrawn, keeps its record through save
+        and reopen."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        right = face("plane", normal=X, through=(20, 0, 0))
+        binder = doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(pad, tuple(right.one(pad.Shape)))]
+        doc.recompute()
+        self.assertTrue(binder.isValid())
+        original = right.one(pad.Shape)[0]
+        self.redraw(doc)
+        self.assertIn("Warning", binder.State)
+        [entry] = App.getReferenceReport(binder)
+        self.assertEqual(entry["guess_kind"], "tier3")
+
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Binder.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+
+        binder = doc.Binder
+        self.assertIn("Warning", binder.State)
+        [entry] = App.getReferenceReport(binder)
+        self.assertEqual(entry["guess_kind"], "tier3")
+        self.assertEqual(entry["original"]["index"], original)
 
     def testSetterDropsTheRecord(self):
         """Setting the property anew, even to the same sub, drops the record: the user chose it."""
