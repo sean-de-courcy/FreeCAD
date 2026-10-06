@@ -206,6 +206,9 @@ SketchObject::SketchObject() : geoLastId(0)
                       "Sketch",
                       (App::PropertyType)(App::Prop_None | App::Prop_ReadOnly),
                       "Sketch external geometry");
+    // A missing external reference keeps its frozen geometry (ops#72); in a reference solver
+    // document the sketch then computes with a warning while another one resolves (ops#127).
+    ExternalGeometry.setPartialAllowed(true);
     ADD_PROPERTY_TYPE(ExternalTypes,
                       ({}),
                       "Sketch",
@@ -378,7 +381,17 @@ App::DocumentObjectExecReturn* SketchObject::execute()
     buildShape();
 
     if (!externalError.empty()) {
-        return new App::DocumentObjectExecReturn(externalError, this);
+        // In a reference solver document a missing external reference is a warning while another
+        // one resolves: the recompute check has set it, naming the missing ones (ops#127).
+        const auto subs = ExternalGeometry.getSubValues();
+        const bool anyResolves = std::any_of(subs.begin(), subs.end(), [](const std::string& sub) {
+            return !Data::hasMissingElement(sub.c_str());
+        });
+        if (!(isWarning() && anyResolves && ExternalGeometry.isPartialAllowed()
+              && ExternalGeometry.inSolverDocument())) {
+            return new App::DocumentObjectExecReturn(externalError, this);
+        }
+        FC_LOG(getFullName() << ": " << externalError);
     }
 
     return App::DocumentObject::StdReturn;

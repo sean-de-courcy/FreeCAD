@@ -141,7 +141,8 @@ names it.
 | `fix/119-link-unregister` | fix | ops#119, ops#120 | - | `integration` `1807cbb5ff` | `e2372ffd85` (fork PR 110), 2026-10-05 | never (fork naming code) |
 | `fix/123-missing-sub-reverse` | fix | ops#123 | - | `integration` `1807cbb5ff` | `ee0c358393` (fork PR 112), 2026-10-05 | never (fork naming code) |
 | `fix/125-profile-link-dialog` | fix | ops#125 | - | `integration` `ee0c358393` | `b8175da50d` (fork PR 113), 2026-10-05 | when upstream's link dialog keeps stale sub-elements apart from new picks |
-| `feat/127-failure-passthrough` | feat | ops#126, ops#127 | - | `integration` `b8175da50d` | (fork PR 114) | never (fork feature) |
+| `feat/127-failure-passthrough` | feat | ops#126, ops#127 | - | `integration` `b8175da50d` | `5b1e893ccd` (fork PR 114), 2026-10-05 | never (fork feature) |
+| `feat/127-solver-warnings` | feat | ops#127, ops#107 | - | `integration` `5b1e893ccd` | (fork PR 115) | never (fork naming: the reference solver is the fork's) |
 
 ## Fork-only commits in carried topics
 

@@ -2294,12 +2294,21 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         Pool& pool = *state.pool;
         const std::string& oldName = state.oldName;
 
-        // The pool for this entry: tier-0 elements only as proven merges.
+        // The pool for this entry: tier-0 elements only as proven merges, and never an element
+        // the user rejected for one of the members (ops#127).
+        std::set<std::string> rejected;
+        for (int member : members) {
+            const auto& excluded = input.entries[member].excluded;
+            rejected.insert(excluded.begin(), excluded.end());
+        }
         std::vector<std::string> flatNames;
         std::vector<int> flatElements;
         std::vector<char> allowed(pool.elements.size(), 0);
         for (std::size_t k = 0; k < pool.elements.size(); ++k) {
             const auto& element = pool.elements[k];
+            if (rejected.count(element.index)) {
+                continue;
+            }
             bool contains = !oldName.empty()
                 && std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
                                 return ancestry.contains(n, oldName);
@@ -2665,6 +2674,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.tier = state.geometric ? 3 : state.geometryTier ? state.geometryTier : 1;
                 state.outcome.element = element.index;
                 state.outcome.name = firstName(element);
+                if (state.geometric || state.geometryTier >= 2) {
+                    // Geometry chose among tier 1's survivors: the others are the alternatives
+                    // the user may prefer (ops#127).
+                    std::vector<int> others;
+                    for (int position : state.listed) {
+                        if (position != k) {
+                            others.push_back(position);
+                        }
+                    }
+                    listCandidates(state, others, state.geometric ? "geometric" : nullptr);
+                }
                 if (state.geometric) {
                     state.outcome.evidence = state.geometryEvidence;
                 }

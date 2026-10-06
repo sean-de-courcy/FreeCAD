@@ -51,6 +51,7 @@
 #include "PropertyExpressionEngine.h"
 #include "PropertyLinks.h"
 #include "ReferenceReport.h"
+#include "private/DocumentP.h"
 
 
 FC_LOG_LEVEL_INIT("App", true, true)
@@ -163,11 +164,17 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
     }
 
     // In a reference solver document (ops#7), a broken element reference fails its owner,
-    // instead of letting it compute without the element.
-    if (auto doc = getDocument(); doc && doc->isReferenceSolverOn()) {
-        std::string why;
-        if (ReferenceReport::describeBroken(this, why)) {
-            return new DocumentObjectExecReturn(why, this);
+    // instead of letting it compute without the element. A guessed reference, one resolved by
+    // geometry, or a missing one of a property that computes on the rest lets it compute with a
+    // warning (ops#127), derived anew on every recompute.
+    if (auto doc = getDocument()) {
+        doc->clearWarning(this);
+        ReferenceReport::Outcome outcome;
+        if (doc->isReferenceSolverOn() && ReferenceReport::describe(this, outcome)) {
+            if (!outcome.fatal.empty()) {
+                return new DocumentObjectExecReturn(outcome.fatal, this);
+            }
+            doc->setWarning(this, outcome.warning);
         }
     }
 
@@ -329,6 +336,15 @@ const char* DocumentObject::getStatusString() const
         const char* text = getDocument()->getErrorDescription(this);
         return text ? text : "Error";
     }
+    else if (isWarning()) {
+        if (auto doc = getDocument()) {
+            auto it = doc->d->_WarningLog.find(this);
+            if (it != doc->d->_WarningLog.end()) {
+                return it->second.status.c_str();
+            }
+        }
+        return "Warning";
+    }
     else if (isFreezed()){
         return "Freezed";
     }
@@ -338,6 +354,12 @@ const char* DocumentObject::getStatusString() const
     else {
         return "Valid";
     }
+}
+
+const char* DocumentObject::getWarningDescription() const
+{
+    auto doc = getDocument();
+    return doc ? doc->getWarningDescription(this) : nullptr;
 }
 
 std::string DocumentObject::getFullName() const

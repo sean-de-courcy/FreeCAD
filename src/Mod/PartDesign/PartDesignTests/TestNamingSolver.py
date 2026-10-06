@@ -787,3 +787,306 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
         self.assertTrue(fillet.isValid())
         self.assertEqual(fillet.Base[1], self.topCircle(20, 15).one(bossPad.Shape))
+
+    # The warning state, the saved guess record and partial regeneration (ops#127, design note
+    # N2: P5). A reference resolved by geometry alone (tier 3 here) computes with a warning and a
+    # record of its original, until it is accepted, repaired or set, or the original comes back.
+
+    def savedObject(self, doc, objectName):
+        """The attributes of `objectName`'s entry in the saved document's object list."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Saved.FCStd")
+        doc.saveCopy(path)
+        with zipfile.ZipFile(path) as archive:
+            root = ElementTree.fromstring(archive.read("Document.xml"))
+        for obj in root.iter("Object"):
+            if obj.get("name") == objectName and obj.get("type"):
+                return dict(obj.attrib)
+        raise AssertionError(f"{objectName} isn't saved")
+
+    def redrawnFillet(self):
+        """A fillet whose edge was found again by geometry alone (the redrawn rectangle, tier 3).
+        Returns (document, pad, fillet, the reference's index before the redraw)."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        original = fillet.Base[1][0]
+        self.redraw(doc)
+        self.assertTrue(fillet.isValid())
+        return doc, pad, fillet, original
+
+    def testGeometryResolutionWarnsWithARecord(self):
+        """The redrawn rectangle's edge, found by tier 3: the fillet computes, with the Warning
+        state and a text naming the edge, the original and the tier; the reference holds the
+        edge, and its saved record names the original."""
+        doc, pad, fillet, original = self.redrawnFillet()
+
+        corner = edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape)
+        self.assertEqual(fillet.Base[1], corner)
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(
+            fillet.getStatusString(),
+            "Warning: Edge reference resolved by geometry: %s for %s (Base[0], tier 3)"
+            % (corner[0], original),
+        )
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3))
+        self.assertEqual(entry["guess_kind"], "tier3")
+        self.assertEqual(entry["original"]["index"], original)
+        self.assertEqual(entry["warning"], fillet.getStatusString()[len("Warning: ") :])
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertEqual(sub["guess"], "tier3")
+        self.assertTrue(sub["orig"].endswith("." + original))
+        self.assertIn("fp", sub)
+        self.assertTrue(self.savedObject(doc, "Fillet")["Warning"].startswith("Edge reference"))
+
+        #   a recompute that changes nothing keeps it, and the reference
+        fillet.touch()
+        doc.recompute()
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(fillet.Base[1], corner)
+
+    def testGuessSnapsBackWhenTheOriginalReturns(self):
+        """Undoing the redraw brings the old sketch geometry back, and with it the edge's old
+        name: the reference snaps back to it, its record goes, and so does the warning."""
+        # Arrange
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        original = fillet.Base[1][0]
+        doc.openTransaction("redraw")
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+        doc.commitTransaction()
+        doc.recompute()  # outside the transaction: the guess isn't undone with it
+        self.assertIn("Warning", fillet.State)
+
+        # Act
+        doc.undo()
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertEqual(fillet.Base[1], [original])
+        self.assertEqual(App.getReferenceReport(fillet), [])
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertNotIn("guess", sub)
+
+    def testWarningAndRecordAreReopened(self):
+        """Saved and opened again, the fillet shows its warning before any recompute, and the
+        report lists the reference with its original."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        text = fillet.getStatusString()
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Warned.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+
+        fillet = doc.Fillet
+        self.assertIn("Warning", fillet.State)
+        self.assertEqual(fillet.getStatusString(), text)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["guess_kind"], "tier3")
+        self.assertEqual(entry["original"]["index"], original)
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertIn("Warning", fillet.State)
+
+    def testAcceptClearsTheRecordAndTheWarning(self):
+        """Accepting the guess: the edge becomes the reference, its record and the warning go."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        held = fillet.Base[1]
+
+        App.acceptReference(fillet, "Base", 0)
+
+        self.assertNotIn("Warning", fillet.State)
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertNotIn("guess", sub)
+        self.assertIn("fp", sub)
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertEqual(fillet.Base[1], held)
+        self.assertEqual(App.getReferenceReport(fillet), [])
+        #   nothing left to accept
+        with self.assertRaises(ValueError):
+            App.acceptReference(fillet, "Base", 0)
+
+    def testMarkBrokenFailsTheOwnerWithTheOriginal(self):
+        """Marking the guess broken: the reference goes back to its original, missing, and the
+        fillet fails naming it and the rejected edge. The next edit upstream doesn't pick the
+        rejected edge again: its record is a rejection, and it keeps no fingerprint (the rejected
+        edge's)."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        rejected = fillet.Base[1][0]
+
+        App.markReferenceBroken(fillet, "Base", 0)
+        doc.recompute()
+
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.Base[1], ["?" + original])
+        status = fillet.getStatusString()
+        self.assertIn("Missing edge reference: " + original, status)
+        self.assertIn("rejected: " + rejected, status)
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertEqual(sub["guess"], "rejected")
+        self.assertNotIn("fp", sub)
+
+        #   an edit upstream: the rejected edge is still there, and still not taken
+        pad.Length = 12
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.Base[1], ["?" + original])
+
+    def testUndoOfAnAcceptBringsTheRecordBack(self):
+        """Undo restores a property through Paste: an accept undone gives the record back, and
+        the next recompute the warning."""
+        doc = self.newDocument()
+        doc.UndoMode = 1
+        pad, fillet = self.padWithFillet(doc)
+        original = fillet.Base[1][0]
+        self.redraw(doc)
+        self.assertIn("Warning", fillet.State)
+
+        doc.openTransaction("accept")
+        App.acceptReference(fillet, "Base", 0)
+        doc.commitTransaction()
+        self.assertNotIn("guess", self.savedSubs(doc, "Fillet", "Base")[0])
+
+        doc.undo()
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertEqual(sub["guess"], "tier3")
+        self.assertTrue(sub["orig"].endswith("." + original))
+        fillet.touch()
+        doc.recompute()
+        self.assertIn("Warning", fillet.State)
+
+    def testBinderRecordIsReopened(self):
+        """A PropertyXLinkSubList's record (a SubShapeBinder's Support): the pad's right face,
+        found again by geometry after the rectangle is redrawn, keeps its record through save
+        and reopen."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        right = face("plane", normal=X, through=(20, 0, 0))
+        binder = doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(pad, tuple(right.one(pad.Shape)))]
+        doc.recompute()
+        self.assertTrue(binder.isValid())
+        original = right.one(pad.Shape)[0]
+        self.redraw(doc)
+        self.assertIn("Warning", binder.State)
+        [entry] = App.getReferenceReport(binder)
+        self.assertEqual(entry["guess_kind"], "tier3")
+
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Binder.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+
+        binder = doc.Binder
+        self.assertIn("Warning", binder.State)
+        [entry] = App.getReferenceReport(binder)
+        self.assertEqual(entry["guess_kind"], "tier3")
+        self.assertEqual(entry["original"]["index"], original)
+
+    def testSetterDropsTheRecord(self):
+        """Setting the property anew, even to the same sub, drops the record: the user chose it."""
+        doc, pad, fillet, original = self.redrawnFillet()
+
+        fillet.Base = (pad, list(fillet.Base[1]))
+        doc.recompute()
+
+        self.assertTrue(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertNotIn("guess", sub)
+
+    def testFilletComputesOnTheEdgesLeft(self):
+        """A fillet on two vertical edges of the pad, at (20, 0) and (0, 10); the corner at
+        (20, 0) is cut (FilletCornerCut's edit), so its edge is gone. The fillet computes on the
+        other edge with a warning naming the missing one, which its reference keeps missing
+        (Onshape's rule): the result is the pad filleted at (0, 10) alone."""
+        # Arrange
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        other = edge("line", direction=Z, through=(0, 10, 0))
+        fillet.Base = (pad, list(fillet.Base[1]) + other.one(pad.Shape))
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+
+        # Act
+        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        doc.recompute()
+
+        # Assert
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertIn("Warning", fillet.State)
+        missing = [s for s in fillet.Base[1] if s.startswith("?")]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual([s for s in fillet.Base[1] if not s.startswith("?")], other.one(pad.Shape))
+        status = fillet.getStatusString()
+        self.assertIn("Missing edge reference: " + missing[0][1:], status)
+        self.assertTrue(status.endswith("computed on 1 of 2 edges"), status)
+        #   the oracle: the pad's shape filleted at (0, 10) alone, radius 1
+        expected = pad.Shape.makeFillet(1, [pad.Shape.getElement(other.one(pad.Shape)[0])])
+        self.assertAlmostEqual(fillet.Shape.Volume, expected.Volume, places=6)
+        self.assertTrue(
+            fillet.Shape.BoundBox.isInside(expected.BoundBox.Center)
+            and expected.BoundBox.isInside(fillet.Shape.BoundBox.Center)
+        )
+
+    def testFilletWithNothingLeftFails(self):
+        """The same fillet on the cut corner's edge alone: nothing left to compute on, so it
+        fails, naming the edge."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+
+        models.setLines(doc.Profile, {0: ((0, 0), (19, 0)), 1: ((20, 1), (20, 10))})
+        doc.Profile.addGeometry(models.polyline([(19, 0), (20, 1)]), False)
+        doc.recompute()
+
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertIn("Missing edge reference", fillet.getStatusString())
+        self.assertNotIn("computed on", fillet.getStatusString())
+
+    def testExpressionErrorDropsTheWarning(self):
+        """A warned fillet whose Radius expression then fails (it reads a property that doesn't
+        exist) fails before DocumentObject::recompute(): it shows the error, not the old warning
+        beside it (N1 4.9)."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        self.assertIn("Warning", fillet.State)
+
+        fillet.setExpression("Radius", "Pad.NoSuchProperty")
+        doc.recompute()
+
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertNotIn("Warning", fillet.getStatusString())
+
+    def testInputFailureDropsTheWarning(self):
+        """A warned fillet whose pad then fails (its Length 0): the fillet fails on its input in
+        error before it runs (the failure pass-through's check, ops#126) and shows that error,
+        not the old warning beside it (N1 4.9)."""
+        doc, pad, fillet, original = self.redrawnFillet()
+        self.assertIn("Warning", fillet.State)
+
+        pad.Length = 0
+        doc.recompute()
+
+        self.assertFalse(pad.isValid())
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertNotIn("Warning", fillet.getStatusString())

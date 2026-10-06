@@ -1011,6 +1011,7 @@ void Document::clearDocument() // NOLINT
     setStatus(Document::PartialDoc, false);
 
     d->clearRecomputeLog();
+    d->_WarningLog.clear();
     d->objectLabelManager.clear();
     d->objectArray.clear();
     d->objectMap.clear();
@@ -1857,6 +1858,13 @@ void Document::writeObjectType(const std::vector<DocumentObject*>& objs,
         if (it->isFreezed()) {
             writer.Stream() << "Freeze=\"1\" ";
         }
+        if (it->isWarning()) {
+            // A guessed or partly resolved element reference (ops#127): the warning stays with
+            // the file until the user accepts or repairs it.
+            auto desc = getWarningDescription(it);
+            writer.Stream() << "Warning=\"" << Property::encodeAttribute(desc ? desc : "")
+                            << "\" ";
+        }
         writer.Stream() << "/>\n";
     }
 }
@@ -2094,6 +2102,10 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                     if (reader.getAttribute<long>("Freeze") != 0) {
                         obj->freeze();
                     }
+                }
+                if (reader.hasAttribute("Warning")) {
+                    setWarning(obj, reader.getAttribute<const char*>("Warning"));
+                    d->_WarningLog[obj].reported = true;  // it was reported when it was set
                 }
             }
         }
@@ -2606,6 +2618,7 @@ void Document::restore(const char* filename,
     setStatus(Document::PartialDoc, false);
 
     d->clearRecomputeLog();
+    d->_WarningLog.clear();
     d->objectLabelManager.clear();
     d->objectArray.clear();
     d->objectNameManager.clear();
@@ -3440,6 +3453,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             continue;
                         }
                         if (verdict == AfterInputFailure::Fail) {
+                            // It doesn't run: its warning from the last recompute goes (ops#127,
+                            // N1 4.9)
+                            clearWarning(obj);
                             d->addRecomputeLog(why, obj);
                             res = 1;
                         }
@@ -3576,6 +3592,18 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                     }
                 }
             }
+        }
+    }
+    // The warnings set in this recompute (ops#127), once each: to the Report view and the
+    // notification area (Console().warning(); userWarning() doesn't reach the Report view).
+    for (auto it : topoSortedObjects) {
+        auto found = d->_WarningLog.find(it);
+        if (found == d->_WarningLog.end() || found->second.reported) {
+            continue;
+        }
+        found->second.reported = true;
+        if (it->isAttachedToDocument() && !it->isError()) {
+            Base::Console().warning("%s: %s\n", it->Label.getValue(), found->second.text.c_str());
         }
     }
 
@@ -3781,10 +3809,44 @@ const char* Document::getErrorDescription(const DocumentObject* Obj) const
     return d->findRecomputeLog(Obj);
 }
 
+void Document::setWarning(DocumentObject* Obj, const std::string& text)
+{
+    if (!Obj) {
+        return;
+    }
+    auto& warning = d->_WarningLog[Obj];
+    if (warning.text != text) {
+        warning.reported = false;
+    }
+    warning.text = text;
+    warning.status = "Warning: " + text;
+    Obj->setStatus(ObjectStatus::Warning, true);
+}
+
+void Document::clearWarning(DocumentObject* Obj)
+{
+    if (!Obj) {
+        return;
+    }
+    d->_WarningLog.erase(Obj);
+    Obj->setStatus(ObjectStatus::Warning, false);
+}
+
+const char* Document::getWarningDescription(const DocumentObject* Obj) const
+{
+    auto it = d->_WarningLog.find(Obj);
+    return it == d->_WarningLog.end() ? nullptr : it->second.text.c_str();
+}
+
 // call the recompute of the Feature and handle the exceptions and errors.
 int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
 {
     FC_LOG("Recomputing " << Feat->getFullName());
+
+    // The warning of the last recompute goes first (ops#127): the paths that fail before
+    // DocumentObject::recompute() (an expression in error) would leave it beside the new error.
+    // DocumentObject::recompute() derives it anew.
+    clearWarning(Feat);
 
     DocumentObjectExecReturn* returnCode = nullptr;
     try {
@@ -4127,6 +4189,7 @@ void Document::_removeObject(DocumentObject* pcObject, RemoveObjectOptions optio
 
     // remove from map
     pcObject->setStatus(ObjectStatus::Remove, false);  // Unset the bit to be on the safe side
+    clearWarning(pcObject);  // keyed by address, as the recompute log (ops#127)
     d->objectIdMap.erase(pcObject->_Id);
     d->objectNameManager.removeExactName(pos->first);
     unregisterLabel(pcObject->Label.getStrValue());

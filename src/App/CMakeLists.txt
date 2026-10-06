@@ -279,6 +279,7 @@ SET(Properties_CPP_SRCS
     PropertyGeo.cpp
     PropertyLinks.cpp
     ReferenceReport.cpp
+    ReferenceRepair.cpp
     PropertyPythonObject.cpp
     PropertyStandard.cpp
     PropertyUnits.cpp
@@ -294,8 +295,10 @@ SET(Properties_HPP_SRCS
     PropertyLinks.h
     LinkRetarget.h
     ElementReferences.h
+    ElementGuess.h
     NamingRevision.h
     ReferenceReport.h
+    ReferenceRepair.h
     PropertyPythonObject.h
     PropertyStandard.h
     PropertyUnits.h

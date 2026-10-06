@@ -100,6 +100,8 @@ public:
     static PyObject *sInsertNameTableEntryForTesting(PyObject *self,PyObject *args);
     static PyObject *sGetReferenceReport     (PyObject *self,PyObject *args);
     static PyObject *sRepairReference        (PyObject *self,PyObject *args);
+    static PyObject *sAcceptReference        (PyObject *self,PyObject *args);
+    static PyObject *sMarkReferenceBroken    (PyObject *self,PyObject *args);
     // clang-format on
 };
 

@@ -30,6 +30,7 @@ from .harness import (
     Defeatured,
     Drafted,
     Filleted,
+    PartialWarned,
     Scenario,
     X,
     Y,
@@ -414,7 +415,8 @@ class DraftSomeFacesRemoved(Scenario):
     degrees, of the left face (x = 0) and the right face (x = 20) on the bottom face, listed in
     that order. The slot becomes a step along the whole right side (x 18..21, y -1..11): the
     right face is gone, the left one stays, and the draft should fail. It used to draft the
-    left face alone (ops#60)."""
+    left face alone (ops#60). With the reference solver it drafts the left face with a warning
+    (ops#127, the user's decision 4: Onshape's rule)."""
 
     area = "dress-ups"
     MULTI = True
@@ -427,7 +429,9 @@ class DraftSomeFacesRemoved(Scenario):
             x = f.Surface.Position.x
             return abs(n.y) < 1e-9 and abs(n.z) < 1e-9 and min(abs(x), abs(x - 20)) < 1e-9
 
-        return BROKEN if self.gone else pieces(face("plane", where=side))
+        if self.gone:
+            return PartialWarned(self.leftFace()) if self.solver else BROKEN
+        return pieces(face("plane", where=side))
 
     def leftFace(self):
         return face("plane", normal=-X, through=(0, 0, 0))
@@ -503,7 +507,12 @@ class DefeaturingFacesRemoved(Scenario):
 class DefeaturingSomeFacesRemoved(DefeaturingFacesRemoved):
     """As DefeaturingFacesRemoved, with both holes' walls defeatured: after the edit the first
     wall stays, and the defeaturing should still fail. It used to fill the first hole alone
-    (ops#60)."""
+    (ops#60). With the reference solver it fills the first hole with a warning (ops#127)."""
 
     def removed(self):
         return face("cylinder")
+
+    def walls(self):
+        if self.gone and self.solver:
+            return PartialWarned(pieces(self.removed()))
+        return super().walls()

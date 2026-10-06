@@ -139,6 +139,9 @@ App::DocumentObjectExecReturn* Feature::recompute()
     setMaterialToBodyMaterial();
 
     if (Suppressed.getValue()) {
+        if (auto doc = getDocument()) {
+            doc->clearWarning(this);  // it computes nothing of its own (ops#127)
+        }
         Shape.setValue(getBaseTopoShape(true));
         updateSuppressedShape();
         return App::DocumentObject::StdReturn;

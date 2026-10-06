@@ -361,6 +361,8 @@ SubShapeBinder::SubShapeBinder()
 {
     ADD_PROPERTY_TYPE(Support, (nullptr), "", (App::PropertyType)(App::Prop_None), "Support of the geometry");
     Support.setStatus(App::Property::ReadOnly, true);
+    // Several supports, one gone: the binder computes on the rest with a warning (ops#127)
+    Support.setPartialAllowed(true);
     ADD_PROPERTY_TYPE(Fuse, (false), "Base", App::Prop_None, "Fuse solids from bound shapes");
     ADD_PROPERTY_TYPE(MakeFace, (true), "Base", App::Prop_None, "Create face using wires from bound shapes");
     ADD_PROPERTY_TYPE(
@@ -877,8 +879,11 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
         // the rest, or to its old shape when nothing is left (ops#69). Only the recompute
         // reports it: update() also runs when Support changes, including while its references
         // are refreshed, where an exception would only be logged as a failed refresh. The
-        // binder is recomputed after that.
-        if (!missing.empty()) {
+        // binder is recomputed after that. In a reference solver document it binds what
+        // resolves, with a warning from the recompute check, while something does (ops#127).
+        const bool partial =
+            Support.isPartialAllowed() && Support.inSolverDocument() && !shapes.empty();
+        if (!missing.empty() && !partial) {
             if (options & UpdateForced) {
                 FC_THROWM(Base::RuntimeError, "Missing element in Support: " << missing);
             }

@@ -129,12 +129,10 @@ class TestDressUpFaces(unittest.TestCase):
     def tearDown(self):
         FreeCAD.closeDocument(self.Doc.Name)
 
-    def testMissingFaceIsNamed(self):
+    def missingFace(self):
         """A block 0..20 x 0..10 x 0..10 with a slot (x 14..16, y 4..6) through it; a draft of
         the right face (x = 20), then the left face (x = 0). The slot becomes a step along the
-        whole right side: the right face is gone. The draft fails, and its error names the
-        right face, not the left one (the left face used to be looked up under the right
-        face's name)."""
+        whole right side: the right face is gone. Returns (draft, right, left)."""
         slotSketch = _sketch(self.Doc, self.Body, "SlotSketch", _rectangle(14, 4, 16, 6), z=10)
         slot = self.Body.newObject("PartDesign::Pocket", "Slot")
         slot.Profile = slotSketch
@@ -162,18 +160,32 @@ class TestDressUpFaces(unittest.TestCase):
 
         self.assertTrue(slot.isValid())
         self.assertEqual(draft.Base[1][0], "?" + right)
+        return draft, right, left
+
+    def testMissingFaceIsNamed(self):
+        """Without the reference solver the draft fails, and its error names the right face,
+        not the left one (the left face used to be looked up under the right face's name)."""
+        self.Doc.ReferenceSolver = False  # new documents start with it on (ops#7 Q7)
+        draft, right, left = self.missingFace()
         self.assertFalse(draft.isValid())
         message = draft.getStatusString()
         self.assertIn("Missing face", message)
         self.assertRegex(message, rf"\b{right}\b")
         self.assertNotRegex(message, rf"\b{left}\b")
 
-    def testMissingFaceIsNamedWithTheSolver(self):
-        """The same in a reference solver document (ops#7): the solver's check fails the draft
-        before it runs, in the draft's words, and names the right face, not the left one."""
+    def testMissingFaceIsWarnedWithTheSolver(self):
+        """In a reference solver document the draft computes on the left face, with a warning
+        that names the right face, not the left one (ops#127, Onshape's rule)."""
         self.Doc.HistoryAlgorithm = "V2"
         self.Doc.ReferenceSolver = True
-        self.testMissingFaceIsNamed()
+        draft, right, left = self.missingFace()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertIn("Warning", draft.State)
+        message = draft.getStatusString()
+        self.assertIn("Missing face", message)
+        self.assertRegex(message, rf"\b{right}\b")
+        self.assertNotRegex(message, rf"\b{left}\b")
+        self.assertTrue(message.endswith("computed on 1 of 2 faces"), message)
 
     def testFaceAfterEdge(self):
         """A block 0..20 x 0..10 x 0..10 with a hole (radius 2 at (10, 5)) through it; a

@@ -22,12 +22,24 @@
 
 """Consumers that lose an element: a SubShapeBinder, a Hole, a Helix, a Loft and a Pipe whose
 referenced element is deleted. Each should fail; each used to carry on without the element, or
-with something else in its place (ops#69, ops#70, ops#71)."""
+with something else in its place (ops#69, ops#70, ops#71). With the reference solver, a binder,
+hole or helix that keeps some of its elements computes on them with a warning instead (ops#127,
+the user's decision 4: Onshape's rule)."""
 
 import FreeCAD as App
 import Part
 
-from .harness import BROKEN, Bound, Scenario, edge, face, faceNormal, pieces, vertex
+from .harness import (
+    BROKEN,
+    Bound,
+    PartialWarned,
+    Scenario,
+    edge,
+    face,
+    faceNormal,
+    pieces,
+    vertex,
+)
 from . import models as m
 
 V = App.Vector
@@ -48,14 +60,17 @@ class BinderFacesRemoved(Scenario):
     the slot's left (x = 8) and right (x = 12) walls, binder B its right wall only. The slot
     becomes a step along the whole right side (x 8..21): the right wall is gone, the left one
     stays, and both binders should fail. A used to bind the left wall alone, and B kept its old
-    face, with no error (ops#69)."""
+    face, with no error (ops#69). With the reference solver A binds the left wall with a warning
+    (ops#127); B, with nothing left, fails."""
 
     area = "consumers"
     REFS = ("binder_both", "binder_right")
     gone = False
 
     def both(self):
-        return BROKEN if self.gone else pieces(face("plane", where=self.walls))
+        if self.gone:
+            return PartialWarned(wall(8)) if self.solver else BROKEN
+        return pieces(face("plane", where=self.walls))
 
     def right(self):
         return BROKEN if self.gone else wall(12)
@@ -85,7 +100,8 @@ class HoleProfileCircleRemoved(Scenario):
     """A plate (0..30 x 0..30 x 0..5); a Hole, diameter 3 through all, whose Profile is the two
     circles (radius 1.5 at (8, 15) and (22, 15)) of a sketch on the top face. The second circle
     is deleted and a new one drawn at (22, 20): its edge is gone, and the hole should fail. It
-    used to drill the first hole alone, with no error (ops#70)."""
+    used to drill the first hole alone, with no error (ops#70). With the reference solver it
+    drills the first hole with a warning (ops#127)."""
 
     area = "consumers"
     MULTI = True
@@ -93,7 +109,9 @@ class HoleProfileCircleRemoved(Scenario):
     gone = False
 
     def circles(self):
-        return BROKEN if self.gone else pieces(edge("circle", radius=1.5))
+        if self.gone:
+            return PartialWarned(edge("circle", center=(8, 15, 5))) if self.solver else BROKEN
+        return pieces(edge("circle", radius=1.5))
 
     def build(self, doc):
         body = m.body(doc)
@@ -119,7 +137,8 @@ class HelixProfileCircleRemoved(Scenario):
     whose Profile is a ring: the two circles (radius 1.5 and 0.5, centred at x = 10, z = 0) of a
     sketch on the XZ plane, which make a tube. The inner circle is deleted and a new one drawn at
     x = 10.3: its edge is gone, and the helix should fail. It used to sweep the outer circle alone, a solid
-    coil, with no error (ops#70)."""
+    coil, with no error (ops#70). With the reference solver it sweeps the outer circle with a
+    warning (ops#127)."""
 
     area = "consumers"
     MULTI = True
@@ -127,7 +146,10 @@ class HelixProfileCircleRemoved(Scenario):
     gone = False
 
     def circles(self):
-        return BROKEN if self.gone else pieces(edge("circle", center=(10, 0, 0)))
+        if self.gone:
+            outer = edge("circle", center=(10, 0, 0), radius=1.5)
+            return PartialWarned(outer) if self.solver else BROKEN
+        return pieces(edge("circle", center=(10, 0, 0)))
 
     def build(self, doc):
         body = m.body(doc)

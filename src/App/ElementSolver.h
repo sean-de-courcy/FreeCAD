@@ -459,6 +459,9 @@ struct AppExport SolveInput
         std::string scope;
         /// The reference's position in its property; a collapsing group keeps its lowest.
         int position = 0;
+        /// Elements the user rejected for this reference (ops#127, App::markReferenceBroken()):
+        /// never its candidates, at any tier.
+        std::vector<std::string> excluded;
     };
     /// An element of the target with all its mapped names.
     struct Element
@@ -513,6 +516,9 @@ enum class SolveStatus
     Broken,
     /// A member of a collapsing group other than the one that stays: the reference goes.
     Removed,
+    /// Resolved provisionally by a guess rule (ops#127, design note N2 section 5): the reference
+    /// takes the element with a warning and a record of the original. Not produced yet (P6).
+    Guessed,
 };
 
 struct AppExport SolveOutcome
@@ -536,7 +542,8 @@ struct AppExport SolveOutcome
     /// Resolved by a collapse: the group's `from` is cleared.
     bool collapsed = false;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
-    /// with their mapped names (parallel).
+    /// with their mapped names (parallel). Resolved by tier 2 or 3 (ops#127): the other
+    /// candidates tier 1 found, which the user may prefer to the one geometry chose.
     std::vector<std::string> candidates;
     std::vector<std::string> candidateNames;
     /// Parallel to candidates: why each is one (ops#105): `place` (it sits where the element

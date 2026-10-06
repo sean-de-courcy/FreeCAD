@@ -79,7 +79,7 @@ CONFIGS = {
     "V2i": ("V2", False, False, True),
     "V2si": ("V2", False, True, True),
 }
-VERDICTS = ("correct", "equivalent", "broken", "partial", "wrong")
+VERDICTS = ("correct", "equivalent", "broken", "partial", "wrong", "partial-warned")
 
 
 class ScenarioError(Exception):
@@ -366,6 +366,23 @@ class Broken:
 
 
 BROKEN = Broken()
+
+
+class PartialWarned:
+    """Some elements of a multi-element reference are gone and the consumer computes on the
+    rest, with a warning (ops#127, Onshape's rule; reference solver documents only): the
+    references that still resolve hold `expected`'s elements (a predicate or `pieces`), the others
+    stay missing (`?`), and the owner is valid with the Warning state. The consumer's outcome
+    check judges its result against `expected`."""
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def select(self, shape):
+        return self.expected.select(shape)
+
+    def __repr__(self):
+        return f"PARTIAL[{self.expected}]"
 
 
 INTERNAL = "Internal"  # SketchObject::internalPrefix()
@@ -738,6 +755,8 @@ class Result:
     def passing(self):
         if str(self.record.get("expect")).startswith("BROKEN"):
             return self.verdict == "broken"
+        if str(self.record.get("expect")).startswith("PARTIAL"):
+            return self.verdict == "partial-warned"
         return self.verdict in ("correct", "equivalent")
 
     def message(self):
@@ -924,13 +943,19 @@ class Scenario:
             expect=repr(expectation),
         )
 
-        # 1. The stored reference
+        # 1. The stored reference. A partly resolved one (ops#127) is judged on the references
+        # that resolve; its missing ones are expected.
+        partialWarned = isinstance(expectation, PartialWarned)
+        missing = sum(1 for s in subs if s.startswith("?"))
+        live = [s for s in subs if not s.startswith("?")] if partialWarned else subs
+        if partialWarned:
+            expectation = expectation.expected
         resolved = []
-        if target is None or not subs or any(s.startswith("?") for s in subs):
+        if target is None or not live or (not partialWarned and missing):
             stored = "broken"
         else:
             try:
-                resolved = [(s, subElement(target, s)) for s in subs]
+                resolved = [(s, subElement(target, s)) for s in live]
                 stored = None
             except Exception:
                 stored = "broken"
@@ -946,8 +971,10 @@ class Scenario:
             record["expected_subs"] = expected
             record["expected_names"] = [self._name(masker, mode, target, s) for s in expected]
             if stored is None:
-                got = set(subs)
-                if got == set(expected):
+                got = set(live)
+                if partialWarned and not missing:
+                    stored = "wrong"  # the missing ones were dropped silently
+                elif got == set(expected):
                     stored = "correct"
                 elif isinstance(expectation, Pieces) and got < set(expected):
                     stored = "partial"
@@ -967,8 +994,16 @@ class Scenario:
         elif not owner.isValid():
             outcome = "broken"
         result.verdict = combine(stored, outcome)
+        warned = "Warning" in owner.State
+        if partialWarned and result.verdict == "correct":
+            if warned:
+                result.verdict = "partial-warned"
+            else:
+                result.verdict, detail = "wrong", f"{owner.Name} computes on the rest silently"
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(self._solverReport(owner, ref.prop))
+        # computed on a guessed, partly resolved or geometry-only reference (ops#127)
+        record["warning"] = warned
         if self.solver and not owner.isValid():
             # a broken reference fails its owner, which names it (ops#7)
             record["error"] = owner.getStatusString()
@@ -982,7 +1017,13 @@ class Scenario:
         isn't (another configuration, or a build without it)."""
         if not hasattr(App, "getReferenceReport"):
             return {}
-        entries = [e for e in App.getReferenceReport(owner) if e["property"] == prop]
+        # A guess record the solver hasn't re-derived since a reopen ("saved guess", ops#127)
+        # is no solver outcome of this step.
+        entries = [
+            e
+            for e in App.getReferenceReport(owner)
+            if e["property"] == prop and e.get("evidence") != "saved guess"
+        ]
         if not entries:
             return {}
         tiers, candidates, roles = [], [], []

@@ -59,6 +59,9 @@ DressUp::DressUp()
     // The reference solver (ops#7): a dress-up takes every piece of a split element (Task 2
     // PR 7; read as One until then).
     Base.setElementPolicy(App::PropertyLinkBase::ElementPolicy::Expand);
+    // and computes on the elements that resolve when some are gone, with a warning (ops#127,
+    // Onshape's rule)
+    Base.setPartialAllowed(true);
     if (PartDesignParameter::instance()->getNamingMultiMatch()) {
         Base.useMultipleMatchedNames(true);
         Base.allowDuplicateLinks(false);
@@ -223,7 +226,13 @@ std::vector<TopoShape> DressUp::getContinuousEdges(const TopoShape& shape)
         ret.push_back(subshape);
     };
 
+    // In a reference solver document the edges that are gone are skipped: the feature computes
+    // on the rest, and the recompute check has warned of them (ops#127).
+    const bool partial = Base.isPartialAllowed() && Base.inSolverDocument();
     for (const auto& v : Base.getShadowSubs()) {
+        if (partial && Data::hasMissingElement(v.oldName.c_str())) {
+            continue;
+        }
         TopoDS_Shape subshape;
         const auto& ref = v.newName.size() ? v.newName : v.oldName;
         subshape = shape.getSubShape(ref.c_str(), true);
@@ -277,7 +286,17 @@ std::vector<TopoShape> DressUp::getFaces(const TopoShape& shape)
             missing += (missing.empty() ? "" : ", ") + element;
         }
     }
-    if (!missing.empty()) {
+    // In a reference solver document the feature computes on the faces that resolve, with a
+    // warning from the recompute check (ops#127, Onshape's rule); never on none.
+    bool anyResolving = false;
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        const std::string& name = indexedName(i);
+        anyResolving = anyResolving
+            || (boost::starts_with(name, "Face") && !Data::hasMissingElement(name.c_str())
+                && !Data::hasMissingElement(vals[i].c_str()));
+    }
+    if (!missing.empty()
+        && !(anyResolving && Base.isPartialAllowed() && Base.inSolverDocument())) {
         FC_THROWM(Part::NullShapeException, "Missing face reference: " << missing);
     }
 

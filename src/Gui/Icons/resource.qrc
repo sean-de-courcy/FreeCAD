@@ -163,6 +163,7 @@
         <file>mouse_pointer.svg</file>
         <file>overlay_error.svg</file>
         <file>overlay_recompute.svg</file>
+        <file>overlay_warning.svg</file>
         <file>Param_Bool.svg</file>
         <file>Param_Float.svg</file>
         <file>Param_Int.svg</file>

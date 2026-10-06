@@ -296,6 +296,26 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
     resolution.shadow.oldName = entry.prefix + Data::MISSING_PREFIX + entry.oldIndex;
     resolution.sub = entry.sub == resolution.shadow.newName ? resolution.shadow.newName
                                                             : resolution.shadow.oldName;
+    // A provisional pick keeps its record (ops#127): the original stays known, and it can still
+    // snap back
+    resolution.guess = entry.guess;
+}
+
+// The record of a provisional resolution of \a entry (ops#127): the original is the entry's, or
+// the record's when the reference holds one already.
+GuessRecord guessRecordFor(const SolverEntry& entry, const char* kind)
+{
+    GuessRecord guess;
+    guess.kind = kind;
+    if (!entry.guess.empty()) {
+        guess.origName = entry.guess.origName;
+        guess.origIndex = entry.guess.origIndex;
+    }
+    else {
+        guess.origName = entry.oldName.empty() ? entry.exactName : entry.oldName;
+        guess.origIndex = entry.oldIndex;
+    }
+    return guess;
 }
 
 // An exact reference whose element can't be measured: no geometric check runs for it.
@@ -430,13 +450,17 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                     std::vector<std::string>& fingerprints,
                     std::vector<std::string>& froms,
                     std::vector<int>& firstNew,
-                    std::vector<int>& countNew)
+                    std::vector<int>& countNew,
+                    std::vector<GuessRecord>* guesses)
 {
     using Status = SolverResolution::Status;
     const std::size_t count = subs.size();
     shadows.resize(count);
     fingerprints.resize(count);
     froms.resize(count);
+    std::vector<GuessRecord> noGuesses;
+    std::vector<GuessRecord>& records = guesses ? *guesses : noGuesses;
+    records.resize(count);
     std::vector<const SolverResolution*> resolutionOf(count, nullptr);
     for (const auto& resolution : resolutions) {
         if (resolution.status != Status::None && resolution.index >= 0
@@ -468,14 +492,17 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
 
     std::vector<std::string> newSubs, newFingerprints, newFroms;
     std::vector<PropertyLinkBase::ShadowSub> newShadows;
+    std::vector<GuessRecord> newRecords;
     auto add = [&](const std::string& sub,
                    const PropertyLinkBase::ShadowSub& shadow,
                    const std::string& fingerprint,
-                   const std::string& from) {
+                   const std::string& from,
+                   const GuessRecord& record = GuessRecord()) {
         newSubs.push_back(sub);
         newShadows.push_back(shadow);
         newFingerprints.push_back(fingerprint);
         newFroms.push_back(from);
+        newRecords.push_back(record);
     };
     firstNew.assign(count, 0);
     countNew.assign(count, 0);
@@ -484,7 +511,7 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
         firstNew[i] = static_cast<int>(newSubs.size());
         const SolverResolution* resolution = resolutionOf[i];
         if (!resolution) {
-            add(subs[i], shadows[i], fingerprints[i], froms[i]);
+            add(subs[i], shadows[i], fingerprints[i], froms[i], records[i]);
         }
         else {
             changed = true;
@@ -508,8 +535,28 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                     }
                     break;
                 case Status::Broken:
-                    // A broken reference keeps its fingerprint for the next retry.
-                    add(resolution->sub, resolution->shadow, fingerprints[i], froms[i]);
+                    // A broken reference keeps its fingerprint for the next retry, and the record
+                    // the resolution carries (ops#127)
+                    add(resolution->sub,
+                        resolution->shadow,
+                        resolution->clearFingerprint ? std::string() : fingerprints[i],
+                        froms[i],
+                        resolution->guess);
+                    break;
+                case Status::Guessed:
+                    // A provisional pick, with its record (ops#127): one element as Resolved
+                    // writes it, or the pieces as Expanded.
+                    if (!resolution->pieces.empty()) {
+                        for (const auto& [sub, shadow] : resolution->pieces) {
+                            if (!held(sub, shadow)) {
+                                add(sub, shadow, {}, resolution->from, resolution->guess);
+                            }
+                        }
+                    }
+                    else {
+                        written.insert(elementOf(resolution->sub, resolution->shadow));
+                        add(resolution->sub, resolution->shadow, {}, froms[i], resolution->guess);
+                    }
                     break;
                 case Status::Removed:
                 case Status::None:
@@ -522,6 +569,7 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
     shadows.swap(newShadows);
     fingerprints.swap(newFingerprints);
     froms.swap(newFroms);
+    records.swap(newRecords);
     return changed;
 }
 
@@ -808,11 +856,17 @@ bool solveElementReferences(DocumentObject* feature,
         bool anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->kind == SolverEntry::Kind::Missing;
         });
+        // A guessed reference whose original's name gives an element again snaps back
+        // (ops#127).
+        bool anyGuessed = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
+            return e->guessed;
+        });
         // An owner with only exact references is solved only if one of them has a saved
         // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
         // update checks every one with a fingerprint (ops#103), and every one whose name now
         // gives another element than its stored index (ops#116).
-        if (!anyMissing && std::none_of(entries.begin(), entries.end(), [reverse](const auto* e) {
+        if (!anyMissing && !anyGuessed
+            && std::none_of(entries.begin(), entries.end(), [reverse](const auto* e) {
                 return e->kind == SolverEntry::Kind::Exact
                     && (!e->oldFingerprint.empty()
                         || (reverse && !e->storedIndex.empty() && e->storedIndex != e->oldIndex));
@@ -843,7 +897,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
-        if (!anyMissing && !reverse) {
+        if (!anyMissing && !anyGuessed && !reverse) {
             // Every entry, not up to the first: each unmeasurable one is logged.
             bool needed = false;
             for (const auto* e : entries) {
@@ -877,7 +931,8 @@ bool solveElementReferences(DocumentObject* feature,
             // agree with its saved fingerprint: if its name moved, the element at its saved place
             // is taken (rule 3).
             for (const auto* entry : entries) {
-                if (entry->kind != SolverEntry::Kind::Exact) {
+                // A snap-back waits for the next update (ops#127).
+                if (entry->kind != SolverEntry::Kind::Exact || entry->guessed) {
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
@@ -936,8 +991,20 @@ bool solveElementReferences(DocumentObject* feature,
                 if (!pick.empty()) {
                     SolverResolution resolution;
                     resolutionFor(*entry, pick, nameAt(pick), resolution);
+                    // Kept by its place, with a warning (ops#127). A plain reference's record
+                    // has no name: the name gives another element now. One that holds a record
+                    // keeps its original. An index record never snaps back.
+                    resolution.status = SolverResolution::Status::Guessed;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = stored.empty() ? hit : stored;
+                    }
                     resolutions[entry->prop].push_back(resolution);
                     item.status = ReferenceReport::Status::Index;
+                    item.kind = resolution.guess.kind;
                     item.newIndex = pick;
                     item.evidence = "migration: the name moved; " + pick + " sits where it was";
                     item.candidates.emplace_back(pick, nameAt(pick));
@@ -998,7 +1065,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             // Missing references: index carry, verified by the saved fingerprint.
             for (const auto* entry : entries) {
-                if (entry->kind != SolverEntry::Kind::Missing) {
+                if (entry->kind != SolverEntry::Kind::Missing || entry->guessed) {
                     continue;
                 }
                 const std::string& index = entry->oldIndex;
@@ -1016,8 +1083,19 @@ bool solveElementReferences(DocumentObject* feature,
                     countReferenceMigration(entry->owner, MigrationOutcome::Moved);
                     SolverResolution resolution;
                     resolutionFor(*entry, index, mapForm(name), resolution);
+                    // Kept by its place, with a warning and a record without the name, which
+                    // isn't found, or the original of the record it holds (ops#127).
+                    resolution.status = SolverResolution::Status::Guessed;
+                    if (!entry->guess.empty()) {
+                        resolution.guess = guessRecordFor(*entry, "index");
+                    }
+                    else {
+                        resolution.guess.kind = "index";
+                        resolution.guess.origIndex = index;
+                    }
                     resolutions[entry->prop].push_back(resolution);
                     item.status = ReferenceReport::Status::Index;
+                    item.kind = resolution.guess.kind;
                     item.newIndex = index;
                     item.evidence = "index carry, fingerprint equal";
                     FC_WARN(referenceName(entry->prop)
@@ -1097,6 +1175,14 @@ bool solveElementReferences(DocumentObject* feature,
             item.scope = std::to_string(reinterpret_cast<std::uintptr_t>(entry->prop)) + "|"
                 + entry->prefix;
             item.position = entry->index;
+            if (entry->guess.kind == "rejected") {
+                // The elements the user rejected for it (App::markReferenceBroken(), ops#127)
+                for (const auto& alternative : entry->guess.alternatives) {
+                    if (alternative.role == "rejected") {
+                        item.excluded.push_back(alternative.index);
+                    }
+                }
+            }
             if (entry->kind == SolverEntry::Kind::Exact) {
                 if (anyMissing && item.fingerprint.isValid()
                     && !fingerprintOf(entry->oldIndex).isValid()) {
@@ -1133,6 +1219,17 @@ bool solveElementReferences(DocumentObject* feature,
             const auto& outcome = outcomes[i];
             const std::string& oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             if (outcome.status == Data::SolveStatus::Exact) {
+                if (entry.guessed) {
+                    // The original's name gives an element again: the reference snaps back to
+                    // it, its record goes and its fingerprint is measured anew (ops#127).
+                    SolverResolution resolution;
+                    resolutionFor(entry, entry.oldIndex, entry.exactName, resolution);
+                    resolutions[entry.prop].push_back(resolution);
+                    FC_WARN(referenceName(entry.prop)
+                            << "[" << entry.index << "]: " << entry.guessedIndex << " -> "
+                            << entry.oldIndex << " (the original " << entry.guess.origIndex
+                            << " is back)");
+                }
                 continue;
             }
             if (outcome.status == Data::SolveStatus::Removed) {
@@ -1149,11 +1246,15 @@ bool solveElementReferences(DocumentObject* feature,
             ReferenceReport::Entry item;
             item.evidence = outcome.evidence;
             if (outcome.status == Data::SolveStatus::Resolved && !outcome.elements.empty()) {
+                // A continuation or a split, expanded: warned, with a record on every piece
+                // (ops#127).
                 SolverResolution resolution;
-                resolution.status = SolverResolution::Status::Expanded;
+                resolution.status = SolverResolution::Status::Guessed;
                 resolution.prop = entry.prop;
                 resolution.index = entry.index;
                 resolution.from = mapForm(outcome.from);
+                resolution.guess =
+                    guessRecordFor(entry, outcome.tier == 4 ? "continued" : "expanded");
                 for (std::size_t p = 0; p < outcome.elements.size(); ++p) {
                     SolverResolution piece;
                     resolutionFor(entry, outcome.elements[p], mapForm(outcome.names[p]), piece);
@@ -1161,26 +1262,54 @@ bool solveElementReferences(DocumentObject* feature,
                     item.pieces.emplace_back(outcome.elements[p], mapForm(outcome.names[p]));
                 }
                 resolutions[entry.prop].push_back(resolution);
-                item.status = ReferenceReport::Status::Expanded;
-                item.tier = outcome.tier;
-                item.newIndex = outcome.element;
                 FC_WARN(referenceName(entry.prop)
                         << "[" << entry.index << "]: " << oldName << " -> "
                         << joinCandidates(outcome.elements) << " (tier " << outcome.tier << ", "
                         << outcome.evidence << ")");
+                item.status = ReferenceReport::Status::Expanded;
+                item.kind = resolution.guess.kind;
+                item.tier = outcome.tier;
+                item.newIndex = outcome.element;
             }
             else if (outcome.status == Data::SolveStatus::Resolved) {
                 SolverResolution resolution;
                 resolutionFor(entry, outcome.element, mapForm(outcome.name), resolution);
                 resolution.clearFrom = outcome.collapsed;
+                if (outcome.tier >= 2) {
+                    // Resolved by geometry: warned, with a record and the other candidates
+                    // (ops#127).
+                    resolution.status = SolverResolution::Status::Guessed;
+                    resolution.guess =
+                        guessRecordFor(entry, outcome.tier == 2 ? "tier2" : "tier3");
+                    for (std::size_t c = 0; c < outcome.candidates.size(); ++c) {
+                        GuessRecord::Alternative alternative;
+                        alternative.index = outcome.candidates[c];
+                        if (c < outcome.candidateRoles.size()) {
+                            alternative.role = outcome.candidateRoles[c];
+                        }
+                        if (c < outcome.candidateDistances.size()) {
+                            alternative.distance = outcome.candidateDistances[c];
+                        }
+                        resolution.guess.alternatives.push_back(std::move(alternative));
+                    }
+                    item.kind = resolution.guess.kind;
+                }
+                else if (!entry.guess.empty() && !outcome.collapsed
+                         && entry.guess.kind != "rejected") {
+                    // A provisional pick followed to its element's next form keeps its record
+                    // and its warning: structure followed the pick, not the original. (A
+                    // rejected one that structure resolves to another element is resolved.)
+                    resolution.status = SolverResolution::Status::Guessed;
+                    resolution.guess = entry.guess;
+                    item.kind = resolution.guess.kind;
+                }
                 resolutions[entry.prop].push_back(resolution);
+                FC_WARN(referenceName(entry.prop)
+                        << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
+                        << " (tier " << outcome.tier << ", " << outcome.evidence << ")");
                 item.status = ReferenceReport::Status::Resolved;
                 item.tier = outcome.tier;
                 item.newIndex = outcome.element;
-                FC_WARN(referenceName(entry.prop)
-                        << "[" << entry.index << "]: " << oldName << " -> "
-                        << outcome.element << " (tier " << outcome.tier << ", " << outcome.evidence
-                        << ")");
             }
             else {
                 if (entry.kind == SolverEntry::Kind::Exact) {

@@ -581,9 +581,18 @@ bool TaskDlgDressUpParameters::accept()
     getViewObject<ViewProviderDressUp>()->highlightReferences(false);
     std::vector<std::string> refs = parameter->getReferences();
     // Base's own object: the references are its element names (ops#84)
-    App::DocumentObject* base = getObject<PartDesign::DressUp>()->Base.getValue();
+    auto dressUp = getObject<PartDesign::DressUp>();
+    App::DocumentObject* base = dressUp->Base.getValue();
     if (!base) {
         base = parameter->getBase();
+    }
+    // Written only when the dialog changed it: written again with plain names, Base would drop
+    // what it keeps per reference, a guess record or a missing element of a partly resolved
+    // dress-up among them, without a warning (ops#127).
+    if (base == dressUp->Base.getValue()
+        && (refs == dressUp->Base.getSubValues(true)
+            || refs == dressUp->Base.getSubValues(false))) {
+        return TaskDlgFeatureParameters::accept();
     }
     std::stringstream str;
     str << Gui::Command::getObjectCmd(getObject()) << ".Base = ("

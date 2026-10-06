@@ -30,6 +30,7 @@
 #include <TopoDS.hxx>
 
 
+#include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include "FeatureThickness.h"
 
@@ -96,7 +97,18 @@ App::DocumentObjectExecReturn* Thickness::execute()
     }
 
     std::map<int, std::vector<TopoShape>> closeFaces;
+    // In a reference solver document the faces that are gone are skipped: the feature computes on
+    // the rest, and the recompute check has warned of them (ops#127, Onshape's rule).
+    const bool partial = Base.isPartialAllowed() && Base.inSolverDocument();
+    const auto& shadows = Base.getShadowSubs();
+    std::size_t position = 0;
     for (const auto& it : subStrings) {
+        const std::size_t i = position++;
+        if (partial
+            && (Data::hasMissingElement(it.c_str())
+                || (i < shadows.size() && Data::hasMissingElement(shadows[i].oldName.c_str())))) {
+            continue;
+        }
         TopoDS_Shape face;
         try {
             face = TopShape.getSubShape(it.c_str());
