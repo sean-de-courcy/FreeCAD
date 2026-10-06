@@ -206,6 +206,18 @@ void TaskRevolutionParameters::setupSideDialog(SideController& side)
     side.angleEdit->setMinimum(side.Angle->getMinimum());
     side.angleEdit->bind(*side.Angle);
 
+    updateUpToFaceName(side);
+    side.lineFaceName->setPlaceholderText(tr("No face selected"));
+
+    int index = int(side.Type->getValue());
+    if (static_cast<Mode>(index) == Mode::TwoAngles) {
+        index = static_cast<int>(Mode::Angle);
+    }
+    translateModeList(side.changeMode, index);
+}
+
+void TaskRevolutionParameters::updateUpToFaceName(SideController& side)
+{
     App::DocumentObject* obj = side.UpToFace->getValue();
     std::vector<std::string> subStrings = side.UpToFace->getSubValues();
     std::string upToFace;
@@ -236,13 +248,14 @@ void TaskRevolutionParameters::setupSideDialog(SideController& side)
     }
 
     side.lineFaceName->setProperty("FaceName", QByteArray(upToFace.c_str()));
-    side.lineFaceName->setPlaceholderText(tr("No face selected"));
+}
 
-    int index = int(side.Type->getValue());
-    if (static_cast<Mode>(index) == Mode::TwoAngles) {
-        index = static_cast<int>(Mode::Angle);
-    }
-    translateModeList(side.changeMode, index);
+void TaskRevolutionParameters::onReferencesRepaired()
+{
+    updateStartReferenceName();
+    updateUpToFaceName(m_side1);
+    updateUpToFaceName(m_side2);
+    fillAxisCombo(false);
 }
 
 void TaskRevolutionParameters::translateModeList(QComboBox* box, int index)
@@ -939,14 +952,46 @@ void TaskRevolutionParameters::apply()
     getReferenceAxis(obj, sub);
     std::string axis = buildLinkSingleSubPythonStr(obj, sub);
     auto tobj = getObject();
-    FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
+
+    // A link property is written only when the panel changed it: written again with plain names
+    // it would drop a guess record without a warning (ops#127).
+    auto unchanged = [](const App::PropertyLinkSub& prop,
+                        const App::DocumentObject* linked,
+                        const std::vector<std::string>& subs) {
+        return prop.getValue() == linked
+            && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
+    };
+    // The face a line edit names.
+    auto faceUnchanged = [&](const App::PropertyLinkSub& prop, QLineEdit* lineEdit) {
+        App::DocumentObject* linked = nullptr;
+        std::vector<std::string> subs;
+        QVariant featureName = lineEdit->property("FeatureName");
+        if (featureName.isValid()) {
+            linked = tobj->getDocument()->getObject(featureName.toString().toUtf8().constData());
+            QString faceName = lineEdit->property("FaceName").toString();
+            if (!faceName.isEmpty()) {
+                subs.push_back(faceName.toStdString());
+            }
+        }
+        return unchanged(prop, linked, subs);
+    };
+    auto revolved = getObject<PartDesign::Revolved>();
+
+    if (!unchanged(*propReferenceAxis, obj, sub)) {
+        FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
+    }
     FCMD_OBJ_CMD(tobj, "SideType = " << getSidesMode());
     FCMD_OBJ_CMD(tobj, "Reversed = " << (getReversed() ? 1 : 0));
     FCMD_OBJ_CMD(tobj, "Type = " << getMode());
     FCMD_OBJ_CMD(tobj, "Type2 = " << getMode2());
     FCMD_OBJ_CMD(tobj, "StartOffset = " << ui->startOffsetEdit->value().getValue());
     FCMD_OBJ_CMD(tobj, "StartType = " << ui->startMode->currentIndex());
-    FCMD_OBJ_CMD(tobj, "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data());
+    if (!faceUnchanged(revolved->StartReference, ui->lineStartReference)) {
+        FCMD_OBJ_CMD(
+            tobj,
+            "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data()
+        );
+    }
 
     QString facename = QStringLiteral("None");
     QString facename2 = QStringLiteral("None");
@@ -956,8 +1001,14 @@ void TaskRevolutionParameters::apply()
     if (static_cast<Mode>(getMode2()) == Mode::ToFace) {
         facename2 = getFaceName(ui->lineFaceName2);
     }
-    FCMD_OBJ_CMD(tobj, "UpToFace = " << facename.toLatin1().data());
-    FCMD_OBJ_CMD(tobj, "UpToFace2 = " << facename2.toLatin1().data());
+    if (static_cast<Mode>(getMode()) != Mode::ToFace
+        || !faceUnchanged(*m_side1.UpToFace, ui->lineFaceName)) {
+        FCMD_OBJ_CMD(tobj, "UpToFace = " << facename.toLatin1().data());
+    }
+    if (static_cast<Mode>(getMode2()) != Mode::ToFace
+        || !faceUnchanged(*m_side2.UpToFace, ui->lineFaceName2)) {
+        FCMD_OBJ_CMD(tobj, "UpToFace2 = " << facename2.toLatin1().data());
+    }
 }
 
 void TaskRevolutionParameters::setupGizmos(ViewProvider* vp)

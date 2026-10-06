@@ -56,6 +56,8 @@ public:
     ~TaskHelixParameters() override;
 
     void apply() override;
+    /// The axis list shows ReferenceAxis again (ops#127).
+    void onReferencesRepaired() override;
 
     static bool showPreview(PartDesign::Helix*);
 

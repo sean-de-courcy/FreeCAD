@@ -268,6 +268,11 @@ void TaskHelixParameters::addPartAxes()
     }
 }
 
+void TaskHelixParameters::onReferencesRepaired()
+{
+    fillAxisCombo(false);
+}
+
 int TaskHelixParameters::addCurrentLink()
 {
     int indexOfCurrent = -1;
@@ -723,7 +728,13 @@ void TaskHelixParameters::apply()  // NOLINT
     getReferenceAxis(obj, sub);
     std::string axis = buildLinkSingleSubPythonStr(obj, sub);
     auto tobj = getObject();
-    FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
+    // Written only when the panel changed it: written again with a plain name, it would drop a
+    // guess record without a warning (ops#127).
+    if (propReferenceAxis->getValue() != obj
+        || (propReferenceAxis->getSubValues(false) != sub
+            && propReferenceAxis->getSubValues(true) != sub)) {
+        FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
+    }
     FCMD_OBJ_CMD(tobj, "Mode = " << propMode->getValue());
     FCMD_OBJ_CMD(tobj, "Pitch = " << propPitch->getValue());
     FCMD_OBJ_CMD(tobj, "Height = " << propHeight->getValue());

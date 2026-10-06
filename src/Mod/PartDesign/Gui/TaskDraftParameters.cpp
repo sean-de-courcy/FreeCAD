@@ -231,6 +231,17 @@ void TaskDraftParameters::getPlane(App::DocumentObject*& obj, std::vector<std::s
     }
 }
 
+void TaskDraftParameters::onReferencesRepaired()
+{
+    TaskDressUpParameters::onReferencesRepaired();
+    auto draft = getObject<PartDesign::Draft>();
+    if (!draft) {
+        return;
+    }
+    ui->linePlane->setText(getRefStr(draft->NeutralPlane.getValue(), draft->NeutralPlane.getSubValues()));
+    ui->lineLine->setText(getRefStr(draft->PullDirection.getValue(), draft->PullDirection.getSubValues()));
+}
+
 void TaskDraftParameters::getLine(App::DocumentObject*& obj, std::vector<std::string>& sub) const
 {
     sub = std::vector<std::string>(1, "");
@@ -412,23 +423,39 @@ bool TaskDlgDraftParameters::accept()
     std::vector<std::string> strings;
     App::DocumentObject* obj = nullptr;
     TaskDraftParameters* draftparameter = static_cast<TaskDraftParameters*>(parameter);
+    auto draft = getObject<PartDesign::Draft>();
+    // Written only when the panel changed them: written again with plain names, they would drop
+    // a guess record without a warning (ops#127).
+    auto unchanged = [](const App::PropertyLinkSub& prop,
+                        const App::DocumentObject* linked,
+                        std::vector<std::string> subs) {
+        std::erase(subs, std::string());
+        return prop.getValue() == linked
+            && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
+    };
 
     draftparameter->getPlane(obj, strings);
     std::string neutralPlane = buildLinkSingleSubPythonStr(obj, strings);
+    const bool planeUnchanged = draft && unchanged(draft->NeutralPlane, obj, strings);
 
     draftparameter->getLine(obj, strings);
     std::string pullDirection = buildLinkSingleSubPythonStr(obj, strings);
+    const bool lineUnchanged = draft && unchanged(draft->PullDirection, obj, strings);
 
     FCMD_OBJ_CMD(tobj, "Angle = " << draftparameter->getAngle());
     FCMD_OBJ_CMD(tobj, "Reversed = " << draftparameter->getReversed());
     if (neutralPlane.empty()) {
         neutralPlane = "None";
     }
-    FCMD_OBJ_CMD(tobj, "NeutralPlane = " << neutralPlane);
+    if (!planeUnchanged) {
+        FCMD_OBJ_CMD(tobj, "NeutralPlane = " << neutralPlane);
+    }
     if (pullDirection.empty()) {
         pullDirection = "None";
     }
-    FCMD_OBJ_CMD(tobj, "PullDirection = " << pullDirection);
+    if (!lineUnchanged) {
+        FCMD_OBJ_CMD(tobj, "PullDirection = " << pullDirection);
+    }
 
     return TaskDlgDressUpParameters::accept();
 }
