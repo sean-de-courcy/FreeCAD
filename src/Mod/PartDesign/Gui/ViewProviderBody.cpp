@@ -988,15 +988,16 @@ bool ViewProviderBody::canDropObjects() const
 
 bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
 {
-    // The Body's own members are dropped among its rows to reorder them (ops#127), not during an
-    // edit (the drop's transaction would commit the edit's). A copy drag of an own solid can't be
-    // done (dropObject() refuses it), so the cursor refuses it too
+    // Nothing is dropped on the Body during an edit, its own members (a reorder, ops#127) or
+    // another body's (ops#139): the drop's transaction would commit the edit's
     auto body = getObject<PartDesign::Body>();
+    if (isEditLocked(body->getDocument())) {
+        Gui::getMainWindow()->showMessage(QCoreApplication::translate("Exception", editLockedMessage), 5000);
+        return false;
+    }
+    // The Body's own members are dropped among its rows to reorder them (ops#127). A copy drag
+    // of an own solid can't be done (dropObject() refuses it), so the cursor refuses it too
     if (body->hasObject(obj)) {
-        if (isEditLocked(body->getDocument())) {
-            Gui::getMainWindow()->showMessage(QCoreApplication::translate("Exception", editLockedMessage), 5000);
-            return false;
-        }
 #ifdef Q_OS_MACOS
         constexpr auto copyModifier = Qt::AltModifier;
 #else

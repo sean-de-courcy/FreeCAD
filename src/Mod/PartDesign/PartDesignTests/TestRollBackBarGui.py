@@ -966,6 +966,127 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertAtTheEnd(c)
         self.assertEqual(list(self.body.Group), group)
 
+    # -- the commands that move the bar or reorder, during an edit (ops#139) ---------------------
+
+    def answerListSoon(self, text, tries=100):
+        """Picks text in each list dialog (QInputDialog) that opens in the next tries * 50 ms and
+        accepts it, and closes any other modal, recording each one's label or text in self.modal,
+        so a command's questions can't block."""
+        left = [tries]
+        self.closing = True
+
+        def answer():
+            if not self.closing:
+                return
+            widget = QtGui.QApplication.activeModalWidget()
+            if widget is not None:
+                if isinstance(widget, QtGui.QInputDialog):
+                    self.modal.append(widget.labelText())
+                    widget.setTextValue(text)
+                    widget.accept()
+                else:
+                    self.modal.append(widget.text() if hasattr(widget, "text") else "")
+                    widget.reject()
+            left[0] -= 1
+            if left[0] > 0:
+                QtCore.QTimer.singleShot(50, answer)
+
+        QtCore.QTimer.singleShot(50, answer)
+
+    def state(self):
+        """Every Body's rows and Tip, by name."""
+        return [
+            ([o.Name for o in b.Group], b.Tip.Name if b.Tip else None)
+            for b in self.doc.findObjects("PartDesign::Body")
+        ]
+
+    def assertLockedInEdit(self, command, answer):
+        """With a dialog open, the command is off, and running it anyway (its list dialog
+        answered with `answer`) changes no Body's order or Tip and opens no transaction (which
+        would commit the edit's)."""
+        before = self.state()
+        undo = self.doc.UndoCount
+        self.modal = []
+        self.answerListSoon(answer)
+        Gui.runCommand(command)
+        processEvents(0.3)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.doc.UndoCount, undo)
+        self.assertEqual(self.modal, [])
+        self.assertFalse(Gui.Command.get(command).isActive())
+
+    def openEditOfA(self):
+        """Block, boss A, boss B, hole C, a free sketch, and a second body; boss A's dialog open.
+        Returns (dialog, hole C, the free sketch, the second body, the undo count before)."""
+        block, a, b, c = self.chain()
+        sketch = self.freeSketch()
+        other = models.body(self.doc)
+        self.doc.recompute()
+        undo = self.doc.UndoCount
+        dialog = self.openEdit(a)
+        self.assertTrue(self.body.isRolledBack())
+        return dialog, c, sketch, other, undo
+
+    def closeEditOfA(self, dialog, c, undo):
+        before = self.state()
+        self.closeEdit(dialog, ok=False)
+        self.assertIs(self.body.Tip, c)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.doc.UndoCount, undo)
+
+    def testSetTipIsLockedDuringAnEdit(self):
+        """With boss A's dialog open, Set Tip on boss B is off and changes nothing."""
+        dialog, c, sketch, other, undo = self.openEditOfA()
+        self.select(self.doc.getObject("BossB"))
+        self.assertLockedInEdit("PartDesign_MoveTip", "")
+        self.closeEditOfA(dialog, c, undo)
+        self.assertTrue(Gui.Command.get("PartDesign_MoveTip").isActive())
+
+    def testMoveFeatureAfterIsLockedDuringAnEdit(self):
+        """With boss A's dialog open, Move Feature After (hole C after boss A) is off and changes
+        nothing."""
+        dialog, c, sketch, other, undo = self.openEditOfA()
+        self.select(c)
+        self.assertLockedInEdit("PartDesign_MoveFeatureInTree", "BossA")
+        self.closeEditOfA(dialog, c, undo)
+        self.assertTrue(Gui.Command.get("PartDesign_MoveFeatureInTree").isActive())
+
+    def testMoveObjectToIsLockedDuringAnEdit(self):
+        """With boss A's dialog open, Move Object To (the free sketch to the second body) is off
+        and changes nothing."""
+        dialog, c, sketch, other, undo = self.openEditOfA()
+        self.select(sketch)
+        self.assertLockedInEdit("PartDesign_MoveFeature", other.Label)
+        self.closeEditOfA(dialog, c, undo)
+        self.assertTrue(Gui.Command.get("PartDesign_MoveFeature").isActive())
+
+    def testNoDropOnAnotherBodyDuringAnEdit(self):
+        """With boss A's dialog open, a drag of the free sketch onto the second body's row is
+        refused and the status bar says why."""
+        dialog, c, sketch, other, undo = self.openEditOfA()
+        self.select(sketch)
+        self.clearLockMessage()
+        self.assertFalse(self.dragMoveAccepted(self.siblingRowCentre(other)))
+        self.assertTrue(self.lockMessageShown())
+        self.closeEditOfA(dialog, c, undo)
+        # Without the dialog, the same drag is accepted
+        self.select(sketch)
+        self.assertTrue(self.dragMoveAccepted(self.siblingRowCentre(other)))
+
+    def siblingRowCentre(self, obj):
+        """The centre of the row of obj, a sibling of the Body's row, in viewport coordinates."""
+        self.bodyItem()
+        parent = self.path[-2]
+        for i in range(parent.childCount()):
+            row = parent.child(i)
+            if row.text(0) == obj.Label:
+                tree = self.tree()
+                tree.scrollToItem(row)
+                processEvents()
+                return tree.visualItemRect(row).center()
+        self.fail(f"no row {obj.Label}")
+
     def testShowFinalPreferenceStartsInFinal(self):
         """With the "Show final result" preference on, boss A's dialog opens in Final: its box
         checked, nothing held; unchecked, the Body is rolled back to boss A."""
