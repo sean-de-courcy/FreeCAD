@@ -233,13 +233,17 @@ class TestReferencePickerGui(unittest.TestCase):
 
     def testPanelClosesWithItsDocument(self):
         """The dialog of "Repair References…" belongs to the object's document and closes with
-        it."""
+        it: its panel is gone from the task view. (`activeDialog()` alone asks the active
+        document, which is no longer the closed one; ops#130.)"""
         pad, fillet, original, corner = self.redrawnFillet()
         self.openPanel(fillet)
+        mainWindow = Gui.getMainWindow()
+        self.assertIsNotNone(mainWindow.findChild(QtWidgets.QTreeWidget, "references"))
 
         App.closeDocument(self.doc.Name)
         pump()
 
+        self.assertIsNone(mainWindow.findChild(QtWidgets.QTreeWidget, "references"))
         self.assertFalse(Gui.Control.activeDialog())
         self.doc = models.newDocument("PickerGui")  # for tearDown
 
@@ -397,6 +401,34 @@ class TestReferencePickerGui(unittest.TestCase):
         self.assertEqual(sorted(fillet.Base[1]), base)
         self.assertIn("Warning", fillet.State)
 
+    def testCancelUndoesTheRepairAndAListEdit(self):
+        """ops#130 (review M5): the fillet's own dialog opened with no transaction booked, as
+        Std_Edit opens it. Accept in the panel, then an edge added to the fillet's list, then
+        Cancel: both are undone and the warning is back. (The list edit used to open a
+        transaction of its own, which committed the panel's.)"""
+        pad, fillet, original, corner = self.redrawnFillet()
+        self.assertFalse(self.doc.HasPendingTransaction)
+        Gui.ActiveDocument.setEdit(fillet)
+        pump()
+        panel = Panel(self)
+        panel.click(panel.accept)
+        self.assertNotIn("Warning", fillet.State)
+        select = Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonRefSel")
+        select.click()
+        pump()
+        self.assertTrue(select.isChecked())
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        Gui.Selection.addSelection(self.doc.Name, "Pad", other)
+        pump()
+        self.assertEqual(sorted(fillet.Base[1]), sorted([corner, other]))
+
+        self.close(QtWidgets.QDialogButtonBox.Cancel)
+
+        self.assertIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["original"]["index"], original)
+        self.assertEqual(len(fillet.Base[1]), 1)
+
     def testPatternKeepsARepickOnOk(self):
         """Review B1: a linear pattern of a pocket along the pad's edge at y = 0; the rectangle
         drawn again, the direction is found again by geometry. In the pattern's own dialog the
@@ -517,3 +549,124 @@ class TestReferencePickerGui(unittest.TestCase):
         self.close(QtWidgets.QDialogButtonBox.Ok)
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, REGION_PAD_VOLUME, places=4)
+
+    def assertProfileSwitchTakesTheNewNormal(self, onOldNormal):
+        """A pad of a rectangle on XY, 10 high; in its own dialog the profile is picked again on
+        a sketch on XZ. The direction box's "Sketch normal" is the new sketch's, and OK pads along
+        it: 10 along Y. (It kept the old sketch's normal, Z, which lies in the new sketch's
+        plane, and the pad failed.) `onOldNormal`: ReferenceAxis names the old sketch's normal,
+        as after an earlier OK of the dialog, and follows the profile."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        xz = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90))
+        side = models.sketch(doc, "Side", models.rectangle(30, 0, 40, 5), body, placement=xz)
+        if onOldNormal:
+            pad.ReferenceAxis = (profile, ["N_Axis"])
+        doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+
+        Gui.ActiveDocument.setEdit(pad)
+        pump()
+        mainWindow = Gui.getMainWindow()
+        combo = mainWindow.findChild(QtWidgets.QComboBox, "directionCB")
+        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
+        self.assertEqual(combo.currentIndex(), 0)
+        button.click()
+        pump()
+        Gui.Selection.addSelection(doc.Name, side.Name)
+        pump()
+        button.click()
+        pump()
+        self.assertEqual(pad.Profile[0], side)
+        self.assertEqual(combo.currentIndex(), 0)
+
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        if pad.ReferenceAxis:
+            self.assertEqual(pad.ReferenceAxis[0], side)
+        box = pad.Shape.BoundBox
+        self.assertAlmostEqual(box.YLength, 10, places=6)
+        self.assertAlmostEqual(box.ZLength, 5, places=6)
+
+    def testProfileSwitchTakesTheNewNormal(self):
+        """ops#130 (review M6), a pad whose direction was never set."""
+        self.assertProfileSwitchTakesTheNewNormal(False)
+
+    def testProfileSwitchRetargetsTheOldNormal(self):
+        """ops#130 (review M6), a pad along its sketch's normal by name."""
+        self.assertProfileSwitchTakesTheNewNormal(True)
+
+    def testProfileSwitchKeepsAnEdgeDirection(self):
+        """ops#130 (PR 120's review): a boss on a block, padded along the block's vertical edge;
+        its profile picked again on another sketch keeps that edge as its direction (only the old
+        sketch's normal follows the profile)."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        block = models.pad(body, profile, 10)
+        boss = models.sketch(doc, "BossSketch", models.rectangle(2, 2, 6, 6), body, z=10)
+        other = models.sketch(doc, "OtherSketch", models.rectangle(12, 2, 16, 6), body, z=10)
+        pad = models.pad(body, boss, 5, "Boss")
+        doc.recompute()
+        [vertical] = edge("line", direction=Z, through=(20, 0, 0)).one(block.Shape)
+        pad.ReferenceAxis = (block, [vertical])
+        doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+
+        Gui.ActiveDocument.setEdit(pad)
+        pump()
+        mainWindow = Gui.getMainWindow()
+        combo = mainWindow.findChild(QtWidgets.QComboBox, "directionCB")
+        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
+        edgeEntry = combo.currentText()
+        self.assertGreater(combo.currentIndex(), 2)
+        button.click()
+        pump()
+        Gui.Selection.addSelection(doc.Name, other.Name)
+        pump()
+        button.click()
+        pump()
+        self.assertEqual(pad.Profile[0], other)
+        self.assertEqual(combo.currentText(), edgeEntry)
+
+        self.close(QtWidgets.QDialogButtonBox.Ok)
+
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(pad.ReferenceAxis, (block, [vertical]))
+        box = pad.Shape.BoundBox
+        self.assertAlmostEqual(box.ZMax, 15, places=6)
+
+    def testProfilePickSaysWhatItRefuses(self):
+        """ops#130 (the review's ProfileGate nit): picking the profile again, a vertex of the solid
+        before or of a sketch is refused with a reason on the status bar."""
+        doc = self.doc
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        base = models.pad(body, profile, 10)
+        top = models.sketch(doc, "Top", models.rectangle(5, 2, 15, 8), body, z=10)
+        pad = models.pad(body, top, 5, "Boss")
+        doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        Gui.ActiveDocument.setEdit(pad)
+        pump()
+        mainWindow = Gui.getMainWindow()
+        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
+        button.click()
+        pump()
+        self.assertTrue(button.isChecked())
+
+        def statusTexts():
+            return [label.text() for label in mainWindow.statusBar().findChildren(QtWidgets.QLabel)]
+
+        for obj, reason in ((base, "faces or edges of the solid"), (top, "its regions or its edges")):
+            mainWindow.showMessage("", 0)
+            Gui.Selection.addSelection(doc.Name, obj.Name, "Vertex1")
+            pump()
+            self.assertEqual(Gui.Selection.getSelectionEx(doc.Name), [])
+            self.assertTrue(any(reason in text for text in statusTexts()), statusTexts())
+        self.assertEqual(pad.Profile[0], top)
+        button.click()
+        pump()

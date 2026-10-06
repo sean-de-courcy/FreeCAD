@@ -69,7 +69,11 @@ public:
 
     bool allow(App::Document* /*doc*/, App::DocumentObject* obj, const char* sub) override
     {
-        if (!obj || obj == feature) {
+        if (!obj) {
+            return false;
+        }
+        if (obj == feature) {
+            notAllowedReason = QT_TR_NOOP("The feature can't be its own profile.");
             return false;
         }
         const std::string element(sub ? sub : "");
@@ -77,7 +81,11 @@ public:
             return element.rfind(prefix, 0) == 0;
         };
         if (obj == base) {
-            return startsWith("Face") || startsWith("Edge");
+            if (startsWith("Face") || startsWith("Edge")) {
+                return true;
+            }
+            notAllowedReason = QT_TR_NOOP("Pick faces or edges of the solid.");
+            return false;
         }
         if (!obj->isDerivedFrom<Part::Part2DObject>()) {
             notAllowedReason = QT_TR_NOOP("Pick a sketch, its regions or edges, or faces of the solid.");
@@ -88,8 +96,12 @@ public:
             notAllowedReason = QT_TR_NOOP("Pick a sketch of the same body.");
             return false;
         }
-        return element.empty() || startsWith("Edge") || startsWith("Face")
-            || startsWith("InternalFace") || startsWith("Wire");
+        if (element.empty() || startsWith("Edge") || startsWith("Face")
+            || startsWith("InternalFace") || startsWith("Wire")) {
+            return true;
+        }
+        notAllowedReason = QT_TR_NOOP("Pick the sketch, its regions or its edges.");
+        return false;
     }
 
 private:
@@ -725,8 +737,44 @@ void TaskExtrudeParameters::selectedProfile(const Gui::SelectionChanges& msg)
     }
     str << "])";
     FCMD_OBJ_CMD(extrude, str.str());
+    followProfile();
     tryRecomputeFeature();
     updateProfileName();
+    if (axesInList.empty()) {
+        fillDirectionCombo();
+    }
+}
+
+bool TaskExtrudeParameters::followProfile()
+{
+    auto profileBased = getObject<PartDesign::ProfileBased>();
+    if (!profileBased || axesInList.empty()) {
+        return false;
+    }
+    App::DocumentObject* profile = profileBased->Profile.getValue();
+    App::DocumentObject* old = directionProfile.getObject();
+    if (profile == old) {
+        return false;
+    }
+    bool changed = false;
+    const std::vector<std::string> normal {"N_Axis"};
+    if (old && propReferenceAxis->getValue() == old && propReferenceAxis->getSubValues() == normal) {
+        // As a command, so a recorded macro moves the direction with the profile
+        if (profile && profile->isDerivedFrom<Part::Part2DObject>()) {
+            FCMD_OBJ_CMD(
+                profileBased,
+                "ReferenceAxis = (" << Gui::Command::getObjectCmd(profile) << ", ['N_Axis'])"
+            );
+        }
+        else {
+            FCMD_OBJ_CMD(profileBased, "ReferenceAxis = None");
+        }
+        changed = true;
+    }
+    // The list first: onDirectionCBChanged returns on an empty one
+    axesInList.clear();
+    ui->directionCB->clear();
+    return changed;
 }
 
 void TaskExtrudeParameters::onReferencesRepaired()
@@ -735,6 +783,9 @@ void TaskExtrudeParameters::onReferencesRepaired()
     updateStartReferenceName();
     updateUpToFaceName(m_side1);
     updateUpToFaceName(m_side2);
+    if (followProfile()) {
+        tryRecomputeFeature();
+    }
     fillDirectionCombo();
 }
 
@@ -980,6 +1031,7 @@ void TaskExtrudeParameters::fillDirectionCombo()
         // we can have sketches or faces
         // for sketches just get the sketch normal
         auto pcFeat = getObject<PartDesign::ProfileBased>();
+        directionProfile = App::DocumentObjectT(pcFeat->Profile.getValue());
         Part::Part2DObject* pcSketch = dynamic_cast<Part::Part2DObject*>(pcFeat->Profile.getValue());
         // for faces we test if it is verified and if we can get its normal
         if (!pcSketch) {

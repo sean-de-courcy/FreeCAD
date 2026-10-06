@@ -298,6 +298,12 @@ private:
     App::DocumentObjectT pickedProfile;
     std::vector<std::string> pickedProfileSubs;
     App::DocumentObjectT shownProfile;
+    /// After a pick of another profile object: the direction box rebuilt for it, and a
+    /// ReferenceAxis on the old profile's normal moved to the new one's (ops#130). True when
+    /// ReferenceAxis changed.
+    bool followProfile();
+    /// The profile object the direction box's normal entries were made for.
+    App::DocumentObjectT directionProfile;
     bool hiddenSelf = false;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;

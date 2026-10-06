@@ -87,8 +87,12 @@ void TaskDressUpParameters::setupTransaction()
         return;
     }
 
+    // Join a transaction booked since the dialog opened, as the transformed dialogs do: the
+    // References panel books one when the dialog has none, and opening another here would commit
+    // the panel's repair on its own, out of Cancel's reach (ops#130).
     int tid = DressUpView->getObject()->getDocument()->getBookedTransactionID();
-    if (tid != App::NullTransaction && tid == transactionID) {
+    if (tid != App::NullTransaction) {
+        transactionID = tid;
         return;
     }
 
