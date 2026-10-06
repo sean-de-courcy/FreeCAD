@@ -1121,7 +1121,11 @@ class Scenario:
                 )
                 candidates.append(e["candidates"])
                 roles.append(e.get("candidate_roles", []))  # ops#105
-            report.update(tier=tiers, candidates=candidates, candidate_roles=roles)
+            # the evidence counts the no-structure tier-3 resolutions (ops#127, N3 6.3)
+            evidence = [e.get("evidence", "") for e in entries]
+            report.update(
+                tier=tiers, candidates=candidates, candidate_roles=roles, evidence=evidence
+            )
         if guesses:
             report["guess"] = guesses
             report["alternatives"] = [

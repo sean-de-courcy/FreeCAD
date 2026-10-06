@@ -43,8 +43,8 @@ sequences in two child processes under two naming hash seeds, and their SCORE re
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
 one test per seed and configuration, V2, V2multi and V2s. It passes when every reference is as
 expected after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
-("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, and FREECAD_SCENARIO_REPLAY=<seed>:<steps>
-runs one seed.
+("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, FREECAD_SCENARIO_REPLAY=<seed>:<steps>
+runs one seed, and FREECAD_SCENARIO_GAP=1 plans the close-spaced series (ops#127, N3 6.2).
 """
 
 import os
@@ -211,7 +211,10 @@ globals().update(_makeTests())
 
 
 def randomRuns():
-    """([seeds], steps) from the environment."""
+    """([seeds], steps) from the environment; FREECAD_SCENARIO_GAP sets the plans' spacing."""
+    gap = os.environ.get("FREECAD_SCENARIO_GAP")
+    if gap:
+        randomized.setSpacing(gap)
     replay = os.environ.get("FREECAD_SCENARIO_REPLAY")
     if replay:
         seed, _, steps = replay.partition(":")

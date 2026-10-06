@@ -39,7 +39,9 @@ geometry (`notes/naming-design.md` section 8).
 
 Features keep apart: each region on the top keeps MARGIN from the block's sides and GAP from the
 others, notches and corner cuts stay within the margin, and dress-ups are small. So the labels stay
-unique, and a model is valid when it builds. **Validity is decided by a fresh build**: the edited
+unique, and a model is valid when it builds. The exception is a near pair: a boss, pocket or hole
+placed on purpose NEAR_MIN to NEAR_MAX from another one, so that deleting either leaves an element
+of the other in the guess rules' wide reach (ops#127, design note N3 6.2). **Validity is decided by a fresh build**: the edited
 spec built from scratch in a new document, every reference picked by its predicate, must recompute
 and judge correct. An edit whose fresh build fails is geometry, not naming: it is discarded, and
 the next one is drawn from the seed. The plan (the model and its edits) is made once per seed in V2
@@ -57,8 +59,18 @@ model may differ from the spec (a fillet on one piece of an edge instead of both
 verdicts would judge the spec's model, not the live one. A live edit that can't find the element it
 needs is scored wrong for the same reason (the model has diverged).
 
+Two edits aim at the guess rules (ops#127, N3 6.2). A redraw deletes one line of a boss's or
+pocket's rectangle, or a hole's circle, and draws it again 0.25 to 1 mm over: the new element has a
+new geometry ID, so no name relates it to the old one, and only the wide reach of the same sketch
+finds it. Its references are judged against the rule: guessed when the new element is the wide
+reach's clear nearest, broken with it listed otherwise, resolved plainly when strict tier 3 already
+holds it, broken without the solver; then their consumers are deleted, as a break's are. A
+delete-near deletes one feature of a near pair whose elements are referenced: they break, and
+policy D guesses no element of the neighbour (another source).
+
 Environment (TestNamingScenarios): FREECAD_SCENARIO_SEEDS ("1-4", "7,9"),
-FREECAD_SCENARIO_STEPS (8), FREECAD_SCENARIO_REPLAY=<seed>:<steps> (one seed).
+FREECAD_SCENARIO_STEPS (8), FREECAD_SCENARIO_REPLAY=<seed>:<steps> (one seed),
+FREECAD_SCENARIO_GAP (GAP and MARGIN, 1 for N3's close-spaced series; `setSpacing`).
 """
 
 import copy
@@ -76,6 +88,7 @@ from .harness import (
     Chamfered,
     ExternalCoincides,
     Filleted,
+    Guessed,
     Ref,
     Result,
     Scenario,
@@ -88,6 +101,8 @@ from .harness import (
     expectedNames,
     face,
     pieces,
+    storedLinks,
+    subElement,
 )
 from . import models as m
 
@@ -96,6 +111,7 @@ V = App.Vector
 QUANTUM = 0.25  # every generated length is a multiple of it
 MARGIN = 3.0  # between the block's sides and the regions of the features on its top
 GAP = 2.0  # between two regions, and between two notches
+NEAR_MIN, NEAR_MAX = 0.5, 1.0  # between the two regions of a near pair
 PIECE_AT = 2.5  # a split side face's piece for an attachment: the one at 2.5 along the side
 LIMITS = {"W": (16, 44), "D": (12, 32), "H": (5, 16)}
 
@@ -112,6 +128,13 @@ OBJECT = {
     "marker": "Marker",
     "external": "External",
 }
+
+
+def setSpacing(gap):
+    """GAP and MARGIN for the plans made from now on (FREECAD_SCENARIO_GAP; N3 6.2's
+    close-spaced series uses 1 mm). Notches and corner cuts stay within the margin."""
+    global GAP, MARGIN
+    GAP = MARGIN = float(gap)
 
 
 def q(x):
@@ -172,12 +195,15 @@ def cutPoints(corner, s):
 class Feature:
     """One feature of the spec. boss, pocket: `region` (x0, y0, x1, y1) and `size` (height,
     depth); hole: `center` and `size` (radius); fillet, chamfer: `label` and `size`; marker,
-    external: `label`. `target` names the object the reference links to."""
+    external: `label`. `target` names the object the reference links to. `near`: the fid of the
+    feature it was placed near on purpose (a near pair). `order`: a rectangle's sides by geometry
+    index in its sketch (a redraw moves a side to the end)."""
 
     def __init__(self, fid, kind, target, **values):
         self.fid, self.kind, self.target = fid, kind, target
         self.region = self.center = self.label = None
-        self.size = None
+        self.size = self.near = None
+        self.order = list(SIDES)
         for key, value in values.items():
             setattr(self, key, value)
 
@@ -228,6 +254,7 @@ class Spec:
         self.features = []
         self.nextId = 1
         self.nextKey = 1
+        self.redrawn = set()  # labels whose element a redraw replaced in this step
 
     def copy(self):
         return copy.deepcopy(self)
@@ -350,8 +377,12 @@ class Spec:
             return segment(V(x, y, min(H, top)), V(x, y, max(H, top)))
         level, side = label[2], label[3]
         z = H if level == "rim" else top
-        a, b = {"front": ("fl", "fr"), "right": ("fr", "br"), "back": ("bl", "br"),
-                "left": ("fl", "bl")}[side]
+        a, b = {
+            "front": ("fl", "fr"),
+            "right": ("fr", "br"),
+            "back": ("bl", "br"),
+            "left": ("fl", "bl"),
+        }[side]
         return segment(V(*corners[a], z), V(*corners[b], z))
 
     def labels(self, target, kinds):
@@ -396,22 +427,42 @@ class Spec:
         refs = {}
         for f in self.features:
             if f.kind in ("boss", "pocket", "hole"):
-                refs[f"F{f.fid}.support"] = (f.sketchName, "AttachmentSupport",
-                                             ("block", "face", "top"), f.target, "attach", f)
+                refs[f"F{f.fid}.support"] = (
+                    f.sketchName,
+                    "AttachmentSupport",
+                    ("block", "face", "top"),
+                    f.target,
+                    "attach",
+                    f,
+                )
             elif f.kind in DRESS:
                 refs[f"F{f.fid}.base"] = (f.name, "Base", f.label, f.target, "dress", f)
             elif f.kind == "marker":
-                refs[f"F{f.fid}.support"] = (f.name, "AttachmentSupport", f.label, f.target,
-                                             "attach", f)
+                refs[f"F{f.fid}.support"] = (
+                    f.name,
+                    "AttachmentSupport",
+                    f.label,
+                    f.target,
+                    "attach",
+                    f,
+                )
             elif f.kind == "external":
-                refs[f"F{f.fid}.external"] = (f.name, "ExternalGeometry", f.label, f.target,
-                                              "external", f)
+                refs[f"F{f.fid}.external"] = (
+                    f.name,
+                    "ExternalGeometry",
+                    f.label,
+                    f.target,
+                    "external",
+                    f,
+                )
         return refs
 
     def expectation(self, label, target, consumer):
         state = self.state(label, target)
         if state == "gone":
             return self.gone(label, target)
+        if label in self.redrawn:
+            return RedrawnElement(self.predicate(label))
         if state == "one":
             return self.predicate(label)
         if consumer == "dress":
@@ -442,6 +493,24 @@ class Spec:
                 broken.append(f)
         return broken
 
+    def referenced(self):
+        """The labels references hold whose element is on their target."""
+        return {
+            label
+            for _, _, label, target, _, _ in self.refs().values()
+            if self.state(label, target) != "gone"
+        }
+
+    def neighbour(self, feature):
+        """(the nearest other boss, pocket or hole, the distance between their regions)."""
+        best = (None, None)
+        for f in self.features:
+            if f is not feature and f.kind in ("boss", "pocket", "hole"):
+                d = separation(feature.area(), f.area())
+                if best[1] is None or d < best[1]:
+                    best = (f, d)
+        return best
+
     # validity (before the fresh build)
 
     def valid(self):
@@ -456,11 +525,11 @@ class Spec:
                 x0, y0, x1, y1 = f.area()
                 if x0 < MARGIN or y0 < MARGIN or x1 > self.W - MARGIN or y1 > self.D - MARGIN:
                     return False
-                areas.append((x0, y0, x1, y1))
-        for i, a in enumerate(areas):
-            for b in areas[i + 1 :]:
-                if not (a[2] + GAP <= b[0] or b[2] + GAP <= a[0]
-                        or a[3] + GAP <= b[1] or b[3] + GAP <= a[1]):
+                areas.append((f, (x0, y0, x1, y1)))
+        for i, (fa, a) in enumerate(areas):
+            for fb, b in areas[i + 1 :]:
+                pair = fa.near == fb.fid or fb.near == fa.fid
+                if separation(a, b) < (NEAR_MIN if pair else GAP):
                     return False
         for side, notches in self.notches.items():
             length = self.length(side)
@@ -494,11 +563,12 @@ class Spec:
 
     def repaired(self):
         """The spec with the broken consumers deleted, last first, or None when one of them
-        can't be deleted cleanly."""
+        can't be deleted cleanly. A redraw's consumers count as broken (RedrawnElement)."""
         spec = self.copy()
         for _ in range(4):
             broken = spec.broken()
             if not broken:
+                spec.redrawn = set()
                 return spec
             for f in sorted(broken, key=lambda f: spec.features.index(f), reverse=True):
                 f = spec.byId(f.fid)
@@ -506,6 +576,25 @@ class Spec:
                     return None
                 spec.delete(f)
         return None
+
+
+def separation(a, b):
+    """How far apart two regions (x0, y0, x1, y1) are along the axis that parts them most;
+    negative when they overlap."""
+    return max(b[0] - a[2], a[0] - b[2], b[1] - a[3], a[1] - b[3])
+
+
+class RedrawnElement(Broken):
+    """The expectation of a reference whose element a redraw replaced (`predicate`, the new
+    element): broken for the plan (its consumer is deleted after the step), judged by
+    RandomSequence.redrawnExpectation in each configuration."""
+
+    def __init__(self, predicate):
+        super().__init__(predicate)
+        self.predicate = predicate
+
+    def __repr__(self):
+        return f"REDRAWN[{self.predicate}]"
 
 
 def segment(p, q):
@@ -681,7 +770,18 @@ class FeatureMove(Edit):
         if f.kind == "hole":
             moveHole(sketch, f)
         else:
-            m.moveRectangle(sketch, *f.region)
+            m.setLines(sketch, {f.order.index(side): line for side, line in sideLines(f).items()})
+
+
+def sideLines(f):
+    """{side: its line} of a rectangle, in the order `m.rectangle` draws them."""
+    x0, y0, x1, y1 = f.region
+    return {
+        "front": ((x0, y0), (x1, y0)),
+        "right": ((x1, y0), (x1, y1)),
+        "back": ((x1, y1), (x0, y1)),
+        "left": ((x0, y1), (x0, y0)),
+    }
 
 
 def moveHole(sketch, f):
@@ -765,6 +865,61 @@ class CornerCut(Edit):
         doc.Profile.addGeometry(m.polyline(list(lines[len(after.lines) - 1])), False)
 
 
+class Redraw(Edit):
+    """One line of a boss's or pocket's rectangle (`side`) moved by `shift` outward (negative:
+    inward), or a hole's circle by `shift` (dx, dy), by deleting it and drawing it again (ops#127,
+    N3 6.2): the new element has a new geometry ID. A side's two neighbours are stretched to meet
+    it and keep theirs."""
+
+    LABELS = {"boss": ("top",), "pocket": ("rim", "floor")}
+
+    def __init__(self, fid, side, shift, text):
+        super().__init__(text)
+        self.fid, self.side, self.shift = fid, side, shift
+        self.saved = {}
+
+    def labels(self, f):
+        if f.kind == "hole":
+            return {(f.fid, "edge", "rim"), (f.fid, "edge", "bottom")}
+        return {(f.fid, "edge", level, self.side) for level in self.LABELS[f.kind]}
+
+    def change(self, spec):
+        f = spec.byId(self.fid)
+        if f.kind == "hole":
+            f.center = (f.center[0] + self.shift[0], f.center[1] + self.shift[1])
+        else:
+            x0, y0, x1, y1 = f.region
+            d = self.shift
+            f.region = {
+                "front": (x0, y0 - d, x1, y1),
+                "right": (x0, y0, x1 + d, y1),
+                "back": (x0, y0, x1, y1 + d),
+                "left": (x0 - d, y0, x1, y1),
+            }[self.side]
+            f.order = [s for s in f.order if s != self.side] + [self.side]
+        spec.redrawn = self.labels(f)
+
+    def apply(self, doc, body, before, after):
+        # The elements the references hold before the edit: the solver's saved fingerprints
+        self.saved = {}
+        for name, (owner, prop, label, target, _, _) in before.refs().items():
+            if label in after.redrawn and before.state(label, target) != "gone":
+                obj, subs = storedLinks(doc.getObject(owner), prop)
+                self.saved[name] = subElement(obj, subs[0])
+        old, f = before.byId(self.fid), after.byId(self.fid)
+        sketch = doc.getObject(f.sketchName)
+        if f.kind == "hole":
+            sketch.delGeometry(0)
+            sketch.addGeometry(m.circle(*f.center, f.size), False)
+            return
+        lines = sideLines(f)
+        k = SIDES.index(self.side)
+        neighbours = (SIDES[k - 1], SIDES[(k + 1) % 4])
+        m.setLines(sketch, {old.order.index(s): lines[s] for s in neighbours})
+        sketch.delGeometry(old.order.index(self.side))
+        sketch.addGeometry(m.polyline(list(lines[self.side])), False)
+
+
 class AddFeature(Edit):
     """A feature added at the tip, or inserted after the block's pad (`insert`), as a user does
     it: the tip set to the pad, the sketch and the feature added, the tip set back."""
@@ -817,8 +972,31 @@ def drawRegion(rng, spec, size):
     return (x0, y0, x0 + w, y0 + d)
 
 
+def drawNearRegion(rng, spec, size):
+    """A region NEAR_MIN to NEAR_MAX from a side of an existing boss, pocket or hole, facing it
+    along at least 1 mm, and that feature's fid; None when there is none."""
+    placed = [f for f in spec.features if f.kind in ("boss", "pocket", "hole")]
+    if not placed:
+        return None
+    other = rng.choice(placed)
+    side = rng.choice(SIDES)
+    w, d = uniform(rng, *size), uniform(rng, *size)
+    if size[0] == size[1]:
+        d = w  # a hole's square
+    g = uniform(rng, NEAR_MIN, NEAR_MAX)
+    x0, y0, x1, y1 = other.area()
+    if side in ("front", "back"):
+        rx = uniform(rng, x0 - w + 1, x1 - 1)
+        ry = y0 - g - d if side == "front" else y1 + g
+    else:
+        ry = uniform(rng, y0 - d + 1, y1 - 1)
+        rx = x0 - g - w if side == "left" else x1 + g
+    return (rx, ry, rx + w, ry + d), other.fid
+
+
 def drawFeature(rng, spec, insert=False):
-    """A new feature for the tip (or, with insert, for after the pad), or None."""
+    """A new feature for the tip (or, with insert, for after the pad), or None. A boss, pocket
+    or hole is placed near another one on purpose one time in four (a near pair)."""
     kinds = [("boss", 2), ("pocket", 2), ("hole", 1.5)]
     if not insert:
         kinds += [("fillet", 2), ("chamfer", 2), ("marker", 1.5), ("external", 1)]
@@ -827,18 +1005,32 @@ def drawFeature(rng, spec, insert=False):
     fid = spec.nextId
     if kind in ("boss", "pocket", "hole"):
         target = tip if insert or rng.random() < 0.7 else "Pad"
+        near = None
         if kind == "hole":
             r = uniform(rng, 1, 2.5)
-            region = drawRegion(rng, spec, (2 * r, 2 * r))
-            if region is None:
+            size = (2 * r, 2 * r)
+        else:
+            size = (3, 8)
+        if rng.random() < 0.25:
+            drawn = drawNearRegion(rng, spec, size)
+            if drawn is None:
                 return None
-            return Feature(fid, kind, target, center=((region[0] + region[2]) / 2,
-                                                      (region[1] + region[3]) / 2), size=r)
-        region = drawRegion(rng, spec, (3, 8))
+            region, near = drawn
+        else:
+            region = drawRegion(rng, spec, size)
         if region is None:
             return None
+        if kind == "hole":
+            return Feature(
+                fid,
+                kind,
+                target,
+                center=((region[0] + region[2]) / 2, (region[1] + region[3]) / 2),
+                size=r,
+                near=near,
+            )
         size = uniform(rng, 2, 6) if kind == "boss" else uniform(rng, 1, spec.H - 2)
-        return Feature(fid, kind, target, region=region, size=size)
+        return Feature(fid, kind, target, region=region, size=size, near=near)
     if kind in DRESS:
         labels = spec.labels(tip, ("edge",))
         if not labels:
@@ -869,9 +1061,64 @@ def raisedByAPocketDepth(spec, height):
     return any(f.kind == "pocket" and abs(height - spec.H) == f.size for f in spec.features)
 
 
+def drawRedraw(rng, spec):
+    """A redraw (N3 6.2) of a line or circle, preferably one whose element a reference holds."""
+    options = []
+    for f in spec.features:
+        if f.kind == "hole":
+            options.append((f, None))
+        elif f.kind in ("boss", "pocket"):
+            options += [(f, side) for side in SIDES]
+    if not options:
+        return None
+    referenced = spec.referenced()
+    held = [(f, side) for f, side in options if Redraw(f.fid, side, 0, "").labels(f) & referenced]
+    f, side = rng.choice(held or options)
+    d = rng.choice((0.25, 0.5, 0.75, 1.0)) * rng.choice((-1, 1))
+    if side is None:
+        shift = (d, 0) if rng.random() < 0.5 else (0, d)
+        return Redraw(
+            f.fid, None, shift, f"redraw {f.name}'s circle by ({shift[0]:g}, " f"{shift[1]:g})"
+        )
+    return Redraw(f.fid, side, d, f"redraw {f.name}'s {side} line {d:+g} outward")
+
+
+def drawDeleteNear(spec):
+    """The features a delete-near (N3 6.2) may delete: a boss, pocket or hole within NEAR_MAX
+    of another one, with an element a reference holds."""
+    owners = {label[0] for label in spec.referenced()}
+    found = []
+    for f in spec.features:
+        if f.kind in ("boss", "pocket", "hole") and f.fid in owners and spec.deletable(f):
+            other, d = spec.neighbour(f)
+            if other is not None and d <= NEAR_MAX:
+                found.append((f, other, d))
+    return found
+
+
 def drawEdit(rng, spec):
-    kind = weighted(rng, [("block", 3), ("feature", 3), ("notch", 1.5), ("cut", 1),
-                          ("insert", 1.5), ("delete", 1.5), ("add", 1.5)])
+    kind = weighted(
+        rng,
+        [
+            ("block", 3),
+            ("feature", 3),
+            ("notch", 1.5),
+            ("cut", 1),
+            ("insert", 1.5),
+            ("delete", 1.5),
+            ("add", 1.5),
+            ("redraw", 1),
+            ("delete-near", 1),
+        ],
+    )
+    if kind == "redraw":
+        return drawRedraw(rng, spec)
+    if kind == "delete-near":
+        found = drawDeleteNear(spec)
+        if not found:
+            return None
+        f, other, d = rng.choice(found)
+        return DeleteFeature(f.fid, f"delete-near {f.name} ({other.name} {d:g} mm away)")
     if kind == "block":
         key = rng.choice(("W", "D", "H"))
         value = uniform(rng, *LIMITS[key])
@@ -903,12 +1150,12 @@ def drawEdit(rng, spec):
         return FeatureSize(f.fid, value, f"{f.name} size {f.size:g} -> {value:g}")
     if kind == "notch":
         side = rng.choice(SIDES)
-        width, depth = uniform(rng, 2, 4), uniform(rng, 1, 1.5)
+        width, depth = uniform(rng, 2, 4), min(uniform(rng, 1, 1.5), MARGIN)
         t0 = uniform(rng, MARGIN, spec.length(side) - MARGIN - width)
         return Notch(side, t0, t0 + width, depth)
     if kind == "cut":
         free = [c for c in CORNERS if c not in spec.cuts]
-        return CornerCut(rng.choice(free), uniform(rng, 1, 2)) if free else None
+        return CornerCut(rng.choice(free), min(uniform(rng, 1, 2), MARGIN)) if free else None
     if kind == "delete":
         candidates = [f for f in spec.features if f.solid and spec.deletable(f)]
         if not candidates:
@@ -941,12 +1188,57 @@ def freshBuild(spec, mode):
         checker.cleanup()
 
 
-def makeRef(spec, name):
+def makeRef(spec, name, sequence=None):
+    """The reference's Ref; a redrawn element's expectation comes from `sequence`, the replay
+    judging it (RandomSequence.redrawnExpectation)."""
     owner, prop, label, target, consumer, f = spec.refs()[name]
-    outcome = None if isinstance(spec.expectation(label, target, consumer), Broken) else (
-        spec.outcome(consumer, f)
-    )
-    return Ref(name, owner, prop, lambda: spec.expectation(label, target, consumer), outcome)
+    expectation = spec.expectation(label, target, consumer)
+    if isinstance(expectation, RedrawnElement):
+        expectation = sequence.redrawnExpectation(name, expectation.predicate, target)
+    outcome = None if isinstance(expectation, Broken) else spec.outcome(consumer, f)
+    return Ref(name, owner, prop, lambda: expectation, outcome)
+
+
+# The reference solver's tier 3 (strict) and the guess rules' wide tier 3 (ops#127, N2 5.2):
+# d_max as a share of the target's diagonal, the gap factor, the relative size difference
+# (GeometryTolerances in ElementSolver.h)
+STRICT_REACH = (0.01, 3.0, 0.01)
+WIDE_REACH = (0.05, 2.0, 0.5)
+
+
+def agrees(saved, e):
+    """Tier 2 for edges: the same curve kind, parallel lines or circles on parallel axes with the
+    same radius."""
+    try:
+        a, b = saved.Curve, e.Curve
+    except TypeError:  # a curve kind Part doesn't wrap: no line or circle
+        return False
+    if a.TypeId != b.TypeId:
+        return False
+    if a.TypeId == "Part::GeomLine":
+        return abs(abs(a.Direction.normalize().dot(b.Direction.normalize())) - 1) < 1e-9
+    if a.TypeId == "Part::GeomCircle":
+        same = abs(abs(a.Axis.normalize().dot(b.Axis.normalize())) - 1) < 1e-9
+        return same and abs(a.Radius - b.Radius) <= 1e-6 * max(a.Radius, b.Radius)
+    return False
+
+
+def nearestIn(saved, edges, diagonal, reach):
+    """The solver's findNearest: the index of the edge whose centre is nearest the saved one,
+    within d_max, with the second nearest at least the gap factor times as far and beyond d_max,
+    and a length within the size tolerance; else None."""
+    share, gapFactor, size = reach
+    dMax = share * diagonal
+    ranked = sorted((((e.CenterOfMass - saved.CenterOfMass).Length, k) for k, e in edges))
+    if not ranked or ranked[0][0] > dMax:
+        return None
+    if len(ranked) > 1 and (ranked[1][0] < gapFactor * ranked[0][0] or ranked[1][0] < dMax):
+        return None
+    k = ranked[0][1]
+    e = dict(edges)[k]
+    if abs(e.Length - saved.Length) > size * max(e.Length, saved.Length):
+        return None
+    return k
 
 
 class Step:
@@ -1032,16 +1324,81 @@ class RandomSequence(Scenario):
     def __init__(self, config, plan):
         super().__init__(config)
         self.plan = plan
+        self.saved = {}  # {reference: the element it held before a redraw}
+        self.redrawnSubs = {}  # {reference: (the redrawn element's names, the rule finding it)}
+        self.redrawnPredicates = {}
+
+    def redrawnExpectation(self, name, predicate, target):
+        """A redrawn element's reference (ops#127, N3 6.2). No name relates the new element to
+        the old one. Without the solver the reference breaks. With it, the new element is right
+        when the solver's geometric rule finds it: strict tier 3 holds it plainly when it is that
+        reach's clear nearest, else G2 guesses it (the same sketch, so the same source) when it
+        is the wide reach's (`rule` strict or wide; structure may hold it plainly first). Beyond
+        both, the reference breaks with the new element listed (`listsRedrawn`), unless
+        structure holds it."""
+        obj = self.doc.getObject(target)
+        shape = obj.Shape
+        new = predicate.one(shape)
+        if not self.solver:
+            self.redrawnSubs[name] = (new, "off")
+            return BROKEN
+        saved = self.saved[name]
+        edges = [(k, e) for k, e in enumerate(shape.Edges, 1) if agrees(saved, e)]
+        diagonal = shape.BoundBox.DiagonalLength
+        index = int(new[0][len("Edge") :])
+        for rule, reach in (("strict", STRICT_REACH), ("wide", WIDE_REACH)):
+            if nearestIn(saved, edges, diagonal, reach) == index:
+                self.redrawnSubs[name] = (new, rule)
+                return predicate
+        self.redrawnSubs[name] = (new, "none")
+        self.redrawnPredicates[name] = predicate
+        return Broken(predicate)
+
+    def listsRedrawn(self, name, result):
+        """A redrawn element's reference beyond both reaches (N3 6.3): broken, it must list the
+        new element among its candidates, else it is scored wrong; held plainly by structure
+        (the solver's tier 1), it is correct, since the new element is the right one."""
+        if name not in self.redrawnSubs:
+            return
+        new, rule = self.redrawnSubs[name]
+        result.record["redrawn"] = [new, rule]
+        if rule != "none":
+            return
+        if result.verdict == "partial" and set(result.record.get("subs", [])) == set(new):
+            result.verdict = "correct"
+            # judged as the new element: the expectation the record shows is that element
+            result.record.update(
+                verdict="correct",
+                expect=repr(self.redrawnPredicates[name]),
+                detail="held by structure",
+            )
+        elif result.verdict == "broken":
+            listed = [c for row in result.record.get("candidates", []) for c in row]
+            if not set(new) <= set(listed):
+                result.verdict = "wrong"
+                result.record.update(
+                    verdict="wrong", detail=f"broken without the redrawn {new} listed: {listed}"
+                )
 
     def diverged(self, name, step, why):
         """The plan's fresh build found the element, so the live model has diverged from the
         spec: something upstream resolved to the wrong element."""
         result = Result(type(self).__name__, name, self.config, step)
         result.verdict = "wrong"
-        result.record.update(area=self.area, config=self.config, platform=sys.platform,
-                             step=step, consumer=name, target=None, subs=[], expect="diverged",
-                             stored="diverged", outcome=None,
-                             detail=f"the live model isn't the spec's: {why}", verdict="wrong")
+        result.record.update(
+            area=self.area,
+            config=self.config,
+            platform=sys.platform,
+            step=step,
+            consumer=name,
+            target=None,
+            subs=[],
+            expect="diverged",
+            stored="diverged",
+            outcome=None,
+            detail=f"the live model isn't the spec's: {why}",
+            verdict="wrong",
+        )
         return result
 
     def reportedUpstream(self, spec, name, result):
@@ -1069,10 +1426,12 @@ class RandomSequence(Scenario):
 
     def judgeAll(self, spec, step, text, names=None):
         results = []
+        self.redrawnSubs = {}
         for name in names if names is not None else list(spec.refs()):
             try:
-                result = self.judge(makeRef(spec, name), step)
+                result = self.judge(makeRef(spec, name, self), step)
                 self.reportedUpstream(spec, name, result)
+                self.listsRedrawn(name, result)
             except ScenarioError as e:
                 result = self.diverged(name, step, e)
             result.scenario = f"Random{self.plan.seed:04d}"
@@ -1104,11 +1463,16 @@ class RandomSequence(Scenario):
                 except ScenarioError as e:  # an element the edit needs isn't there
                     result = self.diverged(f"edit{k}", str(k), e)
                     result.scenario, result.ref = f"Random{self.plan.seed:04d}", f"edit@{k}"
-                    result.record.update(scenario=result.scenario, ref=result.ref,
-                                         seed=self.plan.seed, edit=step.edit.text)
+                    result.record.update(
+                        scenario=result.scenario,
+                        ref=result.ref,
+                        seed=self.plan.seed,
+                        edit=step.edit.text,
+                    )
                     emit(result)
                     results.append(result)
                     break
+                self.saved = getattr(step.edit, "saved", {})
                 self.doc.recompute()
                 if body.Tip is None or body.Tip.Name != step.after.tip():
                     # a feature past the tip would be built on by the next feature added there
@@ -1143,8 +1507,10 @@ class RandomSequence(Scenario):
 
 
 def replayText(plan):
-    lines = [f"seed {plan.seed}: {len(plan.steps)} steps, {len(plan.discarded)} draws discarded",
-             "  build: " + "; ".join(f.describe() for f in plan.initial.features)]
+    lines = [
+        f"seed {plan.seed}: {len(plan.steps)} steps, {len(plan.discarded)} draws discarded",
+        "  build: " + "; ".join(f.describe() for f in plan.initial.features),
+    ]
     for k, step in enumerate(plan.steps, 1):
         repair = ""
         if step.repaired is not None:

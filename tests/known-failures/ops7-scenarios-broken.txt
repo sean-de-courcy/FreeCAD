@@ -128,3 +128,7 @@ cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_x3_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2multi
+
+reason: random sequence seed 1, step 8: a notch splits the block edge a fillet is on, and the fillet keeps one piece without the solver (V2 and V2multi; V2s correct). The plan is new since the generator's redraw and delete-near edits (ops#127 P8b); without the solver, notch splits fail about half of seeds 1-200 at 12 steps in the same way
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V2
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V2multi
