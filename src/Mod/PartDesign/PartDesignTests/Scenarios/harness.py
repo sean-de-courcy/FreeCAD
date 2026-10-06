@@ -188,6 +188,19 @@ class Masker:
 
         return self.V1_TAG.sub(tag, name)
 
+    def maskText(self, text, mode):
+        """`text` with each word that is a mapped name masked: a solver's evidence can quote one
+        ("pieces merged back: <name> found exactly")."""
+
+        def word(token):
+            if ";" not in token or token.endswith(";"):
+                return token
+            if mode == "V2" and hasattr(App, "expandMappedName"):
+                token = App.expandMappedName(token)
+            return self.mask(token, mode)
+
+        return " ".join(word(token) for token in text.split(" "))
+
     def mask(self, name, mode, shape=None):
         """The masked name for a report; the raw name when it can't be masked."""
         try:
@@ -1090,6 +1103,9 @@ class Scenario:
                 result.verdict, detail = "wrong", f"{owner.Name} still has a warning"
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(solverReport)
+        if "evidence" in record:
+            # its names' tags masked as in `names`: records compare across hash seeds and runs
+            record["evidence"] = [masker.maskText(e, mode) for e in record["evidence"]]
         # computed on a guessed, partly resolved or geometry-only reference (ops#127)
         record["warning"] = warned
         if self.solver and not owner.isValid():
