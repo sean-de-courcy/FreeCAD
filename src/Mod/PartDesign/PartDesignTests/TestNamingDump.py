@@ -304,6 +304,8 @@ def modelLinearPattern(doc):
     pattern.Length = 10
     pattern.Occurrences = 3
     pattern.Refine = False
+    # newObject leaves the Tip (the roll-back bar, ops#127) on the pad
+    body.Tip = pattern
     return [pad, pattern]
 
 

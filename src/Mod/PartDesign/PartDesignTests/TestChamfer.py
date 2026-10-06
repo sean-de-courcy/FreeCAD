@@ -239,7 +239,9 @@ class TestChamfer(unittest.TestCase):
         body.Tip = chamfer
         self.Doc.recompute()
         self.assertEqual(chamfer.BaseFeature, boss)
-        self.assertEqual(chamfer.Base[0], block)
+        # The insert reroutes Base onto the inserted boss with its edges (ops#127, a change of
+        # BaseFeature moves what follows the base); the edge is the same (the boss doesn't touch it)
+        self.assertEqual(chamfer.Base[0], boss)
         self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20)
         return body, block, boss, chamfer
 
@@ -247,8 +249,8 @@ class TestChamfer(unittest.TestCase):
         # Another edge of the block added to the chamfer: Base keeps its object, so BaseFeature
         # stays on the boss (it used to fall back to the block, dropping the boss)
         body, block, boss, chamfer = self._block_with_inserted_boss()
-        front = self._edge_between(block.Shape, (0, 0, 10), (20, 0, 10))
-        chamfer.Base = (block, chamfer.Base[1] + [front])
+        front = self._edge_between(boss.Shape, (0, 0, 10), (20, 0, 10))
+        chamfer.Base = (boss, chamfer.Base[1] + [front])
         self.assertEqual(chamfer.BaseFeature, boss)
         self.Doc.recompute()
         self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20 * 2)
@@ -263,7 +265,7 @@ class TestChamfer(unittest.TestCase):
             self.Doc = FreeCAD.openDocument(path)
             block, boss, chamfer = [self.Doc.getObject(name) for name in names]
             self.assertEqual(chamfer.BaseFeature, boss)
-            self.assertEqual(chamfer.Base[0], block)
+            self.assertEqual(chamfer.Base[0], boss)
             chamfer.touch()
             self.Doc.recompute()
             self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 20)
