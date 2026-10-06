@@ -37,4 +37,8 @@ void reorderBody(Body& body,
 /// it has none
 bool parkedReason(const App::DocumentObject* obj, std::string& why);
 
+/// A reorder parked entries of obj's Originals (N1 3.4 b): a pattern whose Originals are all
+/// parked is still a solid feature of its Body, not a MultiTransform's step
+bool hasParkedOriginals(const App::DocumentObject* obj);
+
 }  // namespace PartDesign

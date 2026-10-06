@@ -368,8 +368,9 @@ bool Body::isSolidFeature(const App::DocumentObject* obj)
             return false;
         }
         if (auto transFeature = freecad_cast<PartDesign::Transformed*>(obj)) {
-            // Transformed Features inside a MultiTransform are not solid features
-            return !transFeature->isMultiTransformChild();
+            // Transformed Features inside a MultiTransform are not solid features; a pattern
+            // whose Originals a reorder parked still is (ops#127)
+            return !transFeature->isMultiTransformChild() || hasParkedOriginals(obj);
         }
         return true;
     }

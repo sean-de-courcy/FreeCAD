@@ -3010,6 +3010,23 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
     }
 }
 
+void SketchObject::retargetExternalGeometry(const std::vector<App::DocumentObject*>& objs,
+                                            const std::vector<std::string>& subs,
+                                            std::vector<App::PropertyLinkBase::ShadowSub>&& shadows)
+{
+    // The keys of the external geometry name the entry's object (`<object>.<mapped name>`): with
+    // updateGeoRef set, updateGeometryRefs() maps each entry's old key to its new one by index, so
+    // the projections and the constraints on them stay (ops#127)
+    if (objs.size() != subs.size() || objs.size() != shadows.size()
+        || externalGeoRef.size() != ExternalGeometry.getValues().size()
+        || objs.size() != externalGeoRef.size()) {
+        throw Base::ValueError("retargetExternalGeometry: the entries must keep their count");
+    }
+    updateGeoRef = true;
+    ExternalGeometry.setValues(objs, subs, std::move(shadows));
+    updateGeoRef = false;
+}
+
 void SketchObject::updateGeometryRefs()
 {
     const auto &objs = ExternalGeometry.getValues();

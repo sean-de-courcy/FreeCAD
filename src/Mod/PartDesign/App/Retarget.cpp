@@ -4,14 +4,27 @@
 // section 3)
 
 #include <algorithm>
+#include <cstring>
+#include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 
+#include <App/ComplexGeoData.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ElementNamingUtils.h>
+#include <App/ElementSolverBatch.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
+#include <App/PropertyExpressionEngine.h>
 #include <App/PropertyLinks.h>
+#include <App/PropertyStandard.h>
+#include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Mod/Part/App/PartFeature.h>
+#include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Body.h"
 #include "Feature.h"
@@ -20,6 +33,8 @@
 #include "FeatureSketchBased.h"
 #include "Retarget.h"
 
+FC_LOG_LEVEL_INIT("PartDesign", true, true)
+
 namespace PartDesign
 {
 
@@ -27,6 +42,10 @@ namespace
 {
 
 using Objects = std::vector<App::DocumentObject*>;
+using ShadowSub = App::PropertyLinkBase::ShadowSub;
+
+/// The dynamic property that holds an owner's parked references (N1 3.4 b)
+constexpr const char* ParkedProperty = "ParkedReferences";
 
 const char* nameOf(const App::DocumentObject* obj)
 {
@@ -55,6 +74,1180 @@ bool followsBase(const App::DocumentObject* owner, const App::Property* prop)
     return false;
 }
 
+/// A link property a path of inputs follows (N1 3.1): not the expressions (S4), not a hidden
+/// one, not the Body link or the base chain
+bool isInputLink(const App::DocumentObject* owner, const App::Property* prop)
+{
+    auto link = freecad_cast<const App::PropertyLinkBase*>(prop);
+    if (!link || link->getScope() == App::LinkScope::Hidden || prop == &owner->ExpressionEngine) {
+        return false;
+    }
+    if (auto feature = freecad_cast<const PartDesign::Feature*>(owner)) {
+        if (prop == &feature->BaseFeature || prop == &feature->_Body) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A link property the rule walks (N1 3.2): an input link that doesn't follow the base
+bool isWalked(const App::DocumentObject* owner, const App::Property* prop)
+{
+    return isInputLink(owner, prop) && !followsBase(owner, prop);
+}
+
+bool isFeatureBase(const App::DocumentObject* obj)
+{
+    return obj && obj->isDerivedFrom<PartDesign::FeatureBase>();
+}
+
+// -- The parking record (N1 3.4 b): one line per item, keyed by content --------------------------
+
+std::string escapeField(const std::string& text)
+{
+    std::string out;
+    for (char c : text) {
+        if (c == '%') {
+            out += "%25";
+        }
+        else if (c == '|') {
+            out += "%7C";
+        }
+        else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+std::string unescapeField(const std::string& text)
+{
+    std::string out;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text.compare(i, 3, "%25") == 0) {
+            out += '%';
+            i += 2;
+        }
+        else if (text.compare(i, 3, "%7C") == 0) {
+            out += '|';
+            i += 2;
+        }
+        else {
+            out += text[i];
+        }
+    }
+    return out;
+}
+
+/// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
+/// <position>`) or an expression (`expr|<path>|<T>|<text>`)
+struct ParkedItem
+{
+    bool expression = false;
+    std::string property;  // the property, or the expression's path
+    std::string target;    // the name of the object it refers to
+    std::string sub;
+    std::string shadowNew;
+    std::string shadowOld;
+    std::string fp;
+    std::size_t position = 0;
+    std::string text;  // the expression
+
+    std::string line() const
+    {
+        std::ostringstream ss;
+        if (expression) {
+            ss << "expr|" << escapeField(property) << '|' << escapeField(target) << '|'
+               << escapeField(text);
+        }
+        else {
+            ss << "link|" << escapeField(property) << '|' << escapeField(target) << '|'
+               << escapeField(sub) << '|' << escapeField(shadowNew) << '|'
+               << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
+        }
+        return ss.str();
+    }
+
+    static std::optional<ParkedItem> parse(const std::string& line)
+    {
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        while (true) {
+            auto bar = line.find('|', start);
+            fields.push_back(unescapeField(line.substr(start, bar - start)));
+            if (bar == std::string::npos) {
+                break;
+            }
+            start = bar + 1;
+        }
+        ParkedItem item;
+        if (fields.size() == 4 && fields[0] == "expr") {
+            item.expression = true;
+            item.property = fields[1];
+            item.target = fields[2];
+            item.text = fields[3];
+            return item;
+        }
+        if (fields.size() == 8 && fields[0] == "link") {
+            item.property = fields[1];
+            item.target = fields[2];
+            item.sub = fields[3];
+            item.shadowNew = fields[4];
+            item.shadowOld = fields[5];
+            item.fp = fields[6];
+            try {
+                item.position = static_cast<std::size_t>(std::stoul(fields[7]));
+            }
+            catch (...) {
+                item.position = 0;
+            }
+            return item;
+        }
+        return {};
+    }
+};
+
+std::vector<std::string> parkedLines(const App::DocumentObject* owner)
+{
+    auto prop = freecad_cast<App::PropertyStringList*>(owner->getPropertyByName(ParkedProperty));
+    return prop ? prop->getValues() : std::vector<std::string>();
+}
+
+void writeParkedLines(App::DocumentObject* owner, const std::vector<std::string>& lines)
+{
+    auto prop = freecad_cast<App::PropertyStringList*>(owner->getPropertyByName(ParkedProperty));
+    if (lines.empty()) {
+        if (prop) {
+            owner->removeDynamicProperty(ParkedProperty);
+        }
+        return;
+    }
+    if (!prop) {
+        prop = freecad_cast<App::PropertyStringList*>(owner->addDynamicProperty(
+            "App::PropertyStringList",
+            ParkedProperty,
+            "Base",
+            "References a reorder set aside because they now point below this object "
+            "(FreeCAD-CH ops#127); put back when the order allows",
+            App::Prop_Hidden));
+    }
+    if (prop) {
+        prop->setValues(lines);
+    }
+}
+
+// -- A link property as the rule sees it ---------------------------------------------------------
+
+enum class Kind
+{
+    Link,
+    LinkList,
+    LinkSub,
+    LinkSubList,
+    External,  // a sketch's ExternalGeometry (a PropertyLinkSubList with keyed projections)
+    XLink,
+    XLinkSubList
+};
+
+/// One element reference
+struct SubEntry
+{
+    std::string sub;
+    ShadowSub shadow;
+    std::string fp;
+    App::RetargetRecord record;
+};
+
+/// One object with its references: a PropertyLink(Sub), a PropertyXLink, one link of a
+/// PropertyXLinkSubList, or one entry of a list. No subs: the whole object.
+struct Unit
+{
+    App::DocumentObject* obj = nullptr;
+    std::vector<SubEntry> subs;
+    int origin = -1;       // its position in the property as read; -1: put back from parking
+    bool frozen = false;   // a form the rule doesn't write (sub-object paths, mixed subs)
+    bool edited = false;
+    bool dropped = false;  // parked, or a duplicate of a restored or re-targeted piece
+
+    /// Every sub carries a re-target record to the same object
+    bool allRecorded() const
+    {
+        if (subs.empty()) {
+            return false;
+        }
+        for (const auto& s : subs) {
+            if (s.record.empty() || s.record.target != subs.front().record.target) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+struct PropertyState
+{
+    App::DocumentObject* owner = nullptr;
+    App::PropertyLinkBase* prop = nullptr;
+    Kind kind = Kind::Link;
+    std::vector<Unit> units;
+    Objects removed;                  // PropertyXLinkSubList: the objects of parked links
+    std::set<App::DocumentObject*> solveOn;
+    bool changed = false;
+
+    Objects targets() const
+    {
+        Objects out;
+        for (const auto& u : units) {
+            if (!u.dropped && u.obj) {
+                out.push_back(u.obj);
+            }
+        }
+        return out;
+    }
+};
+
+/// The subs of a single-object property (PropertyLinkSub, PropertyXLink) as one unit
+template<class P>
+Unit unitOf(const P& prop, App::DocumentObject* obj)
+{
+    Unit unit;
+    unit.obj = obj;
+    const auto& subs = prop.getSubValues();
+    const auto& shadows = prop.getShadowSubs();
+    auto fps = prop.getElementFingerprints();
+    const auto& records = prop.getRetargets();
+    bool anyEmpty = false;
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        if (subs[i].empty()) {
+            anyEmpty = true;
+            continue;
+        }
+        if (Data::findElementName(subs[i].c_str()) != subs[i].c_str()) {
+            unit.frozen = true;  // a sub-object path: not the rule's form (as the relink, F.cpp)
+        }
+        SubEntry entry;
+        entry.sub = subs[i];
+        entry.shadow = i < shadows.size() ? shadows[i] : ShadowSub();
+        entry.fp = i < fps.size() ? fps[i] : std::string();
+        entry.record = i < records.size() ? records[i] : App::RetargetRecord();
+        unit.subs.push_back(std::move(entry));
+    }
+    if (anyEmpty && !unit.subs.empty()) {
+        unit.frozen = true;
+    }
+    return unit;
+}
+
+/// The entries of a PropertyLinkSubList, one unit each
+void readList(const App::PropertyLinkSubList& prop, std::vector<Unit>& units)
+{
+    const auto& objs = prop.getValues();
+    const auto& subs = prop.getSubValues();
+    const auto& shadows = prop.getShadowSubs();
+    auto fps = prop.getElementFingerprints();
+    const auto& records = prop.getRetargets();
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        Unit unit;
+        unit.obj = objs[i];
+        unit.origin = static_cast<int>(i);
+        const std::string& sub = i < subs.size() ? subs[i] : std::string();
+        if (!sub.empty()) {
+            if (Data::findElementName(sub.c_str()) != sub.c_str()) {
+                unit.frozen = true;
+            }
+            SubEntry entry;
+            entry.sub = sub;
+            entry.shadow = i < shadows.size() ? shadows[i] : ShadowSub();
+            entry.fp = i < fps.size() ? fps[i] : std::string();
+            entry.record = i < records.size() ? records[i] : App::RetargetRecord();
+            unit.subs.push_back(std::move(entry));
+        }
+        units.push_back(std::move(unit));
+    }
+}
+
+std::optional<PropertyState> readState(App::DocumentObject* owner, App::Property* p)
+{
+    PropertyState state;
+    state.owner = owner;
+    state.prop = freecad_cast<App::PropertyLinkBase*>(p);
+    if (!state.prop) {
+        return {};
+    }
+    auto sketch = freecad_cast<Sketcher::SketchObject*>(owner);
+    if (sketch && p == &sketch->ExternalGeometry) {
+        state.kind = Kind::External;
+        readList(sketch->ExternalGeometry, state.units);
+    }
+    else if (auto xlist = freecad_cast<App::PropertyXLinkSubList*>(p)) {
+        state.kind = Kind::XLinkSubList;
+        int index = 0;
+        for (const auto& link : xlist->getSubListValues()) {
+            Unit unit = unitOf(link, link.getValue());
+            unit.origin = index++;
+            if (!unit.obj) {
+                unit.frozen = true;  // a link into a document that isn't open
+            }
+            state.units.push_back(std::move(unit));
+        }
+    }
+    else if (auto xlink = freecad_cast<App::PropertyXLink*>(p)) {
+        state.kind = Kind::XLink;
+        if (xlink->getValue()) {
+            Unit unit = unitOf(*xlink, xlink->getValue());
+            unit.origin = 0;
+            state.units.push_back(std::move(unit));
+        }
+    }
+    else if (auto list = freecad_cast<App::PropertyLinkSubList*>(p)) {
+        state.kind = Kind::LinkSubList;
+        readList(*list, state.units);
+    }
+    else if (auto linkSub = freecad_cast<App::PropertyLinkSub*>(p)) {
+        state.kind = Kind::LinkSub;
+        if (linkSub->getValue()) {
+            Unit unit = unitOf(*linkSub, linkSub->getValue());
+            unit.origin = 0;
+            state.units.push_back(std::move(unit));
+        }
+    }
+    else if (auto linkList = freecad_cast<App::PropertyLinkList*>(p)) {
+        state.kind = Kind::LinkList;
+        int index = 0;
+        for (auto obj : linkList->getValues()) {
+            Unit unit;
+            unit.obj = obj;
+            unit.origin = index++;
+            state.units.push_back(std::move(unit));
+        }
+    }
+    else if (auto link = freecad_cast<App::PropertyLink*>(p)) {
+        state.kind = Kind::Link;
+        if (link->getValue()) {
+            Unit unit;
+            unit.obj = link->getValue();
+            unit.origin = 0;
+            state.units.push_back(std::move(unit));
+        }
+    }
+    else {
+        return {};
+    }
+    return state;
+}
+
+/// The index name of an element reference, without the missing marker (`?Face6` -> `Face6`)
+std::string indexOf(const SubEntry& entry)
+{
+    const std::string& name = entry.shadow.oldName.empty() ? entry.sub : entry.shadow.oldName;
+    const char* element = Data::findElementName(name.c_str());
+    std::string index = element ? element : "";
+    if (Data::hasMissingElement(index.c_str())) {
+        index.erase(0, std::strlen(Data::MISSING_PREFIX));
+    }
+    if (index.empty()) {
+        index = entry.sub;
+        if (Data::hasMissingElement(index.c_str())) {
+            index.erase(0, std::strlen(Data::MISSING_PREFIX));
+        }
+    }
+    return index;
+}
+
+/// The reference in the missing form a relink writes (`?Face6` with its mapped name in the
+/// shadow), found again by name or by the solver on its new object. Without a mapped name: on
+/// its own object (a restore) the index alone; on another one the index-only missing form, which
+/// nothing resolves (an index never carries over from one shape to another)
+SubEntry missingForm(const std::string& mapped,
+                     const std::string& index,
+                     const std::string& fp,
+                     bool ownObject)
+{
+    SubEntry entry;
+    entry.fp = fp;
+    if (mapped.empty()) {
+        entry.sub = ownObject ? index : Data::MISSING_PREFIX + index;
+        if (!ownObject) {
+            entry.shadow = ShadowSub(std::string(), entry.sub);
+        }
+        return entry;
+    }
+    entry.sub = Data::MISSING_PREFIX + index;
+    entry.shadow = ShadowSub(Data::ComplexGeoData::elementMapPrefix() + mapped + "." + index,
+                             entry.sub);
+    return entry;
+}
+
+/// The original a re-target record keeps, as the reference to put back on its object
+SubEntry originalOf(const App::RetargetRecord& record)
+{
+    return missingForm(record.origName, record.origIndex, record.origFp, true);
+}
+
+/// The re-target record for an entry the rule moves off obj (N1 3.2: its saved original)
+App::RetargetRecord recordFor(const SubEntry& entry, App::DocumentObject* obj)
+{
+    if (!entry.record.empty()) {
+        return entry.record;  // moved again: the original stays the first object's element
+    }
+    App::RetargetRecord record;
+    record.target = obj->getNameInDocument();
+    record.origIndex = indexOf(entry);
+    record.origName = App::bareMappedName(entry.shadow.newName);
+    if (record.origName.empty()) {
+        if (auto feature = freecad_cast<Part::Feature*>(obj)) {
+            auto element = feature->Shape.getShape().getElementName(record.origIndex.c_str());
+            if (element.name) {
+                record.origName = element.name.toString();
+            }
+        }
+    }
+    record.origFp = entry.fp;
+    return record;
+}
+
+std::string recordKey(const App::RetargetRecord& record)
+{
+    return record.target + "|" + record.origText();
+}
+
+// -- The rule (N1 3.1-3.4) ------------------------------------------------------------------------
+
+class Rule
+{
+public:
+    Rule(Body& body,
+         const Objects& group,
+         const std::map<App::DocumentObject*, App::DocumentObject*>& newBase)
+        : body(body)
+        , group(group)
+        , newBase(newBase)
+    {
+        for (auto obj : group) {
+            members.insert(obj);
+            if (Body::isSolidFeature(obj)) {
+                chainPos[obj] = solids.size();
+                solids.push_back(obj);
+            }
+        }
+        computeEarliest();
+    }
+
+    /// Decides every re-target, park and restore on the planned order; writes nothing. Throws
+    /// Base::ValueError for a case it can't break (a sketch's projection with nowhere to go).
+    void plan()
+    {
+        for (auto owner : group) {
+            planLinks(owner);
+        }
+        for (auto owner : group) {
+            planExpressions(owner);
+        }
+    }
+
+    /// The planned objects of owner's property prop; false if the rule leaves it as it is
+    bool plannedTargets(const App::DocumentObject* owner, const App::Property* prop, Objects& out)
+        const
+    {
+        auto it = states.find({owner, prop});
+        if (it == states.end()) {
+            return false;
+        }
+        out = it->second.targets();
+        return true;
+    }
+
+    /// The planned objects owner's expressions read; false if the rule leaves them as they are
+    bool plannedExpressionTargets(const App::DocumentObject* owner, Objects& out) const
+    {
+        auto it = owners.find(owner);
+        if (it == owners.end()
+            || (it->second.parkPaths.empty() && it->second.restoreExprs.empty())) {
+            return false;
+        }
+        for (const auto& [path, expr] : owner->ExpressionEngine.getExpressions()) {
+            if (it->second.parkPaths.count(path.toString())) {
+                continue;
+            }
+            for (const auto& dep : expr->getDepObjects()) {
+                out.push_back(dep.first);
+            }
+        }
+        for (const auto& restored : it->second.restoreExprs) {
+            out.push_back(restored.target);
+        }
+        return true;
+    }
+
+    /// Writes the plan: the links, the expressions, the parking records; then the moved
+    /// references are found on their new objects (the solver, or the name without it)
+    void apply()
+    {
+        std::vector<PropertyState*> written;
+        for (auto owner : group) {
+            for (auto& [key, state] : states) {
+                if (key.first == owner) {
+                    write(state);
+                    written.push_back(&state);
+                }
+            }
+        }
+        for (auto owner : group) {
+            auto it = owners.find(owner);
+            if (it == owners.end()) {
+                continue;
+            }
+            auto& plan = it->second;
+            for (const auto& path : plan.parkPaths) {
+                owner->ExpressionEngine.setValue(App::ObjectIdentifier::parse(owner, path),
+                                                 nullptr);
+            }
+            for (const auto& restored : plan.restoreExprs) {
+                try {
+                    std::shared_ptr<App::Expression> expr(
+                        App::Expression::parse(owner, restored.item.text));
+                    owner->ExpressionEngine.setValue(
+                        App::ObjectIdentifier::parse(owner, restored.item.property), expr);
+                }
+                catch (Base::Exception& e) {
+                    // Kept parked: the owner keeps failing with the message
+                    FC_ERR(owner->getFullName() << ": the expression of '"
+                                                << restored.item.property
+                                                << "' can't be put back: " << e.what());
+                    plan.lines.push_back(restored.item.line());
+                    plan.linesChanged = true;
+                }
+            }
+            if (plan.linesChanged) {
+                writeParkedLines(owner, plan.lines);
+            }
+        }
+        for (auto state : written) {
+            for (auto target : state->solveOn) {
+                solve(*state->prop, target);
+            }
+        }
+    }
+
+    /// The earliest solid whose inputs include obj (N1 3.1), or null
+    App::DocumentObject* earliestUser(const App::DocumentObject* obj) const
+    {
+        auto it = earliest.find(obj);
+        return it == earliest.end() ? nullptr : it->second;
+    }
+
+private:
+    struct RestoredExpression
+    {
+        ParkedItem item;
+        App::DocumentObject* target = nullptr;
+    };
+    struct OwnerPlan
+    {
+        std::vector<std::string> lines;
+        bool linesChanged = false;
+        std::set<std::string> parkPaths;
+        std::vector<RestoredExpression> restoreExprs;
+    };
+
+    // -- In(X) (N1 3.1): X and the members reachable from it along input links, through no
+    // solid and without leaving the Body. Independent of the rule's writes: they only change
+    // links into solids.
+    void computeEarliest()
+    {
+        for (auto solid : solids) {
+            std::vector<App::DocumentObject*> stack {solid};
+            std::set<App::DocumentObject*> seen {solid};
+            while (!stack.empty()) {
+                auto obj = stack.back();
+                stack.pop_back();
+                earliest.emplace(obj, solid);
+                std::vector<App::Property*> props;
+                obj->getPropertyList(props);
+                for (auto prop : props) {
+                    if (!isInputLink(obj, prop)) {
+                        continue;
+                    }
+                    Objects links;
+                    static_cast<App::PropertyLinkBase*>(prop)->getLinks(links, false);
+                    for (auto next : links) {
+                        if (next && next != &body && members.count(next)
+                            && !Body::isSolidFeature(next) && seen.insert(next).second) {
+                            stack.push_back(next);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    App::DocumentObject* plannedBase(App::DocumentObject* solid) const
+    {
+        auto it = newBase.find(solid);
+        if (it != newBase.end()) {
+            return it->second;
+        }
+        auto feature = freecad_cast<PartDesign::Feature*>(solid);
+        return feature ? feature->BaseFeature.getValue() : nullptr;
+    }
+
+    /// target is a solid of the Body at or after x in the planned chain
+    bool atOrAfter(const App::DocumentObject* target, const App::DocumentObject* x) const
+    {
+        auto t = chainPos.find(target);
+        return t != chainPos.end() && t->second >= chainPos.at(x);
+    }
+
+    void planLinks(App::DocumentObject* owner)
+    {
+        auto x = earliestUser(owner);
+        auto doc = owner->getDocument();
+        std::vector<ParkedItem> items;
+        std::vector<std::string> lines = parkedLines(owner);
+        std::vector<bool> keep(lines.size(), true);
+        for (const auto& line : lines) {
+            auto item = ParkedItem::parse(line);
+            items.push_back(item ? *item : ParkedItem());
+        }
+        bool linesChanged = false;
+        std::vector<std::string> newLines;
+
+        std::vector<App::Property*> props;
+        owner->getPropertyList(props);
+        for (auto prop : props) {
+            if (!isWalked(owner, prop)) {
+                continue;
+            }
+            auto state = readState(owner, prop);
+            if (!state) {
+                continue;
+            }
+            decide(*state, x, newLines);
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                if (items[i].expression || items[i].property != prop->getName()) {
+                    continue;
+                }
+                auto target = doc->getObject(items[i].target.c_str());
+                if (target && x && atOrAfter(target, x)) {
+                    continue;  // still after the feature that uses it
+                }
+                if (target) {
+                    putBack(*state, items[i], target);
+                }
+                keep[i] = false;  // put back, or dropped with its object
+                linesChanged = true;
+            }
+            if (state->changed) {
+                states.emplace(std::make_pair(owner, prop), std::move(*state));
+            }
+        }
+        if (!newLines.empty()) {
+            linesChanged = true;
+        }
+        auto& plan = owners[owner];
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            if (keep[i]) {
+                plan.lines.push_back(lines[i]);
+            }
+        }
+        plan.lines.insert(plan.lines.end(), newLines.begin(), newLines.end());
+        plan.linesChanged = linesChanged;
+    }
+
+    /// One property's entries: first the restore, then the re-target or the park (N1 3.2)
+    void decide(PropertyState& state, App::DocumentObject* x, std::vector<std::string>& newLines)
+    {
+        auto doc = state.owner->getDocument();
+        // Pieces of one expanded reference: one restore or re-target. A sketch's projections keep
+        // their count (their keys go by position), so each piece keeps its entry there.
+        const bool list = state.kind == Kind::LinkSubList || state.kind == Kind::XLinkSubList;
+        std::set<std::string> seen;
+        for (auto& unit : state.units) {
+            if (!unit.obj || unit.frozen) {
+                continue;
+            }
+            // 1. The restore: the record's object is no longer after the feature that uses it
+            if (unit.allRecorded()) {
+                auto target = doc->getObject(unit.subs.front().record.target.c_str());
+                if (!target) {
+                    // Its object is gone: nothing to restore to
+                    for (auto& s : unit.subs) {
+                        s.record = App::RetargetRecord();
+                    }
+                    unit.edited = state.changed = true;
+                }
+                else if (chainPos.count(target) && (!x || !atOrAfter(target, x))) {
+                    std::vector<SubEntry> originals;
+                    std::set<std::string> keys;
+                    for (const auto& s : unit.subs) {
+                        if (keys.insert(recordKey(s.record)).second) {
+                            originals.push_back(originalOf(s.record));
+                        }
+                    }
+                    std::string key = recordKey(unit.subs.front().record);
+                    unit.obj = target;
+                    unit.subs = std::move(originals);
+                    unit.edited = state.changed = true;
+                    state.solveOn.insert(target);
+                    if (list && !seen.insert(key).second) {
+                        unit.dropped = true;
+                    }
+                    continue;
+                }
+            }
+            if (!x || !atOrAfter(unit.obj, x)) {
+                continue;
+            }
+            // 2. A reference into a solid at or after the feature that uses it: re-targeted to
+            // that feature's base, or parked without one
+            auto base = plannedBase(x);
+            if (!unit.subs.empty() && base) {
+                std::vector<SubEntry> moved;
+                std::set<std::string> keys;
+                std::string first;
+                for (const auto& s : unit.subs) {
+                    auto record = recordFor(s, unit.obj);
+                    if (!keys.insert(recordKey(record)).second) {
+                        continue;
+                    }
+                    if (first.empty()) {
+                        first = recordKey(record);
+                    }
+                    SubEntry entry =
+                        missingForm(record.origName, record.origIndex, record.origFp, false);
+                    entry.record = record;
+                    moved.push_back(std::move(entry));
+                }
+                unit.obj = base;
+                unit.subs = std::move(moved);
+                unit.edited = state.changed = true;
+                state.solveOn.insert(base);
+                if (list && !first.empty() && !seen.insert(first).second) {
+                    unit.dropped = true;
+                }
+                continue;
+            }
+            if (state.kind == Kind::External) {
+                std::ostringstream text;
+                text << "'" << nameOf(state.owner) << "' projects geometry of '"
+                     << nameOf(unit.obj) << "', which would come after '" << nameOf(x)
+                     << "', and nothing before '" << nameOf(x)
+                     << "' can take the projection: move it below a feature instead";
+                throw Base::ValueError(text.str());
+            }
+            park(state, unit, newLines);
+        }
+    }
+
+    void park(PropertyState& state, Unit& unit, std::vector<std::string>& newLines)
+    {
+        ParkedItem item;
+        item.property = state.prop->getName();
+        item.position = unit.origin < 0 ? 0 : static_cast<std::size_t>(unit.origin);
+        if (unit.subs.empty()) {
+            item.target = unit.obj->getNameInDocument();
+            newLines.push_back(item.line());
+        }
+        else {
+            std::set<std::string> keys;
+            for (const auto& s : unit.subs) {
+                // A re-targeted entry parks its original, on the object it came from
+                SubEntry entry = s.record.empty() ? s : originalOf(s.record);
+                if (!s.record.empty() && !keys.insert(recordKey(s.record)).second) {
+                    continue;
+                }
+                item.target = s.record.empty() ? unit.obj->getNameInDocument() : s.record.target;
+                item.sub = entry.sub;
+                item.shadowNew = entry.shadow.newName;
+                item.shadowOld = entry.shadow.oldName;
+                item.fp = entry.fp;
+                newLines.push_back(item.line());
+            }
+        }
+        if (state.kind == Kind::XLinkSubList && unit.origin >= 0) {
+            state.removed.push_back(unit.obj);
+        }
+        unit.dropped = true;
+        state.changed = true;
+    }
+
+    /// Puts a parked link entry back (N1 3.4 b: appended, at its old position when it is still in
+    /// range); one the property already holds, or a single link the user has set since, is dropped
+    void putBack(PropertyState& state, const ParkedItem& item, App::DocumentObject* target)
+    {
+        Unit unit;
+        unit.obj = target;
+        if (!item.sub.empty()) {
+            SubEntry entry;
+            if (!item.shadowNew.empty()) {
+                std::string index = item.sub;
+                if (Data::hasMissingElement(index.c_str())) {
+                    index.erase(0, std::strlen(Data::MISSING_PREFIX));
+                }
+                entry = missingForm(App::bareMappedName(item.shadowNew), index, item.fp, true);
+            }
+            else {
+                entry.sub = item.sub;
+                entry.fp = item.fp;
+            }
+            unit.subs.push_back(std::move(entry));
+            state.solveOn.insert(target);
+        }
+        unit.edited = true;
+        auto live = [&]() {
+            std::vector<Unit*> out;
+            for (auto& u : state.units) {
+                if (!u.dropped) {
+                    out.push_back(&u);
+                }
+            }
+            return out;
+        };
+        auto current = live();
+        auto holds = [&](const Unit& u) {
+            if (u.obj != target) {
+                return false;
+            }
+            if (unit.subs.empty()) {
+                return u.subs.empty();
+            }
+            return std::any_of(u.subs.begin(), u.subs.end(), [&](const SubEntry& s) {
+                return s.sub == unit.subs.front().sub
+                    || (!s.shadow.newName.empty()
+                        && s.shadow.newName == unit.subs.front().shadow.newName);
+            });
+        };
+        if (std::any_of(current.begin(), current.end(), [&](Unit* u) { return holds(*u); })) {
+            return;
+        }
+        auto insertAt = [&](std::size_t position) {
+            // position among the live units
+            std::size_t live = 0;
+            auto it = state.units.begin();
+            for (; it != state.units.end(); ++it) {
+                if (it->dropped) {
+                    continue;
+                }
+                if (live == position) {
+                    break;
+                }
+                ++live;
+            }
+            state.units.insert(it, std::move(unit));
+            state.changed = true;
+        };
+        switch (state.kind) {
+            case Kind::Link:
+                if (current.empty()) {
+                    insertAt(0);
+                }
+                break;
+            case Kind::LinkSub:
+            case Kind::XLink:
+                if (current.empty()) {
+                    insertAt(0);
+                }
+                else if (current.front()->obj == target && !unit.subs.empty()
+                         && !current.front()->subs.empty()) {
+                    current.front()->subs.push_back(std::move(unit.subs.front()));
+                    current.front()->edited = state.changed = true;
+                }
+                break;
+            case Kind::LinkList:
+            case Kind::LinkSubList:
+                insertAt(std::min(item.position, current.size()));
+                break;
+            case Kind::XLinkSubList: {
+                auto same = std::find_if(current.begin(), current.end(), [&](Unit* u) {
+                    return u->obj == target;
+                });
+                if (same != current.end() && !unit.subs.empty() && !(*same)->subs.empty()) {
+                    (*same)->subs.push_back(std::move(unit.subs.front()));
+                    (*same)->edited = state.changed = true;
+                }
+                else if (same == current.end()) {
+                    insertAt(current.size());
+                }
+                break;
+            }
+            case Kind::External:
+                break;  // never parked
+        }
+    }
+
+    /// d is, or reaches along input links (as planned), a solid at or after x (N1 3.3, S4)
+    bool readsLater(App::DocumentObject* d, App::DocumentObject* x) const
+    {
+        if (chainPos.count(d)) {
+            return atOrAfter(d, x);
+        }
+        if (!members.count(d) || d == &body) {
+            return false;
+        }
+        std::vector<App::DocumentObject*> stack {d};
+        std::set<App::DocumentObject*> seen {d};
+        while (!stack.empty()) {
+            auto obj = stack.back();
+            stack.pop_back();
+            std::vector<App::Property*> props;
+            obj->getPropertyList(props);
+            for (auto prop : props) {
+                if (!isInputLink(obj, prop)) {
+                    continue;
+                }
+                Objects links;
+                if (!plannedTargets(obj, prop, links)) {
+                    static_cast<App::PropertyLinkBase*>(prop)->getLinks(links, false);
+                }
+                for (auto next : links) {
+                    if (!next) {
+                        continue;
+                    }
+                    if (chainPos.count(next)) {
+                        if (atOrAfter(next, x)) {
+                            return true;
+                        }
+                    }
+                    else if (next != &body && members.count(next) && seen.insert(next).second) {
+                        stack.push_back(next);
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    void planExpressions(App::DocumentObject* owner)
+    {
+        auto x = earliestUser(owner);
+        auto doc = owner->getDocument();
+        auto& plan = owners[owner];
+        if (x) {
+            for (const auto& [path, expr] : owner->ExpressionEngine.getExpressions()) {
+                for (const auto& dep : expr->getDepObjects()) {
+                    if (dep.first == owner || !readsLater(dep.first, x)) {
+                        continue;
+                    }
+                    ParkedItem item;
+                    item.expression = true;
+                    item.property = path.toString();
+                    item.target = dep.first->getNameInDocument();
+                    item.text = expr->toString(true);
+                    plan.parkPaths.insert(item.property);
+                    plan.lines.push_back(item.line());
+                    plan.linesChanged = true;
+                    break;
+                }
+            }
+        }
+        std::vector<std::string> kept;
+        for (const auto& line : plan.lines) {
+            auto item = ParkedItem::parse(line);
+            if (!item || !item->expression || plan.parkPaths.count(item->property)) {
+                kept.push_back(line);
+                continue;
+            }
+            auto target = doc->getObject(item->target.c_str());
+            if (target && x && readsLater(target, x)) {
+                kept.push_back(line);
+                continue;
+            }
+            if (target) {
+                plan.restoreExprs.push_back({*item, target});
+            }
+            plan.linesChanged = true;
+        }
+        plan.lines = std::move(kept);
+    }
+
+    // -- Writing ---------------------------------------------------------------------------------
+
+    static void flatten(const std::vector<Unit>& units,
+                        Objects& objs,
+                        std::vector<std::string>& subs,
+                        std::vector<ShadowSub>& shadows,
+                        std::vector<std::string>& fps,
+                        std::vector<App::RetargetRecord>& records)
+    {
+        for (const auto& u : units) {
+            if (u.dropped) {
+                continue;
+            }
+            if (u.subs.empty()) {
+                objs.push_back(u.obj);
+                subs.emplace_back();
+                shadows.emplace_back();
+                fps.emplace_back();
+                records.emplace_back();
+                continue;
+            }
+            for (const auto& s : u.subs) {
+                objs.push_back(u.obj);
+                subs.push_back(s.sub);
+                shadows.push_back(s.shadow);
+                fps.push_back(s.fp);
+                records.push_back(s.record);
+            }
+        }
+    }
+
+    /// The records and fingerprints after a setter that passed the shadows on
+    template<class P>
+    static void finish(P& prop,
+                       std::vector<App::RetargetRecord>&& records,
+                       const std::vector<std::string>& fps)
+    {
+        prop.setRetargets(std::move(records));
+        for (std::size_t i = 0; i < fps.size(); ++i) {
+            if (!fps[i].empty()) {
+                prop.setElementFingerprint(i, fps[i]);
+            }
+        }
+    }
+
+    static void writeXLink(App::PropertyXLink& link, const Unit& unit)
+    {
+        Objects objs;
+        std::vector<std::string> subs;
+        std::vector<ShadowSub> shadows;
+        std::vector<std::string> fps;
+        std::vector<App::RetargetRecord> records;
+        if (unit.subs.empty()) {
+            link.setValue(unit.obj, std::vector<std::string>(), std::vector<ShadowSub>());
+            return;
+        }
+        flatten({unit}, objs, subs, shadows, fps, records);
+        link.setValue(unit.obj, std::move(subs), std::move(shadows));
+        finish(link, std::move(records), fps);
+    }
+
+    void write(PropertyState& state)
+    {
+        Objects objs;
+        std::vector<std::string> subs;
+        std::vector<ShadowSub> shadows;
+        std::vector<std::string> fps;
+        std::vector<App::RetargetRecord> records;
+        std::vector<const Unit*> live;
+        for (const auto& u : state.units) {
+            if (!u.dropped) {
+                live.push_back(&u);
+            }
+        }
+        switch (state.kind) {
+            case Kind::Link:
+                static_cast<App::PropertyLink*>(state.prop)
+                    ->setValue(live.empty() ? nullptr : live.front()->obj);
+                break;
+            case Kind::LinkList: {
+                for (auto u : live) {
+                    objs.push_back(u->obj);
+                }
+                static_cast<App::PropertyLinkList*>(state.prop)->setValues(objs);
+                break;
+            }
+            case Kind::LinkSub: {
+                auto& prop = *static_cast<App::PropertyLinkSub*>(state.prop);
+                if (live.empty()) {
+                    prop.setValue(nullptr);
+                    break;
+                }
+                flatten(state.units, objs, subs, shadows, fps, records);
+                prop.setValue(live.front()->obj, std::move(subs), std::move(shadows));
+                finish(prop, std::move(records), fps);
+                break;
+            }
+            case Kind::LinkSubList: {
+                auto& prop = *static_cast<App::PropertyLinkSubList*>(state.prop);
+                flatten(state.units, objs, subs, shadows, fps, records);
+                prop.setValues(std::move(objs), std::move(subs), std::move(shadows));
+                finish(prop, std::move(records), fps);
+                break;
+            }
+            case Kind::External: {
+                auto sketch = static_cast<Sketcher::SketchObject*>(state.owner);
+                flatten(state.units, objs, subs, shadows, fps, records);
+                sketch->retargetExternalGeometry(objs, subs, std::move(shadows));
+                finish(sketch->ExternalGeometry, std::move(records), fps);
+                break;
+            }
+            case Kind::XLink: {
+                auto& prop = *static_cast<App::PropertyXLink*>(state.prop);
+                if (live.empty()) {
+                    prop.setValue(nullptr);
+                    break;
+                }
+                writeXLink(prop, *live.front());
+                break;
+            }
+            case Kind::XLinkSubList: {
+                auto& prop = *static_cast<App::PropertyXLinkSubList*>(state.prop);
+                // In place first (positions as read), then the parked links go, then the links
+                // put back are added
+                for (const auto& u : state.units) {
+                    if (!u.dropped && u.origin >= 0 && u.edited) {
+                        prop.editLink(static_cast<std::size_t>(u.origin),
+                                      [&u](App::PropertyXLinkSub& link) { writeXLink(link, u); });
+                    }
+                }
+                for (auto obj : state.removed) {
+                    prop.removeValue(obj);
+                }
+                for (const auto& u : state.units) {
+                    if (u.dropped || u.origin >= 0) {
+                        continue;
+                    }
+                    prop.addValue(u.obj, std::vector<std::string>());
+                    const auto& links = prop.getSubListValues();
+                    std::size_t index = 0;
+                    std::size_t found = links.size();
+                    for (const auto& link : links) {
+                        if (link.getValue() == u.obj) {
+                            found = index;
+                        }
+                        ++index;
+                    }
+                    if (found < links.size() && !u.subs.empty()) {
+                        prop.editLink(found,
+                                      [&u](App::PropertyXLinkSub& link) { writeXLink(link, u); });
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    /// The moved references found on their new object: the solver in a solver document (once
+    /// the object has a shape; its first shape solves them otherwise), the name without it
+    static void solve(App::PropertyLinkBase& prop, App::DocumentObject* target)
+    {
+        try {
+            if (prop.inSolverDocument()) {
+                auto feature = freecad_cast<Part::Feature*>(target);
+                if (feature && !feature->Shape.getShape().isNull()) {
+                    App::solveElementReferences(target, {&prop}, false, true);
+                }
+            }
+            else {
+                prop.updateElementReference(target, false, true);
+            }
+        }
+        catch (Base::Exception& e) {
+            FC_ERR(prop.getFullName() << ": " << e.what());
+        }
+    }
+
+    Body& body;
+    const Objects& group;
+    const std::map<App::DocumentObject*, App::DocumentObject*>& newBase;
+    std::set<App::DocumentObject*> members;
+    Objects solids;
+    std::map<const App::DocumentObject*, std::size_t> chainPos;
+    std::map<const App::DocumentObject*, App::DocumentObject*> earliest;
+    std::map<std::pair<const App::DocumentObject*, const App::Property*>, PropertyState> states;
+    std::map<const App::DocumentObject*, OwnerPlan> owners;
+};
+
 /// The planned state of a reorder: the new Group and each solid's new base
 struct Plan
 {
@@ -63,13 +1256,14 @@ struct Plan
     Objects moved;
     std::map<App::DocumentObject*, App::DocumentObject*> newBase;  // solid -> its planned base
     std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> changes;  // (solid, base)
+    const Rule* rule = nullptr;
 
     explicit Plan(Body& b)
         : body(b)
     {}
 
     /// The planned out-edges of obj: its links, with the base-following links of a solid on its
-    /// planned base (the Body itself and hidden links left out)
+    /// planned base and the rule's writes (the Body itself and hidden links left out)
     Objects outEdges(App::DocumentObject* obj) const
     {
         Objects out;
@@ -87,7 +1281,14 @@ struct Plan
                 continue;
             }
             Objects objs;
-            link->getLinks(objs, false);
+            if (rule
+                && (prop == &obj->ExpressionEngine ? rule->plannedExpressionTargets(obj, objs)
+                                                   : rule->plannedTargets(obj, prop, objs))) {
+                // the rule's re-targets, parks and restores (N1 3.5)
+            }
+            else {
+                link->getLinks(objs, false);
+            }
             for (auto o : objs) {
                 if (o && o != &body) {
                     out.push_back(o);
@@ -137,11 +1338,6 @@ struct Plan
         return {};
     }
 };
-
-bool isFeatureBase(const App::DocumentObject* obj)
-{
-    return obj && obj->isDerivedFrom<PartDesign::FeatureBase>();
-}
 
 }  // namespace
 
@@ -266,7 +1462,11 @@ void reorderBody(Body& body,
         }
     }
 
-    // 5. The cycle check on the planned graph (N1 3.5): a refusal writes nothing
+    // 5. The re-target rule on the planned order (N1 3.2-3.4), and the cycle check on the planned
+    // graph with its writes (N1 3.5): a refusal writes nothing
+    Rule rule(body, plan.group, plan.newBase);
+    rule.plan();
+    plan.rule = &rule;
     auto cycle = plan.findCycle();
     if (!cycle.empty()) {
         std::ostringstream text;
@@ -277,36 +1477,36 @@ void reorderBody(Body& body,
         throw Base::ValueError(text.str());
     }
 
-    // The Tip (step 7 of N1 2.1) is decided on the old order
+    // The Tip (step 7 of N1 2.1) is decided on the old order. A Body that isn't rolled back stays
+    // so: the bar stays at the end, also when a feature is dropped below the last solid (which
+    // would otherwise be held)
     App::DocumentObject* tip = body.Tip.getValue();
     App::DocumentObject* newTip = tip;
-    if (tip && movedSet.count(tip)) {
-        if (!body.isRolledBack()) {
-            newTip = nullptr;  // the new last solid, below
+    const bool atEnd = !body.isRolledBack();
+    if (tip && movedSet.count(tip) && !atEnd) {
+        // Rolled back and the Tip moved: the last unmoved solid before it
+        newTip = nullptr;
+        for (std::size_t i = position(tip); i-- > 0;) {
+            if (Body::isSolidFeature(group[i]) && !movedSet.count(group[i])) {
+                newTip = group[i];
+                break;
+            }
         }
-        else {
-            newTip = nullptr;
-            for (std::size_t i = position(tip); i-- > 0;) {
-                if (Body::isSolidFeature(group[i]) && !movedSet.count(group[i])) {
-                    newTip = group[i];
-                    break;
-                }
-            }
-            if (!newTip && hasBase) {
-                newTip = group.front();
-            }
+        if (!newTip && hasBase) {
+            newTip = group.front();
         }
     }
-    bool tipToEnd = tip && movedSet.count(tip) && !body.isRolledBack();
 
-    // 6. Write: Group once, then each changed base in the new chain order (the reroute of N1 2.2)
+    // 6. Write: Group once, then each changed base in the new chain order (the reroute of N1
+    // 2.2), then the rule's re-targets, parks and restores
     body.Group.setValues(plan.group);
     for (const auto& [feature, base] : plan.changes) {
         reroute(feature, base);
     }
+    rule.apply();
 
     // 7. The Tip keeps its place in the list
-    if (tipToEnd) {
+    if (atEnd) {
         body.rollToEnd();
     }
     else if (body.Tip.getValue() != newTip) {
@@ -316,9 +1516,56 @@ void reorderBody(Body& body,
 
 bool parkedReason(const App::DocumentObject* obj, std::string& why)
 {
-    // Parking comes with the re-target rule (N1 3.4 b)
-    (void)obj;
-    (void)why;
+    auto lines = parkedLines(obj);
+    if (lines.empty()) {
+        return false;
+    }
+    auto doc = obj->getDocument();
+    auto item = ParkedItem::parse(lines.front());
+    if (!item || !doc) {
+        why = "A reference was set aside by a reorder";
+        return true;
+    }
+    auto target = doc->getObject(item->target.c_str());
+    std::string targetLabel = target ? target->Label.getValue() : item->target;
+    // The feature it now comes after: the earliest solid whose inputs include obj
+    std::string userLabel;
+    if (auto body = Body::findBodyOf(obj)) {
+        Objects group = body->Group.getValues();
+        std::map<App::DocumentObject*, App::DocumentObject*> none;
+        Rule rule(*body, group, none);
+        if (auto user = rule.earliestUser(obj)) {
+            userLabel = user->Label.getValue();
+        }
+    }
+    std::ostringstream ss;
+    if (item->expression) {
+        ss << "the expression of '" << item->property << "' reads '" << targetLabel << "'";
+    }
+    else {
+        ss << item->property << " refers to '" << targetLabel << "'";
+    }
+    if (!userLabel.empty()) {
+        ss << ", which now comes after '" << userLabel << "'";
+    }
+    else {
+        ss << ", which a reorder put after it";
+    }
+    if (lines.size() > 1) {
+        ss << " (and " << lines.size() - 1 << " more set aside)";
+    }
+    why = ss.str();
+    return true;
+}
+
+bool hasParkedOriginals(const App::DocumentObject* obj)
+{
+    for (const auto& line : parkedLines(obj)) {
+        auto item = ParkedItem::parse(line);
+        if (item && !item->expression && item->property == "Originals") {
+            return true;
+        }
+    }
     return false;
 }
 
