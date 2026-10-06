@@ -31,8 +31,11 @@
 #include <App/DocumentObject.h>
 #include <App/Origin.h>
 #include <App/Part.h>
+#include <Gui/Application.h>
+#include <Gui/Document.h>
 #include <Gui/MainWindow.h>
 #include <Gui/ViewProvider.h>
+#include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/Selection/Selection.h>
 #include <Mod/Part/App/DatumFeature.h>
 #include <Mod/PartDesign/App/Body.h>
@@ -47,6 +50,20 @@
 using namespace PartDesignGui;
 using namespace Gui;
 using namespace Attacher;
+
+namespace
+{
+// The attacher dialog's OK and Cancel leave the edit on (for Assembly, upstream PR 25277). A
+// datum's edit ends with its dialog, and with it the Body's edit roll-back (ops#127). vp is only
+// compared: Cancel of a new datum has deleted it (its document then ended the edit)
+void resetDatumEdit(const std::string& docName, const Gui::ViewProviderDocumentObject* vp)
+{
+    auto gdoc = Gui::Application::Instance->getDocument(docName.c_str());
+    if (gdoc && vp && gdoc->getEditViewProvider() == vp) {
+        gdoc->resetEdit();
+    }
+}
+}  // namespace
 
 /* TRANSLATOR PartDesignGui::TaskDatumParameters */
 
@@ -88,8 +105,11 @@ TaskDlgDatumParameters::~TaskDlgDatumParameters() = default;
 
 bool TaskDlgDatumParameters::reject()
 {
-
-    return PartGui::TaskDlgAttacher::reject();
+    if (!PartGui::TaskDlgAttacher::reject()) {
+        return false;
+    }
+    resetDatumEdit(getDocumentName(), ViewProvider);
+    return true;
 }
 
 
@@ -188,6 +208,9 @@ bool TaskDlgDatumParameters::accept()
         }
     }
 
+    // After the attacher's commit: the Body's tail computes outside the datum's undo step, as
+    // after a sketch (undoing the datum touches it, the next recompute computes the tail again)
+    resetDatumEdit(getDocumentName(), ViewProvider);
     return true;
 }
 

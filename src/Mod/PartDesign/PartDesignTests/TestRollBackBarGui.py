@@ -88,6 +88,8 @@ class TestRollBackBarGui(unittest.TestCase):
         self.modal = []
 
     def tearDown(self):
+        # Stops this test's pending modal and popup closers (they would answer the next test's)
+        self.closing = False
         Gui.Selection.clearSelection()
         App.closeDocument(self.doc.Name)
         processEvents()
@@ -290,8 +292,11 @@ class TestRollBackBarGui(unittest.TestCase):
         standard button), else closes it, so a question or refusal can't block. Gives up after
         tries * 50 ms."""
         left = [tries]
+        self.closing = True
 
         def answer():
+            if not self.closing:
+                return
             widget = QtGui.QApplication.activeModalWidget()
             if widget is None:
                 left[0] -= 1
@@ -316,8 +321,11 @@ class TestRollBackBarGui(unittest.TestCase):
         after tries * 50 ms."""
         self.popups = []
         left = [tries]
+        self.closing = True
 
         def close():
+            if not self.closing:
+                return
             popup = QtGui.QApplication.activePopupWidget()
             if popup is None:
                 left[0] -= 1
@@ -628,6 +636,19 @@ class TestRollBackBarGui(unittest.TestCase):
         processEvents()
         self.assertFalse(Gui.Control.activeDialog())
 
+    def taskButton(self, which):
+        """The task panel's OK or Cancel button (TestReferencePickerGui.taskButton)."""
+        for box in Gui.getMainWindow().findChildren(QtGui.QDialogButtonBox):
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        self.fail("no task panel button")
+
     def panelWidget(self, kind, name):
         widgets = Gui.getMainWindow().findChildren(kind, name)
         shown = [w for w in widgets if w.isVisible()]
@@ -847,7 +868,12 @@ class TestRollBackBarGui(unittest.TestCase):
         self.setLength(8)
         self.assertTrue(self.body.isRolledBack())
         self.answerModalSoon(QtGui.QMessageBox.Save)
-        Gui.runCommand("Std_CloseActiveWindow")
+        # Closing the document's 3D view asks its canClose
+        area = Gui.getMainWindow().findChild(QtGui.QMdiArea)
+        views = [w for w in area.subWindowList() if w.windowTitle().startswith(self.doc.Label)]
+        self.assertTrue(views, [w.windowTitle() for w in area.subWindowList()])
+        for view in views:
+            view.close()
         waitFor(lambda: docName not in App.listDocuments())
         self.assertNotIn(docName, App.listDocuments())
         self.assertEqual(len(self.modal), 1, "no save question")
@@ -882,15 +908,16 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertIs(self.body.Tip, c)
         self.assertTrue(self.lockMessageShown(), "keys")
 
+        # (the message is read at the press: moving over a row shows that row's status)
         self.clearLockMessage()
         start = self.rowRect("|").center()
         target = self.rowRect("BossA")
         lower = QtCore.QPoint(target.center().x(), target.bottom() - 2)
         self.mouse(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton)
+        self.assertTrue(self.lockMessageShown(), "drag")
         self.mouse(QtCore.QEvent.MouseMove, lower, QtCore.Qt.LeftButton)
         self.mouse(QtCore.QEvent.MouseButtonRelease, lower, QtCore.Qt.NoButton)
         self.assertIs(self.body.Tip, c)
-        self.assertTrue(self.lockMessageShown(), "drag")
 
         self.clearLockMessage()
         self.closePopupSoon()
@@ -962,7 +989,8 @@ class TestRollBackBarGui(unittest.TestCase):
 
     def testEditingADatumRollsToBeforeItsFirstUser(self):
         """A datum plane on the block's top carries the sketch of a boss: its dialog rolls the
-        Body back to the block (the boss held); Cancel brings the end back."""
+        Body back to the block (the boss held); Cancel, and OK, end the edit and bring the end
+        back."""
         block = self.block()
         self.doc.recompute()
         top = faceName(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
@@ -977,7 +1005,22 @@ class TestRollBackBarGui(unittest.TestCase):
         dialog = self.openEdit(plane)
         self.assertIs(self.body.Tip, boss)
         self.assertEqual(self.held(), {"OnDatum"})
-        self.closeEdit(dialog, ok=False)
+        # The attacher dialog leaves the edit on (upstream #25277); the datum dialog ends it
+        gdoc = Gui.getDocument(self.doc.Name)
+        self.taskButton(QtGui.QDialogButtonBox.Cancel).click()
+        processEvents()
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertIsNone(gdoc.getInEdit())
+        self.assertIs(self.body.Tip, boss)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertEqual(self.held(), set())
+        # OK too
+        self.openEdit(plane)
+        self.assertEqual(self.held(), {"OnDatum"})
+        self.taskButton(QtGui.QDialogButtonBox.Ok).click()
+        processEvents()
+        self.assertFalse(Gui.Control.activeDialog())
+        self.assertIsNone(gdoc.getInEdit())
         self.assertIs(self.body.Tip, boss)
         self.assertFalse(self.body.isRolledBack())
         self.assertEqual(self.held(), set())
