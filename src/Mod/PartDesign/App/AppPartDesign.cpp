@@ -59,6 +59,7 @@
 #include "FeatureThickness.h"
 #include "FeatureTransformed.h"
 #include "ShapeBinder.h"
+#include "FailureContinuation.h"
 
 
 namespace PartDesign
@@ -80,6 +81,9 @@ PyMOD_INIT_FUNC(_PartDesign)
     }
 
     PyObject* mod = PartDesign::initModule();
+
+    // A failure inside a Body passes through and the recompute goes on (ops#126)
+    PartDesign::registerFailureContinuation();
     Base::Console().log("Loading Part Design module… done\n");
 
 

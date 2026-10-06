@@ -49,6 +49,7 @@
 #include <Base/Console.h>
 
 #include "Feature.h"
+#include "FailureContinuation.h"
 #include "FeaturePy.h"
 #include "Body.h"
 #include "ShapeBinder.h"
@@ -144,6 +145,16 @@ App::DocumentObjectExecReturn* Feature::recompute()
     }
 
     SuppressedShape.setValue(TopoShape());
+
+    // In a Body, an input in error fails the feature before it runs; the recompute's continuation
+    // rule then passes its base shape through (ops#126). getFeatureBody() is the rule's own
+    // membership test for a feature (FailureContinuation.cpp, bodyOf())
+    if (getFeatureBody()) {
+        std::string why;
+        if (inputInError(this, why)) {
+            return new App::DocumentObjectExecReturn(why, this);
+        }
+    }
     return Part::Feature::recompute();
 }
 

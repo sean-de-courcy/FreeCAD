@@ -78,3 +78,7 @@ from PartDesignTests.TestNamingConsumerPass import (  # FreeCAD-CH, ops#116
     TestNamingConsumerPass,
     TestNamingConsumerPassSolver,
 )
+from PartDesignTests.TestFailurePassThrough import (  # FreeCAD-CH, ops#126
+    TestFailurePassThroughV2,
+    TestFailurePassThroughV2s,
+)
