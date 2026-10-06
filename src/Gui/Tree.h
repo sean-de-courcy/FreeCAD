@@ -100,6 +100,8 @@ public:
 
     static const int DocumentType;
     static const int ObjectType;
+    /// The roll-back bar row among an object's children (ops#127)
+    static const int BarType;
 
     void markItem(const App::DocumentObject* Obj, bool mark);
     void syncView(ViewProviderDocumentObject* vp);
@@ -184,6 +186,19 @@ private:
         App::DocumentObject* target
     );
     void sortDroppedObjects(TargetItemInfo& targetInfo, std::vector<App::DocumentObject*> draggedObjects);
+    /// Lets the target's view provider reorder its own children (ops#127); true if it did
+    bool reorderDroppedObjects(
+        TargetItemInfo& targetInfo,
+        const std::vector<ObjectItemSubname>& items,
+        bool& touched
+    );
+    //@}
+
+    /** @name Dragging the roll-back bar row (ops#127) */
+    //@{
+    QTreeWidgetItem* barDragItem = nullptr;
+    QTreeWidgetItem* barDropItem = nullptr;
+    bool barDropBelow = false;
     //@}
 
 protected:
@@ -369,6 +384,8 @@ public:
     void testStatus();
     void setData(int column, int role, const QVariant& value) override;
     void populateItem(DocumentObjectItem* item, bool refresh = false, bool delayUpdate = true);
+    /// Puts the roll-back bar row where the item's view provider wants it (ops#127)
+    void updateTreeBar(DocumentObjectItem* item, QTreeWidgetItem* bar = nullptr);
     bool populateObject(App::DocumentObject* obj);
     void sortObjectItems();
     void selectAllInstances(const ViewProviderDocumentObject& vpd);
@@ -574,6 +591,8 @@ private:
     int previousStatus;
     int selected;
     bool populated;
+    bool held = false;  // shown as held by a roll-back bar (ops#127)
+    bool highlightItalic = false;  // the last setHighlight() asked for italic (ops#127)
 
     friend class TreeWidget;
     friend class DocumentItem;

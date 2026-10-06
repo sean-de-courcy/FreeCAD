@@ -93,6 +93,16 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
                     && body->BaseFeature.getValue() == feature))) {
             *item << "PartDesign_MoveTip";
         }
+        // The roll-back bar (ops#127): on a feature, sketch or datum of a body, and to the end
+        // while the body is rolled back
+        if (selection.size() == 1 && feature && body && body->hasObject(feature)) {
+            *item << "PartDesign_RollTo";
+        }
+        // A selected Body is its own (getBodyFor finds no Body containing it)
+        auto rollBody = body ? body : freecad_cast<PartDesign::Body*>(feature);
+        if (selection.size() == 1 && rollBody && rollBody->isRolledBack()) {
+            *item << "PartDesign_RollToEnd";
+        }
 
         if (strcmp(recipient, "Tree") == 0) {
             // A guessed, partly resolved or broken reference (ops#127)

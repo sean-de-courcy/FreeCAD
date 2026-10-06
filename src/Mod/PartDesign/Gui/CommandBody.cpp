@@ -37,6 +37,7 @@
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/CommandT.h>
+#include <Gui/Selection/Selection.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
 #include <Gui/Application.h>
@@ -51,6 +52,7 @@
 
 #include "TaskFeaturePick.h"
 #include "Utils.h"
+#include "ViewProviderBody.h"
 #include "WorkflowManager.h"
 
 
@@ -745,6 +747,137 @@ bool CmdPartDesignMoveTip::isActive()
 }
 
 //===========================================================================
+// PartDesign_RollTo, PartDesign_RollToEnd (ops#127)
+//===========================================================================
+
+namespace
+{
+/// The Body view provider of the selected Body or Body member (or of the active Body), or null
+PartDesignGui::ViewProviderBody* selectedBodyViewProvider(App::DocumentObject** member = nullptr)
+{
+    if (member) {
+        *member = nullptr;
+    }
+    auto selection = Gui::Selection().getSelection();
+    PartDesign::Body* body = nullptr;
+    if (selection.size() == 1 && selection.front().pObject) {
+        App::DocumentObject* obj = selection.front().pObject;
+        body = freecad_cast<PartDesign::Body*>(obj);
+        if (!body) {
+            body = PartDesign::Body::findBodyOf(obj);
+            if (body && member) {
+                *member = obj;
+            }
+        }
+    }
+    if (!body && !member) {
+        body = PartDesignGui::getBody(/* messageIfNot = */ false, /* autoActivate = */ false);
+    }
+    if (!body) {
+        return nullptr;
+    }
+    return freecad_cast<PartDesignGui::ViewProviderBody*>(
+        Gui::Application::Instance->getViewProvider(body)
+    );
+}
+
+void reportRollFailure(const Base::Exception& e)
+{
+    QMessageBox::warning(
+        Gui::getMainWindow(),
+        QObject::tr("Roll-back bar"),
+        QString::fromUtf8(e.what())
+    );
+}
+}  // namespace
+
+DEF_STD_CMD_A(CmdPartDesignRollTo)
+
+CmdPartDesignRollTo::CmdPartDesignRollTo()
+    : Command("PartDesign_RollTo")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Roll to Here");
+    sToolTipText = QT_TR_NOOP(
+        "Moves the body's roll-back bar after the selected feature: the features after it are "
+        "held, not recomputed, until the bar passes them again. On a sketch or datum, the bar "
+        "goes before the first feature that uses it"
+    );
+    sWhatsThis = "PartDesign_RollTo";
+    sStatusTip = sToolTipText;
+    sPixmap = "PartDesign_MoveTip";
+}
+
+void CmdPartDesignRollTo::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    App::DocumentObject* member = nullptr;
+    auto vp = selectedBodyViewProvider(&member);
+    if (!vp || !member) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Selection error"),
+            QObject::tr("Select one feature, sketch or datum of a body.")
+        );
+        return;
+    }
+    try {
+        auto body = vp->getObject<PartDesign::Body>();
+        vp->rollBar(PartDesignGui::ViewProviderBody::barFeatureFor(body, member));
+    }
+    catch (const Base::Exception& e) {
+        reportRollFailure(e);
+    }
+}
+
+bool CmdPartDesignRollTo::isActive()
+{
+    return hasActiveDocument();
+}
+
+DEF_STD_CMD_A(CmdPartDesignRollToEnd)
+
+CmdPartDesignRollToEnd::CmdPartDesignRollToEnd()
+    : Command("PartDesign_RollToEnd")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Roll to End");
+    sToolTipText = QT_TR_NOOP(
+        "Moves the roll-back bar of the selected (or active) body to its last feature: every "
+        "held feature is recomputed"
+    );
+    sWhatsThis = "PartDesign_RollToEnd";
+    sStatusTip = sToolTipText;
+}
+
+void CmdPartDesignRollToEnd::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto vp = selectedBodyViewProvider();
+    if (!vp) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Selection error"),
+            QObject::tr("Select a body or one of its features, or activate a body.")
+        );
+        return;
+    }
+    try {
+        vp->rollBar(nullptr, true);
+    }
+    catch (const Base::Exception& e) {
+        reportRollFailure(e);
+    }
+}
+
+bool CmdPartDesignRollToEnd::isActive()
+{
+    return hasActiveDocument();
+}
+
+//===========================================================================
 // PartDesign_DuplicateSelection
 //===========================================================================
 
@@ -1168,6 +1301,8 @@ void CreatePartDesignBodyCommands()
     rcCmdMgr.addCommand(new CmdPartDesignBody());
     rcCmdMgr.addCommand(new CmdPartDesignMigrate());
     rcCmdMgr.addCommand(new CmdPartDesignMoveTip());
+    rcCmdMgr.addCommand(new CmdPartDesignRollTo());
+    rcCmdMgr.addCommand(new CmdPartDesignRollToEnd());
 
     rcCmdMgr.addCommand(new CmdPartDesignDuplicateSelection());
     rcCmdMgr.addCommand(new CmdPartDesignMoveFeature());

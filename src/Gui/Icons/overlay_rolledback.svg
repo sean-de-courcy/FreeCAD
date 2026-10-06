@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+<!-- The tree's overlay for an object held by a roll-back bar (ops#127): a slate-blue disc with
+     a pause sign, the size and weight of overlay_error.svg. -->
+<svg
+   width="64"
+   height="64"
+   id="svg_overlay_rolledback"
+   version="1.1"
+   viewBox="0 0 64 64"
+   xmlns="http://www.w3.org/2000/svg">
+  <circle
+     cx="32"
+     cy="32"
+     r="28"
+     style="fill:#729fcf;stroke:#204a87;stroke-width:4" />
+  <path
+     d="M 24,18 V 46 M 40,18 V 46"
+     style="fill:none;stroke:#ffffff;stroke-width:8;stroke-linecap:round" />
+</svg>

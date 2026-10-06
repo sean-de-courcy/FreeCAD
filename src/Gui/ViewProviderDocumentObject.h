@@ -157,6 +157,56 @@ public:
     }
     //@}
 
+    /** @name The roll-back bar and reordering in the tree (ops#127)
+     *
+     * An object can show a bar row among its children in the tree (PartDesign: a Body's roll-back
+     * bar), which the user moves by dragging it, by the arrow keys and by its context menu, and
+     * can reorder its children itself when they are dropped among them.
+     */
+    //@{
+    /// How the user moves the bar
+    enum class TreeBarMove
+    {
+        Before,  ///< before the given child
+        After,   ///< after the given child
+        Up,      ///< one step up
+        Down,    ///< one step down
+        Top,     ///< to the top
+        End      ///< to the end
+    };
+    /** The tree's position of the bar among the claimed children (the child item it goes
+     * before; children.size(): after the last one), or -1 for no bar (the default)
+     */
+    virtual int treeBarIndex(const std::vector<App::DocumentObject*>& children) const
+    {
+        (void)children;
+        return -1;
+    }
+    /** Moves the bar (child: for Before and After). Returns true if the view provider handled
+     * the request (it opens its own transaction).
+     */
+    virtual bool moveTreeBar(TreeBarMove move, App::DocumentObject* child)
+    {
+        (void)move;
+        (void)child;
+        return false;
+    }
+    /** Reorders objs (children, in tree order), dropped before or after target (a child) in
+     * the tree. Returns true if the view provider moved them itself: the tree then writes
+     * nothing. Called inside the drop's transaction; throws Base::Exception to refuse the drop
+     * with a message.
+     */
+    virtual bool reorderObjects(const std::vector<App::DocumentObject*>& objs,
+                                App::DocumentObject* target,
+                                bool after)
+    {
+        (void)objs;
+        (void)target;
+        (void)after;
+        return false;
+    }
+    //@}
+
     bool removeDynamicProperty(const char* prop) override;
 
     App::Property* addDynamicProperty(

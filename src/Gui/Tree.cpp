@@ -21,6 +21,9 @@
  ***************************************************************************/
 
 
+#include <optional>
+#include <unordered_set>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -53,6 +56,7 @@
 #include <App/AutoTransaction.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Link.h>
+#include <App/RecomputeContinuation.h>
 #include <App/SuppressibleExtension.h>
 
 #include "Tree.h"
@@ -92,8 +96,120 @@ std::set<TreeWidget*> TreeWidget::Instances;
 static TreeWidget* _LastSelectedTreeWidget;
 const int TreeWidget::DocumentType = 1000;
 const int TreeWidget::ObjectType = 1001;
+const int TreeWidget::BarType = 1002;
 static bool _DraggingActive;
 static bool _DragEventFilter;
+
+namespace
+{
+/// The roll-back bar row (ops#127): a thin bar among an object's children, not an object
+class TreeBarItem: public QTreeWidgetItem
+{
+public:
+    TreeBarItem()
+        : QTreeWidgetItem(TreeWidget::BarType)
+    {
+        // Enabled, so it can be the current item that the arrow keys move; not selectable, so
+        // the selection keeps only objects; neither editable nor draggable by Qt
+        setFlags(Qt::ItemIsEnabled);
+        setToolTip(
+            0,
+            TreeWidget::tr(
+                "Roll-back bar: drag it, or use the arrow keys, to roll the body back or forward"
+            )
+        );
+        liveBars().insert(this);
+    }
+    ~TreeBarItem() override
+    {
+        liveBars().erase(this);
+    }
+    TreeBarItem(const TreeBarItem&) = delete;
+    TreeBarItem& operator=(const TreeBarItem&) = delete;
+
+    /// item is a bar row that still exists
+    static bool isLive(const QTreeWidgetItem* item)
+    {
+        return item && liveBars().contains(item);
+    }
+
+    /// The bar row among parent's children, or null (a few bars exist: one per Body row)
+    static QTreeWidgetItem* of(const QTreeWidgetItem* parent)
+    {
+        for (auto bar : liveBars()) {
+            if (bar->parent() == parent) {
+                return const_cast<QTreeWidgetItem*>(bar);
+            }
+        }
+        return nullptr;
+    }
+
+private:
+    static std::unordered_set<const QTreeWidgetItem*>& liveBars()
+    {
+        static std::unordered_set<const QTreeWidgetItem*> bars;
+        return bars;
+    }
+};
+
+/// The view provider of the object whose children the bar row is among, or null
+ViewProviderDocumentObject* treeBarOwner(const QTreeWidgetItem* bar)
+{
+    if (!TreeBarItem::isLive(bar) || !bar->parent()
+        || bar->parent()->type() != TreeWidget::ObjectType) {
+        return nullptr;
+    }
+    return static_cast<DocumentObjectItem*>(bar->parent())->object();
+}
+
+/// Asks the bar's owner to move the bar; the tree puts the row in its new place on its next
+/// update, and the row stays the current item there, so the keys go on moving it
+void moveTreeBar(
+    QTreeWidgetItem* bar,
+    ViewProviderDocumentObject::TreeBarMove move,
+    App::DocumentObject* child = nullptr
+)
+{
+    auto vp = treeBarOwner(bar);
+    if (!vp) {
+        return;
+    }
+    try {
+        vp->moveTreeBar(move, child);
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+    }
+}
+
+/** The bar's sibling under pos (the sibling whose descendant is under pos), or null; below is
+ * true when pos is in its lower half or on one of its descendants
+ */
+QTreeWidgetItem* treeBarTarget(const QTreeWidget* tree, const QTreeWidgetItem* bar,
+                               const QPoint& pos, bool& below)
+{
+    below = false;
+    QTreeWidgetItem* item = tree->itemAt(pos);
+    if (!item || !bar->parent()) {
+        return nullptr;
+    }
+    QTreeWidgetItem* hovered = item;
+    while (item && item->parent() != bar->parent()) {
+        item = item->parent();
+    }
+    if (!item || item->type() != TreeWidget::ObjectType) {
+        return nullptr;
+    }
+    if (hovered != item) {
+        below = true;
+    }
+    else {
+        QRect rect = tree->visualItemRect(item);
+        below = pos.y() > rect.top() + rect.height() / 2;
+    }
+    return item;
+}
+}  // namespace
 
 static bool isVisibilityIconEnabled()
 {
@@ -435,6 +551,31 @@ void TreeWidgetItemDelegate::paint(
     auto tree = static_cast<TreeWidget*>(parent());
     auto style = tree->style();
 
+    if (auto item = tree->itemFromIndex(index); item && item->type() == TreeWidget::BarType) {
+        // The roll-back bar (ops#127): a line across the row, with a grip at its start; the
+        // highlight colour while it is the current item or dragged
+        bool active = tree->barDragItem == item
+            || (tree->currentItem() == item && tree->hasFocus());
+        QColor color = active ? opt.palette.color(QPalette::Highlight)
+                              : opt.palette.color(QPalette::Mid);
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        QRect rect = opt.rect;
+        int thickness = std::max(2, rect.height() / 3);
+        QRect line(rect.left(), rect.center().y() - thickness / 2, rect.width(), thickness);
+        painter->fillRect(line, color);
+        if (index.column() == 0) {
+            int dot = thickness + 1;
+            int y = rect.center().y() - dot / 2;
+            for (int k = 0; k < 3; ++k) {
+                painter->fillRect(QRect(rect.left() + 2 + k * (dot + 2), y - dot, dot, dot), color);
+                painter->fillRect(QRect(rect.left() + 2 + k * (dot + 2), y + dot, dot, dot), color);
+            }
+        }
+        painter->restore();
+        return;
+    }
+
     // If only the first column is shown, we'll trim the color background when
     // rendering as transparent overlay.
     bool trimColumnSize = isOnlyNameColumnDisplayed();
@@ -561,6 +702,12 @@ QWidget* TreeWidgetItemDelegate::createEditor(
 QSize TreeWidgetItemDelegate::sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const
 {
     QSize size = QStyledItemDelegate::sizeHint(option, index);
+    auto tree = static_cast<TreeWidget*>(parent());
+    if (auto item = tree->itemFromIndex(index); item && item->type() == TreeWidget::BarType) {
+        // The roll-back bar is a thin row (ops#127), still easy to grab
+        size.setHeight(std::max(8, TreeWidget::getIconSize() / 2));
+        return size;
+    }
     int spacing = std::max(0, static_cast<int>(TreeParams::getItemSpacing()));
     size.setHeight(size.height() + spacing);
     return size;
@@ -1181,6 +1328,19 @@ void TreeWidget::_updateStatus(bool delay)
 
 void TreeWidget::contextMenuEvent(QContextMenuEvent* e)
 {
+    // The roll-back bar row has its own menu (ops#127)
+    if (auto bar = itemAt(e->pos()); bar && bar->type() == BarType) {
+        using Move = ViewProviderDocumentObject::TreeBarMove;
+        QMenu barMenu;
+        QAction* toEnd = barMenu.addAction(tr("Roll to end"));
+        QAction* toTop = barMenu.addAction(tr("Roll to top"));
+        QAction* chosen = barMenu.exec(QCursor::pos());
+        if (chosen == toEnd || chosen == toTop) {
+            moveTreeBar(bar, chosen == toEnd ? Move::End : Move::Top);
+        }
+        return;
+    }
+
     // ask workbenches and view provider, ...
     MenuItem view;
     Gui::Application::Instance->setupContextMenu("Tree", &view);
@@ -1901,6 +2061,15 @@ bool TreeWidget::event(QEvent* e)
             ke->accept();
             return true;
         }
+        // Claim the keys that move the roll-back bar row while it is the current item, before
+        // a global shortcut on them (Home, End) takes them (ops#127)
+        if (auto bar = currentItem(); bar && bar->type() == BarType
+            && ke->modifiers() == Qt::NoModifier
+            && (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down || ke->key() == Qt::Key_Home
+                || ke->key() == Qt::Key_End)) {
+            ke->accept();
+            return true;
+        }
     }
     return QTreeWidget::event(e);
 }
@@ -1944,6 +2113,34 @@ bool isTreeViewDragging()
 
 void TreeWidget::keyPressEvent(QKeyEvent* event)
 {
+    // The arrow keys move the roll-back bar row while it is the current item (ops#127)
+    if (auto bar = currentItem();
+        bar && bar->type() == BarType && event->modifiers() == Qt::NoModifier) {
+        using Move = ViewProviderDocumentObject::TreeBarMove;
+        std::optional<Move> move;
+        switch (event->key()) {
+            case Qt::Key_Up:
+                move = Move::Up;
+                break;
+            case Qt::Key_Down:
+                move = Move::Down;
+                break;
+            case Qt::Key_Home:
+                move = Move::Top;
+                break;
+            case Qt::Key_End:
+                move = Move::End;
+                break;
+            default:
+                break;
+        }
+        if (move) {
+            moveTreeBar(bar, *move);
+            event->accept();
+            return;
+        }
+    }
+
     if (event->matches(QKeySequence::Find)) {
         event->accept();
         onSearchObjects();
@@ -2016,6 +2213,18 @@ void TreeWidget::mousePressEvent(QMouseEvent* event)
 {
     expandIndicatorPressed = false;
     visibilityIconPressed = false;
+    barDragItem = nullptr;
+    barDropItem = nullptr;
+    if (event->button() == Qt::LeftButton) {
+        // A press on the roll-back bar row starts dragging it (ops#127); the base class makes
+        // it the current item and clears the selection (it isn't selectable)
+        if (auto bar = itemAt(event->pos()); bar && bar->type() == BarType) {
+            barDragItem = bar;
+            viewport()->setCursor(Qt::SizeVerCursor);
+            QTreeWidget::mousePressEvent(event);
+            return;
+        }
+    }
     if (isVisibilityIconEnabled()) {
         QTreeWidgetItem* item = itemAt(event->pos());
         if (item && item->type() == TreeWidget::ObjectType && event->button() == Qt::LeftButton) {
@@ -2093,11 +2302,56 @@ void TreeWidget::mouseMoveEvent(QMouseEvent* event)
     if (expandIndicatorPressed || visibilityIconPressed) {
         return;
     }
+    if (barDragItem) {
+        // Dragging the roll-back bar (ops#127): a line shows where it would go
+        QTreeWidgetItem* row = nullptr;
+        bool below = false;
+        if ((event->buttons() & Qt::LeftButton) && TreeBarItem::isLive(barDragItem)) {
+            row = treeBarTarget(this, barDragItem, event->pos(), below);
+            // Below an expanded sibling, the line goes under its last child
+            while (row && below && row->isExpanded() && row->childCount() > 0) {
+                row = row->child(row->childCount() - 1);
+            }
+        }
+        else {
+            barDragItem = nullptr;
+            viewport()->unsetCursor();
+        }
+        if (row != barDropItem || below != barDropBelow) {
+            barDropItem = row;
+            barDropBelow = below;
+            viewport()->update();
+        }
+        event->accept();
+        return;
+    }
     QTreeWidget::mouseMoveEvent(event);
 }
 
 void TreeWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (barDragItem) {
+        // Dropping the roll-back bar (ops#127) before or after the sibling under the mouse
+        QTreeWidgetItem* bar = barDragItem;
+        barDragItem = nullptr;
+        barDropItem = nullptr;
+        viewport()->unsetCursor();
+        viewport()->update();
+        bool below = false;
+        QTreeWidgetItem* target = TreeBarItem::isLive(bar)
+            ? treeBarTarget(this, bar, event->pos(), below)
+            : nullptr;
+        QTreeWidget::mouseReleaseEvent(event);
+        if (target && target != bar) {
+            using Move = ViewProviderDocumentObject::TreeBarMove;
+            moveTreeBar(
+                bar,
+                below ? Move::After : Move::Before,
+                static_cast<DocumentObjectItem*>(target)->object()->getObject()
+            );
+        }
+        return;
+    }
     expandIndicatorPressed = false;
     if (visibilityIconPressed) {
         visibilityIconPressed = false;
@@ -2825,6 +3079,14 @@ bool TreeWidget::dropInObject(
         }
     }
 
+    // Children moved among their siblings: the target may reorder them itself (ops#127)
+    if (da == Qt::MoveAction) {
+        bool reordered = false;
+        if (reorderDroppedObjects(targetInfo, items, reordered)) {
+            return reordered;
+        }
+    }
+
     App::DocumentObject* targetObj = targetItemObj->object()->getObject();
     std::ostringstream targetSubname;
     App::DocumentObject* targetParent = nullptr;
@@ -3179,6 +3441,67 @@ bool TreeWidget::dropInObject(
     return touched;
 }
 
+bool TreeWidget::reorderDroppedObjects(
+    TargetItemInfo& targetInfo,
+    const std::vector<ObjectItemSubname>& items,
+    bool& touched
+)
+{
+    touched = false;
+    auto targetItemObj = static_cast<DocumentObjectItem*>(targetInfo.targetItem);
+    auto vp = targetItemObj->object();
+
+    // Only the target's own children, dropped among them or on the target itself
+    std::vector<std::pair<int, App::DocumentObject*>> ordered;
+    for (auto& v : items) {
+        if (v.first->getParentItem() != targetItemObj) {
+            return false;
+        }
+        ordered.emplace_back(targetItemObj->indexOfChild(v.first), v.first->object()->getObject());
+    }
+    App::DocumentObject* target = nullptr;
+    if (targetInfo.underMouseItem != targetInfo.targetItem) {
+        if (!targetInfo.underMouseItem || targetInfo.underMouseItem->type() != ObjectType
+            || targetInfo.underMouseItem->parent() != targetItemObj) {
+            return false;
+        }
+        target = static_cast<DocumentObjectItem*>(targetInfo.underMouseItem)->object()->getObject();
+    }
+    std::ranges::sort(ordered, {}, &std::pair<int, App::DocumentObject*>::first);
+    std::vector<App::DocumentObject*> objs;
+    objs.reserve(ordered.size());
+    for (auto& v : ordered) {
+        objs.push_back(v.second);
+    }
+
+    auto doc = vp->getObject()->getDocument();
+    int tid = doc->openTransaction("Drag & drop");
+    try {
+        if (!vp->reorderObjects(objs, target, targetInfo.inBottomHalf)) {
+            App::GetApplication().abortTransaction(tid);
+            return false;
+        }
+    }
+    catch (const Base::Exception& e) {
+        // A refused order changes nothing; show why
+        App::GetApplication().abortTransaction(tid);
+        QMessageBox::warning(
+            getMainWindow(),
+            QObject::tr("Drag & drop failed"),
+            QString::fromUtf8(e.what())
+        );
+        return true;
+    }
+    catch (const std::exception& e) {
+        App::GetApplication().abortTransaction(tid);
+        FC_ERR("C++ exception: " << e.what());
+        return true;
+    }
+    App::GetApplication().commitTransaction(tid);
+    touched = true;
+    return true;
+}
+
 bool TreeWidget::canDragFromParents(
     DocumentObjectItem* parentItem,
     App::DocumentObject* obj,
@@ -3330,6 +3653,12 @@ void TreeWidget::drawRow(
 ) const
 {
     QTreeWidget::drawRow(painter, options, index);
+    if (barDropItem && itemFromIndex(index) == barDropItem) {
+        // Where a dragged roll-back bar would go (ops#127)
+        QRect rect = options.rect;
+        int y = barDropBelow ? rect.bottom() - 1 : rect.top();
+        painter->fillRect(QRect(rect.left(), y, rect.width(), 2), options.palette.color(QPalette::Highlight));
+    }
 }
 
 void TreeWidget::slotNewDocument(const Gui::Document& Doc, bool isMainDoc)
@@ -4797,6 +5126,17 @@ void DocumentItem::populateItem(DocumentObjectItem* item, bool refresh, bool del
     bool checkHidden = !showHidden();
     bool updated = false;
 
+    // The roll-back bar row (ops#127) leaves while the object rows are synchronized, so that
+    // their indices are the claimed children's, and comes back at the end
+    QTreeWidgetItem* bar = TreeBarItem::of(item);
+    bool barCurrent = false;
+    if (bar) {
+        barCurrent = getTree()->currentItem() == bar;
+        bool lock = getTree()->blockSelection(true);
+        item->takeChild(item->indexOfChild(bar));
+        getTree()->blockSelection(lock);
+    }
+
     int i = -1;
     // iterate through the claimed children, and try to synchronize them with the
     // children tree item with the same order of appearance.
@@ -4923,9 +5263,75 @@ void DocumentItem::populateItem(DocumentObjectItem* item, bool refresh, bool del
         delete ci;
         getTree()->blockSelection(lock);
     }
+
+    updateTreeBar(item, bar);
+    if (barCurrent && TreeBarItem::isLive(bar) && bar->treeWidget()) {
+        getTree()->setCurrentItem(bar, 0, QItemSelectionModel::NoUpdate);
+    }
+
     if (updated) {
         getTree()->_updateStatus();
     }
+}
+
+void DocumentItem::updateTreeBar(DocumentObjectItem* item, QTreeWidgetItem* bar)
+{
+    // bar: a row populateItem() took out of item, else the one among item's children, if any
+    int at = -1;
+    if (!bar) {
+        bar = TreeBarItem::of(item);
+        if (bar) {
+            at = item->indexOfChild(bar);
+        }
+    }
+    const auto& children = item->myData->children;
+    int index = item->populated ? item->object()->treeBarIndex(children) : -1;
+    auto tree = getTree();
+    if (index < 0) {
+        if (bar) {
+            bool lock = tree->blockSelection(true);
+            delete bar;
+            tree->blockSelection(lock);
+        }
+        return;
+    }
+
+    // The row goes before the first object row whose claimed index is index or more
+    std::unordered_map<const App::DocumentObject*, int> claimed;
+    for (int i = 0; i < static_cast<int>(children.size()); ++i) {
+        claimed.emplace(children[i], i);
+    }
+    int pos = 0;  // among the rows other than the bar
+    for (int k = 0; k < item->childCount(); ++k) {
+        QTreeWidgetItem* ci = item->child(k);
+        if (ci == bar) {
+            continue;
+        }
+        if (ci->type() == TreeWidget::ObjectType) {
+            auto it = claimed.find(static_cast<DocumentObjectItem*>(ci)->object()->getObject());
+            if (it != claimed.end() && it->second >= index) {
+                break;
+            }
+        }
+        ++pos;
+    }
+    if (at == pos) {
+        return;  // in place
+    }
+
+    bool lock = tree->blockSelection(true);
+    bool current = bar && tree->currentItem() == bar;
+    if (!bar) {
+        bar = new TreeBarItem;
+    }
+    else if (at >= 0) {
+        item->takeChild(at);
+    }
+    item->insertChild(pos, bar);
+    if (current) {
+        tree->setCurrentItem(bar, 0, QItemSelectionModel::NoUpdate);
+    }
+    tree->blockSelection(lock);
 }
 
 int DocumentItem::findRootIndex(App::DocumentObject* childObj)
@@ -5135,6 +5541,12 @@ void TreeWidget::updateChildren(
             childrenChanged = found->updateChildren(force);
             removeChildrenFromRoot = found->viewObject->canRemoveChildrenFromRoot();
             if (!childrenChanged && found->removeChildrenFromRoot == removeChildrenFromRoot) {
+                // The roll-back bar row can move while the children stay (ops#127)
+                for (const auto& d : dataSet) {
+                    for (auto item : d->items) {
+                        d->docItem->updateTreeBar(item);
+                    }
+                }
                 return;
             }
         }
@@ -6233,7 +6645,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
             f.setBold(set);
             break;
         case HighlightMode::Italic:
-            f.setItalic(set);
+            highlightItalic = set;
             break;
         case HighlightMode::Underlined:
             f.setUnderline(set);
@@ -6261,7 +6673,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
                 bool underlined = hGrp->GetBool("TreeActiveUnderlined", false);
                 bool overlined = hGrp->GetBool("TreeActiveOverlined", false);
                 f.setBold(bold);
-                f.setItalic(italic);
+                highlightItalic = italic;
                 f.setUnderline(underlined);
                 f.setOverline(overlined);
 
@@ -6270,7 +6682,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
             }
             else {
                 f.setBold(false);
-                f.setItalic(false);
+                highlightItalic = false;
                 f.setUnderline(false);
                 f.setOverline(false);
             }
@@ -6279,6 +6691,8 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
         default:
             break;
     }
+    // A held item stays italic whatever the highlight says (ops#127)
+    f.setItalic(held || highlightItalic);
     this->setFont(0, f);
 }
 
@@ -6290,6 +6704,21 @@ const char* DocumentObjectItem::getTreeName() const
 Gui::ViewProviderDocumentObject* DocumentObjectItem::object() const
 {
     return myData->viewObject;
+}
+
+namespace
+{
+enum Status
+{
+    Visible = 1 << 0,
+    Recompute = 1 << 1,
+    Error = 1 << 2,
+    Hidden = 1 << 3,
+    External = 1 << 4,
+    Freezed = 1 << 5,
+    Warning = 1 << 6,  // computed on a guessed or partly resolved element reference (ops#127)
+    Held = 1 << 7      // held by a roll-back bar: not recomputed until the bar passes it (ops#127)
+};
 }
 
 void DocumentObjectItem::testStatus(bool resetStatus)
@@ -6307,20 +6736,6 @@ void DocumentObjectItem::testStatus(bool resetStatus)
         f.setStrikeOut(suppressed);
         setFont(0, f);
     }
-}
-
-namespace
-{
-enum Status
-{
-    Visible = 1 << 0,
-    Recompute = 1 << 1,
-    Error = 1 << 2,
-    Hidden = 1 << 3,
-    External = 1 << 4,
-    Freezed = 1 << 5,
-    Warning = 1 << 6  // computed on a guessed or partly resolved element reference (ops#127)
-};
 }
 
 // currentStatus is the status enum built by testStatus()
@@ -6383,6 +6798,14 @@ void DocumentObjectItem::generateIcon(int currentStatus, QIcon::Mode mode, QIcon
             pxWarning = Gui::BitmapFactory().pixmapFromSvg("overlay_warning", QSize(10, 10));
         }
         px = pxWarning;
+    }
+    else if (currentStatus & Status::Held) {
+        static QPixmap pxHeld;
+        if (pxHeld.isNull()) {
+            // held by a roll-back bar (ops#127): touched or not, it waits for the bar
+            pxHeld = Gui::BitmapFactory().pixmapFromSvg("overlay_rolledback", QSize(10, 10));
+        }
+        px = pxHeld;
     }
     else if (currentStatus & Status::Recompute) {
         static QPixmap pxRecompute;
@@ -6515,8 +6938,11 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
     bool external = object()->getDocument() != getOwnerDocument()->document()
         || (linked && linked->getDocument() != obj->getDocument());
     bool freezed = pObject->isFreezed();
+    auto rule = App::recomputeContinuation();
+    bool isHeld = rule && rule->holds(pObject);
 
-    int currentStatus = ((pObject->isWarning() ? 1 : 0) << 6) | ((freezed ? 1 : 0) << 5)
+    int currentStatus = ((isHeld ? 1 : 0) << 7) | ((pObject->isWarning() ? 1 : 0) << 6)
+        | ((freezed ? 1 : 0) << 5)
         | ((external ? 1 : 0) << 4) | ((object()->showInTree() ? 0 : 1) << 3)
         | ((pObject->isError() ? 1 : 0) << 2)
         | ((pObject->isTouched() || pObject->mustExecute() == 1 ? 1 : 0) << 1) | (visible ? 1 : 0);
@@ -6527,6 +6953,14 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
     }
 
     previousStatus = currentStatus;
+
+    // Held by a roll-back bar: italic (ops#127), as is an italic highlight (the active object's)
+    if (held != isHeld) {
+        held = isHeld;
+        QFont f = font(0);
+        f.setItalic(held || highlightItalic);
+        setFont(0, f);
+    }
 
     QIcon::Mode mode = QIcon::Normal;
     if (currentStatus & Status::Visible) {
@@ -6953,6 +7387,9 @@ void DocumentObjectItem::getExpandedSnapshot(std::vector<bool>& snapshot) const
     snapshot.push_back(isExpanded());
 
     for (int i = 0; i < childCount(); ++i) {
+        if (child(i)->type() != TreeWidget::ObjectType) {
+            continue;  // the roll-back bar row (ops#127)
+        }
         static_cast<const DocumentObjectItem*>(child(i))->getExpandedSnapshot(snapshot);
     }
 }
@@ -6965,6 +7402,9 @@ void DocumentObjectItem::applyExpandedSnapshot(
     setExpanded(*from++);
 
     for (int i = 0; i < childCount(); ++i) {
+        if (child(i)->type() != TreeWidget::ObjectType) {
+            continue;  // the roll-back bar row (ops#127)
+        }
         static_cast<DocumentObjectItem*>(child(i))->applyExpandedSnapshot(snapshot, from);
     }
 }
