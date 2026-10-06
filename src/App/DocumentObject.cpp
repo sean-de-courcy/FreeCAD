@@ -1218,8 +1218,12 @@ void DocumentObject::onChanged(const Property* prop)
     bool fineGrained = GetApplication().isFineGrainedRecomputeEnabled();
 
     auto outputHasDeps = [this](const Property* prop) {
+        // FreeCAD-CH (ops#154): the edge may name the property by an alias
+        // (a Spreadsheet cell's), so it also matches on what the name resolves to
         return std::ranges::any_of(getInListProp(), [this, prop](const DepEdge& edge) {
-            return edge.toObj == this && edge.toProp == prop->getName();
+            return edge.toObj == this
+                && (edge.toProp == prop->getName()
+                    || (!edge.toProp.empty() && getPropertyByName(edge.toProp.c_str()) == prop));
         });
     };
 

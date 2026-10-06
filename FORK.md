@@ -151,7 +151,8 @@ names it.
 | `feat/127-edit-rollback` | feat | ops#127 | - | `integration` `1cad8bead0` | `b838560813` (fork PR 121), 2026-10-06 | never (fork feature) |
 | `fix/139-edit-lock-commands` | fix | ops#139 | - | `feat/127-edit-rollback` `f9f5468453` (stacked on fork PR 121) | `e5d256f9ff` (fork PR 123), 2026-10-06 | never (fork feature) |
 | `fix/135-mixed-drag` | fix | ops#135 | - | `fix/139-edit-lock-commands` `ee97064747` (stacked on fork PR 123) | `e7caa6e13c` (fork PR 124), 2026-10-06 | never (fork feature) |
-| `fix/128-stale-subelement` | fix | ops#128 | - | `integration` `e7caa6e13c` | (fork PR 125) | upstream's `SketchObject::checkSubName` (or `IndexedName::set`) rejects a name whose type isn't the whole text before its index |
+| `fix/128-stale-subelement` | fix | ops#128 | - | `integration` `e7caa6e13c` | `c0892b56a8` (fork PR 125), 2026-10-06 | upstream's `SketchObject::checkSubName` (or `IndexedName::set`) rejects a name whose type isn't the whole text before its index |
+| `fix/154-alias-recompute` | fix | ops#154 | - | `integration` `c0892b56a8` | (fork PR 127) | upstream's fine-grained recompute follows a Spreadsheet alias edge (`Document::recompute` matching the property an edge's name resolves to, and alias edges kept by name); upstream main `93f831f895` has the bug |
 
 ## Fork-only commits in carried topics
 

@@ -964,8 +964,27 @@ void Expression::getDepObjects(std::map<App::DocumentObject*, bool>& deps,
                 if (!hidden || res.second)
                     res.first->second = hidden;
                 if (propDeps) {
+                    // FreeCAD-CH (ops#154): a property goes in under the name the
+                    // expression writes when that name resolves to it: a Spreadsheet
+                    // alias ("Sheet.L") rather than its cell ("A1"). A moved cell
+                    // takes its alias along and the edges aren't rebuilt; edges built
+                    // before the cell's property exists, or restored, have the alias
+                    // already. Document::recompute resolves the name when it matches.
+                    std::string written;
                     for (auto &propName : dep.second) {
-                        (*propDeps)[std::make_pair(propName, obj)] = hidden;
+                        const std::string* name = &propName;
+                        if (!propName.empty()) {
+                            if (written.empty()) {
+                                written = var.getPropertyName();
+                            }
+                            if (written != propName) {
+                                auto prop = obj->getPropertyByName(written.c_str());
+                                if (prop && prop->getName() && propName == prop->getName()) {
+                                    name = &written;
+                                }
+                            }
+                        }
+                        (*propDeps)[std::make_pair(*name, obj)] = hidden;
                     }
                 }
             }
