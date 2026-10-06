@@ -4637,3 +4637,175 @@ TEST(Moved, hintKeepsATwinAtTheToleranceEdge)
             << c.what;
     }
 }
+
+// The guess rules (ops#127, design note N2 section 5). Off by default in SolveInput; the batch
+// turns them on from the NamingSolver parameters.
+
+TEST(SolveOwner, guessNearestAmongStructuralSurvivors)
+{
+    // G1: two structural survivors that tier 2 keeps; neither within tier 3's strict d_max (0.3
+    // of a 30 diagonal), the nearest within the wide one (1.5) and the second at least twice as
+    // far and beyond it.
+    Placed p;
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.pool["Face"] = {
+        element("Face2", {p.names.newTop}),
+        element("Face10", {p.otherTop}),
+    };
+    input.entries = {missing(p.names.oldTop)};
+    input.entries[0].fingerprint = p.top;
+    measure(input, {{"Face2", p.topAt(11)}, {"Face10", p.topAt(12.5)}}, nullptr);
+
+    //   without the rule: ambiguous, as before
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "ambiguous");
+
+    input.guess = true;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Face2");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].guessKind, "nearest");
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face10"}));
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"guess", "structural"}));
+    ASSERT_EQ(outcomes[0].candidateDistances.size(), 2U);
+    EXPECT_NEAR(outcomes[0].candidateDistances[0], 1.0, 1e-9);
+    EXPECT_NEAR(outcomes[0].candidateDistances[1], 2.5, 1e-9);
+    EXPECT_EQ(outcomes[0].evidence.rfind("guess: tier 3 wide: nearest 1.000, second 2.500", 0), 0U);
+
+    //   a true tie (N8): the second within twice the nearest
+    measure(input, {{"Face2", p.topAt(11)}, {"Face10", p.topAt(11.8)}}, nullptr);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+
+    //   never against a failed target (N10)
+    measure(input, {{"Face2", p.topAt(11)}, {"Face10", p.topAt(12.5)}}, nullptr);
+    input.targetFailed = true;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, guessGeometricWithoutStructure)
+{
+    // G2: SketchRedraw's edges with the edge redrawn 0.5 over: no structural candidate, tier 3's
+    // strict d_max (0.245) misses it, the wide one (1.225) takes it, the next edge is 10 away.
+    const auto oldEdge = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto line = [](double x, double z) {
+        return fingerprint('E', "Line", 10, Base::Vector3d(x, 5, z), Base::Vector3d(0, 1, 0));
+    };
+    SolveInput input;
+    input.diagonal = 24.5;
+    input.pool["Edge"] = {
+        element("Edge1", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge2", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 0, 'E', {"PRJ"})}),
+        element("Edge3", {section({}, {sketchEdge(12, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+        element("Edge4", {section({}, {sketchEdge(13, 6)}, 7, "XTR", 1, 'E', {"PRJ"})}),
+    };
+    measure(
+        input,
+        {{"Edge1", line(0, 0)},
+         {"Edge2", line(20, 0)},
+         {"Edge3", line(0, 10)},
+         {"Edge4", line(20, 10)}},
+        nullptr
+    );
+    input.entries = {missing(oldEdge, "Edge")};
+    input.entries[0].fingerprint = line(20.5, 10);
+
+    //   G1 alone doesn't guess without structure
+    input.guess = true;
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U);
+
+    input.guessNoStructure = true;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge4");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    EXPECT_EQ(outcomes[0].guessKind, "geometric");
+    //   the alternatives in rank order, nearest first
+    EXPECT_EQ(outcomes[0].candidates,
+              (std::vector<std::string> {"Edge4", "Edge2", "Edge3", "Edge1"}));
+    EXPECT_EQ(outcomes[0].candidateRoles[1], "geometric");
+    EXPECT_EQ(outcomes[0].evidence.rfind("guess: no structural candidate, tier 3 wide", 0), 0U);
+
+    //   5 over: beyond the wide d_max too (N7/N8)
+    input.entries[0].fingerprint = line(25, 10);
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, guessThePieceAtTheSavedCentre)
+{
+    // G3: an edge 0..20 along X split under One. Off centre (pieces 0..6 and 8..20) the saved
+    // centre x = 10 lies on the long piece: guessed, tier 1. Centred (0..9 and 11..20) it lies on
+    // neither: broken (N5).
+    const auto old = generated({sketchEdge(1)}, 7, "Extrude", 'E');
+    auto lineX = [](double from, double to) {
+        return fingerprint('E',
+                           "Line",
+                           to - from,
+                           Base::Vector3d((from + to) / 2, 0, 10),
+                           Base::Vector3d(1, 0, 0));
+    };
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.guess = true;
+    input.pool["Edge"] = {
+        element("Edge2", {piece(old, 9, "CUT", 0, 'E')}),
+        element("Edge3", {piece(old, 9, "CUT", 1, 'E')}),
+    };
+    input.entries = {missing(old, "Edge")};
+    input.entries[0].fingerprint = lineX(0, 20);
+
+    measure(input, {{"Edge2", lineX(0, 6)}, {"Edge3", lineX(8, 20)}}, nullptr);
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_EQ(outcomes[0].tier, 1);
+    EXPECT_EQ(outcomes[0].guessKind, "piece");
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge3", "Edge2"}));
+    EXPECT_EQ(outcomes[0].candidateRoles, (std::vector<std::string> {"guess", "piece"}));
+
+    measure(input, {{"Edge2", lineX(0, 9)}, {"Edge3", lineX(11, 20)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
+
+    //   without the rule: broken at once, as before
+    measure(input, {{"Edge2", lineX(0, 6)}, {"Edge3", lineX(8, 20)}}, nullptr);
+    input.guess = false;
+    EXPECT_EQ(Data::solveOwner(input)[0].status, SolveStatus::Broken);
+}
+
+TEST(SolveOwner, guessThePieceOfASplitFace)
+{
+    // G3 on planar faces: a top face 0..20 x 0..10 split at x = 8; the saved centre (10, 5)
+    // lies in the box of the piece 8..20.
+    const auto old = generated({sketchEdge(1)}, 7, "Extrude", 'F');
+    auto top = [](double from, double to) {
+        auto fp = fingerprint('F',
+                              "Plane",
+                              (to - from) * 10,
+                              Base::Vector3d((from + to) / 2, 5, 10),
+                              Base::Vector3d(0, 0, 1));
+        fp.extentMin = Base::Vector3d(from, 0, 10);
+        fp.extentMax = Base::Vector3d(to, 10, 10);
+        return fp;
+    };
+    SolveInput input;
+    input.diagonal = 30.0;
+    input.guess = true;
+    input.pool["Face"] = {
+        element("Face2", {piece(old, 9, "CUT", 0, 'F')}),
+        element("Face3", {piece(old, 9, "CUT", 1, 'F')}),
+    };
+    input.entries = {missing(old, "Face")};
+    input.entries[0].fingerprint = top(0, 20);
+    measure(input, {{"Face2", top(0, 8)}, {"Face3", top(8, 20)}}, nullptr);
+
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Face3");
+    EXPECT_EQ(outcomes[0].guessKind, "piece");
+}

@@ -1224,6 +1224,53 @@ Nearest findNearest(
     return result;
 }
 
+// G3 (ops#127, design note N2 5.2): whether a piece of a split element holds the saved element's
+// centre. A line piece: the centre lies on its line, within half its length; an arc piece: the
+// centre's direction from the circle's centre lies within the arc's angular half-width (a saved
+// arc's centre of mass lies on its bisector); a planar face piece: the centre lies in its box. All
+// grown by ε = continuation × max(1, diagonal), the continuation's own ε. Other kinds hold none.
+bool holdsCentre(const ElementFingerprint& saved,
+                 const ElementFingerprint& piece,
+                 double diagonal,
+                 double continuation)
+{
+    if (!saved.center || !piece.center || !piece.isValid() || saved.type != piece.type
+        || saved.kind != piece.kind) {
+        return false;
+    }
+    const double eps = continuation * std::max(1.0, diagonal);
+    const Base::Vector3d s = *saved.center;
+    const Base::Vector3d c = *piece.center;
+    if (piece.type == 'E' && piece.kind == "Line" && piece.direction && piece.size) {
+        Base::Vector3d d = *piece.direction;
+        if (d.Length() <= 0.0) {
+            return false;
+        }
+        d.Normalize();
+        const Base::Vector3d v = s - c;
+        const double along = v * d;
+        const Base::Vector3d across = v - d * along;
+        return across.Length() <= eps && std::abs(along) <= *piece.size / 2.0 + eps;
+    }
+    if (piece.type == 'E' && piece.kind == "Circle" && piece.location && piece.size
+        && !piece.radii.empty() && piece.radii.front() > 0.0) {
+        const double r = piece.radii.front();
+        const Base::Vector3d a = s - *piece.location;
+        const Base::Vector3d b = c - *piece.location;
+        if (a.Length() <= eps || b.Length() <= eps) {
+            return false;
+        }
+        return a.GetAngle(b) <= *piece.size / (2.0 * r) + eps / r;
+    }
+    if (piece.type == 'F' && piece.kind == "Plane" && piece.extentMin && piece.extentMax) {
+        const Base::Vector3d& lo = *piece.extentMin;
+        const Base::Vector3d& hi = *piece.extentMax;
+        return s.x >= lo.x - eps && s.x <= hi.x + eps && s.y >= lo.y - eps && s.y <= hi.y + eps
+            && s.z >= lo.z - eps && s.z <= hi.z + eps;
+    }
+    return false;
+}
+
 std::string describeNearest(const Nearest& nearest)
 {
     std::string text = "nearest " + formatDistance(nearest.nearest);
@@ -1942,6 +1989,74 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         pool.exact.insert(element.index);
     }
 
+    // G3 on the exact entries' splits (ops#127, N2 5.2): of an exact entry's pieces (\a listed,
+    // positions in \a pool, the hit among them), the one whose extent holds the saved centre,
+    // if exactly one does and the rules may guess; -1 otherwise (N5, N10).
+    auto pieceHoldingCentre = [&](const SolveInput::Entry& entry,
+                                  const Pool& pool,
+                                  const std::vector<int>& listed) {
+        if (!input.guess || input.targetFailed || !entry.fingerprint.isValid()) {
+            return -1;
+        }
+        int found = -1;
+        for (int k : listed) {
+            if (holdsCentre(entry.fingerprint,
+                            fingerprintOf(pool.elements[k]),
+                            input.diagonal,
+                            input.continuationDistance)) {
+                if (found >= 0) {
+                    return -1;
+                }
+                found = k;
+            }
+        }
+        return found;
+    };
+    // The outcome of that guess: the piece, tier 1 (structure found the pieces), the others as
+    // alternatives (the hit's role `name`, the rest `piece`) nearest centre first.
+    auto guessedPiece = [&](const SolveInput::Entry& entry,
+                            const Pool& pool,
+                            const std::vector<int>& listed,
+                            int pick,
+                            int hitPosition) {
+        SolveOutcome outcome;
+        outcome.status = SolveStatus::Guessed;
+        outcome.tier = 1;
+        outcome.guessKind = "piece";
+        outcome.element = pool.elements[pick].index;
+        outcome.name = firstName(pool.elements[pick]);
+        outcome.evidence = "guess: the piece at the saved centre, of "
+            + std::to_string(listed.size()) + " pieces";
+        auto distanceOf = [&](int k) {
+            const ElementFingerprint& now = fingerprintOf(pool.elements[k]);
+            return entry.fingerprint.center && now.center
+                ? Base::Distance(*entry.fingerprint.center, *now.center)
+                : nan;
+        };
+        std::vector<int> order {pick};
+        std::vector<int> others;
+        for (int k : listed) {
+            if (k != pick) {
+                others.push_back(k);
+            }
+        }
+        std::stable_sort(others.begin(), others.end(), [&](int a, int b) {
+            const double da = distanceOf(a);
+            const double db = distanceOf(b);
+            return std::isnan(db) ? !std::isnan(da) : da < db;
+        });
+        order.insert(order.end(), others.begin(), others.end());
+        for (int k : order) {
+            outcome.candidates.push_back(pool.elements[k].index);
+            outcome.candidateNames.push_back(firstName(pool.elements[k]));
+            outcome.candidateRoles.emplace_back(k == pick ? "guess"
+                                                : k == hitPosition ? "name"
+                                                                   : "piece");
+            outcome.candidateDistances.push_back(distanceOf(k));
+        }
+        return outcome;
+    };
+
     // Continuation: an exact line edge that is now a strict part of the edge its fingerprint
     // was saved for, and the other line edges on the old edge that bound a face it bounds.
     {
@@ -2083,7 +2198,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 // Every piece gives the consumer the same result: the hit stands.
             }
             else {
-                breakWith(positions, "split: the old edge continues in " + continuations);
+                // G3 under One: the piece at the saved centre (never under Equivalent, N6)
+                const int pick = entry.policy == SolvePolicy::One
+                    ? pieceHoldingCentre(entry, pool, positions)
+                    : -1;
+                if (pick >= 0) {
+                    outcome = guessedPiece(entry, pool, positions, pick, hitPosition);
+                    if (pick != hitPosition) {
+                        taken.push_back(pick);
+                    }
+                }
+                else {
+                    breakWith(positions, "split: the old edge continues in " + continuations);
+                }
             }
             decidedEntry[i] = 1;
         }
@@ -2183,6 +2310,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             std::sort(listed.begin(), listed.end());
             auto& outcome = outcomes[i];
+            // G3 (One, Expand): the piece at the saved centre, unless a face runs past the old
+            // one (N6) or the pieces give an Equivalent consumer different results (N6)
+            const int pick = pastEnd.empty() && entry.policy != SolvePolicy::Equivalent
+                ? pieceHoldingCentre(entry, pool, listed)
+                : -1;
+            if (pick >= 0) {
+                outcome = guessedPiece(entry, pool, listed, pick, hitPosition);
+                pool.exact.insert(pool.elements[pick].index);
+                decidedEntry[i] = 1;
+                continue;
+            }
             outcome = SolveOutcome();
             outcome.evidence = pastEnd.empty()
                 ? "split: a coplanar face beside it, " + beside
@@ -2239,6 +2377,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::vector<int> expanded;
         // The members' saved fingerprint, if they all hold the same valid one.
         const ElementFingerprint* saved = nullptr;
+        // A guess rule's pick (ops#127, N2 section 5): the rule (`nearest`, `geometric`,
+        // `piece`), the other elements it chose among with their role, and the evidence is
+        // geometryEvidence.
+        std::string guessKind;
+        std::vector<int> guessAlternatives;
+        const char* guessRole = "structural";
     };
 
     // The members' saved fingerprint, if they all hold the same valid one.
@@ -2403,6 +2547,37 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             return findNearest(*saved, fingerprints, input.diagonal, input.tolerances);
         };
+        // The guess rules (N2 section 5): never against a failed target (N10), never without a
+        // saved fingerprint (N8).
+        const bool guessing = input.guess && !input.targetFailed && saved != nullptr;
+        // Tier 3 with the guess rules' wider tolerances (G1, G2)
+        auto wideNearestOf = [&](const std::vector<int>& positions) {
+            GeometryTolerances wide = input.tolerances;
+            wide.distance = input.tolerances.guessDistance;
+            wide.gapFactor = input.tolerances.guessGapFactor;
+            wide.size = input.tolerances.guessSize;
+            std::vector<ElementFingerprint> fingerprints;
+            for (int k : positions) {
+                fingerprints.push_back(fingerprintOf(pool.elements[k]));
+            }
+            return findNearest(*saved, fingerprints, input.diagonal, wide);
+        };
+        // G3: the one piece whose extent holds the saved centre, or -1 (none or several, N5)
+        auto pieceAtSavedCentre = [&](const std::vector<int>& pieces) {
+            int found = -1;
+            for (int k : pieces) {
+                if (holdsCentre(*saved,
+                                fingerprintOf(pool.elements[k]),
+                                input.diagonal,
+                                input.continuationDistance)) {
+                    if (found >= 0) {
+                        return -1;
+                    }
+                    found = k;
+                }
+            }
+            return found;
+        };
 
         // Pieces. Under One they break the entry at once. Under Expand they resolve together.
         // Under Equivalent they resolve as one candidate if every piece gives the consumer the
@@ -2456,11 +2631,26 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             state.listed = pieces;
         }
         else if (!pieces.empty()) {
-            state.decided = true;
-            state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
-            listCandidates(state, pieces);
-            listCandidates(state, others);
-            continue;
+            // G3: under One, the piece whose extent holds the saved centre, if exactly one does
+            const int piece = guessing ? pieceAtSavedCentre(pieces) : -1;
+            if (piece < 0) {
+                state.decided = true;
+                state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
+                listCandidates(state, pieces);
+                listCandidates(state, others);
+                continue;
+            }
+            state.guessKind = "piece";
+            state.guessRole = "piece";
+            for (int k : pieces) {
+                if (k != piece) {
+                    state.guessAlternatives.push_back(k);
+                }
+            }
+            state.geometryEvidence = "guess: the piece at the saved centre, of "
+                + std::to_string(pieces.size()) + " pieces";
+            state.candidates = {piece};
+            state.listed = pieces;
         }
         else {
             state.listed = state.candidates;
@@ -2490,10 +2680,28 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             }
             else if (agree.size() > 1) {
                 Nearest nearest = nearestOf(agree);
+                Nearest wide;
+                if (nearest.index < 0 && guessing) {
+                    wide = wideNearestOf(agree);
+                }
                 if (nearest.index >= 0) {
                     state.geometryTier = 3;
                     state.geometryEvidence = "tier 3: " + describeNearest(nearest);
                     state.candidates = {agree[nearest.index]};
+                }
+                else if (wide.index >= 0) {
+                    // G1: tier 3's wider rule among the structural survivors tier 2 keeps
+                    const int pick = agree[wide.index];
+                    state.geometryTier = 3;
+                    state.guessKind = "nearest";
+                    state.guessRole = "structural";
+                    state.geometryEvidence = "guess: tier 3 wide: " + describeNearest(wide);
+                    for (int k : agree) {
+                        if (k != pick) {
+                            state.guessAlternatives.push_back(k);
+                        }
+                    }
+                    state.candidates = {pick};
                 }
                 else if (agree.size() < state.candidates.size()) {
                     state.geometryTier = 2;
@@ -2523,11 +2731,31 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.listed = state.candidates;
                 }
                 else {
-                    state.decided = true;
-                    state.outcome.evidence = "no structural candidate, tier 3 found none: "
-                        + describeNearest(nearest);
-                    listCandidates(state, agree, "geometric");
-                    continue;
+                    // G2: tier 3's wider rule without structure, behind its own switch
+                    Nearest wide;
+                    if (guessing && input.guessNoStructure) {
+                        wide = wideNearestOf(agree);
+                    }
+                    if (wide.index < 0) {
+                        state.decided = true;
+                        state.outcome.evidence = "no structural candidate, tier 3 found none: "
+                            + describeNearest(nearest);
+                        listCandidates(state, agree, "geometric");
+                        continue;
+                    }
+                    const int pick = agree[wide.index];
+                    state.geometric = true;
+                    state.guessKind = "geometric";
+                    state.guessRole = "geometric";
+                    state.geometryEvidence = "guess: no structural candidate, tier 3 wide: "
+                        + describeNearest(wide);
+                    for (int k : agree) {
+                        if (k != pick) {
+                            state.guessAlternatives.push_back(k);
+                        }
+                    }
+                    state.candidates = {pick};
+                    state.listed = state.candidates;
                 }
             }
         }
@@ -2674,7 +2902,39 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.tier = state.geometric ? 3 : state.geometryTier ? state.geometryTier : 1;
                 state.outcome.element = element.index;
                 state.outcome.name = firstName(element);
-                if (state.geometric || state.geometryTier >= 2) {
+                if (!state.guessKind.empty()) {
+                    // A guess rule's pick (ops#127): the pick first, then the alternatives in
+                    // rank order (nearest centre first), with their distances.
+                    state.outcome.status = SolveStatus::Guessed;
+                    state.outcome.guessKind = state.guessKind;
+                    auto distanceOf = [&](int position) {
+                        const ElementFingerprint& now =
+                            fingerprintOf(state.pool->elements[position]);
+                        return state.saved && state.saved->center && now.center
+                            ? Base::Distance(*state.saved->center, *now.center)
+                            : std::numeric_limits<double>::quiet_NaN();
+                    };
+                    auto addCandidate = [&](int position, const char* role) {
+                        const auto& candidate = state.pool->elements[position];
+                        state.outcome.candidates.push_back(candidate.index);
+                        state.outcome.candidateNames.push_back(
+                            candidate.names.empty() ? std::string() : candidate.names.front()
+                        );
+                        state.outcome.candidateRoles.emplace_back(role);
+                        state.outcome.candidateDistances.push_back(distanceOf(position));
+                    };
+                    addCandidate(k, "guess");
+                    std::vector<int> alternatives = state.guessAlternatives;
+                    std::stable_sort(alternatives.begin(), alternatives.end(), [&](int a, int b) {
+                        const double da = distanceOf(a);
+                        const double db = distanceOf(b);
+                        return std::isnan(db) ? !std::isnan(da) : da < db;
+                    });
+                    for (int position : alternatives) {
+                        addCandidate(position, state.guessRole);
+                    }
+                }
+                else if (state.geometric || state.geometryTier >= 2) {
                     // Geometry chose among tier 1's survivors: the others are the alternatives
                     // the user may prefer (ops#127).
                     std::vector<int> others;
@@ -2685,7 +2945,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     }
                     listCandidates(state, others, state.geometric ? "geometric" : nullptr);
                 }
-                if (state.geometric) {
+                if (state.geometric || !state.guessKind.empty()) {
                     state.outcome.evidence = state.geometryEvidence;
                 }
                 else {
