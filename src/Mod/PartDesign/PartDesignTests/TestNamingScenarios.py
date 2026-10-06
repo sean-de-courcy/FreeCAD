@@ -112,6 +112,7 @@ ORACLE_FIELDS = (
     "names_before",
     "subs_before",
     "tier",
+    "guess",
 )
 
 

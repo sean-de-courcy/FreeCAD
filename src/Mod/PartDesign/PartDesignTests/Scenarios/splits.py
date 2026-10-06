@@ -44,6 +44,7 @@ from .harness import (
     Drafted,
     Extruded,
     Filleted,
+    Guessed,
     Scenario,
     X,
     Y,
@@ -360,6 +361,24 @@ class DraftFaceNotch(SplitModel):
     def edit(self, doc):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
+        self.split = True
+
+
+class DraftFaceNotchOffCentre(DraftFaceNotch):
+    """DraftFaceNotch's notch moved left, to x 4..8: the front face keeps its name on x 0..4,
+    and the rest (x 8..20) holds the old face's centre (x = 10). In solver documents the
+    reference is guessed to that rest (ops#127, N2 5.2 G3: its box holds the saved centre, the
+    named piece's doesn't); without the solver it breaks with both as candidates, as
+    DraftFaceNotch's does."""
+
+    def frontFace(self):
+        if self.split and self.solver:
+            return Guessed(face("plane", normal=-Y, through=(0, 0, 0), contains=(14, 0, 5)))
+        return super().frontFace()
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (4, 0))})
+        doc.Profile.addGeometry(m.polyline([(4, 0), (4, 2), (8, 2), (8, 0), (20, 0)]), False)
         self.split = True
 
 

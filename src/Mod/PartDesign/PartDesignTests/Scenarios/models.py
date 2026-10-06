@@ -207,19 +207,19 @@ def twoFlatDisc():
     ]
 
 
-def notchDiscArc(sketch):
-    """Cuts a notch into the right arc of `twoFlatDisc()`: the arc ends at -10 degrees (its
+def notchDiscArc(sketch, start=-10, end=10):
+    """Cuts a notch into the right arc of `twoFlatDisc()`: the arc ends at `start` degrees (its
     geometry ID kept), lines go in to radius 3 and out again, with a concentric arc of radius 3
-    between them (the notch's floor), and a new arc from 10 degrees to the arc's old end."""
+    between them (the notch's floor), and a new arc from `end` degrees to the arc's old end."""
     geometry = sketch.Geometry
-    geometry[0].setParameterRange(-DISC_HALF_ANGLE, math.radians(-10))
+    geometry[0].setParameterRange(-DISC_HALF_ANGLE, math.radians(start))
     sketch.Geometry = geometry
     sketch.addGeometry(
         [
-            Part.LineSegment(onDisc(DISC_RADIUS, -10), onDisc(3, -10)),
-            Part.ArcOfCircle(discCircle(3), math.radians(-10), math.radians(10)),
-            Part.LineSegment(onDisc(3, 10), onDisc(DISC_RADIUS, 10)),
-            Part.ArcOfCircle(discCircle(), math.radians(10), DISC_HALF_ANGLE),
+            Part.LineSegment(onDisc(DISC_RADIUS, start), onDisc(3, start)),
+            Part.ArcOfCircle(discCircle(3), math.radians(start), math.radians(end)),
+            Part.LineSegment(onDisc(3, end), onDisc(DISC_RADIUS, end)),
+            Part.ArcOfCircle(discCircle(), math.radians(end), DISC_HALF_ANGLE),
         ],
         False,
     )
