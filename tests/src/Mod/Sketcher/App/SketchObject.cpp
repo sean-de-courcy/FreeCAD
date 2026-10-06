@@ -919,3 +919,38 @@ TEST_F(SketchObjectTest, testGetElementNameV2)
     EXPECT_EQ(reverse_export_name.newName, ";" + vertex1Name.toString() + ".Vertex1");
     EXPECT_EQ(reverse_export_name.oldName, "Vertex1");
 }
+
+TEST_F(SketchObjectTest, testStaleOrUntypedSubnameIsNoElement)
+{
+    // A broken reference's name ("?InternalFace1"), a bare index ("1") and a type cut short
+    // ("Ed1", "V1") name no element of the sketch: they parse as nothing, not as the index alone
+    // or as the first type they prefix (ops#128)
+    Base::Vector3d p1(0.0, 0.0, 0.0), p2(1.0, 0.0, 0.0);
+    Part::GeomLineSegment line;
+    line.setPoints(p1, p2);
+    getObject()->addGeometry(&line);
+    getObject()->recomputeFeature();
+
+    for (const char* name : {"?InternalFace1", "1", "Ed1", "V1", "?Edge1"}) {
+        SCOPED_TRACE(name);
+        EXPECT_FALSE(getObject()->checkSubName(name));
+        auto names = getObject()->getElementName(name, App::GeoFeature::ElementNameType::Normal);
+        EXPECT_EQ(names.oldName, "");
+        EXPECT_EQ(names.newName, "");
+        names = getObject()->getElementName(name, App::GeoFeature::ElementNameType::Export);
+        EXPECT_EQ(names.oldName, "");
+        EXPECT_EQ(names.newName, "");
+    }
+    // The sketch's own names still parse
+    EXPECT_EQ(getObject()->checkSubName("Edge1").toString(), "Edge1");
+    EXPECT_EQ(getObject()->checkSubName("edge1").toString(), "Edge1");
+    EXPECT_EQ(getObject()->checkSubName("Vertex2").toString(), "Vertex2");
+    EXPECT_EQ(getObject()->checkSubName("vertex2").toString(), "Vertex2");
+    EXPECT_EQ(getObject()->checkSubName("ExternalEdge1").toString(), "ExternalEdge1");
+    EXPECT_EQ(getObject()->checkSubName("InternalFace1").toString(), "InternalFace1");
+    EXPECT_EQ(getObject()->checkSubName("RootPoint").toString(), "RootPoint");
+    EXPECT_EQ(getObject()->checkSubName("H_Axis").toString(), "H_Axis");
+    EXPECT_EQ(getObject()->checkSubName("V_Axis").toString(), "V_Axis");
+    EXPECT_EQ(getObject()->checkSubName("Constraint3").toString(), "Constraint3");
+    EXPECT_EQ(getObject()->getElementName("Edge1", App::GeoFeature::ElementNameType::Normal).oldName, "Edge1");
+}

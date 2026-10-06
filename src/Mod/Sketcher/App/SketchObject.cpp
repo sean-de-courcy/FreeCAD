@@ -23,6 +23,8 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -2170,6 +2172,17 @@ Data::IndexedName SketchObject::checkSubName(const char *subname) const
     // if not a mapped name parse the indexed name directly, uppercasing "edge" and "vertex"
     if(!mappedSubname)  {
         Data::IndexedName result(subname, types, true);
+        // IndexedName keeps the index of a name whose type it rejects ("?InternalFace1" gives
+        // "1"), and matches the text before the index as a prefix of the types ("1" and "Ed1"
+        // give Edge1). Only a name whose whole text before the index is its type is an element
+        // (ops#128)
+        std::size_t typeLength = std::strlen(subname);
+        while (typeLength > 0 && std::isdigit(static_cast<unsigned char>(subname[typeLength - 1]))) {
+            --typeLength;
+        }
+        if (!result || std::strlen(result.getType()) != typeLength) {
+            return Data::IndexedName();
+        }
         if (boost::equals(result.getType(), "edge"))
             return Data::IndexedName("Edge", result.getIndex());
         if (boost::equals(result.getType(), "vertex"))
