@@ -6645,7 +6645,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
             f.setBold(set);
             break;
         case HighlightMode::Italic:
-            f.setItalic(set);
+            highlightItalic = set;
             break;
         case HighlightMode::Underlined:
             f.setUnderline(set);
@@ -6673,7 +6673,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
                 bool underlined = hGrp->GetBool("TreeActiveUnderlined", false);
                 bool overlined = hGrp->GetBool("TreeActiveOverlined", false);
                 f.setBold(bold);
-                f.setItalic(italic);
+                highlightItalic = italic;
                 f.setUnderline(underlined);
                 f.setOverline(overlined);
 
@@ -6682,7 +6682,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
             }
             else {
                 f.setBold(false);
-                f.setItalic(false);
+                highlightItalic = false;
                 f.setUnderline(false);
                 f.setOverline(false);
             }
@@ -6691,6 +6691,8 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
         default:
             break;
     }
+    // A held item stays italic whatever the highlight says (ops#127)
+    f.setItalic(held || highlightItalic);
     this->setFont(0, f);
 }
 
@@ -6952,12 +6954,11 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
 
     previousStatus = currentStatus;
 
-    // Held by a roll-back bar: italic (ops#127); set only on a change, so another italic
-    // highlight (the active object's) isn't undone
+    // Held by a roll-back bar: italic (ops#127), as is an italic highlight (the active object's)
     if (held != isHeld) {
         held = isHeld;
         QFont f = font(0);
-        f.setItalic(isHeld);
+        f.setItalic(held || highlightItalic);
         setFont(0, f);
     }
 

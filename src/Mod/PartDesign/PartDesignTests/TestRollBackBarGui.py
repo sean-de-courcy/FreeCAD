@@ -448,6 +448,78 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertEqual(names, ["Block", "BossB", "HoleC", "BossA"])
         self.assertIs(self.body.Tip, a)
 
+    def testDropOnTheBodyRowInsertsAtTheBar(self):
+        """Rolled back to boss A, hole C dropped on the Body's own row goes in at the bar, as a
+        new feature would: right after boss A, and the bar follows it; boss B stays held. One
+        undo step."""
+        block, a, b, c = self.chain()
+        self.select(a)
+        Gui.runCommand("PartDesign_RollTo")
+        processEvents()
+        self.waitForRows(["Origin", "Block", "BossA", "|", "BossB", "HoleC"])
+        undo = self.doc.UndoCount
+        self.select(c)
+        tree = self.tree()
+        rect = tree.visualItemRect(self.bodyItem())
+        self.drop(rect.center())
+        names = [o.Name for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")]
+        self.assertEqual(names, ["Block", "BossA", "HoleC", "BossB"])
+        self.assertIs(c.BaseFeature, a)
+        self.assertIs(b.BaseFeature, c)
+        self.assertIs(self.body.Tip, c)
+        self.assertTrue(self.body.holds(b))
+        self.waitForRows(["Origin", "Block", "BossA", "HoleC", "|", "BossB"])
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+
+    def freeSketch(self):
+        """A sketch at the end of the Body that no feature uses: a row of its own."""
+        return models.sketch(self.doc, "FreeSketch", models.rectangle(2, 2, 6, 6), self.body, z=20)
+
+    def testHeldSketchAndDatumAreItalic(self):
+        """A sketch and a datum plane after the bar that nothing above it uses are held (rule
+        B1): rolled back to boss A, their rows are italic as boss B and hole C are; rolled to the
+        end, none is."""
+        block, a, b, c = self.chain()
+        self.freeSketch()
+        self.body.newObject("PartDesign::Plane", "FreePlane")
+        self.doc.recompute()
+        end = ["Origin", "Block", "BossA", "BossB", "HoleC", "FreeSketch", "FreePlane", "|"]
+        self.waitForRows(end)
+        self.select(a)
+        Gui.runCommand("PartDesign_RollTo")
+        processEvents()
+        self.waitForRows(["Origin", "Block", "BossA", "|", "BossB", "HoleC", "FreeSketch", "FreePlane"])
+        held = {"BossB", "HoleC", "FreeSketch", "FreePlane"}
+        waitFor(lambda: self.italic() == held)
+        self.assertEqual(self.italic(), held)
+        self.select(a)
+        Gui.runCommand("PartDesign_RollToEnd")
+        processEvents()
+        self.waitForRows(end)
+        waitFor(lambda: not self.italic())
+        self.assertEqual(self.italic(), set())
+
+    def testSketchRowDropsThroughTheBody(self):
+        """An own sketch row dropped above boss A moves through Body.reorderObject: it lands
+        before boss A, no solid's chain or the Tip changes, in one undo step."""
+        block, a, b, c = self.chain()
+        self.freeSketch()
+        self.doc.recompute()
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "HoleC", "FreeSketch", "|"])
+        undo = self.doc.UndoCount
+        self.select(self.doc.getObject("FreeSketch"))
+        rect = self.rowRect("BossA")
+        self.drop(QtCore.QPoint(rect.center().x(), rect.top() + 1))
+        group = [o.Name for o in self.body.Group]
+        self.assertGreater(group.index("FreeSketch"), group.index("Block"))
+        self.assertLess(group.index("FreeSketch"), group.index("BossA"))
+        self.assertIs(a.BaseFeature, block)
+        self.assertIs(b.BaseFeature, a)
+        self.assertIs(c.BaseFeature, b)
+        self.assertIs(self.body.Tip, c)
+        self.waitForRows(["Origin", "Block", "FreeSketch", "BossA", "BossB", "HoleC", "|"])
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+
     def testRefusedDropShowsWhyAndChangesNothing(self):
         """The hole's sketch sits on a binder outside the Body that binds Pad2's top: dropped
         above the block, the move is refused (a cycle); the message names it, nothing changes

@@ -30,7 +30,7 @@ namespace
 {
 
 /// The Body `obj` belongs to: a PartDesign feature's own (Feature::getFeatureBody(): its _Body,
-/// else the Body whose Group holds it), else the Body whose Group holds it. A MultiTransform's
+/// else the Body whose Group holds it), else the Body whose Group holds it (found in its in-list). A MultiTransform's
 /// sub-transformation is a member too (it is added with body.newObject); it isn't a solid
 /// feature, so it doesn't pass through. The claim (continuesAfter()) and the pass-through
 /// (afterFailure()) both use this one test.
@@ -44,7 +44,15 @@ Body* bodyOf(const App::DocumentObject* obj)
             return body;
         }
     }
-    return Body::findBodyOf(obj);
+    // The Body whose Group holds it: the Group link puts the Body in its members' in-lists, so
+    // this costs O(in-list), not a walk of the document as Body::findBodyOf() (the tree asks
+    // holds() for every item on every status pass, review of fork PR 119)
+    for (auto user : obj->getInList()) {
+        if (auto body = freecad_cast<Body*>(user); body && body->hasObject(obj)) {
+            return body;
+        }
+    }
+    return nullptr;
 }
 
 /// One link of a property: the object and whether it names elements (a non-empty sub)

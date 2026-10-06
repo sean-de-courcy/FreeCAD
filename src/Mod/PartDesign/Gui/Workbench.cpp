@@ -98,7 +98,9 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
         if (selection.size() == 1 && feature && body && body->hasObject(feature)) {
             *item << "PartDesign_RollTo";
         }
-        if (selection.size() == 1 && body && body->isRolledBack()) {
+        // A selected Body is its own (getBodyFor finds no Body containing it)
+        auto rollBody = body ? body : freecad_cast<PartDesign::Body*>(feature);
+        if (selection.size() == 1 && rollBody && rollBody->isRolledBack()) {
             *item << "PartDesign_RollToEnd";
         }
 

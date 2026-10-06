@@ -28,6 +28,7 @@
 #include <unordered_map>
 
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
+#include <QApplication>
 #include <QMenu>
 
 #include <App/Application.h>
@@ -611,8 +612,21 @@ bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& o
             return false;
         }
     }
-    if (!target) {
-        // Dropped on the Body itself: to the end
+    // Dropped on the Body itself: at the bar, as a new feature is inserted (after the Tip; the
+    // bar then follows the last solid dropped), or to the end when the Tip is among them
+    App::DocumentObject* tip = body->Tip.getValue();
+    bool atBar = !target && (!tip || body->hasObject(tip)) && std::ranges::find(objs, tip) == objs.end();
+    App::DocumentObject* lastSolid = nullptr;
+    if (atBar) {
+        for (auto obj : body->Group.getValues()) {
+            if (PartDesign::Body::isSolidFeature(obj) && std::ranges::find(objs, obj) != objs.end()) {
+                lastSolid = obj;
+            }
+        }
+        target = tip;  // null: the top (after the base feature)
+        after = true;
+    }
+    else if (!target) {
         const auto& group = body->Group.getValues();
         auto last = std::find_if(group.rbegin(), group.rend(), [&objs](App::DocumentObject* obj) {
             return std::ranges::find(objs, obj) == objs.end();
@@ -641,6 +655,9 @@ bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& o
                          << (target ? Gui::Command::getObjectCmd(target) : std::string("None"))
                          << ", " << (after ? "True" : "False") << ")"
     );
+    if (atBar && lastSolid) {
+        FCMD_OBJ_CMD(body, "rollTo(" << Gui::Command::getObjectCmd(lastSolid) << ")");
+    }
     return true;
 }
 
@@ -769,9 +786,16 @@ bool ViewProviderBody::canDropObjects() const
 
 bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
 {
-    // The Body's own members are dropped among its rows to reorder them (ops#127)
+    // The Body's own members are dropped among its rows to reorder them (ops#127). A copy
+    // drag of an own solid can't be done (dropObject() refuses it), so the cursor refuses it too
     if (getObject<PartDesign::Body>()->hasObject(obj)) {
-        return true;
+#ifdef Q_OS_MACOS
+        constexpr auto copyModifier = Qt::AltModifier;
+#else
+        constexpr auto copyModifier = Qt::ControlModifier;
+#endif
+        return !PartDesign::Body::isSolidFeature(obj)
+            || !(QApplication::queryKeyboardModifiers() & copyModifier);
     }
     if (obj->isDerivedFrom<App::VarSet>()) {
         return true;
@@ -806,6 +830,13 @@ bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
 void ViewProviderBody::dropObject(App::DocumentObject* obj)
 {
     auto* body = getObject<PartDesign::Body>();
+    // An own solid reaches here only from a copy drag or a drag mixed with other objects; a
+    // reorder is a plain drag of the Body's own rows (ops#127)
+    if (body->hasObject(obj) && PartDesign::Body::isSolidFeature(obj)) {
+        throw Base::RuntimeError(
+            QT_TRANSLATE_NOOP("Exception", "Drag the feature alone, without Ctrl, to reorder it")
+        );
+    }
     if (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<App::DatumElement>()
         || obj->isDerivedFrom<App::LocalCoordinateSystem>()) {
         body->addObject(obj);
