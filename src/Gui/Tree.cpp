@@ -133,6 +133,17 @@ public:
         return item && liveBars().contains(item);
     }
 
+    /// The bar row among parent's children, or null (a few bars exist: one per Body row)
+    static QTreeWidgetItem* of(const QTreeWidgetItem* parent)
+    {
+        for (auto bar : liveBars()) {
+            if (bar->parent() == parent) {
+                return const_cast<QTreeWidgetItem*>(bar);
+            }
+        }
+        return nullptr;
+    }
+
 private:
     static std::unordered_set<const QTreeWidgetItem*>& liveBars()
     {
@@ -5108,17 +5119,13 @@ void DocumentItem::populateItem(DocumentObjectItem* item, bool refresh, bool del
 
     // The roll-back bar row (ops#127) leaves while the object rows are synchronized, so that
     // their indices are the claimed children's, and comes back at the end
-    QTreeWidgetItem* bar = nullptr;
+    QTreeWidgetItem* bar = TreeBarItem::of(item);
     bool barCurrent = false;
-    for (int k = 0; k < item->childCount(); ++k) {
-        if (item->child(k)->type() == TreeWidget::BarType) {
-            bar = item->child(k);
-            barCurrent = getTree()->currentItem() == bar;
-            bool lock = getTree()->blockSelection(true);
-            item->takeChild(k);
-            getTree()->blockSelection(lock);
-            break;
-        }
+    if (bar) {
+        barCurrent = getTree()->currentItem() == bar;
+        bool lock = getTree()->blockSelection(true);
+        item->takeChild(item->indexOfChild(bar));
+        getTree()->blockSelection(lock);
     }
 
     int i = -1;
@@ -5263,12 +5270,9 @@ void DocumentItem::updateTreeBar(DocumentObjectItem* item, QTreeWidgetItem* bar)
     // bar: a row populateItem() took out of item, else the one among item's children, if any
     int at = -1;
     if (!bar) {
-        for (int k = 0; k < item->childCount(); ++k) {
-            if (item->child(k)->type() == TreeWidget::BarType) {
-                bar = item->child(k);
-                at = k;
-                break;
-            }
+        bar = TreeBarItem::of(item);
+        if (bar) {
+            at = item->indexOfChild(bar);
         }
     }
     const auto& children = item->myData->children;
@@ -6721,15 +6725,6 @@ void DocumentObjectItem::testStatus(bool resetStatus)
         f.setStrikeOut(suppressed);
         setFont(0, f);
     }
-    // held by a roll-back bar: italic (ops#127); only on a change, so another italic highlight
-    // (the active object's) isn't undone
-    bool isHeld = previousStatus >= 0 && (previousStatus & Status::Held) != 0;
-    if (held != isHeld) {
-        held = isHeld;
-        f = font(0);
-        f.setItalic(isHeld);
-        setFont(0, f);
-    }
 }
 
 // currentStatus is the status enum built by testStatus()
@@ -6947,6 +6942,15 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
     }
 
     previousStatus = currentStatus;
+
+    // Held by a roll-back bar: italic (ops#127); set only on a change, so another italic
+    // highlight (the active object's) isn't undone
+    if (held != isHeld) {
+        held = isHeld;
+        QFont f = font(0);
+        f.setItalic(isHeld);
+        setFont(0, f);
+    }
 
     QIcon::Mode mode = QIcon::Normal;
     if (currentStatus & Status::Visible) {

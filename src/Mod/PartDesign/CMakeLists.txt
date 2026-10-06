@@ -81,6 +81,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPreviewPython.py
         PartDesignTests/TestProfileLinkDialog.py
         PartDesignTests/TestReferencePickerGui.py
+        PartDesignTests/TestRollBackBarGui.py
     )
 endif(BUILD_GUI)
 

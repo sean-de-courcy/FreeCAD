@@ -30,6 +30,7 @@
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
 #include <QMenu>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/Origin.h>
@@ -534,7 +535,7 @@ void ViewProviderBody::rollBar(App::DocumentObject* feature, bool toEnd)
         return;
     }
     App::DocumentObject* oldTip = body->Tip.getValue();
-    Gui::Command::openCommand(
+    int tid = body->getDocument()->openTransaction(
         toEnd ? QT_TRANSLATE_NOOP("Command", "Roll to end") : QT_TRANSLATE_NOOP("Command", "Roll to here")
     );
     try {
@@ -549,7 +550,7 @@ void ViewProviderBody::rollBar(App::DocumentObject* feature, bool toEnd)
         }
         App::DocumentObject* tip = body->Tip.getValue();
         if (tip == oldTip) {
-            Gui::Command::abortCommand();
+            App::GetApplication().abortTransaction(tid);
             return;
         }
         // Show the feature the bar follows (which hides the Body's other features), or none at
@@ -565,10 +566,10 @@ void ViewProviderBody::rollBar(App::DocumentObject* feature, bool toEnd)
             }
         }
         Gui::Command::updateActive();
-        Gui::Command::commitCommand();
+        App::GetApplication().commitTransaction(tid);
     }
     catch (const Base::Exception&) {
-        Gui::Command::abortCommand();
+        App::GetApplication().abortTransaction(tid);
         throw;
     }
 }

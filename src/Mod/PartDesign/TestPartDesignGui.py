@@ -42,6 +42,7 @@ from PartDesignTests.TestSuppressed import TestSuppressedStrikethrough
 from PartDesignTests.TestPreviewPython import TestPreviewPython
 from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 from PartDesignTests.TestReferencePickerGui import TestReferencePickerGui
+from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
 
 
 # timer runs this class in order to access modal dialog
