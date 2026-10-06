@@ -376,10 +376,9 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
 }
 
 // A reference with a guess record: what it holds and what it stands for, where it is, the
-// evidence and the alternatives (the report entry's when the solver ran since, the record's
-// otherwise: after a reopen). \a elements lists the elements of an expanded reference's pieces.
+// evidence and the alternatives, all from the record (so the text reads the same after a
+// reopen). \a elements lists the elements of an expanded reference's pieces.
 std::string guessedText(const ReferenceReport::Slot& slot,
-                        const ReferenceReport::Entry* entry,
                         const std::string& elements,
                         const std::string& where)
 {
@@ -417,9 +416,14 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     else if (guess.kind == "continued") {
         evidence = "tier 4";
     }
-    else if (guess.kind != "index" && guess.kind != "expanded") {
-        evidence = entry && entry->status == ReferenceReport::Status::Guessed ? entry->evidence
-                                                                            : guess.kind;
+    else if (guess.kind == "nearest") {
+        evidence = "tier 3 wide";
+    }
+    else if (guess.kind == "geometric") {
+        evidence = "tier 3 wide, no structural candidate";
+    }
+    else if (guess.kind == "piece") {
+        evidence = "the piece at the saved centre";
     }
     if (!evidence.empty()) {
         ss << ", " << evidence;
@@ -528,7 +532,7 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
         }
         std::string where = slot.property + "[" + std::to_string(slot.index)
             + (last > s ? ".." + std::to_string(slots[last].index) : std::string()) + "]";
-        append(outcome.warning, guessedText(slot, entry, elements, where));
+        append(outcome.warning, guessedText(slot, elements, where));
         s = last;
     }
     return !outcome.fatal.empty() || !outcome.warning.empty();

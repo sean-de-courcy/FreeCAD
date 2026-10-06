@@ -2426,6 +2426,16 @@ static void holdRestoredRetargetChecks(const PropertyLinkBase* prop,
     holdRetargetChecks(prop, checks);
 }
 
+// Whether pass 1 hands an index-only missing reference to the solver: the no-structure guess
+// (ops#127, N2 5.4, the user's Q3) retries it by its fingerprint alone, when both guess switches
+// are on.
+static bool retryIndexOnly()
+{
+    auto group = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Part/NamingSolver");
+    return group->GetBool("Guess", true) && group->GetBool("GuessNoStructure", true);
+}
+
 // The reference solver's pass 1 (ops#7) for one property's references: the exact lookup (in a
 // solver document, _updateElementReference() does nothing more), then an entry for each
 // reference that is missing (just now, or already) or resolved exactly. The references of
@@ -2520,9 +2530,16 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
                 continue;
             }
         }
+        bool indexOnly = false;
         if (Data::hasMissingElement(shadow.oldName.c_str())) {
             if (!Data::hasMappedElementName(shadow.newName.c_str())) {
-                continue;  // an index-only missing reference: no name to solve from (ops#123)
+                // An index-only missing reference has no name to solve from (ops#123); in a
+                // forward update the no-structure guess retries it by its fingerprint (ops#127)
+                if (batch.reverse || i >= fingerprints.size() || fingerprints[i].empty()
+                    || !retryIndexOnly()) {
+                    continue;
+                }
+                indexOnly = true;
             }
             entry.kind = App::SolverEntry::Kind::Missing;
         }
@@ -2532,12 +2549,13 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         else {
             continue;  // an index-only reference: nothing to solve
         }
-        const char* element = Data::findElementName(shadow.newName.c_str());
+        const std::string& named = indexOnly ? shadow.oldName : shadow.newName;
+        const char* element = Data::findElementName(named.c_str());
         if (!element) {
             continue;
         }
-        entry.prefix = shadow.newName.substr(0, element - shadow.newName.c_str());
-        if (entry.kind == App::SolverEntry::Kind::Missing) {
+        entry.prefix = named.substr(0, element - named.c_str());
+        if (entry.kind == App::SolverEntry::Kind::Missing && !indexOnly) {
             entry.oldName = App::bareMappedName(shadow.newName);
         }
         else {
