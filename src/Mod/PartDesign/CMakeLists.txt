@@ -80,6 +80,7 @@ if(BUILD_GUI)
         PartDesignTests/TestSuppressed.py
         PartDesignTests/TestPreviewPython.py
         PartDesignTests/TestProfileLinkDialog.py
+        PartDesignTests/TestReferencePickerGui.py
     )
 endif(BUILD_GUI)
 
