@@ -114,6 +114,11 @@ static std::unordered_map<const PropertyLinkBase*,
                           std::vector<std::pair<std::size_t, Data::ElementFingerprint>>>
     _RestoredRetargetChecks;
 
+// The reorder's re-target records in a setter (ops#127; defined with their attributes below)
+static void keepRetargetRecords(std::vector<RetargetRecord>& records,
+                                std::size_t count,
+                                const std::vector<PropertyLinkBase::ShadowSub>& shadows);
+
 // The consumer pass at open (ops#116): references whose names are of an older naming revision
 // than their producer's, in another document, re-derived from their geometry.
 // While it runs, the solver-off re-derivation has no snapshot of the shape the names were
@@ -1904,7 +1909,8 @@ void PropertyLinkSub::setValue(App::DocumentObject* lValue,
 
     // `from` (Task 2 PR 7) stays with a reference the caller passes on with its shadow (a
     // restore, a paste, the relink); a sub chosen anew (no shadow, or no shadows at all) drops it.
-    // So does a guess record (ops#127).
+    // So do a guess record and the reorder's re-target record (ops#127).
+    keepRetargetRecords(_Retargets, subs.size(), shadows);
     if (shadows.size() != subs.size() || _ExpandedFrom.size() != subs.size()) {
         _ExpandedFrom.assign(subs.size(), std::string());
     }
@@ -2646,6 +2652,7 @@ void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& reso
     auto fingerprints = _Fingerprints;
     auto froms = _ExpandedFrom;
     auto guesses = _Guesses;
+    auto retargets = _Retargets;
     std::vector<int> firstNew;
     std::vector<int> countNew;
     bool written = rebuildSubList(resolutions,
@@ -2655,7 +2662,8 @@ void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& reso
                                   froms,
                                   firstNew,
                                   countNew,
-                                  &guesses);
+                                  &guesses,
+                                  &retargets);
     bool changed = context.touched;
     if (written) {
         if (!changed && context.notify) {
@@ -2669,6 +2677,7 @@ void PropertyLinkSub::applyResolutions(const std::vector<SolverResolution>& reso
         _Fingerprints.swap(fingerprints);
         _ExpandedFrom.swap(froms);
         _Guesses.swap(guesses);
+        _Retargets.swap(retargets);
         if (moved) {
             _mapped = remapSubIndices(_mapped, firstNew, countNew);
             ReferenceReport::remap(this, firstNew, countNew);
@@ -2966,6 +2975,63 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
 #define ATTR_SHADOWED "shadowed"
 #define ATTR_FINGERPRINT "fp"
 #define ATTR_FROM "from"
+#define ATTR_RETARGET_TARGET "rt"
+#define ATTR_RETARGET_ORIGINAL "rto"
+#define ATTR_RETARGET_FINGERPRINT "rtfp"
+
+// The reorder's re-target record of reference i (ops#127, notes/reorder-rollback-design.md 3.4),
+// written in every document: where the reference was and what it named there.
+static void writeRetargetRecord(Base::Writer& writer,
+                                const std::vector<RetargetRecord>& records,
+                                std::size_t i)
+{
+    if (i >= records.size() || records[i].empty()) {
+        return;
+    }
+    const auto& record = records[i];
+    writer.Stream() << "\" " ATTR_RETARGET_TARGET "=\""
+                    << Base::Persistence::encodeAttribute(record.target)
+                    << "\" " ATTR_RETARGET_ORIGINAL "=\""
+                    << Base::Persistence::encodeAttribute(record.origText());
+    if (!record.origFp.empty()) {
+        writer.Stream() << "\" " ATTR_RETARGET_FINGERPRINT "=\""
+                        << Base::Persistence::encodeAttribute(record.origFp);
+    }
+}
+
+// The record saved on the current element (see writeRetargetRecord()), empty if none. An
+// imported object's name is mapped as the reader maps it.
+static RetargetRecord readRetargetRecord(Base::XMLReader& reader)
+{
+    if (!reader.hasAttribute(ATTR_RETARGET_TARGET)) {
+        return {};
+    }
+    auto attribute = [&](const char* name) {
+        return std::string(reader.hasAttribute(name) ? reader.getAttribute<const char*>(name) : "");
+    };
+    std::string target = reader.getName(reader.getAttribute<const char*>(ATTR_RETARGET_TARGET));
+    return RetargetRecord::fromAttributes(target,
+                                          attribute(ATTR_RETARGET_ORIGINAL),
+                                          attribute(ATTR_RETARGET_FINGERPRINT));
+}
+
+// A setter's rule for the re-target records (ops#127), as for `from`: a reference passed on with
+// its shadow (a restore, a paste, the re-target itself) keeps its record; a sub chosen anew (no
+// shadow, or no shadows at all: a re-pick) ends it.
+static void keepRetargetRecords(std::vector<RetargetRecord>& records,
+                                std::size_t count,
+                                const std::vector<PropertyLinkBase::ShadowSub>& shadows)
+{
+    if (shadows.size() != count || records.size() != count) {
+        records.assign(count, RetargetRecord());
+        return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        if (shadows[i].oldName.empty() && shadows[i].newName.empty()) {
+            records[i] = RetargetRecord();
+        }
+    }
+}
 #define ATTR_SHADOW "shadow"
 #define ATTR_MAPPED "mapped"
 
@@ -3065,6 +3131,7 @@ void PropertyLinkSub::Save(Base::Writer& writer) const
         if (saveFingerprints) {
             writeGuessRecord(writer, _Guesses, i);
         }
+        writeRetargetRecord(writer, _Retargets, i);
         writeRetargetCheck(writer, this, _pcLinkSub, _cSubList[i], shadow);
         writer.Stream() << "\"/>" << endl;
     }
@@ -3101,6 +3168,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
     std::vector<std::string> fingerprints(count);
     std::vector<std::string> froms(count);
     std::vector<GuessRecord> guesses(count);
+    std::vector<RetargetRecord> retargets(count);
     std::vector<std::pair<std::size_t, Data::ElementFingerprint>> checks;
     bool restoreLabel = false;
     // Sub may store '.' separated object names, so be aware of the possible mapping when import
@@ -3109,6 +3177,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         if (reader.hasAttribute(ATTR_FINGERPRINT)) {
             fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
         }
+        retargets[i] = readRetargetRecord(reader);
         readRetargetCheck(reader, i, checks);
         if (reader.hasAttribute(ATTR_FROM)) {
             froms[i] = reader.getAttribute<const char*>(ATTR_FROM);
@@ -3144,6 +3213,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         _Fingerprints = std::move(fingerprints);
         _ExpandedFrom = std::move(froms);
         _Guesses = std::move(guesses);
+        _Retargets = std::move(retargets);
     }
     else {
         setValue(nullptr);
@@ -3253,6 +3323,7 @@ Property* PropertyLinkSub::Copy() const
     p->_Fingerprints = _Fingerprints;
     p->_ExpandedFrom = _ExpandedFrom;
     p->_Guesses = _Guesses;
+    p->_Retargets = _Retargets;
     return p;
 }
 
@@ -3272,6 +3343,28 @@ void PropertyLinkSub::Paste(const Property& from)
     _ExpandedFrom.resize(_cSubList.size());
     _Guesses = link._Guesses;
     _Guesses.resize(_cSubList.size());
+    // So does the reorder's re-target record (ops#127)
+    _Retargets = link._Retargets;
+    _Retargets.resize(_cSubList.size());
+}
+
+void PropertyLinkSub::setRetargets(std::vector<RetargetRecord>&& records)
+{
+    aboutToSetValue();
+    _Retargets = std::move(records);
+    _Retargets.resize(_cSubList.size());
+    hasSetValue();
+}
+
+void PropertyLinkSub::setElementFingerprint(std::size_t index, const std::string& fingerprint)
+{
+    if (index >= _cSubList.size()) {
+        return;
+    }
+    aboutToSetValue();
+    _Fingerprints.resize(_cSubList.size());
+    _Fingerprints[index] = fingerprint;
+    hasSetValue();
 }
 
 void PropertyLinkSub::getLinks(std::vector<App::DocumentObject*>& objs,
@@ -3432,6 +3525,7 @@ void PropertyLinkSubList::setSize(int newSize)
     _lValueList.resize(newSize);
     _lSubList.resize(newSize);
     _ShadowSubList.resize(newSize);
+    _Retargets.clear();
 }
 
 int PropertyLinkSubList::getSize() const
@@ -3592,6 +3686,8 @@ void PropertyLinkSubList::setValues(std::vector<DocumentObject*>&& lValue,
             }
         }
     }
+    // The reorder's re-target records (ops#127) stay with references passed on with their shadows
+    keepRetargetRecords(_Retargets, lSubNames.size(), ShadowSubList);
     _lValueList = std::move(lValue);
     _lSubList = std::move(lSubNames);
     if (ShadowSubList.size() == _lSubList.size()) {
@@ -4056,8 +4152,11 @@ std::vector<GuessRecord> PropertyLinkSubList::getElementGuesses() const
 void PropertyLinkSubList::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
     if (!feature) {
+        // A value set without shadows: the subs are chosen anew, so their re-target records end
+        // (ops#127)
         _ShadowSubList.clear();
         _Guesses.clear();  // a sub set anew (ops#127)
+        _Retargets.clear();
         unregisterElementReference();
     }
     _ShadowSubList.resize(_lSubList.size());
@@ -4169,6 +4268,7 @@ void PropertyLinkSubList::Save(Base::Writer& writer) const
         if (saveFingerprints) {
             writeGuessRecord(writer, _Guesses, i);
         }
+        writeRetargetRecord(writer, _Retargets, i);
         writeRetargetCheck(writer, this, obj, _lSubList[i], shadow);
         writer.Stream() << "\"/>" << endl;
     }
@@ -4194,6 +4294,8 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
     fingerprints.reserve(count);
     std::vector<GuessRecord> guesses;
     guesses.reserve(count);
+    std::vector<RetargetRecord> retargets;
+    retargets.reserve(count);
     DocumentObject* father = freecad_cast<DocumentObject*>(getContainer());
     App::Document* document = father ? father->getDocument() : nullptr;
     std::vector<int> mapped;
@@ -4215,6 +4317,7 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
                                           ? reader.getAttribute<const char*>(ATTR_FINGERPRINT)
                                           : "");
             guesses.push_back(readGuessRecord(reader));
+            retargets.push_back(readRetargetRecord(reader));
             auto& shadow = shadows.back();
             shadow.oldName = importSubName(reader, reader.getAttribute<const char*>("sub"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -4251,6 +4354,9 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
     }
     if (guesses.size() == _lSubList.size()) {
         _Guesses = std::move(guesses);
+    }
+    if (retargets.size() == _lSubList.size()) {
+        _Retargets = std::move(retargets);
     }
     _mapped.swap(mapped);
 }
@@ -4453,6 +4559,10 @@ Property* PropertyLinkSubList::Copy() const
     p->_lSubList = _lSubList;
     p->_ShadowSubList = _ShadowSubList;
     p->_Guesses = _Guesses;
+    // Undo and redo restore a property through Paste: the fingerprints and the reorder's
+    // re-target records come back with their references (ops#127)
+    p->_Fingerprints = _Fingerprints;
+    p->_Retargets = _Retargets;
     return p;
 }
 
@@ -4468,6 +4578,30 @@ void PropertyLinkSubList::Paste(const Property& from)
     if (link._Guesses.size() == _lSubList.size()) {
         _Guesses = link._Guesses;
     }
+    if (link._Fingerprints.size() == _lSubList.size()) {
+        _Fingerprints = link._Fingerprints;
+    }
+    _Retargets = link._Retargets;
+    _Retargets.resize(_lSubList.size());
+}
+
+void PropertyLinkSubList::setRetargets(std::vector<RetargetRecord>&& records)
+{
+    aboutToSetValue();
+    _Retargets = std::move(records);
+    _Retargets.resize(_lSubList.size());
+    hasSetValue();
+}
+
+void PropertyLinkSubList::setElementFingerprint(std::size_t index, const std::string& fingerprint)
+{
+    if (index >= _lSubList.size()) {
+        return;
+    }
+    aboutToSetValue();
+    _Fingerprints.resize(_lSubList.size());
+    _Fingerprints[index] = fingerprint;
+    hasSetValue();
 }
 
 unsigned int PropertyLinkSubList::getMemSize() const
@@ -5536,6 +5670,8 @@ void PropertyXLink::setSubValues(std::vector<std::string>&& subs, std::vector<Sh
             }
         }
     }
+    // The reorder's re-target records (ops#127) stay with references passed on with their shadows
+    keepRetargetRecords(_Retargets, subs.size(), shadows);
     _SubList = std::move(subs);
     _ShadowSubList.clear();
     if (shadows.size() == _SubList.size()) {
@@ -6016,6 +6152,7 @@ void PropertyXLink::Save(Base::Writer& writer) const
         if (saveFingerprints) {
             writeGuessRecord(writer, _Guesses, i);
         }
+        writeRetargetRecord(writer, _Retargets, i);
         writeRetargetCheck(writer, this, _pcLink, _SubList[i], _ShadowSubList[i]);
     };
     if (_SubList.empty()) {
@@ -6125,6 +6262,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
     std::vector<ShadowSub> shadows;
     std::vector<std::string> fingerprints;
     std::vector<GuessRecord> guesses;
+    std::vector<RetargetRecord> retargets;
     std::vector<int> mapped;
     std::vector<std::pair<std::size_t, Data::ElementFingerprint>> checks;
     bool restoreLabel = false;
@@ -6133,6 +6271,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
             mapped.push_back(0);
         }
         readRetargetCheck(reader, 0, checks);
+        retargets.push_back(readRetargetRecord(reader));
         subs.emplace_back();
         auto& subname = subs.back();
         shadows.emplace_back();
@@ -6160,12 +6299,14 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         shadows.resize(count);
         fingerprints.resize(count);
         guesses.resize(count);
+        retargets.resize(count);
         for (int i = 0; i < count; i++) {
             reader.readElement("Sub");
             if (reader.hasAttribute(ATTR_FINGERPRINT)) {
                 fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
             }
             guesses[i] = readGuessRecord(reader);
+            retargets[i] = readRetargetRecord(reader);
             readRetargetCheck(reader, i, checks);
             shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -6206,6 +6347,9 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
     }
     if (guesses.size() == _SubList.size()) {
         _Guesses = std::move(guesses);
+    }
+    if (retargets.size() == _SubList.size()) {
+        _Retargets = std::move(retargets);
     }
 }
 
@@ -6285,6 +6429,7 @@ void PropertyXLink::copyTo(PropertyXLink& other,
         other._ShadowSubList = _ShadowSubList;
         other._Fingerprints = _Fingerprints;
         other._Guesses = _Guesses;
+        other._Retargets = _Retargets;
     }
     other._Flags = _Flags;
 }
@@ -6330,7 +6475,29 @@ void PropertyXLink::Paste(const Property& from)
     if (other._Guesses.size() == _SubList.size()) {
         _Guesses = other._Guesses;  // undo and redo restore a guess with its record (ops#127)
     }
+    // The reorder's re-target records come back with their references (ops#127)
+    _Retargets = other._Retargets;
+    _Retargets.resize(_SubList.size());
     setFlag(LinkAllowPartial, other.testFlag(LinkAllowPartial));
+}
+
+void PropertyXLink::setRetargets(std::vector<RetargetRecord>&& records)
+{
+    aboutToSetValue();
+    _Retargets = std::move(records);
+    _Retargets.resize(_SubList.size());
+    hasSetValue();
+}
+
+void PropertyXLink::setElementFingerprint(std::size_t index, const std::string& fingerprint)
+{
+    if (index >= _SubList.size()) {
+        return;
+    }
+    aboutToSetValue();
+    _Fingerprints.resize(_SubList.size());
+    _Fingerprints[index] = fingerprint;
+    hasSetValue();
 }
 
 bool PropertyXLink::supportXLink(const App::Property* prop)
@@ -7226,6 +7393,19 @@ Property* PropertyXLinkSubList::Copy() const
         l.copyTo(p->_Links.back());
     }
     return p;
+}
+
+void PropertyXLinkSubList::editLink(std::size_t link,
+                                    const std::function<void(PropertyXLinkSub&)>& edit)
+{
+    if (link >= _Links.size()) {
+        return;
+    }
+    aboutToSetValue();
+    auto it = _Links.begin();
+    std::advance(it, link);
+    edit(*it);
+    hasSetValue();
 }
 
 void PropertyXLinkSubList::Paste(const Property& from)

@@ -451,7 +451,8 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                     std::vector<std::string>& froms,
                     std::vector<int>& firstNew,
                     std::vector<int>& countNew,
-                    std::vector<GuessRecord>* guesses)
+                    std::vector<GuessRecord>* guesses,
+                    std::vector<RetargetRecord>* retargets)
 {
     using Status = SolverResolution::Status;
     const std::size_t count = subs.size();
@@ -461,6 +462,9 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
     std::vector<GuessRecord> noGuesses;
     std::vector<GuessRecord>& records = guesses ? *guesses : noGuesses;
     records.resize(count);
+    if (retargets) {
+        retargets->resize(count);
+    }
     std::vector<const SolverResolution*> resolutionOf(count, nullptr);
     for (const auto& resolution : resolutions) {
         if (resolution.status != Status::None && resolution.index >= 0
@@ -493,6 +497,10 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
     std::vector<std::string> newSubs, newFingerprints, newFroms;
     std::vector<PropertyLinkBase::ShadowSub> newShadows;
     std::vector<GuessRecord> newRecords;
+    // The reorder's re-target record (ops#127) stays with its reference through every
+    // resolution, and with each piece of an expansion
+    std::vector<RetargetRecord> newRetargets;
+    std::size_t current = 0;
     auto add = [&](const std::string& sub,
                    const PropertyLinkBase::ShadowSub& shadow,
                    const std::string& fingerprint,
@@ -503,11 +511,15 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
         newFingerprints.push_back(fingerprint);
         newFroms.push_back(from);
         newRecords.push_back(record);
+        if (retargets) {
+            newRetargets.push_back((*retargets)[current]);
+        }
     };
     firstNew.assign(count, 0);
     countNew.assign(count, 0);
     bool changed = false;
     for (std::size_t i = 0; i < count; ++i) {
+        current = i;
         firstNew[i] = static_cast<int>(newSubs.size());
         const SolverResolution* resolution = resolutionOf[i];
         if (!resolution) {
@@ -570,6 +582,9 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
     fingerprints.swap(newFingerprints);
     froms.swap(newFroms);
     records.swap(newRecords);
+    if (retargets) {
+        retargets->swap(newRetargets);
+    }
     return changed;
 }
 

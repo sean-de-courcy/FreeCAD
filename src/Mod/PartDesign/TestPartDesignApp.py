@@ -82,3 +82,7 @@ from PartDesignTests.TestFailurePassThrough import (  # FreeCAD-CH, ops#126
     TestFailurePassThroughV2,
     TestFailurePassThroughV2s,
 )
+from PartDesignTests.TestBodyReorder import (  # FreeCAD-CH, ops#127
+    TestBodyReorderV2,
+    TestBodyReorderV2s,
+)

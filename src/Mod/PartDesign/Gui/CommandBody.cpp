@@ -736,6 +736,7 @@ void CmdPartDesignMoveTip::activated(int iMsg)
     // TODO: Hide all datum features after the Tip feature? But the user might have already hidden
     // some and wants to see others, so we would have to remember their state somehow
     updateActive();
+    commitCommand();
 }
 
 bool CmdPartDesignMoveTip::isActive()
@@ -1112,93 +1113,37 @@ void CmdPartDesignMoveFeatureInTree::activated(int iMsg)
     // first object is the beginning of the body
     App::DocumentObject* target = index != 0 ? model[index - 1] : nullptr;
 
-    openCommand(QT_TRANSLATE_NOOP("Command", "Move a feature inside body"));
-
-    App::DocumentObject* lastObject = target;
+    // One step through the Body (ops#127): the chain, the references that follow a feature's base,
+    // the re-target rule and the Tip are the Body's; a refused order (a dependency cycle) changes
+    // nothing
+    std::vector<App::DocumentObject*> moved;
     for (auto feat : features) {
-        if (feat == target) {
-            continue;
-        }
-
-        // Remove and re-insert the feature to/from the Body, preserving their order.
-        // TODO: if tip was moved the new position of tip is quite undetermined (2015-08-07, Fat-Zer)
-        // TODO: warn the user if we are moving an object to some place before the object's link
-        // (2015-08-07, Fat-Zer)
-        FCMD_OBJ_CMD(body, "removeObject(" << getObjectCmd(feat) << ")");
-        FCMD_OBJ_CMD(
-            body,
-            "insertObject(" << getObjectCmd(feat) << "," << getObjectCmd(lastObject) << ", True)"
-        );
-
-        lastObject = feat;
-    }
-
-    // Dependency order check.
-    // We must make sure the resulting objects of PartDesign::Feature do not
-    // depend on later objects
-    std::vector<App::DocumentObject*> bodyFeatures;
-    std::map<App::DocumentObject*, size_t> orders;
-    for (auto obj : body->Group.getValues()) {
-        if (obj->isDerivedFrom<PartDesign::Feature>()) {
-            orders.emplace(obj, bodyFeatures.size());
-            bodyFeatures.push_back(obj);
+        if (feat != target) {
+            moved.push_back(feat);
         }
     }
-    bool failed = false;
-    std::ostringstream ss;
-    for (size_t i = 0; i < bodyFeatures.size(); ++i) {
-        auto feat = bodyFeatures[i];
-        for (auto obj : feat->getOutList()) {
-            if (obj->isDerivedFrom<PartDesign::Feature>()) {
-                continue;
-            }
-            for (auto dep : App::Document::getDependencyList({obj})) {
-                auto it = orders.find(dep);
-                if (it != orders.end() && it->second > i) {
-                    ss << feat->Label.getValue() << ", " << obj->Label.getValue() << " -> "
-                       << it->first->Label.getValue();
-                    if (!failed) {
-                        failed = true;
-                    }
-                    else {
-                        ss << std::endl;
-                    }
-                }
-            }
-        }
-    }
-    if (failed) {
-        QMessageBox::critical(
-            nullptr,
-            QObject::tr("Dependency violation"),
-            QObject::tr("Early feature must not depend on later feature.\n\n")
-                + QString::fromUtf8(ss.str().c_str())
-        );
-        abortCommand();
+    if (moved.empty()) {
         return;
     }
+    std::ostringstream objects;
+    objects << "[";
+    for (auto feat : moved) {
+        objects << getObjectCmd(feat) << ",";
+    }
+    objects << "]";
 
-    // If the selected objects have been moved after the current tip then ask the
-    // user if they want the last object to be the new tip.
-    // Only do this for features that can hold a tip (not for e.g. datums)
-    if (lastObject != target && body->Tip.getValue() == target
-        && lastObject->isDerivedFrom<PartDesign::Feature>()) {
-        QMessageBox msgBox(Gui::getMainWindow());
-        msgBox.setIcon(QMessageBox::Question);
-        msgBox.setWindowTitle(qApp->translate("PartDesign_MoveFeatureInTree", "Move Tip"));
-        msgBox.setText(qApp->translate(
-            "PartDesign_MoveFeatureInTree",
-            "The moved feature appears after the currently set tip."
-        ));
-        msgBox.setInformativeText(
-            qApp->translate("PartDesign_MoveFeatureInTree", "Set tip to last feature?")
-        );
-        msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
-        msgBox.setDefaultButton(QMessageBox::No);
-        int ret = msgBox.exec();
-        if (ret == QMessageBox::Yes) {
-            FCMD_OBJ_CMD(body, "Tip = " << getObjectCmd(lastObject));
-        }
+    openCommand(QT_TRANSLATE_NOOP("Command", "Move a feature inside body"));
+    try {
+        FCMD_OBJ_CMD(body,
+                     "reorderObject(" << objects.str() << ", " << getObjectCmd(target)
+                                      << ", True)");
+    }
+    catch (Base::Exception& e) {
+        abortCommand();
+        QMessageBox::critical(nullptr,
+                              QObject::tr("Dependency violation"),
+                              QString::fromUtf8(e.what()));
+        return;
     }
 
     updateActive();
