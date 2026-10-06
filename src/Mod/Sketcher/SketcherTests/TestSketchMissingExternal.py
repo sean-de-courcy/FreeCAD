@@ -144,9 +144,8 @@ class TestSketchMissingExternal(unittest.TestCase):
         self.assertEqual(self.sketch.ExternalGeometry, [(self.pad, ("?" + self.topEdge,))])
         self.assertFrozenAtX20()
 
-    def testAddingExternalGeometryKeepsTheMissingLink(self):
-        """Adding another external edge rebuilds the external geometry outside a recompute: the
-        missing link and its frozen geometry stay (it was erased there too)."""
+    def addFrontEdge(self):
+        """After the edit, another external edge, the pad's top front edge, which resolves."""
         self.replaceRightSide()
         frontEdge = edge_between(self.pad.Shape, (0, 0, 10), (20, 0, 10))
         self.sketch.addExternal(self.pad.Name, frontEdge)
@@ -155,11 +154,19 @@ class TestSketchMissingExternal(unittest.TestCase):
             [(self.pad, ("?" + self.topEdge, frontEdge))],
         )
         self.doc.recompute()
-        self.assertFalse(self.sketch.isValid())
+
+    def assertBothLinesKept(self):
         lines = external_lines(self.sketch)
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[1][0].isEqual(V(0, 0, 0), TOL) or lines[1][1].isEqual(V(0, 0, 0), TOL))
         self.assertAlmostEqual((lines[1][1] - lines[1][0]).Length, 20, delta=TOL)
+
+    def testAddingExternalGeometryKeepsTheMissingLink(self):
+        """Adding another external edge rebuilds the external geometry outside a recompute: the
+        missing link and its frozen geometry stay (it was erased there too)."""
+        self.addFrontEdge()
+        self.assertFalse(self.sketch.isValid())
+        self.assertBothLinesKept()
 
     def testFaceLinkNamesEachGeometry(self):
         """A missing face projected onto a parallel plane named its four edges."""
@@ -198,6 +205,18 @@ class TestSketchMissingExternalSolver(TestSketchMissingExternal):
 
     def testFaceLinkNamesEachGeometry(self):
         self.skipTest("the solver's recompute check names the break, not the sketch")
+
+    def testAddingExternalGeometryKeepsTheMissingLink(self):
+        """With the solver, one of the two links still resolving, the sketch computes with a
+        warning naming the missing one (ops#127, Onshape's rule); the missing link and its
+        frozen geometry stay."""
+        self.addFrontEdge()
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+        self.assertIn("Warning", self.sketch.State)
+        message = self.sketch.getStatusString()
+        self.assertIn("ExternalGeometry[0]", message)
+        self.assertTrue(message.endswith("computed on 1 of 2 edges"), message)
+        self.assertBothLinesKept()
 
 
 class TestSketchMissingExternalReturns(unittest.TestCase):
