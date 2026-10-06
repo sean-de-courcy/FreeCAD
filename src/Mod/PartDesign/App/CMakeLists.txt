@@ -19,6 +19,8 @@ set(PartDesign_LIBS
 SET(Features_SRCS
     Feature.cpp
     Feature.h
+    FailureContinuation.cpp
+    FailureContinuation.h
     FeatureSolid.cpp
     FeatureSolid.h
     Body.cpp

@@ -86,6 +86,7 @@
 #include "NameTable.h"
 #include "ElementReferences.h"
 #include "NamingRevision.h"
+#include "RecomputeContinuation.h"
 #include "StringHasher.h"
 #include "Transactions.h"
 
@@ -3351,8 +3352,11 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
         return 0;
     }
 
-    // delete recompute log
-    d->clearRecomputeLog();
+    // Set the log aside: the texts of failures that this recompute doesn't re-run go back after
+    // it (ops#126)
+    decltype(d->_RecomputeLog) carried;
+    carried.swap(d->_RecomputeLog);
+    auto continuation = recomputeContinuation();
 
     Base::TimeTracker tracker("Document::recompute");
     std::optional<Base::ObjectStatusLocker<Document::Status, Document>> recomputingStatus;
@@ -3416,7 +3420,34 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 if (obj->mustRecompute()) {
                     doRecompute = true;
                     ++objectCount;
-                    int res = _recomputeFeature(obj);
+                    int res = 0;
+                    if (continuation) {
+                        // An input that the rule's failure left in error, in this recompute or
+                        // before: run this object, fail it or skip it (ops#126)
+                        auto verdict = AfterInputFailure::Run;
+                        std::string why;
+                        for (auto in : obj->getOutList()) {
+                            if (!in->isError() || !continuation->continuesAfter(in)) {
+                                continue;
+                            }
+                            verdict = continuation->decide(in, obj, why);
+                            if (verdict != AfterInputFailure::Run) {
+                                break;
+                            }
+                        }
+                        if (verdict == AfterInputFailure::Skip) {
+                            obj->getInListEx(filter, true);
+                            filter.insert(obj);
+                            continue;
+                        }
+                        if (verdict == AfterInputFailure::Fail) {
+                            d->addRecomputeLog(why, obj);
+                            res = 1;
+                        }
+                    }
+                    if (res == 0) {
+                        res = _recomputeFeature(obj);
+                    }
                     if (res != 0) {
                         if (hasError) {
                             *hasError = true;
@@ -3424,6 +3455,18 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         if (res < 0) {
                             passes = 2;
                             break;
+                        }
+                        if (continuation && continuation->continuesAfter(obj)) {
+                            // The error stays on obj, and its output is what the rule wrote
+                            // (PartDesign: the pass-through). It is purged like a success: its
+                            // dependants run and are judged above (ops#126)
+                            continuation->afterFailure(obj);
+                            signalRecomputedObject(*obj);
+                            obj->purgeTouched();
+                            for (auto inObj : obj->getInList()) {
+                                inObj->enforceRecompute();
+                            }
+                            continue;
                         }
                         // if something happened filter all object in its
                         // inListRecursive from the queue then proceed
@@ -3482,6 +3525,23 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     tracker.checkpoint("Recompute");
 
+    // The objects that failed in this recompute; then the carried texts of the rule's failures
+    // that weren't re-run go back, so the tooltip and the saved file keep them (ops#126)
+    std::set<const DocumentObject*> failedNow;
+    for (const auto& entry : d->_RecomputeLog) {
+        failedNow.insert(entry.first);
+    }
+    if (continuation && !carried.empty()) {
+        std::set<const DocumentObject*> present(d->objectArray.begin(), d->objectArray.end());
+        for (auto& [object, entry] : carried) {
+            if (present.contains(object) && !failedNow.contains(object) && object->isError()
+                && continuation->continuesAfter(object)) {
+                d->_RecomputeLog.emplace(object, std::move(entry));
+            }
+        }
+    }
+    carried.clear();
+
     for (auto obj : topoSortedObjects) {
         if (!obj->isAttachedToDocument()) {
             continue;
@@ -3505,10 +3565,10 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // References re-derived from geometry in this recompute (a naming migration, ops#103)
     reportReferenceMigration();
 
-    if (!d->_RecomputeLog.empty()) {
+    if (!failedNow.empty()) {
         if (!testStatus(Status::IgnoreErrorOnRecompute)) {
             for (auto it : topoSortedObjects) {
-                if (it->isError()) {
+                if (it->isError() && failedNow.contains(it)) {
                     const char* text = getErrorDescription(it);
                     if (text) {
                         Base::Console().error("%s: %s\n", it->Label.getValue(), text);
@@ -3793,7 +3853,13 @@ bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
         recompute({feature}, true, &hasError);
         return !hasError;
     }
-    _recomputeFeature(feature);
+    if (_recomputeFeature(feature) > 0) {
+        // A failure the rule continues after writes its output as in a recompute (ops#126)
+        auto continuation = recomputeContinuation();
+        if (continuation && continuation->continuesAfter(feature)) {
+            continuation->afterFailure(feature);
+        }
+    }
     signalRecomputedObject(*feature);
     return feature->isValid();
 }

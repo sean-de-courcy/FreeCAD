@@ -413,6 +413,12 @@ App::DocumentObjectExecReturn* Body::execute()
         tipShape = static_cast<Part::Feature*>(tip)->Shape.getShape();
 
         if (tipShape.getShape().IsNull()) {
+            if (tip->isError()) {
+                // A failed first feature passed an empty base through: the Body is empty and
+                // valid (ops#126)
+                Shape.setValue(Part::TopoShape());
+                return App::DocumentObject::StdReturn;
+            }
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Tip shape is empty")
             );
