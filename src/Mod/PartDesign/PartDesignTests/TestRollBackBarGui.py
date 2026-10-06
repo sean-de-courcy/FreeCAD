@@ -60,6 +60,20 @@ def faceName(shape, test):
     raise AssertionError("no such face")
 
 
+class Raiser:
+    """A PartDesign::FeaturePython proxy that passes its base on, or raises while `fail` is set."""
+
+    fail = False
+
+    def __init__(self, obj):
+        obj.Proxy = self
+
+    def execute(self, obj):
+        if Raiser.fail:
+            raise RuntimeError("raised in the tail")
+        obj.Shape = obj.BaseFeature.Shape
+
+
 class TestRollBackBarGui(unittest.TestCase):
     def setUp(self):
         if not App.GuiUp or Gui.getMainWindow() is None:
@@ -271,19 +285,62 @@ class TestRollBackBarGui(unittest.TestCase):
         self.dragLeave()
         return accepted
 
-    def closeModalSoon(self):
-        """Records the text of the next modal dialog and closes it, so a refusal can't block."""
+    def answerModalSoon(self, button=None, tries=100):
+        """Records the text of the next modal dialog and answers it with button (a QMessageBox
+        standard button), else closes it, so a question or refusal can't block. Gives up after
+        tries * 50 ms."""
+        left = [tries]
 
-        def close():
+        def answer():
             widget = QtGui.QApplication.activeModalWidget()
             if widget is None:
-                QtCore.QTimer.singleShot(50, close)
+                left[0] -= 1
+                if left[0] > 0:
+                    QtCore.QTimer.singleShot(50, answer)
                 return
             texts = [widget.text()] if hasattr(widget, "text") else []
             self.modal.append(" ".join(texts))
-            widget.reject()
+            chosen = widget.button(button) if button is not None and hasattr(widget, "button") else None
+            if chosen:
+                chosen.click()
+            else:
+                widget.reject()
+
+        QtCore.QTimer.singleShot(50, answer)
+
+    def closeModalSoon(self):
+        self.answerModalSoon()
+
+    def closePopupSoon(self, tries=40):
+        """Closes the next popup (a context menu), recording its class in self.popups. Gives up
+        after tries * 50 ms."""
+        self.popups = []
+        left = [tries]
+
+        def close():
+            popup = QtGui.QApplication.activePopupWidget()
+            if popup is None:
+                left[0] -= 1
+                if left[0] > 0:
+                    QtCore.QTimer.singleShot(50, close)
+                return
+            self.popups.append(type(popup).__name__)
+            popup.close()
 
         QtCore.QTimer.singleShot(50, close)
+
+    LOCKED = "a dialog or an edit is open"
+
+    def statusLabels(self):
+        return Gui.getMainWindow().statusBar().findChildren(QtGui.QLabel)
+
+    def clearLockMessage(self):
+        for label in self.statusLabels():
+            if self.LOCKED in label.text():
+                label.setText("")
+
+    def lockMessageShown(self):
+        return any(self.LOCKED in label.text() for label in self.statusLabels())
 
     # -- the bar row (5.1) -----------------------------------------------------------------------
 
@@ -772,6 +829,258 @@ class TestRollBackBarGui(unittest.TestCase):
         self.assertEqual(self.body.Tip.Name, "BossB")
         self.assertTrue(self.body.isRolledBack())
         self.assertEqual(self.held(), {"HoleC"})
+
+    def testSavingWhileClosingWithThePanelOpen(self):
+        """Rolled back to boss B, boss A made 8 high in its dialog, the window closed (the
+        document's canClose) and the document saved there, during the edit: it reopens rolled
+        back to boss B (the edit's point is not saved), boss A 8 high."""
+        import os
+        import tempfile
+
+        block, a, b, c = self.chain()
+        self.body.rollTo(b)
+        self.doc.recompute()
+        bodyName, docName = self.body.Name, self.doc.Name
+        path = os.path.join(tempfile.mkdtemp(), "SavedInEdit.FCStd")
+        self.doc.saveAs(path)
+        self.openEdit(a)
+        self.setLength(8)
+        self.assertTrue(self.body.isRolledBack())
+        self.answerModalSoon(QtGui.QMessageBox.Save)
+        Gui.runCommand("Std_CloseActiveWindow")
+        waitFor(lambda: docName not in App.listDocuments())
+        self.assertNotIn(docName, App.listDocuments())
+        self.assertEqual(len(self.modal), 1, "no save question")
+        self.assertFalse(Gui.Control.activeDialog())
+        self.doc = App.openDocument(path)
+        self.body = self.doc.getObject(bodyName)
+        self.assertEqual(self.body.Tip.Name, "BossB")
+        self.assertTrue(self.body.isRolledBack())
+        self.assertEqual(self.held(), {"HoleC"})
+        self.assertAlmostEqual(self.doc.getObject("BossA").Length.Value, 8, places=6)
+
+    def testTheBarIsLockedDuringAnEdit(self):
+        """In Final (no edit point) the bar's keys, drag and menu don't move it while boss A's
+        dialog is open, and the roll commands are off: the status bar says why, and Cancel still
+        takes the dialog's change back, leaving no undo step."""
+        block, a, b, c = self.chain()
+        self.waitForRows(self.END)
+        undo = self.doc.UndoCount
+        dialog = self.openEdit(a)
+        self.setFinal(True)
+        self.setLength(8)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 18, places=6)
+        self.waitForRows(self.END)
+
+        tree = self.tree()
+        tree.setFocus()
+        tree.setCurrentItem(self.barItem(), 0, QtCore.QItemSelectionModel.NoUpdate)
+        processEvents()
+        self.clearLockMessage()
+        self.key(QtCore.Qt.Key_Up)
+        self.assertIs(self.body.Tip, c)
+        self.assertTrue(self.lockMessageShown(), "keys")
+
+        self.clearLockMessage()
+        start = self.rowRect("|").center()
+        target = self.rowRect("BossA")
+        lower = QtCore.QPoint(target.center().x(), target.bottom() - 2)
+        self.mouse(QtCore.QEvent.MouseButtonPress, start, QtCore.Qt.LeftButton)
+        self.mouse(QtCore.QEvent.MouseMove, lower, QtCore.Qt.LeftButton)
+        self.mouse(QtCore.QEvent.MouseButtonRelease, lower, QtCore.Qt.NoButton)
+        self.assertIs(self.body.Tip, c)
+        self.assertTrue(self.lockMessageShown(), "drag")
+
+        self.clearLockMessage()
+        self.closePopupSoon()
+        viewport = tree.viewport()
+        pos = self.rowRect("|").center()
+        event = QtGui.QContextMenuEvent(
+            QtGui.QContextMenuEvent.Mouse, pos, viewport.mapToGlobal(pos)
+        )
+        QtGui.QApplication.sendEvent(viewport, event)
+        processEvents()
+        self.assertEqual(self.popups, [])
+        self.assertTrue(self.lockMessageShown(), "menu")
+        self.assertIs(self.body.Tip, c)
+
+        self.assertFalse(Gui.Command.get("PartDesign_RollTo").isActive())
+        self.assertFalse(Gui.Command.get("PartDesign_RollToEnd").isActive())
+
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+        self.assertAlmostEqual(a.Length.Value, 5, places=6)
+        self.assertAlmostEqual(c.Shape.BoundBox.ZMax, 15, places=6)
+        self.assertEqual(self.doc.UndoCount, undo)
+        self.assertTrue(Gui.Command.get("PartDesign_RollToEnd").isActive())
+
+    def testNoReorderDuringAnEdit(self):
+        """With boss A's dialog open, a drag of boss B among the Body's rows is refused and the
+        status bar says why; a drop that comes anyway is refused and changes nothing."""
+        block, a, b, c = self.chain()
+        self.waitForRows(self.END)
+        dialog = self.openEdit(a)
+        self.waitForRows(self.AT_A)
+        group = list(self.body.Group)
+        self.select(b)
+        rect = self.rowRect("BossA")
+        pos = QtCore.QPoint(rect.center().x(), rect.top() + 1)
+        self.clearLockMessage()
+        self.assertFalse(self.dragMoveAccepted(pos))
+        self.assertTrue(self.lockMessageShown())
+        self.closeModalSoon()
+        self.drop(pos)
+        processEvents(0.3)
+        self.assertEqual(list(self.body.Group), group)
+        if self.modal:
+            self.assertIn(self.LOCKED, self.modal[0])
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+        self.assertEqual(list(self.body.Group), group)
+
+    def testShowFinalPreferenceStartsInFinal(self):
+        """With the "Show final result" preference on, boss A's dialog opens in Final: its box
+        checked, nothing held; unchecked, the Body is rolled back to boss A."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+        had = group.GetBool("ShowFinal", False)
+        group.SetBool("ShowFinal", True)
+        try:
+            block, a, b, c = self.chain()
+            dialog = self.openEdit(a)
+            self.assertTrue(self.panelWidget(QtGui.QCheckBox, "showFinalCheckBox").isChecked())
+            self.assertFalse(self.body.isRolledBack())
+            self.assertEqual(self.held(), set())
+            self.waitForRows(self.END)
+            self.setFinal(False)
+            self.assertEqual(self.held(), {"BossB", "HoleC"})
+            self.waitForRows(self.AT_A)
+            self.closeEdit(dialog, ok=False)
+            self.assertAtTheEnd(c)
+        finally:
+            group.SetBool("ShowFinal", had)
+
+    def testEditingADatumRollsToBeforeItsFirstUser(self):
+        """A datum plane on the block's top carries the sketch of a boss: its dialog rolls the
+        Body back to the block (the boss held); Cancel brings the end back."""
+        block = self.block()
+        self.doc.recompute()
+        top = faceName(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        plane = self.body.newObject("PartDesign::Plane", "DatumP")
+        plane.AttachmentSupport = [(block, top)]
+        plane.MapMode = "FlatFace"
+        self.doc.recompute()
+        sketch = self.sketchOn("OnDatumSketch", plane, "", V(10, 10, 10), 2)
+        boss = models.pad(self.body, sketch, 3, "OnDatum")
+        self.doc.recompute()
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        dialog = self.openEdit(plane)
+        self.assertIs(self.body.Tip, boss)
+        self.assertEqual(self.held(), {"OnDatum"})
+        self.closeEdit(dialog, ok=False)
+        self.assertIs(self.body.Tip, boss)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertEqual(self.held(), set())
+
+    def testEditingASketchWithNoUsersHoldsNothing(self):
+        """A sketch at the end that nothing uses: editing it holds nothing."""
+        block, a, b, c = self.chain()
+        self.freeSketch()
+        self.doc.recompute()
+        gdoc = Gui.getDocument(self.doc.Name)
+        gdoc.setEdit("FreeSketch")
+        processEvents()
+        self.assertFalse(self.body.isRolledBack())
+        self.assertEqual(self.held(), set())
+        gdoc.resetEdit()
+        processEvents()
+        self.assertIs(self.body.Tip, c)
+        self.assertFalse(self.body.isRolledBack())
+
+    def testEditingASketchWithSeveralUsers(self):
+        """A sketch used by a boss and, later, by a pocket: editing it rolls the Body back to
+        before its first user (the block), holding both."""
+        block = self.block()
+        shared = models.sketch(self.doc, "SharedSketch", models.rectangle(1, 1, 5, 5), self.body, z=10)
+        boss = models.pad(self.body, shared, 5, "BossS")
+        b = self.boss("BossB", 15, 15)
+        pocket = models.pocket(self.body, shared, 3, "PocketS")
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        gdoc = Gui.getDocument(self.doc.Name)
+        gdoc.setEdit(shared.Name)
+        processEvents()
+        self.assertIs(self.body.Tip, pocket)
+        self.assertEqual(self.held(), {"BossS", "BossB", "PocketS"})
+        gdoc.resetEdit()
+        processEvents()
+        self.assertIs(self.body.Tip, pocket)
+        self.assertFalse(self.body.isRolledBack())
+
+    def testASecondEditFromTheFirst(self):
+        """Boss A's dialog open, a double click on boss B closes it (the question answered) and
+        opens boss B's: the Body is rolled back to boss B; Cancel brings the end back."""
+        block, a, b, c = self.chain()
+        self.openEdit(a)
+        self.answerModalSoon(QtGui.QMessageBox.Yes)
+        dialog = self.openEdit(b)
+        self.assertEqual(self.held(), {"HoleC"})
+        self.waitForRows(["Origin", "Block", "BossA", "BossB", "|", "HoleC"])
+        self.closeEdit(dialog, ok=False)
+        self.assertAtTheEnd(c)
+
+    def testSketchOkComputesTheTail(self):
+        """Boss B's sketch moved in the sketcher to stick out of the block: closing it computes
+        the held tail (the Body's X extent 22), nothing left touched. The sketch commits its own
+        steps before the tail computes, so undoing them and recomputing brings back the X extent
+        20."""
+        block, a, b, c = self.chain()
+        self.assertAlmostEqual(self.body.Shape.BoundBox.XMax, 20, places=6)
+        undo = self.doc.UndoCount
+        sketch = self.doc.getObject("BossBSketch")
+        gdoc = Gui.getDocument(self.doc.Name)
+        gdoc.setEdit(sketch.Name)
+        processEvents()
+        self.assertEqual(self.held(), {"BossB", "HoleC"})
+        self.doc.openTransaction("Move the boss")
+        models.moveRectangle(sketch, 18, 15, 22, 19)
+        self.doc.commitTransaction()
+        gdoc.resetEdit()
+        processEvents()
+        self.assertAtTheEnd(c)
+        self.assertTrue(c.isValid(), c.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.BoundBox.XMax, 22, places=6)
+        self.assertFalse([o.Name for o in self.body.Group if "Touched" in o.State])
+        self.assertGreater(self.doc.UndoCount, undo)
+        while self.doc.UndoCount > undo:
+            self.doc.undo()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Shape.BoundBox.XMax, 20, places=6)
+
+    def testAnExceptionInTheTail(self):
+        """A feature after hole C that raises when it computes: in Final the raise is reported
+        and the dialog stays; OK closes the edit (the document leaves edit mode) and the
+        feature is marked failed."""
+        block, a, b, c = self.chain()
+        raiser = self.body.newObject("PartDesign::FeaturePython", "Raiser")
+        Raiser(raiser)
+        self.doc.recompute()
+        self.assertTrue(raiser.isValid(), raiser.getStatusString())
+        dialog = self.openEdit(a)
+        Raiser.fail = True
+        try:
+            self.setLength(8)
+            self.setFinal(True)
+            self.assertTrue(Gui.Control.activeDialog())
+            self.assertFalse(raiser.isValid())
+            self.closeEdit(dialog, ok=True)
+        finally:
+            Raiser.fail = False
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertIs(self.body.Tip, raiser)
+        self.assertFalse(self.body.isRolledBack())
+        self.assertAlmostEqual(a.Length.Value, 8, places=6)
+        self.assertFalse(raiser.isValid())
 
 
 if __name__ == "__main__":

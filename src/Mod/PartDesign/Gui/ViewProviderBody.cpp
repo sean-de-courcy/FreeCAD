@@ -41,7 +41,9 @@
 #include <Gui/ActionFunction.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
+#include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/ViewProviderDatum.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
@@ -76,6 +78,24 @@ bool hasBaseFeatureShape(const App::DocumentObject* object)
     }
     return false;
 }
+
+// Recomputes objs (none: every touched object), reporting an exception instead of throwing it
+void recomputeReporting(App::Document* doc, const std::vector<App::DocumentObject*>& objs = {})
+{
+    try {
+        doc->recompute(objs);
+    }
+    catch (const Base::Exception& e) {
+        e.reportException();
+    }
+    catch (const std::exception& e) {
+        Base::Console().error("%s\n", e.what());
+    }
+}
+
+// Why a move of the bar or a reorder is refused during an edit (ViewProviderBody::isEditLocked)
+constexpr const char* editLockedMessage =
+    QT_TRANSLATE_NOOP("Exception", "The body can't change order or roll back while a dialog or an edit is open");
 
 }  // namespace
 
@@ -441,6 +461,12 @@ bool ViewProviderBody::showsThrough() const
     return body && body->isRolledBack();
 }
 
+bool ViewProviderBody::isEditLocked(App::Document* doc)
+{
+    auto gdoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
+    return gdoc && (gdoc->getEditViewProvider() || !Gui::Control().isAllowedAlterDocument(doc));
+}
+
 int ViewProviderBody::treeBarIndex(const std::vector<App::DocumentObject*>& children) const
 {
     auto body = getObject<PartDesign::Body>();
@@ -483,11 +509,8 @@ bool ViewProviderBody::moveTreeBar(TreeBarMove move, App::DocumentObject* child)
     if (!body) {
         return false;
     }
-    // While a dialog holds the edit roll-back, the row shows the edit's point, not the Tip that
-    // these moves step from: the bar stays put until the dialog closes (ops#127, N1 5.4)
-    if (body->getEditRollPoint()) {
-        return true;
-    }
+    // While a dialog or an edit is open (the edit roll-back's row shows the edit's point, not the
+    // Tip these moves step from) rollBar() refuses; the tree refuses first (ops#127, N1 5.4)
     const auto& group = body->Group.getValues();
     auto indexOf = [&group](const App::DocumentObject* obj) {
         return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
@@ -547,6 +570,10 @@ void ViewProviderBody::rollBar(App::DocumentObject* feature, bool toEnd)
     auto body = getObject<PartDesign::Body>();
     if (!body) {
         return;
+    }
+    // Its transaction would commit an open edit's: Cancel couldn't take the edit back
+    if (isEditLocked(body->getDocument())) {
+        throw Base::RuntimeError(editLockedMessage);
     }
     App::DocumentObject* oldTip = body->Tip.getValue();
     int tid = body->getDocument()->openTransaction(
@@ -663,7 +690,8 @@ void ViewProviderBody::setEditRoll(App::DocumentObject* point)
         applyBodyDisplay();
     }
     // The point changes no property: tell the tree as for a Tip change, so the bar row moves and
-    // the held look follows (the tree's status pass asks holds())
+    // the held look follows (the tree's status pass asks holds()). Other observers of
+    // signalChangedObject, Python ones too, see it as a change of the Tip that leaves its value
     if (auto gdoc = getDocument()) {
         gdoc->signalChangedObject(*this, body->Tip);
     }
@@ -706,8 +734,11 @@ void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
     setEditRoll(nullptr);
 
     // What the edit touched after the point computes now, in the edit's transaction (_resetEdit
-    // commits after this signal). Not inside an undo or a recompute, nor while the member or the
-    // Body is being removed: then the held features stay touched for the next recompute
+    // commits after this signal). A sketch has committed its own "Sketch recompute" step by
+    // then (ViewProviderSketch::unsetEdit), so this recompute records no undo step: undoing the
+    // sketch's steps touches the sketch, and the next recompute computes the tail again. Not
+    // inside an undo or a recompute, nor while the member or the Body is being removed: then the
+    // held features stay touched for the next recompute
     App::Document* doc = body->getDocument();
     if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Recomputing)
         || doc->testStatus(App::Document::Restoring) || member->isRemoving() || body->isRemoving()) {
@@ -717,7 +748,8 @@ void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
         return obj->isTouched() || obj->mustRecompute();
     };
     if (touched(body) || std::ranges::any_of(body->Group.getValues(), touched)) {
-        doc->recompute();
+        // An exception must not leave the document in edit (_resetEdit goes on after this)
+        recomputeReporting(doc);
     }
 }
 
@@ -757,11 +789,12 @@ void ViewProviderBody::recomputeEditTail(App::DocumentObject* member)
         return;
     }
     // The dialog recomputed member alone, which touches nothing after it
-    // (Document::recomputeFeature): touch its users, as OK does, and compute the tail
+    // (Document::recomputeFeature): touch its users, as OK does, and compute the Body's tail (the
+    // users outside the Body compute on OK). A failure is reported, not thrown into the dialog
     for (auto user : member->getInList()) {
         user->touch();
     }
-    doc->recompute();
+    recomputeReporting(doc, {body});
 }
 
 bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& objs,
@@ -776,6 +809,10 @@ bool ViewProviderBody::reorderObjects(const std::vector<App::DocumentObject*>& o
         if (!body->hasObject(obj)) {
             return false;
         }
+    }
+    // canDropObject() refuses the drag first; the drop's transaction has committed the edit's
+    if (isEditLocked(body->getDocument())) {
+        throw Base::RuntimeError(editLockedMessage);
     }
     // Dropped on the Body itself: at the bar, as a new feature is inserted (after the Tip; the
     // bar then follows the last solid dropped), or to the end when the Tip is among them
@@ -951,9 +988,15 @@ bool ViewProviderBody::canDropObjects() const
 
 bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
 {
-    // The Body's own members are dropped among its rows to reorder them (ops#127). A copy
-    // drag of an own solid can't be done (dropObject() refuses it), so the cursor refuses it too
-    if (getObject<PartDesign::Body>()->hasObject(obj)) {
+    // The Body's own members are dropped among its rows to reorder them (ops#127), not during an
+    // edit (the drop's transaction would commit the edit's). A copy drag of an own solid can't be
+    // done (dropObject() refuses it), so the cursor refuses it too
+    auto body = getObject<PartDesign::Body>();
+    if (body->hasObject(obj)) {
+        if (isEditLocked(body->getDocument())) {
+            Gui::getMainWindow()->showMessage(QCoreApplication::translate("Exception", editLockedMessage), 5000);
+            return false;
+        }
 #ifdef Q_OS_MACOS
         constexpr auto copyModifier = Qt::AltModifier;
 #else

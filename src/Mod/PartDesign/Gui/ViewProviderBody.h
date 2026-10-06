@@ -120,6 +120,10 @@ public:
                                               App::DocumentObject* member);
     /// The features show one at a time, as in "Through" mode: the mode says so, or rolled back
     bool showsThrough() const;
+    /** While an object of doc is in edit, or a task dialog on doc bars other changes, the bar
+     * and the Body's rows don't move: their transaction would commit the edit's
+     */
+    static bool isEditLocked(App::Document* doc);
     //@}
 
     /** @name The edit roll-back (ops#127, notes/reorder-rollback-design.md 5.4)
