@@ -127,6 +127,16 @@ public:
     /// \a name. An empty name has none.
     static std::vector<std::string_view> splitSections(std::string_view name);
 
+    /** The innermost sources of \a name (ops#127, design note N3 5.1): following the first
+     * section's linked names down, the iteration tags of the sections made from no name (reference
+     * IDs are geometry IDs, not names), e.g. the tag of the sketch whose geometry (`SKT`, `SRC`,
+     * reference ID `g1`) a pad's face comes from. Later sections (a split's MOD, a fusion's) and
+     * connected elements (neighbours) are no sources. A line redrawn in its sketch gives the
+     * same tag under a new ID; an element of another sketch or feature another tag. Sorted and
+     * unique; empty for an empty name.
+     */
+    static std::vector<std::string> sourceTags(std::string_view name);
+
     /** Tier 1's survivors among \a candidates, as indices into it, in increasing order.
      *
      * A candidate survives if its overlap with \a oldName is at least best - \a gap, where best is
@@ -515,6 +525,11 @@ struct AppExport SolveInput
     /// NamingSolver parameters.
     bool guess = false;
     bool guessNoStructure = false;
+    /// G2 without the same-source test (ops#127, design note N3 5.2): by default the wide pick
+    /// is taken only if one of its names shares an innermost source with the old name
+    /// (sourceTags(), a line redrawn in the same sketch); with this, any pick is. For comparison
+    /// runs.
+    bool guessAnySource = false;
     /// The target is in error (a failed feature passing its input through, ops#126): nothing is
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;

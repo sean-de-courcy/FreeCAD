@@ -58,7 +58,9 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 import FreeCAD as App
 import Part
@@ -185,6 +187,19 @@ class Masker:
             return ":H" + value + (":L" if match.group(3) else "")
 
         return self.V1_TAG.sub(tag, name)
+
+    def maskText(self, text, mode):
+        """`text` with each word that is a mapped name masked: a solver's evidence can quote one
+        ("pieces merged back: <name> found exactly")."""
+
+        def word(token):
+            if ";" not in token or token.endswith(";"):
+                return token
+            if mode == "V2" and hasattr(App, "expandMappedName"):
+                token = App.expandMappedName(token)
+            return self.mask(token, mode)
+
+        return " ".join(word(token) for token in text.split(" "))
 
     def mask(self, name, mode, shape=None):
         """The masked name for a report; the raw name when it can't be masked."""
@@ -395,6 +410,21 @@ class Guessed:
 
     def __repr__(self):
         return f"GUESSED[{self.expected}]"
+
+
+class Settled:
+    """The reference holds `expected`'s element plainly: no guess, no record, no warning (ops#133:
+    a guess snapped back to its original). A plain expectation passes a guess too; this one
+    doesn't."""
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def select(self, shape):
+        return self.expected.select(shape)
+
+    def __repr__(self):
+        return f"SETTLED[{self.expected}]"
 
 
 class PartialWarned:
@@ -811,6 +841,8 @@ class Result:
             return self.verdict == "partial-warned"
         if expect.startswith("GUESSED"):
             return self.verdict == "guessed"
+        if expect.startswith("SETTLED"):
+            return self.verdict in ("correct", "equivalent")
         return self.verdict in ("correct", "equivalent", "guessed")
 
     def message(self):
@@ -1000,9 +1032,10 @@ class Scenario:
         # 1. The stored reference. A partly resolved one (ops#127) is judged on the references
         # that resolve; its missing ones are expected.
         partialWarned = isinstance(expectation, PartialWarned)
+        settled = isinstance(expectation, Settled)
         missing = sum(1 for s in subs if s.startswith("?"))
         live = [s for s in subs if not s.startswith("?")] if partialWarned else subs
-        if partialWarned or isinstance(expectation, Guessed):
+        if partialWarned or settled or isinstance(expectation, Guessed):
             expectation = expectation.expected
         resolved = []
         if target is None or not live or (not partialWarned and missing):
@@ -1063,11 +1096,16 @@ class Scenario:
         solverReport = self._solverReport(owner, ref.prop)
         if not partialWarned:
             # A guess rule's pick (ops#127, N2 7.2)
-            result.verdict = guessVerdict(
-                expectation, stored, result.verdict, self._reportRows(owner, ref.prop)
-            )
+            rows = self._reportRows(owner, ref.prop)
+            result.verdict = guessVerdict(expectation, stored, result.verdict, rows)
+            if settled and result.verdict == "correct" and warned:
+                # the right element, but still warned: a record left behind
+                result.verdict, detail = "wrong", f"{owner.Name} still has a warning"
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(solverReport)
+        if "evidence" in record:
+            # its names' tags masked as in `names`: records compare across hash seeds and runs
+            record["evidence"] = [masker.maskText(e, mode) for e in record["evidence"]]
         # computed on a guessed, partly resolved or geometry-only reference (ops#127)
         record["warning"] = warned
         if self.solver and not owner.isValid():
@@ -1099,7 +1137,11 @@ class Scenario:
                 )
                 candidates.append(e["candidates"])
                 roles.append(e.get("candidate_roles", []))  # ops#105
-            report.update(tier=tiers, candidates=candidates, candidate_roles=roles)
+            # the evidence counts the no-structure tier-3 resolutions (ops#127, N3 6.3)
+            evidence = [e.get("evidence", "") for e in entries]
+            report.update(
+                tier=tiers, candidates=candidates, candidate_roles=roles, evidence=evidence
+            )
         if guesses:
             report["guess"] = guesses
             report["alternatives"] = [
@@ -1126,6 +1168,22 @@ class Scenario:
         if name and mode == "V2" and hasattr(App, "expandMappedName"):
             name = App.expandMappedName(name)  # an interned name reads as V2's (ops#6)
         return masker.mask(name, mode, shape) if name else None
+
+
+class Reopens:
+    """A scenario step `reopen`: the document is saved, closed and opened again (Scenario's
+    openDocument()). Listed before the scenario's class: `class XReopened(Reopens, X)`."""
+
+    def reopen(self, doc):
+        self.folder = tempfile.mkdtemp(prefix="NamingScenario")
+        path = os.path.join(self.folder, doc.Name + ".FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        self.doc = self.openDocument(path)
+
+    def cleanup(self):
+        super().cleanup()
+        shutil.rmtree(getattr(self, "folder", ""), ignore_errors=True)
 
 
 def emit(result):

@@ -2426,9 +2426,10 @@ static void holdRestoredRetargetChecks(const PropertyLinkBase* prop,
     holdRetargetChecks(prop, checks);
 }
 
-// Whether pass 1 hands an index-only missing reference to the solver: the no-structure guess
-// (ops#127, N2 5.4, the user's Q3) retries it by its fingerprint alone, when both guess switches
-// are on.
+// Whether pass 1 hands an index-only missing reference to the solver, by its fingerprint alone,
+// when both guess switches are on (ops#127, N2 5.4). With no name it has no source, so policy D
+// breaks it with the candidates ranked by distance (N3 Q3); only NamingSolver/GuessAnySource
+// lets G2 guess it (N3 5.2).
 static bool retryIndexOnly()
 {
     auto group = App::GetApplication().GetParameterGroupByPath(
@@ -2476,9 +2477,8 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
         }
         App::SolverEntry entry;
         // A provisional pick (ops#127) is solved as the element it holds, by that element's
-        // name and fingerprint, and keeps its record; when the original's name gives an element
-        // again, the entry is exact on that one instead, and the reference snaps back to it
-        // unless the solver's checks break it.
+        // name and fingerprint, and keeps its record; when the original's name gives another
+        // element again, a probe entry beside it may snap the reference back (below).
         const App::GuessRecord* guess = records && i < records->size() && !(*records)[i].guess.empty()
             ? &(*records)[i].guess
             : nullptr;
@@ -2510,28 +2510,34 @@ static void collectLinkReferences(App::PropertyLinkBase* prop,
             // The original giving the element held already (a G3 pick of the piece that kept
             // the name) is no snap-back: the reference is solved as the element it holds, with
             // its record (the Fable review of fork PR 117, finding 1).
+            // Otherwise the original's name gives another element: a probe, beside the entry of
+            // the element held. The batch snaps the reference back only if that element agrees
+            // with the original's saved fingerprint; the name alone can give a piece of the
+            // original, the one that kept its name, when the pick is another piece (ops#133).
             if (index && index[0] && !Data::hasMissingElement(index)
                 && !(heldElement && std::strcmp(index, heldElement) == 0)) {
-                entry.kind = App::SolverEntry::Kind::Exact;
-                entry.guessed = true;
+                App::SolverEntry probe;
+                probe.guess = *guess;
+                probe.kind = App::SolverEntry::Kind::Exact;
+                probe.guessed = true;
                 if (!Data::hasMissingElement(heldElement)) {
-                    entry.guessedIndex = heldElement;
+                    probe.guessedIndex = heldElement;
                 }
-                entry.prefix = prefix;
-                entry.exactName = guess->origName;
-                entry.oldIndex = index;
-                entry.prop = prop;
-                entry.index = static_cast<int>(i);
-                entry.obj = obj;
-                entry.owner = owner;
-                entry.sub = subs[i];
-                // no fingerprint: the one saved is the picked element's, not the original's
-                entry.policy = prop->getElementPolicy();
+                probe.prefix = prefix;
+                probe.exactName = guess->origName;
+                probe.oldIndex = index;
+                probe.prop = prop;
+                probe.index = static_cast<int>(i);
+                probe.obj = obj;
+                probe.owner = owner;
+                probe.sub = subs[i];
+                // no fingerprint: the one saved is the picked element's; the record has the
+                // original's
+                probe.policy = prop->getElementPolicy();
                 if (froms && i < froms->size()) {
-                    entry.from = (*froms)[i];
+                    probe.from = (*froms)[i];
                 }
-                batch.entries.push_back(std::move(entry));
-                continue;
+                batch.entries.push_back(std::move(probe));
             }
         }
         bool indexOnly = false;
@@ -3046,6 +3052,7 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
 #define ATTR_RETARGET_GUESS "rtguess"
 #define ATTR_RETARGET_GUESS_ORIG "rtorig"
 #define ATTR_RETARGET_GUESS_ALT "rtalt"
+#define ATTR_RETARGET_GUESS_OFP "rtofp"
 
 // The reorder's re-target record of reference i (ops#127, notes/reorder-rollback-design.md 3.4),
 // written in every document: where the reference was and what it named there.
@@ -3076,6 +3083,10 @@ static void writeRetargetRecord(Base::Writer& writer,
             writer.Stream() << "\" " ATTR_RETARGET_GUESS_ALT "=\""
                             << Base::Persistence::encodeAttribute(alternatives);
         }
+        if (!record.guess.origFingerprint.empty()) {
+            writer.Stream() << "\" " ATTR_RETARGET_GUESS_OFP "=\""
+                            << Base::Persistence::encodeAttribute(record.guess.origFingerprint);
+        }
     }
 }
 
@@ -3098,9 +3109,12 @@ static RetargetRecord readRetargetRecord(Base::XMLReader& reader)
         if (auto* remap = Data::NameRemap::active()) {
             remap->remapSubName(orig);  // as readGuessRecord() does
         }
-        record.guess = GuessRecord::fromAttributes(attribute(ATTR_RETARGET_GUESS),
-                                                   orig,
-                                                   attribute(ATTR_RETARGET_GUESS_ALT));
+        record.guess = GuessRecord::fromAttributes(
+            attribute(ATTR_RETARGET_GUESS),
+            orig,
+            attribute(ATTR_RETARGET_GUESS_ALT),
+            attribute(ATTR_RETARGET_GUESS_OFP)
+        );
     }
     return record;
 }
@@ -3110,10 +3124,12 @@ static RetargetRecord readRetargetRecord(Base::XMLReader& reader)
 
 #define IGNORE_SHADOW false
 
-// A reference's guess record (ops#127): its kind, the original and the alternatives.
+// A reference's guess record (ops#127): its kind, the original, the alternatives and the
+// original's fingerprint (ops#133).
 #define ATTR_GUESS "guess"
 #define ATTR_ORIG "orig"
 #define ATTR_ALT "alt"
+#define ATTR_ORIG_FINGERPRINT "ofp"
 
 static void writeGuessRecord(Base::Writer& writer,
                              const std::vector<ElementRecords>& records,
@@ -3130,6 +3146,10 @@ static void writeGuessRecord(Base::Writer& writer,
     if (!alternatives.empty()) {
         writer.Stream() << "\" " ATTR_ALT "=\"" << Base::Persistence::encodeAttribute(alternatives);
     }
+    if (!guess.origFingerprint.empty()) {
+        writer.Stream() << "\" " ATTR_ORIG_FINGERPRINT "=\""
+                        << Base::Persistence::encodeAttribute(guess.origFingerprint);
+    }
 }
 
 static GuessRecord readGuessRecord(Base::XMLReader& reader)
@@ -3142,11 +3162,14 @@ static GuessRecord readGuessRecord(Base::XMLReader& reader)
     if (auto* remap = Data::NameRemap::active()) {
         remap->remapSubName(orig);  // as importSubName() does (ops#6)
     }
-    return GuessRecord::fromAttributes(reader.getAttribute<const char*>(ATTR_GUESS),
-                                       orig,
-                                       reader.hasAttribute(ATTR_ALT)
-                                           ? reader.getAttribute<const char*>(ATTR_ALT)
-                                           : "");
+    return GuessRecord::fromAttributes(
+        reader.getAttribute<const char*>(ATTR_GUESS),
+        orig,
+        reader.hasAttribute(ATTR_ALT) ? reader.getAttribute<const char*>(ATTR_ALT) : "",
+        reader.hasAttribute(ATTR_ORIG_FINGERPRINT)
+            ? reader.getAttribute<const char*>(ATTR_ORIG_FINGERPRINT)
+            : ""
+    );
 }
 
 void PropertyLinkSub::Save(Base::Writer& writer) const

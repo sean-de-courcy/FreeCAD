@@ -304,8 +304,8 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
     resolution.guess = entry.guess;
 }
 
-// The record of a provisional resolution of \a entry (ops#127): the original is the entry's, or
-// the record's when the reference holds one already.
+// The record of a provisional resolution of \a entry (ops#127): the original is the entry's, with
+// its saved fingerprint (ops#133), or the record's when the reference holds one already.
 GuessRecord guessRecordFor(const SolverEntry& entry, const char* kind)
 {
     GuessRecord guess;
@@ -313,10 +313,12 @@ GuessRecord guessRecordFor(const SolverEntry& entry, const char* kind)
     if (!entry.guess.empty()) {
         guess.origName = entry.guess.origName;
         guess.origIndex = entry.guess.origIndex;
+        guess.origFingerprint = entry.guess.origFingerprint;
     }
     else {
         guess.origName = entry.oldName.empty() ? entry.exactName : entry.oldName;
         guess.origIndex = entry.oldIndex;
+        guess.origFingerprint = entry.oldFingerprint;
     }
     return guess;
 }
@@ -726,6 +728,7 @@ bool solveElementReferences(DocumentObject* feature,
     // The guess rules' switches (ops#127, N2 5.1), on by default
     bool guess = true;
     bool guessNoStructure = true;
+    bool guessAnySource = false;
     double diagonal = 0.0;
     std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
@@ -871,8 +874,8 @@ bool solveElementReferences(DocumentObject* feature,
         bool anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->kind == SolverEntry::Kind::Missing;
         });
-        // A guessed reference whose original's name gives an element again snaps back
-        // (ops#127).
+        // A guessed reference whose original's name gives another element again has a probe,
+        // which may snap it back (ops#127, ops#133).
         bool anyGuessed = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
             return e->guessed;
         });
@@ -880,12 +883,14 @@ bool solveElementReferences(DocumentObject* feature,
         // fingerprint that its element no longer agrees with: moved, or maybe split. A reverse
         // update checks every one with a fingerprint (ops#103), and every one whose name now
         // gives another element than its stored index (ops#116).
-        if (!anyMissing && !anyGuessed
-            && std::none_of(entries.begin(), entries.end(), [reverse](const auto* e) {
-                return e->kind == SolverEntry::Kind::Exact
+        auto exactMayNeedSolving = [&entries, reverse]() {
+            return std::any_of(entries.begin(), entries.end(), [reverse](const auto* e) {
+                return e->kind == SolverEntry::Kind::Exact && !e->guessed
                     && (!e->oldFingerprint.empty()
                         || (reverse && !e->storedIndex.empty() && e->storedIndex != e->oldIndex));
-            })) {
+            });
+        };
+        if (!anyMissing && !anyGuessed && !exactMayNeedSolving()) {
             continue;
         }
 
@@ -904,6 +909,8 @@ bool solveElementReferences(DocumentObject* feature,
             readTolerances(gap, tolerances, continuationDistance);
             guess = solverParameters()->GetBool("Guess", true);
             guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
+            // G2 without the same-source test (N3 5.2), for comparison runs
+            guessAnySource = solverParameters()->GetBool("GuessAnySource", false);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
@@ -914,7 +921,70 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
-        if (!anyMissing && !anyGuessed && !reverse) {
+        if (anyGuessed) {
+            // The probes (ops#133): the original's name gives an element again. The reference
+            // snaps back to it only if it is the original as saved, its fingerprint agreeing
+            // with the record's. A piece of the original that kept the name (the pick is
+            // another piece), the original moved or changed, or an unmeasurable one: the pick
+            // and its record stand, and the reference is solved as the element it holds. A
+            // record saved before ops#133 has no original fingerprint: a piece's never snaps
+            // back by name, the others do as they did. A reverse update leaves it for the next.
+            std::set<std::pair<const PropertyLinkBase*, int>> snapped;
+            for (const auto* entry : entries) {
+                if (!entry->guessed || reverse) {
+                    continue;
+                }
+                bool back = false;
+                const auto original = Data::ElementFingerprint::fromString(
+                    entry->guess.origFingerprint
+                );
+                if (!original.isValid()) {
+                    back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece";
+                }
+                else {
+                    const auto& now = fingerprintOf(entry->oldIndex);
+                    back = now.isValid() && fingerprintsAgree(original, now, diagonal);
+                }
+                if (!back) {
+                    FC_LOG(
+                        referenceName(entry->prop)
+                        << "[" << entry->index << "]: the original " << entry->guess.origIndex
+                        << "'s name gives " << entry->oldIndex << ", not the original as saved; "
+                        << entry->guessedIndex << " is kept"
+                    );
+                    continue;
+                }
+                // The original is back: the reference snaps back to it, its record goes and its
+                // fingerprint is measured anew.
+                SolverResolution resolution;
+                resolutionFor(*entry, entry->oldIndex, entry->exactName, resolution);
+                resolutions[entry->prop].push_back(resolution);
+                snapped.emplace(entry->prop, entry->index);
+                FC_WARN(
+                    referenceName(entry->prop)
+                    << "[" << entry->index << "]: " << entry->guessedIndex << " -> "
+                    << entry->oldIndex << " (the original " << entry->guess.origIndex << " is back)"
+                );
+            }
+            entries.erase(
+                std::remove_if(
+                    entries.begin(),
+                    entries.end(),
+                    [&snapped](const auto* e) {
+                        return e->guessed || snapped.count({e->prop, e->index}) > 0;
+                    }
+                ),
+                entries.end()
+            );
+            anyGuessed = false;
+            anyMissing = std::any_of(entries.begin(), entries.end(), [](const auto* e) {
+                return e->kind == SolverEntry::Kind::Missing;
+            });
+            if (!anyMissing && !exactMayNeedSolving()) {
+                continue;
+            }
+        }
+        if (!anyMissing && !reverse) {
             // Every entry, not up to the first: each unmeasurable one is logged.
             bool needed = false;
             for (const auto* e : entries) {
@@ -948,8 +1018,7 @@ bool solveElementReferences(DocumentObject* feature,
             // agree with its saved fingerprint: if its name moved, the element at its saved place
             // is taken (rule 3).
             for (const auto* entry : entries) {
-                // A snap-back waits for the next update (ops#127).
-                if (entry->kind != SolverEntry::Kind::Exact || entry->guessed) {
+                if (entry->kind != SolverEntry::Kind::Exact) {
                     continue;
                 }
                 const auto saved = Data::ElementFingerprint::fromString(entry->oldFingerprint);
@@ -1082,7 +1151,7 @@ bool solveElementReferences(DocumentObject* feature,
             }
             // Missing references: index carry, verified by the saved fingerprint.
             for (const auto* entry : entries) {
-                if (entry->kind != SolverEntry::Kind::Missing || entry->guessed) {
+                if (entry->kind != SolverEntry::Kind::Missing) {
                     continue;
                 }
                 const std::string& index = entry->oldIndex;
@@ -1153,6 +1222,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.continuationDistance = continuationDistance;
         input.guess = guess;
         input.guessNoStructure = guessNoStructure;
+        input.guessAnySource = guessAnySource;
         // Nothing is guessed against a failed feature passing its input through (N2's N10)
         input.targetFailed = feature->isError();
         input.fingerprintOf = fingerprintOf;
@@ -1240,17 +1310,6 @@ bool solveElementReferences(DocumentObject* feature,
             const auto& outcome = outcomes[i];
             const std::string& oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             if (outcome.status == Data::SolveStatus::Exact) {
-                if (entry.guessed) {
-                    // The original's name gives an element again: the reference snaps back to
-                    // it, its record goes and its fingerprint is measured anew (ops#127).
-                    SolverResolution resolution;
-                    resolutionFor(entry, entry.oldIndex, entry.exactName, resolution);
-                    resolutions[entry.prop].push_back(resolution);
-                    FC_WARN(referenceName(entry.prop)
-                            << "[" << entry.index << "]: " << entry.guessedIndex << " -> "
-                            << entry.oldIndex << " (the original " << entry.guess.origIndex
-                            << " is back)");
-                }
                 continue;
             }
             if (outcome.status == Data::SolveStatus::Removed) {

@@ -212,11 +212,13 @@ TEST_F(RetargetRecordProperty, theGuessRecordItCarriesIsSavedAndRestored)
     records.retarget.guess.origIndex = "Face3";
     records.retarget.guess.alternatives = {
         {"Face4", "rejected", std::numeric_limits<double>::quiet_NaN()}};
+    records.retarget.guess.origFingerprint = "ofp3";  // the snap-back's (ops#133)
     link.setElementRecords({records});
 
     Base::StringWriter writer;
     link.Save(writer);
     EXPECT_NE(writer.getString().find("rtguess=\"rejected\""), std::string::npos);
+    EXPECT_NE(writer.getString().find("rtofp=\"ofp3\""), std::string::npos);
     std::stringstream data("<?xml version='1.0' encoding='utf-8'?>\n<Property name='LinkSub'>\n"
                            + writer.getString() + "</Property>\n");
     link.setValue(_other, {"Face2"});
@@ -442,6 +444,71 @@ TEST_F(BodyReorderChain, parkedOriginalsComeBackByContent)
     expectChain({p(0), p(1), p(2), p(3), p(4), pattern});
     _doc->recompute();
     EXPECT_TRUE(pattern->isValid());
+}
+
+TEST_F(BodyReorderChain, aParkedGuessRecordKeepsItsOriginalFingerprint)
+{
+    auto pattern = _doc->addObject<PartDesign::LinearPattern>("Pattern");
+    _body->addObject(pattern);
+    pattern->Originals.setValues({p(3)});
+    pattern->Direction.setValue(p(4), {"Edge1"});
+    pattern->Length.setValue(6.0);
+    pattern->Occurrences.setValue(2);
+    _body->Tip.setValue(pattern);
+    _doc->recompute();
+    ASSERT_TRUE(pattern->isValid());
+    // A provisional pick's record on the direction, with the original's fingerprint (ops#133)
+    App::ElementRecords records;
+    records.guess.kind = "piece";
+    records.guess.origName = "m";
+    records.guess.origIndex = "Edge3";
+    records.guess.origFingerprint = "ofp3";
+    pattern->Direction.setElementRecords({records});
+
+    auto directionLine = [&]() -> std::string {
+        auto parked =
+            dynamic_cast<App::PropertyStringList*>(pattern->getPropertyByName("ParkedReferences"));
+        if (!parked) {
+            return {};
+        }
+        for (const auto& line : parked->getValues()) {
+            if (line.rfind("link|Direction|", 0) == 0) {
+                return line;
+            }
+        }
+        return {};
+    };
+    auto parkedGuess = [&]() {
+        auto held = pattern->Direction.getElementRecords();
+        return held.empty() ? App::GuessRecord() : held.front().guess;
+    };
+
+    // To the top, no base: the direction is parked, the fingerprint in a twelfth field
+    _body->reorderObject({pattern}, nullptr, true);
+    auto line = directionLine();
+    EXPECT_EQ(std::count(line.begin(), line.end(), '|'), 11) << line;
+    EXPECT_EQ(line.substr(line.rfind('|') + 1), "ofp3");
+
+    // Back to the end: put back with the record whole
+    _body->reorderObject({pattern}, p(4), true);
+    EXPECT_EQ(pattern->getPropertyByName("ParkedReferences"), nullptr);
+    EXPECT_EQ(pattern->Direction.getValue(), p(4));
+    EXPECT_EQ(parkedGuess(), records.guess);
+
+    // A line parked before ops#133 has eleven fields: put back without the fingerprint
+    _body->reorderObject({pattern}, nullptr, true);
+    line = directionLine();
+    ASSERT_EQ(std::count(line.begin(), line.end(), '|'), 11) << line;
+    auto parked =
+        static_cast<App::PropertyStringList*>(pattern->getPropertyByName("ParkedReferences"));
+    auto lines = parked->getValues();
+    std::replace(lines.begin(), lines.end(), line, line.substr(0, line.rfind('|')));
+    parked->setValues(lines);
+    _body->reorderObject({pattern}, p(4), true);
+    EXPECT_EQ(pattern->Direction.getValue(), p(4));
+    auto old = records.guess;
+    old.origFingerprint.clear();
+    EXPECT_EQ(parkedGuess(), old);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

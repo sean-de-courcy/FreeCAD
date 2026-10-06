@@ -29,10 +29,13 @@ cli  PartDesignTests.TestNamingScenarios.SolverSplitThenMergeReopened.test_fille
 reason: a consumer that needs one element keeps one piece of a split element or one of two equal halves; section 8 expects broken with the pieces as candidates (V2)
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentre.test_front_edge_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentreReopened.test_front_edge_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentreFilled.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalSplitNamedPieceKept.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalArcSplit.test_right_arc_V2
 cli  PartDesignTests.TestNamingScenarios.ExternalArcSplitOffCentre.test_right_arc_V2
+cli  PartDesignTests.TestNamingScenarios.ExternalArcSplitOffCentreReopened.test_right_arc_V2
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2
 cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2
 
@@ -54,8 +57,12 @@ reason: a draft on a face that a notch in the sketch splits keeps the shortened 
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotch.test_draft_face_V2
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotch.test_draft_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentre.test_draft_face_V2
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentreReopened.test_draft_face_V2
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentreRaised.test_draft_face_V2
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchNamedPieceKept.test_draft_face_V2
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentre.test_draft_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentreReopened.test_draft_face_V2multi
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentreRaised.test_draft_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchNamedPieceKept.test_draft_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchAndExtend.test_draft_face_V2
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchAndExtend.test_draft_face_V2multi
@@ -100,9 +107,12 @@ reason: the V2 entries above with the multi-match flags on (V2multi): the flags 
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalArcSplit.test_right_arc_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalArcSplitOffCentre.test_right_arc_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalArcSplitOffCentreReopened.test_right_arc_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentre.test_front_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentreReopened.test_front_edge_V2multi
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentreFilled.test_front_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.ExternalSplitNamedPieceKept.test_front_edge_V2multi
 cli  PartDesignTests.TestNamingScenarios.LinearDirection2StepsExtent.test_sketch_60_30_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.MultiTransformStepsExtent.test_sketch_60_30_face_V2multi
@@ -118,3 +128,7 @@ cli  PartDesignTests.TestNamingScenarios.TwoPatternsBoxOnPlateExtent.test_sketch
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_x3_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.TwoPatternsPadExtent.test_sketch_y3_face_V2multi
 cli  PartDesignTests.TestNamingScenarios.UpToFaceSplitAbove.test_pad_up_to_top_V2multi
+
+reason: random sequence seed 1, step 8: a notch splits the block edge a fillet is on, and the fillet keeps one piece without the solver (V2 and V2multi; V2s correct). The plan is new since the generator's redraw and delete-near edits (ops#127 P8b); without the solver, notch splits fail about half of seeds 1-200 at 12 steps in the same way
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V2
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V2multi
