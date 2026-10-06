@@ -473,6 +473,26 @@ void TaskDressUpParameters::setSelectionMode(selectionModes mode)
     setSelectionGate();
     Gui::Selection().clearSelection();
 }
+void TaskDressUpParameters::onReferencesRepaired()
+{
+    auto list = findChild<QListWidget*>(QStringLiteral("listWidgetReferences"));
+    if (!list) {
+        return;
+    }
+    QSignalBlocker block(list);
+    list->clear();
+    for (const auto& ref : getReferences()) {
+        list->addItem(QString::fromStdString(ref));
+    }
+}
+
+void TaskDressUpParameters::onReferencePickStarted()
+{
+    if (selectionMode != none) {
+        setSelectionMode(none);
+    }
+}
+
 void TaskDressUpParameters::setSelectionGate()
 {
     if (selectionMode == none) {

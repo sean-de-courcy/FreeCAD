@@ -203,6 +203,11 @@ void TaskSketchBasedParameters::exitSelectionMode()
     onSelectReference(AllowSelection::NONE);
 }
 
+void TaskSketchBasedParameters::onReferencePickStarted()
+{
+    exitSelectionMode();
+}
+
 QVariant TaskSketchBasedParameters::setUpToFace(const QString& text)
 {
     if (text.isEmpty()) {

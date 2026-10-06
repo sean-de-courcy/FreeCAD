@@ -25,6 +25,7 @@
 #pragma once
 
 
+#include <functional>
 #include <type_traits>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
@@ -36,6 +37,7 @@ namespace PartDesignGui
 {
 
 class Ui_TaskPreviewParameters;
+class TaskReferences;
 
 class TaskPreviewParameters: public Gui::TaskView::TaskBox
 {
@@ -77,6 +79,13 @@ public:
     {}
     /// apply changes made in the parameters input to the model via commands
     virtual void apply()
+    {}
+    /// A reference was repaired in the dialog's References panel (ops#127): widgets that show a
+    /// link property read it again, so that OK doesn't write the old value back.
+    virtual void onReferencesRepaired()
+    {}
+    /// The References panel starts a re-pick: the panel's own selection mode ends.
+    virtual void onReferencePickStarted()
     {}
 
     void recomputeFeature();
@@ -181,8 +190,14 @@ public:
 
 protected:
     PartDesignGui::TaskPreviewParameters* preview;
+    /// The feature's guessed, partly resolved or broken references, at the top; null if none
+    /// (ops#127).
+    PartDesignGui::TaskReferences* references = nullptr;
 
 private:
+    /// Calls \a fn on each parameter panel.
+    void forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn);
+
     PartDesignGui::ViewProvider* vp;
 };
 
