@@ -72,6 +72,10 @@ public:
 
     bool event(QEvent* event) override;
 
+    /// The list shows Base again (ops#127).
+    void onReferencesRepaired() override;
+    void onReferenceSelectionTaken() override;
+
 protected Q_SLOTS:
     void onButtonRefSel(const bool checked);
     void doubleClicked(QListWidgetItem* item);

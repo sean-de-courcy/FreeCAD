@@ -653,6 +653,7 @@ void TaskAttacher::addToReference(const std::vector<SubAndObjName>& pairs)
         }
 
         pcAttach->AttachmentSupport.setValues(refs, refnames);
+        supportEdited = true;
 
         QLineEdit* line = getLine(iActiveRef);
         if (line) {
@@ -868,6 +869,7 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
             }
         }
         pcAttach->AttachmentSupport.setValues(newrefs, newrefnames);
+        supportEdited = true;
         userSelectedMode = false;
         updateListOfModes();
         pcAttach->MapMode.setValue(getActiveMapMode());
@@ -973,6 +975,7 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
         refnames.emplace_back(subElement);
     }
     pcAttach->AttachmentSupport.setValues(refs, refnames);
+    supportEdited = true;
     userSelectedMode = false;
     updateListOfModes();
     pcAttach->MapMode.setValue(getActiveMapMode());
@@ -1621,11 +1624,15 @@ bool TaskDlgAttacher::accept()
             pcAttach->MapReversed.getValue() ? "True" : "False"
         );
 
-        Gui::cmdAppObjectArgs(
-            obj,
-            "AttachmentSupport = %s",
-            pcAttach->AttachmentSupport.getPyReprString().c_str()
-        );
+        // Written again only when the dialog changed it (ops#127): a datum whose support was
+        // guessed keeps its record and warning.
+        if (parameter && parameter->isSupportEdited()) {
+            Gui::cmdAppObjectArgs(
+                obj,
+                "AttachmentSupport = %s",
+                pcAttach->AttachmentSupport.getPyReprString().c_str()
+            );
+        }
 
         Gui::cmdAppObjectArgs(obj, "MapPathParameter = %f", pcAttach->MapPathParameter.getValue());
 

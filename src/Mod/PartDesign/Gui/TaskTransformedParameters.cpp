@@ -606,4 +606,20 @@ bool TaskDlgTransformedParameters::reject()
     return TaskDlgFeatureParameters::reject();
 }
 
+void TaskDlgTransformedParameters::referencesRepaired()
+{
+    TaskDlgFeatureParameters::referencesRepaired();
+    if (parameter) {
+        parameter->onReferencesRepaired();
+    }
+}
+
+void TaskDlgTransformedParameters::referenceSelectionTaken()
+{
+    TaskDlgFeatureParameters::referenceSelectionTaken();
+    if (parameter) {
+        parameter->onReferenceSelectionTaken();
+    }
+}
+
 #include "moc_TaskTransformedParameters.cpp"

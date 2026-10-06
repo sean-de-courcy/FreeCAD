@@ -200,7 +200,9 @@ void TaskMirroredParameters::onUpdateView(bool on)
         App::DocumentObject* obj = nullptr;
 
         getMirrorPlane(obj, mirrorPlanes);
-        pcMirrored->MirrorPlane.setValue(obj, mirrorPlanes);
+        if (!isSameLink(pcMirrored->MirrorPlane, obj, mirrorPlanes)) {
+            pcMirrored->MirrorPlane.setValue(obj, mirrorPlanes);
+        }
 
         recomputeFeature();
     }
@@ -220,7 +222,16 @@ void TaskMirroredParameters::apply()
     getMirrorPlane(obj, mirrorPlanes);
     std::string mirrorPlane = buildLinkSingleSubPythonStr(obj, mirrorPlanes);
 
-    FCMD_OBJ_CMD(getObject(), "MirrorPlane = " << mirrorPlane);
+    // Written only when the panel changed it (ops#127).
+    auto pcMirrored = getObject<PartDesign::Mirrored>();
+    if (!pcMirrored || !isSameLink(pcMirrored->MirrorPlane, obj, mirrorPlanes)) {
+        FCMD_OBJ_CMD(getObject(), "MirrorPlane = " << mirrorPlane);
+    }
+}
+
+void TaskMirroredParameters::onReferencesRepaired()
+{
+    updateUI();
 }
 
 TaskMirroredParameters::~TaskMirroredParameters()

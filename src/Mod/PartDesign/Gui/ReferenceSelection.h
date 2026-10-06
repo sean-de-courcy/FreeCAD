@@ -31,6 +31,7 @@
 namespace App
 {
 class OriginGroupExtension;
+class PropertyLinkSub;
 }
 namespace PartDesign
 {
@@ -116,6 +117,15 @@ QString getRefStr(const App::DocumentObject* obj, const std::vector<std::string>
 std::string buildLinkSubPythonStr(const App::DocumentObject* obj, const std::vector<std::string>& subs);
 /// Return reference as string for python in the format (<obj> ["sub"?])
 std::string buildLinkSingleSubPythonStr(
+    const App::DocumentObject* obj,
+    const std::vector<std::string>& subs
+);
+/** Whether  prop already links  obj with  subs, by the subs' plain or mapped names (ops#127).
+ * A dialog writes a link property on OK only when its widget changed it: written again with plain
+ * names, the link would lose its guess record and its warning without a word.
+ */
+bool isSameLink(
+    const App::PropertyLinkSub& prop,
     const App::DocumentObject* obj,
     const std::vector<std::string>& subs
 );

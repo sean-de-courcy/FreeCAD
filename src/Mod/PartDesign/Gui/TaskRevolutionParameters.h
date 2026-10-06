@@ -69,6 +69,8 @@ public:
     ~TaskRevolutionParameters() override;
 
     void apply() override;
+    /// The axis and face widgets show their properties again (ops#127).
+    void onReferencesRepaired() override;
 
     /**
      * @brief fillAxisCombo fills the combo and selects the item according to
@@ -179,6 +181,7 @@ private:
 private:
     void createSideControllers();
     void setupSideDialog(SideController& side);
+    void updateUpToFaceName(SideController& side);
     void connectSignals();
     void updateUI(Side side);
     void updateWholeUI(Side side);

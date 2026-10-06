@@ -25,6 +25,7 @@
 #pragma once
 
 
+#include <functional>
 #include <type_traits>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
@@ -36,6 +37,7 @@ namespace PartDesignGui
 {
 
 class Ui_TaskPreviewParameters;
+class TaskReferences;
 
 class TaskPreviewParameters: public Gui::TaskView::TaskBox
 {
@@ -77,6 +79,14 @@ public:
     {}
     /// apply changes made in the parameters input to the model via commands
     virtual void apply()
+    {}
+    /// A reference was repaired in the dialog's References panel (ops#127): widgets that show a
+    /// link property read it again, so that OK doesn't write the old value back.
+    virtual void onReferencesRepaired()
+    {}
+    /// The References panel is about to change the selection (a highlight or a re-pick): the
+    /// panel's own selection mode ends, so that it doesn't act on the panel's elements.
+    virtual void onReferenceSelectionTaken()
     {}
 
     void recomputeFeature();
@@ -180,9 +190,21 @@ public:
     }
 
 protected:
+    /// The References panel repaired a reference, or is about to change the selection: the
+    /// parameter panels hear of it (TaskFeatureParameters::onReferencesRepaired and
+    /// onReferenceSelectionTaken). A dialog whose panels aren't TaskFeatureParameters adds its own.
+    virtual void referencesRepaired();
+    virtual void referenceSelectionTaken();
+
     PartDesignGui::TaskPreviewParameters* preview;
+    /// The feature's guessed, partly resolved or broken references, at the top; null if none
+    /// (ops#127).
+    PartDesignGui::TaskReferences* references = nullptr;
 
 private:
+    /// Calls \a fn on each parameter panel.
+    void forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn);
+
     PartDesignGui::ViewProvider* vp;
 };
 

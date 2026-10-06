@@ -39,6 +39,7 @@
 #include "ui_TaskPreviewParameters.h"
 
 #include "TaskFeatureParameters.h"
+#include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
 
 using namespace PartDesignGui;
@@ -184,14 +185,49 @@ TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* 
     , vp(vp)
 {
     assert(vp);
+    // The feature's references that need the user, at the top of its dialog (ops#127). The
+    // subclasses add their panels after this one.
+    App::DocumentObject* feature = vp->getObject();
+    if (TaskReferences::hasRows(feature)) {
+        references = new TaskReferences(feature);
+        Content.push_back(references);
+        connect(references, &TaskReferences::referencesChanged, this, [this]() {
+            referencesRepaired();
+        });
+        connect(references, &TaskReferences::selectionTaken, this, [this]() {
+            referenceSelectionTaken();
+        });
+    }
 }
 
 TaskDlgFeatureParameters::~TaskDlgFeatureParameters() = default;
+
+void TaskDlgFeatureParameters::referencesRepaired()
+{
+    forEachParameters([](TaskFeatureParameters* param) { param->onReferencesRepaired(); });
+}
+
+void TaskDlgFeatureParameters::referenceSelectionTaken()
+{
+    forEachParameters([](TaskFeatureParameters* param) { param->onReferenceSelectionTaken(); });
+}
+
+void TaskDlgFeatureParameters::forEachParameters(const std::function<void(TaskFeatureParameters*)>& fn)
+{
+    for (QWidget* wgt : Content) {
+        if (auto param = qobject_cast<TaskFeatureParameters*>(wgt)) {
+            fn(param);
+        }
+    }
+}
 
 bool TaskDlgFeatureParameters::accept()
 {
     App::DocumentObject* feature = getObject();
     bool isUpdateBlocked = false;
+    if (references) {
+        references->stopPick();
+    }
     try {
         // Iterate over parameter dialogs and apply all parameters from them
         for (QWidget* wgt : Content) {
@@ -285,6 +321,10 @@ bool TaskDlgFeatureParameters::reject()
     // Find out previous feature we won't be able to do it after abort
     // (at least in the body case)
     App::DocumentObject* previous = feature->getBaseObject(/* silent = */ true);
+
+    if (references) {
+        references->stopPick();
+    }
 
     // detach the task panel from the selection to avoid to invoke
     // eventually onAddSelection when the selection changes

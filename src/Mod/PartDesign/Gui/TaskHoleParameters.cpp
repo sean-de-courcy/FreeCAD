@@ -45,6 +45,7 @@
 #include <Mod/Part/App/Tools.h>
 
 #include "ui_TaskHoleParameters.h"
+#include "ReferenceSelection.h"
 #include "TaskHoleParameters.h"
 
 using namespace PartDesignGui;
@@ -1360,7 +1361,33 @@ void TaskHoleParameters::apply()
     }
     FCMD_OBJ_CMD(hole, "StartOffset = " << ui->StartOffset->value().getValue());
     FCMD_OBJ_CMD(hole, "StartType = " << ui->StartType->currentIndex());
-    FCMD_OBJ_CMD(hole, "StartReference = " << getStartReference().toUtf8().data());
+    // Written only when the panel changed it (ops#127).
+    App::DocumentObject* startObject = nullptr;
+    std::vector<std::string> startSubs;
+    QVariant featureName = ui->lineStartReference->property("FeatureName");
+    if (featureName.isValid()) {
+        startObject = hole->getDocument()->getObject(featureName.toString().toUtf8().constData());
+        QString faceName = ui->lineStartReference->property("FaceName").toString();
+        if (!faceName.isEmpty()) {
+            startSubs.push_back(faceName.toStdString());
+        }
+    }
+    if (!isSameLink(hole->StartReference, startObject, startSubs)) {
+        FCMD_OBJ_CMD(hole, "StartReference = " << getStartReference().toUtf8().data());
+    }
+}
+
+void TaskHoleParameters::onReferencesRepaired()
+{
+    updateStartReferenceName();
+}
+
+void TaskHoleParameters::onReferenceSelectionTaken()
+{
+    if (ui->buttonStartReference->isChecked()) {
+        ui->buttonStartReference->setChecked(false);
+    }
+    TaskSketchBasedParameters::onReferenceSelectionTaken();
 }
 
 void TaskHoleParameters::updateHoleCutLimits(PartDesign::Hole* hole)

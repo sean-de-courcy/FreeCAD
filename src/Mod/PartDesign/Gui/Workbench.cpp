@@ -32,6 +32,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
 
+#include "TaskReferences.h"
 #include "Utils.h"
 #include "Workbench.h"
 #include "WorkflowManager.h"
@@ -94,6 +95,11 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
         }
 
         if (strcmp(recipient, "Tree") == 0) {
+            // A guessed, partly resolved or broken reference (ops#127)
+            if (selection.size() == 1 && TaskReferences::hasRows(feature)) {
+                *item << "PartDesign_RepairReferences";
+            }
+
             Gui::MDIView* activeView = Gui::Application::Instance->activeView();
 
             if (activeView) {

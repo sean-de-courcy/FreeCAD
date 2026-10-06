@@ -49,6 +49,8 @@ public:
     ~TaskDraftParameters() override;
 
     void apply() override;
+    /// The neutral plane and pull direction show their properties again (ops#127).
+    void onReferencesRepaired() override;
 
     double getAngle() const;
     bool getReversed() const;

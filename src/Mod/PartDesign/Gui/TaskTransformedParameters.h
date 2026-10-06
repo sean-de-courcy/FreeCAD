@@ -93,6 +93,16 @@ public:
     /// Exit the selection mode of the associated task panel
     void exitSelectionMode();
 
+    /// A reference was repaired in the dialog's References panel (ops#127): widgets that show a
+    /// link property read it again, so that OK doesn't write the old value back.
+    virtual void onReferencesRepaired()
+    {}
+    /// The References panel is about to change the selection: the selection mode ends.
+    virtual void onReferenceSelectionTaken()
+    {
+        exitSelectionMode();
+    }
+
     static void removeItemFromListWidget(QListWidget* widget, const QString& itemstr);
 
 protected:
@@ -236,6 +246,9 @@ public:
     bool reject() override;
 
 protected:
+    void referencesRepaired() override;
+    void referenceSelectionTaken() override;
+
     TaskTransformedParameters* parameter = nullptr;
     TaskTransformedMessages* message = nullptr;
 };

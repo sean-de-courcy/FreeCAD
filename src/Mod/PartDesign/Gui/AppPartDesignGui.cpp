@@ -69,6 +69,7 @@
 void CreatePartDesignCommands();
 void CreatePartDesignBodyCommands();
 void CreatePartDesignPrimitiveCommands();
+void CreatePartDesignReferenceCommands();
 
 void loadPartDesignResource()
 {
@@ -124,6 +125,7 @@ PyMOD_INIT_FUNC(PartDesignGui)
     CreatePartDesignCommands();
     CreatePartDesignBodyCommands();
     CreatePartDesignPrimitiveCommands();
+    CreatePartDesignReferenceCommands();
 
     // clang-format off
     PartDesignGui::Workbench                 ::init();

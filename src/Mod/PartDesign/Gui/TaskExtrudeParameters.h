@@ -26,6 +26,7 @@
 
 #include <QLabel>
 
+#include <App/DocumentObserver.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
 
 #include "TaskSketchBasedParameters.h"
@@ -35,6 +36,7 @@ class QCheckBox;
 class QComboBox;
 class QLineEdit;
 class QListWidget;
+class QPushButton;
 class QToolButton;
 
 class Ui_TaskPadPocketParameters;
@@ -121,7 +123,10 @@ public:
         SelectStartReference,
         SelectShape,
         SelectShapeFaces,
-        SelectReferenceAxis
+        SelectReferenceAxis,
+        /// The profile picked again (ops#125, ops#127): the sketch, its regions or edges, or
+        /// faces of the solid before.
+        SelectProfile
     };
 
     TaskExtrudeParameters(
@@ -144,6 +149,10 @@ public:
     void applyParameters();
 
     void setSelectionMode(SelectionMode mode, Side side = Side::First);
+
+    /// The widgets that show link properties read them again (ops#127).
+    void onReferencesRepaired() override;
+    void onReferenceSelectionTaken() override;
 
 protected:
     // This struct holds all pointers for one side's UI and properties
@@ -276,6 +285,20 @@ private:
     void createSideControllers();
     void updateStartUI();
     void updateStartReferenceName();
+    void updateUpToFaceName(SideController& side);
+
+    /// The Profile row (ops#125): what Profile holds, and a button to pick it again.
+    void setupProfileRow();
+    void updateProfileName();
+    void onSelectProfileToggle(bool checked);
+    void selectedProfile(const Gui::SelectionChanges& msg);
+    QLineEdit* lineProfile = nullptr;
+    QPushButton* buttonProfile = nullptr;
+    /// The profile picked so far in this selection mode, and the sketch the mode showed.
+    App::DocumentObjectT pickedProfile;
+    std::vector<std::string> pickedProfileSubs;
+    App::DocumentObjectT shownProfile;
+    bool hiddenSelf = false;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
     Gui::LinearGizmo* startOffsetGizmo = nullptr;

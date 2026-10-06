@@ -22,19 +22,27 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <sstream>
+
 #include <QAction>
 #include <QAbstractButton>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QSignalBlocker>
 
 
 #include <App/Document.h>
 #include <Base/Tools.h>
 #include <Base/UnitsApi.h>
+#include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Tools.h>
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/Inventor/Draggers/SoLinearDragger.h>
 #include <Gui/Inventor/Draggers/SoRotationDragger.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
 #include <Mod/Part/App/GizmoHelper.h>
 
@@ -46,6 +54,49 @@
 
 using namespace PartDesignGui;
 using namespace Gui;
+
+namespace
+{
+// The gate of the profile's pick (ops#125): a sketch or other 2D object of the body, whole or by
+// its edges and regions, or faces and edges of the solid before the feature.
+class ProfileGate: public Gui::SelectionGate
+{
+public:
+    ProfileGate(const App::DocumentObject* feature, const App::DocumentObject* base)
+        : feature(feature)
+        , base(base)
+    {}
+
+    bool allow(App::Document* /*doc*/, App::DocumentObject* obj, const char* sub) override
+    {
+        if (!obj || obj == feature) {
+            return false;
+        }
+        const std::string element(sub ? sub : "");
+        auto startsWith = [&element](const char* prefix) {
+            return element.rfind(prefix, 0) == 0;
+        };
+        if (obj == base) {
+            return startsWith("Face") || startsWith("Edge");
+        }
+        if (!obj->isDerivedFrom<Part::Part2DObject>()) {
+            notAllowedReason = QT_TR_NOOP("Pick a sketch, its regions or edges, or faces of the solid.");
+            return false;
+        }
+        auto body = PartDesign::Body::findBodyOf(feature);
+        if (body && !body->hasObject(obj)) {
+            notAllowedReason = QT_TR_NOOP("Pick a sketch of the same body.");
+            return false;
+        }
+        return element.empty() || startsWith("Edge") || startsWith("Face")
+            || startsWith("InternalFace") || startsWith("Wire");
+    }
+
+private:
+    const App::DocumentObject* feature;
+    const App::DocumentObject* base;
+};
+}  // namespace
 
 /* TRANSLATOR PartDesignGui::TaskExtrudeParameters */
 
@@ -113,6 +164,7 @@ void TaskExtrudeParameters::setupDialog()
     ui->startOffsetEdit->bind(extrude->StartOffset);
 
     updateStartReferenceName();
+    setupProfileRow();
 
     // --- Per-Side Setup using the Helper ---
     setupSideDialog(m_side1);
@@ -161,7 +213,22 @@ void TaskExtrudeParameters::setupSideDialog(SideController& side)
     side.offsetEdit->bind(*side.Offset);
     side.taperEdit->bind(*side.TaperAngle);
 
-    // --- Handle "Up to face" label logic ---
+    updateUpToFaceName(side);
+
+    // --- Update shape-related UI ---
+    updateShapeName(side.lineShapeName, *side.UpToShape);
+    updateShapeFaces(side.listWidgetReferences, *side.UpToShape);
+
+    // --- Set up the mode combobox and list widget context menu ---
+    translateModeList(side.changeMode, typeIndex);
+
+    side.listWidgetReferences->addAction(side.unselectShapeFaceAction);
+    side.listWidgetReferences->setContextMenuPolicy(Qt::ActionsContextMenu);
+    side.checkBoxAllFaces->setChecked(side.listWidgetReferences->count() == 0);
+}
+
+void TaskExtrudeParameters::updateUpToFaceName(SideController& side)
+{
     App::DocumentObject* faceObj = side.UpToFace->getValue();
     std::vector<std::string> subStrings = side.UpToFace->getSubValues();
     std::string upToFaceName;
@@ -190,17 +257,6 @@ void TaskExtrudeParameters::setupSideDialog(SideController& side)
         side.lineFaceName->setProperty("FeatureName", QVariant());
     }
     side.lineFaceName->setProperty("FaceName", QByteArray(upToFaceName.c_str()));
-
-    // --- Update shape-related UI ---
-    updateShapeName(side.lineShapeName, *side.UpToShape);
-    updateShapeFaces(side.listWidgetReferences, *side.UpToShape);
-
-    // --- Set up the mode combobox and list widget context menu ---
-    translateModeList(side.changeMode, typeIndex);
-
-    side.listWidgetReferences->addAction(side.unselectShapeFaceAction);
-    side.listWidgetReferences->setContextMenuPolicy(Qt::ActionsContextMenu);
-    side.checkBoxAllFaces->setChecked(side.listWidgetReferences->count() == 0);
 }
 
 void TaskExtrudeParameters::updateStartUI()
@@ -447,6 +503,26 @@ void TaskExtrudeParameters::setSelectionMode(SelectionMode mode, Side side)
     updateCheckedForSide(Side::First, ui->buttonFace, ui->buttonShape, ui->buttonShapeFace);
     updateCheckedForSide(Side::Second, ui->buttonFace2, ui->buttonShape2, ui->buttonShapeFace2);
     ui->buttonStartReference->setChecked(mode == SelectStartReference);
+    if (buttonProfile) {
+        QSignalBlocker block(buttonProfile);
+        buttonProfile->setChecked(mode == SelectProfile);
+    }
+
+    // Leaving the profile's pick: what it showed and hid goes back.
+    if (selectionMode == SelectProfile && mode != SelectProfile) {
+        if (auto profile = shownProfile.getObject()) {
+            if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
+                vp->hide();
+            }
+        }
+        shownProfile = App::DocumentObjectT();
+        if (hiddenSelf) {
+            if (auto vp = getViewObject()) {
+                vp->show();
+            }
+            hiddenSelf = false;
+        }
+    }
 
     selectionMode = mode;
     activeSelectionSide = side;
@@ -471,6 +547,28 @@ void TaskExtrudeParameters::setSelectionMode(SelectionMode mode, Side side)
         case SelectReferenceAxis:
             onSelectReference(AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE);
             break;
+        case SelectProfile: {
+            // The solid before shows instead of the body's shown feature; the profile's sketch
+            // shows too, and the feature itself hides when nothing comes before it.
+            onSelectReference(AllowSelection::FACE | AllowSelection::EDGE);
+            auto profileBased = getObject<PartDesign::ProfileBased>();
+            App::DocumentObject* base = profileBased->getBaseObject(/* silent =*/true);
+            if (auto profile = profileBased->Profile.getValue()) {
+                auto vp = Gui::Application::Instance->getViewProvider(profile);
+                if (vp && !vp->isShow()) {
+                    vp->show();
+                    shownProfile = profile;
+                }
+            }
+            if (!base && getViewObject() && getViewObject()->isShow()) {
+                getViewObject()->hide();
+                hiddenSelf = true;
+            }
+            pickedProfile = App::DocumentObjectT();
+            pickedProfileSubs.clear();
+            Gui::Selection().addSelectionGate(new ProfileGate(profileBased, base));
+            break;
+        }
         default:
             getViewObject<ViewProviderExtrude>()->highlightShapeFaces({});
             onSelectReference(AllowSelection::NONE);
@@ -513,16 +611,136 @@ void TaskExtrudeParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
                 selectedReferenceAxis(msg);
                 break;
 
+            case SelectProfile:
+                selectedProfile(msg);
+                break;
+
             default:
                 // no-op
                 break;
         }
+    }
+    else if (msg.Type == Gui::SelectionChanges::RmvSelection && selectionMode == SelectProfile) {
+        selectedProfile(msg);
     }
     else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
         if (selectionMode == SelectFace) {
             clearFaceName(sideCtrl.lineFaceName);
         }
     }
+}
+
+void TaskExtrudeParameters::setupProfileRow()
+{
+    auto row = new QHBoxLayout();
+    auto label = new QLabel(tr("Profile"), proxy);
+    lineProfile = new QLineEdit(proxy);
+    lineProfile->setObjectName(QStringLiteral("lineProfile"));
+    lineProfile->setReadOnly(true);
+    buttonProfile = new QPushButton(tr("Select"), proxy);
+    buttonProfile->setObjectName(QStringLiteral("buttonProfile"));
+    buttonProfile->setCheckable(true);
+    buttonProfile->setToolTip(
+        tr("Pick the profile again: a sketch, regions or edges of a sketch, or faces of the solid "
+           "before. The picks replace the profile.")
+    );
+    row->addWidget(label);
+    row->addWidget(lineProfile, 1);
+    row->addWidget(buttonProfile);
+    ui->verticalLayout->insertLayout(0, row);
+    connect(buttonProfile, &QPushButton::toggled, this, &TaskExtrudeParameters::onSelectProfileToggle);
+    updateProfileName();
+}
+
+void TaskExtrudeParameters::updateProfileName()
+{
+    if (!lineProfile) {
+        return;
+    }
+    auto profileBased = getObject<PartDesign::ProfileBased>();
+    App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
+    if (!profile) {
+        lineProfile->clear();
+        return;
+    }
+    QString text = QString::fromUtf8(profile->Label.getValue());
+    QStringList names;
+    // Old-style names: a missing element shows as `?InternalFace1`.
+    for (const auto& sub : profileBased->Profile.getSubValues(false)) {
+        names << QString::fromStdString(sub);
+    }
+    if (!names.isEmpty()) {
+        text += QStringLiteral(": ") + names.join(QStringLiteral(", "));
+    }
+    lineProfile->setText(text);
+    lineProfile->setToolTip(text);
+}
+
+void TaskExtrudeParameters::onSelectProfileToggle(bool checked)
+{
+    setSelectionMode(checked ? SelectProfile : None);
+}
+
+void TaskExtrudeParameters::selectedProfile(const Gui::SelectionChanges& msg)
+{
+    auto extrude = getObject<PartDesign::FeatureExtrude>();
+    App::Document* document = extrude->getDocument();
+    if (strcmp(msg.pDocName, document->getName()) != 0) {
+        return;
+    }
+    App::DocumentObject* picked = document->getObject(msg.pObjectName);
+    if (!picked) {
+        return;
+    }
+    const std::string subName(msg.pSubName ? msg.pSubName : "");
+    if (pickedProfile.getObject() != picked) {
+        pickedProfile = picked;
+        pickedProfileSubs.clear();
+    }
+    auto position = std::ranges::find(pickedProfileSubs, subName);
+    if (msg.Type == Gui::SelectionChanges::AddSelection) {
+        if (subName.empty()) {
+            pickedProfileSubs.clear();  // the whole object
+        }
+        else if (position == pickedProfileSubs.end()) {
+            pickedProfileSubs.push_back(subName);
+        }
+    }
+    else if (position != pickedProfileSubs.end()) {
+        pickedProfileSubs.erase(position);
+        if (pickedProfileSubs.empty()) {
+            return;  // nothing picked: the profile stays as the last pick left it
+        }
+    }
+    else {
+        return;
+    }
+
+    // A fresh list: the picks replace the profile, broken elements included, and the App side
+    // repairs the reference from them (TestPad.testReselectedRegionsRepairThePad).
+    std::ostringstream str;
+    str << "Profile = (" << Gui::Command::getObjectCmd(picked) << ", [";
+    for (const auto& sub : pickedProfileSubs) {
+        str << "'" << sub << "',";
+    }
+    str << "])";
+    FCMD_OBJ_CMD(extrude, str.str());
+    tryRecomputeFeature();
+    updateProfileName();
+}
+
+void TaskExtrudeParameters::onReferencesRepaired()
+{
+    updateProfileName();
+    updateStartReferenceName();
+    updateUpToFaceName(m_side1);
+    updateUpToFaceName(m_side2);
+    fillDirectionCombo();
+}
+
+void TaskExtrudeParameters::onReferenceSelectionTaken()
+{
+    setSelectionMode(None);
 }
 
 void TaskExtrudeParameters::selectedReferenceAxis(const Gui::SelectionChanges& msg)

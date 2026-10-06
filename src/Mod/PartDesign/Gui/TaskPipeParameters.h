@@ -98,6 +98,7 @@ public:
     ~TaskPipeParameters() override;
 
     bool accept();
+    void onReferenceSelectionTaken() override;
 
 private Q_SLOTS:
     void onTangentChanged(bool checked);
@@ -139,6 +140,7 @@ public:
     );
     ~TaskPipeOrientation() override;
 
+    void onReferenceSelectionTaken() override;
 
 private Q_SLOTS:
     void onOrientationChanged(int);
@@ -172,6 +174,8 @@ class TaskPipeScaling: public TaskSketchBasedParameters
 public:
     explicit TaskPipeScaling(ViewProviderPipe* PipeView, bool newObj = false, QWidget* parent = nullptr);
     ~TaskPipeScaling() override;
+
+    void onReferenceSelectionTaken() override;
 
 private Q_SLOTS:
     void onScalingChanged(int);

@@ -23,6 +23,8 @@
  ******************************************************************************/
 
 
+#include <algorithm>
+
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <TopoDS.hxx>
@@ -35,6 +37,7 @@
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/Part.h>
+#include <App/PropertyLinks.h>
 #include <Base/Tools.h>
 #include <Gui/Command.h>
 #include <Gui/Document.h>
@@ -423,6 +426,27 @@ std::string buildLinkSingleSubPythonStr(
     else {
         return Gui::Command::getObjectCmd(obj, "(", ", ['") + subs.front() + "'])";
     }
+}
+
+bool isSameLink(
+    const App::PropertyLinkSub& prop,
+    const App::DocumentObject* obj,
+    const std::vector<std::string>& subs
+)
+{
+    if (prop.getValue() != obj) {
+        return false;
+    }
+    // A datum is linked with no sub or with one empty sub.
+    auto noElement = [](const std::vector<std::string>& names) {
+        return std::all_of(names.begin(), names.end(), [](const std::string& name) {
+            return name.empty();
+        });
+    };
+    if (noElement(subs)) {
+        return noElement(prop.getSubValues(false));
+    }
+    return prop.getSubValues(false) == subs || prop.getSubValues(true) == subs;
 }
 
 std::string buildLinkListPythonStr(const std::vector<App::DocumentObject*>& objs)

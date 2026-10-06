@@ -57,6 +57,8 @@ public:
 
     ~TaskMirroredParameters() override;
 
+    void onReferencesRepaired() override;
+
     void apply() override;
 
 protected:

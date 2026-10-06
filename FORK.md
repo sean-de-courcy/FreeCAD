@@ -144,7 +144,8 @@ names it.
 | `feat/127-failure-passthrough` | feat | ops#126, ops#127 | - | `integration` `b8175da50d` | `5b1e893ccd` (fork PR 114), 2026-10-05 | never (fork feature) |
 | `feat/127-solver-warnings` | feat | ops#127, ops#107 | - | `integration` `5b1e893ccd` | `97d8ac7f33` (fork PR 115), 2026-10-06 | never (fork naming: the reference solver is the fork's) |
 | `feat/127-body-reorder` | feat | ops#127, ops#94 | - | `integration` `97d8ac7f33` | `4c9c124aeb` (fork PR 116), 2026-10-06 | never (fork feature) |
-| `feat/127-solver-guesses` | feat | ops#127, ops#107 | - | `integration` | (fork PR 117) | never (fork feature) |
+| `feat/127-solver-guesses` | feat | ops#127, ops#107 | - | `integration` | `161447e4a0` (fork PR 117), 2026-10-06 | never (fork feature) |
+| `feat/127-picker` | feat | ops#127, ops#125 | - | `feat/127-solver-guesses` `438e976e35` | (fork PR 118) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

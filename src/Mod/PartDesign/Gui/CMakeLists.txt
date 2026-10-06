@@ -133,6 +133,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     ReferenceSelection.h
     TaskFeatureParameters.cpp
     TaskFeatureParameters.h
+    TaskReferences.cpp
+    TaskReferences.h
     TaskSketchBasedParameters.cpp
     TaskSketchBasedParameters.h
     TaskExtrudeParameters.cpp

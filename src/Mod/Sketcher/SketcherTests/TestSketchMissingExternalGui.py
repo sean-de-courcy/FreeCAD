@@ -124,7 +124,12 @@ class TestSketchMissingExternalGui(SketcherGuiTestCase):
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
 
         self.replaceRightSide()
-        self.assertFalse(sketch.isValid())
+        if getattr(self.doc, "ReferenceSolver", False):
+            # link 2 resolves: a reference solver document computes on it, warned (ops#127)
+            self.assertTrue(sketch.isValid(), sketch.getStatusString())
+            self.assertIn("Warning", sketch.State)
+        else:
+            self.assertFalse(sketch.isValid())
         self.openAndClose(sketch)
 
         edge = edge_between(self.pad.Shape, (0, 0, 10), (0, 20, 10))  # renumbered by the edit
