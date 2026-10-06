@@ -257,7 +257,32 @@ public:
     int delExternal(const std::vector<int>& ExtGeoIds);
     /// attach a link reference to an external geometry
     int attachExternal(const std::vector<int>& geoIds, App::DocumentObject* Obj, const char* SubName);
-    int detachExternal(const std::vector<int>& geoIds);
+    /// The Ids of the geometries ExternalGeometry's entry `entry` gives, in projection order
+    /// (ops#131: a reorder records them when it parks the entry)
+    std::vector<long> externalGeometryIds(int entry) const;
+    /// The type of ExternalGeometry's entry `entry` as the projection uses it (0 projection,
+    /// 1 intersection, 2 both)
+    int externalType(int entry) const;
+    /// The reference of the external geometry with Id `id`: empty when it has no link (a parked
+    /// projection), none when the sketch has no external geometry with that Id
+    std::optional<std::string> externalGeometryRefOf(long id) const;
+    /** Parks ExternalGeometry's entries `entries` (ops#131, a reorder that drops the sketch's
+     * feature above the projected solid): each entry's link is removed, and its geometries stay
+     * where they are as fixed geometry without a reference, with their Ids and every constraint
+     * on them. Nothing is renumbered. The other entries keep their shadows.
+     */
+    void parkExternalGeometry(const std::vector<int>& entries);
+    /** Puts a parked entry back (ops#131): appends the link `obj`, `sub` with `shadow` and the
+     * projection type `type`, and gives it the parked geometries `ids` in projection order, so
+     * the next rebuild projects the element onto the same geometries and their constraints hold.
+     * An Id that is no longer free (deleted, or given a reference since) is replaced by a new
+     * one: that projection comes back as new geometry. Returns how many were replaced.
+     */
+    int unparkExternalGeometry(App::DocumentObject* obj,
+                               const std::string& sub,
+                               App::PropertyLinkBase::ShadowSub&& shadow,
+                               int type,
+                               const std::vector<long>& ids);
     /** Writes ExternalGeometry's entries as given (the same count, in the same order) and keeps
      * each projection with its constraints when its entry's object changed (ops#127, the
      * reorder's re-target and its restore: an entry moves from one object to another with its
