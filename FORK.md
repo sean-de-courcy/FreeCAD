@@ -149,7 +149,8 @@ names it.
 | `fix/130-picker-followups` | fix | ops#130, ops#127 | - | `integration` `2eb8b6ec7a` | `1a1f9d51a9` (fork PR 120), 2026-10-06 | never (fork feature) |
 | `feat/127-tree-bar` | feat | ops#127 | - | `integration` `4c9c124aeb` | `1cad8bead0` (fork PR 119), 2026-10-06 | never (fork feature) |
 | `feat/127-edit-rollback` | feat | ops#127 | - | `integration` `1cad8bead0` | `b838560813` (fork PR 121), 2026-10-06 | never (fork feature) |
-| `fix/139-edit-lock-commands` | fix | ops#139 | - | `feat/127-edit-rollback` `f9f5468453` (stacked on fork PR 121) | (fork PR 123) | never (fork feature) |
+| `fix/139-edit-lock-commands` | fix | ops#139 | - | `feat/127-edit-rollback` `f9f5468453` (stacked on fork PR 121) | `e5d256f9ff` (fork PR 123), 2026-10-06 | never (fork feature) |
+| `fix/135-mixed-drag` | fix | ops#135 | - | `fix/139-edit-lock-commands` `ee97064747` (stacked on fork PR 123) | (fork PR 124) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -45,6 +45,7 @@
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
+#include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderDatum.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
@@ -96,6 +97,10 @@ void recomputeReporting(App::Document* doc, const std::vector<App::DocumentObjec
 // Why a move of the bar or a reorder is refused during an edit (ViewProviderBody::isEditLocked)
 constexpr const char* editLockedMessage =
     QT_TRANSLATE_NOOP("Exception", "The body can't change order or roll back while a dialog or an edit is open");
+
+// Why an own solid isn't dropped on its Body in a copy drag or with other objects (dropObject)
+constexpr const char* dragAloneMessage =
+    QT_TRANSLATE_NOOP("Exception", "Drag the feature alone, without Ctrl, to reorder it");
 
 }  // namespace
 
@@ -995,16 +1000,27 @@ bool ViewProviderBody::canDropObject(App::DocumentObject* obj) const
         Gui::getMainWindow()->showMessage(QCoreApplication::translate("Exception", editLockedMessage), 5000);
         return false;
     }
-    // The Body's own members are dropped among its rows to reorder them (ops#127). A copy drag
-    // of an own solid can't be done (dropObject() refuses it), so the cursor refuses it too
+    // The Body's own members are dropped among its rows to reorder them (ops#127). An own solid
+    // in a copy drag, or dragged with objects from outside the Body (ops#135; the tree drags its
+    // selection), isn't reordered but dropped, which dropObject() refuses: the cursor refuses it
     if (body->hasObject(obj)) {
+        if (!PartDesign::Body::isSolidFeature(obj)) {
+            return true;
+        }
 #ifdef Q_OS_MACOS
         constexpr auto copyModifier = Qt::AltModifier;
 #else
         constexpr auto copyModifier = Qt::ControlModifier;
 #endif
-        return !PartDesign::Body::isSolidFeature(obj)
-            || !(QApplication::queryKeyboardModifiers() & copyModifier);
+        auto selection = Gui::Selection().getCompleteSelection();
+        bool mixed = std::ranges::any_of(selection, [body](const Gui::SelectionSingleton::SelObj& sel) {
+            return sel.pObject && !body->hasObject(sel.pObject);
+        });
+        if (mixed || (QApplication::queryKeyboardModifiers() & copyModifier)) {
+            Gui::getMainWindow()->showMessage(QCoreApplication::translate("Exception", dragAloneMessage), 5000);
+            return false;
+        }
+        return true;
     }
     if (obj->isDerivedFrom<App::VarSet>()) {
         return true;
@@ -1042,9 +1058,7 @@ void ViewProviderBody::dropObject(App::DocumentObject* obj)
     // An own solid reaches here only from a copy drag or a drag mixed with other objects; a
     // reorder is a plain drag of the Body's own rows (ops#127)
     if (body->hasObject(obj) && PartDesign::Body::isSolidFeature(obj)) {
-        throw Base::RuntimeError(
-            QT_TRANSLATE_NOOP("Exception", "Drag the feature alone, without Ctrl, to reorder it")
-        );
+        throw Base::RuntimeError(dragAloneMessage);
     }
     if (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<App::DatumElement>()
         || obj->isDerivedFrom<App::LocalCoordinateSystem>()) {
