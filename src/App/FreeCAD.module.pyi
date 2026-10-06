@@ -374,12 +374,14 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
 
     One dict per reference the solver resolved beyond the exact lookup, or left broken, plus one
     per missing reference it has no entry for, sorted by property and index. Keys: `property`,
-    `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken`, `index` or
-    `expanded`), `tier` (0-3 for `resolved`; 1, or 4 for a continuation, for `expanded`), `new`
+    `index`, `sub`, `old` (the old mapped name), `status` (`resolved`, `broken`, `index`,
+    `expanded` or `guessed`), `tier` (0-3 for `resolved`; 1, or 4 for a continuation, for
+    `expanded`; 3, or 1 for a split's piece, for `guessed`), `new`
     (the element it resolved to, the first for `expanded`), `pieces` (`expanded`: every element),
     `candidates` (element names), `candidate_names` (their mapped names), `candidate_roles`
     (why each is one: `place` for an element where a moved one was, `name` for the element the
-    reference's name holds, `piece`, `structural`, `geometric`, `index`, or empty),
+    reference's name holds, `piece`, `structural`, `geometric`, `index`, `guess` for a guess
+    rule's pick, or empty),
     `candidate_distances` (each one's centre from the saved centre, or None), `evidence` and
     `target`.
 
@@ -387,7 +389,10 @@ def getReferenceReport(obj: DocumentObject, /) -> list[dict[str, Any]]:
     expanded, a naming migration's index carry) is listed too, even before the solver ran again
     (a reopened file: `evidence` `saved guess`, `status` and `tier` as its kind gives; key on
     `guess_kind`, not `status`). Keys for it: `guess_kind`
-    (`tier2`, `tier3`, `continued`, `expanded`, `index`, ...; empty without a record),
+    (`tier2`, `tier3`, `continued`, `expanded`, `index`, `rejected`, or a guess rule's:
+    `nearest`, the nearest of several structural candidates by a wider tier 3; `geometric`, the
+    nearest without a structural candidate, by the same wider tier 3; `piece`, the piece of a
+    split element that holds its saved centre; empty without a record),
     `original` (`{"index", "name"}`: what the reference stood for), `alternatives` (a list of
     `{"index", "role", "distance"}`, the other elements it could be), `headline` and `warning`
     (the owner's warning text, empty if none).

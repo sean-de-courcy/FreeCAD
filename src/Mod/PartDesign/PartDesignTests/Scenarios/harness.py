@@ -79,7 +79,16 @@ CONFIGS = {
     "V2i": ("V2", False, False, True),
     "V2si": ("V2", False, True, True),
 }
-VERDICTS = ("correct", "equivalent", "broken", "partial", "wrong", "partial-warned")
+VERDICTS = (
+    "correct",
+    "equivalent",
+    "broken",
+    "partial",
+    "wrong",
+    "partial-warned",
+    "guessed",
+    "guessed-wrong",
+)
 
 
 class ScenarioError(Exception):
@@ -366,6 +375,26 @@ class Broken:
 
 
 BROKEN = Broken()
+
+
+# The guess rules' record kinds (ops#127, N2 section 5): G1, G2, G3
+GUESS_KINDS = ("nearest", "geometric", "piece")
+
+
+class Guessed:
+    """The reference should be guessed (ops#127, N2 section 5: a reference solver document's
+    guess rules): it holds `expected`'s element (a predicate or `pieces`) and the solver's report
+    says it was guessed. Resolved plainly to the same element, it doesn't pass: the expectation
+    asserts a guess."""
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def select(self, shape):
+        return self.expected.select(shape)
+
+    def __repr__(self):
+        return f"GUESSED[{self.expected}]"
 
 
 class PartialWarned:
@@ -747,6 +776,25 @@ def combine(stored, outcome):
     return "correct"
 
 
+def liveGuesses(rows):
+    """The report rows (App.getReferenceReport) a guess rule's pick holds now (ops#127). A record
+    kept by a reference that broke since (A1: a record survives a break) is no pick."""
+    return [e for e in rows if e.get("guess_kind") in GUESS_KINDS and e.get("status") != "broken"]
+
+
+def guessVerdict(expectation, stored, verdict, rows):
+    """N2 7.2: the verdict of a reference whose report `rows` show a guess rule's pick. Right if
+    the pick is the expected element, or one of an expected break's listed candidates (`stored`
+    "partial"); otherwise `guessed-wrong`. Without a live pick, `verdict` stands."""
+    if not liveGuesses(rows):
+        return verdict
+    if isinstance(expectation, Broken):
+        right = stored == "partial"
+    else:
+        right = verdict in ("correct", "equivalent")
+    return "guessed" if right else "guessed-wrong"
+
+
 class Result:
     def __init__(self, scenario, ref, config, step):
         self.scenario, self.ref, self.config, self.step = scenario, ref, config, step
@@ -755,11 +803,15 @@ class Result:
 
     @property
     def passing(self):
-        if str(self.record.get("expect")).startswith("BROKEN"):
-            return self.verdict == "broken"
-        if str(self.record.get("expect")).startswith("PARTIAL"):
+        expect = str(self.record.get("expect"))
+        if expect.startswith("BROKEN"):
+            # a loud guess among the listed candidates is the user's policy (ops#127)
+            return self.verdict in ("broken", "guessed")
+        if expect.startswith("PARTIAL"):
             return self.verdict == "partial-warned"
-        return self.verdict in ("correct", "equivalent")
+        if expect.startswith("GUESSED"):
+            return self.verdict == "guessed"
+        return self.verdict in ("correct", "equivalent", "guessed")
 
     def message(self):
         return "SCORE " + json.dumps(self.record, sort_keys=True)
@@ -950,7 +1002,7 @@ class Scenario:
         partialWarned = isinstance(expectation, PartialWarned)
         missing = sum(1 for s in subs if s.startswith("?"))
         live = [s for s in subs if not s.startswith("?")] if partialWarned else subs
-        if partialWarned:
+        if partialWarned or isinstance(expectation, Guessed):
             expectation = expectation.expected
         resolved = []
         if target is None or not live or (not partialWarned and missing):
@@ -1008,8 +1060,14 @@ class Scenario:
                 result.verdict = "partial-warned"
             else:
                 result.verdict, detail = "wrong", f"{owner.Name} computes on the rest silently"
+        solverReport = self._solverReport(owner, ref.prop)
+        if not partialWarned:
+            # A guess rule's pick (ops#127, N2 7.2)
+            result.verdict = guessVerdict(
+                expectation, stored, result.verdict, self._reportRows(owner, ref.prop)
+            )
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
-        record.update(self._solverReport(owner, ref.prop))
+        record.update(solverReport)
         # computed on a guessed, partly resolved or geometry-only reference (ops#127)
         record["warning"] = warned
         if self.solver and not owner.isValid():
@@ -1025,21 +1083,36 @@ class Scenario:
         isn't (another configuration, or a build without it)."""
         if not hasattr(App, "getReferenceReport"):
             return {}
-        # A guess record the solver hasn't re-derived since a reopen ("saved guess", ops#127)
-        # is no solver outcome of this step.
-        entries = [
-            e
-            for e in App.getReferenceReport(owner)
-            if e["property"] == prop and e.get("evidence") != "saved guess"
-        ]
-        if not entries:
-            return {}
-        tiers, candidates, roles = [], [], []
-        for e in entries:
-            tiers.append(e["tier"] if e["status"] in ("resolved", "expanded") else e["status"])
-            candidates.append(e["candidates"])
-            roles.append(e.get("candidate_roles", []))  # ops#105
-        return {"tier": tiers, "candidates": candidates, "candidate_roles": roles}
+        rows = Scenario._reportRows(owner, prop)
+        # A guess rule's pick (ops#127) the reference holds, from this step or an earlier one
+        live = liveGuesses(rows)
+        guesses = [e["guess_kind"] for e in live]
+        # A record the solver hasn't solved since (a reopen, or a guess it kept): no outcome of
+        # this step
+        entries = [e for e in rows if e.get("evidence") != "saved guess"]
+        report = {}
+        if entries:
+            tiers, candidates, roles = [], [], []
+            for e in entries:
+                tiers.append(
+                    e["tier"] if e["status"] in ("resolved", "expanded", "guessed") else e["status"]
+                )
+                candidates.append(e["candidates"])
+                roles.append(e.get("candidate_roles", []))  # ops#105
+            report.update(tier=tiers, candidates=candidates, candidate_roles=roles)
+        if guesses:
+            report["guess"] = guesses
+            report["alternatives"] = [
+                [[a["index"], a["role"], a["distance"]] for a in e.get("alternatives", [])]
+                for e in live
+            ]
+        return report
+
+    @staticmethod
+    def _reportRows(owner, prop):
+        if not hasattr(App, "getReferenceReport"):
+            return []
+        return [e for e in App.getReferenceReport(owner) if e["property"] == prop]
 
     @staticmethod
     def _name(masker, mode, target, sub):

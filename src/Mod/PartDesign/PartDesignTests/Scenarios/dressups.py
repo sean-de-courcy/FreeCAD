@@ -127,6 +127,43 @@ class DressUpReorder(DressUpEdit):
         body.insertObject(doc.HoleA, doc.HoleB, True)
 
 
+class FilletDeleteNearStep(Scenario):
+    """A block (0..20 x 0..10, 10 high) and a step padded onto its right side (x 20..20.5, the
+    same height); a fillet, radius 0.25, on the step's front vertical edge at x = 20.5. The step
+    is deleted: its edge is gone, and the reference should break. The block's front right edge is
+    the same kind 0.5 mm away (2 % of the diagonal), within the no-structure guess's wide reach
+    (N2 5.5, the case it names): in solver documents with NamingSolver/GuessNoStructure on (the
+    default), G2 picks it loudly, which N2 7.2 scores `guessed-wrong` (the Fable review of fork
+    PR 117, finding 3: the record the user decides G2's default with; ops#127)."""
+
+    area = "dress-ups"
+    REFS = ("fillet_edge",)
+
+    def stepEdge(self):
+        return edge("line", direction=Z, through=(20.5, 0, 0))
+
+    def filletEdge(self):
+        return BROKEN if getattr(self, "deleted", False) else self.stepEdge()
+
+    def build(self, doc):
+        body = m.body(doc)
+        self.bodyObject = body
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        m.pad(body, profile, 10)
+        stepSketch = m.sketch(doc, "StepSketch", m.rectangle(20, 0, 20.5, 10), body)
+        step = m.pad(body, stepSketch, 10, name="Step")
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (step, self.names(step, self.stepEdge()))
+        fillet.Radius = 0.25
+        self.ref("fillet_edge", fillet, "Base", self.filletEdge, Filleted(0.25))
+
+    def edit(self, doc):
+        self.bodyObject.removeObject(doc.Step)
+        doc.removeObject("Step")
+        self.deleted = True
+
+
 class FilletDeleteBase(Scenario):
     """A block (0..10 each way); fillet A on the front top edge, radius 1; fillet B on A's back
     bottom edge, radius 0.25, an edge A leaves as it was on the block. A is deleted, as the GUI

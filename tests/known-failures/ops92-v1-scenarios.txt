@@ -25,10 +25,15 @@ cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V1
 reason: V1 gives the same verdict as V2 at every step, and V2's test is listed with the cause (ops#7: splits, notches, merges, Extent patterns; ops#68: the Attacher's old index)
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V1
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotch.test_draft_face_V1
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchOffCentre.test_draft_face_V1
+cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchNamedPieceKept.test_draft_face_V1
 cli  PartDesignTests.TestNamingScenarios.DraftFaceNotchAndExtend.test_draft_face_V1
 cli  PartDesignTests.TestNamingScenarios.ExternalArcSplit.test_right_arc_V1
+cli  PartDesignTests.TestNamingScenarios.ExternalArcSplitOffCentre.test_right_arc_V1
 cli  PartDesignTests.TestNamingScenarios.ExternalNotchAndExtend.test_front_edge_V1
 cli  PartDesignTests.TestNamingScenarios.ExternalSplit.test_front_edge_V1
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitOffCentre.test_front_edge_V1
+cli  PartDesignTests.TestNamingScenarios.ExternalSplitNamedPieceKept.test_front_edge_V1
 cli  PartDesignTests.TestNamingScenarios.FilletDeleteBaseTrimmedBox.test_fillet_edge_V1
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_chamfer_edge_V1
 cli  PartDesignTests.TestNamingScenarios.FilletNotchAfterChamfer.test_fillet_edge_V1

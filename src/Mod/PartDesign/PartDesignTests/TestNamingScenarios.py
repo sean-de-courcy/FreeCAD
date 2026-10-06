@@ -112,6 +112,7 @@ ORACLE_FIELDS = (
     "names_before",
     "subs_before",
     "tier",
+    "guess",
 )
 
 
@@ -371,10 +372,66 @@ class HarnessSameSolid(unittest.TestCase):
         self.assertEqual(harness.sameSolid(fresh, meshed), (True, ""))
 
 
+class HarnessGuessVerdicts(unittest.TestCase):
+    """N2 7.2's verdicts for a guess rule's pick (ops#127), on report rows as
+    App.getReferenceReport gives them: the `guessed-wrong` branch runs in no scenario yet."""
+
+    EDGE = harness.edge("line", direction=harness.Z, through=(20, 0, 0))
+
+    @staticmethod
+    def rows(status="guessed", kind="piece"):
+        return [{"property": "Base", "index": 0, "status": status, "guess_kind": kind}]
+
+    def verdict(self, expectation, stored, verdict, rows):
+        return harness.guessVerdict(expectation, stored, verdict, rows)
+
+    def passing(self, expectation, verdict):
+        result = harness.Result(None, None, "V2s", 0)
+        result.record["expect"] = repr(expectation)
+        result.verdict = verdict
+        return result.passing
+
+    def testExpectedBreakResolvedByAGuessIsWrong(self):
+        verdict = self.verdict(harness.BROKEN, "wrong", "wrong", self.rows())
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(harness.BROKEN, verdict))
+
+    def testGuessAmongAnExpectedBreaksCandidatesPasses(self):
+        expectation = harness.Broken(self.EDGE)
+        verdict = self.verdict(expectation, "partial", "partial", self.rows())
+        self.assertEqual(verdict, "guessed")
+        self.assertTrue(self.passing(expectation, verdict))
+
+    def testGuessOfTheExpectedElementPasses(self):
+        verdict = self.verdict(self.EDGE, "correct", "correct", self.rows(kind="nearest"))
+        self.assertEqual(verdict, "guessed")
+        self.assertTrue(self.passing(self.EDGE, verdict))
+
+    def testGuessOfAnotherElementIsWrong(self):
+        verdict = self.verdict(self.EDGE, "wrong", "wrong", self.rows(kind="geometric"))
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(self.EDGE, verdict))
+
+    def testExpectedGuessResolvedPlainlyDoesNotPass(self):
+        expectation = harness.Guessed(self.EDGE)
+        verdict = self.verdict(expectation, "correct", "correct", [])
+        self.assertEqual(verdict, "correct")
+        self.assertFalse(self.passing(expectation, verdict))
+        #   a warned resolution's record is no guess
+        verdict = self.verdict(expectation, "correct", "correct", self.rows("resolved", "tier3"))
+        self.assertEqual(verdict, "correct")
+
+    def testBreakThatKeptItsRecordStaysBroken(self):
+        """A1: a record survives a break; a correct break isn't turned into a wrong guess."""
+        verdict = self.verdict(harness.BROKEN, "broken", "broken", self.rows("broken", "piece"))
+        self.assertEqual(verdict, "broken")
+        self.assertTrue(self.passing(harness.BROKEN, verdict))
+
+
 __all__ = [
     name
     for name, value in globals().items()
     if isinstance(value, type)
     and issubclass(value, ScenarioTestCase)
     and value is not ScenarioTestCase
-] + ["RandomSequences", "SolverSeeded", "HarnessSameSolid"]
+] + ["RandomSequences", "SolverSeeded", "HarnessSameSolid", "HarnessGuessVerdicts"]

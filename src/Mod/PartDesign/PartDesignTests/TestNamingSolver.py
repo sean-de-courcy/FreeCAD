@@ -235,12 +235,15 @@ class TestNamingSolver(unittest.TestCase):
         """A reference whose mapped name is gone after an element-map version change is
         re-derived by its index, checked against its saved fingerprint: the same geometry
         resolves ("index"). With tier 3 kept from deciding (NamingSolver/Tier3Distance so large
-        that every other edge is within d_max), reopening the stale-name file breaks the
-        reference, and the version change then restores it."""
+        that every other edge is within d_max) and the guess rules off (their wider tier 3 would
+        decide), reopening the stale-name file breaks the reference, and the version change then
+        restores it."""
         # Arrange
         group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
         group.SetFloat("Tier3Distance", 100.0)
         self.addCleanup(group.RemFloat, "Tier3Distance")
+        group.SetBool("Guess", False)
+        self.addCleanup(group.RemBool, "Guess")
         doc, index = self.openWithStaleName()
         pad, fillet = doc.Pad, doc.Fillet
         self.assertEqual(fillet.Base[1], ["?" + index])
@@ -633,9 +636,9 @@ class TestNamingSolver(unittest.TestCase):
         old = group.GetBool("NamingMultiMatch", False)
         group.SetBool("NamingMultiMatch", True)
         self.addCleanup(
-            lambda: group.SetBool("NamingMultiMatch", old)
-            if had
-            else group.RemBool("NamingMultiMatch")
+            lambda: (
+                group.SetBool("NamingMultiMatch", old) if had else group.RemBool("NamingMultiMatch")
+            )
         )
 
     def testMultiMatchFlagsAreIgnoredInSolverDocuments(self):
@@ -1090,3 +1093,229 @@ class TestNamingSolver(unittest.TestCase):
         self.assertFalse(fillet.isValid())
         self.assertNotIn("Warning", fillet.State)
         self.assertNotIn("Warning", fillet.getStatusString())
+
+    # The guess rules (ops#127, N2 section 5): G1, G2 and G3 on designed models, each warned,
+    # with its kind and its alternatives, and turned off by its switch.
+
+    def guessSwitch(self, name, value):
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/NamingSolver")
+        group.SetBool(name, value)
+        self.addCleanup(group.RemBool, name)
+
+    def filletedSlot(self, doc):
+        """The pad (0..20 x 0..10, 10 high) with a rectangular slot (x 6..14, y 3..7) pocketed
+        through it, and a fillet, radius 0.5, on the slot's bottom edge at y = 3. The edge's
+        name comes from the cut, so it shares structure with the slot's other bottom edges."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 10)
+        slot = models.sketch(doc, "SlotSketch", models.rectangle(6, 3, 14, 7), body, z=10)
+        pocket = models.pocketThroughAll(body, slot)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, edge("line", direction=X, through=(0, 3, 0)).one(pocket.Shape))
+        fillet.Radius = 0.5
+        doc.recompute()
+        self.assertTrue(fillet.isValid())
+        return pocket, fillet
+
+    def redrawSlotShifted(self, doc):
+        """The slot drawn again 0.5 mm over in y: new geometry IDs, every edge 0.5 mm from its
+        old place."""
+        doc.SlotSketch.deleteAllGeometry()
+        doc.SlotSketch.addGeometry(
+            models.polygon([(14, 7.5), (14, 3.5), (6, 3.5), (6, 7.5)]), False
+        )
+        doc.recompute()
+
+    def testStructuralCandidatesAreGuessedByTheNearest(self):
+        """G1: the slot redrawn 0.5 mm over. Structure keeps the slot's two bottom edges along x,
+        and tier 3's strict reach (1 % of the diagonal, 0.24 mm) holds neither; the wide reach
+        (5 %, 1.22 mm) holds the nearer one, 0.5 mm away, and the other is far enough (4.5 mm).
+        The fillet computes on it, warned, kind `nearest`, the other as the alternative. Marked
+        broken, the fillet fails naming the original and the rejected pick."""
+        # Arrange
+        doc = self.newDocument()
+        pocket, fillet = self.filletedSlot(doc)
+        original = fillet.Base[1][0]
+
+        # Act
+        self.redrawSlotShifted(doc)
+
+        # Assert
+        nearer = edge("line", direction=X, through=(0, 3.5, 0)).one(pocket.Shape)
+        other = edge("line", direction=X, through=(0, 7.5, 0)).one(pocket.Shape)
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], nearer)
+        self.assertIn("Warning", fillet.State)
+        self.assertIn("tier 3 wide", fillet.getStatusString())
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["tier"]), ("guessed", 3))
+        self.assertEqual(entry["guess_kind"], "nearest")
+        self.assertEqual(entry["original"]["index"], original)
+        self.assertEqual(
+            [(a["index"], a["role"]) for a in entry["alternatives"]], [(other[0], "structural")]
+        )
+        [sub] = self.savedSubs(doc, "Fillet", "Base")
+        self.assertEqual(sub["guess"], "nearest")
+
+        #   marked broken: the fillet fails on the original, the pick rejected
+        App.markReferenceBroken(fillet, "Base", 0)
+        doc.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.Base[1], ["?" + original])
+        self.assertIn("rejected: " + nearer[0], fillet.getStatusString())
+
+    def testStructuralCandidatesBreakWithTheGuessesOff(self):
+        """G1's model with NamingSolver/Guess off: neither bottom edge along x is within tier 3's
+        strict reach, so the fillet breaks with the slot's bottom edges as candidates."""
+        self.guessSwitch("Guess", False)
+        doc = self.newDocument()
+        pocket, fillet = self.filletedSlot(doc)
+
+        self.redrawSlotShifted(doc)
+
+        self.assertFalse(fillet.isValid())
+        self.assertNotIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual(entry["status"], "broken")
+        self.assertEqual(entry["guess_kind"], "")
+        for y in (3.5, 7.5):
+            [along] = edge("line", direction=X, through=(0, y, 0)).one(pocket.Shape)
+            self.assertIn(along, entry["candidates"])
+
+    def redrawShifted(self, doc):
+        """The profile's rectangle drawn again 0.5 mm over in x: new geometry IDs, so no name
+        relates the old edges to the new ones, and every edge 0.5 mm from its old place."""
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(models.polygon([(20.5, 10), (20.5, 0), (0.5, 0), (0.5, 10)]), False)
+        doc.recompute()
+
+    def testNoStructureIsGuessedByTheWideReach(self):
+        """G2: the rectangle redrawn 0.5 mm over. No structural candidate; tier 3's strict reach
+        (0.24 mm) misses the moved corner edge, the wide one (1.22 mm) holds it, and the next
+        vertical edge is 19.5 mm away. The fillet computes on it, warned, kind `geometric`. With
+        NamingSolver/GuessNoStructure off it breaks."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+
+        self.redrawShifted(doc)
+
+        corner = edge("line", direction=Z, through=(20.5, 0, 0)).one(pad.Shape)
+        self.assertTrue(fillet.isValid())
+        self.assertEqual(fillet.Base[1], corner)
+        self.assertIn("Warning", fillet.State)
+        self.assertIn("no structural candidate", fillet.getStatusString())
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["tier"]), ("guessed", 3))
+        self.assertEqual(entry["guess_kind"], "geometric")
+
+        #   the switch off
+        self.guessSwitch("GuessNoStructure", False)
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        self.redrawShifted(doc)
+        self.assertFalse(fillet.isValid())
+
+    def openIndexOnly(self):
+        """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
+        no name to solve from, ops#123), its fingerprint kept; the file opened again with the
+        solver off, which is then turned on. Returns (document, the reference's index name)."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        index = fillet.Base[1][0]
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "IndexOnly.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml = files["Document.xml"].decode("utf-8")
+        found = re.findall(r'<Sub value="%s" shadow="[^"]*"( fp=")' % index, xml)
+        self.assertEqual(len(found), 1)  # the setup: the fillet's reference, with a fingerprint
+        xml = re.sub(
+            r'<Sub value="%s" shadow="[^"]*" fp="' % index, '<Sub value="?%s" fp="' % index, xml
+        )
+        # Opened with the solver off: on, the open itself would find the edge in its place
+        # (strict tier 3), before any edit.
+        xml, solverOff = re.subn(
+            r'(<Property name="ReferenceSolver"[^>]*>\s*<Bool value=")true(")', r"\1false\2", xml
+        )
+        self.assertEqual(solverOff, 1)
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        self.assertEqual(doc.Fillet.Base[1], ["?" + index])
+        doc.ReferenceSolver = True
+        return doc, index
+
+    def testIndexOnlyReferenceIsGuessedByItsFingerprint(self):
+        """N2 5.4: an index-only missing reference has no name, so no structural candidate; in a
+        forward update of its target it is retried by its fingerprint, and only G2 can take it.
+        The rectangle redrawn 0.5 mm over: G2 picks the moved corner edge, kind `geometric`, and
+        the record has no original name (it never snaps back). With
+        NamingSolver/GuessNoStructure off it stays broken (the review of fork PR 117, 4b)."""
+        doc, index = self.openIndexOnly()
+
+        self.redrawShifted(doc)
+
+        corner = edge("line", direction=Z, through=(20.5, 0, 0)).one(doc.Pad.Shape)
+        fillet = doc.Fillet
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], corner)
+        self.assertIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+        self.assertEqual(entry["original"]["name"], "")
+
+        #   the switch off
+        self.guessSwitch("GuessNoStructure", False)
+        doc, index = self.openIndexOnly()
+        self.redrawShifted(doc)
+        self.assertFalse(doc.Fillet.isValid())
+        self.assertEqual(doc.Fillet.Base[1], ["?" + index])
+
+    def testSplitIsGuessedByThePieceAtTheSavedCentre(self):
+        """G3: ExternalSplitOffCentre's model. A notch at x 4..8 splits the front top edge; the
+        piece with its name (x 0..4) misses its old centre (x = 10), the rest (x 8..20) holds
+        it. The external edge takes the rest, warned, kind `piece`, with the named piece as the
+        alternative. Accepted, the warning goes and the reference holds."""
+        # Arrange
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10))
+        sketch = models.sketch(doc, "OnFront", [], body, z=10)
+        original = front.one(pad.Shape)[0]
+        sketch.addExternal(pad.Name, original)
+        doc.recompute()
+
+        # Act
+        models.setLines(doc.Profile, {0: ((0, 0), (4, 0))})
+        doc.Profile.addGeometry(models.polyline([(4, 0), (4, 2), (8, 2), (8, 0), (20, 0)]), False)
+        doc.recompute()
+
+        # Assert
+        rest = edge("line", direction=X, contains=(14, 0, 10)).one(pad.Shape)
+        named = edge("line", direction=X, contains=(2, 0, 10)).one(pad.Shape)
+        self.assertTrue(sketch.isValid())
+        self.assertIn("Warning", sketch.State)
+        self.assertIn("the piece at the saved centre", sketch.getStatusString())
+        [entry] = App.getReferenceReport(sketch)
+        self.assertEqual((entry["status"], entry["tier"]), ("guessed", 1))
+        self.assertEqual(entry["guess_kind"], "piece")
+        self.assertEqual(entry["new"], rest[0])
+        self.assertEqual([a["index"] for a in entry["alternatives"]], named)
+
+        #   accepted
+        App.acceptReference(sketch, "ExternalGeometry", 0)
+        doc.recompute()
+        self.assertTrue(sketch.isValid())
+        self.assertNotIn("Warning", sketch.State)
+        self.assertEqual(App.getReferenceReport(sketch), [])

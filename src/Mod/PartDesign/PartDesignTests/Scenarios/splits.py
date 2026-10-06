@@ -44,6 +44,7 @@ from .harness import (
     Drafted,
     Extruded,
     Filleted,
+    Guessed,
     Scenario,
     X,
     Y,
@@ -361,6 +362,48 @@ class DraftFaceNotch(SplitModel):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         self.split = True
+
+
+class DraftFaceNotchOffCentre(DraftFaceNotch):
+    """DraftFaceNotch's notch moved left, to x 4..8: the front face keeps its name on x 0..4,
+    and the rest (x 8..20) holds the old face's centre (x = 10). In solver documents the
+    reference is guessed to that rest (ops#127, N2 5.2 G3: its box holds the saved centre, the
+    named piece's doesn't); without the solver it breaks with both as candidates, as
+    DraftFaceNotch's does."""
+
+    def frontFace(self):
+        if self.split and self.solver:
+            return Guessed(face("plane", normal=-Y, through=(0, 0, 0), contains=(14, 0, 5)))
+        return super().frontFace()
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (4, 0))})
+        doc.Profile.addGeometry(m.polyline([(4, 0), (4, 2), (8, 2), (8, 0), (20, 0)]), False)
+        self.split = True
+
+
+class DraftFaceNotchNamedPieceKept(DraftFaceNotch):
+    """DraftFaceNotch's notch moved right, to x 12..16, in two steps. `notch`: the front face
+    keeps its name on x 0..12, which holds the old face's centre (x = 10); the rest is x 16..20.
+    In solver documents the reference is guessed to the named piece (N2 5.2 G3) and keeps its
+    record. `moveBack`: the back side moves out to y = 12, an edit that leaves the pick alone;
+    the guess stays a guess, its warning too (A1; the Fable review of fork PR 117, finding 1).
+    Without the solver it breaks, as DraftFaceNotch's does."""
+
+    steps = ("notch", "moveBack")
+
+    def frontFace(self):
+        if self.split and self.solver:
+            return Guessed(face("plane", normal=-Y, through=(0, 0, 0), contains=(6, 0, 5)))
+        return super().frontFace()
+
+    def notch(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (12, 0))})
+        doc.Profile.addGeometry(m.polyline([(12, 0), (12, 2), (16, 2), (16, 0), (20, 0)]), False)
+        self.split = True
+
+    def moveBack(self, doc):
+        m.setLines(doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))})
 
 
 class SolverNotchRedrawn(SplitFilletNotch):

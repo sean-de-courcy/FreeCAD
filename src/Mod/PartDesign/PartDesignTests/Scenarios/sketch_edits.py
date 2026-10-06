@@ -25,7 +25,19 @@
 import FreeCAD as App
 import Part
 
-from .harness import BROKEN, Attached, Filleted, ReachesFace, Scenario, X, Y, Z, edge, face
+from .harness import (
+    BROKEN,
+    Attached,
+    Filleted,
+    Guessed,
+    ReachesFace,
+    Scenario,
+    X,
+    Y,
+    Z,
+    edge,
+    face,
+)
 from . import models as m
 
 V = App.Vector
@@ -100,6 +112,40 @@ class SketchRedraw(SketchEdit):
     def edit(self, doc):
         doc.Profile.deleteAllGeometry()
         doc.Profile.addGeometry(m.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+
+
+class SolverRedrawShifted(Scenario):
+    """A rectangle (0..20 x 0..10) padded 10 high, a fillet, radius 1, on its front right
+    vertical edge (x = 20). The rectangle is drawn again 0.5 mm over in x: every geometry ID new,
+    so no name relates the old edges to the new ones, and the edge's analogue is 0.5 mm away,
+    beyond tier 3's strict reach (1 % of the diagonal) and within the wide one (5 %). With no
+    structural candidate, solver documents guess it loudly (N2 5.2 G2, kind `geometric`; the Fable
+    review of fork PR 117, finding 3); without the solver the reference breaks."""
+
+    area = "sketch edits"
+    REFS = ("corner_edge",)
+
+    def cornerEdge(self):
+        if not getattr(self, "redrawn", False):
+            return edge("line", direction=Z, through=(20, 0, 0))
+        if self.solver:
+            return Guessed(edge("line", direction=Z, through=(20.5, 0, 0)))
+        return BROKEN
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 1
+        self.ref("corner_edge", fillet, "Base", self.cornerEdge, Filleted(1))
+
+    def edit(self, doc):
+        doc.Profile.deleteAllGeometry()
+        doc.Profile.addGeometry(m.polygon([(20.5, 10), (20.5, 0), (0.5, 0), (0.5, 10)]), False)
+        self.redrawn = True
 
 
 class SketchReaddLine(SketchEdit):

@@ -1,0 +1,10 @@
+# The no-structure guess (G2, NamingSolver/GuessNoStructure, on by default) on a deletion: a
+# designed scenario whose reference should break, where G2 picks a same-kind neighbour within its
+# wide reach instead, loudly (status guessed, the record, the warning). N2 7.2 scores that
+# guessed-wrong. The user decides G2's default with this record in hand (the Fable review of fork
+# PR 117, finding 3): keep it as the policy, add a structural guard, or switch G2 off.
+
+issue: ops#127
+
+reason: the filleted edge's feature (a 0.5 mm step) is deleted; G2 takes the block's corner edge 0.5 mm away, where the scenario expects broken (V2s; V2 breaks it, and the V2si oracle only compares V2si with V2s)
+cli  PartDesignTests.TestNamingScenarios.FilletDeleteNearStep.test_fillet_edge_V2s

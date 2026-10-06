@@ -246,6 +246,9 @@ void readTolerances(double& gap, Data::GeometryTolerances& tolerances, double& c
     read("Tier3Size", tolerances.size);
     read("SamePlaceSize", tolerances.placeSize);
     read("ContinuationDistance", continuation);
+    read("GuessDistance", tolerances.guessDistance);
+    read("GuessGapFactor", tolerances.guessGapFactor);
+    read("GuessSize", tolerances.guessSize);
 }
 
 Data::SolvePolicy solvePolicy(PropertyLinkBase::ElementPolicy policy)
@@ -720,6 +723,9 @@ bool solveElementReferences(DocumentObject* feature,
     double gap = Data::SolveInput().gap;
     Data::GeometryTolerances tolerances;
     double continuationDistance = Data::SolveInput().continuationDistance;
+    // The guess rules' switches (ops#127, N2 5.1), on by default
+    bool guess = true;
+    bool guessNoStructure = true;
     double diagonal = 0.0;
     std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
@@ -896,6 +902,8 @@ bool solveElementReferences(DocumentObject* feature,
             measure = overlapMeasure();
             check = tier1Check();
             readTolerances(gap, tolerances, continuationDistance);
+            guess = solverParameters()->GetBool("Guess", true);
+            guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
@@ -1143,6 +1151,10 @@ bool solveElementReferences(DocumentObject* feature,
         input.diagonal = diagonal;
         input.maplessTag = maplessTag;
         input.continuationDistance = continuationDistance;
+        input.guess = guess;
+        input.guessNoStructure = guessNoStructure;
+        // Nothing is guessed against a failed feature passing its input through (N2's N10)
+        input.targetFailed = feature->isError();
         input.fingerprintOf = fingerprintOf;
         input.hintOf = hintOf;
         // The solver's only topology: the faces an edge bounds, for the continuation.
@@ -1319,6 +1331,39 @@ bool solveElementReferences(DocumentObject* feature,
                 item.status = ReferenceReport::Status::Resolved;
                 item.tier = outcome.tier;
                 item.newIndex = outcome.element;
+            }
+            else if (outcome.status == Data::SolveStatus::Guessed) {
+                // A guess rule's pick (ops#127, N2 section 5): warned, with a record whose
+                // alternatives are the other elements the rule chose among
+                SolverResolution resolution;
+                resolutionFor(entry, outcome.element, mapForm(outcome.name), resolution);
+                resolution.status = SolverResolution::Status::Guessed;
+                resolution.guess = guessRecordFor(entry, outcome.guessKind.c_str());
+                for (std::size_t c = 1; c < outcome.candidates.size(); ++c) {
+                    GuessRecord::Alternative alternative;
+                    alternative.index = outcome.candidates[c];
+                    if (c < outcome.candidateRoles.size()) {
+                        alternative.role = outcome.candidateRoles[c];
+                    }
+                    if (c < outcome.candidateDistances.size()) {
+                        alternative.distance = outcome.candidateDistances[c];
+                    }
+                    resolution.guess.alternatives.push_back(std::move(alternative));
+                }
+                resolutions[entry.prop].push_back(resolution);
+                item.status = ReferenceReport::Status::Guessed;
+                item.kind = outcome.guessKind;
+                item.tier = outcome.tier;
+                item.newIndex = outcome.element;
+                for (std::size_t c = 0; c < outcome.candidates.size(); ++c) {
+                    item.candidates.emplace_back(outcome.candidates[c],
+                                                 mapForm(outcome.candidateNames[c]));
+                }
+                item.candidateRoles = outcome.candidateRoles;
+                item.candidateDistances = outcome.candidateDistances;
+                FC_WARN(referenceName(entry.prop)
+                        << "[" << entry.index << "]: " << oldName << " -> " << outcome.element
+                        << " (guessed, " << outcome.evidence << ")");
             }
             else {
                 if (entry.kind == SolverEntry::Kind::Exact) {

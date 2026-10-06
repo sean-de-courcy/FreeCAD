@@ -27,7 +27,7 @@ as candidates (the naming design's section 8: the consumer needs exactly one edg
 import FreeCAD as App
 import Part
 
-from .harness import BROKEN, Broken, ExternalCoincides, Scenario, X, Y, edge, pieces
+from .harness import BROKEN, Broken, ExternalCoincides, Guessed, Scenario, X, Y, edge, pieces
 from . import models as m
 
 
@@ -98,6 +98,49 @@ class ExternalSplit(ExternalEdit):
         m.setLines(doc.Profile, {0: ((0, 0), (8, 0))})
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
         self.split = True
+
+
+class ExternalSplitOffCentre(ExternalSplit):
+    """ExternalSplit's notch moved left, to x 4..8: the front top edge splits into x 0..4, which
+    keeps its name, and x 8..20, which holds the old edge's centre (x = 10). In solver documents
+    the reference is guessed to the piece at the saved centre, the continuation, not the piece
+    with the name (ops#127, N2 5.2 G3); without the solver it breaks with both pieces as
+    candidates, as ExternalSplit's does."""
+
+    def frontEdge(self):
+        if self.split and self.solver:
+            return Guessed(edge("line", direction=X, contains=(14, 0, self.height)))
+        return super().frontEdge()
+
+    def edit(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (4, 0))})
+        doc.Profile.addGeometry(m.polyline([(4, 0), (4, 2), (8, 2), (8, 0), (20, 0)]), False)
+        self.split = True
+
+
+class ExternalSplitNamedPieceKept(ExternalSplit):
+    """ExternalSplit's notch moved right, to x 12..16, in two steps. `notch`: the front top edge
+    splits into x 0..12, which keeps its name and holds the old edge's centre (x = 10), and
+    x 16..20. In solver documents the reference is guessed to the named piece (N2 5.2 G3) and
+    keeps its record. `moveBack`: the back side moves out to y = 12, an edit that leaves the
+    pick alone; the guess stays a guess, its warning too, until the user ends it (A1; the Fable
+    review of fork PR 117, finding 1). Without the solver it breaks, as ExternalSplit's does."""
+
+    steps = ("notch", "moveBack")
+
+    def frontEdge(self):
+        if self.split and self.solver:
+            return Guessed(edge("line", direction=X, contains=(6, 0, self.height)))
+        return super().frontEdge()
+
+    def notch(self, doc):
+        m.setLines(doc.Profile, {0: ((0, 0), (12, 0))})
+        doc.Profile.addGeometry(m.polyline([(12, 0), (12, 2), (16, 2), (16, 0), (20, 0)]), False)
+        self.split = True
+
+    def moveBack(self, doc):
+        m.setLines(doc.Profile, {1: ((20, 0), (20, 12)), 2: ((20, 12), (0, 12)), 3: ((0, 12), (0, 0))})
+        self.depth = 12
 
 
 class ExternalMoveSideIn(ExternalEdit):
@@ -226,6 +269,30 @@ class ExternalArcSplit(Scenario):
 
     def edit(self, doc):
         m.notchDiscArc(doc.Profile)
+        self.split = True
+
+
+class ExternalArcSplitOffCentre(ExternalArcSplit):
+    """ExternalArcSplit's notch moved down, to -30..-10 degrees: the arc keeps its ID on
+    -53..-30, and the new arc on -10..53 holds the old arc's mid-angle (0 degrees). In solver
+    documents the reference is guessed to that arc, not the piece with the name (ops#127, N2 5.2
+    G3); without the solver it breaks with both pieces as candidates, as ExternalArcSplit's
+    does."""
+
+    def rightArc(self):
+        if self.split and self.solver:
+            on = m.onDisc(m.DISC_RADIUS, 0)
+            return Guessed(
+                edge(
+                    center=(*m.DISC_CENTER, self.height),
+                    radius=m.DISC_RADIUS,
+                    contains=(on.x, on.y, self.height),
+                )
+            )
+        return super().rightArc()
+
+    def edit(self, doc):
+        m.notchDiscArc(doc.Profile, -30, -10)
         self.split = True
 
 

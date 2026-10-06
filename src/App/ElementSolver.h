@@ -299,6 +299,11 @@ struct AppExport GeometryTolerances
     double size = 0.01;
     /// atSamePlace(): the largest relative difference of sizes (ops#105).
     double placeSize = 1e-6;
+    /// The guess rules' wider tier 3 (ops#127, design note N2 section 5): d_max as a share of
+    /// the diagonal, the gap factor and the relative size difference.
+    double guessDistance = 0.05;
+    double guessGapFactor = 2.0;
+    double guessSize = 0.5;
 };
 
 /** Tier 2, intrinsic geometry: the same element type and surface or curve kind, directions
@@ -504,6 +509,15 @@ struct AppExport SolveInput
     std::function<std::vector<std::string>(const std::string& index)> neighboursOf;
     /// The continuation's distance ε, as a share of max(1, diagonal) (hitWithinOldEdge()).
     double continuationDistance = 1e-7;
+    /// The guess rules (ops#127, design note N2 section 5): G1 (a wider tier 3 among structural
+    /// survivors) and G3 (the split piece at the saved centre) with \a guess, G2 (a wider tier 3
+    /// without structure) with both. Off by default here; the batch sets them from the
+    /// NamingSolver parameters.
+    bool guess = false;
+    bool guessNoStructure = false;
+    /// The target is in error (a failed feature passing its input through, ops#126): nothing is
+    /// guessed against it (N2's never list, N10).
+    bool targetFailed = false;
 };
 
 enum class SolveStatus
@@ -517,7 +531,7 @@ enum class SolveStatus
     /// A member of a collapsing group other than the one that stays: the reference goes.
     Removed,
     /// Resolved provisionally by a guess rule (ops#127, design note N2 section 5): the reference
-    /// takes the element with a warning and a record of the original. Not produced yet (P6).
+    /// takes the element with a warning and a record of the original (SolveOutcome::guessKind).
     Guessed,
 };
 
@@ -554,6 +568,9 @@ struct AppExport SolveOutcome
     std::vector<double> candidateDistances;
     /// The evidence, for the log and the report: overlap and sources, or why it broke.
     std::string evidence;
+    /// Guessed: the rule, `nearest` (G1), `geometric` (G2) or `piece` (G3); the candidates
+    /// then list the pick first (role `guess`) and the alternatives after it.
+    std::string guessKind;
 };
 
 /** Tiers 0-4 and forced matching for one owner's references to one target (Task 2 PRs 3-7).
@@ -628,6 +645,24 @@ struct AppExport SolveOutcome
  *   from the IDX source, or stands for equivalent pieces; otherwise the entry is broken, with
  *   its candidates ("no top agreement"). A partner that only tiers 2 and 3 found needs both to
  *   have passed.
+ * - The guess rules (ops#127, design note N2 section 5), with SolveInput::guess, on an entry
+ *   that would otherwise break; the outcome is Guessed (the pick first among the candidates,
+ *   role `guess`, the others after it nearest first; evidence `guess: ...`):
+ *   - G1 (`nearest`, tier 3): several structural candidates that tier 2 keeps, and tier 3's
+ *     strict rule chooses none: the one findNearest() chooses with the wider tolerances
+ *     (GeometryTolerances::guessDistance, guessGapFactor, guessSize). The partner's checks
+ *     above still apply after the graph.
+ *   - G2 (`geometric`, tier 3), also with SolveInput::guessNoStructure: no structural candidate,
+ *     and tier 3's strict rule chooses none among those tier 2 keeps: the wider rule's choice.
+ *   - G3 (`piece`, tier 1): a split under One (a candidate that is a piece of the old element,
+ *     an exact edge's continuation, or a split face): the one piece whose extent holds the
+ *     saved centre (holdsCentre(): a line's or an arc's extent, a planar face's box); none or
+ *     several break the entry. Never under Equivalent; under Expand only for a split face,
+ *     which Expand doesn't take.
+ *   - Never: ops#105's moved check, a pattern sibling, no top agreement, tier 2 disagreeing,
+ *     pieces that give different results, a run-past or overlapping continuation, no
+ *     candidate, a tie or no saved fingerprint, too large to solve, and a target in error
+ *     (SolveInput::targetFailed).
  *
  * The result depends only on the input as a set (pool order, name order, entry order).
  */
