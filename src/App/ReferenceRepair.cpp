@@ -328,6 +328,7 @@ void markReferenceBroken(PropertyLinkBase* prop, int localIndex)
     rejected.kind = "rejected";
     rejected.origName = guess.origName;
     rejected.origIndex = guess.origIndex;
+    rejected.origFingerprint = guess.origFingerprint;  // for the snap-back (ops#133)
     if (guess.kind == "rejected") {
         rejected.alternatives = guess.alternatives;
     }

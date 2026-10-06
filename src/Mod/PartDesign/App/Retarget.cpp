@@ -170,6 +170,9 @@ struct ParkedItem
             if (!guess.empty()) {
                 ss << '|' << escapeField(guess.kind) << '|' << escapeField(guess.origText()) << '|'
                    << escapeField(guess.altText());
+                if (!guess.origFingerprint.empty()) {
+                    ss << '|' << escapeField(guess.origFingerprint);  // ops#133
+                }
             }
         }
         return ss.str();
@@ -195,7 +198,8 @@ struct ParkedItem
             item.text = fields[3];
             return item;
         }
-        if ((fields.size() == 8 || fields.size() == 11) && fields[0] == "link") {
+        if ((fields.size() == 8 || fields.size() == 11 || fields.size() == 12)
+            && fields[0] == "link") {
             item.property = fields[1];
             item.target = fields[2];
             item.sub = fields[3];
@@ -208,8 +212,13 @@ struct ParkedItem
             catch (...) {
                 item.position = 0;
             }
-            if (fields.size() == 11) {
-                item.guess = App::GuessRecord::fromAttributes(fields[8], fields[9], fields[10]);
+            if (fields.size() >= 11) {
+                item.guess = App::GuessRecord::fromAttributes(
+                    fields[8],
+                    fields[9],
+                    fields[10],
+                    fields.size() == 12 ? fields[11] : std::string()
+                );
             }
             return item;
         }

@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <map>
 #include <sstream>
 
@@ -354,9 +356,15 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     }
     ss << " (" << slot.property << '[' << slot.index << "], ";
     if (entry && !entry->candidates.empty()) {
+        // with each one's distance from the saved centre when known (ops#127, N3 5.3)
         ss << "candidates: ";
         for (std::size_t i = 0; i < entry->candidates.size(); ++i) {
             ss << (i ? ", " : "") << entry->candidates[i].first;
+            if (i < entry->candidateDistances.size() && !std::isnan(entry->candidateDistances[i])) {
+                char distance[32];
+                std::snprintf(distance, sizeof(distance), "%.3g", entry->candidateDistances[i]);
+                ss << " (" << distance << " mm)";
+            }
         }
     }
     else {

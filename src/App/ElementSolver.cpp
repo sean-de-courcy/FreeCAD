@@ -144,6 +144,36 @@ std::vector<std::string_view> NameAncestry::splitSections(std::string_view name)
     return sections;
 }
 
+std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
+{
+    std::vector<std::string> tags;
+    // A name's first section says where its element came from: the names it was made from
+    // (linked names), down to a section made from none. The sections after it are what later
+    // features did to it (MOD, a fusion's FUS), and connected elements name neighbours that tell
+    // pieces apart; neither is a source.
+    std::function<void(std::string_view)> collect = [&](std::string_view part) {
+        auto sections = splitSections(part);
+        if (sections.empty()) {
+            return;
+        }
+        const auto& decoded = decodeSection(sections.front());
+        bool embeds = false;
+        for (const auto& embedded : decoded.linkedNames) {
+            if (!embedded.empty() && embedded != Data::EMPTY_VALUE) {
+                embeds = true;
+                collect(embedded);
+            }
+        }
+        if (!embeds && !decoded.iterationTag.empty() && decoded.iterationTag != Data::EMPTY_VALUE) {
+            tags.push_back(decoded.iterationTag);
+        }
+    };
+    collect(name);
+    std::sort(tags.begin(), tags.end());
+    tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
+    return tags;
+}
+
 const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
 {
     if (_done[key]) {
@@ -2425,6 +2455,49 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             state.outcome.candidateDistances.push_back(nan);
         }
     };
+    // The candidates at \a positions nearest the saved centre first, with their distances, at
+    // most eight (ops#127, N3 5.3: a no-structure break). Those without a distance last.
+    auto listByDistance =
+        [&fingerprintOf](GroupState& state, const std::vector<int>& positions, const char* role) {
+            auto distanceOf = [&](int k) {
+                const ElementFingerprint& now = fingerprintOf(state.pool->elements[k]);
+                return state.saved && state.saved->center && now.center
+                    ? Base::Distance(*state.saved->center, *now.center)
+                    : std::numeric_limits<double>::quiet_NaN();
+            };
+            std::vector<std::pair<double, int>> ranked;
+            for (int k : positions) {
+                ranked.emplace_back(distanceOf(k), k);
+            }
+            std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+                return std::isnan(b.first) ? !std::isnan(a.first) : a.first < b.first;
+            });
+            if (ranked.size() > 8) {
+                ranked.resize(8);
+            }
+            for (const auto& [distance, k] : ranked) {
+                const auto& element = state.pool->elements[k];
+                state.outcome.candidates.push_back(element.index);
+                state.outcome.candidateNames.push_back(
+                    element.names.empty() ? std::string() : element.names.front()
+                );
+                state.outcome.candidateRoles.emplace_back(role);
+                state.outcome.candidateDistances.push_back(distance);
+            }
+        };
+    // Whether one of \a element's names shares an innermost source with \a oldName (policy D).
+    auto sharesSource = [](const SolveInput::Element& element, const std::string& oldName) {
+        const auto old = NameAncestry::sourceTags(oldName);
+        if (old.empty()) {
+            return false;
+        }
+        return std::any_of(element.names.begin(), element.names.end(), [&](const auto& name) {
+            const auto tags = NameAncestry::sourceTags(name);
+            return std::any_of(tags.begin(), tags.end(), [&](const auto& tag) {
+                return std::binary_search(old.begin(), old.end(), tag);
+            });
+        });
+    };
 
     MatchGraph graph;
     std::map<int, int> nodeOfId;              // element ID -> graph candidate
@@ -2731,24 +2804,42 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.listed = state.candidates;
                 }
                 else {
-                    // G2: tier 3's wider rule without structure, behind its own switch
+                    // G2: tier 3's wider rule without structure, behind its own switch. Policy D
+                    // (ops#127, N3 4.4): the pick must share an innermost source with the old
+                    // name, as a line redrawn in its sketch does; an element of another source
+                    // (a neighbour of a deleted feature, a new sketch object) is no guess, and
+                    // the reference breaks with the candidates by distance.
                     Nearest wide;
                     if (guessing && input.guessNoStructure) {
                         wide = wideNearestOf(agree);
                     }
+                    std::string otherSource;
+                    if (wide.index >= 0 && !input.guessAnySource
+                        && !sharesSource(pool.elements[agree[wide.index]], oldName)) {
+                        otherSource = pool.elements[agree[wide.index]].index;
+                        wide = Nearest();
+                    }
                     if (wide.index < 0) {
                         state.decided = true;
                         state.outcome.evidence = "no structural candidate, tier 3 found none: "
-                            + describeNearest(nearest);
-                        listCandidates(state, agree, "geometric");
+                            + describeNearest(nearest)
+                            + (otherSource.empty()
+                                   ? std::string()
+                                   : "; the wide reach's " + otherSource + " has another source");
+                        listByDistance(state, agree, "geometric");
                         continue;
                     }
                     const int pick = agree[wide.index];
                     state.geometric = true;
                     state.guessKind = "geometric";
                     state.guessRole = "geometric";
-                    state.geometryEvidence = "guess: no structural candidate, tier 3 wide: "
-                        + describeNearest(wide);
+                    state.geometryEvidence
+                        = std::string(
+                              input.guessAnySource
+                                  ? "guess: no structural candidate"
+                                  : "guess: no structural candidate, redrawn in the same source"
+                          )
+                        + ", tier 3 wide: " + describeNearest(wide);
                     for (int k : agree) {
                         if (k != pick) {
                             state.guessAlternatives.push_back(k);
