@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+
 #include <BRep_Tool.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -13,6 +15,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <Base/FileInfo.h>
 #include <Mod/Part/App/FeaturePartBox.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Part/App/PartFeature.h>
@@ -156,6 +159,8 @@ protected:
     std::string otherEdge;
     std::string verticalEdge;  // an intersection gives its point
     int lineId {};
+
+    void unparkReplacesADeletedGeometry(int deleted);
 };
 
 TEST_F(SketchObjectParkTest, parkKeepsGeometryIdAndConstraints)
@@ -306,9 +311,14 @@ TEST_F(SketchObjectParkTest, unparkKeepsTheTypes)
     EXPECT_TRUE(sketch->getGeometry(GeoEnum::RefExt)->is<Part::GeomPoint>());
 }
 
-TEST_F(SketchObjectParkTest, unparkReplacesADeletedGeometry)
+// A face gives four geometries, and a line has its ends on the second's and the fourth's start;
+// parked, the geometry at `deleted` (0 or 2) is deleted, then the entry is put back. The deleted
+// one comes back as new geometry at its own place in the projection order, the others on their
+// Ids, and the line's constraints on the same geometries; this lasts through two more rebuilds and
+// a save and reopen, which rebuild the order of the Ids from ExternalGeo.
+void SketchObjectParkTest::unparkReplacesADeletedGeometry(int deleted)
 {
-    // Arrange: a face gives four geometries; one is deleted while parked
+    // Arrange
     auto sketch = getObject();
     std::string face;
     auto shape = Part::Feature::getTopoShape(box, Part::ShapeOption::NoFlag);
@@ -324,46 +334,97 @@ TEST_F(SketchObjectParkTest, unparkReplacesADeletedGeometry)
     doc->recompute();
     const auto ids = sketch->externalGeometryIds(0);
     ASSERT_EQ(ids.size(), 4U);
-    const int geoCount = sketch->ExternalGeo.getSize();
-    std::vector<const Part::Geometry*> before;
+    const std::string ref = refOf(sketch->getGeometry(GeoEnum::RefExt));
+    std::vector<std::pair<Base::Vector3d, Base::Vector3d>> before;
     for (int i = 0; i < 4; ++i) {
-        before.push_back(sketch->getGeometry(GeoEnum::RefExt - i)->clone());
+        auto line = dynamic_cast<const Part::GeomLineSegment*>(
+            sketch->getGeometry(GeoEnum::RefExt - i));
+        ASSERT_NE(line, nullptr);
+        before.emplace_back(line->getStartPoint(), line->getEndPoint());
     }
+    Part::GeomLineSegment segment;
+    segment.setPoints(Base::Vector3d(1, 1, 0), Base::Vector3d(4, 6, 0));
+    const int line = sketch->addGeometry(&segment);
+    for (int edge : {1, 3}) {
+        auto coincident = new Sketcher::Constraint();
+        coincident->Type = Sketcher::Coincident;
+        coincident->First = line;
+        coincident->FirstPos = edge == 1 ? Sketcher::PointPos::start : Sketcher::PointPos::end;
+        coincident->Second = GeoEnum::RefExt - edge;
+        coincident->SecondPos = Sketcher::PointPos::start;
+        sketch->addConstraint(coincident);
+    }
+    doc->recompute();
+    ASSERT_TRUE(sketch->isValid());
+    const int geoCount = sketch->ExternalGeo.getSize();
     const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
     auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
     sketch->parkExternalGeometry({0});
     // Deleting a geometry without a reference deletes only that one
-    ASSERT_EQ(sketch->delExternal(0), 0);
+    ASSERT_EQ(sketch->delExternal(deleted), 0);
     EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount - 1);
-    EXPECT_FALSE(sketch->externalGeometryRefOf(ids[0]).has_value());
+    EXPECT_FALSE(sketch->externalGeometryRefOf(ids[deleted]).has_value());
 
     // Act
     int replaced = sketch->unparkExternalGeometry(box, sub, std::move(shadow), 0, ids);
     doc->recompute();
 
-    // Assert: the three others come back on their Ids, the deleted one as new geometry
+    // Assert: each projection at its own place, the kept ones on their Ids, the line's ends on the
+    // second's and the fourth's start
     EXPECT_EQ(replaced, 1);
-    EXPECT_TRUE(sketch->isValid());
-    EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount);
-    auto now = sketch->externalGeometryIds(0);
-    ASSERT_EQ(now.size(), 4U);
-    EXPECT_EQ(std::count(now.begin(), now.end(), ids[0]), 0);
-    for (int i = 1; i < 4; ++i) {
-        EXPECT_EQ(sketch->externalGeometryRefOf(ids[i]), sketch->externalGeometryRefOf(now[0]));
-        EXPECT_NE(std::find(now.begin(), now.end(), ids[i]), now.end());
+    auto expected = ids;
+    expected[deleted] = idOf(sketch->getGeometry(GeoEnum::RefExt - deleted));
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), expected[deleted]), 0);
+    auto expectInPlace = [&](Sketcher::SketchObject* sketch) {
+        EXPECT_TRUE(sketch->isValid());
+        EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount);
+        EXPECT_EQ(sketch->externalGeometryIds(0), expected);
+        for (int i = 0; i < 4; ++i) {
+            auto geo = sketch->getGeometry(GeoEnum::RefExt - i);
+            EXPECT_EQ(idOf(geo), expected[i]) << "projection " << i;
+            EXPECT_EQ(refOf(geo), ref) << "projection " << i;
+            EXPECT_TRUE(hasEnds(geo, before[i])) << "projection " << i;
+        }
+        const auto& constraints = sketch->Constraints.getValues();
+        ASSERT_EQ(constraints.size(), 2U);
+        EXPECT_EQ(constraints[0]->Second, GeoEnum::RefExt - 1);
+        EXPECT_EQ(constraints[1]->Second, GeoEnum::RefExt - 3);
+        auto segment = static_cast<const Part::GeomLineSegment*>(sketch->getGeometry(line));
+        EXPECT_TRUE(segment->getStartPoint().IsEqual(before[1].first, tolerance));
+        EXPECT_TRUE(segment->getEndPoint().IsEqual(before[3].first, tolerance));
+    };
+    expectInPlace(sketch);
+    for (int i = 0; i < 2; ++i) {
+        sketch->touch();
+        doc->recompute();
+        expectInPlace(sketch);
     }
-    // Each projection is where it was: the three kept geometries first, the new one last
-    for (int i = 1; i < 4; ++i) {
-        auto geo = sketch->getGeometry(GeoEnum::RefExt - i + 1);
-        auto old = static_cast<const Part::GeomLineSegment*>(before[i]);
-        EXPECT_TRUE(hasEnds(geo, {old->getStartPoint(), old->getEndPoint()}));
-    }
-    auto added = sketch->getGeometry(GeoEnum::RefExt - 3);
-    auto old = static_cast<const Part::GeomLineSegment*>(before[0]);
-    EXPECT_TRUE(hasEnds(added, {old->getStartPoint(), old->getEndPoint()}));
-    for (auto geo : before) {
-        delete geo;
-    }
+
+    // and through a save and reopen (under the same name, which TearDown closes)
+    const std::string name = doc->getName();
+    const std::string sketchName = sketch->getNameInDocument();
+    auto path = std::filesystem::temp_directory_path() / (name + ".FCStd");
+    doc->saveAs(Base::FileInfo::pathToString(path).c_str());
+    App::GetApplication().closeDocument(name.c_str());
+    doc = App::GetApplication().openDocument(Base::FileInfo::pathToString(path).c_str());
+    ASSERT_NE(doc, nullptr);
+    ASSERT_EQ(std::string(doc->getName()), name);
+    sketch = static_cast<Sketcher::SketchObject*>(doc->getObject(sketchName.c_str()));
+    ASSERT_NE(sketch, nullptr);
+    sketch->touch();
+    doc->recompute();
+    expectInPlace(sketch);
+    std::filesystem::remove(path);
+}
+
+TEST_F(SketchObjectParkTest, unparkReplacesADeletedGeometry)
+{
+    unparkReplacesADeletedGeometry(0);
+}
+
+TEST_F(SketchObjectParkTest, unparkReplacesADeletedMiddleGeometry)
+{
+    unparkReplacesADeletedGeometry(2);
 }
 
 TEST_F(SketchObjectParkTest, parkUndoesAndRedoes)

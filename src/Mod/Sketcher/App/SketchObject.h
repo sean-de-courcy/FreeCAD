@@ -276,7 +276,9 @@ public:
      * projection type `type`, and gives it the parked geometries `ids` in projection order, so
      * the next rebuild projects the element onto the same geometries and their constraints hold.
      * An Id that is no longer free (deleted, or given a reference since) is replaced by a new
-     * one: that projection comes back as new geometry. Returns how many were replaced.
+     * one: that projection comes back as new geometry, at its place in the projection order
+     * among the kept ones (the external constraints' GeoIds move with it). Returns how many were
+     * replaced.
      */
     int unparkExternalGeometry(App::DocumentObject* obj,
                                const std::string& sub,

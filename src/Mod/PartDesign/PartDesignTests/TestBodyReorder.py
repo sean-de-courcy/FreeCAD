@@ -942,10 +942,10 @@ class BodyReorderBase:
         self.assertCircleAt(sketch, 10, 10)
         self.assertBody(BLOCK + PAD2 - HOLE1)
 
-    def testFaceProjectionPartlyDeleted(self):
-        """RO11j: the sketch projects Pad2's top face (four edges, constraints on the second and
-        fourth); parked, the first edge's geometry is deleted; moved back, edges 2-4 are on their
-        own Ids with their constraints, each where its edge is, and edge 1 comes back new."""
+    def faceProjectionPartlyDeleted(self, deleted):
+        """RO11j's model and steps: the sketch projects Pad2's top face (four edges, constraints on
+        the second and fourth); parked, the geometry of edge `deleted` (0-3) is deleted; then moved
+        back. Returns what assertFaceRestored needs."""
         block = self.block()
         pad2 = self.pad2()
         self.recompute()
@@ -966,26 +966,70 @@ class BodyReorderBase:
         self.body.reorderObject([hole], None, True)
         self.recompute()
         self.assertEqual([self.projection(sketch, i)[1] for i in range(2, 6)], [""] * 4)
-        sketch.delExternal(0)
-        self.assertEqual([c.First for c in sketch.Constraints], [-3, -5])
+        sketch.delExternal(deleted)
+        self.assertEqual(
+            [c.First for c in sketch.Constraints], [g + (g < -3 - deleted) for g in (-4, -6)]
+        )
 
         self.body.reorderObject([hole], pad2, True)
         self.recompute()
+        return block, pad2, sketch, hole, before
+
+    def assertFaceRestored(self, sketch, hole, before, deleted, new=None):
+        """RO11j's oracles: each edge's projection at its own place in the projection order, on
+        its own Id (edge `deleted`'s on a new one, `new` once known) and with its reference; the
+        constraints on the same geometries, so the circle is where it was. Returns the new Id."""
         self.assertValid(sketch, hole)
         self.assertEqual(len(sketch.ExternalGeo), 6)
-        now = {self.projection(sketch, i)[0]: self.projection(sketch, i) for i in range(2, 6)}
-        for old in before[1:]:
-            self.assertIn(old[0], now)
-            self.assertEqual(now[old[0]][1], old[1])
-            for a, b in zip(now[old[0]][2], old[2]):
+        now = [self.projection(sketch, i) for i in range(2, 6)]
+        for old, current in zip(before, now):
+            self.assertEqual(current[1], old[1])
+            for a, b in zip(current[2], old[2]):
                 self.assertLess((a - b).Length, TOL)
-        self.assertNotIn(before[0][0], now)
-        self.assertEqual([c.First for c in sketch.Constraints], [-3, -5])
+        self.assertEqual(
+            [current[0] for current in now[:deleted] + now[deleted + 1 :]],
+            [old[0] for old in before[:deleted] + before[deleted + 1 :]],
+        )
+        if new is None:
+            self.assertNotIn(now[deleted][0], [old[0] for old in before])
+        else:
+            self.assertEqual(now[deleted][0], new)
+        self.assertEqual([c.First for c in sketch.Constraints], [-4, -6])
         self.assertCircleAt(sketch, 10, 10)
-        newest = self.projection(sketch, 5)
-        self.assertEqual(newest[1], before[0][1])
-        for a, b in zip(newest[2], before[0][2]):
-            self.assertLess((a - b).Length, TOL)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+        return now[deleted][0]
+
+    def checkFaceProjectionPartlyDeleted(self, deleted):
+        """RO11j: moved back, edge `deleted` comes back new at its own place, the others on their
+        own Ids with their constraints; the order lasts through two more rebuilds and a save and
+        reopen (each rebuilds the Ids' order from ExternalGeo)."""
+        block, pad2, sketch, hole, before = self.faceProjectionPartlyDeleted(deleted)
+        self.assertEqual(self.parked(sketch), [])
+        new = self.assertFaceRestored(sketch, hole, before, deleted)
+        for _ in range(2):
+            sketch.touch()
+            self.recompute()
+            self.assertFaceRestored(sketch, hole, before, deleted, new)
+
+        self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, f"BodyReorder{type(self).__name__}Face{deleted}.FCStd")
+        self.doc.saveAs(path)
+        names = [o.Name for o in (self.body, sketch, hole)]
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body, sketch, hole = (self.doc.getObject(name) for name in names)
+        sketch.touch()
+        self.recompute()
+        self.assertFaceRestored(sketch, hole, before, deleted, new)
+
+    def testFaceProjectionPartlyDeleted(self):
+        """RO11j, the first edge's geometry deleted while parked."""
+        self.checkFaceProjectionPartlyDeleted(0)
+
+    def testFaceProjectionMiddleDeleted(self):
+        """RO11j, a middle edge's geometry (the third, between the constrained ones) deleted while
+        parked."""
+        self.checkFaceProjectionPartlyDeleted(2)
 
     def testStayAboveNotRestored(self):
         """RO11k: from the top to just below Block, still above Pad2: the projection stays parked

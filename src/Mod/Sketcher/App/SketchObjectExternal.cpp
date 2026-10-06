@@ -3153,7 +3153,9 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     // rebuild gives projection n to the n-th Id, and an Id it doesn't find becomes new geometry
     auto geos = ExternalGeo.getValues();
     std::vector<long> refs;
+    std::vector<bool> kept;
     refs.reserve(ids.size());
+    kept.reserve(ids.size());
     int replaced = 0;
     for (long id : ids) {
         auto it = externalGeoMap.find(id);
@@ -3163,13 +3165,81 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             geo = geo->clone();
             ExternalGeometryFacade::getFacade(geo)->setRef(key);
             refs.push_back(id);
+            kept.push_back(true);
         }
         else {
             refs.push_back(++geoLastId);
+            kept.push_back(false);
             ++replaced;
         }
     }
-    ExternalGeo.setValues(std::move(geos));
+
+    // externalGeoRefMap lists a key's Ids in ExternalGeo's order whenever it is rebuilt from
+    // ExternalGeo (onExternalGeoChanged: every rebuild's write, undo, reopen), so a new Id must sit
+    // at its place in the projection order, not be appended after the kept ones: a placeholder
+    // with the new Id goes right after the entry's previous geometry (or before its next kept one),
+    // and the rebuild replaces it with the projection. When none is kept, the rebuild appends all
+    // of them in order, which is that order already.
+    std::vector<int> inserted;  // the ExternalGeo indexes the placeholders took, in turn
+    if (replaced > 0 && replaced < static_cast<int>(ids.size())) {
+        auto indexOf = [&geos](long id) {
+            for (std::size_t i = 0; i < geos.size(); ++i) {
+                if (GeometryFacade::getId(geos[i]) == id) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        int previous = -1;  // the index of the entry's previous geometry
+        for (std::size_t n = 0; n < refs.size(); ++n) {
+            if (kept[n]) {
+                previous = indexOf(refs[n]);
+                continue;
+            }
+            int model = previous;  // a kept geometry of the entry: the placeholder copies its flags
+            if (model < 0) {
+                auto next = std::find(kept.begin() + n, kept.end(), true);
+                model = indexOf(refs[next - kept.begin()]);
+            }
+            if (model < 0) {
+                continue;  // not expected: a kept Id is in ExternalGeo
+            }
+            const int at = previous >= 0 ? previous + 1 : model;
+            auto placeholder = geos[model]->copy();
+            GeometryFacade::setId(placeholder, refs[n]);
+            ExternalGeometryFacade::getFacade(placeholder)->setRef(key);
+            geos.insert(geos.begin() + at, placeholder);
+            inserted.push_back(at);
+            previous = at;
+        }
+    }
+
+    if (inserted.empty()) {
+        ExternalGeo.setValues(std::move(geos));
+    }
+    else {
+        // The reverse of delExternalPrivate: each external GeoId at or after an inserted index
+        // moves one on, so every constraint stays on its geometry
+        std::vector<Constraint*> constraints;
+        for (const auto& cstr : Constraints.getValues()) {
+            auto shifted = cstr->clone();
+            for (int at : inserted) {
+                const int geoId = -at - 1;
+                for (int i = 0; shifted->hasElement(i); ++i) {
+                    const int given = shifted->getGeoId(i);
+                    if (given <= geoId && given != GeoEnum::GeoUndef) {
+                        shifted->setGeoId(i, given - 1);
+                    }
+                }
+            }
+            constraints.push_back(shifted);
+        }
+        Base::StateLocker lock(managedoperation, true);
+        ExternalGeo.setValues(std::move(geos));
+        solverNeedsUpdate = true;
+        Constraints.setValues(std::move(constraints));
+        acceptGeometry();
+    }
     externalGeoRefMap[key] = std::move(refs);
     return replaced;
 }
