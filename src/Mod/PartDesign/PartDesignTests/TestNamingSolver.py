@@ -1408,3 +1408,129 @@ class TestNamingSolver(unittest.TestCase):
         self.assertTrue(sketch.isValid())
         self.assertNotIn("Warning", sketch.State)
         self.assertEqual(App.getReferenceReport(sketch), [])
+
+    # A pick whose original's name gives another element (ops#133; the Fable review of fork PR
+    # 122, 3b and 3c): the reference snaps back only to the original as saved, by the record's
+    # original fingerprint (`ofp`); a record saved without one snaps back by name, except a
+    # piece's.
+
+    def putBackAsHole(self, doc, lines):
+        """The rectangle's original lines (copies that keep their geometry IDs) added to the
+        profile again, in their order (front, right, back, left), as a hole x 6..14, y 3..7."""
+        corners = [(6, 3), (14, 3), (14, 7), (6, 7)]
+        for i, line in enumerate(lines):
+            line.StartPoint = App.Vector(*corners[i], 0)
+            line.EndPoint = App.Vector(*corners[(i + 1) % 4], 0)
+        doc.Profile.Geometry = doc.Profile.Geometry + lines
+        doc.recompute()
+
+    def reopenWithoutOfp(self, doc):
+        """`doc` saved, its one record's original fingerprint (`ofp`) taken out as in a file
+        saved before ops#133, and opened again. Returns the document opened."""
+        folder = tempfile.mkdtemp(prefix="NamingSolver")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "NoOfp.FCStd")
+        doc.saveAs(path)
+        App.closeDocument(doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        xml, count = re.subn(r' ofp="[^"]*"', "", files["Document.xml"].decode("utf-8"))
+        self.assertEqual(count, 1)  # the setup: one record, with its original fingerprint
+        files["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        doc = App.openDocument(path)
+        self.documents.append(doc.Name)
+        return doc
+
+    def assertGeometricPickAt(self, fillet, pad, x):
+        corner = edge("line", direction=Z, through=(x, 0, 0)).one(pad.Shape)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], corner)
+        self.assertIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+
+    def testPickStandsWhenTheOriginalsNameGivesAnotherElement(self):
+        """The rectangle redrawn 0.5 mm over (G2, kind `geometric`), then its original lines put
+        back with their geometry IDs as a hole in the block: the original's name gives the
+        hole's corner edge at (14, 3), not the original as saved, while the pick is still there.
+        The pick and its record stand, and through a later edit too (before ops#133 the
+        reference snapped back to the hole's corner by the name alone, silently)."""
+        # Arrange
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        lines = doc.Profile.Geometry
+        self.redrawShifted(doc)
+        self.assertGeometricPickAt(fillet, pad, 20.5)
+        original = App.getReferenceReport(fillet)[0]["original"]["name"]
+
+        # Act
+        self.putBackAsHole(doc, lines)
+
+        # Assert
+        hole = edge("line", direction=Z, through=(14, 3, 0)).one(pad.Shape)
+        self.assertEqual([pad.Shape.getElementName(original)], hole)  # the setup
+        self.assertGeometricPickAt(fillet, pad, 20.5)
+
+        #   a later edit
+        pad.Length = 12
+        doc.recompute()
+        self.assertGeometricPickAt(fillet, pad, 20.5)
+
+    def testRecordWithoutTheOriginalsFingerprintSnapsBackByName(self):
+        """A guess other than a piece's, saved without the original's fingerprint, snaps back
+        when the original's name gives an element again, as before ops#133. The rectangle
+        redrawn 0.5 mm over (G2), the file saved without `ofp` and opened again, then the
+        original lines put back in their place: the reference is the original edge, plainly."""
+        doc = self.newDocument()
+        pad, fillet = self.padWithFillet(doc)
+        lines = doc.Profile.Geometry
+        self.redrawShifted(doc)
+        self.assertGeometricPickAt(fillet, pad, 20.5)
+        doc = self.reopenWithoutOfp(doc)
+
+        doc.Profile.Geometry = lines
+        doc.recompute()
+
+        fillet = doc.Fillet
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertNotIn("Warning", fillet.State)
+        self.assertEqual(
+            fillet.Base[1], edge("line", direction=Z, through=(20, 0, 0)).one(doc.Pad.Shape)
+        )
+        self.assertEqual(App.getReferenceReport(fillet), [])
+
+    def testPieceWithoutTheOriginalsFingerprintNeverSnapsBack(self):
+        """A piece's record saved without the original's fingerprint doesn't snap back by name,
+        which can give the other piece. testSplitIsGuessedByThePieceAtTheSavedCentre's model,
+        saved without `ofp` and opened again: the original's name gives the named piece
+        (x 0..4); the external edge stays on the rest (x 8..20), warned, and through a later
+        recompute too."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        pad = models.pad(body, profile, 10)
+        doc.recompute()
+        sketch = models.sketch(doc, "OnFront", [], body, z=10)
+        front = edge("line", direction=X, through=(0, 0, 10)).one(pad.Shape)[0]
+        sketch.addExternal(pad.Name, front)
+        doc.recompute()
+        models.setLines(doc.Profile, {0: ((0, 0), (4, 0))})
+        doc.Profile.addGeometry(models.polyline([(4, 0), (4, 2), (8, 2), (8, 0), (20, 0)]), False)
+        doc.recompute()
+        self.assertEqual(App.getReferenceReport(sketch)[0]["guess_kind"], "piece")
+
+        doc = self.reopenWithoutOfp(doc)
+
+        sketch, pad = doc.OnFront, doc.Pad
+        rest = edge("line", direction=X, contains=(14, 0, 10)).one(pad.Shape)
+        for step in ("opened", "recomputed"):
+            self.assertTrue(sketch.isValid(), step)
+            self.assertEqual(list(sketch.ExternalGeometry[0][1]), rest, step)
+            self.assertIn("Warning", sketch.State, step)
+            [entry] = App.getReferenceReport(sketch)
+            self.assertEqual(entry["guess_kind"], "piece", step)
+            pad.touch()
+            doc.recompute()
