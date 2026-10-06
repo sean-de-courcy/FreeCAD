@@ -743,7 +743,8 @@ void CmdPartDesignMoveTip::activated(int iMsg)
 
 bool CmdPartDesignMoveTip::isActive()
 {
-    return hasActiveDocument();
+    // Not during an edit: the move's transaction would commit the edit's (ops#139)
+    return hasActiveDocument() && !PartDesignGui::ViewProviderBody::isEditLocked(getDocument());
 }
 
 //===========================================================================
@@ -1145,7 +1146,8 @@ void CmdPartDesignMoveFeature::activated(int iMsg)
 
 bool CmdPartDesignMoveFeature::isActive()
 {
-    return hasActiveDocument();
+    // Not during an edit: the move's transaction would commit the edit's (ops#139)
+    return hasActiveDocument() && !PartDesignGui::ViewProviderBody::isEditLocked(getDocument());
 }
 
 DEF_STD_CMD_A(CmdPartDesignMoveFeatureInTree)
@@ -1288,7 +1290,8 @@ void CmdPartDesignMoveFeatureInTree::activated(int iMsg)
 
 bool CmdPartDesignMoveFeatureInTree::isActive()
 {
-    return hasActiveDocument();
+    // Not during an edit: the move's transaction would commit the edit's (ops#139)
+    return hasActiveDocument() && !PartDesignGui::ViewProviderBody::isEditLocked(getDocument());
 }
 
 
