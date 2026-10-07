@@ -1506,9 +1506,11 @@ TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
 
     auto outcomes = Data::solveOwner(input);
 
-    //   the floor edge is the cut's (tag 9), not the pad's: no candidate at all (T1, ops#167)
+    //   the floor edge is the cut's (tag 9), not the pad's: no structural candidate (T1,
+    //   ops#167), listed last for the user's pick (ops#174)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_TRUE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge7"});
+    EXPECT_EQ(outcomes[0].candidateRoles, std::vector<std::string> {"other maker"});
     EXPECT_EQ(outcomes[0].evidence, "no candidate; tier 1's 1 survivor has another maker");
 
     //   without T1, the top sections decide

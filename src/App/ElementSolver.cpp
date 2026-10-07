@@ -2556,7 +2556,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromOverlap;
         std::set<int> fromNames;
         std::set<int> inAncestry;
-        // Tier 1's candidates that T1 dropped, made by another maker (ops#167): for the evidence.
+        // Tier 1's candidates that T1 dropped, made by another maker (ops#167): for the evidence,
+        // and listed last on a break (ops#174).
         std::vector<int> otherMaker;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
@@ -2630,8 +2631,10 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     };
     // The candidates at \a positions nearest the saved centre first, with their distances, at
     // most eight (ops#127, N3 5.3: a no-structure break). Those without a distance last.
-    auto listByDistance =
-        [&fingerprintOf](GroupState& state, const std::vector<int>& positions, const char* role) {
+    auto listByDistance = [&fingerprintOf](GroupState& state,
+                                           const std::vector<int>& positions,
+                                           const char* role,
+                                           std::size_t most = 8) {
             auto distanceOf = [&](int k) {
                 const ElementFingerprint& now = fingerprintOf(state.pool->elements[k]);
                 return state.saved && state.saved->center && now.center
@@ -2645,8 +2648,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
                 return std::isnan(b.first) ? !std::isnan(a.first) : a.first < b.first;
             });
-            if (ranked.size() > 8) {
-                ranked.resize(8);
+            if (ranked.size() > most) {
+                ranked.resize(most);
             }
             for (const auto& [distance, k] : ranked) {
                 const auto& element = state.pool->elements[k];
@@ -2691,6 +2694,25 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         return n == 1 ? std::string("; tier 1's 1 survivor has another maker")
                       : "; tier 1's " + std::to_string(n) + " survivors have another maker";
+    };
+    // The survivors T1 dropped, last on a break (ops#174), in the room left of eight
+    // candidates: never taken automatically, offered to the user's pick. \a listed: those the
+    // break listed already.
+    auto listDropped = [&listByDistance](GroupState& state, const std::vector<int>& listed) {
+        auto unlisted = [&](const std::vector<int>& dropped) {
+            std::vector<int> rest;
+            for (int k : dropped) {
+                if (std::find(listed.begin(), listed.end(), k) == listed.end()) {
+                    rest.push_back(k);
+                }
+            }
+            return rest;
+        };
+        auto room = [&]() {
+            const auto n = state.outcome.candidates.size();
+            return n < 8 ? 8 - n : std::size_t(0);
+        };
+        listByDistance(state, unlisted(state.otherMaker), "other maker", room());
     };
 
     MatchGraph graph;
@@ -2903,6 +2925,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     + " different results for the consumer";
                 listCandidates(state, pieces);
                 listCandidates(state, others);
+                listDropped(state, {});
                 continue;
             }
             int representative = *std::min_element(pieces.begin(), pieces.end(), [&](int a, int b) {
@@ -2928,6 +2951,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
                 listCandidates(state, pieces);
                 listCandidates(state, others);
+                listDropped(state, {});
                 continue;
             }
             state.guessKind = "piece";
@@ -3045,6 +3069,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         state.outcome.evidence = "no structural candidate, tier 3 found none: "
                             + describeNearest(nearest) + otherSource + otherMakerText(state);
                         listByDistance(state, agree, "geometric");
+                        listDropped(state, agree);
                         continue;
                     }
                     const int pick = agree[wide.index];
@@ -3072,6 +3097,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         if (state.candidates.empty()) {
             state.decided = true;
             state.outcome.evidence = "no candidate" + otherMakerText(state);
+            listDropped(state, {});
             continue;
         }
 
@@ -3276,6 +3302,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     state.outcome.evidence += ", " + state.geometryEvidence;
                 }
                 listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
+            }
+            if (state.outcome.status == SolveStatus::Broken) {
+                listDropped(state, {});
             }
         }
         for (int member : *state.members) {

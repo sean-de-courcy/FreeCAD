@@ -1224,7 +1224,14 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(entry["status"], "broken")
         self.assertEqual(entry["candidates"][0], nearest)
         self.assertAlmostEqual(entry["candidate_distances"][0], distance, places=6)
-        distances = [d for d in entry["candidate_distances"] if d == d]  # NaN last
+        # NaN last; the survivors tier 1 dropped (ops#174) come after the ranked ones
+        dropped = ("other maker", "other source")
+        roles = entry["candidate_roles"]
+        ranked = [r for r in roles if r not in dropped]
+        self.assertEqual(roles[: len(ranked)], ranked)
+        distances = [
+            d for d, r in zip(entry["candidate_distances"], roles) if d == d and r not in dropped
+        ]
         self.assertEqual(distances, sorted(distances))
         self.assertLessEqual(len(entry["candidates"]), 8)
         self.assertIn(f"candidates: {nearest} ({distance:.3g} mm)", fillet.getStatusString())
