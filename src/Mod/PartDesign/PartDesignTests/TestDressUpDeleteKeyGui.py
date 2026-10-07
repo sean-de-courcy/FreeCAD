@@ -78,15 +78,33 @@ def focus(widget):
     return False
 
 
+def waitFor(condition, timeout=5.0):
+    """Pumps events until condition() holds, or the timeout passes. Instead of fixed waits, which
+    can pass for nothing on a slow machine."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if condition():
+            return True
+        pump(0.05)
+    return bool(condition())
+
+
+def deleteActions():
+    return Gui.Command.get("Std_Delete").getAction()
+
+
 def pressDelete():
     """Delete as the window system delivers it: to the main window, through the shortcut map, then
     to the focus widget. (QTest's QWidget overload skips the window's shortcut handling.)"""
     QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Delete)
-    pump(0.5)
 
 
-def view3d():
-    return Gui.getMainWindow().findChild(QtWidgets.QMdiArea).activeSubWindow().widget()
+def reportText():
+    """The Report view's text, where Std_Delete's warnings go."""
+    for edit in Gui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+        if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+            return edit.toPlainText()
+    return None
 
 
 class TestDressUpDeleteKeyGui(unittest.TestCase):
@@ -102,6 +120,10 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         Gui.Selection.clearSelection()
 
     def tearDown(self):
+        guiDoc = Gui.getDocument(self.doc.Name)
+        if guiDoc.getInEdit():
+            guiDoc.resetEdit()
+            pump()
         if Gui.Control.activeDialog():
             Gui.Control.closeDialog()
             pump()
@@ -165,6 +187,7 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         undoCount = self.doc.UndoCount
         refs = self.openList(feature)
         pressDelete()
+        self.assertTrue(waitFor(lambda: self.rows(refs) == EDGES[1:]), "the row stays")
 
         self.checkModelIntact(feature)
         self.assertEqual(self.rows(refs), EDGES[1:])
@@ -174,8 +197,7 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
         self.assertIsNotNone(ok)
         ok.click()
-        pump(0.5)
-        self.assertFalse(Gui.Control.activeDialog())
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         self.doc.recompute()
         self.assertTrue(feature.isValid(), feature.getStatusString())
         self.assertEqual(feature.Base[1], EDGES[1:])
@@ -191,19 +213,77 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
     def testChamferListDelete(self):
         self.checkListDelete(self.makeDressUp("PartDesign::Chamfer", Size=1))
 
+    def view3d(self):
+        """The document's 3D view, made the active sub-window. (activeSubWindow() can be None off
+        screen, and the current one can be another window, e.g. the Start page.)"""
+        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        views = [
+            subWindow
+            for subWindow in mdi.subWindowList()
+            if subWindow.widget().metaObject().className() == "Gui::View3DInventor"
+        ]
+        self.assertEqual(len(views), 1, "the document's 3D view")
+        # held: PySide drops the view's wrapper with the sub-window's
+        self.viewWindow = views[0]
+        mdi.setActiveSubWindow(self.viewWindow)
+        return self.viewWindow.widget()
+
+    def deleteInView(self, done=None):
+        """Presses Delete with the focus in the 3D view and waits until Std_Delete has run, or
+        until done() holds. The command's actions are enabled on a timer from the selection, and
+        the key reaches them later than its own events: a check right after the key could pass
+        for nothing."""
+        actions = deleteActions()
+        self.assertTrue(actions)
+        self.assertTrue(
+            waitFor(lambda: all(action.isEnabled() for action in actions)),
+            "Std_Delete stays disabled",
+        )
+        self.assertTrue(focus(self.view3d()), "the 3D view doesn't take the focus")
+        ran = []
+
+        def onTriggered(*args):  # after the command's own slot: the command has run
+            ran.append(True)
+
+        for action in actions:
+            action.triggered.connect(onTriggered)
+        try:
+            pressDelete()
+            if done:
+                self.assertTrue(waitFor(done), "Delete did nothing")
+            else:
+                self.assertTrue(waitFor(lambda: ran), "Std_Delete didn't run")
+        finally:
+            for action in actions:
+                action.triggered.disconnect(onTriggered)
+        pump(0.1)
+
+    def assertWarned(self, reportBefore, *kept):
+        """Std_Delete said, in the Report view, that it kept these objects."""
+
+        def warning():
+            report = reportText()
+            self.assertIsNotNone(report, "no Report view")
+            new = report[len(reportBefore) :]
+            return new.split("is being edited", 1)[1] if "is being edited" in new else None
+
+        self.assertTrue(waitFor(warning, 2.0), "no warning")
+        for obj in kept:
+            self.assertIn(obj.Label, warning())
+
     def testDeleteInViewKeepsBody(self):
         """The row's highlight is selected and the focus is in the 3D view: the Body stays (it
         was deleted, with everything in it)."""
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
         refs = self.openList(fillet)
         undoCount = self.doc.UndoCount  # with the dialog's transaction
-        pump(0.5)  # Std_Delete's action is enabled on a timer
-        self.assertTrue(focus(view3d()), "the 3D view doesn't take the focus")
-        pressDelete()
+        reportBefore = reportText() or ""
+        self.deleteInView()
         self.checkModelIntact(fillet)
         self.assertEqual(self.rows(refs), EDGES)
         self.assertEqual(fillet.Base[1], EDGES)
         self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertWarned(reportBefore, self.body)
 
     def deleteInEdit(self, feature, sub=""):
         """Selects the feature in edit (or a sub-element of it) and presses Delete in the 3D view."""
@@ -213,12 +293,12 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         undoCount = self.doc.UndoCount  # with the dialog's transaction
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, feature.Name, sub)
-        pump(0.5)  # Std_Delete's action is enabled on a timer
-        self.assertTrue(focus(view3d()), "the 3D view doesn't take the focus")
-        pressDelete()
+        reportBefore = reportText() or ""
+        self.deleteInView()
         self.checkModelIntact(feature)
         self.assertEqual(feature.Base[1], EDGES)
         self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertWarned(reportBefore, feature)
 
     def testDeleteEditedFeatureKeepsIt(self):
         """The fillet in edit, selected: not deleted under its dialog."""
@@ -238,11 +318,28 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         pump(0.5)
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(other)
-        pump(0.5)  # Std_Delete's action is enabled on a timer
-        self.assertTrue(focus(view3d()))
-        pressDelete()
+        self.deleteInView()
         self.assertIsNone(self.doc.getObject("Other"))
         self.checkModelIntact(fillet)
+
+    def testDeleteEditedSubElementAndOtherObject(self):
+        """An edge of the fillet in edit and another object: the other object is deleted, and the
+        fillet stays, with a warning (ops#160). The edge took the in-edit path, which handed it to
+        the fillet and skipped the rest of the selection: nothing deleted, nothing said."""
+        other = self.doc.addObject("Part::Box", "Other")
+        self.doc.recompute()
+        fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
+        Gui.getDocument(self.doc.Name).setEdit(fillet.Name)
+        pump(0.5)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, fillet.Name, "Edge3")
+        Gui.Selection.addSelection(other)
+        reportBefore = reportText() or ""
+        self.deleteInView()
+        self.assertIsNone(self.doc.getObject("Other"), "the other object wasn't deleted")
+        self.checkModelIntact(fillet)
+        self.assertEqual(fillet.Base[1], EDGES)
+        self.assertWarned(reportBefore, fillet)
 
     def testDeleteContainersInEdit(self):
         """The Body, and an App::Part and a plain group holding it, stay while the fillet is in
@@ -258,17 +355,47 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         for container in (self.body, part, group):
             Gui.Selection.clearSelection()
             Gui.Selection.addSelection(container)
-            pump(0.5)  # Std_Delete's action is enabled on a timer
-            self.assertTrue(focus(view3d()))
-            pressDelete()
+            reportBefore = reportText() or ""
+            self.deleteInView()
             for name in ("Group", "Part"):
                 self.assertIsNotNone(self.doc.getObject(name), f"{name} deleted")
             self.checkModelIntact(fillet)
+            self.assertWarned(reportBefore, container)
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
+    def testDeleteEditRootInEdit(self):
+        """The fillet edited through a Link to its Body (Link.Fillet): the Link, and a group
+        holding it, stay while it's in edit (ops#160). Deleting the Link reset the edit under the
+        open dialog."""
+        group = self.doc.addObject("App::DocumentObjectGroup", "LinkGroup")
+        link = self.doc.addObject("App::Link", "Link")
+        link.LinkedObject = self.body
+        group.addObject(link)
+        fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.setEdit(link, 0, "Fillet.")
+        pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "no dress-up dialog")
+        inEdit = guiDoc.getInEdit()
+        self.assertIsNotNone(inEdit)
+        self.assertEqual(inEdit.Object, fillet)
+        undoCount = self.doc.UndoCount  # with the dialog's transaction
+        for container in (link, group):
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(container)
+            reportBefore = reportText() or ""
+            self.deleteInView()
+            for name in ("Link", "LinkGroup"):
+                self.assertIsNotNone(self.doc.getObject(name), f"{name} deleted")
+            self.checkModelIntact(fillet)
+            self.assertIsNotNone(guiDoc.getInEdit(), "the edit was reset")
+            self.assertWarned(reportBefore, container)
         self.assertEqual(self.doc.UndoCount, undoCount)
 
     def testSketchGeometryStillDeletedInEdit(self):
         """In a sketch in edit (in the Body), Delete still deletes the selected geometry: the
-        Sketcher takes it through the in-edit path, which the guard leaves alone."""
+        Sketcher's own key handling, and Std_Delete's in-edit path, which hands the Sketcher its
+        sub-elements and which the guard leaves alone."""
         import Part
 
         sketch = self.body.newObject("Sketcher::SketchObject", "Sketch")
@@ -279,10 +406,13 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         pump(0.5)
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, sketch.Name, "Edge1")
-        pump(0.5)  # Std_Delete's action is enabled on a timer
-        self.assertTrue(focus(view3d()))
-        pressDelete()
-        self.assertEqual(sketch.GeometryCount, 1)
+        self.deleteInView(done=lambda: sketch.GeometryCount == 1)
+        self.assertIsNotNone(self.doc.getObject("Sketch"))
+        self.assertIn(sketch, self.body.Group)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sketch.Name, "Edge1")
+        Gui.runCommand("Std_Delete")
+        self.assertTrue(waitFor(lambda: sketch.GeometryCount == 0), "Std_Delete deleted nothing")
         self.assertIsNotNone(self.doc.getObject("Sketch"))
         self.assertIn(sketch, self.body.Group)
         Gui.getDocument(self.doc.Name).resetEdit()
