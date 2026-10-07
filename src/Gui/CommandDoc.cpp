@@ -1639,31 +1639,48 @@ void StdCmdDelete::activated(int iMsg)
 
         Gui::getMainWindow()->setUpdatesEnabled(false);
 
-        bool deletedSelectionOfEditDocument = false;
+        // Read before the in-edit path: the Sketcher's onDelete clears the selection
+        auto sels = Selection().getSelectionEx();
         std::vector<Gui::Document*> editDocs = Application::Instance->editDocuments();
+        struct HandedToEdited
+        {
+            ViewProviderDocumentObject* vp;
+            App::DocumentObject* obj;
+            std::vector<std::string> subNames;
+        };
+        std::vector<HandedToEdited> handed;
         for (auto& editDoc : editDocs) {
-            auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getInEdit());
+            // getEditViewProvider(), not getInEdit(): that is null while another view of the
+            // document is active (ops#164)
+            auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getEditViewProvider());
 
             // In practice, no ViewProviderDocumentObject accepts deletion in edit - 2025-06-17
             if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
                         if (!sel.getSubNames().empty()) {
-                            deletedSelectionOfEditDocument = true;
-                            manageDocCommand(editDoc->getDocument());
-                            vpedit->onDelete(sel.getSubNames());
-                            docs.insert(editDoc->getDocument());
+                            handed.push_back({vpedit, sel.getObject(), sel.getSubNames()});
                         }
                         break;
                     }
                 }
             }
         }
+        for (auto& [vpedit, edited, subNames] : handed) {
+            manageDocCommand(edited->getDocument());
+            vpedit->onDelete(subNames);
+            docs.insert(edited->getDocument());
+        }
+        // The rest of the selection goes the general way: it was skipped, silently (ops#164)
+        std::erase_if(sels, [&handed](const SelectionObject& sel) {
+            return std::ranges::any_of(handed, [&sel](const HandedToEdited& entry) {
+                return sel.getObject() == entry.obj;
+            });
+        });
 
-        if (!deletedSelectionOfEditDocument) {
+        if (!sels.empty()) {
             std::set<QString> affectedLabels;
             bool more = false;
-            auto sels = Selection().getSelectionEx();
 
             // Never delete an object in edit, or a group holding it (its Body, its Part): its
             // task dialog would be left on deleted objects. A dress-up panel's highlight selects
@@ -1673,10 +1690,13 @@ void StdCmdDelete::activated(int iMsg)
             std::set<const App::DocumentObject*> editProtected;
             QStringList editedLabels;
             for (auto& editDoc : editDocs) {
+                // getInEdit() fills its out-parameters even when it returns null, i.e. while
+                // another view of the document is active (ops#164)
                 ViewProviderDocumentObject* parentVp = nullptr;
                 std::string subname;
+                editDoc->getInEdit(&parentVp, &subname);
                 auto vpedit = freecad_cast<ViewProviderDocumentObject*>(
-                    editDoc->getInEdit(&parentVp, &subname)
+                    editDoc->getEditViewProvider()
                 );
                 if (!vpedit || vpedit->acceptDeletionsInEdit()) {
                     continue;
