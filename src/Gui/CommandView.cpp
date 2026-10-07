@@ -4053,7 +4053,8 @@ StdCmdClarifySelection::StdCmdClarifySelection()
     );
     sWhatsThis = "Std_ClarifySelection";
     sStatusTip = sToolTipText;
-    sAccel = "G, G";
+    // FreeCAD-CH (ops#147): one key, as Onshape's "select other" (upstream: "G, G")
+    sAccel = "`";
     sPixmap = "tree-pre-sel";
     eType = NoTransaction | AlterSelection;
 }

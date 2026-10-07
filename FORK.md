@@ -191,7 +191,8 @@ names it.
 | `fix/169-known-failure-lists` | fix | ops#169 | - | `integration` `df1c89c675` | `0d70bced95` (fork PR 162), 2026-10-07 | never (fork feature) |
 | `feat/150-w7-loft-pipe-sections` | feat | ops#150 | - | `feat/150-w6-revolution-helix` `d5423e62b9` (stacked on fork PR 159) | `a949fff4df` (fork PR 163), 2026-10-07 | never (fork feature) |
 | `fix/190-fixkeepingnames-followups` | fix | ops#190, ops#195 | - | `integration` `0d70bced95` | `57bb8bfe3c` (fork PR 164), 2026-10-07 | never (fork feature) |
-| `fix/148-stale-previews` | fix | ops#148 | upstream issues 32414, 24326 | `integration` `ec7262a329` | (fork PR 165) | a new base fixes upstream issues 32414 and 24326 |
+| `fix/148-stale-previews` | fix | ops#148 | upstream issues 32414, 24326 | `integration` `ec7262a329` | `7e373c0303` (fork PR 165), 2026-10-07 | a new base fixes upstream issues 32414 and 24326 |
+| `fix/146-esc-and-selection-filters` | fix | ops#146, ops#147 | upstream issues 23518, 30992, 28305, 26645 | `integration` `50485c0283` | (fork PR 160) | a new base fixes upstream issues 23518, 30992, 28305 and 26645, and the fork-only choices go with it or are dropped: Clarify Selection on `` ` ``, the filter off in sketch edit and only on element picks, its status-bar button, "No Selection Filters" never clearing a task's gate |
 
 ## Fork-only commits in carried topics
 

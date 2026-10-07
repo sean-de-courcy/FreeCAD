@@ -319,3 +319,73 @@ class TestExpressionFieldsGui(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(self.pad.Length.Value, 10.0, places=6)
         self.assertEqual(list(self.doc.UndoNames), undo)
+
+    # ops#146 (upstream issue 23518): Esc that closes the expression editor opened with '=' in a
+    # field also closed the panel. The press closes the editor; focus then lands on the 3D view,
+    # and the view took the key's release as an Esc of its own.
+
+    def view3d(self):
+        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        # held: PySide drops a view's wrapper with its sub-window's
+        self.viewWindows = [
+            subWindow
+            for subWindow in mdi.subWindowList()
+            if subWindow.widget().metaObject().className() == "Gui::View3DInventor"
+        ]
+        self.assertEqual(len(self.viewWindows), 1, "the document's 3D view")
+        return self.viewWindows[0].widget()
+
+    def focus(self, widget):
+        """Off screen, one activateWindow() and setFocus() aren't always enough."""
+        for _ in range(20):
+            widget.window().activateWindow()
+            widget.setFocus(QtCore.Qt.OtherFocusReason)
+            pump(0.05)
+            focused = QtWidgets.QApplication.focusWidget()
+            if focused is not None and (focused is widget or widget.isAncestorOf(focused)):
+                return
+        self.fail(f"no focus on {widget.objectName() or widget.metaObject().className()}")
+
+    def openEqualsEditor(self):
+        """Types '=' in the Pad's Taper field, which opens the expression editor."""
+        self.openPanel(self.pad)
+        pump(0.3)
+        Gui.Control.showTaskView()  # the last dialog's late switch to the Model tab hides it
+        taper = self.field("taperEdit")
+        self.assertTrue(taper.isVisible() and taper.isEnabled(), "the Taper field")
+        self.focus(taper)
+        QtTest.QTest.keyClick(taper, QtCore.Qt.Key_Equal)
+
+        def editor():
+            for dialog in taper.findChildren(QtWidgets.QDialog, "DlgExpressionInput"):
+                if dialog.isVisible():
+                    return dialog
+            return None
+
+        self.assertTrue(waitFor(lambda: editor() is not None), "'=' opened no expression editor")
+        return editor()
+
+    def testEscInExpressionEditorKeepsPanel(self):
+        for releaseIn in ("focus", "view"):
+            with self.subTest(releaseIn=releaseIn):
+                dialog = self.openEqualsEditor()
+                edit = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+                QtTest.QTest.keyPress(edit, QtCore.Qt.Key_Escape)
+                self.assertTrue(waitFor(lambda: not dialog.isVisible()), "the editor stays")
+                pump(0.3)
+                if releaseIn == "view":
+                    # Where upstream's focus went (the 3D view) whatever it does off screen
+                    self.focus(self.view3d())
+                QtTest.QTest.keyRelease(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Escape)
+                pump(0.5)
+                self.assertTrue(Gui.Control.activeDialog(), "Esc in the editor closed the panel")
+                self.assertEqual(self.pad.ExpressionEngine, [("Length", "Sheet.L")])
+                taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+                self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+
+    def testEscInViewStillClosesPanel(self):
+        # The view's own Esc, pressed and released there, still cancels the panel
+        self.openPanel(self.pad)
+        self.focus(self.view3d())
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Esc in the view")
