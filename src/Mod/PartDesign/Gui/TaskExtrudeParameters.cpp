@@ -445,7 +445,7 @@ void TaskExtrudeParameters::createFields()
     auto writeAxis = [this, axisSelf](App::DocumentObject* obj,
                                       const std::vector<std::string>& picked) {
         // A line or an origin axis is linked whole as {""}: getAxis() takes no direction from no
-        // subs (PR 159 review)
+        // subs (ops#150)
         const std::vector<std::string> subs =
             picked.empty() ? std::vector<std::string> {""} : picked;
         if (*axisSelf) {

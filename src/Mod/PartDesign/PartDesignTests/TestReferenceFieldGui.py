@@ -2903,21 +2903,22 @@ class TestReferenceFieldGui(unittest.TestCase):
         return sketch, helix
 
     def helixPreview(self):
-        """The additive helix's preview on (with it, the stock axis pick hid the profile), as the
-        test found it after."""
+        """The additive helix's preview on, restored after the test. With it on, the stock axis
+        pick hid the profile (startReferenceSelection), so its lines couldn't be picked."""
         prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
         old = prefs.GetBool("AdditiveHelixPreview", False)
         prefs.SetBool("AdditiveHelixPreview", True)
         self.addCleanup(prefs.SetBool, "AdditiveHelixPreview", old)
 
     def testHelixAxisRow(self):
-        """T25, B18: with the preview on, the helix's axis row armed leaves the profile sketch
-        shown (the stock pick hid it while the preview is on, so its lines couldn't be picked);
-        the x = -1 line picked: 48 pi, the row disarmed; OK closes the dialog (B15's throw)."""
+        """T25, B18: with the preview on and the profile sketch hidden, the helix's axis row armed
+        shows it (the stock pick hid it); the x = -1 line picked: 48 pi, the row disarmed and the
+        sketch hidden again; OK closes the dialog (B15's throw)."""
         self.helixPreview()
         sketch, helix = self.coil()
         self.edit(helix, count=0)
-        self.assertTrue(sketch.ViewObject.isVisible(), "the edit doesn't show the sketch")
+        sketch.ViewObject.Visibility = False
+        pump(0.1)
         field = findField("fieldReferenceAxis")
         self.selectReference("axis")
         self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
@@ -2925,6 +2926,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(sketch.ViewObject.isVisible(), "the profile isn't shown")
         self.pick(self.lines[-1], "")
         self.assertTrue(waitFor(lambda: not armed(field)), "the row stays armed")
+        pump(0.2)
+        self.assertFalse(sketch.ViewObject.isVisible(), "the sketch stays shown after the pick")
         self.assertLink(helix.ReferenceAxis, self.lines[-1], [])
         self.doc.recompute()
         self.assertAlmostEqual(helix.Shape.Volume / (48 * math.pi), 1, delta=1e-3)
@@ -2947,7 +2950,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertLink(helix.ReferenceAxis, sketch, ["V_Axis"])
 
-    # -- PR 159 review round 1 ----------------------------------------------------------------------
+    # -- PR 159 review round 1 -----------------------------------------------------------------
 
     def testRevolutionStartReferenceWholeSketch(self):
         """Review (1): a whole sketch is a start reference again (its plane; only an up-to-face
@@ -2958,7 +2961,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         feature.Angle = 90
         self.doc.recompute()
         self.assertAlmostEqual(feature.Shape.Volume, 4 * math.pi, places=3)
-        plane = App.Rotation(App.Vector(0, 0, 1), 60).multiply(App.Rotation(App.Vector(1, 0, 0), 90))
+        plane = App.Rotation(App.Vector(0, 0, 1), 60).multiply(
+            App.Rotation(App.Vector(1, 0, 0), 90)
+        )
         reference = models.sketch(
             self.doc,
             "StartPlane",
@@ -3039,7 +3044,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump(0.1)
         self.assertFalse(armed(field))
         key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
-        self.assertTrue(waitFor(lambda: feature.ReferenceAxis[1] == ["V_Axis"]), feature.ReferenceAxis)
+        self.assertTrue(
+            waitFor(lambda: feature.ReferenceAxis[1] == ["V_Axis"]), feature.ReferenceAxis
+        )
         self.assertTrue(
             waitFor(lambda: combo.currentText() == "Vertical sketch axis"), combo.currentText()
         )
@@ -3091,6 +3098,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(QtCore.QMetaObject.invokeMethod(panel, "selectionTaken"))
         pump(0.2)
         self.assertFalse(armed(field), "the row stays armed")
+        # The guessed axis is no choice of the box: the box shows "Select reference...", the row
+        # under it holds the axis
+        self.assertTrue(self.axisCombo().currentText().startswith("Select reference"))
+        self.assertTrue(field.isVisible())
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertEqual(feature.ReferenceAxis[0].Name, "AxisSketch")
