@@ -4450,6 +4450,20 @@ TEST(Moved, twoPiecesOfOneEdgeAreNoTwins)
               "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
 }
 
+TEST(Moved, twoPiecesOfOneEdgeInACopyAreNoTwins)
+{
+    // The PR 143 verification's finding A: the split made before a pattern instance (8, instance
+    // 2) copies both pieces, `X|<split>|<TRF;2>`. Compared without the copy chain they share,
+    // they are two pieces of one edge, no twins: it breaks.
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto held = stepInstance(piece(top, 9, "CUT", 0, 'E', {"Face3"}), 8, "2", 'E');
+    auto input = liftedBoss(stepInstance(piece(top, 9, "CUT", 0, 'E', {"Face5"}), 8, "2", 'E'));
+    input.pool["Edge"][1] = element("Edge33", {held});
+    input.entries[0].exactName = held;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
 TEST(Moved, onlyTheHeldNameOfTheHitMakesATwin)
 {
     // The PR 143 review's finding 3: the hit also has a name made from line g3, the element at

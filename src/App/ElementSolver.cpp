@@ -223,6 +223,20 @@ bool piecesOfOne(std::string_view a, std::string_view b)
 {
     const auto as = NameAncestry::splitSections(a);
     const auto bs = NameAncestry::splitSections(b);
+    // Pieces of a split made before a copy (`X|<split A>|<TRF>`, `X|<split B>|<TRF>`) are
+    // compared without the chain of copy sections both end in, as isPieceOf() does.
+    std::size_t copies = 0;
+    while (copies < as.size() && copies < bs.size()
+           && as[as.size() - 1 - copies] == bs[bs.size() - 1 - copies]
+           && isCopySection(decodeSection(as[as.size() - 1 - copies]))) {
+        ++copies;
+    }
+    if (copies > 0 && copies < as.size() && copies < bs.size()) {
+        auto head = [](std::string_view whole, std::string_view firstStripped) {
+            return whole.substr(0, firstStripped.data() - whole.data() - 1);
+        };
+        return piecesOfOne(head(a, as[as.size() - copies]), head(b, bs[bs.size() - copies]));
+    }
     std::size_t common = 0;
     while (common < as.size() && common < bs.size() && as[common] == bs[common]) {
         ++common;
