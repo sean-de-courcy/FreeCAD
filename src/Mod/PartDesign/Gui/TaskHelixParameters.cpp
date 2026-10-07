@@ -85,6 +85,7 @@ TaskHelixParameters::TaskHelixParameters(PartDesignGui::ViewProviderHelix* Helix
     initializeHelix();
 
     assignProperties();
+    createAxisField();
     setValuesFromProperties();
 
     updateUI();
@@ -173,8 +174,6 @@ void TaskHelixParameters::connectSlots()
             this, &TaskHelixParameters::onAngleChanged);
     connect(ui->growth, qOverload<double>(&QuantitySpinBox::valueChanged),
             this, &TaskHelixParameters::onGrowthChanged);
-    connect(ui->axis, qOverload<int>(&QComboBox::activated),
-            this, &TaskHelixParameters::onAxisChanged);
     connect(ui->checkBoxLeftHanded, &QCheckBox::toggled,
             this, &TaskHelixParameters::onLeftHandedChanged);
     connect(ui->checkBoxReversed, &QCheckBox::toggled,
@@ -206,61 +205,106 @@ void TaskHelixParameters::showCoordinateAxes()
     }
 }
 
-void TaskHelixParameters::fillAxisCombo(bool forceRefill)
+void TaskHelixParameters::createAxisField()
 {
-    Base::StateLocker lock(getUpdateBlockRef(), true);
-
-    if (axesInList.empty()) {
-        forceRefill = true;  // not filled yet, full refill
-    }
-
-    if (forceRefill) {
-        ui->axis->clear();
-        this->axesInList.clear();
-
-        // add sketch axes
-        addSketchAxes();
-
-        // add part axes
-        addPartAxes();
-
-        // add "Select reference"
-        addAxisToCombo(nullptr, std::string(), tr("Select reference…"));
-    }
-
-    // add current link, if not in list and highlight it
-    int indexOfCurrent = addCurrentLink();
-    if (indexOfCurrent != -1) {
-        ui->axis->setCurrentIndex(indexOfCurrent);
-    }
+    // The axis: the box's choices, and a picked edge or line in the row under it, through the
+    // cross-body question as before
+    ReferenceField::Options axis;
+    axis.kind = ReferenceField::Kind::SingleElement;
+    axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
+    axis.target = [this]() -> App::DocumentObject* {
+        auto helix = getObject<PartDesign::ProfileBased>();
+        return helix ? helix->getBaseObject(/*silent=*/true) : nullptr;
+    };
+    axis.required = false;
+    axis.removable = false;
+    axis.once = true;
+    axis.label = tr("Picked axis");
+    axis.kinds = tr("A straight or circular edge, or a line");
+    axis.resolve = [this](const Gui::SelectionChanges& msg,
+                          App::DocumentObject*& obj,
+                          std::vector<std::string>& subs) {
+        obj = nullptr;
+        return getReferencedSelection(getObject(), msg, obj, subs) && obj;
+    };
+    auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto write = [this, axisSelf](App::DocumentObject* obj,
+                                  const std::vector<std::string>& picked) {
+        // A line or an origin axis is linked whole as {""}: getAxis() takes no axis from no subs
+        const std::vector<std::string> subs =
+            picked.empty() ? std::vector<std::string> {""} : picked;
+        if (*axisSelf) {
+            (*axisSelf)->assign(obj, subs);
+        }
+        writeAxis(obj, subs);
+    };
+    auto axisField = new ReferenceField(getObject(), "ReferenceAxis", axis, write, proxy);
+    *axisSelf = axisField;
+    axisField->takePlaceOf(ui->axisFieldPlaceholder);
+    axisField->hide();
+    // The box is filled by fillAxisCombo (the .ui's entries are placeholders)
+    ui->axis->clear();
+    axisCombo = new ReferenceCombo(ui->axis, axisField, propReferenceAxis, write, this);
+    // The profile shows while the row is armed, the preview's or not (B18)
+    showProfileWhileArmed(axisField);
 }
 
-void TaskHelixParameters::addSketchAxes()
+std::vector<ReferenceField*> TaskHelixParameters::referenceFields() const
+{
+    if (axisCombo && axisCombo->field()) {
+        return {axisCombo->field()};
+    }
+    return {};
+}
+
+void TaskHelixParameters::onReferenceSelectionTaken()
+{
+    // The row disarms through the dialog's group (B15)
+}
+
+void TaskHelixParameters::fillAxisCombo(bool forceRefill)
+{
+    if (!axisCombo) {
+        return;
+    }
+    Base::StateLocker lock(getUpdateBlockRef(), true);
+
+    if (!forceRefill && ui->axis->count() > 0) {
+        axisCombo->refresh();
+        return;
+    }
+
+    std::vector<ReferenceCombo::Choice> choices;
+    addSketchAxes(choices);
+    addPartAxes(choices);
+    // A link that is none of these shows in the row under the box (B19)
+    axisCombo->setChoices(choices, tr("Select reference…"));
+}
+
+void TaskHelixParameters::addSketchAxes(std::vector<ReferenceCombo::Choice>& choices)
 {
     auto profile = getObject<PartDesign::ProfileBased>();
     auto sketch = dynamic_cast<Part::Part2DObject*>(profile->Profile.getValue());
     if (sketch) {
-        addAxisToCombo(sketch, "N_Axis", tr("Normal sketch axis"));
-        addAxisToCombo(sketch, "V_Axis", tr("Vertical sketch axis"));
-        addAxisToCombo(sketch, "H_Axis", tr("Horizontal sketch axis"));
+        choices.push_back({tr("Normal sketch axis"), sketch, "N_Axis"});
+        choices.push_back({tr("Vertical sketch axis"), sketch, "V_Axis"});
+        choices.push_back({tr("Horizontal sketch axis"), sketch, "H_Axis"});
         for (int i = 0; i < sketch->getAxisCount(); i++) {
             QString itemText = tr("Construction line %1").arg(i + 1);
-            std::stringstream sub;
-            sub << "Axis" << i;
-            addAxisToCombo(sketch, sub.str(), itemText);
+            choices.push_back({itemText, sketch, "Axis" + std::to_string(i)});
         }
     }
 }
 
-void TaskHelixParameters::addPartAxes()
+void TaskHelixParameters::addPartAxes(std::vector<ReferenceCombo::Choice>& choices)
 {
     auto profile = getObject<PartDesign::ProfileBased>();
     if (PartDesign::Body* body = PartDesign::Body::findBodyOf(profile)) {
         try {
             App::Origin* orig = body->getOrigin();
-            addAxisToCombo(orig->getX(), "", tr("Base X-axis"));
-            addAxisToCombo(orig->getY(), "", tr("Base Y-axis"));
-            addAxisToCombo(orig->getZ(), "", tr("Base Z-axis"));
+            choices.push_back({tr("Base X-axis"), orig->getX(), std::string()});
+            choices.push_back({tr("Base Y-axis"), orig->getY(), std::string()});
+            choices.push_back({tr("Base Z-axis"), orig->getZ(), std::string()});
         }
         catch (const Base::Exception& ex) {
             ex.reportException();
@@ -271,43 +315,6 @@ void TaskHelixParameters::addPartAxes()
 void TaskHelixParameters::onReferencesRepaired()
 {
     fillAxisCombo(false);
-}
-
-int TaskHelixParameters::addCurrentLink()
-{
-    int indexOfCurrent = -1;
-    App::DocumentObject* ax = propReferenceAxis->getValue();
-    const std::vector<std::string>& subList = propReferenceAxis->getSubValues();
-    for (size_t i = 0; i < axesInList.size(); i++) {
-        if (ax == axesInList[i]->getValue() && subList == axesInList[i]->getSubValues()) {
-            indexOfCurrent = i;
-            break;
-        }
-    }
-
-    if (indexOfCurrent == -1 && ax) {
-        assert(subList.size() <= 1);
-        std::string sub;
-        if (!subList.empty()) {
-            sub = subList[0];
-        }
-        addAxisToCombo(ax, sub, getRefStr(ax, subList));
-        indexOfCurrent = axesInList.size() - 1;
-    }
-
-    return indexOfCurrent;
-}
-
-void TaskHelixParameters::addAxisToCombo(
-    App::DocumentObject* linkObj,
-    std::string linkSubname,
-    QString itemText
-)
-{
-    this->ui->axis->addItem(itemText);
-    this->axesInList.emplace_back(new App::PropertyLinkSub);
-    App::PropertyLinkSub& lnk = *(axesInList.back());
-    lnk.setValue(linkObj, std::vector<std::string>(1, linkSubname));
 }
 
 void TaskHelixParameters::updateStatus()
@@ -442,20 +449,8 @@ void TaskHelixParameters::assignToolTipsFromPropertyDocs()
     ui->checkBoxOutside->setToolTip(toolTip);
 }
 
-void TaskHelixParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
-{
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        std::vector<std::string> axis;
-        App::DocumentObject* selObj {};
-        if (getReferencedSelection(getObject(), msg, selObj, axis) && selObj) {
-            exitSelectionMode();
-            propReferenceAxis->setValue(selObj, axis);
-            recomputeFeature();
-            updateUI();
-        }
-    }
-}
-
+void TaskHelixParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
+{}
 void TaskHelixParameters::onPitchChanged(double len)
 {
     if (getObject()) {
@@ -501,37 +496,12 @@ void TaskHelixParameters::onGrowthChanged(double len)
     }
 }
 
-void TaskHelixParameters::onAxisChanged(int num)
+void TaskHelixParameters::writeAxis(App::DocumentObject* obj, const std::vector<std::string>& subs)
 {
-    auto helix = getObject<PartDesign::ProfileBased>();
-
-    if (axesInList.empty()) {
-        return;
+    // The field's writer has assigned it (with its records); a choice of the box is set here
+    if (propReferenceAxis->getValue() != obj || propReferenceAxis->getSubValues() != subs) {
+        propReferenceAxis->setValue(obj, subs);
     }
-
-    App::PropertyLinkSub& lnk = *(axesInList[num]);
-    if (!lnk.getValue()) {
-        // enter reference selection mode
-        // assure the sketch is visible
-        if (auto sketch = dynamic_cast<Part::Part2DObject*>(helix->Profile.getValue())) {
-            Gui::cmdAppObjectShow(sketch);
-        }
-        TaskSketchBasedParameters::onSelectReference(
-            AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE
-        );
-        return;
-    }
-    else {
-        if (!helix->getDocument()->isIn(lnk.getValue())) {
-            Base::Console().error("Object was deleted\n");
-            return;
-        }
-        propReferenceAxis->Paste(lnk);
-
-        // in case user is in selection mode, but changed their mind before selecting anything.
-        exitSelectionMode();
-    }
-
     try {
         // FreeCAD-CH (ops#170): no "suggest reversed" here. Revolution's block was copied with a
         // test of the value against itself (never true); a helix has no rule for it, its
@@ -615,41 +585,14 @@ void TaskHelixParameters::changeEvent(QEvent* e)
     TaskBox::changeEvent(e);
     if (e->type() == QEvent::LanguageChange) {
         // save current indexes
-        int axis = ui->axis->currentIndex();
         int mode = ui->inputMode->currentIndex();
         ui->retranslateUi(proxy);
         assignToolTipsFromPropertyDocs();
 
-        // Axes added by the user cannot be restored
+        // The box shows the property again (a picked axis in its row)
         fillAxisCombo(true);
 
-        // restore the indexes
-        if (axis < ui->axis->count()) {
-            ui->axis->setCurrentIndex(axis);
-        }
         ui->inputMode->setCurrentIndex(mode);
-    }
-}
-
-void TaskHelixParameters::getReferenceAxis(App::DocumentObject*& obj, std::vector<std::string>& sub) const
-{
-    if (axesInList.empty()) {
-        throw Base::RuntimeError("Not initialized!");
-    }
-
-    int num = ui->axis->currentIndex();
-    const App::PropertyLinkSub& lnk = *(axesInList.at(num));
-    if (!lnk.getValue()) {
-        throw Base::RuntimeError("Still in reference selection mode; reference was not selected yet");
-    }
-    else {
-        auto revolution = getObject<PartDesign::ProfileBased>();
-        if (!revolution->getDocument()->isIn(lnk.getValue())) {
-            throw Base::RuntimeError("Object was deleted");
-        }
-
-        obj = lnk.getValue();
-        sub = lnk.getSubValues();
     }
 }
 
@@ -668,51 +611,12 @@ bool TaskHelixParameters::showPreview(PartDesign::Helix* helix)
     return false;
 }
 
-void TaskHelixParameters::startReferenceSelection(App::DocumentObject* profile, App::DocumentObject* base)
-{
-    if (auto helix = getObject<PartDesign::Helix>()) {
-        if (helix && showPreview(helix)) {
-            Gui::Document* doc = getGuiDocument();
-            if (doc) {
-                doc->setHide(profile->getNameInDocument());
-            }
-        }
-        else {
-            TaskSketchBasedParameters::startReferenceSelection(profile, base);
-        }
-    }
-}
-
-void TaskHelixParameters::finishReferenceSelection(App::DocumentObject* profile, App::DocumentObject* base)
-{
-    if (auto helix = getObject<PartDesign::Helix>()) {
-        if (helix && showPreview(helix)) {
-            Gui::Document* doc = getGuiDocument();
-            if (doc) {
-                doc->setShow(profile->getNameInDocument());
-            }
-        }
-        else {
-            TaskSketchBasedParameters::finishReferenceSelection(profile, base);
-        }
-    }
-}
-
 // this is used for logging the command fully when recording macros
 void TaskHelixParameters::apply()  // NOLINT
 {
-    std::vector<std::string> sub;
-    App::DocumentObject* obj {};
-    getReferenceAxis(obj, sub);
-    std::string axis = buildLinkSingleSubPythonStr(obj, sub);
     auto tobj = getObject();
-    // Written only when the panel changed it: written again with a plain name, it would drop a
-    // guess record without a warning (ops#127).
-    if (propReferenceAxis->getValue() != obj
-        || (propReferenceAxis->getSubValues(false) != sub
-            && propReferenceAxis->getSubValues(true) != sub)) {
-        FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
-    }
+    // The axis was written as picked or chosen (ops#150: the fields write references, not
+    // commands; written again with a plain name it would drop a guess record, ops#127)
     FCMD_OBJ_CMD(tobj, "Mode = " << propMode->getValue());
     FCMD_OBJ_CMD(tobj, "Pitch = " << propPitch->getValue());
     FCMD_OBJ_CMD(tobj, "Height = " << propHeight->getValue());

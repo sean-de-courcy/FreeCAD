@@ -206,41 +206,14 @@ App::DocumentObject* TaskExtrudeParameters::baseSolid() const
 
 ReferenceField* TaskExtrudeParameters::createFaceField(QWidget* placeholder,
                                                        const char* property,
-                                                       const QString& label)
+                                                       const QString& label,
+                                                       bool refuseWholeSketch)
 {
-    ReferenceField::Options options;
-    options.kind = ReferenceField::Kind::SingleElement;
-    options.flags = AllowSelection::FACE;
     // The solid before shows while the field is armed, as the face pick showed it
-    options.target = [this]() -> App::DocumentObject* {
+    auto target = [this]() -> App::DocumentObject* {
         return baseSolid();
     };
-    options.required = false;
-    options.noDependents = true;
-    options.label = label;
-    options.kinds = tr("A face or a plane");
-    // A plane of a coordinate system is linked through the system, a datum or origin plane
-    // whole (as the face pick did)
-    options.resolve = [](const Gui::SelectionChanges& msg,
-                         App::DocumentObject*& obj,
-                         std::vector<std::string>& subs) {
-        subs.clear();
-        if (!obj) {
-            return false;
-        }
-        if (PartDesign::Feature::isDatum(obj)) {
-            auto datum = freecad_cast<App::DatumElement*>(obj);
-            if (datum && datum->getLCS()) {
-                subs.emplace_back(datum->getNameInDocument());
-                obj = datum->getLCS();
-            }
-            return true;
-        }
-        if (!Base::Tools::isNullOrEmpty(msg.pSubName)) {
-            subs.emplace_back(msg.pSubName);
-        }
-        return true;
-    };
+    ReferenceField::Options options = faceFieldOptions(label, target, refuseWholeSketch);
     auto self = std::make_shared<QPointer<ReferenceField>>();
     auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
         if (*self) {
@@ -263,7 +236,10 @@ void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
     QWidget* facesPlaceholder =
         first ? ui->shapeFacesFieldPlaceholder : ui->shapeFacesFieldPlaceholder2;
 
-    side.faceField = createFaceField(facePlaceholder, first ? "UpToFace" : "UpToFace2", tr("Face"));
+    side.faceField = createFaceField(facePlaceholder,
+                                     first ? "UpToFace" : "UpToFace2",
+                                     tr("Face"),
+                                     /*refuseWholeSketch=*/true);
 
     // The up-to-shape: a whole shape; a pick of another one takes all its faces
     QCheckBox* allFaces = side.checkBoxAllFaces;
@@ -441,7 +417,8 @@ void TaskExtrudeParameters::createFields()
     createProfileField();
     startField = createFaceField(ui->startReferenceFieldPlaceholder,
                                  "StartReference",
-                                 tr("Start reference"));
+                                 tr("Start reference"),
+                                 /*refuseWholeSketch=*/false);
     createSideFields(m_side1, Side::First);
     createSideFields(m_side2, Side::Second);
 
@@ -454,6 +431,7 @@ void TaskExtrudeParameters::createFields()
         return baseSolid();
     };
     axis.required = false;
+    axis.removable = false;
     axis.once = true;
     axis.covers = false;
     axis.kinds = tr("A straight or circular edge, or a line");
@@ -464,7 +442,12 @@ void TaskExtrudeParameters::createFields()
         return getReferencedSelection(getObject(), msg, obj, subs) && obj;
     };
     auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
-    auto writeAxis = [this, axisSelf](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+    auto writeAxis = [this, axisSelf](App::DocumentObject* obj,
+                                      const std::vector<std::string>& picked) {
+        // A line or an origin axis is linked whole as {""}: getAxis() takes no direction from no
+        // subs (PR 159 review)
+        const std::vector<std::string> subs =
+            picked.empty() ? std::vector<std::string> {""} : picked;
         if (*axisSelf) {
             (*axisSelf)->assign(obj, subs);
         }

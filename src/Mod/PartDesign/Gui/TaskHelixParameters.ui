@@ -83,6 +83,9 @@
     </layout>
    </item>
    <item>
+    <widget class="QWidget" name="axisFieldPlaceholder"/>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="horizontalLayoutMode">
      <item>
       <widget class="QLabel" name="labelInputMode">

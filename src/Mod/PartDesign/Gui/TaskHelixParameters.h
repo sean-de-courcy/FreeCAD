@@ -56,24 +56,26 @@ public:
     ~TaskHelixParameters() override;
 
     void apply() override;
-    /// The axis list shows ReferenceAxis again (ops#127).
+    /// The axis box shows ReferenceAxis again (ops#127).
     void onReferencesRepaired() override;
+    /// The axis row disarms through the dialog's group; the panel has no pick mode (B15).
+    void onReferenceSelectionTaken() override;
+    /// The picked axis's row (ops#150 W6).
+    std::vector<ReferenceField*> referenceFields() const override;
 
     static bool showPreview(PartDesign::Helix*);
 
 private:
     /**
-     * @brief fillAxisCombo fills the combo and selects the item according to
-     * current value of revolution object's axis reference.
-     * @param forceRefill if true, the combo box will be completely refilled. If
-     * false, the current value of revolution object's axis will be added to the
-     * list (if necessary), and selected. If the list is empty, it will be refilled anyway.
+     * @brief fillAxisCombo fills the axis box with the sketch's and the body's axes; with
+     * \a forceRefill false it only shows the property again, unless it is still empty.
      */
     void fillAxisCombo(bool forceRefill = false);
-    void addAxisToCombo(App::DocumentObject* linkObj, std::string linkSubname, QString itemText);
-    void addSketchAxes();
-    void addPartAxes();
-    int addCurrentLink();
+    void addSketchAxes(std::vector<ReferenceCombo::Choice>& choices);
+    void addPartAxes(std::vector<ReferenceCombo::Choice>& choices);
+    void createAxisField();
+    /// Writes a picked or chosen axis.
+    void writeAxis(App::DocumentObject* obj, const std::vector<std::string>& subs);
     void assignToolTipsFromPropertyDocs();
     void adaptVisibilityToMode();
 
@@ -83,7 +85,6 @@ private Q_SLOTS:
     void onTurnsChanged(double);
     void onAngleChanged(double);
     void onGrowthChanged(double);
-    void onAxisChanged(int);
     void onLeftHandedChanged(bool);
     void onReversedChanged(bool);
     void onModeChanged(int);
@@ -91,12 +92,10 @@ private Q_SLOTS:
 
 
 protected:
+    /// The picks go to the axis row
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void changeEvent(QEvent* e) override;
     bool updateView() const;
-    void getReferenceAxis(App::DocumentObject*& obj, std::vector<std::string>& sub) const;
-    void startReferenceSelection(App::DocumentObject* profile, App::DocumentObject* base) override;
-    void finishReferenceSelection(App::DocumentObject* profile, App::DocumentObject* base) override;
 
     // mirrors of helixes's properties
     App::PropertyLength* propPitch;
@@ -125,15 +124,8 @@ private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskHelixParameters> ui;
 
-    /**
-     * @brief axesInList is the list of links corresponding to axis combo; must
-     * be kept in sync with the combo. A special value of zero-pointer link is
-     * for "Select axis" item.
-     *
-     * It is a list of pointers, because properties prohibit assignment. Use new
-     * when adding stuff, and delete when removing stuff.
-     */
-    std::vector<std::unique_ptr<App::PropertyLinkSub>> axesInList;
+    /// The axis box and its picked axis's row (ops#150 W6)
+    ReferenceCombo* axisCombo = nullptr;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
     Gui::LinearGizmo* heightGizmo = nullptr;

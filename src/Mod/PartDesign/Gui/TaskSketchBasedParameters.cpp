@@ -32,13 +32,17 @@
 
 #include <App/Document.h>
 #include <App/Origin.h>
+#include <App/Datums.h>
 #include <Base/Console.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProvider.h>
 #include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
@@ -133,6 +137,92 @@ void TaskSketchBasedParameters::updateReferenceName(
     lineEdit->setText(text);
     lineEdit->setProperty("FeatureName", QByteArray(referencedObject->getNameInDocument()));
     lineEdit->setProperty("FaceName", QByteArray(subName.c_str()));
+}
+
+// ops#150 W2, W6
+ReferenceField::Options TaskSketchBasedParameters::faceFieldOptions(
+    const QString& label,
+    std::function<App::DocumentObject*()> target,
+    bool refuseWholeSketch
+)
+{
+    ReferenceField::Options options;
+    options.kind = ReferenceField::Kind::SingleElement;
+    options.flags = AllowSelection::FACE;
+    options.target = std::move(target);
+    options.required = false;
+    options.noDependents = true;
+    options.label = label;
+    options.kinds = tr("A face or a plane");
+    // A sketch whole passes the face gate but gives an up-to-face no face (B20)
+    if (refuseWholeSketch) {
+        options.accept = [](App::DocumentObject* obj, const char* sub, std::string& why) {
+            if (obj && obj->isDerivedFrom<Part::Part2DObject>()
+                && Base::Tools::isNullOrEmpty(sub)) {
+                why = QT_TR_NOOP("A whole sketch isn't a face: pick a face or a plane");
+                return false;
+            }
+            return true;
+        };
+    }
+    // A plane of a coordinate system is linked through the system, a datum or origin plane
+    // whole (as the face pick did)
+    options.resolve = [](const Gui::SelectionChanges& msg,
+                         App::DocumentObject*& obj,
+                         std::vector<std::string>& subs) {
+        subs.clear();
+        if (!obj) {
+            return false;
+        }
+        if (PartDesign::Feature::isDatum(obj)) {
+            auto datum = freecad_cast<App::DatumElement*>(obj);
+            if (datum && datum->getLCS()) {
+                subs.emplace_back(datum->getNameInDocument());
+                obj = datum->getLCS();
+            }
+            return true;
+        }
+        if (!Base::Tools::isNullOrEmpty(msg.pSubName)) {
+            subs.emplace_back(msg.pSubName);
+        }
+        return true;
+    };
+    return options;
+}
+
+// ops#150 W6
+void TaskSketchBasedParameters::showProfileWhileArmed(ReferenceField* field)
+{
+    // The lambda holds what it needs: the panel may be gone when the field disarms
+    auto shown = std::make_shared<App::DocumentObjectT>();
+    App::DocumentObjectT feature(getObject());
+    connect(field, &ReferenceField::armedChanged, field, [shown, feature](bool on) {
+        if (auto profile = shown->getObject()) {
+            if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
+                vp->hide();
+            }
+        }
+        *shown = App::DocumentObjectT();
+        auto profileBased = freecad_cast<PartDesign::ProfileBased*>(feature.getObject());
+        App::DocumentObject* profile = profileBased ? profileBased->Profile.getValue() : nullptr;
+        if (!on || !profile) {
+            return;
+        }
+        Gui::ViewProvider* vp = Gui::Application::Instance->getViewProvider(profile);
+        if (vp && !vp->isShow()) {
+            vp->show();
+            *shown = profile;
+        }
+    });
+    // A dialog closed while the field is armed (resetEdit, closeDialog) never disarms it: the
+    // profile it showed hides when the field goes
+    QObject::connect(field, &QObject::destroyed, [shown]() {
+        if (auto profile = shown->getObject()) {
+            if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
+                vp->hide();
+            }
+        }
+    });
 }
 
 void TaskSketchBasedParameters::startReferenceSelection(App::DocumentObject*, App::DocumentObject* base)

@@ -43,6 +43,7 @@
 #include "ReferenceActions.h"
 
 class QAction;
+class QComboBox;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -122,6 +123,8 @@ public:
         bool noDependents = false;
         /// Armed when the dialog opens while it is empty.
         bool required = true;
+        /// SingleElement: Delete may clear it; an axis can't be empty (PR 159 review).
+        bool removable = true;
         /// What it takes: "Edges, faces". The label, and the hint while armed.
         QString kinds;
         /// The label when it isn't the kinds: "Neutral plane".
@@ -404,6 +407,54 @@ private:
     std::vector<QPointer<ReferenceField>> fieldList;
     std::vector<QPointer<QWidget>> panels;
     fastsignals::scoped_connection activeDocumentConnection;
+};
+
+/** An axis box (ops#150 W6; notes 11.3): a combo box of fixed choices ending in "Select
+ * reference...", and under it a reference field (Kind::SingleElement) for a picked reference.
+ * The field shows while the property links something that isn't a choice, with its state and
+ * menu, so a guessed or broken axis is never a plain entry of the box (B19). "Select
+ * reference..." shows the field and arms it; a choice disarms and hides it. A choice is written
+ * through the same writer as the field's picks.
+ */
+class ReferenceCombo: public QObject
+{
+    Q_OBJECT
+
+public:
+    struct Choice
+    {
+        QString text;
+        App::DocumentObject* object = nullptr;
+        std::string sub;
+    };
+
+    /// \a combo and \a field are the panel's; \a property is the field's.
+    ReferenceCombo(QComboBox* combo,
+                   ReferenceField* field,
+                   App::PropertyLinkSub* property,
+                   ReferenceField::Writer write,
+                   QObject* parent = nullptr);
+
+    /// Fills the box: the choices, then \a selectReference ("Select reference...", in the
+    /// panel's translation context).
+    void setChoices(const std::vector<Choice>& choices, const QString& selectReference);
+    /// Shows the property: its choice, or "Select reference..." with the field under the box.
+    void refresh();
+    ReferenceField* field() const
+    {
+        return referenceField;
+    }
+
+private:
+    void onActivated(int index);
+    /// The choice the property links, or -1.
+    int currentChoice() const;
+
+    QPointer<QComboBox> combo;
+    QPointer<ReferenceField> referenceField;
+    App::PropertyLinkSub* property;
+    ReferenceField::Writer writer;
+    std::vector<std::pair<App::DocumentObjectT, std::string>> choices;
 };
 
 }  // namespace PartDesignGui

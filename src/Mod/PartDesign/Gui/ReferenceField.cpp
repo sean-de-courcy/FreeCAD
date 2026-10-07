@@ -28,6 +28,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QFocusEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -35,6 +36,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -1139,6 +1141,11 @@ void ReferenceField::removeSelected()
         return;
     }
     if (isSingle()) {
+        if (!options.removable) {
+            message = tr("The reference can't be empty: pick another one.");
+            updateLook();
+            return;
+        }
         write(nullptr, {});
         return;
     }
@@ -1844,6 +1851,110 @@ void ReferenceFieldGroup::onFocusChanged(QWidget* /*old*/, QWidget* now)
             return;
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+
+ReferenceCombo::ReferenceCombo(QComboBox* combo,
+                               ReferenceField* field,
+                               App::PropertyLinkSub* property,
+                               ReferenceField::Writer write,
+                               QObject* parent)
+    : QObject(parent)
+    , combo(combo)
+    , referenceField(field)
+    , property(property)
+    , writer(std::move(write))
+{
+    connect(combo, qOverload<int>(&QComboBox::activated), this, &ReferenceCombo::onActivated);
+    // Disarmed (a pick made, Esc, another input): the box shows the property again
+    connect(field, &ReferenceField::armedChanged, this, [this](bool on) {
+        if (!on) {
+            refresh();
+        }
+    });
+    // Written by the field itself (its undo and redo, a menu action): the same (PR 159 review)
+    connect(field, &ReferenceField::picked, this, &ReferenceCombo::refresh);
+}
+
+void ReferenceCombo::setChoices(const std::vector<Choice>& list, const QString& selectReference)
+{
+    if (!combo) {
+        return;
+    }
+    {
+        QSignalBlocker block(combo);
+        combo->clear();
+        choices.clear();
+        for (const Choice& choice : list) {
+            if (!choice.object) {
+                continue;
+            }
+            combo->addItem(choice.text);
+            choices.emplace_back(choice.object, choice.sub);
+        }
+        combo->addItem(selectReference);
+    }
+    refresh();
+}
+
+int ReferenceCombo::currentChoice() const
+{
+    App::DocumentObject* linked = property->getValue();
+    const std::vector<std::string>& subs = property->getSubValues();
+    if (!linked || subs.size() > 1) {
+        return -1;
+    }
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    for (std::size_t i = 0; i < choices.size(); ++i) {
+        if (choices[i].first.getObject() == linked && choices[i].second == sub) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void ReferenceCombo::refresh()
+{
+    if (!combo || !referenceField) {
+        return;
+    }
+    const int choice = currentChoice();
+    QSignalBlocker block(combo);
+    if (choice >= 0 && !referenceField->isArmed()) {
+        combo->setCurrentIndex(choice);
+        referenceField->hide();
+    }
+    else {
+        combo->setCurrentIndex(combo->count() - 1);
+        referenceField->show();
+    }
+}
+
+void ReferenceCombo::onActivated(int index)
+{
+    if (!referenceField) {
+        return;
+    }
+    if (index < 0 || index >= static_cast<int>(choices.size())) {
+        // "Select reference...": the field takes the next pick, once it shows
+        referenceField->show();
+        QTimer::singleShot(0, referenceField, [field = referenceField]() {
+            if (field) {
+                field->setArmed(true);
+                if (field->isArmed()) {
+                    field->list()->setFocus(Qt::OtherFocusReason);
+                }
+            }
+        });
+        return;
+    }
+    referenceField->setArmed(false);
+    App::DocumentObject* obj = choices[index].first.getObject();
+    if (obj && index != currentChoice()) {
+        writer(obj, {choices[index].second});
+    }
+    refresh();
 }
 
 #include "moc_ReferenceField.cpp"

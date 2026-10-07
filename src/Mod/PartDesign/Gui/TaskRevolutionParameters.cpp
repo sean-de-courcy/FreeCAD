@@ -25,6 +25,7 @@
 #include <cstring>
 #include <QAbstractButton>
 #include <QSignalBlocker>
+#include <QTimer>
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
@@ -75,8 +76,6 @@ TaskRevolutionParameters::TaskRevolutionParameters(
     , ui(new Ui_TaskRevolutionParameters)
     , proxy(new QWidget(this))
     , isGroove(false)
-    , selectionMode(SelectionMode::None)
-    , activeSelectionSide(Side::First)
 {
     // we need a separate container widget to add all controls to
     ui->setupUi(proxy);
@@ -132,11 +131,11 @@ Gui::ViewProviderCoordinateSystem* TaskRevolutionParameters::getOriginView() con
 void TaskRevolutionParameters::setupDialog()
 {
     createSideControllers();
+    createFields();
 
     auto revolved = getObject<PartDesign::Revolved>();
     ui->checkBoxMidplane->hide();
     ui->checkBoxReversed->setChecked(propReversed->getValue());
-    ui->lineStartReference->setPlaceholderText(tr("No start reference selected"));
     ui->startOffsetEdit->setToolTip(tr("Angular offset from the profile or selected start reference"));
     ui->startMode->setCurrentIndex(revolved->StartType.getValue());
     ui->startOffsetEdit->setValue(revolved->StartOffset.getValue());
@@ -144,13 +143,117 @@ void TaskRevolutionParameters::setupDialog()
     ui->startOffsetEdit->setMaximum(revolved->StartOffset.getMaximum());
     ui->startOffsetEdit->setSingleStep(revolved->StartOffset.getStepSize());
     ui->startOffsetEdit->bind(revolved->StartOffset);
-    updateStartReferenceName();
 
     setupSideDialog(m_side1);
     setupSideDialog(m_side2);
 
     translateSidesList(propSideType->getValue());
     updateStartUI();
+}
+
+void TaskRevolutionParameters::createFields()
+{
+    auto baseSolid = [this]() -> App::DocumentObject* {
+        auto revolved = getObject<PartDesign::ProfileBased>();
+        return revolved ? revolved->getBaseObject(/*silent=*/true) : nullptr;
+    };
+    // The start reference and the up-to-faces: a face or a plane (ops#150 W6). Only an
+    // up-to-face refuses a sketch whole (B20): a start reference takes the sketch's plane.
+    auto faceField = [this, baseSolid](QWidget* placeholder,
+                                       const char* property,
+                                       const QString& label,
+                                       bool refuseWholeSketch) {
+        auto self = std::make_shared<QPointer<ReferenceField>>();
+        auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+            if (*self) {
+                (*self)->assign(obj, subs);
+            }
+            recomputeFeature();
+            setGizmoPositions();
+        };
+        auto options = faceFieldOptions(label, baseSolid, refuseWholeSketch);
+        auto field = new ReferenceField(getObject(), property, options, write, proxy);
+        *self = field;
+        field->takePlaceOf(placeholder);
+        return field;
+    };
+    startField = faceField(ui->startReferenceFieldPlaceholder,
+                           "StartReference",
+                           tr("Start reference"),
+                           /*refuseWholeSketch=*/false);
+    m_side1.faceField = faceField(ui->faceFieldPlaceholder, "UpToFace", tr("Face"), true);
+    m_side2.faceField = faceField(ui->faceFieldPlaceholder2, "UpToFace2", tr("Face"), true);
+
+    // The axis: the box's choices, and a picked edge or line in the row under it, through the
+    // cross-body question as before
+    ReferenceField::Options axis;
+    axis.kind = ReferenceField::Kind::SingleElement;
+    axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
+    axis.target = baseSolid;
+    axis.required = false;
+    axis.removable = false;
+    axis.once = true;
+    axis.label = tr("Picked axis");
+    axis.kinds = tr("A straight or circular edge, or a line");
+    axis.resolve = [this](const Gui::SelectionChanges& msg,
+                          App::DocumentObject*& obj,
+                          std::vector<std::string>& subs) {
+        obj = nullptr;
+        return getReferencedSelection(getObject(), msg, obj, subs) && obj;
+    };
+    auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeField = [this, axisSelf](App::DocumentObject* obj,
+                                       const std::vector<std::string>& picked) {
+        // A line or an origin axis is linked whole as {""}: getAxis() takes no axis from no subs
+        const std::vector<std::string> subs =
+            picked.empty() ? std::vector<std::string> {""} : picked;
+        if (*axisSelf) {
+            (*axisSelf)->assign(obj, subs);
+        }
+        writeAxis(obj, subs);
+    };
+    // The box is filled by fillAxisCombo (the .ui's entries are placeholders)
+    ui->axis->clear();
+    auto axisField = new ReferenceField(getObject(), "ReferenceAxis", axis, writeField, proxy);
+    *axisSelf = axisField;
+    axisField->takePlaceOf(ui->axisFieldPlaceholder);
+    axisField->hide();
+    axisCombo = new ReferenceCombo(ui->axis, axisField, propReferenceAxis, writeField, this);
+    // The profile's lines can be picked while the row is armed
+    showProfileWhileArmed(axisField);
+}
+
+std::vector<ReferenceField*> TaskRevolutionParameters::referenceFields() const
+{
+    std::vector<ReferenceField*> fields;
+    ReferenceField* axisField = axisCombo ? axisCombo->field() : nullptr;
+    for (ReferenceField* field : {startField, m_side1.faceField, m_side2.faceField, axisField}) {
+        if (field) {
+            fields.push_back(field);
+        }
+    }
+    return fields;
+}
+
+void TaskRevolutionParameters::onReferenceSelectionTaken()
+{
+    // The fields disarm through their group (B15)
+}
+
+void TaskRevolutionParameters::armField(ReferenceField* field)
+{
+    if (!field) {
+        return;
+    }
+    // After the mode's widgets are shown
+    QTimer::singleShot(0, field, [field]() {
+        if (field->isVisible() && field->entries().empty()) {
+            field->setArmed(true);
+            if (field->isArmed()) {
+                field->list()->setFocus(Qt::OtherFocusReason);
+            }
+        }
+    });
 }
 
 void TaskRevolutionParameters::updateStartUI()
@@ -161,19 +264,13 @@ void TaskRevolutionParameters::updateStartUI()
 
     ui->labelStartOffset->setVisible(hasOffset);
     ui->startOffsetEdit->setVisible(hasOffset);
-    ui->labelStartReference->setVisible(hasReference);
-    ui->lineStartReference->setVisible(hasReference);
-    ui->buttonStartReference->setVisible(hasReference);
-}
-
-void TaskRevolutionParameters::updateStartReferenceName()
-{
-    auto revolved = getObject<PartDesign::Revolved>();
-    updateReferenceName(
-        ui->lineStartReference,
-        revolved->StartReference,
-        tr("No start reference selected")
-    );
+    if (startField) {
+        startField->setVisible(hasReference);
+        startField->setRequired(hasReference);
+        if (!hasReference) {
+            startField->setArmed(false);
+        }
+    }
 }
 
 void TaskRevolutionParameters::createSideControllers()
@@ -183,8 +280,6 @@ void TaskRevolutionParameters::createSideControllers()
     m_side1.changeMode = ui->changeMode;
     m_side1.labelAngle = ui->labelAngle;
     m_side1.angleEdit = ui->revolveAngle;
-    m_side1.buttonFace = ui->buttonFace;
-    m_side1.lineFaceName = ui->lineFaceName;
     m_side1.Type = &rev->Type;
     m_side1.Angle = &rev->Angle;
     m_side1.UpToFace = &rev->UpToFace;
@@ -192,8 +287,6 @@ void TaskRevolutionParameters::createSideControllers()
     m_side2.changeMode = ui->changeMode2;
     m_side2.labelAngle = ui->labelAngle2;
     m_side2.angleEdit = ui->revolveAngle2;
-    m_side2.buttonFace = ui->buttonFace2;
-    m_side2.lineFaceName = ui->lineFaceName2;
     m_side2.Type = &rev->Type2;
     m_side2.Angle = &rev->Angle2;
     m_side2.UpToFace = &rev->UpToFace2;
@@ -206,9 +299,6 @@ void TaskRevolutionParameters::setupSideDialog(SideController& side)
     side.angleEdit->setMinimum(side.Angle->getMinimum());
     side.angleEdit->bind(*side.Angle);
 
-    updateUpToFaceName(side);
-    side.lineFaceName->setPlaceholderText(tr("No face selected"));
-
     int index = int(side.Type->getValue());
     if (static_cast<Mode>(index) == Mode::TwoAngles) {
         index = static_cast<int>(Mode::Angle);
@@ -216,45 +306,8 @@ void TaskRevolutionParameters::setupSideDialog(SideController& side)
     translateModeList(side.changeMode, index);
 }
 
-void TaskRevolutionParameters::updateUpToFaceName(SideController& side)
-{
-    App::DocumentObject* obj = side.UpToFace->getValue();
-    std::vector<std::string> subStrings = side.UpToFace->getSubValues();
-    std::string upToFace;
-    int faceId = -1;
-    if (obj && !subStrings.empty()) {
-        upToFace = subStrings.front();
-        if (upToFace.compare(0, 4, "Face") == 0) {
-            faceId = std::atoi(&upToFace[4]);
-        }
-    }
-
-    // Set object labels
-    if (obj && PartDesign::Feature::isDatum(obj)) {
-        side.lineFaceName->setText(QString::fromUtf8(obj->Label.getValue()));
-        side.lineFaceName->setProperty("FeatureName", QByteArray(obj->getNameInDocument()));
-    }
-    else if (obj && faceId >= 0) {
-        side.lineFaceName->setText(QStringLiteral("%1:%2%3").arg(
-            QString::fromUtf8(obj->Label.getValue()),
-            tr("Face"),
-            QString::number(faceId)
-        ));
-        side.lineFaceName->setProperty("FeatureName", QByteArray(obj->getNameInDocument()));
-    }
-    else {
-        side.lineFaceName->clear();
-        side.lineFaceName->setProperty("FeatureName", QVariant());
-    }
-
-    side.lineFaceName->setProperty("FaceName", QByteArray(upToFace.c_str()));
-}
-
 void TaskRevolutionParameters::onReferencesRepaired()
 {
-    updateStartReferenceName();
-    updateUpToFaceName(m_side1);
-    updateUpToFaceName(m_side2);
     fillAxisCombo(false);
 }
 
@@ -284,87 +337,49 @@ void TaskRevolutionParameters::translateSidesList(int index)
 
 void TaskRevolutionParameters::fillAxisCombo(bool forceRefill)
 {
+    if (!axisCombo) {
+        return;
+    }
     Base::StateLocker lock(getUpdateBlockRef(), true);
 
-    if (axesInList.empty()) {
-        // not filled yet, full refill
-        forceRefill = true;
+    // not filled yet: full refill
+    if (!forceRefill && ui->axis->count() > 0) {
+        axisCombo->refresh();
+        return;
     }
 
-    if (forceRefill) {
-        ui->axis->clear();
-        axesInList.clear();
-
-        auto* pcFeat = getObject<PartDesign::ProfileBased>();
-        if (!pcFeat) {
-            throw Base::TypeError("The object is not profile-based.");
-        }
-
-        // add sketch axes
-        if (auto* pcSketch = dynamic_cast<Part::Part2DObject*>(pcFeat->Profile.getValue())) {
-            addAxisToCombo(pcSketch, "V_Axis", QObject::tr("Vertical sketch axis"));
-            addAxisToCombo(pcSketch, "H_Axis", QObject::tr("Horizontal sketch axis"));
-            for (int i = 0; i < pcSketch->getAxisCount(); i++) {
-                QString itemText = QObject::tr("Construction line %1").arg(i + 1);
-                std::stringstream sub;
-                sub << "Axis" << i;
-                addAxisToCombo(pcSketch, sub.str(), itemText);
-            }
-        }
-
-        // add origin axes
-        if (PartDesign::Body* body = PartDesign::Body::findBodyOf(pcFeat)) {
-            try {
-                App::Origin* orig = body->getOrigin();
-                addAxisToCombo(orig->getX(), std::string(), tr("Base X-axis"));
-                addAxisToCombo(orig->getY(), std::string(), tr("Base Y-axis"));
-                addAxisToCombo(orig->getZ(), std::string(), tr("Base Z-axis"));
-            }
-            catch (const Base::Exception& ex) {
-                ex.reportException();
-            }
-        }
-
-        // add "Select reference"
-        addAxisToCombo(nullptr, std::string(), tr("Select reference…"));
-    }  // endif forceRefill
-
-    // add current link, if not in list
-    // first, figure out the item number for current axis
-    int indexOfCurrent = -1;
-    App::DocumentObject* ax = propReferenceAxis->getValue();
-    const std::vector<std::string>& subList = propReferenceAxis->getSubValues();
-    for (size_t i = 0; i < axesInList.size(); i++) {
-        if (ax == axesInList[i]->getValue() && subList == axesInList[i]->getSubValues()) {
-            indexOfCurrent = int(i);
-        }
-    }
-    if (indexOfCurrent == -1 && ax) {
-        assert(subList.size() <= 1);
-        std::string sub;
-        if (!subList.empty()) {
-            sub = subList[0];
-        }
-        addAxisToCombo(ax, sub, getRefStr(ax, subList));
-        indexOfCurrent = int(axesInList.size()) - 1;
+    auto* pcFeat = getObject<PartDesign::ProfileBased>();
+    if (!pcFeat) {
+        throw Base::TypeError("The object is not profile-based.");
     }
 
-    // highlight current.
-    if (indexOfCurrent != -1) {
-        ui->axis->setCurrentIndex(indexOfCurrent);
+    std::vector<ReferenceCombo::Choice> choices;
+    // add sketch axes
+    if (auto* pcSketch = dynamic_cast<Part::Part2DObject*>(pcFeat->Profile.getValue())) {
+        choices.push_back({QObject::tr("Vertical sketch axis"), pcSketch, "V_Axis"});
+        choices.push_back({QObject::tr("Horizontal sketch axis"), pcSketch, "H_Axis"});
+        for (int i = 0; i < pcSketch->getAxisCount(); i++) {
+            choices.push_back({QObject::tr("Construction line %1").arg(i + 1),
+                               pcSketch,
+                               "Axis" + std::to_string(i)});
+        }
     }
-}
 
-void TaskRevolutionParameters::addAxisToCombo(
-    App::DocumentObject* linkObj,
-    const std::string& linkSubname,
-    const QString& itemText
-)
-{
-    this->ui->axis->addItem(itemText);
-    this->axesInList.emplace_back(new App::PropertyLinkSub());
-    App::PropertyLinkSub& lnk = *(axesInList[axesInList.size() - 1]);
-    lnk.setValue(linkObj, std::vector<std::string>(1, linkSubname));
+    // add origin axes
+    if (PartDesign::Body* body = PartDesign::Body::findBodyOf(pcFeat)) {
+        try {
+            App::Origin* orig = body->getOrigin();
+            choices.push_back({tr("Base X-axis"), orig->getX(), std::string()});
+            choices.push_back({tr("Base Y-axis"), orig->getY(), std::string()});
+            choices.push_back({tr("Base Z-axis"), orig->getZ(), std::string()});
+        }
+        catch (const Base::Exception& ex) {
+            ex.reportException();
+        }
+    }
+
+    // A link that is none of these shows in the row under the box (B19)
+    axisCombo->setChoices(choices, tr("Select reference…"));
 }
 
 void TaskRevolutionParameters::updateSideUI(
@@ -386,12 +401,6 @@ void TaskRevolutionParameters::updateSideUI(
     }
     else if (mode == Mode::ToFace) {
         isFaceVisible = true;
-        if (setFocus) {
-            QMetaObject::invokeMethod(side.lineFaceName, "setFocus", Qt::QueuedConnection);
-            if (side.lineFaceName->property("FeatureName").isNull()) {
-                side.buttonFace->setChecked(true);
-            }
-        }
     }
 
     const bool finalAngleVisible = isParentVisible && isAngleVisible;
@@ -400,12 +409,10 @@ void TaskRevolutionParameters::updateSideUI(
     side.labelAngle->setVisible(finalAngleVisible);
 
     const bool finalFaceVisible = isParentVisible && isFaceVisible;
-    side.buttonFace->setVisible(finalFaceVisible);
-    side.buttonFace->setEnabled(finalFaceVisible);
-    side.lineFaceName->setVisible(finalFaceVisible);
-    side.lineFaceName->setEnabled(finalFaceVisible);
+    side.faceField->setVisible(finalFaceVisible);
+    side.faceField->setRequired(finalFaceVisible);
     if (!finalFaceVisible) {
-        side.buttonFace->setChecked(false);
+        side.faceField->setArmed(false);
     }
 }
 
@@ -438,16 +445,12 @@ void TaskRevolutionParameters::connectSignals()
             this, &TaskRevolutionParameters::onAngleChanged);
     connect(ui->revolveAngle2, qOverload<double>(&Gui::QuantitySpinBox::valueChanged),
             this, &TaskRevolutionParameters::onAngle2Changed);
-    connect(ui->axis, qOverload<int>(&QComboBox::activated),
-            this, &TaskRevolutionParameters::onAxisChanged);
     connect(ui->checkBoxReversed, &QCheckBox::toggled,
             this, &TaskRevolutionParameters::onReversed);
     connect(ui->startMode, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TaskRevolutionParameters::onStartModeChanged);
     connect(ui->startOffsetEdit, qOverload<double>(&Gui::PrefQuantitySpinBox::valueChanged),
             this, &TaskRevolutionParameters::onStartOffsetChanged);
-    connect(ui->buttonStartReference, &QAbstractButton::toggled,
-            this, &TaskRevolutionParameters::onSelectStartReferenceToggle);
     connect(ui->checkBoxUpdateView, &QCheckBox::toggled,
             this, &TaskRevolutionParameters::onUpdateView);
     connect(ui->changeMode, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -457,19 +460,6 @@ void TaskRevolutionParameters::connectSignals()
     connect(ui->sidesMode, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TaskRevolutionParameters::onSidesModeChanged);
     // clang-format on
-
-    connect(ui->buttonFace, &QAbstractButton::toggled, this, [this](bool checked) {
-        onButtonFace(checked, Side::First);
-    });
-    connect(ui->buttonFace2, &QAbstractButton::toggled, this, [this](bool checked) {
-        onButtonFace(checked, Side::Second);
-    });
-    connect(ui->lineFaceName, &QLineEdit::textEdited, this, [this](const QString& text) {
-        onFaceName(text, Side::First);
-    });
-    connect(ui->lineFaceName2, &QLineEdit::textEdited, this, [this](const QString& text) {
-        onFaceName(text, Side::Second);
-    });
 }
 
 void TaskRevolutionParameters::updateUI(Side side)
@@ -483,196 +473,12 @@ void TaskRevolutionParameters::updateUI(Side side)
     updateWholeUI(side);
 }
 
-void TaskRevolutionParameters::setSelectionMode(SelectionMode mode, Side side)
-{
-    QSignalBlocker face1Blocker(ui->buttonFace);
-    QSignalBlocker face2Blocker(ui->buttonFace2);
-    QSignalBlocker startBlocker(ui->buttonStartReference);
-
-    ui->buttonFace->setChecked(mode == SelectionMode::Face && side == Side::First);
-    ui->buttonFace2->setChecked(mode == SelectionMode::Face && side == Side::Second);
-    ui->buttonStartReference->setChecked(mode == SelectionMode::StartReference);
-
-    selectionMode = mode;
-    activeSelectionSide = side;
-
-    handleLineFaceNameNo(ui->lineFaceName);
-    handleLineFaceNameNo(ui->lineFaceName2);
-    ui->buttonStartReference->setText(tr("Pick Reference"));
-    ui->lineStartReference->setPlaceholderText(tr("No start reference selected"));
-
-    switch (mode) {
-        case SelectionMode::Face:
-            handleLineFaceNameClick(getSideController(side).lineFaceName);
-            onSelectReference(AllowSelection::FACE);
-            break;
-        case SelectionMode::StartReference:
-            ui->buttonStartReference->setText(tr("Cancel"));
-            ui->lineStartReference->setPlaceholderText(tr("Select face, plane..."));
-            onSelectReference(AllowSelection::FACE);
-            break;
-        case SelectionMode::Axis:
-            onSelectReference(AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE);
-            break;
-        case SelectionMode::None:
-            onSelectReference(AllowSelection::NONE);
-            break;
-    }
-}
-
-void TaskRevolutionParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
-{
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        switch (selectionMode) {
-            case SelectionMode::Face: {
-                auto& side = getSideController(activeSelectionSide);
-                QString refText = onAddSelection(msg, *side.UpToFace);
-                if (refText.length() > 0) {
-                    QSignalBlocker block(side.lineFaceName);
-                    side.lineFaceName->setText(refText);
-                    side.lineFaceName->setProperty("FeatureName", QByteArray(msg.pObjectName));
-                    side.lineFaceName->setProperty("FaceName", QByteArray(msg.pSubName));
-                    setSelectionMode(SelectionMode::None);
-                }
-                else {
-                    clearFaceName(side.lineFaceName);
-                }
-                break;
-            }
-            case SelectionMode::StartReference: {
-                auto revolved = getObject<PartDesign::Revolved>();
-                onAddSelection(msg, revolved->StartReference);
-                updateStartReferenceName();
-                setSelectionMode(SelectionMode::None);
-                setGizmoPositions();
-                break;
-            }
-            case SelectionMode::Axis: {
-                std::vector<std::string> axis;
-                App::DocumentObject* selectedObject {};
-                if (getReferencedSelection(getObject(), msg, selectedObject, axis) && selectedObject) {
-                    propReferenceAxis->setValue(selectedObject, axis);
-                    setSelectionMode(SelectionMode::None);
-                    recomputeFeature();
-                    updateUI(Side::First);
-                    setGizmoPositions();
-                }
-                break;
-            }
-            case SelectionMode::None:
-                break;
-        }
-    }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection && selectionMode == SelectionMode::Face) {
-        clearFaceName(getSideController(activeSelectionSide).lineFaceName);
-    }
-}
-
-void TaskRevolutionParameters::onButtonFace(bool pressed, Side side)
-{
-    auto& sideCtrl = getSideController(side);
-    if (pressed) {
-        setSelectionMode(SelectionMode::Face, side);
-    }
-    else if (selectionMode == SelectionMode::Face && activeSelectionSide == side) {
-        setSelectionMode(SelectionMode::None);
-        sideCtrl.buttonFace->clearFocus();
-    }
-}
-
-void TaskRevolutionParameters::onSelectStartReferenceToggle(bool checked)
-{
-    if (checked) {
-        setSelectionMode(SelectionMode::StartReference);
-    }
-    else if (selectionMode == SelectionMode::StartReference) {
-        setSelectionMode(SelectionMode::None);
-        ui->buttonStartReference->clearFocus();
-    }
-}
-
-void TaskRevolutionParameters::onFaceName(const QString& text, Side side)
-{
-    QLineEdit* lineFaceName = getSideController(side).lineFaceName;
-    if (text.isEmpty()) {
-        // if user cleared the text field then also clear the properties
-        lineFaceName->setProperty("FeatureName", QVariant());
-        lineFaceName->setProperty("FaceName", QVariant());
-    }
-    else {
-        // expect that the label of an object is used
-        QStringList parts = text.split(QChar::fromLatin1(':'));
-        QString label = parts[0];
-        QVariant name = objectNameByLabel(label, lineFaceName->property("FeatureName"));
-        if (name.isValid()) {
-            parts[0] = name.toString();
-            QString uptoface = parts.join(QStringLiteral(":"));
-            lineFaceName->setProperty("FeatureName", name);
-            lineFaceName->setProperty("FaceName", setUpToFace(uptoface));
-        }
-        else {
-            lineFaceName->setProperty("FeatureName", QVariant());
-            lineFaceName->setProperty("FaceName", QVariant());
-        }
-    }
-}
-
-void TaskRevolutionParameters::translateFaceName(QLineEdit* lineFaceName)
-{
-    handleLineFaceNameNo(lineFaceName);
-    QVariant featureName = lineFaceName->property("FeatureName");
-    if (featureName.isValid()) {
-        QStringList parts = lineFaceName->text().split(QChar::fromLatin1(':'));
-        QByteArray upToFace = lineFaceName->property("FaceName").toByteArray();
-        int faceId = -1;
-        bool ok = false;
-        if (upToFace.indexOf("Face") == 0) {
-            faceId = upToFace.remove(0, 4).toInt(&ok);
-        }
-
-        if (ok) {
-            lineFaceName->setText(QStringLiteral("%1:%2%3").arg(parts[0], tr("Face")).arg(faceId));
-        }
-        else {
-            lineFaceName->setText(parts[0]);
-        }
-    }
-}
-
-QString TaskRevolutionParameters::getFaceName(QLineEdit* lineFaceName) const
-{
-    QVariant featureName = lineFaceName->property("FeatureName");
-    if (featureName.isValid()) {
-        QString faceName = lineFaceName->property("FaceName").toString();
-        return getFaceReference(featureName.toString(), faceName);
-    }
-
-    return QStringLiteral("None");
-}
-
-void TaskRevolutionParameters::handleLineFaceNameClick(QLineEdit* lineEdit)
-{
-    lineEdit->setPlaceholderText(tr("Face selection active"));
-}
-
-void TaskRevolutionParameters::handleLineFaceNameNo(QLineEdit* lineEdit)
-{
-    lineEdit->setPlaceholderText(tr("No face selected"));
-}
-
-void TaskRevolutionParameters::clearFaceName(QLineEdit* lineFaceName)
-{
-    QSignalBlocker block(lineFaceName);
-    lineFaceName->clear();
-    lineFaceName->setProperty("FeatureName", QVariant());
-    lineFaceName->setProperty("FaceName", QVariant());
-}
-
+void TaskRevolutionParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
+{}
 void TaskRevolutionParameters::onAngleChanged(double len)
 {
     if (getObject()) {
         m_side1.Angle->setValue(len);
-        setSelectionMode(SelectionMode::None);
         recomputeFeature();
 
         setGizmoPositions();
@@ -683,7 +489,6 @@ void TaskRevolutionParameters::onAngle2Changed(double len)
 {
     if (getObject()) {
         m_side2.Angle->setValue(len);
-        setSelectionMode(SelectionMode::None);
         recomputeFeature();
 
         setGizmoPositions();
@@ -695,14 +500,11 @@ void TaskRevolutionParameters::onStartModeChanged(int type)
     auto revolved = getObject<PartDesign::Revolved>();
     const auto mode = static_cast<StartMode>(type);
     revolved->StartType.setValue(type);
-    if (mode == StartMode::Reference && !revolved->StartReference.getValue()) {
-        ui->buttonStartReference->setChecked(true);
-    }
-    else if (mode != StartMode::Reference) {
-        setSelectionMode(SelectionMode::None);
-    }
 
     updateStartUI();
+    if (mode == StartMode::Reference) {
+        armField(startField);
+    }
     recomputeFeature();
     setGizmoPositions();
 }
@@ -714,69 +516,33 @@ void TaskRevolutionParameters::onStartOffsetChanged(double angle)
     setGizmoPositions();
 }
 
-void TaskRevolutionParameters::onAxisChanged(int num)
+void TaskRevolutionParameters::writeAxis(
+    App::DocumentObject* obj,
+    const std::vector<std::string>& subs
+)
 {
-    if (isUpdateBlocked()) {
-        return;
-    }
     auto pcRevolution = getObject<PartDesign::ProfileBased>();
-
-    if (axesInList.empty()) {
+    if (!pcRevolution) {
         return;
     }
-
-    App::DocumentObject* oldRefAxis = propReferenceAxis->getValue();
-    std::vector<std::string> oldSubRefAxis = propReferenceAxis->getSubValues();
-    std::string oldRefName;
-    if (!oldSubRefAxis.empty()) {
-        oldRefName = oldSubRefAxis.front();
-    }
-
-    App::PropertyLinkSub& lnk = *(axesInList[num]);
-    if (!lnk.getValue()) {
-        // enter reference selection mode
-        if (auto sketch = dynamic_cast<Part::Part2DObject*>(pcRevolution->Profile.getValue())) {
-            Gui::cmdAppObjectShow(sketch);
-        }
-        setSelectionMode(SelectionMode::Axis);
-    }
-    else {
-        if (!pcRevolution->getDocument()->isIn(lnk.getValue())) {
-            Base::Console().error("Object was deleted\n");
-            return;
-        }
-        propReferenceAxis->Paste(lnk);
-        setSelectionMode(SelectionMode::None);
+    // The field's writer has assigned it (with its records); a choice of the box is set here
+    if (propReferenceAxis->getValue() != obj || propReferenceAxis->getSubValues() != subs) {
+        propReferenceAxis->setValue(obj, subs);
     }
 
     try {
-        App::DocumentObject* newRefAxis = propReferenceAxis->getValue();
-        const std::vector<std::string>& newSubRefAxis = propReferenceAxis->getSubValues();
-        std::string newRefName;
-        if (!newSubRefAxis.empty()) {
-            newRefName = newSubRefAxis.front();
+        // A picked axis turns the revolution as a chosen one does
+        bool reversed = propReversed->getValue();
+        if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
+            reversed = revolved->suggestReversed();
         }
-
-        if (oldRefAxis != newRefAxis || oldSubRefAxis.size() != newSubRefAxis.size()
-            || oldRefName != newRefName) {
-            bool reversed = propReversed->getValue();
-            if (pcRevolution->isDerivedFrom<PartDesign::Revolution>()) {
-                reversed = static_cast<PartDesign::Revolution*>(pcRevolution)->suggestReversed();
-            }
-            if (pcRevolution->isDerivedFrom<PartDesign::Groove>()) {
-                reversed = static_cast<PartDesign::Groove*>(pcRevolution)->suggestReversed();
-            }
-
-            if (reversed != propReversed->getValue()) {
-                propReversed->setValue(reversed);
-                ui->checkBoxReversed->blockSignals(true);
-                ui->checkBoxReversed->setChecked(reversed);
-                ui->checkBoxReversed->blockSignals(false);
-            }
+        if (reversed != propReversed->getValue()) {
+            propReversed->setValue(reversed);
+            QSignalBlocker block(ui->checkBoxReversed);
+            ui->checkBoxReversed->setChecked(reversed);
         }
 
         recomputeFeature();
-
         setGizmoPositions();
     }
     catch (const Base::Exception& e) {
@@ -810,15 +576,16 @@ void TaskRevolutionParameters::onModeChanged(int index, Side side)
             break;
         case Mode::ToFace:
             sideCtrl.Type->setValue("UpToFace");
-            if (sideCtrl.lineFaceName->text().isEmpty()) {
-                sideCtrl.buttonFace->setChecked(true);
-            }
             break;
         case Mode::TwoAngles:
             break;
     }
 
     updateUI(side);
+    // Up to a face with none yet: its field takes the next pick
+    if (static_cast<Mode>(index) == Mode::ToFace) {
+        armField(sideCtrl.faceField);
+    }
     recomputeFeature();
 
     setGizmoPositions();
@@ -855,30 +622,6 @@ void TaskRevolutionParameters::onReversed(bool on)
     }
 }
 
-void TaskRevolutionParameters::getReferenceAxis(
-    App::DocumentObject*& obj,
-    std::vector<std::string>& sub
-) const
-{
-    if (axesInList.empty()) {
-        throw Base::RuntimeError("Not initialized!");
-    }
-
-    int num = ui->axis->currentIndex();
-    const App::PropertyLinkSub& lnk = *(axesInList[num]);
-    if (!lnk.getValue()) {
-        throw Base::RuntimeError("Still in reference selection mode; reference wasn't selected yet");
-    }
-
-    auto revolution = getObject<PartDesign::ProfileBased>();
-    if (!revolution->getDocument()->isIn(lnk.getValue())) {
-        throw Base::RuntimeError("Object was deleted");
-    }
-
-    obj = lnk.getValue();
-    sub = lnk.getSubValues();
-}
-
 bool TaskRevolutionParameters::getReversed() const
 {
     return ui->checkBoxReversed->isChecked();
@@ -910,8 +653,6 @@ TaskRevolutionParameters::~TaskRevolutionParameters()
     catch (const Base::Exception& ex) {
         ex.reportException();
     }
-
-    axesInList.clear();
 }
 
 void TaskRevolutionParameters::changeEvent(QEvent* event)
@@ -920,11 +661,8 @@ void TaskRevolutionParameters::changeEvent(QEvent* event)
     if (event->type() == QEvent::LanguageChange) {
         QSignalBlocker startMode(ui->startMode);
         QSignalBlocker startOffset(ui->startOffsetEdit);
-        QSignalBlocker startReference(ui->lineStartReference);
         QSignalBlocker angle(ui->revolveAngle);
         QSignalBlocker angle2(ui->revolveAngle2);
-        QSignalBlocker face(ui->lineFaceName);
-        QSignalBlocker face2(ui->lineFaceName2);
         QSignalBlocker mode(ui->changeMode);
         QSignalBlocker mode2(ui->changeMode2);
         QSignalBlocker sidesMode(ui->sidesMode);
@@ -935,9 +673,7 @@ void TaskRevolutionParameters::changeEvent(QEvent* event)
         translateModeList(ui->changeMode, ui->changeMode->currentIndex());
         translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
         translateSidesList(ui->sidesMode->currentIndex());
-        updateStartReferenceName();
-        translateFaceName(ui->lineFaceName);
-        translateFaceName(ui->lineFaceName2);
+        fillAxisCombo(true);
     }
 }
 
@@ -947,67 +683,25 @@ void TaskRevolutionParameters::apply()
     ui->startOffsetEdit->apply();
     ui->revolveAngle->apply();
     ui->revolveAngle2->apply();
-    std::vector<std::string> sub;
-    App::DocumentObject* obj {};
-    getReferenceAxis(obj, sub);
-    std::string axis = buildLinkSingleSubPythonStr(obj, sub);
     auto tobj = getObject();
-
-    // A link property is written only when the panel changed it: written again with plain names
-    // it would drop a guess record without a warning (ops#127).
-    auto unchanged = [](const App::PropertyLinkSub& prop,
-                        const App::DocumentObject* linked,
-                        const std::vector<std::string>& subs) {
-        return prop.getValue() == linked
-            && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
-    };
-    // The face a line edit names.
-    auto faceUnchanged = [&](const App::PropertyLinkSub& prop, QLineEdit* lineEdit) {
-        App::DocumentObject* linked = nullptr;
-        std::vector<std::string> subs;
-        QVariant featureName = lineEdit->property("FeatureName");
-        if (featureName.isValid()) {
-            linked = tobj->getDocument()->getObject(featureName.toString().toUtf8().constData());
-            QString faceName = lineEdit->property("FaceName").toString();
-            if (!faceName.isEmpty()) {
-                subs.push_back(faceName.toStdString());
-            }
-        }
-        return unchanged(prop, linked, subs);
-    };
     auto revolved = getObject<PartDesign::Revolved>();
 
-    if (!unchanged(*propReferenceAxis, obj, sub)) {
-        FCMD_OBJ_CMD(tobj, "ReferenceAxis = " << axis);
-    }
+    // The axis, the start reference and the faces were written as picked or chosen (ops#150:
+    // the fields write references, not commands; written again with plain names a link would
+    // drop its guess record, ops#127)
     FCMD_OBJ_CMD(tobj, "SideType = " << getSidesMode());
     FCMD_OBJ_CMD(tobj, "Reversed = " << (getReversed() ? 1 : 0));
     FCMD_OBJ_CMD(tobj, "Type = " << getMode());
     FCMD_OBJ_CMD(tobj, "Type2 = " << getMode2());
     FCMD_OBJ_CMD(tobj, "StartOffset = " << ui->startOffsetEdit->value().getValue());
     FCMD_OBJ_CMD(tobj, "StartType = " << ui->startMode->currentIndex());
-    if (!faceUnchanged(revolved->StartReference, ui->lineStartReference)) {
-        FCMD_OBJ_CMD(
-            tobj,
-            "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data()
-        );
-    }
 
-    QString facename = QStringLiteral("None");
-    QString facename2 = QStringLiteral("None");
-    if (static_cast<Mode>(getMode()) == Mode::ToFace) {
-        facename = getFaceName(ui->lineFaceName);
+    // A side that doesn't go up to a face keeps none
+    if (static_cast<Mode>(getMode()) != Mode::ToFace && revolved->UpToFace.getValue()) {
+        FCMD_OBJ_CMD(tobj, "UpToFace = None");
     }
-    if (static_cast<Mode>(getMode2()) == Mode::ToFace) {
-        facename2 = getFaceName(ui->lineFaceName2);
-    }
-    if (static_cast<Mode>(getMode()) != Mode::ToFace
-        || !faceUnchanged(*m_side1.UpToFace, ui->lineFaceName)) {
-        FCMD_OBJ_CMD(tobj, "UpToFace = " << facename.toLatin1().data());
-    }
-    if (static_cast<Mode>(getMode2()) != Mode::ToFace
-        || !faceUnchanged(*m_side2.UpToFace, ui->lineFaceName2)) {
-        FCMD_OBJ_CMD(tobj, "UpToFace2 = " << facename2.toLatin1().data());
+    if (static_cast<Mode>(getMode2()) != Mode::ToFace && revolved->UpToFace2.getValue()) {
+        FCMD_OBJ_CMD(tobj, "UpToFace2 = None");
     }
 }
 
