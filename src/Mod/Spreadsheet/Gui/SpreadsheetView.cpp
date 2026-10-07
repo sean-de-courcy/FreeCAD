@@ -33,6 +33,7 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/Range.h>
+#include <App/VariableLookup.h>  // FreeCAD-CH (ops#152)
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
@@ -313,6 +314,8 @@ void SheetView::updateContentLine()
     if (i.isValid()) {
         std::string str;
         if (const auto* cell = sheet->getCell(CellAddress(i.row(), i.column()))) {
+            // FreeCAD-CH (ops#152): variables as #Name, as in the cell editor (SheetModel)
+            App::VariableDisplayScope scope;
             (void)cell->getStringContent(str);
         }
         ui->cellContent->setText(QString::fromUtf8(str.c_str()));

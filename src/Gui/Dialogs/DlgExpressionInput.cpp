@@ -49,6 +49,7 @@
 #include "Tools.h"
 #include "ExpressionBinding.h"
 #include "BitmapFactory.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 #include "ViewProviderDocumentObject.h"
 
 using namespace App;
@@ -86,7 +87,8 @@ DlgExpressionInput::DlgExpressionInput(
     connect(discardBtn, &QPushButton::clicked, this, &DlgExpressionInput::setDiscarded);
 
     if (expression) {
-        ui->expression->setPlainText(QString::fromStdString(expression->toString()));
+        // FreeCAD-CH (ops#152): variables as #Name; the text is parsed back with the same owner
+        ui->expression->setPlainText(expressionDisplayText(expression.get()));
     }
     else {
         QVariant text = parent->property("text");

@@ -78,6 +78,7 @@
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 // #include <Gui/Inventor/SoFCSwitch.h>
 #include <Gui/Utilities.h>
+#include <Gui/VariableDisplay.h>  // FreeCAD-CH (ops#152)
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
 #include <Mod/Part/App/Geometry.h>
@@ -3122,9 +3123,12 @@ bool ViewProviderSketch::detectAndShowPreselection(
                 QString tooltipText;
                 for (int id : result.ConstrIndices) {
                     if (constraintHasExpression(id)) {
-                        std::string expr = getSketchObject()->getConstraintExpression(id);
-                        if (!expr.empty()) {
-                            tooltipText = QString::fromUtf8("\U0001D453\U0001D465 = ") + QString::fromStdString(expr);
+                        // FreeCAD-CH (ops#152): variables as #Name, with where each lives
+                        auto sketch = getSketchObject();
+                        auto expr = sketch->getExpression(sketch->Constraints.createPath(id)).expression;
+                        if (expr) {
+                            tooltipText = QString::fromUtf8("\U0001D453\U0001D465 = ")
+                                + Gui::expressionToolTipText(expr.get());
                             break;
                         }
                     }

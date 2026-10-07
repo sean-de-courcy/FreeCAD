@@ -38,12 +38,23 @@
 
 #include "SheetModel.h"
 #include "App/Range.h"
+#include <App/VariableLookup.h>  // FreeCAD-CH (ops#152)
 
 
 using namespace SpreadsheetGui;
 using namespace Spreadsheet;
 using namespace App;
 namespace sp = std::placeholders;
+
+// FreeCAD-CH (ops#152, notes/variables-design.md 8.3): a cell's content as the editor, the content
+// line and the error/pending texts show it: Cell::getStringContent with references to variables
+// written as #Name in its `=` expressions (they use toString(), which a scope shortens; the other
+// branches have no variables). Commits parse the text back, so the stored text is the full path.
+static bool displayContent(const Cell* cell, std::string& str)
+{
+    VariableDisplayScope scope;
+    return cell->getStringContent(str);
+}
 
 SheetModel::SheetModel(Sheet* _sheet, QObject* parent)
     : QAbstractTableModel(parent)
@@ -247,7 +258,7 @@ QVariant SheetModel::data(const QModelIndex& index, int role) const
                 );
 #else
                 std::string str;
-                if (cell->getStringContent(str)) {
+                if (displayContent(cell, str)) {  // FreeCAD-CH (ops#152)
                     return QVariant::fromValue(QString::fromUtf8(str.c_str()));
                 }
                 return QVariant::fromValue(QStringLiteral("#ERR"));
@@ -266,7 +277,7 @@ QVariant SheetModel::data(const QModelIndex& index, int role) const
     if (role == Qt::EditRole || role == Qt::StatusTipRole) {
         std::string str;
 
-        if (cell->getStringContent(str)) {
+        if (displayContent(cell, str)) {  // FreeCAD-CH (ops#152)
             return QVariant(QString::fromUtf8(str.c_str()));
         }
         return {};
@@ -355,7 +366,7 @@ QVariant SheetModel::data(const QModelIndex& index, int role) const
             case Qt::DisplayRole:
                 if (cell->getExpression()) {
                     std::string str;
-                    if (cell->getStringContent(str)) {
+                    if (displayContent(cell, str)) {  // FreeCAD-CH (ops#152)
                         if (!str.empty() && str[0] == '=') {
                             // If this is a real computed value, indicate that a recompute is
                             // needed before we can display it
@@ -649,7 +660,7 @@ bool SheetModel::setData(const QModelIndex& index, const QVariant& value, int ro
         auto cell = sheet->getCell(address);
         if (cell) {
             std::string oldContent;
-            cell->getStringContent(oldContent);
+            displayContent(cell, oldContent);  // FreeCAD-CH (ops#152): what the editor showed
             if (str == QString::fromStdString(oldContent)) {
                 return true;
             }

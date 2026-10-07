@@ -38,6 +38,7 @@
 #include "BitmapFactory.h"
 #include "Command.h"
 #include "QuantitySpinBox_p.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 
 
 using namespace Gui;
@@ -131,7 +132,7 @@ void InputField::bind(const App::ObjectIdentifier& _path)
         std::shared_ptr<const Expression> expr(docObj->getExpression(getPath()).expression);
 
         if (expr) {
-            newInput(QString::fromStdString(expr->toString()));
+            newInput(expressionDisplayText(expr.get()));  // FreeCAD-CH (ops#152)
         }
     }
 
@@ -179,7 +180,7 @@ void InputField::updateText(const Base::Quantity& quant)
         );
 
         if (e) {
-            setText(QString::fromStdString(e->toString()));
+            setText(expressionDisplayText(e.get()));  // FreeCAD-CH (ops#152)
             return;
         }
     }

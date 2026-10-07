@@ -24,10 +24,12 @@
 #include <QEvent>
 #include <QGridLayout>
 #include <QTimer>
+#include <cstring>  // FreeCAD-CH (ops#152)
 
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/VarSet.h>  // FreeCAD-CH (ops#152)
 #include <Base/Console.h>
 #include <Base/Parameter.h>
 #include <Base/Tools.h>
@@ -223,8 +225,37 @@ void PropertyView::slotRollback()
     clearPropertyItemSelection();
 }
 
+// FreeCAD-CH (ops#152, notes/variables-design.md 8.4): whether a change to `prop` can change which
+// variable names are unique in its document, and so how the editor's `value ( #Name )` texts read
+// for any object: a VarSet's properties appearing, going or renamed (`dynamic`), or a sheet's cells,
+// where its aliases live.
+static bool mayChangeVariableNames(const App::Property& prop, bool dynamic)
+{
+    auto obj = freecad_cast<App::DocumentObject*>(prop.getContainer());
+    if (!obj) {
+        return false;
+    }
+    if (dynamic) {
+        return obj->isDerivedFrom<App::VarSet>();
+    }
+    const Base::Type sheet = Base::Type::fromName("Spreadsheet::Sheet");
+    return !sheet.isBad() && obj->isDerivedFrom(sheet) && prop.getName()
+        && std::strcmp(prop.getName(), "cells") == 0;
+}
+
+// FreeCAD-CH (ops#152): repaint, so texts computed at paint time follow (no rebuild).
+static void repaintForVariables(Gui::PropertyEditor::PropertyEditor* editor,
+                                const App::Property& prop,
+                                bool dynamic)
+{
+    if (mayChangeVariableNames(prop, dynamic)) {
+        editor->viewport()->update();
+    }
+}
+
 void PropertyView::slotChangePropertyData(const App::Property& prop)
 {
+    repaintForVariables(propertyEditorData, prop, false);  // FreeCAD-CH (ops#152)
     if (propertyEditorData->propOwners.contains(prop.getContainer())) {
         propertyEditorData->updateProperty(prop);
         timer->start(ViewParams::instance()->getPropertyViewTimer());
@@ -247,6 +278,7 @@ bool PropertyView::isPropertyHidden(const App::Property* prop)
 
 void PropertyView::slotAppendDynamicProperty(const App::Property& prop)
 {
+    repaintForVariables(propertyEditorData, prop, true);  // FreeCAD-CH (ops#152)
     if (isPropertyHidden(&prop)) {
         return;
     }
@@ -264,6 +296,7 @@ void PropertyView::slotAppendDynamicProperty(const App::Property& prop)
 
 void PropertyView::slotRemoveDynamicProperty(const App::Property& prop)
 {
+    repaintForVariables(propertyEditorData, prop, true);  // FreeCAD-CH (ops#152)
     App::PropertyContainer* parent = prop.getContainer();
     if (propertyEditorData->propOwners.contains(parent)) {
         propertyEditorData->removeProperty(prop);
@@ -279,6 +312,7 @@ void PropertyView::slotRemoveDynamicProperty(const App::Property& prop)
 
 void PropertyView::slotRenameDynamicProperty(const App::Property& prop, const char* /*oldName*/)
 {
+    repaintForVariables(propertyEditorData, prop, true);  // FreeCAD-CH (ops#152)
     App::PropertyContainer* parent = prop.getContainer();
     if (propertyEditorData->propOwners.contains(parent)) {
         propertyEditorData->renameProperty(prop);

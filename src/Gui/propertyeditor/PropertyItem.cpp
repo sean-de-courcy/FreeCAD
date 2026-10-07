@@ -63,6 +63,7 @@
 #include <Gui/VectorListEditor.h>
 #include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/Document.h>
+#include <App/VariableLookup.h>  // FreeCAD-CH (ops#152)
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-prefer-member-initializer)
 using namespace Gui::PropertyEditor;
@@ -72,6 +73,23 @@ namespace
 {
 constexpr const int lowPrec = 2;
 constexpr const int highPrec = 16;
+
+// FreeCAD-CH (ops#152): the `value ( expr )` texts show variables as #Name
+// (notes/variables-design.md section 8). getExpressionString() keeps the stored text, which apply()
+// writes back.
+std::string displayExpressionString(const std::shared_ptr<App::Expression>& expr)
+{
+    try {
+        return expr ? App::toDisplayString(expr.get()) : std::string();
+    }
+    catch (const Base::Exception& e) {
+        Base::Console().error("failed to get expression string: %s\n", e.what());
+    }
+    catch (const std::exception& e) {
+        Base::Console().error("failed to get expression string: %s\n", e.what());
+    }
+    return {};
+}
 }  // namespace
 
 
@@ -1014,7 +1032,7 @@ QString PropertyIntegerItem::toString(const QVariant& v) const
     QString string(PropertyItem::toString(v));
 
     if (hasExpression()) {
-        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(getExpressionString()));
+        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return string;
@@ -1106,7 +1124,7 @@ QString PropertyIntegerConstraintItem::toString(const QVariant& v) const
     }
 
     if (hasExpression()) {
-        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(getExpressionString()));
+        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return string;
@@ -1126,7 +1144,7 @@ QString PropertyFloatItem::toString(const QVariant& prop) const
     QString data = QLocale().toString(value, 'g', highPrec);
 
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(getExpressionString()));
+        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return data;
@@ -1198,7 +1216,7 @@ QString PropertyUnitItem::toString(const QVariant& prop) const
     const Base::Quantity& unit = prop.value<Base::Quantity>();
     std::string str = unit.getUserString();
     if (hasExpression()) {
-        str += fmt::format("  ( {} )", getExpressionString());
+        str += fmt::format("  ( {} )", displayExpressionString(getExpression()));
     }
 
     return QString::fromStdString(str);
@@ -1521,7 +1539,7 @@ QString PropertyVectorItem::toString(const QVariant& prop) const
                            loc.toString(value.z, 'f', lowPrec)
                        );
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(getExpressionString()));
+        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
     return data;
 }
@@ -1743,7 +1761,7 @@ QString PropertyVectorListItem::toString(const QVariant& prop) const
                        );
 
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(getExpressionString()));
+        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
     return data;
 }
@@ -1828,7 +1846,7 @@ QString PropertyVectorDistanceItem::toString(const QVariant& prop) const
         Base::Quantity(value.z, Base::Unit::Length).getUserString()
     );
     if (hasExpression()) {
-        str += fmt::format("  ( {} )", getExpressionString());
+        str += fmt::format("  ( {} )", displayExpressionString(getExpression()));
     }
     return QString::fromStdString(str);
 }
