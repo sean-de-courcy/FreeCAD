@@ -66,6 +66,7 @@ class ProfileBased;
 namespace PartDesignGui
 {
 
+class ReferenceField;
 
 class TaskExtrudeParameters: public TaskSketchBasedParameters
 {
@@ -116,14 +117,10 @@ public:
         Reference = 2,
     };
 
+    /// The panel's own pick mode besides its reference fields (ops#150).
     enum SelectionMode
     {
         None,
-        SelectFace,
-        SelectStartReference,
-        SelectShape,
-        SelectShapeFaces,
-        SelectReferenceAxis,
         /// The profile picked again (ops#125, ops#127): the sketch, its regions or edges, or
         /// faces of the solid before.
         SelectProfile
@@ -153,6 +150,9 @@ public:
     /// The widgets that show link properties read them again (ops#127).
     void onReferencesRepaired() override;
     void onReferenceSelectionTaken() override;
+    /// The start reference, each side's up-to-face, up-to-shape and its faces, and the hidden
+    /// direction field (ops#150).
+    std::vector<ReferenceField*> referenceFields() const override;
 
 protected:
     // This struct holds all pointers for one side's UI and properties
@@ -166,16 +166,13 @@ protected:
         Gui::PrefQuantitySpinBox* lengthEdit = nullptr;
         Gui::PrefQuantitySpinBox* offsetEdit = nullptr;
         Gui::PrefQuantitySpinBox* taperEdit = nullptr;
-        QLineEdit* lineFaceName = nullptr;
-        QToolButton* buttonFace = nullptr;
-        QLineEdit* lineShapeName = nullptr;
-        QToolButton* buttonShape = nullptr;
-        QListWidget* listWidgetReferences = nullptr;
-        QToolButton* buttonShapeFace = nullptr;
+        /// The up-to-face, the up-to-shape's object and its faces (ops#150).
+        ReferenceField* faceField = nullptr;
+        ReferenceField* shapeField = nullptr;
+        ReferenceField* shapeFacesField = nullptr;
         QCheckBox* checkBoxAllFaces = nullptr;
         QWidget* upToShapeList = nullptr;
         QWidget* upToShapeFaces = nullptr;
-        QAction* unselectShapeFaceAction = nullptr;
 
         // Feature Properties
         App::PropertyEnumeration* Type = nullptr;
@@ -214,14 +211,7 @@ private:
     void onStartOffsetChanged(double len);
     void onOffsetChanged(double len, Side side);
     void onTaperChanged(double angle, Side side);
-    void onSelectFaceToggle(bool checked, Side side);
-    void onSelectStartReferenceToggle(bool checked);
-
-    void onFaceName(const QString& text, Side side);
     void onAllFacesToggled(bool checked, Side side);
-    void onSelectShapeToggle(bool checked, Side side);
-    void onSelectShapeFacesToggle(bool checked, Side side);
-    void onUnselectShapeFacesTrigger(Side side);
 
 protected:
     void updateWholeUI(Type type, Side side);
@@ -250,42 +240,39 @@ protected:
     int getMode() const;
     int getMode2() const;
     int getSidesMode() const;
-    QString getFaceName(QLineEdit*) const;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void translateSidesList(int index);
     virtual void translateModeList(QComboBox* box, int index);
     virtual void updateUI(Side side);
     void updateDirectionEdits();
     void setDirectionMode(int index);
-    void handleLineFaceNameClick(QLineEdit*);
-    void handleLineFaceNameNo(QLineEdit*);
 
 private:
     void setupSideDialog(SideController& side);
 
-    void selectedReferenceAxis(const Gui::SelectionChanges& msg);
-    void selectedFace(const Gui::SelectionChanges& msg, SideController& side);
-    void selectedStartReference(const Gui::SelectionChanges& msg);
-    void selectedShape(const Gui::SelectionChanges& msg, SideController& side);
-    void selectedShapeFace(const Gui::SelectionChanges& msg, SideController& side);
-
     void tryRecomputeFeature();
-    void translateFaceName(QLineEdit*);
     void connectSlots();
     bool hasProfileFace(PartDesign::ProfileBased*) const;
-    void clearFaceName(QLineEdit*);
-
-    void updateShapeName(QLineEdit*, App::PropertyLinkSubList&);
-    void updateShapeFaces(QListWidget* list, App::PropertyLinkSubList& prop);
-
-    std::vector<std::string> getShapeFaces(App::PropertyLinkSubList& prop);
-
-    void changeFaceName(QLineEdit* lineEdit, const QString& text);
 
     void createSideControllers();
     void updateStartUI();
-    void updateStartReferenceName();
-    void updateUpToFaceName(SideController& side);
+
+    /// The reference fields, in place of the `.ui` placeholders (ops#150).
+    void createFields();
+    void createSideFields(SideController& side, Side which);
+    /// A single-entry field of a face or plane (an up-to-face, the start reference).
+    ReferenceField* createFaceField(QWidget* placeholder,
+                                    const char* property,
+                                    const QString& label);
+    /// Arms \a field and gives it the focus, once the dialog is up (a mode just chosen).
+    void armField(ReferenceField* field);
+    /// The solid before the feature: shown while a field is armed.
+    App::DocumentObject* baseSolid() const;
+    ReferenceField* startField = nullptr;
+    /// The direction box's "Select reference…": a hidden field for one pick.
+    ReferenceField* axisField = nullptr;
+    /// setupDialog() is done: a mode chosen now arms its field.
+    bool dialogReady = false;
 
     /// The Profile row (ops#125): what Profile holds, and a button to pick it again.
     void setupProfileRow();
@@ -317,8 +304,6 @@ private:
 
 protected:
     QWidget* proxy;
-    QAction* unselectShapeFaceAction;
-    QAction* unselectShapeFaceAction2;
 
     std::unique_ptr<Ui_TaskPadPocketParameters> ui;
     std::vector<std::unique_ptr<App::PropertyLinkSub>> axesInList;

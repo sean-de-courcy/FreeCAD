@@ -23,15 +23,19 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <memory>
 #include <sstream>
 
 #include <QAction>
 #include <QAbstractButton>
 #include <QHBoxLayout>
 #include <QPushButton>
+#include <QPointer>
 #include <QSignalBlocker>
+#include <QTimer>
 
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <Base/Tools.h>
 #include <Base/UnitsApi.h>
@@ -49,6 +53,7 @@
 #include "ui_TaskPadPocketParameters.h"
 #include "TaskExtrudeParameters.h"
 #include "TaskTransformedParameters.h"
+#include "ReferenceField.h"
 #include "ReferenceSelection.h"
 
 
@@ -125,9 +130,6 @@ TaskExtrudeParameters::TaskExtrudeParameters(
     // we need a separate container widget to add all controls to
     proxy = new QWidget(this);
     ui->setupUi(proxy);
-    handleLineFaceNameNo(ui->lineFaceName);
-    handleLineFaceNameNo(ui->lineFaceName2);
-    ui->lineStartReference->setPlaceholderText(tr("No start reference selected"));
     ui->startOffsetEdit->setToolTip(tr("Offset from the profile or selected start reference"));
 
     Gui::ButtonGroup* group = new Gui::ButtonGroup(this);
@@ -139,17 +141,8 @@ TaskExtrudeParameters::TaskExtrudeParameters(
 
 void TaskExtrudeParameters::setupDialog()
 {
-    auto createRemoveAction = [this]() -> QAction* {
-        auto action = new QAction(tr("Remove"), this);
-        action->setShortcut(Gui::QtTools::deleteKeySequence());
-        action->setShortcutVisibleInContextMenu(true);
-        return action;
-    };
-
-    unselectShapeFaceAction = createRemoveAction();
-    unselectShapeFaceAction2 = createRemoveAction();
-
     createSideControllers();
+    createFields();
 
     // --- Global, Non-Side-Specific Setup ---
     auto extrude = getObject<PartDesign::FeatureExtrude>();
@@ -175,7 +168,6 @@ void TaskExtrudeParameters::setupDialog()
     ui->startOffsetEdit->setValue(extrude->StartOffset.getQuantityValue());
     ui->startOffsetEdit->bind(extrude->StartOffset);
 
-    updateStartReferenceName();
     setupProfileRow();
 
     // --- Per-Side Setup using the Helper ---
@@ -196,6 +188,219 @@ void TaskExtrudeParameters::setupDialog()
     // trigger recompute to ensure external geometry references update correctly.
     // see freecad issue #25794
     tryRecomputeFeature();
+    // From here a mode chosen arms its field; on open the dialog arms the first empty one
+    dialogReady = true;
+}
+
+App::DocumentObject* TaskExtrudeParameters::baseSolid() const
+{
+    auto profileBased = getObject<PartDesign::ProfileBased>();
+    return profileBased ? profileBased->getBaseObject(/* silent =*/true) : nullptr;
+}
+
+ReferenceField* TaskExtrudeParameters::createFaceField(QWidget* placeholder,
+                                                       const char* property,
+                                                       const QString& label)
+{
+    ReferenceField::Options options;
+    options.kind = ReferenceField::Kind::SingleElement;
+    options.flags = AllowSelection::FACE;
+    // The solid before shows while the field is armed, as the face pick showed it
+    options.target = [this]() -> App::DocumentObject* {
+        return baseSolid();
+    };
+    options.required = false;
+    options.noDependents = true;
+    options.label = label;
+    options.kinds = tr("A face or a plane");
+    // A plane of a coordinate system is linked through the system, a datum or origin plane
+    // whole (as the face pick did)
+    options.resolve = [](const Gui::SelectionChanges& msg,
+                         App::DocumentObject*& obj,
+                         std::vector<std::string>& subs) {
+        subs.clear();
+        if (!obj) {
+            return false;
+        }
+        if (PartDesign::Feature::isDatum(obj)) {
+            auto datum = freecad_cast<App::DatumElement*>(obj);
+            if (datum && datum->getLCS()) {
+                subs.emplace_back(datum->getNameInDocument());
+                obj = datum->getLCS();
+            }
+            return true;
+        }
+        if (!Base::Tools::isNullOrEmpty(msg.pSubName)) {
+            subs.emplace_back(msg.pSubName);
+        }
+        return true;
+    };
+    auto self = std::make_shared<QPointer<ReferenceField>>();
+    auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        if (*self) {
+            (*self)->assign(obj, subs);
+        }
+        tryRecomputeFeature();
+        setGizmoPositions();
+    };
+    auto field = new ReferenceField(getObject(), property, options, write, proxy);
+    *self = field;
+    field->takePlaceOf(placeholder);
+    return field;
+}
+
+void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
+{
+    const bool first = which == Side::First;
+    QWidget* facePlaceholder = first ? ui->faceFieldPlaceholder : ui->faceFieldPlaceholder2;
+    QWidget* shapePlaceholder = first ? ui->shapeFieldPlaceholder : ui->shapeFieldPlaceholder2;
+    QWidget* facesPlaceholder =
+        first ? ui->shapeFacesFieldPlaceholder : ui->shapeFacesFieldPlaceholder2;
+
+    side.faceField = createFaceField(facePlaceholder, first ? "UpToFace" : "UpToFace2", tr("Face"));
+
+    // The up-to-shape: a whole shape; a pick of another one takes all its faces
+    QCheckBox* allFaces = side.checkBoxAllFaces;
+    const char* shapeProperty = first ? "UpToShape" : "UpToShape2";
+    ReferenceField::Options shape;
+    shape.kind = ReferenceField::Kind::SingleElement;
+    shape.wholeObject = true;
+    shape.target = [this]() -> App::DocumentObject* {
+        return baseSolid();
+    };
+    shape.required = false;
+    shape.noDependents = true;
+    shape.label = tr("Shape");
+    shape.kinds = tr("A shape");
+    auto shapeSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeShape = [this, shapeSelf, allFaces](App::DocumentObject* obj,
+                                                  const std::vector<std::string>& subs) {
+        if (*shapeSelf) {
+            (*shapeSelf)->assign(obj, subs);
+        }
+        QSignalBlocker block(allFaces);
+        allFaces->setChecked(true);
+        tryRecomputeFeature();
+    };
+    side.shapeField = new ReferenceField(getObject(), shapeProperty, shape, writeShape, proxy);
+    *shapeSelf = side.shapeField;
+    side.shapeField->takePlaceOf(shapePlaceholder);
+
+    // Its faces: a list on the shape, or on the solid before while there is none (the feature
+    // goes up to that then)
+    ReferenceField::Options faces;
+    faces.flags = AllowSelection::FACE;
+    // Looked up each time: the feature can go while the panel is open (a script)
+    faces.target = [this, first]() -> App::DocumentObject* {
+        auto extrude = getObject<PartDesign::FeatureExtrude>();
+        if (!extrude) {
+            return nullptr;
+        }
+        App::DocumentObject* obj = (first ? extrude->UpToShape : extrude->UpToShape2).getValue();
+        return obj ? obj : baseSolid();
+    };
+    faces.required = false;
+    faces.kinds = tr("Faces");
+    auto facesSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeFaces = [this, facesSelf](App::DocumentObject* obj,
+                                        const std::vector<std::string>& subs) {
+        if (*facesSelf) {
+            (*facesSelf)->assign(obj, subs);
+        }
+        tryRecomputeFeature();
+    };
+    side.shapeFacesField = new ReferenceField(getObject(), shapeProperty, faces, writeFaces, proxy);
+    *facesSelf = side.shapeFacesField;
+    side.shapeFacesField->setObjectName(QStringLiteral("field") + QString::fromLatin1(shapeProperty).replace(QStringLiteral("UpToShape"), QStringLiteral("UpToShapeFaces")));
+    side.shapeFacesField->takePlaceOf(facesPlaceholder);
+}
+
+void TaskExtrudeParameters::createFields()
+{
+    startField = createFaceField(ui->startReferenceFieldPlaceholder,
+                                 "StartReference",
+                                 tr("Start reference"));
+    createSideFields(m_side1, Side::First);
+    createSideFields(m_side2, Side::Second);
+
+    // The direction box's "Select reference…": a pick of an edge or a datum line, through the
+    // cross-body question as before; hidden, so its states stay in the References panel
+    ReferenceField::Options axis;
+    axis.kind = ReferenceField::Kind::SingleElement;
+    axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
+    axis.target = [this]() -> App::DocumentObject* {
+        return baseSolid();
+    };
+    axis.required = false;
+    axis.once = true;
+    axis.covers = false;
+    axis.kinds = tr("A straight or circular edge, or a line");
+    axis.resolve = [this](const Gui::SelectionChanges& msg,
+                          App::DocumentObject*& obj,
+                          std::vector<std::string>& subs) {
+        obj = nullptr;
+        return getReferencedSelection(getObject(), msg, obj, subs) && obj;
+    };
+    auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeAxis = [this, axisSelf](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        if (*axisSelf) {
+            (*axisSelf)->assign(obj, subs);
+        }
+        tryRecomputeFeature();
+        fillDirectionCombo();
+        setGizmoPositions();
+    };
+    axisField = new ReferenceField(getObject(), "ReferenceAxis", axis, writeAxis, proxy);
+    *axisSelf = axisField;
+    axisField->hide();
+    ui->verticalLayout->addWidget(axisField);
+    // Disarmed without a pick: the box shows the direction there is
+    connect(axisField, &ReferenceField::armedChanged, this, [this](bool on) {
+        if (!on && ui->directionCB->currentIndex() == DirectionModes::Select) {
+            fillDirectionCombo();
+        }
+    });
+
+    // A field arming ends the profile's pick: its gate replaces the profile's
+    for (ReferenceField* field : referenceFields()) {
+        connect(field, &ReferenceField::arming, this, [this]() {
+            if (selectionMode != None) {
+                setSelectionMode(None);
+            }
+        });
+    }
+}
+
+std::vector<ReferenceField*> TaskExtrudeParameters::referenceFields() const
+{
+    std::vector<ReferenceField*> fields;
+    for (ReferenceField* field : {startField,
+                                  m_side1.faceField,
+                                  m_side1.shapeField,
+                                  m_side1.shapeFacesField,
+                                  m_side2.faceField,
+                                  m_side2.shapeField,
+                                  m_side2.shapeFacesField,
+                                  axisField}) {
+        if (field) {
+            fields.push_back(field);
+        }
+    }
+    return fields;
+}
+
+void TaskExtrudeParameters::armField(ReferenceField* field)
+{
+    if (!dialogReady || !field) {
+        return;
+    }
+    // After the mode's widgets are shown
+    QTimer::singleShot(0, field, [field]() {
+        if (field->isVisible()) {
+            field->setArmed(true);
+            field->list()->setFocus(Qt::OtherFocusReason);
+        }
+    });
 }
 
 void TaskExtrudeParameters::setupSideDialog(SideController& side)
@@ -225,50 +430,12 @@ void TaskExtrudeParameters::setupSideDialog(SideController& side)
     side.offsetEdit->bind(*side.Offset);
     side.taperEdit->bind(*side.TaperAngle);
 
-    updateUpToFaceName(side);
-
-    // --- Update shape-related UI ---
-    updateShapeName(side.lineShapeName, *side.UpToShape);
-    updateShapeFaces(side.listWidgetReferences, *side.UpToShape);
-
-    // --- Set up the mode combobox and list widget context menu ---
+    // --- Set up the mode combobox ---
     translateModeList(side.changeMode, typeIndex);
 
-    side.listWidgetReferences->addAction(side.unselectShapeFaceAction);
-    side.listWidgetReferences->setContextMenuPolicy(Qt::ActionsContextMenu);
-    side.checkBoxAllFaces->setChecked(side.listWidgetReferences->count() == 0);
-}
-
-void TaskExtrudeParameters::updateUpToFaceName(SideController& side)
-{
-    App::DocumentObject* faceObj = side.UpToFace->getValue();
-    std::vector<std::string> subStrings = side.UpToFace->getSubValues();
-    std::string upToFaceName;
-    int faceId = -1;
-    if (faceObj && !subStrings.empty()) {
-        upToFaceName = subStrings.front();
-        if (upToFaceName.rfind("Face", 0) == 0) {  // starts_with
-            faceId = std::atoi(&upToFaceName[4]);
-        }
-    }
-
-    if (faceObj && PartDesign::Feature::isDatum(faceObj)) {
-        side.lineFaceName->setText(QString::fromUtf8(faceObj->Label.getValue()));
-        side.lineFaceName->setProperty("FeatureName", QByteArray(faceObj->getNameInDocument()));
-    }
-    else if (faceObj && faceId >= 0) {
-        side.lineFaceName->setText(QStringLiteral("%1:%2%3").arg(
-            QString::fromUtf8(faceObj->Label.getValue()),
-            tr("Face"),
-            QString::number(faceId)
-        ));
-        side.lineFaceName->setProperty("FeatureName", QByteArray(faceObj->getNameInDocument()));
-    }
-    else {
-        side.lineFaceName->clear();
-        side.lineFaceName->setProperty("FeatureName", QVariant());
-    }
-    side.lineFaceName->setProperty("FaceName", QByteArray(upToFaceName.c_str()));
+    // All faces: the shape without faces of its own
+    side.checkBoxAllFaces->setChecked(side.shapeFacesField->entries().empty());
+    side.upToShapeFaces->setVisible(!side.checkBoxAllFaces->isChecked());
 }
 
 void TaskExtrudeParameters::updateStartUI()
@@ -279,19 +446,11 @@ void TaskExtrudeParameters::updateStartUI()
 
     ui->labelStartOffset->setVisible(hasOffset);
     ui->startOffsetEdit->setVisible(hasOffset);
-    ui->labelStartReference->setVisible(hasReference);
-    ui->lineStartReference->setVisible(hasReference);
-    ui->buttonStartReference->setVisible(hasReference);
-}
-
-void TaskExtrudeParameters::updateStartReferenceName()
-{
-    auto extrude = getObject<PartDesign::FeatureExtrude>();
-    updateReferenceName(
-        ui->lineStartReference,
-        extrude->StartReference,
-        tr("No start reference selected")
-    );
+    startField->setVisible(hasReference);
+    startField->setRequired(hasReference);
+    if (!hasReference) {
+        startField->setArmed(false);
+    }
 }
 
 void TaskExtrudeParameters::createSideControllers()
@@ -306,16 +465,9 @@ void TaskExtrudeParameters::createSideControllers()
     m_side1.lengthEdit = ui->lengthEdit;
     m_side1.offsetEdit = ui->offsetEdit;
     m_side1.taperEdit = ui->taperEdit;
-    m_side1.lineFaceName = ui->lineFaceName;
-    m_side1.buttonFace = ui->buttonFace;
-    m_side1.lineShapeName = ui->lineShapeName;
-    m_side1.buttonShape = ui->buttonShape;
-    m_side1.listWidgetReferences = ui->listWidgetReferences;
-    m_side1.buttonShapeFace = ui->buttonShapeFace;
     m_side1.checkBoxAllFaces = ui->checkBoxAllFaces;
     m_side1.upToShapeList = ui->upToShapeList;
     m_side1.upToShapeFaces = ui->upToShapeFaces;
-    m_side1.unselectShapeFaceAction = unselectShapeFaceAction;
 
     m_side1.Type = &extrude->Type;
     m_side1.Length = &extrude->Length;
@@ -332,16 +484,9 @@ void TaskExtrudeParameters::createSideControllers()
     m_side2.lengthEdit = ui->lengthEdit2;
     m_side2.offsetEdit = ui->offsetEdit2;
     m_side2.taperEdit = ui->taperEdit2;
-    m_side2.lineFaceName = ui->lineFaceName2;
-    m_side2.buttonFace = ui->buttonFace2;
-    m_side2.lineShapeName = ui->lineShapeName2;
-    m_side2.buttonShape = ui->buttonShape2;
-    m_side2.listWidgetReferences = ui->listWidgetReferences2;
-    m_side2.buttonShapeFace = ui->buttonShapeFace2;
     m_side2.checkBoxAllFaces = ui->checkBoxAllFaces2;
     m_side2.upToShapeList = ui->upToShapeList2;
     m_side2.upToShapeFaces = ui->upToShapeFaces2;
-    m_side2.unselectShapeFaceAction = unselectShapeFaceAction2;
 
     m_side2.Type = &extrude->Type2;
     m_side2.Length = &extrude->Length2;
@@ -391,23 +536,8 @@ void TaskExtrudeParameters::connectSlots()
             [this, sideEnum](double val) { onTaperChanged(val, sideEnum); }
         );
         connect(side.changeMode, qOverload<int>(&QComboBox::currentIndexChanged), this, modeChangedSlot);
-        connect(side.buttonFace, &QToolButton::toggled, this, [this, sideEnum](bool checked) {
-            onSelectFaceToggle(checked, sideEnum);
-        });
-        connect(side.lineFaceName, &QLineEdit::textEdited, this, [this, sideEnum](const QString& text) {
-            onFaceName(text, sideEnum);
-        });
         connect(side.checkBoxAllFaces, &QCheckBox::toggled, this, [this, sideEnum](bool checked) {
             onAllFacesToggled(checked, sideEnum);
-        });
-        connect(side.buttonShape, &QToolButton::toggled, this, [this, sideEnum](bool checked) {
-            onSelectShapeToggle(checked, sideEnum);
-        });
-        connect(side.buttonShapeFace, &QToolButton::toggled, this, [this, sideEnum](bool checked) {
-            onSelectShapeFacesToggle(checked, sideEnum);
-        });
-        connect(side.unselectShapeFaceAction, &QAction::triggered, this, [this, sideEnum]() {
-            onUnselectShapeFacesTrigger(sideEnum);
         });
     };
 
@@ -424,9 +554,6 @@ void TaskExtrudeParameters::connectSlots()
         this,
         [this](double value) { onStartOffsetChanged(value); }
     );
-    connect(ui->buttonStartReference, &QAbstractButton::toggled, this, [this](bool checked) {
-        onSelectStartReferenceToggle(checked);
-    });
 
     // clang-format off
     connect(ui->directionCB, qOverload<int>(&QComboBox::activated),
@@ -460,61 +587,13 @@ void TaskExtrudeParameters::onModeChanged_Side2(int index)
     setGizmoPositions();
 }
 
-void TaskExtrudeParameters::onSelectShapeFacesToggle(bool checked, Side side)
-{
-    auto& sideCtrl = getSideController(side);
-    if (checked) {
-        setSelectionMode(SelectShapeFaces, side);
-        sideCtrl.buttonShapeFace->setText(tr("Preview"));
-    }
-    else {
-        setSelectionMode(None);
-        sideCtrl.buttonShapeFace->setText(tr("Select Faces"));
-    }
-}
-
-void PartDesignGui::TaskExtrudeParameters::onUnselectShapeFacesTrigger(Side side)
-{
-    auto& sideCtrl = getSideController(side);
-
-    auto selected = sideCtrl.listWidgetReferences->selectedItems();
-    auto faces = getShapeFaces(*sideCtrl.UpToShape);
-
-
-    faces.erase(std::remove_if(faces.begin(), faces.end(), [selected](const std::string& face) {
-        for (auto& item : selected) {
-            if (item->text().toStdString() == face) {
-                return true;
-            }
-        }
-
-        return false;
-    }));
-
-    sideCtrl.UpToShape->setValue(sideCtrl.UpToShape->getValue(), faces);
-
-    updateShapeFaces(sideCtrl.listWidgetReferences, *sideCtrl.UpToShape);
-}
-
 void TaskExtrudeParameters::setSelectionMode(SelectionMode mode, Side side)
 {
     if (selectionMode == mode && activeSelectionSide == side) {
         return;
     }
+    const SelectionMode before = selectionMode;
 
-    const auto updateCheckedForSide = [mode, side](
-                                          Side relatedSide,
-                                          QAbstractButton* buttonFace,
-                                          QAbstractButton* buttonShape,
-                                          QAbstractButton* buttonShapeFace
-                                      ) {
-        buttonFace->setChecked(mode == SelectFace && side == relatedSide);
-        buttonShape->setChecked(mode == SelectShape && side == relatedSide);
-        buttonShapeFace->setChecked(mode == SelectShapeFaces && side == relatedSide);
-    };
-    updateCheckedForSide(Side::First, ui->buttonFace, ui->buttonShape, ui->buttonShapeFace);
-    updateCheckedForSide(Side::Second, ui->buttonFace2, ui->buttonShape2, ui->buttonShapeFace2);
-    ui->buttonStartReference->setChecked(mode == SelectStartReference);
     if (buttonProfile) {
         QSignalBlocker block(buttonProfile);
         buttonProfile->setChecked(mode == SelectProfile);
@@ -540,26 +619,11 @@ void TaskExtrudeParameters::setSelectionMode(SelectionMode mode, Side side)
     activeSelectionSide = side;
 
     switch (mode) {
-        case SelectShape:
-            onSelectReference(AllowSelection::WHOLE);
-            Gui::Selection().addSelectionGate(new SelectionFilterGate("SELECT Part::Feature COUNT 1"));
-            break;
-        case SelectFace:
-        case SelectStartReference:
-            onSelectReference(AllowSelection::FACE);
-            break;
-        case SelectShapeFaces: {
-            onSelectReference(AllowSelection::FACE);
-            auto& sideCtrl = getSideController(activeSelectionSide);
-            getViewObject<ViewProviderExtrude>()->highlightShapeFaces(
-                getShapeFaces(*sideCtrl.UpToShape)
-            );
-            break;
-        }
-        case SelectReferenceAxis:
-            onSelectReference(AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE);
-            break;
         case SelectProfile: {
+            // The fields' picks end: the profile's gate takes the selection
+            for (ReferenceField* field : referenceFields()) {
+                field->setArmed(false);
+            }
             // The solid before shows instead of the body's shown feature; the profile's sketch
             // shows too, and the feature itself hides when nothing comes before it.
             onSelectReference(AllowSelection::FACE | AllowSelection::EDGE);
@@ -582,8 +646,10 @@ void TaskExtrudeParameters::setSelectionMode(SelectionMode mode, Side side)
             break;
         }
         default:
-            getViewObject<ViewProviderExtrude>()->highlightShapeFaces({});
-            onSelectReference(AllowSelection::NONE);
+            // Only the profile's pick has a gate of the panel's own to remove
+            if (before == SelectProfile) {
+                onSelectReference(AllowSelection::NONE);
+            }
     }
 }
 
@@ -600,45 +666,13 @@ void TaskExtrudeParameters::tryRecomputeFeature()
 
 void TaskExtrudeParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
-    auto& sideCtrl = getSideController(activeSelectionSide);
-
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        switch (selectionMode) {
-            case SelectShape:
-                selectedShape(msg, sideCtrl);
-                break;
-            case SelectShapeFaces:
-                selectedShapeFace(msg, sideCtrl);
-                break;
-
-            case SelectFace:
-                selectedFace(msg, sideCtrl);
-                break;
-
-            case SelectStartReference:
-                selectedStartReference(msg);
-                break;
-
-            case SelectReferenceAxis:
-                selectedReferenceAxis(msg);
-                break;
-
-            case SelectProfile:
-                selectedProfile(msg);
-                break;
-
-            default:
-                // no-op
-                break;
-        }
+    // The other references are the fields' (ops#150)
+    if (selectionMode != SelectProfile) {
+        return;
     }
-    else if (msg.Type == Gui::SelectionChanges::RmvSelection && selectionMode == SelectProfile) {
+    if (msg.Type == Gui::SelectionChanges::AddSelection
+        || msg.Type == Gui::SelectionChanges::RmvSelection) {
         selectedProfile(msg);
-    }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
-        if (selectionMode == SelectFace) {
-            clearFaceName(sideCtrl.lineFaceName);
-        }
     }
 }
 
@@ -780,9 +814,9 @@ bool TaskExtrudeParameters::followProfile()
 void TaskExtrudeParameters::onReferencesRepaired()
 {
     updateProfileName();
-    updateStartReferenceName();
-    updateUpToFaceName(m_side1);
-    updateUpToFaceName(m_side2);
+    for (ReferenceField* field : referenceFields()) {
+        field->reload();
+    }
     if (followProfile()) {
         tryRecomputeFeature();
     }
@@ -792,177 +826,6 @@ void TaskExtrudeParameters::onReferencesRepaired()
 void TaskExtrudeParameters::onReferenceSelectionTaken()
 {
     setSelectionMode(None);
-}
-
-void TaskExtrudeParameters::selectedReferenceAxis(const Gui::SelectionChanges& msg)
-{
-    std::vector<std::string> edge;
-    App::DocumentObject* selObj;
-
-    if (getReferencedSelection(getObject(), msg, selObj, edge) && selObj) {
-        setSelectionMode(None);
-
-        propReferenceAxis->setValue(selObj, edge);
-        tryRecomputeFeature();
-
-        // update direction combobox
-        fillDirectionCombo();
-
-        setGizmoPositions();
-    }
-}
-
-void TaskExtrudeParameters::selectedShapeFace(const Gui::SelectionChanges& msg, SideController& side)
-{
-    auto extrude = getObject<PartDesign::FeatureExtrude>();
-    auto document = extrude->getDocument();
-
-    if (strcmp(msg.pDocName, document->getName()) != 0) {
-        return;
-    }
-
-    // Get the base shape from the correct side's property
-    auto base = static_cast<Part::Feature*>(side.UpToShape->getValue());
-    if (!base) {
-        base = static_cast<Part::Feature*>(extrude);
-    }
-    else if (strcmp(msg.pObjectName, base->getNameInDocument()) != 0) {
-        return;
-    }
-
-    std::vector<std::string> faces = getShapeFaces(*side.UpToShape);
-    const std::string subName(msg.pSubName);
-
-    if (subName.empty()) {
-        return;
-    }
-
-    // Add or remove the face from the list
-    if (const auto positionInList = std::ranges::find(faces, subName); positionInList != faces.end()) {
-        faces.erase(positionInList);  // Remove it if it exists
-    }
-    else {
-        faces.push_back(subName);  // Add it if it's new
-    }
-
-    side.UpToShape->setValue(base, faces);
-
-    updateShapeFaces(side.listWidgetReferences, *side.UpToShape);
-
-    tryRecomputeFeature();
-}
-
-void PartDesignGui::TaskExtrudeParameters::selectedFace(
-    const Gui::SelectionChanges& msg,
-    SideController& side
-)
-{
-    QString refText = onAddSelection(msg, *side.UpToFace);
-
-    if (refText.length() > 0) {
-        QSignalBlocker block(side.lineFaceName);
-
-        side.lineFaceName->setText(refText);
-        side.lineFaceName->setProperty("FeatureName", QByteArray(msg.pObjectName));
-        side.lineFaceName->setProperty("FaceName", QByteArray(msg.pSubName));
-
-        // Turn off reference selection mode
-        side.buttonFace->setChecked(false);
-    }
-    else {
-        clearFaceName(side.lineFaceName);
-    }
-
-    setSelectionMode(None);
-}
-
-void PartDesignGui::TaskExtrudeParameters::selectedStartReference(const Gui::SelectionChanges& msg)
-{
-    auto extrude = getObject<PartDesign::FeatureExtrude>();
-    onAddSelection(msg, extrude->StartReference);
-    updateStartReferenceName();
-
-    setSelectionMode(None);
-    setGizmoPositions();
-}
-
-void PartDesignGui::TaskExtrudeParameters::selectedShape(
-    const Gui::SelectionChanges& msg,
-    SideController& side
-)
-{
-    auto document = getObject()->getDocument();
-
-    if (strcmp(msg.pDocName, document->getName()) != 0) {
-        return;
-    }
-
-    Gui::Selection().clearSelection();
-
-    auto ref = document->getObject(msg.pObjectName);
-
-    side.UpToShape->setValue(ref);
-
-    side.checkBoxAllFaces->setChecked(true);
-
-    setSelectionMode(None);
-
-    updateShapeName(side.lineShapeName, *side.UpToShape);
-    updateShapeFaces(side.listWidgetReferences, *side.UpToShape);
-
-    tryRecomputeFeature();
-}
-
-void TaskExtrudeParameters::clearFaceName(QLineEdit* lineEdit)
-{
-    QSignalBlocker block(lineEdit);
-    lineEdit->clear();
-    lineEdit->setProperty("FeatureName", QVariant());
-    lineEdit->setProperty("FaceName", QVariant());
-}
-
-void TaskExtrudeParameters::updateShapeName(QLineEdit* lineEdit, App::PropertyLinkSubList& prop)
-{
-    QSignalBlocker block(lineEdit);
-
-    auto shape = prop.getValue();
-
-    if (shape) {
-        lineEdit->setText(QString::fromStdString(shape->getFullName()));
-    }
-    else {
-        lineEdit->setText({});
-        lineEdit->setPlaceholderText(tr("No shape selected"));
-    }
-}
-
-void TaskExtrudeParameters::updateShapeFaces(QListWidget* list, App::PropertyLinkSubList& prop)
-{
-    auto faces = getShapeFaces(prop);
-
-    list->clear();
-    for (auto& ref : faces) {
-        list->addItem(QString::fromStdString(ref));
-    }
-
-    if (selectionMode == SelectShapeFaces) {
-        getViewObject<ViewProviderExtrude>()->highlightShapeFaces(faces);
-    }
-}
-
-std::vector<std::string> PartDesignGui::TaskExtrudeParameters::getShapeFaces(
-    App::PropertyLinkSubList& prop
-)
-{
-    std::vector<std::string> faces;
-
-    auto allRefs = prop.getSubValues();
-
-    std::copy_if(allRefs.begin(), allRefs.end(), std::back_inserter(faces), [](const std::string& ref) {
-        return boost::starts_with(ref, "Face");
-    });
-
-    return faces;
 }
 
 void TaskExtrudeParameters::onLengthChanged(double len, Side side)
@@ -983,13 +846,11 @@ void TaskExtrudeParameters::onStartModeChanged(int type)
     auto extrude = getObject<PartDesign::FeatureExtrude>();
     const auto mode = static_cast<StartMode>(type);
     extrude->StartType.setValue(type);
-    if (mode == StartMode::Reference && !extrude->StartReference.getValue()) {
-        ui->buttonStartReference->setChecked(true);
-    }
-    else if (mode != StartMode::Reference) {
-        setSelectionMode(None);
-    }
     updateStartUI();
+    // A start reference to pick: its field arms
+    if (mode == StartMode::Reference && !extrude->StartReference.getValue()) {
+        armField(startField);
+    }
     tryRecomputeFeature();
     setGizmoPositions();
 }
@@ -1176,20 +1037,15 @@ void TaskExtrudeParameters::updateSideUI(
     else if (sideMode == Mode::ToFace) {
         isOffsetVisible = true;
         isFaceVisible = true;
-        if (setFocus) {
-            QMetaObject::invokeMethod(s.lineFaceName, "setFocus", Qt::QueuedConnection);
-            // Go into reference selection mode if no face has been selected yet
-            if (s.lineFaceName->property("FeatureName").isNull()) {
-                s.buttonFace->setChecked(true);
-            }
+        // No face yet: its field arms (on open the dialog arms it, as the first empty one)
+        if (setFocus && s.faceField->entries().empty()) {
+            armField(s.faceField);
         }
     }
     else if (sideMode == Mode::ToShape) {
         isShapeVisible = true;
-        if (setFocus) {
-            if (!s.checkBoxAllFaces->isChecked()) {
-                s.buttonShapeFace->setChecked(true);
-            }
+        if (setFocus && !s.checkBoxAllFaces->isChecked()) {
+            armField(s.shapeFacesField);
         }
     }
 
@@ -1210,13 +1066,20 @@ void TaskExtrudeParameters::updateSideUI(
     s.taperEdit->setVisible(finalTaperVisible);
     s.taperEdit->setEnabled(finalTaperVisible);
 
-    s.buttonFace->setVisible(isParentVisible && isFaceVisible);
-    s.lineFaceName->setVisible(isParentVisible && isFaceVisible);
-    if (!isFaceVisible) {
-        s.buttonFace->setChecked(false);  // Ensure button is unchecked when hidden
+    // A hidden field doesn't pick
+    const bool faceShown = isParentVisible && isFaceVisible;
+    s.faceField->setVisible(faceShown);
+    s.faceField->setRequired(faceShown);
+    if (!faceShown) {
+        s.faceField->setArmed(false);
     }
 
-    s.upToShapeList->setVisible(isParentVisible && isShapeVisible);
+    const bool shapeShown = isParentVisible && isShapeVisible;
+    s.upToShapeList->setVisible(shapeShown);
+    if (!shapeShown) {
+        s.shapeField->setArmed(false);
+        s.shapeFacesField->setArmed(false);
+    }
 }
 
 void TaskExtrudeParameters::onDirectionCBChanged(int num)
@@ -1237,9 +1100,9 @@ void TaskExtrudeParameters::onDirectionCBChanged(int num)
     App::PropertyLinkSub& lnk = *(axesInList[num]);
 
     if (num == DirectionModes::Select) {
-        // to distinguish that this is the direction selection
-        setSelectionMode(SelectReferenceAxis);
+        // The hidden direction field takes the next pick (ops#150)
         setDirectionMode(num);
+        axisField->setArmed(true);
     }
     else if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
         if (lnk.getValue()) {
@@ -1251,7 +1114,7 @@ void TaskExtrudeParameters::onDirectionCBChanged(int num)
         }
 
         // in case the user is in selection mode, but changed his mind before selecting anything
-        setSelectionMode(None);
+        axisField->setArmed(false);
         setDirectionMode(num);
 
         extrude->ReferenceAxis.setValue(lnk.getValue(), lnk.getSubValues());
@@ -1276,14 +1139,17 @@ void TaskExtrudeParameters::onAllFacesToggled(bool on, Side side)
 {
     auto& sideCtrl = getSideController(side);
     sideCtrl.upToShapeFaces->setVisible(!on);
-    sideCtrl.buttonShapeFace->setChecked(false);
 
     if (on) {
-        if (auto extrude = getObject<PartDesign::FeatureExtrude>()) {
-            extrude->UpToShape.setValue(extrude->UpToShape.getValue());
-            updateShapeFaces(sideCtrl.listWidgetReferences, *sideCtrl.UpToShape);
+        // All faces of this side's shape (it was always the first side's)
+        sideCtrl.shapeFacesField->setArmed(false);
+        if (!sideCtrl.shapeFacesField->entries().empty()) {
+            sideCtrl.UpToShape->setValue(sideCtrl.UpToShape->getValue());
             tryRecomputeFeature();
         }
+    }
+    else {
+        armField(sideCtrl.shapeFacesField);
     }
 }
 
@@ -1425,98 +1291,6 @@ void TaskExtrudeParameters::getReferenceAxis(App::DocumentObject*& obj, std::vec
     }
 }
 
-void TaskExtrudeParameters::onSelectFaceToggle(const bool checked, Side side)
-{
-    auto& sideCtrl = getSideController(side);
-    if (checked) {
-        handleLineFaceNameClick(sideCtrl.lineFaceName);
-        setSelectionMode(SelectFace, side);
-    }
-    else {
-        handleLineFaceNameNo(sideCtrl.lineFaceName);
-    }
-}
-
-void TaskExtrudeParameters::onSelectStartReferenceToggle(const bool checked)
-{
-    if (checked) {
-        ui->buttonStartReference->setText(tr("Cancel"));
-        ui->lineStartReference->setPlaceholderText(tr("Select face, plane..."));
-        setSelectionMode(SelectStartReference);
-    }
-    else {
-        ui->buttonStartReference->setText(tr("Pick Reference"));
-        ui->lineStartReference->setPlaceholderText(tr("No start reference selected"));
-    }
-}
-
-void TaskExtrudeParameters::onSelectShapeToggle(bool checked, Side side)
-{
-    auto& sideCtrl = getSideController(side);
-    if (checked) {
-        setSelectionMode(SelectShape, side);
-        sideCtrl.lineShapeName->setText({});
-        sideCtrl.lineShapeName->setPlaceholderText(tr("Click on a shape in the model"));
-    }
-    else {
-        setSelectionMode(None);
-        updateShapeName(sideCtrl.lineShapeName, *sideCtrl.UpToShape);
-    }
-}
-
-void TaskExtrudeParameters::onFaceName(const QString& text, Side side)
-{
-    auto& sideCtrl = getSideController(side);
-    changeFaceName(sideCtrl.lineFaceName, text);
-}
-
-void TaskExtrudeParameters::changeFaceName(QLineEdit* lineEdit, const QString& text)
-{
-    if (text.isEmpty()) {
-        // if user cleared the text field then also clear the properties
-        lineEdit->setProperty("FeatureName", QVariant());
-        lineEdit->setProperty("FaceName", QVariant());
-    }
-    else {
-        // expect that the label of an object is used
-        QStringList parts = text.split(QChar::fromLatin1(':'));
-        QString label = parts[0];
-        QVariant name = objectNameByLabel(label, lineEdit->property("FeatureName"));
-        if (name.isValid()) {
-            parts[0] = name.toString();
-            QString uptoface = parts.join(QStringLiteral(":"));
-            lineEdit->setProperty("FeatureName", name);
-            lineEdit->setProperty("FaceName", setUpToFace(uptoface));
-        }
-        else {
-            lineEdit->setProperty("FeatureName", QVariant());
-            lineEdit->setProperty("FaceName", QVariant());
-        }
-    }
-}
-
-void TaskExtrudeParameters::translateFaceName(QLineEdit* lineEdit)
-{
-    handleLineFaceNameNo(lineEdit);
-    QVariant featureName = lineEdit->property("FeatureName");
-    if (featureName.isValid()) {
-        QStringList parts = lineEdit->text().split(QChar::fromLatin1(':'));
-        QByteArray upToFace = lineEdit->property("FaceName").toByteArray();
-        int faceId = -1;
-        bool ok = false;
-        if (upToFace.indexOf("Face") == 0) {
-            faceId = upToFace.remove(0, 4).toInt(&ok);
-        }
-
-        if (ok) {
-            lineEdit->setText(QStringLiteral("%1:%2%3").arg(parts[0], tr("Face")).arg(faceId));
-        }
-        else {
-            lineEdit->setText(parts[0]);
-        }
-    }
-}
-
 double TaskExtrudeParameters::getOffset() const
 {
     return ui->offsetEdit->value().getValue();
@@ -1580,17 +1354,6 @@ int TaskExtrudeParameters::getSidesMode() const
     return ui->sidesMode->currentIndex();
 }
 
-QString TaskExtrudeParameters::getFaceName(QLineEdit* lineEdit) const
-{
-    QVariant featureName = lineEdit->property("FeatureName");
-    if (featureName.isValid()) {
-        QString faceName = lineEdit->property("FaceName").toString();
-        return getFaceReference(featureName.toString(), faceName);
-    }
-
-    return QStringLiteral("None");
-}
-
 void TaskExtrudeParameters::changeEvent(QEvent* e)
 {
     TaskBox::changeEvent(e);
@@ -1605,8 +1368,6 @@ void TaskExtrudeParameters::changeEvent(QEvent* e)
         QSignalBlocker ydir(ui->YDirectionEdit);
         QSignalBlocker zdir(ui->ZDirectionEdit);
         QSignalBlocker dir(ui->directionCB);
-        QSignalBlocker face(ui->lineFaceName);
-        QSignalBlocker face2(ui->lineFaceName2);
         QSignalBlocker mode(ui->changeMode);
         QSignalBlocker mode2(ui->changeMode2);
         QSignalBlocker sidesMode(ui->sidesMode);
@@ -1632,10 +1393,6 @@ void TaskExtrudeParameters::changeEvent(QEvent* e)
         translateModeList(ui->changeMode, ui->changeMode->currentIndex());
         translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
         translateSidesList(ui->sidesMode->currentIndex());
-
-        translateFaceName(ui->lineFaceName);
-        translateFaceName(ui->lineFaceName2);
-        updateStartReferenceName();
     }
 }
 
@@ -1664,39 +1421,6 @@ void TaskExtrudeParameters::applyParameters()
         return prop.getValue() == linked
             && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
     };
-    // The face a line edit names: its feature (the name before `:`) and the face.
-    auto faceOf = [obj](QLineEdit* lineEdit,
-                        App::DocumentObject*& linked,
-                        std::vector<std::string>& subs) {
-        linked = nullptr;
-        subs.clear();
-        QVariant featureName = lineEdit->property("FeatureName");
-        if (!featureName.isValid()) {
-            return;
-        }
-        QString name = featureName.toString();
-        name = name.left(name.indexOf(QStringLiteral(":")));
-        linked = obj->getDocument()->getObject(name.toUtf8().constData());
-        QString faceName = lineEdit->property("FaceName").toString();
-        if (!faceName.isEmpty()) {
-            subs.push_back(faceName.toStdString());
-        }
-    };
-    auto faceUnchanged = [&](const App::PropertyLinkSub& prop, QLineEdit* lineEdit) {
-        App::DocumentObject* linked = nullptr;
-        std::vector<std::string> subs;
-        faceOf(lineEdit, linked, subs);
-        return unchanged(prop, linked, subs);
-    };
-
-    QString facename = QStringLiteral("None");
-    QString facename2 = QStringLiteral("None");
-    if (static_cast<Mode>(getMode()) == Mode::ToFace) {
-        facename = getFaceName(ui->lineFaceName);
-    }
-    if (static_cast<Mode>(getMode2()) == Mode::ToFace) {
-        facename2 = getFaceName(ui->lineFaceName2);
-    }
 
     // Handle deprecated 'TwoLength' mode.
     int type1 = getMode();
@@ -1730,25 +1454,19 @@ void TaskExtrudeParameters::applyParameters()
     FCMD_OBJ_CMD(obj, "SideType = " << getSidesMode());
     FCMD_OBJ_CMD(obj, "Type = " << type1);
     FCMD_OBJ_CMD(obj, "Type2 = " << type2);
-    if (!extrude || static_cast<Mode>(getMode()) != Mode::ToFace
-        || !faceUnchanged(extrude->UpToFace, ui->lineFaceName)) {
-        FCMD_OBJ_CMD(obj, "UpToFace = " << facename.toUtf8().data());
+    // The faces and the start reference are written by their fields as they are picked
+    // (ops#150); a side that doesn't go up to a face drops its face
+    if (extrude && static_cast<Mode>(getMode()) != Mode::ToFace && extrude->UpToFace.getValue()) {
+        FCMD_OBJ_CMD(obj, "UpToFace = None");
     }
-    if (!extrude || static_cast<Mode>(getMode2()) != Mode::ToFace
-        || !faceUnchanged(extrude->UpToFace2, ui->lineFaceName2)) {
-        FCMD_OBJ_CMD(obj, "UpToFace2 = " << facename2.toUtf8().data());
+    if (extrude && static_cast<Mode>(getMode2()) != Mode::ToFace && extrude->UpToFace2.getValue()) {
+        FCMD_OBJ_CMD(obj, "UpToFace2 = None");
     }
     FCMD_OBJ_CMD(obj, "Reversed = " << (getReversed() ? 1 : 0));
     FCMD_OBJ_CMD(obj, "Offset = " << getOffset());
     FCMD_OBJ_CMD(obj, "Offset2 = " << getOffset2());
     FCMD_OBJ_CMD(obj, "StartOffset = " << ui->startOffsetEdit->value().getValue());
     FCMD_OBJ_CMD(obj, "StartType = " << ui->startMode->currentIndex());
-    if (!extrude || !faceUnchanged(extrude->StartReference, ui->lineStartReference)) {
-        FCMD_OBJ_CMD(
-            obj,
-            "StartReference = " << getFaceName(ui->lineStartReference).toUtf8().data()
-        );
-    }
 }
 
 void TaskExtrudeParameters::onSidesModeChanged(int index)
@@ -1789,16 +1507,6 @@ void TaskExtrudeParameters::translateSidesList(int index)
     ui->sidesMode->addItem(tr("Two sided"));
     ui->sidesMode->addItem(tr("Symmetric"));
     ui->sidesMode->setCurrentIndex(index);
-}
-
-void TaskExtrudeParameters::handleLineFaceNameClick(QLineEdit* lineEdit)
-{
-    lineEdit->setPlaceholderText(tr("Face selection active"));
-}
-
-void TaskExtrudeParameters::handleLineFaceNameNo(QLineEdit* lineEdit)
-{
-    lineEdit->setPlaceholderText(tr("No face selected"));
 }
 
 void TaskExtrudeParameters::setupGizmos()

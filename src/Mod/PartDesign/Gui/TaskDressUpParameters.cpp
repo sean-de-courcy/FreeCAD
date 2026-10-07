@@ -68,17 +68,10 @@ TaskDressUpParameters::TaskDressUpParameters(
 {
     // remember initial transaction ID
     transactionID = DressUpView->getObject()->getDocument()->getBookedTransactionID();
-
-    selectionMode = none;
 }
 
-TaskDressUpParameters::~TaskDressUpParameters()
-{
-    // The Base field removes its own gate; this one removes a plane or line pick's
-    if (selectionMode != none) {
-        Gui::Selection().rmvSelectionGate();
-    }
-}
+// The fields remove their own gates
+TaskDressUpParameters::~TaskDressUpParameters() = default;
 
 void TaskDressUpParameters::setupTransaction()
 {
@@ -125,18 +118,7 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
         }
     };
     baseField = new ReferenceField(getObject(), "Base", options, write, proxy);
-    if (QWidget* parent = placeholder->parentWidget(); parent && parent->layout()) {
-        delete parent->layout()->replaceWidget(placeholder, baseField);
-    }
-    placeholder->hide();
-    placeholder->deleteLater();
-
-    // The panel's other pick modes end when the field arms: its gate replaces theirs
-    connect(baseField, &ReferenceField::arming, this, [this]() {
-        if (selectionMode != none) {
-            setSelectionMode(none);
-        }
-    });
+    baseField->takePlaceOf(placeholder);
     connect(baseField, &ReferenceField::picked, this, [this]() { onBaseChanged(); });
 }
 
@@ -162,10 +144,10 @@ std::vector<ReferenceField*> TaskDressUpParameters::referenceFields() const
     return {baseField};
 }
 
-void TaskDressUpParameters::disarmBaseField()
+void TaskDressUpParameters::disarmFields()
 {
-    if (baseField) {
-        baseField->setArmed(false);
+    for (ReferenceField* field : referenceFields()) {
+        field->setArmed(false);
     }
 }
 
@@ -264,37 +246,16 @@ Part::Feature* TaskDressUpParameters::getBase() const
     return nullptr;
 }
 
-void TaskDressUpParameters::setSelectionMode(selectionModes mode)
-{
-    if (DressUpView.expired()) {
-        return;
-    }
-    // A value edit or another pick mode ends the field's picking too (B3)
-    disarmBaseField();
-    const bool wasPicking = selectionMode != none;
-    selectionMode = mode;
-    setButtons(mode);
-    // Its gate goes with it (B3, B4); the Base field's stays
-    if (mode == none && wasPicking) {
-        DressUpView->highlightReferences(false);
-        Gui::Selection().rmvSelectionGate();
-    }
-    Gui::Selection().clearSelection();
-}
-
 void TaskDressUpParameters::onReferencesRepaired()
 {
-    if (baseField) {
-        baseField->reload();
+    for (ReferenceField* field : referenceFields()) {
+        field->reload();
     }
 }
 
 void TaskDressUpParameters::onReferenceSelectionTaken()
 {
-    disarmBaseField();
-    if (selectionMode != none) {
-        setSelectionMode(none);
-    }
+    disarmFields();
 }
 
 namespace

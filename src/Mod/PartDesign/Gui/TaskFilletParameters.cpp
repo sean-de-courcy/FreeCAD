@@ -107,7 +107,7 @@ void TaskFilletParameters::onCheckBoxUseAllEdgesToggled(bool checked)
 {
     if (auto fillet = getObject<PartDesign::Fillet>()) {
         if (checked) {
-            setSelectionMode(none);
+            disarmFields();
         }
 
         baseField->setEnabled(!checked);
@@ -124,7 +124,7 @@ void TaskFilletParameters::onBaseChanged()
 void TaskFilletParameters::onLengthChanged(double len)
 {
     if (auto fillet = getObject<PartDesign::Fillet>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         fillet->Radius.setValue(len);
         fillet->recomputeFeature();

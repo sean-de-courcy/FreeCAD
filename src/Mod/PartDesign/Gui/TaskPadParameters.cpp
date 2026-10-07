@@ -113,11 +113,8 @@ void TaskPadParameters::onModeChanged(int index, Side side)
             sideCtrl.Type->setValue("UpToFirst");
             break;
         case Mode::ToFace:
+            // An empty face field arms in updateUI() (ops#150)
             sideCtrl.Type->setValue("UpToFace");
-            if (sideCtrl.lineFaceName->text().isEmpty()) {
-                sideCtrl.buttonFace->setChecked(true);
-                handleLineFaceNameClick(sideCtrl.lineFaceName);  // sets placeholder text
-            }
             break;
         case Mode::ToShape:
             sideCtrl.Type->setValue("UpToShape");

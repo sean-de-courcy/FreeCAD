@@ -42,44 +42,8 @@
        </item>
       </widget>
      </item>
-     <item row="1" column="0" rowspan="2">
-      <widget class="QLabel" name="labelStartReference">
-       <property name="text">
-        <string>Reference</string>
-       </property>
-       <property name="alignment">
-        <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
-       </property>
-      </widget>
-     </item>
-     <item row="1" column="1">
-      <widget class="QLineEdit" name="lineStartReference">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Ignored" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="readOnly">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item row="2" column="1">
-      <widget class="QPushButton" name="buttonStartReference">
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Ignored" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="text">
-        <string>Pick Reference</string>
-       </property>
-       <property name="checkable">
-        <bool>true</bool>
-       </property>
-      </widget>
+     <item row="1" column="0" colspan="2">
+      <widget class="QWidget" name="startReferenceFieldPlaceholder"/>
      </item>
      <item row="3" column="0">
       <widget class="QLabel" name="labelStartOffset">
@@ -236,31 +200,7 @@
          <number>0</number>
         </property>
         <item>
-         <layout class="QGridLayout" name="_2">
-          <item row="0" column="1">
-           <widget class="QLineEdit" name="lineShapeName">
-            <property name="readOnly">
-             <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="0">
-           <widget class="QToolButton" name="buttonShape">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>22</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>Select Shape</string>
-            </property>
-            <property name="checkable">
-             <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-         </layout>
+         <widget class="QWidget" name="shapeFieldPlaceholder"/>
         </item>
         <item>
          <widget class="QCheckBox" name="checkBoxAllFaces">
@@ -291,24 +231,7 @@
             <number>0</number>
            </property>
            <item>
-            <widget class="QToolButton" name="buttonShapeFace">
-             <property name="toolTip">
-              <string>Toggles between selection and preview mode</string>
-             </property>
-             <property name="text">
-              <string>Select</string>
-             </property>
-             <property name="checkable">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QListWidget" name="listWidgetReferences">
-             <property name="selectionMode">
-              <enum>QAbstractItemView::ExtendedSelection</enum>
-             </property>
-            </widget>
+            <widget class="QWidget" name="shapeFacesFieldPlaceholder"/>
            </item>
           </layout>
          </widget>
@@ -317,31 +240,7 @@
       </widget>
      </item>
      <item row="11" column="0" colspan="2">
-      <layout class="QGridLayout" name="gridLayout_5">
-       <item row="0" column="1">
-        <widget class="QLineEdit" name="lineFaceName">
-         <property name="readOnly">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="0">
-        <widget class="QToolButton" name="buttonFace">
-         <property name="minimumSize">
-          <size>
-           <width>0</width>
-           <height>22</height>
-          </size>
-         </property>
-         <property name="text">
-          <string>Select Face</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-      </layout>
+      <widget class="QWidget" name="faceFieldPlaceholder"/>
      </item>
      <item row="12" column="0" colspan="2">
       <layout class="QHBoxLayout" name="verticalLayout_221">
@@ -465,31 +364,7 @@
          <number>0</number>
         </property>
         <item>
-         <layout class="QGridLayout" name="_22">
-          <item row="0" column="1">
-           <widget class="QLineEdit" name="lineShapeName2">
-            <property name="readOnly">
-             <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="0">
-           <widget class="QToolButton" name="buttonShape2">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>22</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>Select Shape</string>
-            </property>
-            <property name="checkable">
-             <bool>true</bool>
-            </property>
-           </widget>
-          </item>
-         </layout>
+         <widget class="QWidget" name="shapeFieldPlaceholder2"/>
         </item>
         <item>
          <widget class="QCheckBox" name="checkBoxAllFaces2">
@@ -520,24 +395,7 @@
             <number>0</number>
            </property>
            <item>
-            <widget class="QToolButton" name="buttonShapeFace2">
-             <property name="toolTip">
-              <string>Toggles between selection and preview mode</string>
-             </property>
-             <property name="text">
-              <string>Select</string>
-             </property>
-             <property name="checkable">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QListWidget" name="listWidgetReferences2">
-             <property name="selectionMode">
-              <enum>QAbstractItemView::ExtendedSelection</enum>
-             </property>
-            </widget>
+            <widget class="QWidget" name="shapeFacesFieldPlaceholder2"/>
            </item>
           </layout>
          </widget>
@@ -546,31 +404,7 @@
       </widget>
      </item>
      <item row="24" column="0" colspan="2">
-      <layout class="QGridLayout" name="gridLayout_52">
-       <item row="0" column="1">
-        <widget class="QLineEdit" name="lineFaceName2">
-         <property name="readOnly">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-       <item row="0" column="0">
-        <widget class="QToolButton" name="buttonFace2">
-         <property name="minimumSize">
-          <size>
-           <width>0</width>
-           <height>22</height>
-          </size>
-         </property>
-         <property name="text">
-          <string>Select Face</string>
-         </property>
-         <property name="checkable">
-          <bool>true</bool>
-         </property>
-        </widget>
-       </item>
-      </layout>
+      <widget class="QWidget" name="faceFieldPlaceholder2"/>
      </item>
     </layout>
    </item>

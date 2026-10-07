@@ -51,38 +51,10 @@
     </layout>
    </item>
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_3">
-     <item>
-      <widget class="QToolButton" name="buttonPlane">
-       <property name="text">
-        <string>Neutral Plane</string>
-       </property>
-       <property name="checkable">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QLineEdit" name="linePlane"/>
-     </item>
-    </layout>
+    <widget class="QWidget" name="planeFieldPlaceholder"/>
    </item>
    <item>
-    <layout class="QHBoxLayout" name="horizontalLayout_4">
-     <item>
-      <widget class="QToolButton" name="buttonLine">
-       <property name="text">
-        <string>Pull Direction</string>
-       </property>
-       <property name="checkable">
-        <bool>true</bool>
-       </property>
-      </widget>
-     </item>
-     <item>
-      <widget class="QLineEdit" name="lineLine"/>
-     </item>
-    </layout>
+    <widget class="QWidget" name="lineFieldPlaceholder"/>
    </item>
    <item>
     <widget class="QCheckBox" name="checkReverse">
@@ -103,10 +75,6 @@
  </customwidgets>
  <tabstops>
   <tabstop>draftAngle</tabstop>
-  <tabstop>buttonPlane</tabstop>
-  <tabstop>linePlane</tabstop>
-  <tabstop>buttonLine</tabstop>
-  <tabstop>lineLine</tabstop>
   <tabstop>checkReverse</tabstop>
  </tabstops>
  <resources/>

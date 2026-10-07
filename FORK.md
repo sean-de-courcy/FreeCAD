@@ -168,7 +168,8 @@ names it.
 | `fix/165-rt-target-id` | fix | ops#165 | - | fork PR 135 `5c70af9d49` | `5071d55b23` (fork PR 138), 2026-10-07 | never (fork feature) |
 | `feat/145-dimension-in-place` | feat | ops#145 | - | `integration` `640c4fba6b` | `4bcf3a3e1d` (fork PR 139), 2026-10-07 | never (fork feature). Changes upstream behaviour: opening a sketch no longer turns or fits the view by default (`OrientViewOnEdit`), a new dimension's value is typed at its label and Esc keeps the measured value (`DimensionValueInPlace`), the Dimension tool asks in placement order. Outside Sketcher: `Part/Gui/ViewProviderGridExtension.cpp` (grid guards). Upstream edits to `EditDatumDialog::exec` and `ViewProviderSketch::setEditViewer` will conflict |
 | `feat/150-w1-reference-field` | feat | ops#150 | - | `integration` `640c4fba6b` | `ab57bc30de` (fork PR 140), 2026-10-07 | never (fork feature) |
-| `fix/167-tier1-same-maker` | fix | ops#167 | - | `integration` `d902dc50ae` | (fork PR 141) | never (fork feature) |
+| `fix/167-tier1-same-maker` | fix | ops#167 | - | `integration` `d902dc50ae` | `24a1199c52` (fork PR 141), 2026-10-07 | never (fork feature) |
+| `feat/150-w2-single-entry-fields` | feat | ops#150 | - | `feat/150-w1-reference-field` `d0f23f9c6a` (stacked on fork PR 140) | (fork PR 142) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
