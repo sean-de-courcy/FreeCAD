@@ -12,6 +12,7 @@
 #include <set>
 #include <sstream>
 
+#include <App/Application.h>
 #include <App/ComplexGeoData.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
@@ -24,6 +25,7 @@
 #include <App/PropertyStandard.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/Reader.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -1911,6 +1913,118 @@ bool hasParkedOriginals(const App::DocumentObject* obj)
         }
     }
     return false;
+}
+
+namespace
+{
+
+/// The copy an import made of the object saved as name, or null if it didn't come in. A saved
+/// project (merge) has plain names; copy and paste save `<name>@<document>`
+/// (Document::exportObjects), so each open document is tried; of two hits, the one from the
+/// document whose object of that name has the ID id (the original) wins
+App::DocumentObject* importedCopy(Base::XMLReader& reader,
+                                  const std::set<const App::DocumentObject*>& imported,
+                                  const App::Document* doc,
+                                  const std::string& name,
+                                  long id)
+{
+    auto copyOf = [&](const std::string& saved) -> App::DocumentObject* {
+        auto obj = doc->getObject(reader.getName(saved.c_str()));
+        return obj && imported.count(obj) ? obj : nullptr;
+    };
+    if (auto copy = copyOf(name)) {
+        return copy;
+    }
+    App::DocumentObject* found = nullptr;
+    for (auto source : App::GetApplication().getDocuments()) {
+        auto copy = copyOf(name + "@" + source->getName());
+        auto original = source->getObject(name.c_str());
+        if (copy && (!found || (id > 0 && original && original->getID() == id))) {
+            found = copy;
+        }
+    }
+    return found;
+}
+
+/// Import, merge and paste (ops#158): readObjects gives the imported objects new IDs and, where a
+/// name is taken, new names, so an imported owner's lines would name an object that is gone, or
+/// another one. Each line whose object came in with it is rewritten to name the copy (and to put
+/// the reference back by its index), and so are the objects an expression's text names. A line
+/// whose object stayed behind is kept as it is: an object of that name here is the same one only
+/// if its ID matches.
+void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& reader)
+{
+    std::set<const App::DocumentObject*> imported(objs.begin(), objs.end());
+    for (auto owner : objs) {
+        if (!owner || !owner->isAttachedToDocument()) {
+            continue;
+        }
+        auto doc = owner->getDocument();
+        auto lines = parkedLines(owner);
+        bool changed = false;
+        for (auto& line : lines) {
+            auto item = ParkedItem::parse(line);
+            if (!item) {
+                continue;
+            }
+            if (auto copy = importedCopy(reader, imported, doc, item->target, item->targetId)) {
+                item->setTarget(copy);
+                // The mapped name's tags are the source objects' IDs, which the copies don't
+                // have: the reference goes back by its index, as an imported link's does
+                item->shadowNew.clear();
+            }
+            if (item->expression) {
+                try {
+                    // The parse renames the objects a saved project's names map (the reader is
+                    // the expression importer here); the objects it finds that didn't come in
+                    // are the original names of a copy
+                    std::unique_ptr<App::Expression> expr(
+                        App::Expression::parse(owner, item->text));
+                    for (const auto& dep : expr->getDeps(App::Expression::DepAll)) {
+                        auto obj = dep.first;
+                        if (!obj || imported.count(obj) || !obj->isAttachedToDocument()) {
+                            continue;
+                        }
+                        auto copy =
+                            importedCopy(reader, imported, doc, obj->getNameInDocument(), 0);
+                        if (copy) {
+                            if (auto replaced = expr->replaceObject(owner, obj, copy)) {
+                                expr = std::move(replaced);
+                            }
+                        }
+                    }
+                    item->text = expr->toString(true);
+                }
+                catch (const Base::Exception& e) {
+                    FC_WARN(owner->getFullName() << ": a parked expression could not be read on "
+                                                    "import: " << e.what());
+                }
+            }
+            auto rewritten = item->line();
+            if (rewritten != line) {
+                line = rewritten;
+                changed = true;
+            }
+        }
+        if (changed) {
+            writeParkedLines(owner, lines);
+        }
+    }
+}
+
+}  // namespace
+
+void registerParkedImport()
+{
+    auto watch = [](App::Document& doc) {
+        doc.signalImportObjects.connect(&importParkedLines);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
 }
 
 void registerParkedReferenceProvider()

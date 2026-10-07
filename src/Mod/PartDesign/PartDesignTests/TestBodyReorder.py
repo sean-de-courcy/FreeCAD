@@ -1346,6 +1346,187 @@ class BodyReorderBase:
         self.body.reorderObject([hole], pad2, True)
         self.assertRestoredState(block, pad2, sketch, hole, before, counts)
 
+    # -- parked lines copied, pasted and merged (ops#158) ----------------------------------------
+
+    def otherDocument(self, *names):
+        """A second document in the same configuration, holding an unrelated object for each name,
+        so that copies get other names and other IDs than in self.doc."""
+        doc = models.newDocument(f"BodyReorder{type(self).__name__}Other")
+        if hasattr(doc, "HistoryAlgorithm"):
+            doc.HistoryAlgorithm = "V2"
+        doc.ReferenceSolver = self.solver
+        doc.InternNames = False
+        for name in names:
+            self.assertEqual(doc.addObject("App::FeaturePython", name).Name, name)
+        return doc
+
+    def copiesIn(self, doc, before, *specs):
+        """The objects of doc not in before, one for each (type, label) spec: a copy keeps its type
+        and its label, or the label with other digits at the end when it is taken."""
+        new = [o for o in doc.Objects if o.Name not in before]
+        found = []
+        for typeId, label in specs:
+            pattern = re.compile(re.escape(label.rstrip("0123456789")) + r"\d*$")
+            matches = [o for o in new if o.TypeId == typeId and pattern.match(o.Label)]
+            self.assertEqual(len(matches), 1, (label, [o.Label for o in matches]))
+            found.append(matches[0])
+        return found
+
+    def assertProjectionOnto(self, sketch, hole, pad2, before, counts):
+        """RO11c's oracles for a copy: the link on this pad2's front top edge, on the same geometry,
+        the constraints holding, the circle where it was, nothing parked."""
+        self.assertEqual(self.parked(sketch), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertIs(sketch.ExternalGeometry[-1][0], pad2)
+        projected = pad2.Shape.getElement(sketch.ExternalGeometry[-1][1][0])
+        self.assertTrue(
+            all(abs(v.Point.y - 5) < TOL and abs(v.Point.z - 15) < TOL for v in projected.Vertexes)
+        )
+        geoId, ref, _ = self.projection(sketch)
+        self.assertEqual(geoId, before[0])
+        self.assertTrue(ref.startswith(f"{pad2.Name}."), ref)
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+        self.assertGapBound(sketch)
+        self.assertCircleAt(sketch, 10, 10)
+        self.assertBody(BLOCK + PAD2 - HOLE1)
+
+    def parkedProjectionCopied(self, copy):
+        """RO11 parked, then copy(specs) gives the copied objects of self.doc, which becomes the
+        document that holds them, with self.body their Body. Recomputed (the copies get element maps
+        of their own) and moved back below the copy's Pad2, the projection goes onto it."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        source = (self.doc, self.body, block, pad2, sketch, hole)
+
+        self.doc, self.body, block, pad2, sketch, hole = copy(
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "Block"),
+            ("PartDesign::Pad", "Pad2"),
+            ("Sketcher::SketchObject", "Projecting"),
+            ("PartDesign::Pocket", "ProjectedHole"),
+        )
+        self.assertNotEqual((pad2.Name, pad2.ID), (source[3].Name, source[3].ID))
+        self.recompute()
+        self.assertValid(block, pad2)
+        lines = self.parked(sketch)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(
+            lines[0].startswith(f"extgeo|ExternalGeometry|{pad2.Name}#{pad2.ID}|"), lines[0]
+        )
+        self.body.reorderObject([hole], pad2, True)
+        self.assertProjectionOnto(sketch, hole, pad2, before, counts)
+        return source
+
+    def testParkedProjectionPastedIntoAnotherDocument(self):
+        """RO11 parked, and the Body copied with its dependencies into another document whose
+        objects take the names Pad2 and Body: the copied line names the copy of Pad2 (a new name
+        and a new ID), and moved back, the projection goes onto it."""
+        other = self.otherDocument("Pad2", "Body")
+
+        def copy(*specs):
+            before = {o.Name for o in other.Objects}
+            other.copyObject(self.body, True)
+            return (other, *self.copiesIn(other, before, *specs))
+
+        self.parkedProjectionCopied(copy)
+
+    def testParkedProjectionMergedFromAProject(self):
+        """RO11 parked and saved; the project merged into another document whose objects take the
+        names Pad2 and Body: moved back, the projection goes onto the merged copy of Pad2."""
+        other = self.otherDocument("Pad2", "Body")
+
+        def copy(*specs):
+            self.tempDir = tempfile.mkdtemp()
+            path = os.path.join(self.tempDir, "Parked.FCStd")
+            self.doc.saveCopy(path)
+            before = {o.Name for o in other.Objects}
+            other.mergeProject(path)
+            return (other, *self.copiesIn(other, before, *specs))
+
+        self.parkedProjectionCopied(copy)
+
+    def testParkedProjectionCopiedInTheSameDocument(self):
+        """RO11 parked, and the Body copied with its dependencies in the same document: moved back,
+        the copy's projection goes onto the copy of Pad2, not onto the original, which stays
+        parked."""
+
+        def copy(*specs):
+            before = {o.Name for o in self.doc.Objects}
+            self.doc.copyObject(self.body, True)
+            return (self.doc, *self.copiesIn(self.doc, before, *specs))
+
+        _, body, block, pad2, sketch, hole = self.parkedProjectionCopied(copy)
+        lines = self.parked(sketch)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(f"extgeo|ExternalGeometry|Pad2#{pad2.ID}|"), lines[0])
+        self.assertEqual(sketch.ExternalGeometry, [])
+
+    def testParkedOriginalPastedIntoAnotherDocument(self):
+        """RO8 parked, and the Body copied into another document whose objects take the names
+        HoleC and Pattern: moved back, the copied pattern's Originals are the copy of HoleC."""
+        block, a, b, c = self.chain()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [c]
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 4
+        pattern.Occurrences = 2
+        self.body.Tip = pattern
+        self.recompute()
+        self.body.reorderObject([pattern], b, True)
+        self.assertEqual(len(self.parked(pattern)), 1)
+        other = self.otherDocument("HoleC", "Pattern")
+        before = {o.Name for o in other.Objects}
+        other.copyObject(self.body, True)
+        self.doc = other
+        self.body, c, pattern = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pocket", "HoleC"),
+            ("PartDesign::LinearPattern", "Pattern"),
+        )
+        self.assertNotEqual(c.Name, "HoleC")
+        self.recompute()
+
+        self.body.reorderObject([pattern], c, True)
+        self.assertEqual(pattern.Originals, [c])
+        self.assertEqual(self.parked(pattern), [])
+        self.recompute()
+        self.assertValid(pattern)
+
+    def testParkedExpressionPastedIntoAnotherDocument(self):
+        """RO9 parked, and the Body copied into another document whose objects take the names
+        BossA and BossB: moved back, the copy of B reads the copy of BossA (the expression's text
+        names it too)."""
+        block, a, b, c = self.chain()
+        b.setExpression("Length", "BossA.Length")
+        self.recompute()
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        other = self.otherDocument("BossA", "BossB")
+        before = {o.Name for o in other.Objects}
+        other.copyObject(self.body, True)
+        self.doc = other
+        self.body, a, b = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "BossA"),
+            ("PartDesign::Pad", "BossB"),
+        )
+        self.assertNotEqual(a.Name, "BossA")
+        self.recompute()
+
+        self.body.reorderObject([b], a, True)
+        self.assertEqual(b.ExpressionEngine, [("Length", f"{a.Name}.Length")])
+        self.assertEqual(self.parked(b), [])
+        self.recompute()
+        self.assertValid(a, b)
+
 
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
     solver = False
