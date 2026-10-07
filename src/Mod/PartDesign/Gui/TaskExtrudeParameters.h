@@ -117,22 +117,13 @@ public:
         Reference = 2,
     };
 
-    /// The panel's own pick mode besides its reference fields (ops#150).
-    enum SelectionMode
-    {
-        None,
-        /// The profile picked again (ops#125, ops#127): the sketch, its regions or edges, or
-        /// faces of the solid before.
-        SelectProfile
-    };
-
     TaskExtrudeParameters(
         ViewProviderExtrude* ExtrudeView,
         QWidget* parent,
         const std::string& pixmapname,
         const QString& parname
     );
-    ~TaskExtrudeParameters() override = default;
+    ~TaskExtrudeParameters() override;
 
     void saveHistory() override;
 
@@ -145,13 +136,11 @@ public:
     );
     void applyParameters();
 
-    void setSelectionMode(SelectionMode mode, Side side = Side::First);
-
     /// The widgets that show link properties read them again (ops#127).
     void onReferencesRepaired() override;
     void onReferenceSelectionTaken() override;
-    /// The start reference, each side's up-to-face, up-to-shape and its faces, and the hidden
-    /// direction field (ops#150).
+    /// The profile, the start reference, each side's up-to-face, up-to-shape and its faces, and
+    /// the hidden direction field (ops#150).
     std::vector<ReferenceField*> referenceFields() const override;
 
 protected:
@@ -259,6 +248,18 @@ private:
 
     /// The reference fields, in place of the `.ui` placeholders (ops#150).
     void createFields();
+    /// The profile and its regions (ops#150 W3).
+    void createProfileField();
+    /// Sets AllowMultiFace when the profile gets subs (a command): an older feature without it
+    /// ignores a sketch's subs and pads the whole sketch (ops#162 B7). Without subs it goes back
+    /// to the value the dialog opened with (undo, Use whole sketch, the last region taken out).
+    /// True if it was changed.
+    bool allowMultiFace(bool hasSubs);
+    /// AllowMultiFace when the dialog opened.
+    bool savedAllowMultiFace = false;
+    /// While the profile field is armed: the sketch shown with its regions stronger, the profile
+    /// preview shown, and the feature hidden when nothing comes before it; off, as they were.
+    void showProfileTarget(bool on);
     void createSideFields(SideController& side, Side which);
     /// A single-entry field of a face or plane (an up-to-face, the start reference).
     ReferenceField* createFaceField(QWidget* placeholder,
@@ -268,29 +269,23 @@ private:
     void armField(ReferenceField* field);
     /// The solid before the feature: shown while a field is armed.
     App::DocumentObject* baseSolid() const;
+    ReferenceField* profileField = nullptr;
     ReferenceField* startField = nullptr;
     /// The direction box's "Select reference…": a hidden field for one pick.
     ReferenceField* axisField = nullptr;
     /// setupDialog() is done: a mode chosen now arms its field.
     bool dialogReady = false;
 
-    /// The Profile row (ops#125): what Profile holds, and a button to pick it again.
-    void setupProfileRow();
-    void updateProfileName();
-    void onSelectProfileToggle(bool checked);
-    void selectedProfile(const Gui::SelectionChanges& msg);
-    QLineEdit* lineProfile = nullptr;
-    QPushButton* buttonProfile = nullptr;
-    /// The profile picked so far in this selection mode, and the sketch the mode showed.
-    App::DocumentObjectT pickedProfile;
-    std::vector<std::string> pickedProfileSubs;
+    /// What showProfileTarget() showed and emphasized.
     App::DocumentObjectT shownProfile;
+    App::DocumentObjectT emphasizedProfile;
     /// After a pick of another profile object: the direction box rebuilt for it, and a
     /// ReferenceAxis on the old profile's normal moved to the new one's (ops#130). True when
     /// ReferenceAxis changed.
     bool followProfile();
     /// The profile object the direction box's normal entries were made for.
     App::DocumentObjectT directionProfile;
+    /// showProfileTarget() hid the feature.
     bool hiddenSelf = false;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
@@ -307,9 +302,6 @@ protected:
 
     std::unique_ptr<Ui_TaskPadPocketParameters> ui;
     std::vector<std::unique_ptr<App::PropertyLinkSub>> axesInList;
-
-    SelectionMode selectionMode = None;
-    Side activeSelectionSide = Side::First;
 };
 
 class TaskDlgExtrudeParameters: public TaskDlgSketchBasedParameters
@@ -319,9 +311,6 @@ class TaskDlgExtrudeParameters: public TaskDlgSketchBasedParameters
 public:
     explicit TaskDlgExtrudeParameters(PartDesignGui::ViewProviderExtrude* vp);
     ~TaskDlgExtrudeParameters() override = default;
-
-    bool accept() override;
-    bool reject() override;
 
 protected:
     virtual TaskExtrudeParameters* getTaskParameters() = 0;

@@ -50,6 +50,16 @@ public:
 
     void attach(App::DocumentObject* pcObject) override;
 
+    /** Shows the profile preview whatever its preference, while the profile is picked
+     * (FreeCAD-CH, ops#150): the picked regions are drawn over the sketch's. Off: the preference
+     * again.
+     */
+    void setProfileEmphasis(bool on);
+    bool isProfileEmphasis() const
+    {
+        return profileEmphasis;
+    }
+
 protected:
     void updateData(const App::Property* prop) override;
     void updatePreview() override;
@@ -64,6 +74,7 @@ private:
         "User parameter:BaseApp/Preferences/Mod/PartDesign/Preview"
     );
     Gui::ParamHandlers handlers;
+    bool profileEmphasis = false;
 };
 
 }  // namespace PartDesignGui

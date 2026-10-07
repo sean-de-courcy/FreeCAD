@@ -23,7 +23,7 @@
 """The References panel (FreeCAD-CH, ops#127 P7; design note N2 section 6): a feature's guessed,
 partly resolved or broken references, with Accept, Use this one, Mark broken and Re-pick, from the
 tree's "Repair References…" and at the top of the feature's own dialog; and the Pad's profile
-picked again in its own dialog (ops#125).
+picked again in its own dialog (ops#125), through its reference field since ops#150 W3.
 
 Designed models: a pad whose rectangle is drawn again (the filleted corner edge found again by
 geometry, tier 3), the datum point on a split face (TestNamingSolver's), and the Pad made from two
@@ -37,7 +37,7 @@ import unittest
 import FreeCAD as App
 import FreeCADGui as Gui
 
-from PySide import QtWidgets
+from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import X, Y, Z, edge, face
@@ -47,10 +47,12 @@ from PartDesignTests.TestPad import (
     makeRegionPad,
     redrawBosses,
 )
+from PartDesignTests.TestDressUpDeleteKeyGui import waitFor
 from PartDesignTests.TestReferenceFieldGui import (
     armed,
     entries,
     fields,
+    findField,
     menuActions,
     openMenu,
     states,
@@ -408,7 +410,7 @@ class TestReferencePickerGui(unittest.TestCase):
         pump()
         panel = Panel(self)
         self.assertEqual([r[0] for r in panel.rows()], ["ReferenceAxis[0]"])
-        [field] = fields()
+        [profile, field] = fields()
         self.assertEqual(field.objectName(), "fieldUpToFace")
         field.setProperty("armed", True)
         pump()
@@ -543,8 +545,11 @@ class TestReferencePickerGui(unittest.TestCase):
 
     def testPadProfileIsPickedAgain(self):
         """ops#125: the Pad of two sketch regions, the regions drawn again elsewhere: the Pad
-        breaks. In its own dialog the Profile row shows the missing regions; Select, then the
-        two new regions picked in the 3D view, replace the profile, and the Pad is whole again."""
+        breaks. In its own dialog the profile field shows the two missing regions; each entry's
+        Re-pick, then the new region picked in the 3D view, replaces it, and the Pad is whole
+        again. (Since ops#150 W3 the field is the way: a pick adds or takes out a region, so the
+        missing ones are re-picked, or removed, one by one; the P7 Select button's "the picks
+        replace the profile" is gone.)"""
         sketch, pad, fillet = makeRegionPad(self.doc)
         redrawBosses(sketch)
         self.doc.recompute()
@@ -552,30 +557,48 @@ class TestReferencePickerGui(unittest.TestCase):
 
         Gui.ActiveDocument.setEdit(pad)
         pump()
-        mainWindow = Gui.getMainWindow()
-        line = mainWindow.findChild(QtWidgets.QLineEdit, "lineProfile")
-        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
-        self.assertIn("?InternalFace1", line.text())
-        #   the References panel lists the Profile too
-        self.assertIn("Profile[0]", [r[0] for r in Panel(self).rows()])
+        field = findField("fieldProfile")
+        self.assertIsNotNone(field, "no profile field")
+        self.assertEqual(states(field), ["broken", "broken"])
+        subs = [entries(field).item(i).data(QtCore.Qt.UserRole + 2) for i in range(2)]
+        self.assertIn("?InternalFace1", subs)
+        #   the field shows the Profile: the References panel doesn't (ops#150 3.5)
+        #   (its only rows are the field's, so it is left out: PR 144's review, the check was
+        #   skipped whenever the panel was hidden)
+        tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+        self.assertTrue(tree is None or not tree.isVisible(), "the References panel is shown")
 
-        button.click()
-        pump()
-        self.assertTrue(button.isChecked())
-        self.assertTrue(sketch.ViewObject.Visibility)
-        for region in REGIONS:
+        for row, region in enumerate(REGIONS):
+            menu = openMenu(field, row)
+            self.assertIsNotNone(menu, "no entry menu")
+            menuActions(menu)["Re-pick"].trigger()
+            menu.close()
+            pump()
+            self.assertTrue(armed(field))
+            self.assertTrue(sketch.ViewObject.Visibility)
             Gui.Selection.addSelection(self.doc.Name, "Body", sketch.Name + "." + region)
             pump()
-        button.click()
+        self.assertTrue(waitFor(lambda: states(field) == ["exact", "exact"]), states(field))
+        self.assertEqual(
+            texts(field), ["%s:%s" % (sketch.Label, region) for region in REGIONS]
+        )
+        field.setProperty("armed", False)
         pump()
-
-        self.assertEqual(pad.Profile[1], REGIONS)
-        self.assertEqual(line.text(), "%s: %s" % (sketch.Label, ", ".join(REGIONS)))
-        #   the panel lists the rows again after the dialog's own write (review M3)
-        self.assertNotIn("Profile[0]", [r[0] for r in Panel(self).rows()])
         self.close(QtWidgets.QDialogButtonBox.Ok)
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, REGION_PAD_VOLUME, places=4)
+
+    def pickProfile(self, obj):
+        """The profile field armed, obj picked whole, the field disarmed."""
+        field = findField("fieldProfile")
+        self.assertIsNotNone(field, "no profile field")
+        field.setProperty("armed", True)
+        pump()
+        self.assertTrue(armed(field))
+        Gui.Selection.addSelection(self.doc.Name, obj.Name)
+        pump()
+        field.setProperty("armed", False)
+        pump()
 
     def assertProfileSwitchTakesTheNewNormal(self, onOldNormal):
         """A pad of a rectangle on XY, 10 high; in its own dialog the profile is picked again on
@@ -598,14 +621,8 @@ class TestReferencePickerGui(unittest.TestCase):
         pump()
         mainWindow = Gui.getMainWindow()
         combo = mainWindow.findChild(QtWidgets.QComboBox, "directionCB")
-        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
         self.assertEqual(combo.currentIndex(), 0)
-        button.click()
-        pump()
-        Gui.Selection.addSelection(doc.Name, side.Name)
-        pump()
-        button.click()
-        pump()
+        self.pickProfile(side)
         self.assertEqual(pad.Profile[0], side)
         self.assertEqual(combo.currentIndex(), 0)
 
@@ -647,15 +664,9 @@ class TestReferencePickerGui(unittest.TestCase):
         pump()
         mainWindow = Gui.getMainWindow()
         combo = mainWindow.findChild(QtWidgets.QComboBox, "directionCB")
-        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
         edgeEntry = combo.currentText()
         self.assertGreater(combo.currentIndex(), 2)
-        button.click()
-        pump()
-        Gui.Selection.addSelection(doc.Name, other.Name)
-        pump()
-        button.click()
-        pump()
+        self.pickProfile(other)
         self.assertEqual(pad.Profile[0], other)
         self.assertEqual(combo.currentText(), edgeEntry)
 
@@ -680,10 +691,11 @@ class TestReferencePickerGui(unittest.TestCase):
         Gui.ActiveDocument.setEdit(pad)
         pump()
         mainWindow = Gui.getMainWindow()
-        button = mainWindow.findChild(QtWidgets.QPushButton, "buttonProfile")
-        button.click()
+        field = findField("fieldProfile")
+        self.assertIsNotNone(field, "no profile field")
+        field.setProperty("armed", True)
         pump()
-        self.assertTrue(button.isChecked())
+        self.assertTrue(armed(field))
 
         def statusTexts():
             return [label.text() for label in mainWindow.statusBar().findChildren(QtWidgets.QLabel)]
@@ -695,5 +707,5 @@ class TestReferencePickerGui(unittest.TestCase):
             self.assertEqual(Gui.Selection.getSelectionEx(doc.Name), [])
             self.assertTrue(any(reason in text for text in statusTexts()), statusTexts())
         self.assertEqual(pad.Profile[0], top)
-        button.click()
+        field.setProperty("armed", False)
         pump()

@@ -170,7 +170,8 @@ names it.
 | `feat/150-w1-reference-field` | feat | ops#150 | - | `integration` `640c4fba6b` | `ab57bc30de` (fork PR 140), 2026-10-07 | never (fork feature) |
 | `fix/167-tier1-same-maker` | fix | ops#167 | - | `integration` `d902dc50ae` | `24a1199c52` (fork PR 141), 2026-10-07 | never (fork feature) |
 | `feat/150-w2-single-entry-fields` | feat | ops#150 | - | `feat/150-w1-reference-field` `d0f23f9c6a` (stacked on fork PR 140) | `8020ec49c8` (fork PR 142), 2026-10-07 | never (fork feature) |
-| `fix/168-own-twin-lift` | fix | ops#168 | - | `fix/167-tier1-same-maker` `50025eb6e9` (fork PR 141) | (fork PR 143) | never (fork feature) |
+| `fix/168-own-twin-lift` | fix | ops#168 | - | `fix/167-tier1-same-maker` `50025eb6e9` (fork PR 141) | `3a47b52e13` (fork PR 143), 2026-10-07 | never (fork feature) |
+| `feat/150-w3-profile-regions` | feat | ops#150 | - | `feat/150-w2-single-entry-fields` `10e7208c6e` (stacked on fork PR 142) | (fork PR 144) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -606,6 +606,16 @@ public:
     bool isInEditMode() const;
     //@}
 
+    /** Draws the regions (SoSketchFaces) stronger than their saved transparency, while a
+     * reference field picks them (FreeCAD-CH, ops#150). The material node only: nothing is saved
+     * or undone. Off: the saved transparency again.
+     */
+    void setRegionEmphasis(bool on);
+    bool isRegionEmphasis() const
+    {
+        return regionEmphasis;
+    }
+
     // create right click context menu based on selection in the 3D view
     void generateContextMenu();
 
@@ -1082,6 +1092,7 @@ private:
 
     Gui::CoinPtr<SoSketchFaces> pcSketchFaces;
     Gui::CoinPtr<SoToggleSwitch> pcSketchFacesToggle;
+    bool regionEmphasis = false;
 
     std::unique_ptr<ShortcutListener> listener;
 
