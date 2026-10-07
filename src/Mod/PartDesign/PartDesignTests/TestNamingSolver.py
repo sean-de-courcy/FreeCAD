@@ -1535,6 +1535,217 @@ class TestNamingSolver(unittest.TestCase):
         [entry] = App.getReferenceReport(fillet)
         self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
 
+    # ops#183: T1' on a horizontal through-hole, a patterned hole, refined faces and external
+    # sketch geometry. Each pins the reference's element; none may move it silently.
+
+    def redrawProfile(self, sketch, corners):
+        """Deletes the rectangle drawn by `models.rectangle()` (geometry 0-3) and draws it again
+        at `corners`: every line a new geometry ID."""
+        for _ in range(4):
+            sketch.delGeometry(0)
+        sketch.addGeometry(models.rectangle(*corners), False)
+
+    def assertWarnedInPlace(self, owner, kind, expected):
+        """The reference resolved by geometry at tier 3, on `expected`, with a warning. Returns
+        its report row."""
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertIn("Warning", owner.State)
+        [entry] = App.getReferenceReport(owner)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
+        self.assertIn(f"{kind} reference resolved by geometry: {expected}", owner.getStatusString())
+        return entry
+
+    def testHorizontalHoleKeepsTheEntryCircle(self):
+        """ops#183: a hole through the block from its front face (y = 0) to its back (y = 20); a
+        fillet on its entry circle. The block's whole profile is redrawn, every line a new
+        geometry ID, which renames both circles. T1' asks only for the hole's own source (its
+        circle), which the exit circle keeps too: both survive tier 1 with equal overlap. Tier 3
+        takes the entry circle, in place, with a warning, and lists the exit circle, 20 mm away,
+        as the alternative. Never the exit circle, and never silently."""
+        doc = self.newDocument()
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
+        models.pad(body, profile, 10)
+        #   the sketch on the front plane (its y is the block's z), its normal -y
+        front = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 90))
+        sketch = models.sketch(doc, "HoleSketch", [models.circle(15, 5, 2)], body, placement=front)
+        pocket = models.pocketThroughAll(body, sketch, "Hole")
+        pocket.Midplane = True
+        doc.recompute()
+        entryCircle = edge("circle", center=(15, 0, 5), radius=2)
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, entryCircle.one(pocket.Shape))
+        fillet.Radius = 0.5
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        [old] = entryCircle.one(pocket.Shape)
+        oldName = pocket.Shape.getElementMappedName(old)
+
+        self.redrawProfile(profile, (0, 0, 30, 20))
+        doc.recompute()
+
+        [entry] = entryCircle.one(pocket.Shape)
+        [exitCircle] = edge("circle", center=(15, 20, 5), radius=2).one(pocket.Shape)
+        self.assertNotEqual(pocket.Shape.getElementMappedName(entry), oldName)
+        self.assertEqual(fillet.Base[1], [entry])
+        row = self.assertWarnedInPlace(fillet, "Edge", entry)
+        self.assertIn(exitCircle, [a["index"] for a in row["alternatives"]])
+
+    def testPatternedHoleUnderARedrawnProfileWarns(self):
+        """ops#183: T1''s fallback. A hole pocketed at (8, 10) and patterned 14 mm along x; a
+        fillet on the patterned hole's bottom circle at (22, 10, 0). The block's whole profile is
+        redrawn, which renames the circle. Its maker is the pattern, which made no input of the
+        name itself, so T1' asks for every known source, the block's lines among them: the circle
+        lost them and isn't tier 1's. Tier 3 takes it in place, with a warning. With
+        NamingSolver/Tier1SameSource off, tier 1 takes it silently (round 0's behaviour there)."""
+        for sameSource in (True, False):
+            if not sameSource:
+                self.guessSwitch("Tier1SameSource", False)
+            doc = self.newDocument()
+            body = models.body(doc)
+            profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
+            models.pad(body, profile, 10)
+            sketch = models.sketch(doc, "HoleSketch", [models.circle(8, 10, 2)], body, z=10)
+            pocket = models.pocketThroughAll(body, sketch, "Hole")
+            doc.recompute()
+            pattern = doc.addObject("PartDesign::LinearPattern", "Pattern")
+            pattern.Originals = [pocket]
+            pattern.Direction = (models.originFeature(body, "X_Axis"), [""])
+            pattern.Length = 14
+            pattern.Occurrences = 2
+            pattern.Refine = False
+            body.addObject(pattern)
+            doc.recompute()
+            circle = edge("circle", center=(22, 10, 0), radius=2)
+            fillet = body.newObject("PartDesign::Fillet", "Fillet")
+            fillet.Base = (pattern, circle.one(pattern.Shape))
+            fillet.Radius = 0.5
+            doc.recompute()
+            self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+            self.redrawProfile(profile, (0, 0, 30, 20))
+            doc.recompute()
+
+            [bottom] = circle.one(pattern.Shape)
+            self.assertEqual(fillet.Base[1], [bottom])
+            if sameSource:
+                self.assertWarnedInPlace(fillet, "Edge", bottom)
+            else:
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertNotIn("Warning", fillet.State)
+                [entry] = App.getReferenceReport(fillet)
+                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+
+    def refinedBlocks(self, doc):
+        """Pad A, 0..20 x 0..20 x 10, from `Profile`, and pad B beside it, 20..40, from
+        `ProfileB`, refined: one top face over both and one front top edge. Returns pad B."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 20), body)
+        models.pad(body, profile, 10)
+        profileB = models.sketch(doc, "ProfileB", models.rectangle(20, 0, 40, 20), body)
+        padB = models.pad(body, profileB, 10, "PadB")
+        padB.Refine = True
+        doc.recompute()
+        self.assertTrue(padB.isValid(), padB.getStatusString())
+        return padB
+
+    def testRefinedFaceAfterAProfileRedrawn(self):
+        """ops#183: a sketch attached to the refined top face of two pads. Pad B's whole profile
+        redrawn leaves the face's name (the refined face is named from pad A's): exact. Pad A's
+        redrawn renames it, and no element has the old name's structure: tier 3 takes the face in
+        place, with a warning (also with T1' off)."""
+        for redrawn in ("ProfileB", "Profile"):
+            doc = self.newDocument()
+            padB = self.refinedBlocks(doc)
+            top = face("plane", normal=Z, through=(0, 0, 10))
+            sketch = doc.addObject("Sketcher::SketchObject", "OnTop")
+            padB.getParent().addObject(sketch)
+            sketch.AttachmentSupport = [(padB, top.one(padB.Shape)[0])]
+            sketch.MapMode = "FlatFace"
+            doc.recompute()
+            self.assertTrue(sketch.isValid(), sketch.getStatusString())
+
+            corners = (20, 0, 40, 20) if redrawn == "ProfileB" else (0, 0, 20, 20)
+            self.redrawProfile(doc.getObject(redrawn), corners)
+            doc.recompute()
+
+            [merged] = top.one(padB.Shape)
+            self.assertEqual(sketch.AttachmentSupport[0][1], (merged,))
+            if redrawn == "ProfileB":
+                self.assertTrue(sketch.isValid(), sketch.getStatusString())
+                self.assertNotIn("Warning", sketch.State)
+                self.assertFalse(App.getReferenceReport(sketch))
+            else:
+                self.assertWarnedInPlace(sketch, "Face", merged)
+
+    def testRefinedEdgeAfterAProfileRedrawn(self):
+        """ops#183: as testRefinedFaceAfterAProfileRedrawn, with a fillet on the refined front
+        top edge (0..40 at y = 0, z = 10). Pad A's whole profile redrawn: tier 3 takes the edge
+        in place, with a warning."""
+        doc = self.newDocument()
+        padB = self.refinedBlocks(doc)
+        frontTop = edge("line", direction=X, contains=(30, 0, 10), where=lambda e: e.Length > 39)
+        fillet = padB.getParent().newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (padB, frontTop.one(padB.Shape))
+        fillet.Radius = 0.5
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        self.redrawProfile(doc.Profile, (0, 0, 20, 20))
+        doc.recompute()
+
+        [merged] = frontTop.one(padB.Shape)
+        self.assertEqual(fillet.Base[1], [merged])
+        self.assertWarnedInPlace(fillet, "Edge", merged)
+
+    def testCollarFromExternalGeometry(self):
+        """ops#183: a collar padded 3 mm on the block from a sketch of a circle (radius 4) and,
+        as defining external geometry, the hole's top circle (radius 2); a fillet (0.3) on the
+        collar's inner top circle, made from the external circle. The hole moved 1 mm: the
+        external circle follows it and keeps its geometry ID, so the circle keeps its name:
+        exact. The external circle deleted and added again: a new geometry ID renames the
+        circle, and no element has its structure: tier 3 takes it in place, with a warning."""
+        for edit in ("move", "re-add"):
+            doc = self.newDocument()
+            body = models.body(doc)
+            profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
+            models.pad(body, profile, 10)
+            holeSketch = models.sketch(doc, "HoleSketch", [models.circle(8, 10, 2)], body, z=10)
+            hole = models.pocketThroughAll(body, holeSketch, "Hole")
+            doc.recompute()
+            [holeTop] = edge("circle", center=(8, 10, 10), radius=2).one(hole.Shape)
+            sketch = models.sketch(doc, "CollarSketch", [models.circle(8, 10, 4)], body, z=10)
+            sketch.addExternal(hole.Name, holeTop, True)
+            collar = models.pad(body, sketch, 3, "Collar")
+            doc.recompute()
+            inner = edge("circle", center=(8, 10, 13), radius=2)
+            fillet = body.newObject("PartDesign::Fillet", "Fillet")
+            fillet.Base = (collar, inner.one(collar.Shape))
+            fillet.Radius = 0.3
+            doc.recompute()
+            self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+            if edit == "move":
+                geometry = holeSketch.Geometry
+                geometry[0].Center = App.Vector(9, 10, 0)
+                holeSketch.Geometry = geometry
+                inner = edge("circle", center=(9, 10, 13), radius=2)
+            else:
+                sketch.delExternal(0)
+                doc.recompute()
+                [holeTop] = edge("circle", center=(8, 10, 10), radius=2).one(hole.Shape)
+                sketch.addExternal(hole.Name, holeTop, True)
+            doc.recompute()
+
+            [circle] = inner.one(collar.Shape)
+            self.assertEqual(fillet.Base[1], [circle])
+            if edit == "move":
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertNotIn("Warning", fillet.State)
+                self.assertFalse(App.getReferenceReport(fillet))
+            else:
+                self.assertWarnedInPlace(fillet, "Edge", circle)
+
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
         no name to solve from, ops#123), its fingerprint kept; the file opened again with the
