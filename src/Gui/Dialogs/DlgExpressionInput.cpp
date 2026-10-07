@@ -356,15 +356,16 @@ bool DlgExpressionInput::checkCyclicDependencyVarSet(const QString& text)
 void DlgExpressionInput::checkExpression(const QString& text)
 {
     // now handle expression
-    std::shared_ptr<Expression> expr(
-        ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData())
-    );
-
     // FreeCAD-CH (ops#152): the shown text of the stored expression keeps it, so OK with the text
     // unchanged doesn't rewrite a label or a `.Width` reference into the form it parses back to.
+    // Compared before parsing, so the shown text is never parsed (ops#185).
+    std::shared_ptr<Expression> expr;
     if (std::shared_ptr<Expression> stored = path.getDocumentObject()->getExpression(path).expression;
         stored && text == expressionDisplayText(stored.get())) {
         expr = stored->copy();
+    }
+    else {
+        expr = ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData());
     }
 
     if (expr) {

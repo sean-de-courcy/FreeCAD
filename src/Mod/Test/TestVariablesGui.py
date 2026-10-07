@@ -267,6 +267,27 @@ class TestVariablesGui(unittest.TestCase):
         self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2")
         self.assertEqual(self.doc.UndoCount, undoCount)
 
+    def test_input_field_group_separator(self):
+        """An InputField whose locale's group separator is '.' (German): showing
+        `#Width * 2.5` changes nothing, though fixup() makes it `#Width * 25` (ops#185)."""
+        self.varSet.Label = "Variables"
+        self.box.setExpression("Length", "<<Variables>>.Width * 2.5")
+        self.doc.recompute()
+        undoCount = self.doc.UndoCount
+        field = Gui.UiLoader().createWidget("Gui::InputField")
+        self.widgets.append(field)
+        field.setLocale(QtCore.QLocale(QtCore.QLocale.German, QtCore.QLocale.Germany))
+        self.assertEqual(field.locale().groupSeparator(), ".")
+        binding = Gui.ExpressionBinding(field)
+        binding.bind(self.box, "Length")
+        field.show()
+        pump(0.1)
+        self.assertEqual(field.text(), "#Width * 2.5")
+        field.setProperty("unit", "mm")  # updateText() shows the text again
+        pump(0.1)
+        self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2.5")
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
     def test_property_view_repaints(self):
         """8.4: changes that make a name unique or ambiguous repaint the property view's Data tab:
         an alias set, a VarSet deleted, and its deletion undone (fork PR 153 review)."""
@@ -286,12 +307,18 @@ class TestVariablesGui(unittest.TestCase):
             pump(0.3)
             return counter.count
 
+        # The baseline (ops#185): a change the hook ignores, a value, repaints as much as no
+        # change at all. Each change below must repaint more than that.
+        baseline = max(
+            repainted(lambda: None), repainted(lambda: setattr(self.varSet, "Width", 25))
+        )
+
         self.doc.openTransaction("Delete Other")
-        self.assertGreater(repainted(lambda: self.doc.removeObject("Other")), 0, "delete")
+        self.assertGreater(repainted(lambda: self.doc.removeObject("Other")), baseline, "delete")
         self.doc.commitTransaction()
-        self.assertGreater(repainted(self.doc.undo), 0, "undo of the delete")
+        self.assertGreater(repainted(self.doc.undo), baseline, "undo of the delete")
         self.assertIsNotNone(self.doc.getObject("Other"))
-        self.assertGreater(repainted(lambda: sheet.setAlias("A1", "Depth")), 0, "alias")
+        self.assertGreater(repainted(lambda: sheet.setAlias("A1", "Depth")), baseline, "alias")
         editor.viewport().removeEventFilter(counter)
 
     def test_live_ambiguity_change(self):
