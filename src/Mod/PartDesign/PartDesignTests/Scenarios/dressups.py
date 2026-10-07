@@ -734,3 +734,35 @@ class StepNarrowPieceGrooveDeleted(Scenario):
         self.bodyObject.removeObject(doc.Step)
         doc.removeObject("Step")
         self.deleted = True
+
+
+class FilletHoleCircleDeletedBesideAnother(Scenario):
+    """A block 0..30 x 0..20 x 10 (a pad) with one pocket through all from a sketch of two
+    circles, radius 2, at (8, 10) (geometry 0) and (22, 10); a fillet (0.5) on the first hole's
+    bottom circle. The first circle is deleted from the sketch. The other hole's bottom circle has
+    the same maker and shares the block's bottom face: the solver's tier 1 took it, silently, 14 mm
+    away (ops#173). It lost the old circle's source, so the fillet breaks."""
+
+    area = "dress-ups"
+    REFS = ("hole_bottom",)
+    gone = False
+
+    def holeBottom(self):
+        return BROKEN if self.gone else edge("circle", center=(8, 10, 0), radius=2)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 30, 20), body)
+        m.pad(body, profile, 10)
+        circles = [m.circle(8, 10, 2), m.circle(22, 10, 2)]
+        holes = m.sketch(doc, "HoleSketch", circles, body, z=10)
+        pocket = m.pocketThroughAll(body, holes, "Holes")
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, self.holeBottom()))
+        fillet.Radius = 0.5
+        self.ref("hole_bottom", fillet, "Base", self.holeBottom, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.HoleSketch.delGeometry(0)
+        self.gone = True

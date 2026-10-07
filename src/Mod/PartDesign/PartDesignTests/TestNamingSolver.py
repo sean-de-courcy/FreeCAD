@@ -1127,11 +1127,14 @@ class TestNamingSolver(unittest.TestCase):
         doc.recompute()
 
     def testStructuralCandidatesAreGuessedByTheNearest(self):
-        """G1: the slot redrawn 0.5 mm over. Structure keeps the slot's two bottom edges along x,
-        and tier 3's strict reach (1 % of the diagonal, 0.24 mm) holds neither; the wide reach
-        (5 %, 1.22 mm) holds the nearer one, 0.5 mm away, and the other is far enough (4.5 mm).
-        The fillet computes on it, warned, kind `nearest`, the other as the alternative. Marked
-        broken, the fillet fails naming the original and the rejected pick."""
+        """The slot redrawn 0.5 mm over. Its bottom edges along x have the slot's maker, but
+        every line of the slot is new, so they lost the old edge's source (ops#173): no
+        structural candidate. Tier 3's strict reach (1 % of the diagonal, 0.24 mm) holds
+        neither; G2's wide reach (5 %, 1.22 mm) holds the nearer one, 0.5 mm away, from the same
+        sketch and pocket (policy D), and the other is far enough (4.5 mm). The fillet computes
+        on it, warned, kind `geometric` (G1, `nearest`, before ops#173), the other as the
+        alternative. Marked broken, the fillet fails naming the original and the rejected
+        pick."""
         # Arrange
         doc = self.newDocument()
         pocket, fillet = self.filletedSlot(doc)
@@ -1149,13 +1152,15 @@ class TestNamingSolver(unittest.TestCase):
         self.assertIn("tier 3 wide", fillet.getStatusString())
         [entry] = App.getReferenceReport(fillet)
         self.assertEqual((entry["status"], entry["tier"]), ("guessed", 3))
-        self.assertEqual(entry["guess_kind"], "nearest")
+        self.assertEqual(entry["guess_kind"], "geometric")
         self.assertEqual(entry["original"]["index"], original)
-        self.assertEqual(
-            [(a["index"], a["role"]) for a in entry["alternatives"]], [(other[0], "structural")]
-        )
+        #   the alternatives: what geometry ranked (the other edge among them), not the pick
+        alternatives = [(a["index"], a["role"]) for a in entry["alternatives"]]
+        self.assertIn((other[0], "geometric"), alternatives)
+        self.assertEqual({role for _, role in alternatives}, {"geometric"})
+        self.assertNotIn(nearer[0], [index for index, _ in alternatives])
         [sub] = self.savedSubs(doc, "Fillet", "Base")
-        self.assertEqual(sub["guess"], "nearest")
+        self.assertEqual(sub["guess"], "geometric")
 
         #   marked broken: the fillet fails on the original, the pick rejected
         App.markReferenceBroken(fillet, "Base", 0)
@@ -1224,7 +1229,14 @@ class TestNamingSolver(unittest.TestCase):
         self.assertEqual(entry["status"], "broken")
         self.assertEqual(entry["candidates"][0], nearest)
         self.assertAlmostEqual(entry["candidate_distances"][0], distance, places=6)
-        distances = [d for d in entry["candidate_distances"] if d == d]  # NaN last
+        # NaN last; the survivors tier 1 dropped (ops#174) come after the ranked ones
+        dropped = ("other maker", "other source")
+        roles = entry["candidate_roles"]
+        ranked = [r for r in roles if r not in dropped]
+        self.assertEqual(roles[: len(ranked)], ranked)
+        distances = [
+            d for d, r in zip(entry["candidate_distances"], roles) if d == d and r not in dropped
+        ]
         self.assertEqual(distances, sorted(distances))
         self.assertLessEqual(len(entry["candidates"]), 8)
         self.assertIn(f"candidates: {nearest} ({distance:.3g} mm)", fillet.getStatusString())
@@ -1343,8 +1355,9 @@ class TestNamingSolver(unittest.TestCase):
             self.assertEqual(entry["candidates"][1], rim)
             self.assertAlmostEqual(entry["candidate_distances"][1], (14**2 + 10**2) ** 0.5, 6)
 
-        #   the switch off
+        #   the switches off (T1 and T1', ops#173)
         self.guessSwitch("Tier1SameMaker", False)
+        self.guessSwitch("Tier1SameSource", False)
         doc = self.newDocument()
         last, fillet = self.filletedHoles(doc, (holeA, holeB), 0.5)
         self.deleteHoleA(doc)
@@ -1383,6 +1396,144 @@ class TestNamingSolver(unittest.TestCase):
                 self.assertAlmostEqual(
                     entry["candidate_distances"][1], (1.5**2 + 10**2) ** 0.5, 6
                 )
+
+    # ops#173: a deleted circle of a multi-circle sketch isn't another circle's hole.
+
+    def testDeletedCircleOfATwoCircleSketchBreaks(self):
+        """ops#173: the first circle of the pocket's sketch is deleted. The other hole's bottom
+        circle has the same maker (the pocket) and shares the block's bottom face, so it was
+        tier 1's only survivor and the fillet moved to it silently, 14 mm away. It lost the old
+        circle's source (its own circle has another geometry ID): the fillet breaks with it first
+        and its rim second. With NamingSolver/Tier1SameSource off, tier 1 takes it as before."""
+        for sameSource in (True, False):
+            if not sameSource:
+                self.guessSwitch("Tier1SameSource", False)
+            doc = self.newDocument()
+            pocket, fillet = self.filletedHole(doc, circles=((8, 10), (22, 10)))
+
+            doc.HoleSketch.delGeometry(0)
+            doc.recompute()
+
+            [bottom] = edge("circle", center=(22, 10, 0), radius=2).one(pocket.Shape)
+            [entry] = App.getReferenceReport(fillet)
+            if sameSource:
+                [rim] = edge("circle", center=(22, 10, 10), radius=2).one(pocket.Shape)
+                self.assertBrokenNearest(fillet, bottom, 14.0)
+                #   the whole list: no other maker's element (PR 149's review)
+                self.assertEqual(entry["candidates"], [bottom, rim])
+                self.assertEqual(entry["candidate_roles"], ["geometric", "geometric"])
+                self.assertIn("lost the old element's source", entry["evidence"])
+                self.assertNotIn("another maker", entry["evidence"])
+            else:
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertEqual(fillet.Base[1], [bottom])
+                self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+
+    def filletedHole(self, doc, size=(30, 20), circles=((8, 10),), height=10):
+        """A block 0..size, `height` high, its sketch `Profile`; one pocket through all from
+        `HoleSketch`, circles of radius 2 at `circles`, and a fillet (0.5) on the first hole's
+        bottom circle. Returns (the pocket, the fillet)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, *size), body)
+        models.pad(body, profile, height)
+        holes = [models.circle(x, y, 2) for x, y in circles]
+        sketch = models.sketch(doc, "HoleSketch", holes, body, z=height)
+        pocket = models.pocketThroughAll(body, sketch, "Holes")
+        doc.recompute()
+        x, y = circles[0]
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, edge("circle", center=(x, y, 0), radius=2).one(pocket.Shape))
+        fillet.Radius = 0.5
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        return pocket, fillet
+
+    def assertHoleCircleKept(self, pocket, fillet, tier):
+        """The fillet still on the hole's bottom circle at (8, 10, 0), no warning; resolved by
+        `tier` (None: exact, no solver row)."""
+        [bottom] = edge("circle", center=(8, 10, 0), radius=2).one(pocket.Shape)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], [bottom])
+        self.assertNotIn("Warning", fillet.State)
+        rows = App.getReferenceReport(fillet)
+        self.assertFalse([e for e in rows if e["status"] in ("broken", "guessed")], rows)
+        if tier is not None:
+            self.assertEqual([(e["status"], e["tier"]) for e in rows], [("resolved", tier)], rows)
+
+    def testRedrawnHoleCircleIsAWarnedGuess(self):
+        """ops#173's control: the single hole's circle is deleted and drawn again 0.5 mm over, a
+        new geometry ID. The new bottom circle lost the old one's source as another hole's would,
+        so geometry decides: within G2's reach, from the same sketch and pocket (policy D), the
+        fillet takes it with a warning (decision 20, as a pad edge's redraw)."""
+        doc = self.newDocument()
+        pocket, fillet = self.filletedHole(doc)
+
+        doc.HoleSketch.delGeometry(0)
+        doc.HoleSketch.addGeometry(models.circle(8.5, 10, 2), False)
+        doc.recompute()
+
+        [bottom] = edge("circle", center=(8.5, 10, 0), radius=2).one(pocket.Shape)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], [bottom])
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+
+    def testUnrelatedEditKeepsTheHoleCircle(self):
+        """ops#173: the rule touches only references whose name is gone. After an edit of the
+        block's sketch, the single hole's bottom circle keeps its name: exact, no warning."""
+        doc = self.newDocument()
+        pocket, fillet = self.filletedHole(doc)
+
+        models.moveRectangle(doc.Profile, 0, 0, 32, 20)
+        doc.recompute()
+
+        self.assertHoleCircleKept(pocket, fillet, None)
+
+    def testRedrawnBlockLineKeepsTheHoleCircle(self):
+        """PR 149's review: the block's bottom line is deleted and drawn again, a new geometry
+        ID. The hole's bottom circle keeps its name (the block's bottom face is named from its
+        other lines): exact, no warning. testRedrawnBlockProfileKeepsTheHoleCircle renames it."""
+        doc = self.newDocument()
+        pocket, fillet = self.filletedHole(doc)
+
+        doc.Profile.delGeometry(0)
+        doc.Profile.addGeometry(models.polyline([(0, 0), (30, 0)]), False)
+        doc.recompute()
+
+        self.assertHoleCircleKept(pocket, fillet, None)
+
+    def testRedrawnBlockProfileKeepsTheHoleCircle(self):
+        """PR 149's review (Medium 1): the block's whole profile is deleted and drawn again, every
+        line a new geometry ID. T1' asks only for the sources of what the pocket made itself (the
+        hole's cylinder, from its circle), not of the face it cut: the hole's bottom circle keeps
+        them and stays tier 1's, no warning."""
+        doc = self.newDocument()
+        pocket, fillet = self.filletedHole(doc)
+
+        for _ in range(4):
+            doc.Profile.delGeometry(0)
+        doc.Profile.addGeometry(models.rectangle(0, 0, 30, 20), False)
+        doc.recompute()
+
+        self.assertHoleCircleKept(pocket, fillet, 1)
+
+    def testDeletedCircleWithinReachIsAWarnedGuess(self):
+        """ops#173 under policy D: the deleted circle's sketch and pocket survive, so another hole
+        of that sketch within G2's wide reach is its warned pick, never silent: holes 5 mm apart
+        in a block 200 x 100 x 20 (diagonal 224 mm: strict reach 2.2 mm, wide 11.2 mm); the
+        other hole's rim, 20.6 mm away, is beyond three times that."""
+        doc = self.newDocument()
+        pocket, fillet = self.filletedHole(doc, (200, 100), ((100, 50), (105, 50)), 20)
+
+        doc.HoleSketch.delGeometry(0)
+        doc.recompute()
+
+        [other] = edge("circle", center=(105, 50, 0), radius=2).one(pocket.Shape)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], [other])
+        self.assertIn("Warning", fillet.State)
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
 
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:

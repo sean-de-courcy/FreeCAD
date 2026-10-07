@@ -179,7 +179,8 @@ names it.
 | `fix/152-uses-undo` | fix | ops#152, ops#177, ops#179 | - | `integration` (after fork PRs 146, 147) | `437e9ba684` (fork PR 148), 2026-10-07 | when upstream fixes `PropertySheet::renameObjectIdentifiers` for undo copies and the `_ExprContainers` iteration in `PropertyExpressionEngine.cpp` (drop those parts); the uses helper stays (fork feature) |
 | `feat/150-w4-pattern-originals` | feat | ops#150 | - | `integration` `dbd0b40f6f` | `d68294375b` (fork PR 154), 2026-10-07 | never (fork feature) |
 | `fix/163-undo-dynamic-props` | fix | ops#163 | upstream issue 32285 (upstream commit f4665aa7b5) | `integration` `ab57bc30de` | `92fbbe9288` (fork PR 150), 2026-10-07 | a new base fixes upstream issue 32285 |
-| `feat/152-completion` | feat | ops#152 | - | `integration` (after fork PRs 145, 146) | (fork PR 152) | never (fork feature); refit when upstream changes `ExpressionCompleter`'s fuzzy model |
+| `feat/152-completion` | feat | ops#152 | - | `integration` (after fork PRs 145, 146) | `74cabd709a` (fork PR 152), 2026-10-07 | never (fork feature); refit when upstream changes `ExpressionCompleter`'s fuzzy model |
+| `fix/173-multi-circle-tier1` | fix | ops#173, ops#174 | - | `integration` (`fix/168-own-twin-lift` `f911f50fc3`) | (fork PR 149) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
