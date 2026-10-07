@@ -1405,10 +1405,6 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 || prop->testStatus(App::Property::LockDynamic)) {
                 break;
             }
-            int tid = 0;
-            if (App::Document* doc = propertyDocument(prop->getContainer())) {
-                tid = doc->openTransaction("Rename property");
-            }
             const char* oldName = prop->getName();
             QString res = QInputDialog::getText(
                 Gui::getMainWindow(),
@@ -1420,13 +1416,23 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             if (res.isEmpty()) {
                 break;
             }
+            // FreeCAD-CH (ops#163): the transaction opens once there is a name. Booked before the
+            // dialog, a cancel left it booked (the user's next change was recorded as "Rename
+            // property"), and a change made while the dialog ran landed in it.
+            int tid = 0;
+            if (App::Document* doc = propertyDocument(prop->getContainer())) {
+                tid = doc->openTransaction("Rename property");
+            }
 
             std::string newName = res.toUtf8().constData();
             try {
                 prop->getContainer()->renameDynamicProperty(prop, newName.c_str());
             }
             catch (Base::Exception& e) {
-                App::GetApplication().abortTransaction(tid);
+                // Only our own: an ID of 0 would mean the current global transaction
+                if (tid) {
+                    App::GetApplication().abortTransaction(tid);
+                }
                 e.reportException();
                 break;
             }

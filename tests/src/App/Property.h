@@ -52,6 +52,9 @@ protected:
 
     void TearDown() override
     {
+        // An object in an undo step opens a "Delete" transaction when removed, which no one
+        // would close: the next test's changes would land in it (a test ending with a redo)
+        doc->clearUndos();
         doc->removeObject(varSet->getNameInDocument());
     }
 

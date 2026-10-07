@@ -573,9 +573,14 @@ void Document::changePropertyOfObject(TransactionalObject* obj,
     }
     if (!isPerformingTransaction() && !d->activeUndoTransaction) {
         if (!testStatus(Restoring) || testStatus(Importing)) {
+            // FreeCAD-CH (ops#163; upstream issue 32285, from upstream f4665aa7b5): open the
+            // global transaction once booked, as _checkTransaction does. It was only booked, so
+            // a dynamic property added, removed, renamed or moved as its first change wasn't
+            // recorded, and Undo left it.
             if (d->bookedTransaction == NullTransaction) {
                 d->bookedTransaction = GetApplication().getGlobalTransaction();
-            } else {
+            }
+            if (d->bookedTransaction != NullTransaction) {
                 _openTransaction(GetApplication().getTransactionName(d->bookedTransaction), d->bookedTransaction);
             }
         }

@@ -177,7 +177,8 @@ names it.
 | `carry/152-fuzzy-autocomplete` | carry | ops#152 | `upstream PR 30531`: main `2b815ef77d` (cherry-picked unchanged as `10710a6ebc`) | `integration` `4bcf3a3e1d` | `0620397821` (fork PR 145), 2026-10-07 | a new base contains main `2b815ef77d` |
 | `fix/170-pipe-hole-helix-panels` | fix | ops#170 | - | `integration` `ab57bc30de` | `dbd0b40f6f` (fork PR 151), 2026-10-07 | upstream fixes all seven (W6-W9 keep the behaviour, ops#150) |
 | `fix/152-uses-undo` | fix | ops#152, ops#177, ops#179 | - | `integration` (after fork PRs 146, 147) | `437e9ba684` (fork PR 148), 2026-10-07 | when upstream fixes `PropertySheet::renameObjectIdentifiers` for undo copies and the `_ExprContainers` iteration in `PropertyExpressionEngine.cpp` (drop those parts); the uses helper stays (fork feature) |
-| `feat/150-w4-pattern-originals` | feat | ops#150 | - | `integration` `dbd0b40f6f` | (fork PR 154) | never (fork feature) |
+| `feat/150-w4-pattern-originals` | feat | ops#150 | - | `integration` `dbd0b40f6f` | `d68294375b` (fork PR 154), 2026-10-07 | never (fork feature) |
+| `fix/163-undo-dynamic-props` | fix | ops#163 | upstream issue 32285 (upstream commit f4665aa7b5) | `integration` `ab57bc30de` | (fork PR 150) | a new base fixes upstream issue 32285 |
 
 ## Fork-only commits in carried topics
 
