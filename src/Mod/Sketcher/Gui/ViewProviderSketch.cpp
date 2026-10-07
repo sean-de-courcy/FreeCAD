@@ -61,6 +61,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ObjectIdentifier.h>  // FreeCAD-CH (ops#152)
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
