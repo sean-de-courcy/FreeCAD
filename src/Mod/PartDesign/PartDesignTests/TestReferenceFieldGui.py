@@ -37,6 +37,10 @@ Designed models, each built by the test:
 - Redraw: a pad of a rectangle 0..20 x 0..10, 10 high, a fillet r = 1 on its vertical edge at
   (20, 0); the rectangle drawn again the other way round: the edge is found again by geometry
   (tier 3), a guess with a warning.
+- Regions (W3): a sketch with rectangle A 0..20 x 0..10, a circle r = 2 at (10, 5) inside it, and
+  a separate rectangle B 30..40 x 0..10; Pad 5. Its regions: A minus the disk (200 - 4 pi), the
+  disk (4 pi), B (100). The whole sketch pads 5 (300 - 4 pi) (A's hole stays); B alone 500; the
+  disk alone 20 pi; all three 1500 (the hole filled).
 
 Keys go through the window (QTest's QWindow overload), so the shortcut map sees them as it sees a
 user's. Each arming test also has a twin that arms through the field's `armed` property, so that a
@@ -69,6 +73,8 @@ DRAFT_CHANGE = 500 * math.tan(math.radians(2))
 TOP_FRONT = edge("line", direction=X, through=(0, 0, 10))
 BOTTOM_BACK = edge("line", direction=X, through=(0, 10, 0))
 VERTICAL = edge("line", direction=Z, through=(10, 0, 0))
+# The Regions model padded 5 from the whole sketch: A's hole stays.
+WHOLE_SKETCH = 5 * (300 - 4 * math.pi)
 
 
 def flushDeletes():
@@ -726,7 +732,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pad, second = self.redrawnSecondPad()
         rows = {(e["property"], e["index"]) for e in App.getReferenceReport(second)}
         self.assertIn(("ReferenceAxis", 0), rows)
-        [field] = self.edit(second)
+        [profile, field] = self.edit(second, count=2)
         self.assertEqual(field.objectName(), "fieldUpToFace")
         tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
         self.assertIsNotNone(tree, "no References panel")
@@ -918,7 +924,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         rows = {(e["property"], e["index"]) for e in App.getReferenceReport(second)}
         self.assertEqual(rows, {("UpToFace", 0)})
-        [field] = self.edit(second)
+        [profile, field] = self.edit(second, count=2)
         self.assertIsNone(self.listedRows())
         Gui.runCommand("Std_Undo")
         self.doc.recompute()
@@ -1114,7 +1120,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         at 15 pads 5 high (20 mm^3), the plane at 17 replaces it (28 mm^3), the same pick again
         changes nothing and the field stays armed."""
         box, pad = self.padOnBox(toFace=False)
-        self.edit(pad, count=0)
+        self.edit(pad, count=1)
         self.assertIsNone(Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonFace"))
         self.padModeBox().setCurrentIndex(3)
         pump(0.2)
@@ -1139,7 +1145,7 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testPadOffsetDisarmsTheFace(self):
         """T3: the offset takes the focus: the face field disarms, a pick leaves UpToFace."""
         box, pad = self.padOnBox()
-        [field] = self.edit(pad)
+        [profile, field] = self.edit(pad, count=2)
         self.assertFalse(armed(field), "a complete pad opens armed")
         self.arm(field, byFocus=True)
         offset = Gui.getMainWindow().findChild(QtWidgets.QWidget, "offsetEdit")
@@ -1151,7 +1157,7 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testPadFaceStaysArmedIn3DView(self):
         """T4: the face field stays armed with the focus in the 3D view, and takes the pick."""
         box, pad = self.padOnBox()
-        [field] = self.edit(pad)
+        [profile, field] = self.edit(pad, count=2)
         self.arm(field, byFocus=False)
         self.assertTrue(focus(views3D()[0]))
         pump(0.2)
@@ -1166,7 +1172,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         # The edit opened as a double click opens it, in a command Cancel aborts (the Pad's panel
         # opens none of its own)
         self.doc.openTransaction("Edit Pad")
-        [field] = self.edit(pad)
+        [profile, field] = self.edit(pad, count=2)
         self.arm(field, byFocus=True)
         self.pick(self.high, "")
         self.assertLink(pad.UpToFace, self.high, [])
@@ -1190,7 +1196,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         exactly those two go, and the pad stops at the middle face (120 mm^3)."""
         pad, target = self.upToShapePad(["Face1", "Face2", "Face3"])
         self.assertAlmostEqual(pad.Shape.Volume, 80, places=3)
-        [shape, faces] = self.edit(pad, count=2)
+        [profile, shape, faces] = self.edit(pad, count=3)
         self.assertEqual(shape.objectName(), "fieldUpToShape")
         self.assertEqual(faces.objectName(), "fieldUpToShapeFaces")
         self.assertEqual(texts(shape), [target.Label])
@@ -1209,7 +1215,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """The faces field is a list: a pick of the shape's top face adds it, a pick of the
         lowest removes it; the pad follows (80, then 120 mm^3)."""
         pad, target = self.upToShapePad(["Face1", "Face2"])
-        [shape, faces] = self.edit(pad, count=2)
+        [profile, shape, faces] = self.edit(pad, count=3)
         self.arm(faces, byFocus=False)
         self.pick(target, "Face3")
         self.assertEqual(texts(faces), ["Face1", "Face2", "Face3"])
@@ -1224,7 +1230,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pad, target = self.upToShapePad([])
         pad.UpToShape = None
         self.doc.recompute()
-        [shape] = self.edit(pad, count=1)
+        [profile, shape] = self.edit(pad, count=2)
         self.assertEqual(shape.objectName(), "fieldUpToShape")
         self.arm(shape, byFocus=True)
         self.pick(target, "Face2")
@@ -1242,7 +1248,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         lower = self.datumPlane(body, "Lower", 3)
         upper = self.datumPlane(body, "Upper", 4)
         self.doc.recompute()
-        self.edit(pad, count=0)
+        self.edit(pad, count=1)
         start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
         start.setCurrentIndex(2)
         pump(0.2)
@@ -1266,7 +1272,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         the box's vertical edge becomes ReferenceAxis and the box's entry, and the field
         disarms (one pick)."""
         box, pad = self.padOnBox(toFace=False)
-        self.edit(pad, count=0)
+        self.edit(pad, count=1)
         combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "directionCB")
         combo.setCurrentIndex(1)
         combo.activated.emit(1)
@@ -1371,7 +1377,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """Finding 2: the second pad's up-to-face is a guess, in its field; the pad switched to
         a length hides the field, and the References panel lists UpToFace again."""
         pad, second = self.redrawnSecondPad()
-        [field] = self.edit(second)
+        [profile, field] = self.edit(second, count=2)
         self.assertEqual(field.objectName(), "fieldUpToFace")
         self.assertEqual(self.listedRows(), ["ReferenceAxis[0]"])
         self.padModeBox().setCurrentIndex(0)
@@ -1430,7 +1436,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """Ctrl+Z / Ctrl+Y in a single-entry field: the up-to-face steps back to the lower plane
         and forward to the higher one."""
         box, pad = self.padOnBox()
-        [field] = self.edit(pad)
+        [profile, field] = self.edit(pad, count=2)
         self.arm(field, byFocus=True)
         self.pick(self.high, "")
         self.assertLink(pad.UpToFace, self.high, [])
@@ -1446,7 +1452,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """The face field armed, the pad switched to a length: the field disarms, its gate goes
         (a pick of the plane selects it), UpToFace stays."""
         box, pad = self.padOnBox()
-        [field] = self.edit(pad)
+        [profile, field] = self.edit(pad, count=2)
         self.arm(field, byFocus=False)
         self.padModeBox().setCurrentIndex(0)
         pump(0.2)
@@ -1470,7 +1476,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """The direction box's "Select reference" chosen in its popup arms the hidden field;
         the sketch normal chosen there again disarms it without a pick."""
         box, pad = self.padOnBox(toFace=False)
-        self.edit(pad, count=0)
+        self.edit(pad, count=1)
         combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "directionCB")
         self.choose(combo, 1)
         field = findField("fieldReferenceAxis")
@@ -1482,3 +1488,229 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, vertical)
         self.assertNotEqual(pad.ReferenceAxis[1] if pad.ReferenceAxis else [], [vertical])
         self.assertVolume(pad, 1012)
+    # -- W3: the Pad's profile and its regions (T14-T16) ----------------------------------------
+
+    def regionsPad(self, allowMultiFace=True, makeInternals=True):
+        """The Regions model, padded 5 from the whole sketch; returns the pad, the sketch and its
+        regions by name (found by their areas): "A" A minus the disk, "disk", "B"."""
+        body = models.body(self.doc)
+        geometry = (
+            models.rectangle(0, 0, 20, 10)
+            + [models.circle(10, 5, 2)]
+            + models.rectangle(30, 0, 40, 10)
+        )
+        sketch = models.sketch(self.doc, "Regions", geometry, body)
+        sketch.MakeInternals = True
+        pad = models.pad(body, sketch, 5)
+        pad.AllowMultiFace = allowMultiFace
+        self.doc.recompute()
+        regions = {}
+        for i, f in enumerate(sketch.InternalShape.Faces):
+            for name, area in (("A", 200 - 4 * math.pi), ("disk", 4 * math.pi), ("B", 100)):
+                if abs(f.Area - area) < 1e-6:
+                    regions[name] = "InternalFace%d" % (i + 1)
+        self.assertEqual(sorted(regions), ["A", "B", "disk"], regions)
+        if not makeInternals:
+            sketch.MakeInternals = False
+            self.doc.recompute()
+        self.assertVolume(pad, WHOLE_SKETCH)
+        return pad, sketch, regions
+
+    def pickRegion(self, sketch, region):
+        """A region picked in the 3D view, through the body as the view gives it."""
+        Gui.Selection.addSelection(self.doc.Name, "Body", sketch.Name + "." + region)
+        pump(0.2)
+
+    def profileRegions(self, byFocus):
+        """T14: the profile field shows the whole sketch; region B picked: 500 mm^3 and
+        AllowMultiFace set; the disk added: 500 + 20 pi; B picked again goes: 20 pi; the disk
+        picked again, the last region, leaves the whole sketch."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.assertEqual(field.objectName(), "fieldProfile")
+        self.assertFalse(armed(field), "a complete pad opens armed")
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.arm(field, byFocus)
+
+        self.pickRegion(sketch, regions["B"])
+        self.assertEqual(pad.Profile[1], [regions["B"]])
+        self.assertTrue(pad.AllowMultiFace)
+        self.assertEqual(texts(field), ["Regions:" + regions["B"]])
+        self.assertVolume(pad, 500)
+        self.pickRegion(sketch, regions["disk"])
+        self.assertEqual(pad.Profile[1], [regions["B"], regions["disk"]])
+        self.assertVolume(pad, 500 + 20 * math.pi)
+        self.pickRegion(sketch, regions["B"])
+        self.assertEqual(pad.Profile[1], [regions["disk"]])
+        self.assertVolume(pad, 20 * math.pi)
+        self.pickRegion(sketch, regions["disk"])
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.assertTrue(armed(field))
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+    def testProfileRegionsPickAndRemove(self):
+        self.profileRegions(byFocus=True)
+
+    def testProfileRegionsPickAndRemoveArmedByProperty(self):
+        self.profileRegions(byFocus=False)
+
+    def testProfileAllRegionsFillTheHole(self):
+        """5.1: all three regions are not the whole sketch: A minus the disk and the disk fill
+        A's hole (1000 mm^3 with B: 1500)."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        for name in ("A", "disk", "B"):
+            self.pickRegion(sketch, regions[name])
+        self.assertEqual(len(entries(field).findItems("*", QtCore.Qt.MatchWildcard)), 3)
+        self.assertVolume(pad, 1500)
+
+    def testOlderPadGetsAllowMultiFace(self):
+        """T16, B7: a pad saved before AllowMultiFace (False): region B picked pads B alone,
+        500 mm^3, not the whole sketch (P7's re-pick padded the whole sketch silently)."""
+        pad, sketch, regions = self.regionsPad(allowMultiFace=False)
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        self.assertEqual(pad.Profile[1], [regions["B"]])
+        self.assertTrue(pad.AllowMultiFace)
+        self.assertVolume(pad, 500)
+
+    def testProfileOtherSketchReplaces(self):
+        """A pick of another sketch, whole, replaces the profile, regions and all: a square
+        50..52 x 0..2 padded 5, 20 mm^3."""
+        pad, sketch, regions = self.regionsPad()
+        other = models.sketch(self.doc, "Other", models.rectangle(50, 0, 52, 2), pad.getParent())
+        self.doc.recompute()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        self.pick(other, "")
+        self.assertEqual(pad.Profile, (other, []))
+        self.assertEqual(texts(field), ["Other (whole)"])
+        self.assertVolume(pad, 20)
+
+    def testProfileDeleteAndUseWholeSketch(self):
+        """Delete of the last region, and the entry menu's Use whole sketch, leave the whole
+        sketch; the whole entry can't be removed."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=True)
+        self.pickRegion(sketch, regions["B"])
+        self.assertEqual(pad.Profile[1], [regions["B"]])
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: pad.Profile[1] == []), pad.Profile)
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        menu = openMenu(field, 0)
+        actions = menuActions(menu)
+        self.assertFalse(actions["Remove"].isEnabled())
+        self.assertNotIn("Use whole sketch", actions)
+        menu.close()
+        pump()
+
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["disk"])
+        self.pickRegion(sketch, regions["B"])
+        menu = openMenu(field, 1)
+        menuActions(menu)["Use whole sketch"].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertVolume(pad, WHOLE_SKETCH)
+        #   one step of the field's undo
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        both = [regions["disk"], regions["B"]]
+        self.assertTrue(waitFor(lambda: pad.Profile[1] == both), pad.Profile)
+
+    def testProfileMakeRegions(self):
+        """A sketch that makes no regions: the armed field says so, its menu's Make regions sets
+        MakeInternals, and region B can be picked then (500 mm^3)."""
+        pad, sketch, regions = self.regionsPad(makeInternals=False)
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        hint = field.findChild(QtWidgets.QLabel, "hint")
+        self.assertIn("Make regions", hint.text())
+        menu = openMenu(field, 0)
+        menuActions(menu)["Make regions"].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertTrue(sketch.MakeInternals)
+        self.assertNotIn("Make regions", hint.text())
+        self.pickRegion(sketch, regions["B"])
+        self.assertVolume(pad, 500)
+
+    def testProfileEscDisarmsThenCancels(self):
+        """Esc disarms the profile field (10.1), the next Esc cancels: the whole sketch again."""
+        pad, sketch, regions = self.regionsPad()
+        self.doc.openTransaction("Edit Pad")
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=True)
+        self.pickRegion(sketch, regions["B"])
+        self.assertEqual(pad.Profile[1], [regions["B"]])
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+        )
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+    def coinNodes(self, obj, typeName):
+        """obj's view provider's nodes of a type, those under switches that are off included."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setType(coin.SoType.fromName(typeName))
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.setSearchingAll(True)
+        search.apply(obj.ViewObject.RootNode)
+        return [path.getTail() for path in search.getPaths()]
+
+    def regionTransparency(self, sketch):
+        [faces] = self.coinNodes(sketch, "SoSketchFaces")
+        return faces.getField("transparency").getValue()
+
+    def shownToggles(self, pad):
+        return sum(bool(t.getField("on").getValue()) for t in self.coinNodes(pad, "SoToggleSwitch"))
+
+    def testProfileShadingWhileArmed(self):
+        """T15, S1: while the field is armed the sketch shows, its regions drawn at half their
+        saved transparency, the profile preview shows though its preference is off, and the pad
+        (nothing before it) hides; disarmed, all as before."""
+        pad, sketch, regions = self.regionsPad()
+        preview = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+        had = preview.GetBool("ShowProfilePreview", True)
+        preview.SetBool("ShowProfilePreview", False)
+        try:
+            sketch.ViewObject.Visibility = False
+            saved = sketch.ViewObject.ShapeAppearance[0].Transparency
+            [field] = self.edit(pad)
+            padShown = pad.ViewObject.Visibility
+            toggles = self.shownToggles(pad)
+            self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
+
+            self.arm(field, byFocus=True)
+            self.assertTrue(sketch.ViewObject.Visibility)
+            self.assertAlmostEqual(self.regionTransparency(sketch), saved / 2, places=5)
+            self.assertEqual(self.shownToggles(pad), toggles + 1)
+            self.assertFalse(pad.ViewObject.Visibility)
+            #   a pick keeps it so
+            self.pickRegion(sketch, regions["B"])
+            self.assertAlmostEqual(self.regionTransparency(sketch), saved / 2, places=5)
+
+            field.setProperty("armed", False)
+            pump(0.2)
+            self.assertFalse(sketch.ViewObject.Visibility)
+            self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
+            self.assertEqual(self.shownToggles(pad), toggles)
+            self.assertEqual(pad.ViewObject.Visibility, padShown)
+        finally:
+            preview.SetBool("ShowProfilePreview", had)
