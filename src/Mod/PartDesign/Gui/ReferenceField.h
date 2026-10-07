@@ -115,6 +115,16 @@ public:
     };
     /// Turns a pick into what is written: the object and its subs (a copy of another body's
     /// element, a datum's coordinate system). False: nothing is written.
+    /// What a Kind::Profile field's object and elements are for.
+    enum class ProfileUse
+    {
+        /// A profile: a sketch whole, its regions or edges, faces of a solid.
+        Profile,
+        /// A path to sweep along: edges, or a sketch or a wire whole.
+        Path,
+        /// A hole's positions: circles, arcs and points, or a sketch whole.
+        Positions,
+    };
     using Resolver = std::function<
         bool(const Gui::SelectionChanges& msg, App::DocumentObject*& obj, std::vector<std::string>& subs)>;
     struct Options
@@ -154,9 +164,10 @@ public:
         /// refuses (a pipe takes a point only as the last section).
         std::function<bool(const std::vector<App::PropertyLinkSubList::SubSet>&, std::string& why)>
             checkSections;
-        /// Profile: a path of edges (a pipe's spine), not a profile: no regions to make, and the
-        /// menu and messages speak of edges.
-        bool path = false;
+        /// Profile: what the object and its elements are for. A path of edges (a pipe's spine)
+        /// or a hole's positions (circles, arcs, points) has no regions to make, and the menu
+        /// and messages speak of edges or positions.
+        ProfileUse use = ProfileUse::Profile;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =

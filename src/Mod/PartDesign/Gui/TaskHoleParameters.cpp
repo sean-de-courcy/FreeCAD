@@ -26,8 +26,13 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <TopoDS.hxx>
+#include <Standard_Failure.hxx>
 
 #include <cstring>
+#include <memory>
+
+#include <QPointer>
+#include <QTimer>
 
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -40,11 +45,16 @@
 #include <Gui/Inventor/Draggers/SoRotationDragger.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProvider.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/PartFeature.h>
+#include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureHole.h>
 #include <Mod/Part/App/GizmoHelper.h>
 #include <Mod/Part/App/Tools.h>
 
 #include "ui_TaskHoleParameters.h"
+#include "ReferenceActions.h"
+#include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "TaskHoleParameters.h"
 
@@ -62,6 +72,65 @@ namespace sp = std::placeholders;
     qApp->translate("PartDesignGui::TaskHoleParameters", "Counterdrill");
 #endif
 
+namespace
+{
+// A hole's position: a circle, an arc or a point of a sketch or of a solid in the hole's body, or
+// a sketch whole (Hole::execute makes a hole at each circle's centre and each point; what the
+// command takes from a preselection) (ops#150 W9)
+bool acceptPosition(const App::DocumentObjectT& holeT,
+                    App::DocumentObject* obj,
+                    const char* sub,
+                    std::string& why)
+{
+    constexpr const char* notAPosition =
+        QT_TR_NOOP("A hole goes on a circle, an arc or a point: pick one, or a sketch whole.");
+    if (!obj || !obj->isDerivedFrom<Part::Feature>()) {
+        why = notAPosition;
+        return false;
+    }
+    auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
+    PartDesign::Body* body = hole ? PartDesign::Body::findBodyOf(hole) : nullptr;
+    if (body && PartDesign::Body::findBodyOf(obj) != body) {
+        why = QT_TR_NOOP("Pick the positions in the hole's body.");
+        return false;
+    }
+    if (Base::Tools::isNullOrEmpty(sub)) {
+        if (obj->isDerivedFrom<Part::Part2DObject>()) {
+            return true;
+        }
+        why = QT_TR_NOOP("A solid whole has no positions: pick its circular edges or its "
+                         "vertices.");
+        return false;
+    }
+    const std::string type = ReferenceActions::subElementType(sub);
+    if (type == "Vertex") {
+        return true;
+    }
+    if (type == "Edge") {
+        try {
+            const Part::TopoShape shape = Part::Feature::getTopoShape(
+                obj,
+                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                    | Part::ShapeOption::Transform,
+                sub
+            );
+            if (!shape.isNull() && shape.getShape().ShapeType() == TopAbs_EDGE) {
+                BRepAdaptor_Curve curve(TopoDS::Edge(shape.getShape()));
+                if (curve.GetType() == GeomAbs_Circle) {
+                    return true;
+                }
+            }
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+    }
+    why = notAPosition;
+    return false;
+}
+}  // namespace
+
 TaskHoleParameters::TaskHoleParameters(ViewProviderHole* HoleView, QWidget* parent)
     : TaskSketchBasedParameters(HoleView, parent, "PartDesign_Hole", tr("Hole Parameters"))
     , observer(new Observer(this, getObject<PartDesign::Hole>()))
@@ -71,6 +140,7 @@ TaskHoleParameters::TaskHoleParameters(ViewProviderHole* HoleView, QWidget* pare
     proxy = new QWidget(this);
     ui->setupUi(proxy);
     QMetaObject::connectSlotsByName(this);
+    createFields();
 
     ui->ThreadType->addItem(tr("None"), QByteArray("None"));
     ui->ThreadType->addItem(tr("ISO metric regular"), QByteArray("ISO"));
@@ -201,7 +271,6 @@ TaskHoleParameters::TaskHoleParameters(ViewProviderHole* HoleView, QWidget* pare
     ui->StartOffset->setValue(pcHole->StartOffset.getValue());
     ui->StartOffset->bind(pcHole->StartOffset);
     ui->StartOffset->setToolTip(tr("Offset from the profile or selected start reference"));
-    updateStartReferenceName();
     updateStartUI();
 
     setCutDiagram();
@@ -267,8 +336,6 @@ TaskHoleParameters::TaskHoleParameters(ViewProviderHole* HoleView, QWidget* pare
             this, &TaskHoleParameters::startTypeChanged);
     connect(ui->StartOffset, qOverload<double>(&Gui::QuantitySpinBox::valueChanged),
             this, &TaskHoleParameters::startOffsetChanged);
-    connect(ui->buttonStartReference, &QPushButton::toggled,
-            this, &TaskHoleParameters::selectStartReference);
     // clang-format on
 
     ui->Diameter->bind(pcHole->Diameter);
@@ -676,13 +743,16 @@ void TaskHoleParameters::startTypeChanged(int index)
 
     const auto type = static_cast<StartTypeIndex>(index);
     hole->StartType.setValue(index);
-    if (type == Reference && !hole->StartReference.getValue()) {
-        ui->buttonStartReference->setChecked(true);
-    }
-    else if (type != Reference) {
-        exitSelectionMode();
-    }
     updateStartUI();
+    // A start reference to pick: its field arms, once it shows
+    if (type == Reference && !hole->StartReference.getValue()) {
+        QTimer::singleShot(0, startField, [field = QPointer<ReferenceField>(startField)]() {
+            if (field && field->isVisible()) {
+                field->setArmed(true);
+                field->list()->setFocus(Qt::OtherFocusReason);
+            }
+        });
+    }
     recomputeFeature();
     setGizmoPositions();
 }
@@ -693,22 +763,6 @@ void TaskHoleParameters::startOffsetChanged(double value)
         hole->StartOffset.setValue(value);
         recomputeFeature();
         setGizmoPositions();
-    }
-}
-
-void TaskHoleParameters::selectStartReference(bool checked)
-{
-    if (checked) {
-        ui->buttonStartReference->setText(tr("Cancel"));
-        ui->lineStartReference->setPlaceholderText(tr("Select face, plane..."));
-        selectingStartReference = true;
-        onSelectReference(AllowSelection::FACE);
-    }
-    else {
-        ui->buttonStartReference->setText(tr("Pick Reference"));
-        ui->lineStartReference->setPlaceholderText(tr("No start reference selected"));
-        selectingStartReference = false;
-        exitSelectionMode();
     }
 }
 
@@ -1061,9 +1115,6 @@ void TaskHoleParameters::changedObject(const App::Document&, const App::Property
     else if (&Prop == &hole->StartOffset) {
         updateSpinBox(ui->StartOffset, hole->StartOffset.getValue());
     }
-    else if (&Prop == &hole->StartReference) {
-        updateStartReferenceName();
-    }
 }
 
 void TaskHoleParameters::updateHoleTypeCombo()
@@ -1088,24 +1139,9 @@ void TaskHoleParameters::updateHoleTypeCombo()
     }
 }
 
-void TaskHoleParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
+void TaskHoleParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
 {
-    if (selectingStartReference && msg.Type == Gui::SelectionChanges::AddSelection) {
-        selectedStartReference(msg);
-    }
-}
-
-void TaskHoleParameters::selectedStartReference(const Gui::SelectionChanges& msg)
-{
-    auto hole = getObject<PartDesign::Hole>();
-    if (!hole) {
-        return;
-    }
-
-    onAddSelection(msg, hole->StartReference);
-    updateStartReferenceName();
-    ui->buttonStartReference->setChecked(false);
-    setGizmoPositions();
+    // The picks are the reference fields' (ops#150 W9)
 }
 
 void TaskHoleParameters::updateStartUI()
@@ -1116,27 +1152,93 @@ void TaskHoleParameters::updateStartUI()
 
     ui->labelStartOffset->setVisible(hasOffset);
     ui->StartOffset->setVisible(hasOffset);
-    ui->labelStartReference->setVisible(hasReference);
-    ui->lineStartReference->setVisible(hasReference);
-    ui->buttonStartReference->setVisible(hasReference);
-}
-
-void TaskHoleParameters::updateStartReferenceName()
-{
-    auto hole = getObject<PartDesign::Hole>();
-    updateReferenceName(ui->lineStartReference, hole->StartReference, tr("No start reference selected"));
-}
-
-QString TaskHoleParameters::getStartReference() const
-{
-    QVariant featureName = ui->lineStartReference->property("FeatureName");
-    if (featureName.isValid()) {
-        return getFaceReference(
-            featureName.toString(),
-            ui->lineStartReference->property("FaceName").toString()
-        );
+    startField->setVisible(hasReference);
+    startField->setRequired(hasReference);
+    if (!hasReference) {
+        startField->setArmed(false);
     }
-    return QStringLiteral("None");
+}
+
+void TaskHoleParameters::createFields()
+{
+    App::DocumentObjectT holeT(getObject());
+    // The solid before shows while a field is armed, as the face pick showed it
+    auto baseSolid = [holeT]() -> App::DocumentObject* {
+        auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
+        return hole ? hole->getBaseObject(/*silent =*/true) : nullptr;
+    };
+
+    // The positions (Q10 (a)): the sketch whole, or chosen circles, arcs and points of it, or
+    // circular edges and vertices of a solid of the body; a pick of another object starts the
+    // list on it
+    ReferenceField::Options positions;
+    positions.kind = ReferenceField::Kind::Profile;
+    positions.use = ReferenceField::ProfileUse::Positions;
+    positions.target = baseSolid;
+    positions.noDependents = true;
+    positions.label = tr("Positions");
+    positions.kinds = tr("Circles, arcs and points, or a sketch whole");
+    positions.accept = [holeT](App::DocumentObject* obj, const char* sub, std::string& why) {
+        return acceptPosition(holeT, obj, sub, why);
+    };
+    auto positionsSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writePositions = [this, positionsSelf](App::DocumentObject* obj,
+                                                const std::vector<std::string>& subs) {
+        widenBaseProfileType(subs);
+        if (*positionsSelf) {
+            (*positionsSelf)->assign(obj, subs);
+        }
+        recomputeFeature();
+        setGizmoPositions();
+    };
+    positionsField = new ReferenceField(getObject(), "Profile", positions, writePositions, proxy);
+    *positionsSelf = positionsField;
+    positionsField->takePlaceOf(ui->positionsFieldPlaceholder);
+
+    // The start reference, shown for Start "Reference" only: a face or a plane, as Pad's
+    ReferenceField::Options start = faceFieldOptions(tr("Start reference"), baseSolid, false);
+    auto startSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeStart = [this, startSelf](App::DocumentObject* obj,
+                                        const std::vector<std::string>& subs) {
+        if (*startSelf) {
+            (*startSelf)->assign(obj, subs);
+        }
+        recomputeFeature();
+        setGizmoPositions();
+    };
+    startField = new ReferenceField(getObject(), "StartReference", start, writeStart, proxy);
+    *startSelf = startField;
+    startField->takePlaceOf(ui->startReferenceFieldPlaceholder);
+}
+
+std::vector<ReferenceField*> TaskHoleParameters::referenceFields() const
+{
+    return {positionsField, startField};
+}
+
+void TaskHoleParameters::widenBaseProfileType(const std::vector<std::string>& subs)
+{
+    using Options = PartDesign::Hole::BaseProfileTypeOptions;
+    auto hole = getObject<PartDesign::Hole>();
+    if (!hole) {
+        return;
+    }
+    const long type = hole->BaseProfileType.getValue();
+    bool point = false;
+    bool curve = false;
+    for (const std::string& sub : subs) {
+        const std::string element = ReferenceActions::subElementType(sub);
+        point = point || element == "Vertex";
+        curve = curve || element == "Edge";
+    }
+    const bool widen = (point && !(type & Options::OnPoints))
+        || (curve && !(type & (Options::OnCircles | Options::OnArcs)));
+    if (!widen) {
+        return;
+    }
+    // A command, before the positions' own write: one undo step with the pick; the combo
+    // follows through changedObject
+    FCMD_OBJ_CMD(hole, "BaseProfileType = " << (type | Options::OnPointsCirclesArcs));
 }
 
 bool TaskHoleParameters::getThreaded() const
@@ -1370,33 +1472,20 @@ void TaskHoleParameters::apply()
     }
     FCMD_OBJ_CMD(hole, "StartOffset = " << ui->StartOffset->value().getValue());
     FCMD_OBJ_CMD(hole, "StartType = " << ui->StartType->currentIndex());
-    // Written only when the panel changed it (ops#127).
-    App::DocumentObject* startObject = nullptr;
-    std::vector<std::string> startSubs;
-    QVariant featureName = ui->lineStartReference->property("FeatureName");
-    if (featureName.isValid()) {
-        startObject = hole->getDocument()->getObject(featureName.toString().toUtf8().constData());
-        QString faceName = ui->lineStartReference->property("FaceName").toString();
-        if (!faceName.isEmpty()) {
-            startSubs.push_back(faceName.toStdString());
-        }
-    }
-    if (!isSameLink(hole->StartReference, startObject, startSubs)) {
-        FCMD_OBJ_CMD(hole, "StartReference = " << getStartReference().toUtf8().data());
-    }
+    // The positions and the start reference are written at each pick, with their records
+    // (ops#150 W9; ops#127)
 }
 
 void TaskHoleParameters::onReferencesRepaired()
 {
-    updateStartReferenceName();
+    for (ReferenceField* field : referenceFields()) {
+        field->reload();
+    }
 }
 
 void TaskHoleParameters::onReferenceSelectionTaken()
 {
-    if (ui->buttonStartReference->isChecked()) {
-        ui->buttonStartReference->setChecked(false);
-    }
-    TaskSketchBasedParameters::onReferenceSelectionTaken();
+    // The fields disarm through their group; the panel has no pick mode of its own to end
 }
 
 void TaskHoleParameters::updateHoleCutLimits(PartDesign::Hole* hole)

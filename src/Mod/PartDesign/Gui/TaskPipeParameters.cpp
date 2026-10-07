@@ -256,7 +256,7 @@ ReferenceField::Options pathOptions(const App::DocumentObjectT& pipeT)
 {
     ReferenceField::Options options;
     options.kind = ReferenceField::Kind::Profile;
-    options.path = true;
+    options.use = ReferenceField::ProfileUse::Path;
     options.noDependents = true;
     options.kinds = TaskPipeParameters::tr("Edges, or a sketch or a wire whole");
     options.accept = [pipeT](App::DocumentObject* obj, const char* sub, std::string& why) {
