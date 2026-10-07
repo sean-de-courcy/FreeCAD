@@ -3390,7 +3390,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         so the order isn't told from the shape here.) A point of S30 replaces it, last; moved up
         it is refused with the reason (only the last section can be a point)."""
         pipe = self.rod()
-        self.edit(pipe, count=1)
+        self.edit(pipe, count=3)
         field = self.sectionsField()
         self.assertTrue(field.isVisible(), "the multisection page isn't shown")
         self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
@@ -3418,7 +3418,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe = self.rod()
         pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
         self.assertThroughSection(pipe, 10, 16)
-        self.edit(pipe, count=1)
+        self.edit(pipe, count=3)
         buttons = Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
         self.assertFalse([b for b in buttons if b.text() == "Remove Section"])
         field = self.sectionsField()
@@ -3432,7 +3432,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """T35 for the pipe: a constant pipe's sections field is hidden and not armed; switching to
         Multisection arms it (it has no sections)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=0)
+        self.edit(pipe, count=2)
         field = findField("fieldSections")
         self.assertFalse(field.isVisible())
         self.assertFalse(armed(field))
@@ -3445,8 +3445,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.sectionNames(pipe), ["S10"])
 
     def pipeVisibility(self, ok):
-        """B13: the sections each go back to their own visibility when the dialog closes, not to
-        the profile's; on Cancel the spine and the profile too."""
+        """B13: on Cancel the sections each go back to their own visibility, not to the
+        profile's, and the spine too. On OK the spine goes back and the sections are hidden, as
+        the loft's are (PR 163 review, Low 2: the user's answer)."""
         pipe = self.rod()
         pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
         self.doc.recompute()
@@ -3454,7 +3455,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.spine.ViewObject.Visibility = False
         self.s10.ViewObject.Visibility = False
         self.s30.ViewObject.Visibility = True
-        self.edit(pipe, count=1)
+        self.edit(pipe, count=3)
         self.assertTrue(self.s10.ViewObject.Visibility)
         self.assertTrue(self.spine.ViewObject.Visibility)
         button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
@@ -3462,7 +3463,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog didn't close")
         pump(0.2)
         self.assertFalse(self.s10.ViewObject.Visibility, "a hidden section is shown after")
-        self.assertTrue(self.s30.ViewObject.Visibility, "a shown section is hidden after")
+        if ok:
+            self.assertFalse(self.s30.ViewObject.Visibility, "OK left a section shown")
+        else:
+            self.assertTrue(self.s30.ViewObject.Visibility, "a shown section is hidden after")
         self.assertFalse(self.spine.ViewObject.Visibility, "the spine is shown after")
 
     def testPipeOkRestoresSectionVisibility(self):
@@ -3572,3 +3576,185 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(block, "Face6")  # its top, at z = 50
         self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
         self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])
+
+    # -- W8: the Pipe's profile, spine and auxiliary spine (T31-T33, T35; B9-B12) -----------------
+
+    def spineField(self):
+        field = findField("fieldSpine")
+        self.assertIsNotNone(field, "no spine field")
+        return field
+
+    def spineSubs(self, pipe):
+        return [s for s in pipe.Spine[1]] if pipe.Spine else None
+
+    def testPipeSpinePicksToggle(self):
+        """T31: the Rod's spine whole (120); edge 1 picked: the sweep follows it alone, 4 x 10 =
+        40; edge 2 added: both edges, 120; edge 2 again: out, 40; edge 1 deleted: the sketch whole
+        again, 120. The Spine's subs follow each pick."""
+        pipe = self.rod("Constant")
+        self.assertVolume(pipe, 120)
+        self.edit(pipe, count=2)
+        field = self.spineField()
+        self.assertEqual(texts(field), ["Spine (whole)"])
+        self.arm(field, byFocus=False)
+        self.pick(self.spine, "Edge1")
+        self.assertEqual(self.spineSubs(pipe), ["Edge1"])
+        self.assertVolume(pipe, 40)
+        self.pick(self.spine, "Edge2")
+        self.assertEqual(self.spineSubs(pipe), ["Edge1", "Edge2"])
+        self.assertVolume(pipe, 120)
+        self.pick(self.spine, "Edge2")
+        self.assertEqual(self.spineSubs(pipe), ["Edge1"])
+        self.assertVolume(pipe, 40)
+        self.assertTrue(armed(field), "a pick disarmed the spine")
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.spineSubs(pipe) == []), pipe.Spine)
+        self.assertEqual(texts(field), ["Spine (whole)"])
+        self.assertVolume(pipe, 120)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(pipe.Spine, self.spine, [])
+        self.assertVolume(pipe, 120)
+
+    def testPipeSpineOtherObject(self):
+        """T32, B9, B10: an edge of another sketch (a line along Z, 5 long) starts the spine on
+        that sketch with that edge alone (4 x 5 = 20), not the old sketch's edge names; a tree
+        pick of the Rod's spine sketch makes it the spine whole (120), with no empty sub. The
+        profile is refused as the spine, with the reason; so is a face."""
+        pipe = self.rod("Constant")
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        other = models.sketch(
+            self.doc, "Other", models.polyline([(0, 0), (0, 5)]), self.body, placement=xz
+        )
+        pipe.Spine = (self.spine, ["Edge1", "Edge2"])
+        self.doc.recompute()
+        self.assertVolume(pipe, 120)
+        self.edit(pipe, count=2)
+        field = self.spineField()
+        self.assertEqual(texts(field), ["Spine:Edge1", "Spine:Edge2"])
+        self.arm(field, byFocus=False)
+        self.pick(other, "Edge1")
+        self.assertLink(pipe.Spine, other, ["Edge1"])
+        self.assertEqual(self.spineSubs(pipe), ["Edge1"])
+        self.assertEqual(texts(field), ["Other:Edge1"])
+        self.assertVolume(pipe, 20)
+        self.pick(self.spine, "")
+        self.assertEqual(pipe.Spine[0].Name, "Spine")
+        self.assertEqual(self.spineSubs(pipe), [])
+        self.assertEqual(texts(field), ["Spine (whole)"])
+        self.assertVolume(pipe, 120)
+        self.pick(self.rodProfile, "Edge1")
+        self.assertEqual(pipe.Spine[0].Name, "Spine")
+        self.assertIn("profile", statusText().lower())
+        block = self.doc.addObject("Part::Box", "Block")
+        self.doc.recompute()
+        self.pick(block, "Face1")
+        self.assertEqual(pipe.Spine[0].Name, "Spine")
+        self.assertIn("edge", statusText().lower())
+
+    def testPipeSpineDeleteRemovesAllSelected(self):
+        """B11, B12: no Object / Add edge / Remove edge buttons on the Pipe's panels; Delete on
+        both selected edges of the spine leaves the sketch whole (120)."""
+        pipe = self.rod("Constant")
+        pipe.Spine = (self.spine, ["Edge1", "Edge2"])
+        self.doc.recompute()
+        self.edit(pipe, count=2)
+        buttons = [b.text() for b in Gui.getMainWindow().findChildren(QtWidgets.QToolButton)]
+        for text in ("Object", "Add edge", "Remove edge", "Add Edge", "Remove Edge"):
+            self.assertNotIn(text, buttons)
+        field = self.spineField()
+        clickRow(field, 0)
+        clickRow(field, 1, QtCore.Qt.ControlModifier)
+        self.assertEqual(len(entries(field).selectedItems()), 2)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.spineSubs(pipe) == []), pipe.Spine)
+        self.assertVolume(pipe, 120)
+
+    def testPipeProfileField(self):
+        """The profile is a field (a sketch, a sketch point or a face): another sketch picked
+        replaces it (a 4 x 4 square along the spine: 480); the spine is refused as the profile,
+        with the reason."""
+        pipe = self.rod("Constant")
+        self.edit(pipe, count=2)
+        profile, spine = fields()
+        self.assertEqual(profile.objectName(), "fieldProfile")
+        self.assertEqual(spine.objectName(), "fieldSpine")
+        self.assertEqual(texts(profile), ["Profile"])
+        self.arm(profile, byFocus=False)
+        self.pick(self.spine, "Edge1")
+        self.assertEqual(pipe.Profile[0].Name, "Profile")
+        self.assertIn("path", statusText().lower())
+        big = self.squareSketch("Big", 2, 0)
+        self.doc.recompute()
+        self.pick(big, "Edge1")  # an edge of a sketch: the sketch whole
+        self.assertLink(pipe.Profile, big, [])
+        self.assertEqual(texts(profile), ["Big"])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 480, places=3)
+
+    def auxiliarySketch(self):
+        """A line along Z at x = 5, 30 long, in the XZ plane: the auxiliary spine, parallel to the
+        Rod's spine, so the profile keeps its orientation."""
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        return models.sketch(
+            self.doc, "Aux", models.polyline([(5, 0), (5, 30)]), self.body, placement=xz
+        )
+
+    def testPipeAuxiliarySpineField(self):
+        """T33: Mode Auxiliary shows the field titled "Auxiliary path"; an edge picked sets
+        AuxiliarySpine (the pipe about 120 still: the path is parallel); the profile, spine and
+        auxiliary spine fields share one armed field across the panels; Delete on the edge leaves
+        the sketch whole, Delete on the whole entry clears it."""
+        pipe = self.rod("Constant")
+        aux = self.auxiliarySketch()
+        self.doc.recompute()
+        self.edit(pipe, count=2)
+        field = findField("fieldAuxiliarySpine")
+        self.assertIsNotNone(field)
+        self.assertFalse(field.isVisible(), "the auxiliary path shows outside Mode Auxiliary")
+        box = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "comboBoxMode")
+        self.choose(box, 3)
+        self.assertTrue(waitFor(lambda: field.isVisible()), "no auxiliary path in Mode Auxiliary")
+        self.assertEqual(field.findChild(QtWidgets.QLabel, "label").text(), "Auxiliary path")
+        self.arm(field, byFocus=False)
+        self.pick(aux, "Edge1")
+        self.assertLink(pipe.AuxiliarySpine, aux, ["Edge1"])
+        self.assertEqual(pipe.Mode, "Auxiliary")
+        # The Auxiliary sweep along the two-edge spine comes out 0.7 % under the prism's 120
+        # (119.14 on Windows, the sweep's own approximation): the field's write is what's tested
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume / 120, 1, delta=0.01)
+        spine = self.spineField()
+        self.arm(spine, byFocus=False)
+        self.assertFalse(armed(field), "two armed fields")
+        self.arm(field, byFocus=False)
+        self.assertFalse(armed(spine), "two armed fields")
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: list(pipe.AuxiliarySpine[1]) == []), pipe.AuxiliarySpine)
+        self.assertEqual(texts(field), ["Aux (whole)"])
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: pipe.AuxiliarySpine is None), pipe.AuxiliarySpine)
+        self.assertEqual(texts(field), [])
+
+    def testNewPipeArmsItsSpine(self):
+        """T35: PartDesign_AdditivePipe on a selected sketch makes a pipe with that profile and
+        opens its dialog with the spine field armed."""
+        self.body = models.body(self.doc)
+        profile = self.squareSketch("Profile", 1, 0)
+        self.doc.recompute()
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand("PartDesign_AdditivePipe")
+        self.assertTrue(waitFor(lambda: len(fields()) == 2), "the pipe's fields")
+        settle()
+        field = self.spineField()
+        self.assertTrue(waitFor(lambda: armed(field)), "the new pipe's spine isn't armed")
+        pipe = self.doc.getObject("AdditivePipe")
+        self.assertEqual(pipe.Profile[0].Name, "Profile")
+        self.assertIsNone(pipe.Spine)
