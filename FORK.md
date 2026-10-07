@@ -172,7 +172,8 @@ names it.
 | `feat/150-w2-single-entry-fields` | feat | ops#150 | - | `feat/150-w1-reference-field` `d0f23f9c6a` (stacked on fork PR 140) | `8020ec49c8` (fork PR 142), 2026-10-07 | never (fork feature) |
 | `fix/168-own-twin-lift` | fix | ops#168 | - | `fix/167-tier1-same-maker` `50025eb6e9` (fork PR 141) | `3a47b52e13` (fork PR 143), 2026-10-07 | never (fork feature) |
 | `feat/150-w3-profile-regions` | feat | ops#150 | - | `feat/150-w2-single-entry-fields` `10e7208c6e` (stacked on fork PR 142) | `99f0d46e4a` (fork PR 144), 2026-10-07 | never (fork feature) |
-| `feat/152-hashname` | feat | ops#152 | - | `integration` `4bcf3a3e1d` | (fork PR 146) | never (fork feature). Upstream edits to `ExpressionParser::parse` (`src/App/Expression.cpp`) or to `AppSpreadsheet.cpp`'s init will conflict |
+| `feat/152-hashname` | feat | ops#152 | - | `integration` `4bcf3a3e1d` | `1f6ccc6636` (fork PR 146), 2026-10-07 | never (fork feature). Upstream edits to `ExpressionParser::parse` (`src/App/Expression.cpp`) or to `AppSpreadsheet.cpp`'s init will conflict |
+| `feat/152-display-app` | feat | ops#152 | - | `feat/152-hashname` `8977dcfb18` (fork PR 146) | (fork PR 147) | never (fork feature). Upstream edits to `VariableExpression::_toString` (`src/App/Expression.cpp`) will conflict |
 
 ## Fork-only commits in carried topics
 

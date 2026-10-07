@@ -77,7 +77,7 @@ class VariablesBase(unittest.TestCase):
         return box
 
     def assertParserError(self, fn, *fragments):
-        with self.assertRaises(Exception) as cm:
+        with self.assertRaises(FreeCAD.Base.ParserError) as cm:
             fn()
         message = str(cm.exception)
         for fragment in fragments:
@@ -122,8 +122,10 @@ class TestScanner(VariablesBase):
         )
 
     def test_document_paths_unchanged(self):
-        # `Doc#Obj.Prop`, `<<Doc>>#Obj.Prop`, `Doc # Obj.Prop` and `<<a#b>>` aren't rewritten:
-        # nothing here is named `Obj` or `b`, so a rewrite would raise `no variable named ...`.
+        # `Doc#Obj.Prop`, `<<Doc>>#Obj.Prop`, `<<Doc>> #Obj.Prop` and `Doc # Obj.Prop` aren't
+        # rewritten: no variable here is named `Obj`, so a rewrite would raise `no variable named
+        # Obj`. The `#` inside `<<a#b>>` would become `VarSet.b`, which exists, so that case is
+        # checked by its stored text.
         other = FreeCAD.newDocument("VarOther")
         self.extraDocs.append(other)
         obj = other.addObject("App::VarSet", "Obj")
@@ -133,14 +135,36 @@ class TestScanner(VariablesBase):
         labelled.Label = "a#b"
         labelled.addProperty("App::PropertyLength", "Size")
         labelled.Size = 9
+        # An expression may link to another document only once both are saved.
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        self.doc.saveAs(os.path.join(self.tempDir, "variables.FCStd"))
+        other.saveAs(os.path.join(self.tempDir, "other.FCStd"))
         for expr, value in [
             (f"{other.Name}#Obj.Prop", 12),
-            (f"<<{other.Name}>>#Obj.Prop", 12),
+            (f"<<{other.Label}>>#Obj.Prop", 12),
+            (f"<<{other.Label}>> #Obj.Prop", 12),
             (f"{other.Name} # Obj.Prop", 12),
-            ("<<a#b>>.Size", 9),
         ]:
             with self.subTest(expr=expr):
                 self.assertAlmostEqual(float(self.box.evalExpression(expr)), value)
+                text = self.textOf(expr)
+                self.assertIn("#Obj.Prop", text)
+                self.assertNotIn("VarSet", text)
+        self.assertEqual(self.textOf("<<a#b>>.Size"), "<<a#b>>.Size")
+        self.assertAlmostEqual(float(self.box.evalExpression("<<a#b>>.Size")), 9)
+
+    def test_unterminated_string(self):
+        # `<<` without its `>>` isn't a string: the parser rejects the text as it does today.
+        for expr in ["#Width + <<x", "<<x #Width", r"<<x\>> #Width"]:
+            with self.subTest(expr=expr):
+                self.assertParserError(lambda: self.box.setExpression("Length", expr))
+
+    def test_no_owner(self):
+        # Without an owner there is no document to search, so `#Width` stays a syntax error.
+        self.assertParserError(
+            lambda: FreeCAD.DocumentObject.evalExpression("#Width"),
+            "Failed to parse expression '#Width'",
+        )
 
 
 class TestResolution(VariablesBase):
@@ -217,13 +241,15 @@ class TestResolution(VariablesBase):
         """T5. `#Nope`: an error naming it, and the property keeps its value and expression."""
         self.addVarSet(Width=20)
         box = self.addBox(length=17)
+        box.setExpression("Length", "VarSet.Width")
         self.doc.recompute()
+        self.assertAlmostEqual(box.Length.Value, 20)
         self.assertParserError(
             lambda: box.setExpression("Length", "#Nope"), "no variable named Nope"
         )
         self.doc.recompute()
-        self.assertAlmostEqual(box.Length.Value, 17)
-        self.assertIsNone(expressionText(box, "Length"))
+        self.assertEqual(expressionText(box, "Length"), "VarSet.Width")
+        self.assertAlmostEqual(box.Length.Value, 20)
 
     def test_static_binding(self):
         """T6. A later alias `Width` doesn't re-bind an existing expression."""

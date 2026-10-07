@@ -1662,6 +1662,16 @@ void Sheet::setAlias(CellAddress address, const std::string& alias)
     }
 }
 
+std::vector<std::string> Sheet::getAliases() const
+{
+    std::vector<std::string> aliases;
+    aliases.reserve(cells.aliasProp.size());
+    for (const auto& [address, alias] : cells.aliasProp) {
+        aliases.push_back(alias);
+    }
+    return aliases;
+}
+
 /**
  * @brief Get cell given an alias string
  * @param alias Alias for cell

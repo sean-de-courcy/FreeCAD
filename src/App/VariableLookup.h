@@ -24,7 +24,9 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Base/Type.h>
@@ -35,6 +37,8 @@ namespace App
 
 class Document;
 class DocumentObject;
+class Expression;
+class ObjectIdentifier;
 
 /// A named variable of a document: a VarSet property or a Spreadsheet alias (FreeCAD-CH, ops#152).
 struct AppExport VariableRef
@@ -65,6 +69,50 @@ public:
 
     /// Every variable of @a doc, per object in the document's object order.
     static std::vector<VariableRef> listVariables(const Document* doc);
+
+    /// Whether @a obj holds a variable named @a name.
+    static bool isVariable(const DocumentObject* obj, const std::string& name);
 };
+
+/** While alive, Expression::toString(persistent = false) on this thread writes a reference to a
+ * variable as `#Name` (FreeCAD-CH, ops#152, notes/variables-design.md section 8).
+ *
+ * A reference is shortened when it names a variable of the owner's document whose name is unique
+ * there, names no other document and no sub-object, and has an object part (`VarSet.Width`,
+ * `<<Variables>>.Width`, `.Width`). A bare name is kept as written, except in the VarSet itself,
+ * where `#Width` is stored as `Width`. Everything else is written as today, and
+ * toString(persistent = true) never shortens. Scopes nest; each restores the previous one.
+ */
+class AppExport VariableDisplayScope
+{
+public:
+    VariableDisplayScope();
+    ~VariableDisplayScope();
+    VariableDisplayScope(const VariableDisplayScope&) = delete;
+    VariableDisplayScope& operator=(const VariableDisplayScope&) = delete;
+
+    /// The innermost scope of this thread, or nullptr.
+    static VariableDisplayScope* current();
+
+    /// `#Name` plus sub-path for @a var in an expression owned by @a owner, or empty to keep it.
+    std::string shortForm(const DocumentObject* owner, const ObjectIdentifier& var);
+
+    /// The (#Name, full path) pairs shortened so far, each once, in order.
+    const std::vector<std::pair<std::string, std::string>>& shortened() const
+    {
+        return _shortened;
+    }
+
+private:
+    VariableDisplayScope* _previous;
+    std::map<const Document*, std::map<std::string, int>> _counts;
+    std::vector<std::pair<std::string, std::string>> _shortened;
+};
+
+/// @a e as text for display, in a scope of its own; @a shortened gets the (#Name, path) pairs.
+AppExport std::string toDisplayString(
+    const Expression* e,
+    std::vector<std::pair<std::string, std::string>>* shortened = nullptr
+);
 
 }  // namespace App

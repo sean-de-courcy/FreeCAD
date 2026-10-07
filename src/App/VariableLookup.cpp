@@ -21,10 +21,14 @@
  *                                                                          *
  ****************************************************************************/
 
+#include <algorithm>
+
 #include "VariableLookup.h"
 
 #include "Document.h"
 #include "DocumentObject.h"
+#include "Expression.h"
+#include "ObjectIdentifier.h"
 #include "VarSet.h"
 
 using namespace App;
@@ -100,4 +104,97 @@ std::vector<VariableRef> VariableLookup::listVariables(const Document* doc)
         }
     }
     return result;
+}
+
+bool VariableLookup::isVariable(const DocumentObject* obj, const std::string& name)
+{
+    if (!obj || name.empty()) {
+        return false;
+    }
+    for (const auto& provider : providers()) {
+        if (obj->isDerivedFrom(provider.type)) {
+            return provider.has(obj, name);
+        }
+    }
+    return false;
+}
+
+namespace
+{
+thread_local VariableDisplayScope* currentScope = nullptr;
+}
+
+VariableDisplayScope::VariableDisplayScope()
+    : _previous(currentScope)
+{
+    currentScope = this;
+}
+
+VariableDisplayScope::~VariableDisplayScope()
+{
+    currentScope = _previous;
+}
+
+VariableDisplayScope* VariableDisplayScope::current()
+{
+    return currentScope;
+}
+
+std::string VariableDisplayScope::shortForm(const DocumentObject* owner, const ObjectIdentifier& var)
+{
+    if (!owner || !owner->getDocument() || !var.getSubObjectName().empty()) {
+        return {};
+    }
+    const std::string& text = var.toString();
+    if (text.find('#') != std::string::npos) {
+        return {};  // names a document
+    }
+    auto holder = var.getDocumentObject();
+    if (!holder || holder->getDocument() != owner->getDocument()) {
+        return {};
+    }
+    std::string name = var.getPropertyName();
+    if (!VariableLookup::isVariable(holder, name)) {
+        return {};
+    }
+    std::string subPath = var.getSubPathStr();
+    // A bare name is the user's own way of naming a property of the owner; in the VarSet itself it
+    // is also what `#Name` is stored as.
+    if (text == name + subPath
+        && !(holder == owner && holder->isDerivedFrom(VarSet::getClassTypeId()))) {
+        return {};
+    }
+    const Document* doc = owner->getDocument();
+    auto counts = _counts.find(doc);
+    if (counts == _counts.end()) {
+        counts = _counts.emplace(doc, std::map<std::string, int>()).first;
+        for (const auto& ref : VariableLookup::listVariables(doc)) {
+            ++counts->second[ref.name];
+        }
+    }
+    auto count = counts->second.find(name);
+    if (count == counts->second.end() || count->second != 1) {
+        return {};
+    }
+    std::pair<std::string, std::string> entry("#" + name, VariableRef {holder, name}.path());
+    if (std::find(_shortened.begin(), _shortened.end(), entry) == _shortened.end()) {
+        _shortened.push_back(entry);
+    }
+    return entry.first + subPath;
+}
+
+std::string App::toDisplayString(
+    const Expression* e,
+    std::vector<std::pair<std::string, std::string>>* shortened
+)
+{
+    if (!e) {
+        return {};
+    }
+    VariableDisplayScope scope;
+    std::string text = e->toString();
+    if (shortened) {
+        *shortened = scope.shortened();
+    }
+    return text;
 }
