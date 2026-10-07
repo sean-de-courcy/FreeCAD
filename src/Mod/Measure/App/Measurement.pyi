@@ -67,3 +67,19 @@ class Measurement(BaseClass):
     def com(self) -> Any:
         """measure the center of mass for selected volumes"""
         ...
+
+    def distances(self, timeLimit: int = 200, /) -> dict:
+        """
+        FreeCAD-CH (ops#153): min, max and center distances between exactly two references,
+        within timeLimit milliseconds. Returns a dict: Min, Inside, Max, MaxExact, Center (each
+        missing when not computed), the point pairs MinPoints, MaxPoints, CenterPoints, and
+        TimedOut.
+        """
+        ...
+
+    def sums(self) -> dict:
+        """
+        FreeCAD-CH (ops#153): the summed Length (edges) and Area (faces), and the counts
+        Vertices, Edges, Faces, Solids and Other.
+        """
+        ...

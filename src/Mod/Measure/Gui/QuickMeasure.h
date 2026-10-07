@@ -26,6 +26,7 @@
 #pragma once
 
 #include <QObject>
+#include <QStringList>
 
 #include <Mod/Measure/MeasureGlobal.h>
 
@@ -51,6 +52,11 @@ public:
     void print(const QString& message);
 
 private:
+    // FreeCAD-CH (ops#153)
+    void printTypeResult();
+    void showResult(const QString& message, const QStringList& details);
+    static int timeLimit();
+
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void tryMeasureSelection();
 
@@ -65,6 +71,7 @@ private:
 
     QTimer* selectionTimer;
     bool pendingProcessing;
+    QString label;  // FreeCAD-CH (ops#153): the selection type's values
 };
 
 }  // namespace MeasureGui

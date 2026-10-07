@@ -28,6 +28,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <Base/GeometryPyCXX.h>
+#include <Mod/Part/App/OCCError.h>
 
 // inclusion of the generated files (generated out of SketchObjectSFPy.xml)
 #include "MeasurementPy.h"
@@ -212,6 +213,67 @@ PyObject* MeasurementPy::com(PyObject* args)
     Py::Vector com(this->getMeasurementPtr()->massCenter());
 
     return Py::new_reference_to(com);
+}
+
+// FreeCAD-CH (ops#153)
+PyObject* MeasurementPy::distances(PyObject* args)
+{
+    int timeLimit = 200;
+    if (!PyArg_ParseTuple(args, "|i", &timeLimit)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        const Measure::DistanceResult result = getMeasurementPtr()->distances(timeLimit);
+        auto pair = [](const Base::Vector3d& from, const Base::Vector3d& to) {
+            Py::Tuple tuple(2);
+            tuple.setItem(0, Py::Vector(from));
+            tuple.setItem(1, Py::Vector(to));
+            return tuple;
+        };
+        Py::Dict dict;
+        dict.setItem("TimedOut", Py::Boolean(result.timedOut));
+        if (result.hasMin) {
+            dict.setItem("Min", Py::Float(result.min));
+            dict.setItem("Inside", Py::Boolean(result.inside));
+            dict.setItem("MinPoints", pair(result.minFrom, result.minTo));
+        }
+        if (result.hasMax) {
+            dict.setItem("Max", Py::Float(result.max));
+            dict.setItem("MaxExact", Py::Boolean(result.maxExact));
+            dict.setItem("MaxPoints", pair(result.maxFrom, result.maxTo));
+        }
+        if (result.hasCenter) {
+            dict.setItem("Center", Py::Float(result.center));
+            dict.setItem("CenterPoints", pair(result.centerFrom, result.centerTo));
+        }
+        return Py::new_reference_to(dict);
+    }
+    PY_CATCH_OCC
+}
+
+// FreeCAD-CH (ops#153)
+PyObject* MeasurementPy::sums(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        const Measure::SumResult result = getMeasurementPtr()->sums();
+        Py::Dict dict;
+        dict.setItem("Length", Py::Float(result.length));
+        dict.setItem("Area", Py::Float(result.area));
+        dict.setItem("Vertices", Py::Long(result.vertices));
+        dict.setItem("Edges", Py::Long(result.edges));
+        dict.setItem("Faces", Py::Long(result.faces));
+        dict.setItem("Solids", Py::Long(result.solids));
+        dict.setItem("Other", Py::Long(result.other));
+        return Py::new_reference_to(dict);
+    }
+    PY_CATCH_OCC
 }
 
 PyObject* MeasurementPy::getCustomAttributes(const char* /*attr*/) const
