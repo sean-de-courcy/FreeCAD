@@ -46,6 +46,7 @@ from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
 from PartDesignTests.TestParkedMarkingGui import TestParkedMarkingGui
 from PartDesignTests.TestExpressionFieldsGui import TestExpressionFieldsGui
 from PartDesignTests.TestPanelFixesGui import TestPanelFixesGui
+from PartDesignTests.TestStalePreviewGui import TestStalePreviewGui
 from PartDesignTests.TestDressUpDeleteKeyGui import TestDressUpDeleteKeyGui
 from PartDesignTests.TestReferenceFieldGui import TestReferenceFieldGui
 
