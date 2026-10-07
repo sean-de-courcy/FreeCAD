@@ -146,6 +146,10 @@ PropertyView::PropertyView(QWidget* parent)
     this->connectChangedDocument = App::GetApplication().signalChangedDocument.connect(
         std::bind(&PropertyView::slotChangePropertyData, this, sp::_2)
     );
+    // FreeCAD-CH (ops#152)
+    this->connectNewObject = App::GetApplication().signalNewObject.connect(
+        std::bind(&PropertyView::slotNewObject, this, sp::_1)
+    );
     // NOLINTEND
 }
 
@@ -163,6 +167,7 @@ PropertyView::~PropertyView()
     this->connectDelObject.disconnect();
     this->connectDelViewObject.disconnect();
     this->connectChangedDocument.disconnect();
+    this->connectNewObject.disconnect();  // FreeCAD-CH (ops#152)
 }
 
 static bool _ShowAll;
@@ -238,9 +243,23 @@ static bool mayChangeVariableNames(const App::Property& prop, bool dynamic)
     if (dynamic) {
         return obj->isDerivedFrom<App::VarSet>();
     }
+    // The name first: this runs on every property change in the application.
+    if (!prop.getName() || std::strcmp(prop.getName(), "cells") != 0) {
+        return false;
+    }
     const Base::Type sheet = Base::Type::fromName("Spreadsheet::Sheet");
-    return !sheet.isBad() && obj->isDerivedFrom(sheet) && prop.getName()
-        && std::strcmp(prop.getName(), "cells") == 0;
+    return !sheet.isBad() && obj->isDerivedFrom(sheet);
+}
+
+// FreeCAD-CH (ops#152): a whole VarSet or Sheet made or deleted (undo and redo included) adds or
+// takes away all its names at once, with no property signal.
+static bool holdsVariables(const App::DocumentObject& obj)
+{
+    if (obj.isDerivedFrom<App::VarSet>()) {
+        return true;
+    }
+    const Base::Type sheet = Base::Type::fromName("Spreadsheet::Sheet");
+    return !sheet.isBad() && obj.isDerivedFrom(sheet);
 }
 
 // FreeCAD-CH (ops#152): repaint, so texts computed at paint time follow (no rebuild).
@@ -356,8 +375,20 @@ void PropertyView::slotDeletedViewObject(const Gui::ViewProvider& vp)
     }
 }
 
+void PropertyView::slotNewObject(const App::DocumentObject& obj)
+{
+    // FreeCAD-CH (ops#152)
+    if (holdsVariables(obj)) {
+        propertyEditorData->viewport()->update();
+    }
+}
+
 void PropertyView::slotDeletedObject(const App::DocumentObject& obj)
 {
+    // FreeCAD-CH (ops#152)
+    if (holdsVariables(obj)) {
+        propertyEditorData->viewport()->update();
+    }
     if (propertyEditorData->propOwners.contains(&obj)) {
         propertyEditorView->buildUp();
         propertyEditorData->buildUp();

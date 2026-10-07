@@ -271,11 +271,17 @@ void InputField::newInput(const QString& text)
         fixup(input);
 
         if (isBound()) {
-            std::shared_ptr<Expression> e(
-                ExpressionParser::parse(getPath().getDocumentObject(), input.toUtf8())
-            );
+            // FreeCAD-CH (ops#152): the shown text of the current expression (`#Width`, set by
+            // bind() and updateText()) keeps it. Parsed back, a label or a `.Width` reference would
+            // come back in another form and rewrite the expression with nobody editing.
+            std::shared_ptr<Expression> current = getExpression();
+            if (!current || input != expressionDisplayText(current.get())) {
+                std::shared_ptr<Expression> e(
+                    ExpressionParser::parse(getPath().getDocumentObject(), input.toUtf8())
+                );
 
-            setExpression(e);
+                setExpression(e);
+            }
 
             std::unique_ptr<Expression> evalRes(getExpression()->eval());
 

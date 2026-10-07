@@ -360,6 +360,13 @@ void DlgExpressionInput::checkExpression(const QString& text)
         ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData())
     );
 
+    // FreeCAD-CH (ops#152): the shown text of the stored expression keeps it, so OK with the text
+    // unchanged doesn't rewrite a label or a `.Width` reference into the form it parses back to.
+    if (std::shared_ptr<Expression> stored = path.getDocumentObject()->getExpression(path).expression;
+        stored && text == expressionDisplayText(stored.get())) {
+        expr = stored->copy();
+    }
+
     if (expr) {
         std::string error = path.getDocumentObject()->ExpressionEngine.validateExpression(path, expr);
 

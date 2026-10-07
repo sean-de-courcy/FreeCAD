@@ -1032,7 +1032,9 @@ QString PropertyIntegerItem::toString(const QVariant& v) const
     QString string(PropertyItem::toString(v));
 
     if (hasExpression()) {
-        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
+        // FreeCAD-CH (ops#152)
+        string += QStringLiteral("  ( %1 )")
+            .arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return string;
@@ -1124,7 +1126,9 @@ QString PropertyIntegerConstraintItem::toString(const QVariant& v) const
     }
 
     if (hasExpression()) {
-        string += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
+        // FreeCAD-CH (ops#152)
+        string += QStringLiteral("  ( %1 )")
+            .arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return string;
@@ -1144,7 +1148,9 @@ QString PropertyFloatItem::toString(const QVariant& prop) const
     QString data = QLocale().toString(value, 'g', highPrec);
 
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
+        // FreeCAD-CH (ops#152)
+        data += QStringLiteral("  ( %1 )")
+            .arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
 
     return data;
@@ -1216,6 +1222,7 @@ QString PropertyUnitItem::toString(const QVariant& prop) const
     const Base::Quantity& unit = prop.value<Base::Quantity>();
     std::string str = unit.getUserString();
     if (hasExpression()) {
+        // FreeCAD-CH (ops#152)
         str += fmt::format("  ( {} )", displayExpressionString(getExpression()));
     }
 
@@ -1539,7 +1546,9 @@ QString PropertyVectorItem::toString(const QVariant& prop) const
                            loc.toString(value.z, 'f', lowPrec)
                        );
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
+        // FreeCAD-CH (ops#152)
+        data += QStringLiteral("  ( %1 )")
+            .arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
     return data;
 }
@@ -1761,7 +1770,9 @@ QString PropertyVectorListItem::toString(const QVariant& prop) const
                        );
 
     if (hasExpression()) {
-        data += QStringLiteral("  ( %1 )").arg(QString::fromStdString(displayExpressionString(getExpression())));
+        // FreeCAD-CH (ops#152)
+        data += QStringLiteral("  ( %1 )")
+            .arg(QString::fromStdString(displayExpressionString(getExpression())));
     }
     return data;
 }
@@ -1846,6 +1857,7 @@ QString PropertyVectorDistanceItem::toString(const QVariant& prop) const
         Base::Quantity(value.z, Base::Unit::Length).getUserString()
     );
     if (hasExpression()) {
+        // FreeCAD-CH (ops#152)
         str += fmt::format("  ( {} )", displayExpressionString(getExpression()));
     }
     return QString::fromStdString(str);

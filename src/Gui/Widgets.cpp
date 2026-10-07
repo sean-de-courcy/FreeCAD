@@ -1647,7 +1647,8 @@ void ExpLineEdit::onChange()
         QPalette p(palette());
         p.setColor(QPalette::Text, Qt::lightGray);
         setPalette(p);
-        iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));  // FreeCAD-CH (ops#152)
+        // FreeCAD-CH (ops#152)
+        iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
     }
     else {
         setReadOnly(false);
@@ -1679,7 +1680,8 @@ void ExpLineEdit::resizeEvent(QResizeEvent* event)
             QPalette p(palette());
             p.setColor(QPalette::Text, Qt::lightGray);
             setPalette(p);
-            iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));  // FreeCAD-CH (ops#152)
+            // FreeCAD-CH (ops#152)
+            iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
         }
         else {
             setReadOnly(false);

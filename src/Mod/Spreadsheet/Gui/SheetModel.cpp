@@ -664,6 +664,12 @@ bool SheetModel::setData(const QModelIndex& index, const QVariant& value, int ro
             if (str == QString::fromStdString(oldContent)) {
                 return true;
             }
+            // FreeCAD-CH (ops#152): the stored text retyped is no change either
+            std::string storedContent;
+            cell->getStringContent(storedContent);
+            if (str == QString::fromStdString(storedContent)) {
+                return true;
+            }
         }
 
         QMetaObject::invokeMethod(

@@ -92,6 +92,7 @@ private:
     void slotDeleteDocument(const Gui::Document&);
     void slotDeletedViewObject(const Gui::ViewProvider&);
     void slotDeletedObject(const App::DocumentObject&);
+    void slotNewObject(const App::DocumentObject&);  // FreeCAD-CH (ops#152)
 
     void checkEnable(const char* doc = nullptr);
 
@@ -112,6 +113,7 @@ private:
     Connection connectDelObject;
     Connection connectDelViewObject;
     Connection connectChangedDocument;
+    Connection connectNewObject;  // FreeCAD-CH (ops#152)
     QTabWidget* tabs;
     QTimer* timer;
     bool updating = false;

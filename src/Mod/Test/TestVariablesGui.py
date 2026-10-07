@@ -49,6 +49,19 @@ def widgetsOfClass(parent, cls, className):
     return [w for w in parent.findChildren(cls) if w.metaObject().className() == className]
 
 
+class PaintCounter(QtCore.QObject):
+    """Counts the paint and update requests a widget gets."""
+
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QtCore.QEvent.Paint, QtCore.QEvent.UpdateRequest):
+            self.count += 1
+        return False
+
+
 class TestVariablesGui(unittest.TestCase):
     def setUp(self):
         self.doc = App.newDocument("TestVariablesGui")
@@ -203,11 +216,83 @@ class TestVariablesGui(unittest.TestCase):
         pump(0.3)
         self.assertEqual(self.doc.UndoCount, undoCount)
         self.assertNotIn("Touched", sheet.State)
+        # The stored text retyped is no change either (fork PR 153 review).
+        model.setData(b1, "=VarSet.Width", QtCore.Qt.EditRole)
+        pump(0.3)
+        self.assertEqual(self.doc.UndoCount, undoCount)
+        self.assertNotIn("Touched", sheet.State)
 
         model.setData(b1, "=#Width*3", QtCore.Qt.EditRole)
         pump(0.3)
         self.assertEqual(sheet.getContents("B1"), "=VarSet.Width * 3")
         self.assertEqual(self.doc.UndoCount, undoCount + 1)
+
+    def test_formula_dialog_keeps_label_reference(self):
+        """G11, a label reference (fork PR 153 review): OK with the shown text unchanged keeps
+        `<<Variables>>.Width`, which parses back as `VarSet.Width`."""
+        self.varSet.Label = "Variables"
+        self.box.setExpression("Length", "<<Variables>>.Width * 2")
+        self.doc.recompute()
+        spin = self.boundSpinBox(self.box, "Length")
+        QTest.keyClicks(spin, "=")
+        dialog = waitFor(
+            lambda: widgetsOfClass(spin, QtWidgets.QDialog, "Gui::Dialog::DlgExpressionInput")
+        )
+        self.assertTrue(dialog, "the f(x) dialog didn't open")
+        dialog = dialog[0]
+        editor = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+        self.assertEqual(editor.toPlainText(), "#Width * 2")
+        dialog.accept()
+        pump(0.3)
+        self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2")
+
+    def test_input_field_keeps_expression(self):
+        """An InputField bound to Box.Length shows `#Width * 2`, and showing it changes nothing:
+        the stored text keeps its label reference, and there is no new undo entry (fork PR 153
+        review, Medium)."""
+        self.varSet.Label = "Variables"
+        self.box.setExpression("Length", "<<Variables>>.Width * 2")
+        self.doc.recompute()
+        undoCount = self.doc.UndoCount
+        field = Gui.UiLoader().createWidget("Gui::InputField")
+        self.widgets.append(field)
+        binding = Gui.ExpressionBinding(field)
+        binding.bind(self.box, "Length")
+        field.show()
+        pump(0.1)
+        self.assertEqual(field.text(), "#Width * 2")
+        field.setProperty("unit", "mm")  # updateText() shows the text again
+        pump(0.1)
+        self.assertEqual(field.text(), "#Width * 2")
+        self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2")
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
+    def test_property_view_repaints(self):
+        """8.4: changes that make a name unique or ambiguous repaint the property view's Data tab:
+        an alias set, a VarSet deleted, and its deletion undone (fork PR 153 review)."""
+        other = self.doc.addObject("App::VarSet", "Other")
+        other.addProperty("App::PropertyLength", "Width")
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        self.doc.recompute()
+        self.assertIn("( VarSet.Width * 2 )", self.propertyRowText(self.box, "Length"))
+        editor, _ = self._propertyIndex("Length")
+        counter = PaintCounter()
+        editor.viewport().installEventFilter(counter)
+        pump(0.3)
+
+        def repainted(change):
+            counter.count = 0
+            change()
+            pump(0.3)
+            return counter.count
+
+        self.doc.openTransaction("Delete Other")
+        self.assertGreater(repainted(lambda: self.doc.removeObject("Other")), 0, "delete")
+        self.doc.commitTransaction()
+        self.assertGreater(repainted(self.doc.undo), 0, "undo of the delete")
+        self.assertIsNotNone(self.doc.getObject("Other"))
+        self.assertGreater(repainted(lambda: sheet.setAlias("A1", "Depth")), 0, "alias")
+        editor.viewport().removeEventFilter(counter)
 
     def test_live_ambiguity_change(self):
         """G15. A sheet alias `Width` makes the name ambiguous: the Length row falls back to the
