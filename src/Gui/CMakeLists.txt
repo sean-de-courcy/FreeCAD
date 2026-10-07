@@ -743,6 +743,7 @@ SET(Dock_Windows_CPP_SRCS
     ToolBox.cpp
     Tree.cpp
     TreeView.cpp
+    VariablesView.cpp
     DAGView/DAGView.cpp
     DAGView/DAGModel.cpp
     DAGView/DAGRectItem.cpp
@@ -757,6 +758,7 @@ SET(Dock_Windows_HPP_SRCS
     ToolBox.h
     Tree.h
     TreeView.h
+    VariablesView.h
     DAGView/DAGView.h
     DAGView/DAGModel.h
     DAGView/DAGRectItem.h
