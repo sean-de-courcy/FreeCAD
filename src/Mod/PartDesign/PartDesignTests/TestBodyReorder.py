@@ -748,7 +748,7 @@ class BodyReorderBase:
         self.assertGapBound(sketch)
         lines = self.parked(sketch)
         self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].startswith("extgeo|ExternalGeometry|Pad2|"), lines[0])
+        self.assertTrue(lines[0].startswith(f"extgeo|ExternalGeometry|Pad2#{pad2.ID}|"), lines[0])
         self.recompute()
         self.assertFalse(sketch.isValid())
         self.assertFalse(hole.isValid())
@@ -1255,6 +1255,96 @@ class BodyReorderBase:
         self.body.rollToEnd()
         self.recompute()
         self.assertAlmostEqual(binder.Shape.Volume, BLOCK + 4 * 4 * 7 + BOSS - HOLE, delta=1e-4)
+
+    # -- a parked line's object deleted, its name taken by a new one (ops#158) -------------------
+
+    def deleteFeature(self, feature):
+        """Deletes a sketch-based feature and its sketch."""
+        profile = feature.Profile[0]
+        self.body.removeObject(feature)
+        self.doc.removeObject(feature.Name)
+        self.doc.removeObject(profile.Name)
+
+    def testParkedProjectionNameTakenByNewObject(self):
+        """RO11f with a newcomer: Pad2 deleted while the projection is parked, and a 4 x 4 x 5 boss
+        made afterwards gets the name Pad2. Moved below the boss, the projection is not put on it:
+        the line is dropped and the geometry is a missing reference naming the old Pad2, its
+        constraints kept."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.deleteFeature(pad2)
+        newcomer = self.boss("Pad2", 1, 1)
+        self.assertEqual(newcomer.Name, "Pad2")
+        self.recompute()
+
+        self.body.reorderObject([hole], newcomer, True)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertEqual(sketch.ExternalGeometry, [])
+        geoId, ref, _ = self.projection(sketch)
+        self.assertEqual((geoId, ref), before[:2])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertTrue(Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing"))
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+
+    def testParkedOriginalNameTakenByNewObject(self):
+        """RO8 with a newcomer: HoleC deleted while it is parked on the pattern, and a new hole
+        gets the name HoleC. Moved below it, the pattern's Originals stay empty and the line is
+        dropped."""
+        block, a, b, c = self.chain()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [c]
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 4
+        pattern.Occurrences = 2
+        self.body.Tip = pattern
+        self.recompute()
+        self.body.reorderObject([pattern], b, True)
+        self.assertEqual(len(self.parked(pattern)), 1)
+        self.deleteFeature(c)
+        newcomer = self.hole("HoleC", 12, 6)
+        self.assertEqual(newcomer.Name, "HoleC")
+        self.recompute()
+
+        self.body.reorderObject([pattern], newcomer, True)
+        self.assertEqual(pattern.Originals, [])
+        self.assertEqual(self.parked(pattern), [])
+
+    def testParkedExpressionNameTakenByNewObject(self):
+        """RO9 with a newcomer: BossA deleted while B's expression reading it is parked, and a new
+        boss gets the name BossA. Moved below it, B's expression is not put back."""
+        block, a, b, c = self.chain()
+        b.setExpression("Length", "BossA.Length")
+        self.recompute()
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.deleteFeature(a)
+        newcomer = self.boss("BossA", 8, 1)
+        self.assertEqual(newcomer.Name, "BossA")
+        self.recompute()
+
+        self.body.reorderObject([b], newcomer, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.assertEqual(self.parked(b), [])
+
+    def testParkedLineWithoutObjectId(self):
+        """A line written before ops#158 names its object without the ID: it still parses and
+        puts the projection back (RO11c)."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        lines = self.parked(sketch)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith(f"extgeo|ExternalGeometry|Pad2#{pad2.ID}|"), lines[0])
+        sketch.ParkedReferences = [lines[0].replace(f"Pad2#{pad2.ID}|", "Pad2|", 1)]
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertRestoredState(block, pad2, sketch, hole, before, counts)
 
 
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):

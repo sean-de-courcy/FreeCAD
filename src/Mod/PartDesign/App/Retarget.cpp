@@ -144,13 +144,15 @@ std::string unescapeField(const std::string& text)
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
 /// <position>`, then `|<guess>|<orig>|<alt>[|<orig fp>]` when it has a guess record), a sketch's
 /// projection parked in place (`extgeo|`, the same fields, then `|<type>|<ids>` before the guess
-/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`)
+/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
+/// since ops#158, its ID: `Pad2#17` (object names have no `#`; a line without the ID still reads)
 struct ParkedItem
 {
     bool expression = false;
     bool extgeo = false;  // a projection: its geometries stay in the sketch without the link
     std::string property;  // the property, or the expression's path
     std::string target;    // the name of the object it refers to
+    long targetId = 0;     // its ID (getID()), 0 in lines written before ops#158
     std::string sub;
     std::string shadowNew;
     std::string shadowOld;
@@ -165,12 +167,13 @@ struct ParkedItem
     {
         std::ostringstream ss;
         if (expression) {
-            ss << "expr|" << escapeField(property) << '|' << escapeField(target) << '|'
+            ss << "expr|" << escapeField(property) << '|' << escapeField(targetField()) << '|'
                << escapeField(text);
         }
         else {
             ss << (extgeo ? "extgeo|" : "link|") << escapeField(property) << '|'
-               << escapeField(target) << '|' << escapeField(sub) << '|' << escapeField(shadowNew)
+               << escapeField(targetField()) << '|' << escapeField(sub) << '|'
+               << escapeField(shadowNew)
                << '|' << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
             if (extgeo) {
                 ss << '|' << type << '|';
@@ -189,6 +192,37 @@ struct ParkedItem
         return ss.str();
     }
 
+    std::string targetField() const
+    {
+        return targetId > 0 ? target + "#" + std::to_string(targetId) : target;
+    }
+
+    void setTarget(const std::string& field)
+    {
+        target = field;
+        targetId = 0;
+        auto hash = field.rfind('#');
+        if (hash == std::string::npos || hash + 1 == field.size()) {
+            return;
+        }
+        try {
+            std::size_t used = 0;
+            long id = std::stol(field.substr(hash + 1), &used);
+            if (used == field.size() - hash - 1 && id > 0) {
+                target = field.substr(0, hash);
+                targetId = id;
+            }
+        }
+        catch (...) {
+        }
+    }
+
+    void setTarget(const App::DocumentObject* obj)
+    {
+        target = obj->getNameInDocument();
+        targetId = obj->getID();
+    }
+
     static std::optional<ParkedItem> parse(const std::string& line)
     {
         std::vector<std::string> fields;
@@ -205,7 +239,7 @@ struct ParkedItem
         if (fields.size() == 4 && fields[0] == "expr") {
             item.expression = true;
             item.property = fields[1];
-            item.target = fields[2];
+            item.setTarget(fields[2]);
             item.text = fields[3];
             return item;
         }
@@ -216,7 +250,7 @@ struct ParkedItem
                 || fields.size() == base + 4)) {
             item.extgeo = fields[0] == "extgeo";
             item.property = fields[1];
-            item.target = fields[2];
+            item.setTarget(fields[2]);
             item.sub = fields[3];
             item.shadowNew = fields[4];
             item.shadowOld = fields[5];
@@ -300,6 +334,17 @@ void writeParkedLines(App::DocumentObject* owner, const std::vector<std::string>
     if (prop) {
         prop->setValues(lines);
     }
+}
+
+/// The object a parked item refers to: the one of that name, if it is the same object
+/// (ops#158: a new object can take a deleted one's name); null when it was deleted
+App::DocumentObject* parkedTarget(const App::Document* doc, const ParkedItem& item)
+{
+    auto obj = doc ? doc->getObject(item.target.c_str()) : nullptr;
+    if (obj && item.targetId > 0 && obj->getID() != item.targetId) {
+        return nullptr;
+    }
+    return obj;
 }
 
 // -- A link property as the rule sees it ---------------------------------------------------------
@@ -857,7 +902,7 @@ private:
                 if (items[i].expression || items[i].property != prop->getName()) {
                     continue;
                 }
-                auto target = doc->getObject(items[i].target.c_str());
+                auto target = parkedTarget(doc, items[i]);
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
@@ -978,7 +1023,7 @@ private:
             item.ids = unit.ids;
         }
         if (unit.subs.empty()) {
-            item.target = unit.obj->getNameInDocument();
+            item.setTarget(unit.obj);
             newLines.push_back(item.line());
         }
         else {
@@ -989,7 +1034,16 @@ private:
                 if (!s.record.empty() && !keys.insert(recordKey(s.record)).second) {
                     continue;
                 }
-                item.target = s.record.empty() ? unit.obj->getNameInDocument() : s.record.target;
+                // A record's object exists here: decide() ends a record whose object is gone
+                auto doc = unit.obj->getDocument();
+                auto source = s.record.empty() ? unit.obj : doc->getObject(s.record.target.c_str());
+                if (source) {
+                    item.setTarget(source);
+                }
+                else {
+                    item.target = s.record.target;
+                    item.targetId = 0;
+                }
                 item.sub = entry.sub;
                 item.shadowNew = entry.shadow.newName;
                 item.shadowOld = entry.shadow.oldName;
@@ -1218,7 +1272,7 @@ private:
                     ParkedItem item;
                     item.expression = true;
                     item.property = path.toString();
-                    item.target = dep.first->getNameInDocument();
+                    item.setTarget(dep.first);
                     item.text = expr->toString(true);
                     plan.parkPaths.insert(item.property);
                     plan.lines.push_back(item.line());
@@ -1234,7 +1288,7 @@ private:
                 kept.push_back(line);
                 continue;
             }
-            auto target = doc->getObject(item->target.c_str());
+            auto target = parkedTarget(doc, *item);
             if (target && x && readsLater(target, x)) {
                 kept.push_back(line);
                 continue;
@@ -1791,7 +1845,7 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
         why = "A reference was set aside by a reorder";
         return true;
     }
-    auto target = doc->getObject(item->target.c_str());
+    auto target = parkedTarget(doc, *item);
     std::string targetLabel = target ? target->Label.getValue() : item->target;
     // The feature it now comes after: the earliest solid whose inputs include obj
     std::string userLabel;
