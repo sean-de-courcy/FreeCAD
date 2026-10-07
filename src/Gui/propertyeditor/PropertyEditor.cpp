@@ -1417,7 +1417,13 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 QLineEdit::Normal,
                 QString::fromUtf8(oldName)
             );
+            // FreeCAD-CH (ops#163): a cancelled dialog gives the booked transaction back, or the
+            // user's next change in the document is recorded as "Rename property". Only our own:
+            // an ID of 0 would mean the current global transaction.
             if (res.isEmpty()) {
+                if (tid) {
+                    App::GetApplication().abortTransaction(tid);
+                }
                 break;
             }
 
@@ -1426,7 +1432,9 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 prop->getContainer()->renameDynamicProperty(prop, newName.c_str());
             }
             catch (Base::Exception& e) {
-                App::GetApplication().abortTransaction(tid);
+                if (tid) {
+                    App::GetApplication().abortTransaction(tid);
+                }
                 e.reportException();
                 break;
             }
