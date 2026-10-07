@@ -187,7 +187,8 @@ names it.
 | `fix/185-variables-followups` | fix | ops#185, ops#188 | - | `integration` `d4965681c6` | `df1c89c675` (fork PR 158), 2026-10-07 | never (fork feature); goes with `feat/152-display-gui` and `feat/152-panel` |
 | `fix/168-fix-keeps-names` | fix | ops#168 | - | `integration` `dbd0b40f6f` | `c10f794a1c` (fork PR 157), 2026-10-07 | never (fork feature) |
 | `feat/150-w6-revolution-helix` | feat | ops#150 | - | `integration` `50485c0283` | `5540399399` (fork PR 159), 2026-10-07 | never (fork feature) |
-| `fix/183-t1prime-followups` | fix | ops#183 | - | `integration` (`fix/173-multi-circle-tier1` `2c829d6ff0`) | (fork PR 161) | never (fork feature) |
+| `fix/183-t1prime-followups` | fix | ops#183 | - | `integration` (`fix/173-multi-circle-tier1` `2c829d6ff0`) | `ec7262a329` (fork PR 161), 2026-10-07 | never (fork feature) |
+| `fix/169-known-failure-lists` | fix | ops#169 | - | `integration` `df1c89c675` | (fork PR 162) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

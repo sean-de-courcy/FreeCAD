@@ -6,7 +6,7 @@
 
 issue: ops#92
 
-reason: V1 breaks (or, for FilletNotchBeside, moves) a reference that V2 resolves correctly: V2's gains over V1 (phase4-checkpoint.md 1.1); DressUpInsertThenNotch errors because V1 can't build the model (its chamfer breaks at the insert); seed 1 breaks F4Fillet's edge at step 1
+reason: V1 breaks (or, for FilletNotchBeside, moves) a reference that V2 resolves correctly: V2's gains over V1 (phase4-checkpoint.md 1.1); DressUpInsertThenNotch errors because V1 can't build the model (its chamfer breaks at the insert); seed 1 breaks F4Fillet's edge at step 1; seed 4 breaks F4Chamfer's and F5Chamfer's edges at step 2 (block H -> 14.5; ops#169)
 cli  PartDesignTests.TestNamingScenarios.ChamferEdgeShortened.test_chamfer_edge_V1
 cli  PartDesignTests.TestNamingScenarios.DressUpInsertPocket.test_draft_face_V1
 cli  PartDesignTests.TestNamingScenarios.DressUpInsertPocket.test_draft_neutral_V1
@@ -21,6 +21,7 @@ cli  PartDesignTests.TestNamingScenarios.R7EdgeReturns.test_chamfer_edge_V1
 cli  PartDesignTests.TestNamingScenarios.UpToFaceLength.test_pad_up_to_top_V1
 cli  PartDesignTests.TestNamingScenarios.DressUpInsertThenNotch.test_chamfer_edge_V1
 cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0001_V1
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0004_V1
 
 reason: V1 gives the same verdict as V2 at every step, and V2's test is listed with the cause (ops#7: splits, notches, merges, Extent patterns; ops#68: the Attacher's old index)
 cli  PartDesignTests.TestNamingScenarios.AmbiguousHalves.test_point_top_V1
