@@ -35,6 +35,7 @@
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/PropertyUnits.h>
+#include <Base/Console.h>
 
 #include "SpinBox.h"
 #include "Command.h"
@@ -46,6 +47,8 @@
 using namespace Gui;
 using namespace App;
 using namespace Base;
+
+FC_LOG_LEVEL_INIT("Expression", true, true)
 
 namespace SpinBoxPrivate
 {
@@ -181,14 +184,43 @@ void ExpressionSpinBox::bind(const App::ObjectIdentifier& _path)
     connection.disconnect();
     const App::Property* prop = getPath().getProperty();
     App::DocumentObject* obj = getPath().getDocumentObject();
+    // The document's signal, not the object's own signalChanged: only the document's are
+    // delivered on the GUI thread. The filter is a pointer compare.
     if (prop && obj && obj->getDocument()) {
         connection = obj->getDocument()->signalChangedObject.connect(
             [this, prop](const App::DocumentObject&, const App::Property& changed) {
-                if (&changed != prop || !hasExpression()) {
+                if (&changed != prop) {
                     return;
                 }
-                QSignalBlocker blocker(spinbox);
-                showValidExpression(Number::SetIfNumber);
+                if (!isBound()) {
+                    // Unbound since (an override of unbind() would change SpinBox.h): drop the
+                    // connection once this signal is done; a re-bind replaces it anyway (ops#159)
+                    QMetaObject::invokeMethod(
+                        spinbox,
+                        [this]() {
+                            if (!isBound()) {
+                                SpinBoxPrivate::propertyConnections().erase(this);
+                            }
+                        },
+                        Qt::QueuedConnection
+                    );
+                    return;
+                }
+                if (!hasExpression()) {
+                    return;
+                }
+                // This runs inside the property's onChanged, e.g. in a recompute: nothing may
+                // escape into it (ops#159)
+                try {
+                    QSignalBlocker blocker(spinbox);
+                    showValidExpression(Number::SetIfNumber);
+                }
+                catch (const std::exception& e) {
+                    FC_ERR("Refreshing an expression field: " << e.what());
+                }
+                catch (...) {
+                    FC_ERR("Refreshing an expression field: unknown error");
+                }
             }
         );
     }

@@ -2225,7 +2225,37 @@ void StdCmdEdit::activated(int iMsg)
         else {
             if (!Selection().getCompleteSelection().empty()) {
                 SelectionSingleton::SelObj obj = Selection().getCompleteSelection()[0];
-                doCommand(Command::Gui, "Gui.activeDocument().setEdit(\"%s\",0)", obj.FeatName);
+                // The edit gets its transaction, as from the tree's double-click: the panel's
+                // Cancel then reverts what it changed, expressions included (ops#156). A view
+                // provider without a transaction text (the Sketcher) opens its own.
+                Gui::Document* guiDoc = getActiveGuiDocument();
+                auto vp = freecad_cast<ViewProviderDocumentObject*>(
+                    Application::Instance->getViewProvider(obj.pObject)
+                );
+                const bool transaction = guiDoc && vp && vp->getTransactionText()
+                    && obj.pObject->getDocument() == guiDoc->getDocument();
+                if (transaction) {
+                    const QString text = QObject::tr("Edit %1").arg(
+                        QString::fromUtf8(obj.pObject->Label.getValue())
+                    );
+                    guiDoc->openCommand(text.toUtf8());
+                }
+                try {
+                    doCommand(
+                        Command::Gui,
+                        "Gui.activeDocument().setEdit(\"%s\",0)",
+                        obj.FeatName
+                    );
+                }
+                catch (...) {
+                    if (transaction) {
+                        guiDoc->abortCommand();
+                    }
+                    throw;
+                }
+                if (transaction && !guiDoc->getEditViewProvider()) {
+                    guiDoc->abortCommand();
+                }
             }
         }
     }

@@ -35,7 +35,8 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import Part
 
-from PySide import QtWidgets
+from PySide import QtCore, QtWidgets
+from PySide6 import QtTest
 
 
 def pump(seconds=0.3):
@@ -58,6 +59,16 @@ def taskButton(which):
                 return button
             parent = parent.parentWidget()
     return None
+
+
+def waitFor(condition, timeout=5.0):
+    """Pumps events until condition() holds, or the timeout passes."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if condition():
+            return True
+        pump(0.05)
+    return bool(condition())
 
 
 def rectangleSketch(body, name, x0, y0, x1, y1, z=0.0):
@@ -125,6 +136,40 @@ class TestExpressionFieldsGui(unittest.TestCase):
         widget = self.field(name)
         self.assertAlmostEqual(widget.property("rawValue"), value, places=6)
         self.assertTrue(widget.property("readOnly"), f"{name} is editable with an expression")
+
+    def setFormula(self, widget, text):
+        """Sets an expression through the field's f(x) dialog, as a user would."""
+
+        def formulaDialog():  # the open one: a closed one is deleted later
+            for dialog in widget.findChildren(QtWidgets.QDialog, "DlgExpressionInput"):
+                if dialog.isVisible():
+                    return dialog
+            return None
+
+        # the field's f(x) icon
+        icons = [
+            label
+            for label in widget.findChildren(QtWidgets.QLabel)
+            if label.metaObject().className() == "ExpressionLabel"
+        ]
+        self.assertEqual(len(icons), 1, "the field's f(x) icon")
+        QtTest.QTest.mouseClick(icons[0], QtCore.Qt.LeftButton)
+        self.assertTrue(waitFor(lambda: formulaDialog() is not None), "no f(x) dialog")
+        dialog = formulaDialog()
+        edit = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+        self.assertIsNotNone(edit)
+        edit.setPlainText(text)
+        pump(0.1)
+        ok = dialog.findChild(QtWidgets.QDialogButtonBox, "buttonBox").button(
+            QtWidgets.QDialogButtonBox.Ok
+        )
+        self.assertTrue(ok.isEnabled(), f"the f(x) dialog doesn't take {text}")
+        ok.click()
+        self.assertTrue(waitFor(lambda: formulaDialog() is None), "the f(x) dialog stays")
+
+    def assertUnit(self, name, unit="mm"):
+        text = self.field(name).text()
+        self.assertTrue(text.endswith(unit), f"{name} shows {text!r}, not in {unit}")
 
     def addFillet(self):
         # The vertical edge at (20, 10)
@@ -224,9 +269,53 @@ class TestExpressionFieldsGui(unittest.TestCase):
         widget.setProperty("rawValue", 12.0)
         pump()
         self.assertAlmostEqual(self.pad.Length.Value, 12.0, places=6)
+        # a change of the bound property itself (B5 never changed it, ops#159): the field keeps
+        # the user's value
+        self.pad.Length = 14
+        self.doc.recompute()
+        pump()
+        self.assertAlmostEqual(self.pad.Length.Value, 14.0, places=6)
+        self.assertAlmostEqual(widget.property("rawValue"), 12.0, places=6)
+        self.assertFalse(widget.property("readOnly"))
+
+    def testFormulaWithoutUnitShowsFieldUnit(self):
+        # B6 (ops#157): the f(x) dialog sets an expression whose result has no unit (a Sheet cell
+        # without one): the field showed "20.00", not "20.00 mm", until the panel was reopened.
+        # Also after a refresh (B1's path)
+        self.openPanel(self.pad)
+        self.assertUnit("lengthEdit")
+        self.setFormula(self.field("lengthEdit"), "Sheet.L * 2")
+        self.assertAlmostEqual(self.field("lengthEdit").property("rawValue"), 20.0, places=6)
+        self.assertUnit("lengthEdit")
         self.sheet.set("A1", "15")
         self.doc.recompute()
         pump()
-        self.assertAlmostEqual(widget.property("rawValue"), 12.0, places=6)
-        self.assertAlmostEqual(self.pad.Length.Value, 12.0, places=6)
-        self.assertFalse(widget.property("readOnly"))
+        self.assertShows("lengthEdit", 30.0)
+        self.assertUnit("lengthEdit")
+
+    def testToggleEditModeCancelRevertsExpression(self):
+        # B7 (ops#156): Edit > Toggle edit mode (Std_Edit) opened the panel without a transaction,
+        # so an expression set in it went into its own committed transaction: Cancel kept it
+        undo = list(self.doc.UndoNames)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.pad)
+        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        views = [
+            subWindow
+            for subWindow in mdi.subWindowList()
+            if subWindow.widget().metaObject().className() == "Gui::View3DInventor"
+        ]
+        self.assertEqual(len(views), 1, "the document's 3D view")
+        mdi.setActiveSubWindow(views[0])  # Std_Edit acts on the active 3D view
+        pump(0.1)
+        Gui.runCommand("Std_Edit")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "Std_Edit opened no panel")
+        self.setFormula(self.field("lengthEdit"), "Sheet.L * 2")
+        self.assertEqual(self.pad.ExpressionEngine, [("Length", "Sheet.L * 2")])
+
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the panel stays")
+        self.assertEqual(self.pad.ExpressionEngine, [("Length", "Sheet.L")])
+        self.doc.recompute()
+        self.assertAlmostEqual(self.pad.Length.Value, 10.0, places=6)
+        self.assertEqual(list(self.doc.UndoNames), undo)

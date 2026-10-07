@@ -435,7 +435,14 @@ void QuantitySpinBox::evaluateExpression()
 
 void Gui::QuantitySpinBox::setNumberExpression(App::NumberExpression* expr)
 {
-    updateEdit(getUserString(expr->getQuantity()));
+    Q_D(const QuantitySpinBox);
+    // A result without a unit (e.g. a Sheet cell without one) is in the field's unit, as the
+    // property takes it; shown bare, "24.00" stayed until the panel was reopened (ops#157)
+    Base::Quantity quantity = expr->getQuantity();
+    if (quantity.isDimensionless()) {
+        quantity.setUnit(d->unit);
+    }
+    updateEdit(getUserString(quantity));
     handlePendingEmit();
 }
 
