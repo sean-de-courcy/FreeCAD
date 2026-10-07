@@ -2164,7 +2164,19 @@ void StdCmdEdit::activated(int iMsg)
                     );
                     guiDoc->openCommand(text.toUtf8());
                 }
-                doCommand(Command::Gui, "Gui.activeDocument().setEdit(\"%s\",0)", obj.FeatName);
+                try {
+                    doCommand(
+                        Command::Gui,
+                        "Gui.activeDocument().setEdit(\"%s\",0)",
+                        obj.FeatName
+                    );
+                }
+                catch (...) {
+                    if (transaction) {
+                        guiDoc->abortCommand();
+                    }
+                    throw;
+                }
                 if (transaction && !guiDoc->getEditViewProvider()) {
                     guiDoc->abortCommand();
                 }

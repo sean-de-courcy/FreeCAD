@@ -35,6 +35,7 @@
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/PropertyUnits.h>
+#include <Base/Console.h>
 
 #include "SpinBox.h"
 #include "Command.h"
@@ -46,6 +47,8 @@
 using namespace Gui;
 using namespace App;
 using namespace Base;
+
+FC_LOG_LEVEL_INIT("Expression", true, true)
 
 namespace SpinBoxPrivate
 {
@@ -212,7 +215,11 @@ void ExpressionSpinBox::bind(const App::ObjectIdentifier& _path)
                     QSignalBlocker blocker(spinbox);
                     showValidExpression(Number::SetIfNumber);
                 }
+                catch (const std::exception& e) {
+                    FC_ERR("Refreshing an expression field: " << e.what());
+                }
                 catch (...) {
+                    FC_ERR("Refreshing an expression field: unknown error");
                 }
             }
         );
