@@ -1171,7 +1171,8 @@ long TaskHoleParameters::getThreadSize() const
 
 long TaskHoleParameters::getThreadClass() const
 {
-    if (ui->ThreadSize->currentIndex() == -1) {
+    // FreeCAD-CH (ops#170): its own combo (it tested ThreadSize's)
+    if (ui->ThreadClass->currentIndex() == -1) {
         return 0;
     }
     else {
@@ -1287,7 +1288,15 @@ double TaskHoleParameters::getThreadDepth() const
 }
 int TaskHoleParameters::getBaseProfileType() const
 {
-    return PartDesign::Hole::baseProfileOption_idxToBitmask(ui->BaseProfileType->currentIndex());
+    int idx = ui->BaseProfileType->currentIndex();
+    // FreeCAD-CH (ops#170): a value the combo doesn't list (set from Python, e.g. circles only)
+    // shows blank; OK keeps it instead of writing 0 (no positions, no holes)
+    if (idx < 0) {
+        if (auto hole = getObject<PartDesign::Hole>()) {
+            return hole->BaseProfileType.getValue();
+        }
+    }
+    return PartDesign::Hole::baseProfileOption_idxToBitmask(idx);
 }
 void TaskHoleParameters::apply()
 {
