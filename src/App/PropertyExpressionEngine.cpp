@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <boost/graph/topological_sort.hpp>
 #include <boost/unordered/unordered_map.hpp>
 #include <boost_graph_adjacency_list.hpp>
@@ -38,6 +41,7 @@
 
 #include "PropertyExpressionEngine.h"
 #include "ExpressionVisitors.h"
+#include "Transactions.h"  // FreeCAD-CH (ops#152)
 
 
 FC_LOG_LEVEL_INIT("App", true);
@@ -49,7 +53,56 @@ namespace sp = std::placeholders;
 
 TYPESYSTEM_SOURCE_ABSTRACT(App::PropertyExpressionContainer, App::PropertyXLinkContainer)
 
-static std::set<PropertyExpressionContainer*> _ExprContainers;
+// FreeCAD-CH (ops#177, ops#179): every living container, undo/redo copies included, with the
+// serial number it got when it was made. The slots below visit a snapshot taken before they start,
+// and skip an entry that is gone or whose address now belongs to a newer container: visiting one
+// container can make undo copies (they hold the state from before this change, so they must not
+// be visited) or, under an application transaction, clear another document's redo stack (whose
+// copies are then freed).
+static std::map<PropertyExpressionContainer*, std::uint64_t> _ExprContainers;
+static std::uint64_t _ExprContainerSerial;
+
+template<class Function>
+static void forEachExpressionContainer(Function visit)
+{
+    const auto containers = _ExprContainers;
+    for (const auto& [container, serial] : containers) {
+        auto it = _ExprContainers.find(container);
+        if (it != _ExprContainers.end() && it->second == serial) {
+            visit(container);
+        }
+    }
+}
+
+// FreeCAD-CH (ops#152): visit the containers with `change`, as above. A container whose owner an
+// undo/redo transaction holds (detached, still alive) needs care: changing it opens a transaction
+// in the owner's document when one is booked there (an application transaction), and opening one
+// clears that document's redo stack, which can free the owner in the middle of the change. So the
+// change is tried on a copy first, and if it changes anything that transaction is opened before
+// the real change; a container freed by it is then skipped like any other.
+template<class Change>
+static void changeEachExpressionContainer(Change change)
+{
+    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
+        auto owner = freecad_cast<DocumentObject*>(container->getContainer());
+        if (owner && !owner->isAttachedToDocument() && owner->getDocument()) {
+            const auto serial = _ExprContainers[container];
+            std::unique_ptr<Property> copy(container->Copy());
+            copy->purgeTouched();
+            change(static_cast<PropertyExpressionContainer*>(copy.get()));
+            if (!copy->isTouched()) {
+                return;
+            }
+            copy.reset();
+            Transaction::openPendingTransaction(*owner->getDocument());
+            auto it = _ExprContainers.find(container);
+            if (it == _ExprContainers.end() || it->second != serial) {
+                return;
+            }
+        }
+        change(container);
+    });
+}
 
 PropertyExpressionContainer::PropertyExpressionContainer()
 {
@@ -63,7 +116,7 @@ PropertyExpressionContainer::PropertyExpressionContainer()
         GetApplication().signalMoveDynamicProperty.connect(
             PropertyExpressionContainer::slotMoveDynamicProperty);
     }
-    _ExprContainers.insert(this);
+    _ExprContainers[this] = ++_ExprContainerSerial;
 }
 
 PropertyExpressionContainer::~PropertyExpressionContainer()
@@ -78,25 +131,27 @@ void PropertyExpressionContainer::slotRelabelDocument(const App::Document& doc)
     // because document relabel is not undoable/redoable.
 
     if (doc.getOldLabel() != doc.Label.getValue()) {
-        for (auto prop : _ExprContainers) {
+        forEachExpressionContainer([&doc](PropertyExpressionContainer* prop) {
             prop->onRelabeledDocument(doc);
-        }
+        });
     }
 }
 
 void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property& prop, const char* oldName)
 {
-    for (auto container : _ExprContainers) {
+    // Copies too: undoing the rename renames the property back, and the undo states it passes
+    // through must use the name current then.
+    changeEachExpressionContainer([&](PropertyExpressionContainer* container) {
         container->onRenameDynamicProperty(prop, oldName);
-    }
+    });
 }
 
 void PropertyExpressionContainer::slotMoveDynamicProperty(const App::Property& prop,
                                                           const App::DocumentObject& targetObj)
 {
-    for (auto container : _ExprContainers) {
+    changeEachExpressionContainer([&](PropertyExpressionContainer* container) {
         container->onMoveDynamicProperty(prop, targetObj);
-    }
+    });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////

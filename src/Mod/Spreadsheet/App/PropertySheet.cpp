@@ -1700,7 +1700,28 @@ void PropertySheet::renameObjectIdentifiers(
     const std::map<App::ObjectIdentifier, App::ObjectIdentifier>& paths
 )
 {
-    RenameObjectIdentifierExpressionVisitor<PropertySheet> v {*this, paths, *this};
+    // FreeCAD-CH (ops#179, ops#152): an undo/redo copy has no container, and
+    // ObjectIdentifier(*this) throws for it. Its expressions belong to the same sheet, so name the
+    // sheet's cells instead. A sheet deleted in a transaction stays alive, detached, in the undo
+    // stack, and naming it by its name throws too ("invalid object"), for its cells and their
+    // copies alike. It has no name then: give it one no object can have ('@' is invalid in an
+    // internal name), so it resolves to no object, as the paths of a detached object's own
+    // expression engine do, and renamed references keep their object (and document) name.
+    // A sheet removed outside a transaction is freed while copies of its cells keep `owner`, so
+    // renaming in those copies reads freed memory; stock engine copies share the flaw.
+    if (!getContainer() && !owner) {
+        return;
+    }
+    const ObjectIdentifier ownerId = [this] {
+        if (!owner || owner->isAttachedToDocument()) {
+            return getContainer() ? ObjectIdentifier(*this) : ObjectIdentifier(owner->cells);
+        }
+        ObjectIdentifier id(owner, false);
+        id.setDocumentObjectName(ObjectIdentifier::String("@", false, true), true);
+        id << ObjectIdentifier::SimpleComponent("cells");
+        return id;
+    }();
+    RenameObjectIdentifierExpressionVisitor<PropertySheet> v {*this, paths, ownerId};
     for (auto& c : data) {
         c.second->visit(v);
         if (v.changed()) {

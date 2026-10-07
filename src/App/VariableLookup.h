@@ -32,13 +32,15 @@
 #include <Base/Type.h>
 #include <FCGlobal.h>
 
+#include "ObjectIdentifier.h"
+
 namespace App
 {
 
 class Document;
 class DocumentObject;
 class Expression;
-class ObjectIdentifier;
+class Property;
 
 /// A named variable of a document: a VarSet property or a Spreadsheet alias (FreeCAD-CH, ops#152).
 struct AppExport VariableRef
@@ -48,6 +50,23 @@ struct AppExport VariableRef
 
     /// The full path an expression uses for it, e.g. "VarSet.Width" or "Sheet.Depth".
     std::string path() const;
+};
+
+/** An expression that uses a variable: @a path is a property of @a user, or a cell of a sheet.
+ *
+ * It holds plain pointers: use it right away and drop it before the next document change, since
+ * deleting @a user (or closing its document) leaves it dangling. Detaching @a user (removed in a
+ * transaction) is fine: toString() then gives only the path.
+ */
+struct AppExport VariableUse
+{
+    const DocumentObject* user = nullptr;
+    ObjectIdentifier path;
+
+    /** E.g. "Box.Length" or "Sheet.B1", and "Other#Box.Length" for a user outside @a home
+     * (no @a home: always with the document). A user detached since uses() gives only the path.
+     */
+    std::string toString(const Document* home = nullptr) const;
 };
 
 /** The objects that hold variables for `#name` in expressions (FreeCAD-CH, ops#152).
@@ -72,6 +91,12 @@ public:
 
     /// Whether @a obj holds a variable named @a name.
     static bool isVariable(const DocumentObject* obj, const std::string& name);
+
+    /// Every expression that uses @a prop: properties' expressions and Spreadsheet cells alike
+    /// (DocumentObject::getPropertyUses misses the cells), of its object and its InList, other
+    /// documents included. A use through an App::Link to the holder isn't found: the Link, not
+    /// the user, is in the InList.
+    static std::vector<VariableUse> uses(const Property* prop);
 };
 
 /** While alive, Expression::toString(persistent = false) on this thread writes a reference to a
@@ -82,6 +107,10 @@ public:
  * `<<Variables>>.Width`, `.Width`). A bare name is kept as written, except in the VarSet itself,
  * where `#Width` is stored as `Width`. Everything else is written as today, and
  * toString(persistent = true) never shortens. Scopes nest; each restores the previous one.
+ *
+ * Keep a scope short-lived, around one display call: the name counts are taken at the first
+ * variable reference and kept for the scope's life, keyed by Document*, so a scope held across
+ * document changes would judge uniqueness on stale counts.
  */
 class AppExport VariableDisplayScope
 {

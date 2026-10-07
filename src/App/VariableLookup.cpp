@@ -29,6 +29,7 @@
 #include "DocumentObject.h"
 #include "Expression.h"
 #include "ObjectIdentifier.h"
+#include "PropertyExpressionEngine.h"
 #include "VarSet.h"
 
 using namespace App;
@@ -119,10 +120,85 @@ bool VariableLookup::isVariable(const DocumentObject* obj, const std::string& na
     return false;
 }
 
+std::vector<VariableUse> VariableLookup::uses(const Property* prop)
+{
+    std::vector<VariableUse> result;
+    auto holder = prop ? freecad_cast<DocumentObject*>(prop->getContainer()) : nullptr;
+    if (!holder || !holder->isAttachedToDocument()) {
+        return result;
+    }
+    auto usesProp = [prop](const Expression* expr) {
+        if (!expr) {
+            return false;
+        }
+        for (const auto& [id, hidden] : expr->getIdentifiers()) {
+            if (id.getProperty() == prop) {
+                return true;
+            }
+        }
+        return false;
+    };
+    std::vector<DocumentObject*> users {holder};
+    for (auto obj : holder->getInList()) {
+        if (std::find(users.begin(), users.end(), obj) == users.end()) {
+            users.push_back(obj);
+        }
+    }
+    for (auto user : users) {
+        if (!user || !user->isAttachedToDocument()) {
+            continue;
+        }
+        std::vector<Property*> props;
+        user->getPropertyList(props);
+        for (auto userProp : props) {
+            // The ExpressionEngine, and a sheet's cells.
+            auto container = freecad_cast<PropertyExpressionContainer*>(userProp);
+            if (!container) {
+                continue;
+            }
+            for (const auto& [id, expr] : container->getExpressions()) {
+                if (usesProp(expr)) {
+                    result.push_back({user, id});
+                }
+            }
+        }
+    }
+    return result;
+}
+
+std::string VariableUse::toString(const Document* home) const
+{
+    if (!user || !user->isAttachedToDocument()) {
+        return path.toString();
+    }
+    const std::string name = user->getDocument() == home ? std::string(user->getNameInDocument())
+                                                          : user->getFullName();
+    return name + "." + path.toString();
+}
+
 namespace
 {
 thread_local VariableDisplayScope* currentScope = nullptr;
+
+// Whether an identifier's text names a document: a `#` outside `<<...>>` (a label may hold one).
+bool namesDocument(const std::string& text)
+{
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '#') {
+            return true;
+        }
+        if (text.compare(i, 2, "<<") == 0) {
+            for (i += 2; i < text.size() && text.compare(i, 2, ">>") != 0; ++i) {
+                if (text[i] == '\\') {
+                    ++i;
+                }
+            }
+            ++i;  // the second `>`
+        }
+    }
+    return false;
 }
+}  // namespace
 
 VariableDisplayScope::VariableDisplayScope()
     : _previous(currentScope)
@@ -146,8 +222,9 @@ std::string VariableDisplayScope::shortForm(const DocumentObject* owner, const O
         return {};
     }
     const std::string& text = var.toString();
-    if (text.find('#') != std::string::npos) {
-        return {};  // names a document
+    // getDocumentName() can't tell: it falls back to the owner's document.
+    if (namesDocument(text)) {
+        return {};
     }
     auto holder = var.getDocumentObject();
     if (!holder || holder->getDocument() != owner->getDocument()) {

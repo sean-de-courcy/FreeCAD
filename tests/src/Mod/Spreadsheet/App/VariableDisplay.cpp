@@ -339,6 +339,124 @@ TEST_F(VariableDisplay, listVariablesWithAliases)
     EXPECT_FALSE(App::VariableLookup::isVariable(fresh, "A2"));
 }
 
+// T10: the uses helper finds property expressions and sheet cells alike.
+TEST_F(VariableDisplay, usesCoverSheetCells)
+{
+    box->setExpression(
+        App::ObjectIdentifier(*length),
+        std::shared_ptr<App::Expression>(App::Expression::parse(box, "#Width * 2"))
+    );
+    sheet->setCell("B1", "=VarSet.Width");
+    sheet->setCell("B2", "=Sheet.Depth * 2");  // uses another variable
+    doc->recompute();
+
+    std::set<std::string> uses;
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        uses.insert(use.toString(doc));
+    }
+    EXPECT_EQ(uses, (std::set<std::string> {"Box.Length", "Sheet.B1"}));
+    // DocumentObject::getPropertyUses, for comparison, misses the cell.
+    std::set<std::string> stock;
+    for (const auto& id : varSet->getPropertyUses(width)) {
+        stock.insert(id.toString());
+    }
+    EXPECT_EQ(stock.count("B1"), 0U);
+}
+
+// fork PR 148 review: the VarSet's own expressions and another document's count too, and
+// an unused variable has no uses.
+TEST_F(VariableDisplay, usesCoverOwnExpressionsAndOtherDocuments)
+{
+    auto depth = static_cast<App::PropertyLength*>(
+        varSet->addDynamicProperty("App::PropertyLength", "Depth")
+    );
+    auto unused = varSet->addDynamicProperty("App::PropertyLength", "Unused");
+    varSet->setExpression(
+        App::ObjectIdentifier(*depth),
+        std::shared_ptr<App::Expression>(App::Expression::parse(varSet, "Width * 3"))
+    );
+    // An expression may reference another document only once both are saved.
+    auto doc2 = otherDocument("uses2");
+    auto otherBox = doc2->addObject("App::DocumentObjectGroup", "Box");
+    auto otherLength = static_cast<App::PropertyLength*>(
+        otherBox->addDynamicProperty("App::PropertyLength", "Length")
+    );
+    const std::string path1 = Base::FileInfo::getTempFileName("uses1") + ".FCStd";
+    const std::string path2 = Base::FileInfo::getTempFileName("uses2") + ".FCStd";
+    ASSERT_TRUE(doc->saveAs(path1.c_str()));
+    ASSERT_TRUE(doc2->saveAs(path2.c_str()));
+    otherBox->setExpression(
+        App::ObjectIdentifier(*otherLength),
+        std::shared_ptr<App::Expression>(
+            App::Expression::parse(otherBox, std::string(doc->getName()) + "#VarSet.Width")
+        )
+    );
+    doc->recompute();
+    doc2->recompute();
+
+    std::set<std::string> uses;
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        uses.insert(use.toString(doc));
+    }
+    EXPECT_EQ(
+        uses,
+        (std::set<std::string> {"VarSet.Depth", std::string(doc2->getName()) + "#Box.Length"})
+    );
+    EXPECT_TRUE(App::VariableLookup::uses(unused).empty());
+    // Without a home document every use names its document.
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        EXPECT_EQ(use.toString().find(use.user->getDocument()->getName()), 0U);
+    }
+    std::remove(path1.c_str());
+    std::remove(path2.c_str());
+}
+
+// fork PR 147 review: a `#` in a label isn't a document part.
+TEST_F(VariableDisplay, documentPartOnlyOutsideStrings)
+{
+    varSet->Label.setValue("a#b");
+    EXPECT_EQ(display(box, "<<a#b>>.Width * 2"), "#Width * 2");
+    // The owner's own document named explicitly: the parser already drops it from the stored
+    // text (stock behaviour), so the reference is an ordinary one and shows short.
+    auto named = parse(box, std::string(doc->getName()) + "#VarSet.Width");
+    EXPECT_EQ(named->toString(true), "VarSet.Width");
+    EXPECT_EQ(App::toDisplayString(named.get()), "#Width");
+}
+
+TEST_F(VariableDisplay, indexSubPath)
+{
+    auto list = static_cast<App::PropertyFloatList*>(
+        varSet->addDynamicProperty("App::PropertyFloatList", "List")
+    );
+    list->setValues({4.0, 5.0});
+    auto expr = parse(box, "VarSet.List[1]");
+    EXPECT_EQ(App::toDisplayString(expr.get()), "#List[1]");
+    auto back = parse(box, "#List[1]");
+    EXPECT_EQ(back->toString(true), "VarSet.List[1]");
+    EXPECT_EQ(back->eval()->toString(), expr->eval()->toString());
+}
+
+TEST_F(VariableDisplay, ambiguousInsideTheVarSet)
+{
+    EXPECT_EQ(display(varSet, "Width + 1 mm"), "#Width + 1 mm");
+    sheet->setCell("C1", "5 mm");
+    sheet->setAlias(App::CellAddress("C1"), "Width");
+    EXPECT_EQ(display(varSet, "Width + 1 mm"), "Width + 1 mm");
+}
+
+TEST_F(VariableDisplay, nestedDisplayLeavesOuterList)
+{
+    auto outerExpr = parse(box, "VarSet.Width * 2");
+    auto innerExpr = parse(box, "Sheet.Depth");
+    App::VariableDisplayScope outer;
+    EXPECT_EQ(outerExpr->toString(), "#Width * 2");
+    Pairs inner;
+    EXPECT_EQ(App::toDisplayString(innerExpr.get(), &inner), "#Depth");
+    EXPECT_EQ(inner, (Pairs {{"#Depth", "Sheet.Depth"}}));
+    EXPECT_EQ(outer.shortened(), (Pairs {{"#Width", "VarSet.Width"}}));
+    EXPECT_EQ(App::VariableDisplayScope::current(), &outer);
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers)
