@@ -1566,6 +1566,20 @@ bool StdCmdSelectAll::isActive()
 //===========================================================================
 DEF_STD_CMD_A(StdCmdDelete)
 
+namespace
+{
+// Std_Delete hands an object in edit its own selected sub-elements, for the Sketcher to delete
+// geometry. A PartDesign feature in edit deletes nothing that way (its onDelete does nothing in
+// edit, ops#143): its sub-elements take the general path, which keeps it and says so, and the
+// rest of the selection is still deleted (ops#160). Looked up by name: Gui doesn't link
+// PartDesignGui.
+bool handsSubElementsToEdited(const ViewProviderDocumentObject* vpedit)
+{
+    const Base::Type partDesignFeature = Base::Type::fromName("PartDesignGui::ViewProvider");
+    return partDesignFeature.isBad() || !vpedit->isDerivedFrom(partDesignFeature);
+}
+}  // namespace
+
 StdCmdDelete::StdCmdDelete()
     : Command("Std_Delete")
 {
@@ -1631,7 +1645,7 @@ void StdCmdDelete::activated(int iMsg)
             auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getInEdit());
 
             // In practice, no ViewProviderDocumentObject accepts deletion in edit - 2025-06-17
-            if (vpedit && !vpedit->acceptDeletionsInEdit()) {
+            if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
                         if (!sel.getSubNames().empty()) {
@@ -1654,20 +1668,32 @@ void StdCmdDelete::activated(int iMsg)
             // Never delete an object in edit, or a group holding it (its Body, its Part): its
             // task dialog would be left on deleted objects. A dress-up panel's highlight selects
             // the Body, so a Delete that missed the panel's list deleted the whole Body
-            // (ops#143, upstream issue 29180).
+            // (ops#143, upstream issue 29180). Nor the objects the edit was entered through,
+            // e.g. a Link to the Body (Link.Fillet): deleting them resets the edit (ops#160).
             std::set<const App::DocumentObject*> editProtected;
-            QString editedLabel;
+            QStringList editedLabels;
             for (auto& editDoc : editDocs) {
-                auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getInEdit());
+                ViewProviderDocumentObject* parentVp = nullptr;
+                std::string subname;
+                auto vpedit = freecad_cast<ViewProviderDocumentObject*>(
+                    editDoc->getInEdit(&parentVp, &subname)
+                );
                 if (!vpedit || vpedit->acceptDeletionsInEdit()) {
                     continue;
                 }
                 App::DocumentObject* edited = vpedit->getObject();
-                if (editedLabel.isEmpty()) {
-                    editedLabel = QString::fromUtf8(edited->Label.getValue());
+                if (!edited) {
+                    continue;
                 }
-                // the groups holding it: plain groups, and geo-feature groups (Body, Part)
+                editedLabels << QString::fromUtf8(edited->Label.getValue());
                 std::vector<const App::DocumentObject*> pending {edited};
+                App::DocumentObject* root = parentVp ? parentVp->getObject() : nullptr;
+                if (root && root != edited) {
+                    for (auto obj : root->getSubObjectList(subname.c_str())) {
+                        pending.push_back(obj);
+                    }
+                }
+                // with the groups holding them: plain groups, and geo-feature groups (Body, Part)
                 while (!pending.empty()) {
                     const App::DocumentObject* obj = pending.back();
                     pending.pop_back();
@@ -1690,7 +1716,10 @@ void StdCmdDelete::activated(int iMsg)
             if (!keptLabels.isEmpty()) {
                 const QString message
                     = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
-                          .arg(editedLabel, keptLabels.join(QStringLiteral(", ")));
+                          .arg(
+                              editedLabels.join(QStringLiteral(", ")),
+                              keptLabels.join(QStringLiteral(", "))
+                          );
                 getMainWindow()->showStatus(MainWindow::Wrn, message);
                 Base::Console().warning("%s\n", message.toUtf8().constData());
             }

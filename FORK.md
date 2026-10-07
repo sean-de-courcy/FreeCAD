@@ -157,7 +157,8 @@ names it.
 | `feat/127-guess-policy` | feat | ops#127, ops#133, ops#107 | - | `integration` `2eb8b6ec7a` | `872ffe8fc1` (fork PR 122), 2026-10-06 | never (fork feature) |
 | `feat/131-park-projections` | feat | ops#131 | - | `feat/127-guess-policy` `5dde1ed1e0` (stacked on fork PR 122) | `e1823b66e8` (fork PR 126), 2026-10-06 | never (fork feature) |
 | `feat/131-parked-marking` | feat | ops#131 | - | `feat/131-park-projections` `464c20fa17` (stacked on fork PR 126) | `8361a07aaf` (fork PR 133), 2026-10-06 | never (fork feature) |
-| `fix/143-dressup-delete-key` | fix | ops#143 | - | `integration` `872ffe8fc1` | (fork PR 129) | upstream's Std_Delete keeps the object in edit and the groups holding it |
+| `fix/143-dressup-delete-key` | fix | ops#143 | - | `integration` `872ffe8fc1` | `1304cce8d0` (fork PR 129), 2026-10-06 | upstream's Std_Delete keeps the object in edit and the groups holding it |
+| `fix/160-delete-guard-followups` | fix | ops#160 | - | `fix/143-dressup-delete-key` `262a5d8e9b` (stacked on fork PR 129) | (fork PR 131) | upstream's Std_Delete deletes the rest of a mixed in-edit selection and keeps the object an edit was entered through |
 
 ## Fork-only commits in carried topics
 
