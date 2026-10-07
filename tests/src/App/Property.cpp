@@ -397,7 +397,8 @@ TEST_F(RenameProperty, undo)
 }
 
 // Tests whether adding a property as the first change under a global (application) transaction,
-// as a Gui command's openCommand makes, is undone with it (ops#163)
+// as Application::setActiveTransaction makes with no active document, or openGlobalTransaction,
+// is undone and redone with it (ops#163)
 TEST_F(RenameProperty, addUnderGlobalTransactionUndoes)
 {
     // Arrange
@@ -412,13 +413,20 @@ TEST_F(RenameProperty, addUnderGlobalTransactionUndoes)
     added->setValue(5);
     App::GetApplication().commitTransaction(tid);
 
-    // Assert
+    // Assert: nothing stays booked, one step undoes and redoes the add
+    EXPECT_EQ(doc->getBookedTransactionID(), 0);
+    EXPECT_EQ(App::GetApplication().getGlobalTransaction(), 0);
     ASSERT_EQ(doc->getAvailableUndos(), undos + 1);
     EXPECT_TRUE(doc->undo());
     EXPECT_EQ(varSet->getDynamicPropertyByName("Added"), nullptr);
+    EXPECT_TRUE(doc->redo());
+    auto* redone = freecad_cast<App::PropertyInteger*>(varSet->getDynamicPropertyByName("Added"));
+    ASSERT_NE(redone, nullptr);
+    EXPECT_EQ(redone->getValue(), 5);
 }
 
-// Tests whether a rename as the first change under a global transaction is undone with it (ops#163)
+// Tests whether a rename as the first change under a global transaction is undone and redone with
+// it (ops#163)
 TEST_F(RenameProperty, renameUnderGlobalTransactionUndoes)
 {
     // Arrange
@@ -431,11 +439,16 @@ TEST_F(RenameProperty, renameUnderGlobalTransactionUndoes)
 
     // Assert
     EXPECT_TRUE(isRenamed);
+    EXPECT_EQ(doc->getBookedTransactionID(), 0);
+    EXPECT_EQ(App::GetApplication().getGlobalTransaction(), 0);
     ASSERT_EQ(doc->getAvailableUndos(), undos + 1);
     EXPECT_TRUE(doc->undo());
     EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
     EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), prop);
     EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
+    EXPECT_TRUE(doc->redo());
+    EXPECT_STREQ(varSet->getPropertyName(prop), "NewName");
+    EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), nullptr);
 }
 
 

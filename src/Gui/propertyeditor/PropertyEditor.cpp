@@ -1405,10 +1405,6 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 || prop->testStatus(App::Property::LockDynamic)) {
                 break;
             }
-            int tid = 0;
-            if (App::Document* doc = propertyDocument(prop->getContainer())) {
-                tid = doc->openTransaction("Rename property");
-            }
             const char* oldName = prop->getName();
             QString res = QInputDialog::getText(
                 Gui::getMainWindow(),
@@ -1417,14 +1413,15 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 QLineEdit::Normal,
                 QString::fromUtf8(oldName)
             );
-            // FreeCAD-CH (ops#163): a cancelled dialog gives the booked transaction back, or the
-            // user's next change in the document is recorded as "Rename property". Only our own:
-            // an ID of 0 would mean the current global transaction.
             if (res.isEmpty()) {
-                if (tid) {
-                    App::GetApplication().abortTransaction(tid);
-                }
                 break;
+            }
+            // FreeCAD-CH (ops#163): the transaction opens once there is a name. Booked before the
+            // dialog, a cancel left it booked (the user's next change was recorded as "Rename
+            // property"), and a change made while the dialog ran landed in it.
+            int tid = 0;
+            if (App::Document* doc = propertyDocument(prop->getContainer())) {
+                tid = doc->openTransaction("Rename property");
             }
 
             std::string newName = res.toUtf8().constData();
@@ -1432,6 +1429,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 prop->getContainer()->renameDynamicProperty(prop, newName.c_str());
             }
             catch (Base::Exception& e) {
+                // Only our own: an ID of 0 would mean the current global transaction
                 if (tid) {
                     App::GetApplication().abortTransaction(tid);
                 }
