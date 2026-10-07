@@ -39,6 +39,9 @@
 #include <App/ExpressionParser.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Property.h>
+#include <App/PropertyStandard.h>
+#include <App/PropertyUnits.h>
+#include <App/VariableLookup.h>
 #include <Gui/Application.h>
 #include <Gui/MainWindow.h>
 #include <Base/Tools.h>
@@ -305,7 +308,12 @@ public:
             if (index.row() >= fuzzyMatches.size()) {
                 return {};
             }
-            return fuzzyMatches.at(index.row()).completion;
+            const Match& match = fuzzyMatches.at(index.row());
+            // A variable row shows its value and source (FreeCAD-CH, ops#152).
+            if (role == Qt::DisplayRole && !match.display.isEmpty()) {
+                return match.display;
+            }
+            return match.completion;
         }
         QVariant variant;
         Info info = getInfo(index);
@@ -912,6 +920,41 @@ public:
         endResetModel();
     }
 
+    // FreeCAD-CH (ops#152): `#name` completion. The rows are the current document's variables
+    // (VarSet properties, sheet aliases), matched against the text after the '#'. A name held by
+    // more than one object completes to each holder's full path, since `#name` would be an error.
+    void setVariableFilter(const QString& prefix, bool startsWithOnly)
+    {
+        if (fuzzyMode && fuzzyFilter == prefix) {
+            return;
+        }
+
+        ensureVariableCandidates();
+        const QString lowercaseFilter = prefix.mid(1).toLower();
+        QList<Match> matches;
+        for (const auto& candidate : variableCandidates) {
+            int score = 0;
+            const bool matched = startsWithOnly
+                ? candidate.searchText.startsWith(lowercaseFilter)
+                : Gui::FuzzyMatcher::matchLowercase(lowercaseFilter, candidate.searchText, score);
+            if (matched) {
+                matches.push_back(
+                    {candidate.completion, score, candidate.priority, candidate.display}
+                );
+            }
+        }
+        // Best match first; equal scores keep the document's object order.
+        std::stable_sort(matches.begin(), matches.end(), [](const Match& left, const Match& right) {
+            return left.score > right.score;
+        });
+
+        beginResetModel();
+        fuzzyMode = true;
+        fuzzyFilter = prefix;
+        fuzzyMatches.swap(matches);
+        endResetModel();
+    }
+
     QString pathFromIndex(const QModelIndex& index) const
     {
         if (!index.isValid()) {
@@ -946,6 +989,7 @@ private:
         QString completion;
         int score = 0;
         MatchPriority priority = MatchPriority::Other;
+        QString display;  // FreeCAD-CH (ops#152): a variable row's text, if not the completion
     };
 
     struct Candidate
@@ -955,6 +999,7 @@ private:
         QString labelCompletion;
         QString labelSearchText;
         MatchPriority priority = MatchPriority::Other;
+        QString display;
     };
 
     void invalidate()
@@ -972,6 +1017,8 @@ private:
         inList.clear();
         fuzzyCandidates.clear();
         fuzzyCandidatesInitialized = false;
+        variableCandidates.clear();
+        variableCandidatesInitialized = false;
         fuzzyMatches.clear();
         fuzzyFilter.clear();
         endResetModel();
@@ -1015,6 +1062,65 @@ private:
             }
         }
         fuzzyCandidatesInitialized = true;
+    }
+
+    // FreeCAD-CH (ops#152): one candidate per variable of the current document, shown as
+    // `Width  20.00 mm  (Variables)`. Holders that depend on the current object are left out, as
+    // objects are above, since using them would make a cycle.
+    void ensureVariableCandidates()
+    {
+        if (variableCandidatesInitialized) {
+            return;
+        }
+        variableCandidatesInitialized = true;
+
+        auto doc = App::GetApplication().getDocument(currentDoc.c_str());
+        if (!doc) {
+            return;
+        }
+        const auto variables = App::VariableLookup::listVariables(doc);
+        std::map<std::string, int> holdersPerName;
+        for (const auto& variable : variables) {
+            ++holdersPerName[variable.name];
+        }
+        for (const auto& variable : variables) {
+            auto holder = const_cast<App::DocumentObject*>(variable.holder);
+            if (inList.contains(holder)) {
+                continue;
+            }
+            const QString name = QString::fromStdString(variable.name);
+            Candidate candidate;
+            candidate.completion = holdersPerName[variable.name] > 1
+                ? QString::fromStdString(variable.path())
+                : u'#' + name;
+            candidate.searchText = name.toLower();
+            candidate.priority = MatchPriority::UserProperty;
+            candidate.display = name;
+            const QString value = variableValue(holder->getPropertyByName(variable.name.c_str()));
+            if (!value.isEmpty()) {
+                candidate.display += QStringLiteral("  ") + value;
+            }
+            candidate.display += QStringLiteral("  (")
+                + QString::fromUtf8(holder->Label.getValue()) + u')';
+            variableCandidates.push_back(candidate);
+        }
+    }
+
+    static QString variableValue(const App::Property* prop)
+    {
+        if (auto quantity = freecad_cast<const App::PropertyQuantity*>(prop)) {
+            return QString::fromStdString(quantity->getQuantityValue().getUserString());
+        }
+        if (auto number = freecad_cast<const App::PropertyFloat*>(prop)) {
+            return QString::number(number->getValue());
+        }
+        if (auto integer = freecad_cast<const App::PropertyInteger*>(prop)) {
+            return QString::number(integer->getValue());
+        }
+        if (auto text = freecad_cast<const App::PropertyString*>(prop)) {
+            return QString::fromUtf8(text->getValue());
+        }
+        return {};
     }
 
     void addObjectCandidate(
@@ -1077,6 +1183,7 @@ private:
     std::string currentDoc;
     std::string currentObj;
     QList<Candidate> fuzzyCandidates;
+    QList<Candidate> variableCandidates;
     QList<Match> fuzzyMatches;
     QString fuzzyFilter;
     QString contextPrefix;
@@ -1086,6 +1193,7 @@ private:
     bool checkInList = true;
     bool dirty = true;
     bool fuzzyCandidatesInitialized = false;
+    bool variableCandidatesInitialized = false;
     bool fuzzyMode = false;
     std::vector<fastsignals::scoped_connection> connections;
 };
@@ -1154,6 +1262,16 @@ void ExpressionCompleter::updateCompletionModel(const QString& completionPrefix)
         return;
     }
 
+    // FreeCAD-CH (ops#152): an operand starting with '#' names a variable (`#Width`). The
+    // tokenizer gives `#...` only when nothing joins it to a name before it, so `Doc#Obj` keeps
+    // its document completion.
+    if (!noProperty && completionPrefix.startsWith(u'#')) {
+        m->setPathContext(currentObj.getObject(), QString());
+        m->setVariableFilter(completionPrefix, filterMode() == Qt::MatchStartsWith);
+        setCompletionPrefix(QString());
+        return;
+    }
+
     const bool containsSeparator = completionPrefix.contains(u'.') || completionPrefix.contains(u'#');
     const bool hasPathSeparator = containsSeparator && splitPath(completionPrefix).size() > 1;
     const bool useFuzzyModel = !noProperty && !hasPathSeparator
@@ -1204,6 +1322,11 @@ QStringList ExpressionCompleter::splitPath(const QString& input) const
     std::string path = input.toUtf8().constData();
     if (path.empty()) {
         return resultList;
+    }
+    // FreeCAD-CH (ops#152): `#Wi` is a variable name still being typed. Parsing would resolve it
+    // (ObjectIdentifier::parse goes through the `#name` rewrite) and fail on the partial name.
+    if (path.front() == '#') {
+        return resultList << input;
     }
 
     int retry = 0;
