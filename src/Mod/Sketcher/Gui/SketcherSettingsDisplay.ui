@@ -377,7 +377,8 @@ the characters listed here will be drawn using a substitute font.</string>
        <widget class="Gui::PrefCheckBox" name="dimensionValueInPlace">
         <property name="toolTip">
          <string>Asks for the value in a field at the dimension's label, instead of in a dialog.
-Enter applies the value, Esc keeps the measured value. Also used when double-clicking a dimension.</string>
+Enter applies the value, Esc keeps the measured value. Double-clicking a dimension uses it too,
+also when the value isn't asked for after creation.</string>
         </property>
         <property name="text">
          <string>Type the value at the dimension's label</string>
@@ -825,22 +826,6 @@ Works only when &quot;Restore camera position after editing&quot; is enabled.</s
  </tabstops>
  <resources/>
  <connections>
-  <connection>
-   <sender>dialogOnDistanceConstraint</sender>
-   <signal>toggled(bool)</signal>
-   <receiver>dimensionValueInPlace</receiver>
-   <slot>setEnabled(bool)</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>20</x>
-     <y>20</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>20</x>
-     <y>20</y>
-    </hint>
-   </hints>
-  </connection>
   <connection>
    <sender>checkBoxTVRestoreCamera</sender>
    <signal>toggled(bool)</signal>

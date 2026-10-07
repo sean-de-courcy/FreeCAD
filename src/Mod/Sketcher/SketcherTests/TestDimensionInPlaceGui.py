@@ -146,7 +146,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
 
     def answer_fields(self, steps, timeout_ms=6000):
         """Answers the value fields as they open, one step each: a dict with "text" to type
-        (replacing the selection; None types nothing), "key" to send, and "window" to type
+        (replacing the selection; None types nothing), "act" (a function of the popup and its
+        line edit, for keys sent by hand), "key" to send, and "window" to type
         through the popup's window (shortcut map first, as a user's key). Any other modal
         window is rejected, so a failure doesn't hang the run. Returns the state, whose "seen"
         list records, per step, the popup's id, its global centre, the field's text and tooltip
@@ -206,6 +207,9 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
                     QTest.keyClick(window, char)
             else:
                 QTest.keyClicks(edit, text)
+        act = step.get("act")
+        if act is not None:
+            act(popup, edit)
         key = step.get("key")
         if key is not None:
             modifier = step.get("modifier", QtCore.Qt.NoModifier)
@@ -509,8 +513,9 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
     def test_d9_dialog_lock_is_one_step(self):
         """D9 with the dialog (DimensionValueInPlace off): both of the lock's values (3 and 3,
         so their order doesn't matter here; D9 checks it) land in the placement's one undo
-        step: undo goes back to (2, 1), redo to (3, 3). Before ops#145 the first dialog
-        committed, and the second value was set outside any transaction, so redo lost it."""
+        step: undo goes back to (2, 1), redo to (3, 3). The report that redo lost the second
+        value didn't reproduce on the base (the order was reversed, which D9 checks); this
+        stays as a regression test."""
         self.set_param(SKETCHER_PARAMS, "Bool", "DimensionValueInPlace", False)
         state = self.place_lock(None, arm=lambda: self.answer_dialogs(["3 mm", "3 mm"]))
         self.assertTrue(
@@ -684,3 +689,145 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
 
         self.assertEqual(len(self.constraints_of("Distance")), 1)
         self.assert_one_undo_step()
+
+    # D17-D19: the review of fork PR 139 --------------------------------------------------------
+
+    def add_triangle(self):
+        """Right triangle (0, 0), (4, 0), (0, 3): line 0 (4 long, horizontal from the origin),
+        line 1 (from (4, 0) to (0, 3), the hypotenuse, 5 long), line 2 (3 long, back down to
+        the origin), closed by coincidences; the legs fixed at 4 and 3. The hypotenuse can take
+        any length from 1 to 7 by turning the right angle, never 100."""
+        sketch = self.sketch
+        sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(4, 0, 0)), False)
+        sketch.addGeometry(Part.LineSegment(V(4, 0, 0), V(0, 3, 0)), False)
+        sketch.addGeometry(Part.LineSegment(V(0, 3, 0), V(0, 0, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -1, 1))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 1, 2, 2, 1))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 2, 2, 0, 1))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 4.0))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 2, 3.0))
+        self.doc.recompute()
+
+    def test_d17_retry_after_a_solver_failure(self):
+        """D17: on the triangle's hypotenuse, 100 fails in the solver (the legs allow 1 to 7):
+        the field stays open. Then 6 and Enter sets 6. The failed setDatum replaced the
+        constraint objects; the retry must not use the old one."""
+        self.add_triangle()
+        self.start_edit()
+        state = self.answer_fields(
+            [
+                {"text": "100", "key": QtCore.Qt.Key_Return},
+                {"text": "6", "key": QtCore.Qt.Key_Return},
+            ]
+        )
+        self.run_with_selection(["Edge2"], "Sketcher_ConstrainDistance")
+        self.wait_answered(state, 2)
+
+        first, second = state["seen"]
+        self.assertTrue(first["open_after"], "Expected the field to stay open after 100")
+        self.assertFalse(second["open_after"])
+        new = self.sketch.Constraints[-1]
+        self.assertEqual(new.Type, "Distance")
+        self.assertAlmostEqual(new.Value, 6.0, places=9)
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[1].length(), 6.0, places=7)
+        self.assert_one_undo_step()
+
+    def test_d18_failed_link_then_escape_keeps_the_measured_value(self):
+        """D18: the cell Sheet.width reads the sketch's Distance "a" (10); linking a new
+        Distance to it would make the sketch depend on itself, so the link fails and the field
+        stays open. Esc then keeps the new Distance at its measured 7, with no expression
+        (the cell's 10 was applied before the link failed)."""
+        sketch = self.sketch
+        self.add_line()  # line 0, (0, 0) to (10, 0)
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        sketch.renameConstraint(len(sketch.Constraints) - 1, "a")
+        sketch.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, 7, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 1, 1, -1, 1))
+        sketch.addConstraint(Sketcher.Constraint("Vertical", 1))
+        self.doc.recompute()
+        sheet = self.add_sheet("=Sketch.Constraints.a")
+        self.assertAlmostEqual(sheet.width.Value, 10.0)
+
+        self.start_edit()
+        state = self.answer_fields(
+            [
+                {"text": "Sheet.width", "key": QtCore.Qt.Key_Return},
+                {"key": QtCore.Qt.Key_Escape},
+            ]
+        )
+        self.run_with_selection(["Edge2"], "Sketcher_ConstrainDistance")
+        self.wait_answered(state, 2)
+
+        first, second = state["seen"]
+        self.assertTrue(first["open_after"], "Expected the cyclic link to keep the field open")
+        self.assertFalse(second["open_after"])
+        new = self.sketch.Constraints[-1]
+        self.assertEqual(new.Type, "Distance")
+        self.assertAlmostEqual(new.Value, 7.0, places=9)
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[1].length(), 7.0, places=7)
+        self.assertNotIn("width", " ".join(self.expressions().values()))
+        self.assert_one_undo_step()
+
+    def origin_marker_is_hollow(self):
+        """The origin marker is hollow while a drawing tool is active (TestOnViewParameterGui)."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName("OriginPointSet")
+        search.setSearchingAll(True)
+        search.apply(self.view.getViewer().getSoRenderManager().getSceneGraph())
+        path = search.getPath()
+        self.assertIsNotNone(path, "Expected the origin marker in the scene graph")
+        index = path.getTail().markerIndex.getValues()[0]
+        sizes = (5, 7, 9, 11, 13, 15, 20, 25, 30)
+        return index in {FreeCADGui.getMarkerIndex("CIRCLE_LINE", size) for size in sizes}
+
+    def test_d19_escape_keeps_the_dimension_tool_in_continuous_mode(self):
+        """D19: with ContinuousCreationMode on, Esc in the field keeps the measured value and
+        the Dimension tool stays active (the next Esc leaves it). The key's press and release
+        go where Qt sends them: to the field while it's open, else to the 3D view, where the
+        tools quit on Esc's release. The release comes a moment later, as a user's does: after
+        the field's own event loop has ended."""
+        self.set_param(SKETCHER_PARAMS, "Bool", "ContinuousCreationMode", True)
+        self.add_line()
+        self.start_edit()
+
+        def escape(popup, edit):
+            def key_event(kind):
+                return QtGui.QKeyEvent(kind, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier)
+
+            def release():
+                open_now = QtGui.QApplication.activePopupWidget() is popup
+                target = edit if open_now else self.viewport
+                QtGui.QApplication.sendEvent(target, key_event(QtCore.QEvent.KeyRelease))
+
+            QtGui.QApplication.sendEvent(edit, key_event(QtCore.QEvent.KeyPress))
+            QtCore.QTimer.singleShot(100, release)
+
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.Selection.addSelection(self.doc.Name, self.sketch.Name, "Edge1")
+        FreeCADGui.runCommand("Sketcher_Dimension")
+        self.flush_gui(150)
+        self.assertTrue(self.origin_marker_is_hollow(), "Expected the Dimension tool active")
+
+        state = self.answer_fields([{"text": "25", "act": escape}])
+        empty = self.screen_point(8, 9)
+        self.move(self.viewport, empty)
+        self.click(self.viewport, empty)
+        self.wait_answered(state, 1)
+        self.assertTrue(
+            self.wait_until(lambda: QtGui.QApplication.activePopupWidget() is None, 2000),
+            "Expected Esc to close the field",
+        )
+        self.flush_gui(300)
+
+        new = self.sketch.Constraints[-1]
+        self.assertIn(new.Type, ("Distance", "DistanceX"))
+        self.assertAlmostEqual(new.Value, 10.0, places=9)
+        self.assertTrue(
+            self.origin_marker_is_hollow(), "Expected the Dimension tool to stay active after Esc"
+        )

@@ -514,7 +514,6 @@ void SketcherSettingsDisplay::loadSettings()
     ui->SegmentsPerGeometry->onRestore();
     ui->dialogOnDistanceConstraint->onRestore();
     ui->dimensionValueInPlace->onRestore();
-    ui->dimensionValueInPlace->setEnabled(ui->dialogOnDistanceConstraint->isChecked());
     ui->continueMode->onRestore();
     ui->constraintMode->onRestore();
     ui->checkBoxHideUnits->onRestore();

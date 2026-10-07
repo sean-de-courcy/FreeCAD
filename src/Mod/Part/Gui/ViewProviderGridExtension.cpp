@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <cmath>
 #include <limits>
 
 #include <Inventor/nodes/SoCamera.h>
@@ -365,6 +366,15 @@ void GridExtensionP::createGridPart(
         isTooManySegmentsNotified = false;
     }
 
+    // The line offsets below are ints too: no grid for a camera centre they can't hold.
+    Base::Vector3d camCenterOnSketch = getCamCenterInSketchCoordinates();
+    const double maxOffset = 1e9;
+    if (!(std::fabs(camCenterOnSketch.x / computedGridValue) < maxOffset
+          && std::fabs(camCenterOnSketch.y / computedGridValue) < maxOffset)) {
+        Gui::coinRemoveAllChildren(GridRoot);
+        return;
+    }
+
     // set the grid indices
     grid->numVertices.setNum(nlines);
     auto* vertices = grid->numVertices.startEditing();
@@ -378,7 +388,6 @@ void GridExtensionP::createGridPart(
     SbVec3f* vertex_coords = vts->vertex.startEditing();
 
     float minX, minY, maxX, maxY;
-    Base::Vector3d camCenterOnSketch = getCamCenterInSketchCoordinates();
     minX = static_cast<float>(camCenterOnSketch.x);
     minY = static_cast<float>(camCenterOnSketch.y);
 

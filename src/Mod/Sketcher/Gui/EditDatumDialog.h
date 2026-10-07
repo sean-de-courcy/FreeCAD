@@ -118,6 +118,7 @@ private:
     QDialog* inPlacePopup {nullptr};
     bool inPlaceHasNext {false};
     bool inPlaceHasPrevious {false};
+    bool inPlaceEscapePressed {false};
 
 private Q_SLOTS:
     void accepted();

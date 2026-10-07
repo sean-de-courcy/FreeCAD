@@ -419,6 +419,7 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
     popup.adjustSize();
 
     inPlacePopup = &popup;
+    inPlaceEscapePressed = false;
     inPlaceHasNext = hasNext;
     inPlaceHasPrevious = hasPrevious;
     box->installEventFilter(this);
@@ -451,12 +452,23 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
 bool EditDatumDialog::eventFilter(QObject* watched, QEvent* event)
 {
     if (!inPlacePopup
-        || (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)) {
+        || (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease
+            && event->type() != QEvent::ShortcutOverride)) {
         return QObject::eventFilter(watched, event);
     }
 
     auto* keyEvent = static_cast<QKeyEvent*>(event);
     int key = keyEvent->key();
+    if (event->type() == QEvent::KeyRelease) {
+        // Esc closes the field on its release: closed on the press, the field would leave the
+        // release to the 3D view, where the sketch's tools quit on it (the Dimension tool in
+        // continuous mode too).
+        if (key == Qt::Key_Escape && inPlaceEscapePressed && !keyEvent->isAutoRepeat()) {
+            inPlacePopup->done(InPlaceKept);
+            return true;
+        }
+        return QObject::eventFilter(watched, event);
+    }
     bool fieldKey = key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Tab
         || key == Qt::Key_Backtab || key == Qt::Key_Escape;
     if (!fieldKey) {
@@ -470,7 +482,7 @@ bool EditDatumDialog::eventFilter(QObject* watched, QEvent* event)
 
     QDialog* popup = inPlacePopup;
     if (key == Qt::Key_Escape) {
-        popup->done(InPlaceKept);
+        inPlaceEscapePressed = true;
     }
     else if (key == Qt::Key_Backtab) {
         if (inPlaceHasPrevious && applyInPlace()) {
@@ -506,6 +518,10 @@ bool EditDatumDialog::applyInPlace()
 
 void EditDatumDialog::applyValue()
 {
+    // setDatum replaces the constraint objects (PropertyConstraintList::applyValues deletes the
+    // old ones), also when it fails and the field stays open for another try: read it afresh.
+    Constr = sketch->Constraints.getValues()[ConstrNbr];
+
     if (valueEdit->hasExpression()) {
         // A formula from the formula editor ('=').
         valueEdit->apply();
@@ -534,6 +550,7 @@ void EditDatumDialog::applyValue()
             quantity.setUnit(Base::Unit::Angle);  // degrees, as the expression engine reads it
         }
         auto unitString = Base::Tools::escapeQuotesFromString(quantity.getUnit().getString());
+        const double oldDatum = Constr->getValue();
         Gui::cmdAppObjectArgs(
             sketch,
             "setDatum(%i,App.Units.Quantity('%.12g %s'))",
@@ -544,12 +561,19 @@ void EditDatumDialog::applyValue()
 
         std::string exprString = Base::Tools::escapedUnicodeFromUtf8(expr->toString().c_str());
         exprString = Base::Tools::escapeQuotesFromString(exprString);
-        Gui::cmdAppObjectArgs(
-            sketch,
-            "setExpression('%s', u'%s')",
-            sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
-            exprString
-        );
+        try {
+            Gui::cmdAppObjectArgs(
+                sketch,
+                "setExpression('%s', u'%s')",
+                sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
+                exprString
+            );
+        }
+        catch (const Base::Exception&) {
+            // No link (e.g. a cyclic one): put the value back, so that Esc keeps the old one.
+            sketch->setDatum(ConstrNbr, oldDatum);
+            throw;
+        }
         return;
     }
 
