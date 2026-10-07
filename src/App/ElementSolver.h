@@ -627,8 +627,10 @@ struct AppExport SolveOutcome
  *   them gives the consumer the hit's result. Those elements leave the other entries' pools, as
  *   tier-0 elements do. An element that moved with nothing at its old place keeps its reference,
  *   and so does one whose old place only its own twins hold (ops#168): elements with the same
- *   source sections (NameAncestry::sourceSections(), for a name of each), in the same pattern
- *   instances, and not told apart only by the duplicate counter, e.g. a pad's bottom edge where
+ *   source sections (NameAncestry::sourceSections(), for the name the entry holds and a name of
+ *   the other), made in the same copies (pattern instances and boundaries, anywhere in the
+ *   lineage), not told apart only by the duplicate counter, and not two pieces of one split
+ *   element (NameAncestry::isPieceOf() of their common sections), e.g. a pad's bottom edge where
  *   its top edge was after a lift by the pad's own length. The exact outcome's evidence says so.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and

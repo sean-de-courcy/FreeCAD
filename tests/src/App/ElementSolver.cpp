@@ -105,7 +105,7 @@ std::string piece(
     return incoming + "|" + section({}, {}, tag, opCode, index, elementType, {"MOD"}, connected);
 }
 
-// Instance  number of pattern  tag, with the number as text: one number per step of a
+// Instance \a number of pattern \a tag, with the number as text: one number per step of a
 // multi-step pattern (`2:2`, ops#6).
 std::string stepInstance(
     const std::string& incoming,
@@ -4333,7 +4333,7 @@ namespace
 // ops#168's seed 267: a boss (tag 7) padded from sketch line g2 (sketch 5) on a block; a
 // chamfer names its top right edge, Edge33, the line's `XTR;PRJ` copy at z = 15. The block is
 // raised by the boss's height, 2.5: Edge33 is at z = 17.5, and the boss's bottom edge Edge22,
-// the sketch line verbatim, sits where Edge33 was.  atOldPlace names Edge22.
+// the sketch line verbatim, sits where Edge33 was. \a atOldPlace names Edge22.
 SolveInput liftedBoss(const std::string& atOldPlace)
 {
     const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
@@ -4406,6 +4406,62 @@ TEST(Moved, ownTwinOfAnotherInstanceBreaks)
     input.pool["Edge"][0] = element("Edge22", {stepInstance(sketchEdge(2), 8, "1", 'E')});
     EXPECT_EQ(describe(Data::solveOwner(input)[0]),
               "exact Edge33 0 [] moved 2.500 mm; its own twin Edge22 sits where it was");
+}
+
+TEST(Moved, laterFeaturesEdgeOfAMirroredCopyIsNoTwin)
+{
+    // The PR 143 review's finding 1 (MirroredBossesTradePlaces): a pocket (tag 9) slices the
+    // top off a boss and its Mirrored copy (tag 8, instance 2), and its edges carry the copy only
+    // inside the linked face. The copy's edge at the boss's old place is no own twin of the
+    // boss's, so the reference breaks, as two copies trading places do.
+    const auto side = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'F', {"GEN"});
+    const auto floor = section({}, {sketchEdge(4, 6)}, 9, "XTR", 0, 'F', {"PRJ"});
+    auto sliced = [&](const std::string& face) {
+        return generated({floor, face}, 9, "CUT", 'E');
+    };
+    auto input = liftedBoss(sliced(stepInstance(side, 8, "2", 'F')));
+    input.pool["Edge"][1] = element("Edge33", {sliced(side)});
+    input.entries[0].exactName = sliced(side);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+    //   two instances of a pattern, the same
+    input.pool["Edge"][1] = element("Edge33", {sliced(stepInstance(side, 8, "3", 'F'))});
+    input.entries[0].exactName = sliced(stepInstance(side, 8, "3", 'F'));
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+    //   the hit's own copy in the same instance is its twin
+    const auto bottom = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'F', {"PRJ"});
+    input.pool["Edge"][0] = element("Edge22", {sliced(stepInstance(bottom, 8, "3", 'F'))});
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "exact Edge33 0 [] moved 2.500 mm; its own twin Edge22 sits where it was");
+}
+
+TEST(Moved, twoPiecesOfOneEdgeAreNoTwins)
+{
+    // The PR 143 review's finding 2 (EdgePiecesTradePlaces): a notch (tag 9) splits the boss's
+    // top edge into two equal pieces, told apart by their neighbours; a move puts one where the
+    // other was. They share every source, but two pieces of one edge are no twins: it breaks.
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto held = piece(top, 9, "CUT", 0, 'E', {"Face3"});
+    auto input = liftedBoss(piece(top, 9, "CUT", 0, 'E', {"Face5"}));
+    input.pool["Edge"][1] = element("Edge33", {held});
+    input.entries[0].exactName = held;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
+TEST(Moved, onlyTheHeldNameOfTheHitMakesATwin)
+{
+    // The PR 143 review's finding 3: the hit also has a name made from line g3, the element at
+    // the old place's source. The reference holds the g2 name, so that one decides: no twin.
+    auto input = liftedBoss(sketchEdge(3));
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"][1] =
+        element("Edge33", {top, section({}, {sketchEdge(3, 6)}, 7, "XTR", 0, 'E', {"PRJ"})});
+    input.pool["Edge"][0] = element("Edge22", {sketchEdge(3, 6)});
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
 }
 
 TEST(Moved, independentOfInputOrder)

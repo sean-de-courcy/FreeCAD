@@ -147,14 +147,14 @@ std::vector<std::string_view> NameAncestry::splitSections(std::string_view name)
 namespace
 {
 
-// Walks the lineage of  name, how its element was made, calling  visit(section, source) on
+// Walks the lineage of \a name, how its element was made, calling \a visit(section, source) on
 // each section until it returns true (then true). The lineage: the name's first section and,
 // recursively, every section of every name a visited section links. The sections after the
 // name's first are what later features did to it (MOD, a fusion's FUS), and connected elements
 // name neighbours that tell pieces apart; neither is followed.
 // A source is an innermost section of the first sections' chain: following the first section's
 // linked names, and their first sections' linked names, down to a section made from no name. With
-//  sourcesOnly, only that chain is walked (the later sections of a linked name aren't).
+// \a sourcesOnly, only that chain is walked (the later sections of a linked name aren't).
 bool walkLineage(
     std::string_view name,
     bool sourcesOnly,
@@ -192,6 +192,47 @@ bool walkLineage(
 bool hasTag(const DecodedMappedSection& section)
 {
     return !section.iterationTag.empty() && section.iterationTag != Data::EMPTY_VALUE;
+}
+
+// The copies \a name's element is made in, in its whole lineage: its own top-level TRF and EXT
+// sections (patternInstances()) and those of every name its lineage links, at any depth, sorted.
+// A later feature's element made from a copy's (a pocket slicing a Mirrored boss) carries the
+// copy only inside a linked name (ops#168 review).
+std::vector<std::pair<std::string, std::string>> copyContexts(std::string_view name)
+{
+    auto contexts = patternInstances(name);
+    walkLineage(name, false, [&](const DecodedMappedSection& section, bool) {
+        if (section.opCode == patternInstanceOpCode) {
+            contexts.emplace_back(section.iterationTag, section.index);
+        }
+        else if (section.opCode == boundaryOpCode) {
+            contexts.emplace_back(section.iterationTag,
+                                  std::string(boundaryOpCode) + ";" + section.index);
+        }
+        return false;
+    });
+    std::sort(contexts.begin(), contexts.end());
+    contexts.erase(std::unique(contexts.begin(), contexts.end()), contexts.end());
+    return contexts;
+}
+
+// True if \a a and \a b are two pieces of one split element: both names are the element's
+// sections, each followed by its own split's (NameAncestry::isPieceOf()). Two equal pieces of an
+// edge share every source, but are no twins (ops#168 review).
+bool piecesOfOne(std::string_view a, std::string_view b)
+{
+    const auto as = NameAncestry::splitSections(a);
+    const auto bs = NameAncestry::splitSections(b);
+    std::size_t common = 0;
+    while (common < as.size() && common < bs.size() && as[common] == bs[common]) {
+        ++common;
+    }
+    if (common == 0 || common == as.size() || common == bs.size()) {
+        return false;
+    }
+    const auto& last = as[common - 1];
+    const std::string_view whole = a.substr(0, last.data() + last.size() - a.data());
+    return NameAncestry::isPieceOf(a, whole) && NameAncestry::isPieceOf(b, whole);
 }
 
 }  // namespace
@@ -2018,23 +2059,24 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const char* sit = place.size() > 1 ? " sit" : " sits";
             // Own twins (ops#168): the elements there are copies of the hit's own source
             // geometry, e.g. a pad's bottom edge where its top edge was after a lift by the pad's
-            // length. The element moved with its feature; nothing else took its place.
-            const auto& hitNames = pool.elements[hitPosition].names;
+            // length. The element moved with its feature; nothing else took its place. The hit's
+            // name is the one the reference holds; copies count in the whole lineage, so a
+            // later feature's edges on a boss and on its mirror copy are no twins.
+            const std::string& hitName = entry.exactName.empty()
+                ? firstName(pool.elements[hitPosition])
+                : entry.exactName;
+            const auto hitSources = NameAncestry::sourceSections(hitName);
+            const auto hitCopies = copyContexts(hitName);
             auto ownTwin = [&](int k) {
-                for (const auto& name : pool.elements[k].names) {
-                    const auto sources = NameAncestry::sourceSections(name);
-                    if (sources.empty()) {
-                        continue;
-                    }
-                    for (const auto& hitName : hitNames) {
-                        if (NameAncestry::sourceSections(hitName) == sources
-                            && patternInstances(name) == patternInstances(hitName)
-                            && !isCounterSibling(name, hitName)) {
-                            return true;
-                        }
-                    }
+                if (hitSources.empty()) {
+                    return false;
                 }
-                return false;
+                const auto& names = pool.elements[k].names;
+                return std::any_of(names.begin(), names.end(), [&](const auto& name) {
+                    return NameAncestry::sourceSections(name) == hitSources
+                        && copyContexts(name) == hitCopies && !isCounterSibling(name, hitName)
+                        && !piecesOfOne(name, hitName);
+                });
             };
             if (std::all_of(place.begin(), place.end(), ownTwin)) {
                 outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
