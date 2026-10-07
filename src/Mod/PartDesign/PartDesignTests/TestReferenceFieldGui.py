@@ -3961,3 +3961,179 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertIsNone(pipe.AuxiliarySpine)
         self.assertEqual(pipe.Mode, "Standard")
         self.assertFalse(aux.ViewObject.Visibility, "Cancel left the auxiliary path shown")
+
+    # -- T34, T37: the Hole (W9) ------------------------------------------------------------------
+
+    def plate(self, positions=None, boss=False):
+        """The Plate: a 20 x 20 x 10 additive box; a sketch on its top with three circles r = 1,
+        at (5, 5), (15, 5) and (10, 15), and a point at (10, 10); a hole of diameter 2 through
+        all, on circles and arcs (6), from the sketch whole or the given positions. Each hole
+        removes 10 pi. With boss, a cylinder r = 2, 2 high, centred at (10, 10) on the plate,
+        before the hole."""
+        import Part
+
+        self.body = models.body(self.doc)
+        self.plateBox = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        self.plateBox.Length = 20
+        self.plateBox.Width = 20
+        self.plateBox.Height = 10
+        geometry = [
+            models.circle(5, 5, 1),
+            models.circle(15, 5, 1),
+            models.circle(10, 15, 1),
+            Part.Point(App.Vector(10, 10, 0)),
+        ]
+        self.holes = models.sketch(self.doc, "Holes", geometry, self.body, z=10)
+        if boss:
+            self.boss = self.body.newObject("PartDesign::AdditiveCylinder", "Boss")
+            self.boss.Radius = 2
+            self.boss.Height = 2
+            self.boss.Placement = App.Placement(App.Vector(10, 10, 10), App.Rotation())
+        self.doc.recompute()
+        hole = self.body.newObject("PartDesign::Hole", "Hole")
+        hole.Profile = (self.holes, positions or [])
+        hole.Diameter = 2
+        hole.DepthType = "ThroughAll"
+        hole.BaseProfileType = 6
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        return hole
+
+    def circleOf(self, x, y):
+        [name] = edge("circle", center=(x, y, 10), radius=1).one(self.holes.Shape)
+        return name
+
+    def pointOf(self, x, y):
+        """The sketch's vertex at (x, y) on its plane that no edge has: the point."""
+        for i, vertex in enumerate(self.holes.Shape.Vertexes):
+            if vertex.Point.distanceToPoint(App.Vector(x, y, 10)) < 1e-6:
+                return "Vertex%d" % (i + 1)
+        self.fail("no vertex at (%g, %g)" % (x, y))
+
+    def removed(self, hole):
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        return self.plateBox.Shape.Volume - hole.Shape.Volume
+
+    def assertHoles(self, hole, count):
+        self.assertAlmostEqual(self.removed(hole), count * 10 * math.pi, places=3)
+
+    def refusedPick(self, obj, sub):
+        """The status bar's text right after a pick: the Hole's gizmos write their hint over a
+        refusal's reason soon after."""
+        Gui.Selection.addSelection(self.doc.Name, obj.Name, sub)
+        text = statusText().lower()
+        pump(0.2)
+        return text
+
+    def positionsSubs(self, hole):
+        return [s for s in hole.Profile[1] if s]
+
+    def testHoleStartReferenceField(self):
+        """T34: Start "Reference" with no reference arms the start field; a datum plane at z = 6
+        picked: StartReference is the plane, and the holes start there, their top at z = 6 (the
+        removed part's bounding box), 3 x 6 pi removed."""
+        hole = self.plate()
+        low = self.datumPlane(self.body, "Low", 6)
+        self.doc.recompute()
+        self.assertHoles(hole, 3)
+        self.edit(hole, count=1)
+        start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "StartType")
+        start.setCurrentIndex(2)
+        pump(0.2)
+        field = findField("fieldStartReference")
+        self.assertIsNotNone(field, "no start reference field")
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "the start field isn't armed"
+        )
+        self.assertIsNone(Gui.getMainWindow().findChild(QtWidgets.QLineEdit, "lineStartReference"))
+        self.pick(low, "")
+        self.assertLink(hole.StartReference, low, [])
+        self.assertAlmostEqual(self.removed(hole), 3 * 6 * math.pi, places=3)
+        cut = self.plateBox.Shape.cut(hole.Shape)
+        self.assertAlmostEqual(cut.BoundBox.ZMax, 6, places=4)
+        self.assertAlmostEqual(cut.BoundBox.ZMin, 0, places=4)
+        start.setCurrentIndex(0)
+        pump(0.2)
+        self.assertTrue(waitFor(lambda: not field.isVisible()), "the start field stays shown")
+        self.assertFalse(armed(field))
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(hole.StartType, "Profile plane")
+        self.assertHoles(hole, 3)
+
+    def testHolePositionsPicksToggle(self):
+        """T37: the positions field lists the sketch whole (30 pi); circles 1 and 2 picked: two
+        holes, 20 pi; both deleted: the sketch whole again, 30 pi."""
+        hole = self.plate()
+        self.assertHoles(hole, 3)
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.assertIsNotNone(field, "no positions field")
+        self.assertEqual(field.findChild(QtWidgets.QLabel, "label").text(), "Positions")
+        self.assertEqual(texts(field), ["Holes (whole)"])
+        self.arm(field, byFocus=False)
+        first, second = self.circleOf(5, 5), self.circleOf(15, 5)
+        self.pick(self.holes, first)
+        self.assertEqual(self.positionsSubs(hole), [first])
+        self.assertHoles(hole, 1)
+        self.pick(self.holes, second)
+        self.assertEqual(self.positionsSubs(hole), [first, second])
+        self.assertHoles(hole, 2)
+        clickRow(field, 0)
+        clickRow(field, 1, QtCore.Qt.ControlModifier)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.positionsSubs(hole) == []), hole.Profile)
+        self.assertEqual(texts(field), ["Holes (whole)"])
+        self.assertHoles(hole, 3)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(hole.Profile, self.holes, [])
+        self.assertHoles(hole, 3)
+
+    def testHolePositionsPointWidensTheType(self):
+        """T37: under "Circles and arcs", the three circles picked (30 pi), then the sketch's
+        point: BaseProfileType widens to points, circles and arcs (7) in the same pick, the combo
+        follows, and the point makes a fourth hole, 40 pi. A face of the plate and a straight
+        edge are refused, with the reason."""
+        hole = self.plate()
+        self.edit(hole, count=1)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "BaseProfileType")
+        self.assertEqual(combo.currentIndex(), 0)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        circles = [self.circleOf(5, 5), self.circleOf(15, 5), self.circleOf(10, 15)]
+        for name in circles:
+            self.pick(self.holes, name)
+        self.assertHoles(hole, 3)
+        point = self.pointOf(10, 10)
+        self.pick(self.holes, point)
+        self.assertEqual(self.positionsSubs(hole), circles + [point])
+        self.assertEqual(hole.BaseProfileType, 7)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() == 1), "the combo didn't follow")
+        self.assertHoles(hole, 4)
+        [top] = face(normal=(0, 0, 1), through=(0, 0, 10)).one(self.plateBox.Shape)
+        self.assertIn("circle", self.refusedPick(self.plateBox, top))
+        self.assertEqual(self.positionsSubs(hole), circles + [point])
+        [straight] = edge("line", direction=X, through=(0, 0, 10)).one(self.plateBox.Shape)
+        self.assertIn("circle", self.refusedPick(self.plateBox, straight))
+        self.assertEqual(self.positionsSubs(hole), circles + [point])
+
+    def testHolePositionsOnASolidsCircularEdge(self):
+        """Q10: a circular edge of a solid: a boss r = 2, 2 high, centred at (10, 10) on the
+        plate; its top circle picked as the positions starts the list on the boss, and the hole
+        drills from z = 12 through all: a column r = 1, 12 high, 12 pi removed from the plate
+        and boss (whose volume is 4000 + 8 pi)."""
+        hole = self.plate(boss=True)
+        boss = self.boss
+        self.assertEqual(hole.BaseFeature, boss)
+        self.assertAlmostEqual(boss.Shape.Volume, 4000 + 8 * math.pi, places=3)
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        [rim] = edge("circle", center=(10, 10, 12), radius=2).one(boss.Shape)
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [rim])
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
