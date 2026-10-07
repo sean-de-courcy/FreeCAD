@@ -1296,6 +1296,94 @@ class TestNamingSolver(unittest.TestCase):
             else:
                 self.assertBrokenNearest(fillet, corner, 0.5)
 
+    # ops#167: a deleted hole's edge on the face it cut isn't another hole's edge on that face.
+
+    def filletedHoles(self, doc, holes, radius):
+        """A block 0..30 x 0..20, 10 high, with holes pocketed through it, `holes` being
+        (name, x, y, r) with hole A first, and a fillet of `radius` on A's bottom circle (z = 0),
+        its Base the last hole. Returns (the last hole, the fillet)."""
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 30, 20), body)
+        models.pad(body, profile, 10)
+        for name, x, y, r in holes:
+            sketch = models.sketch(doc, name + "Sketch", [models.circle(x, y, r)], body, z=10)
+            last = models.pocketThroughAll(body, sketch, name)
+        doc.recompute()
+        _, x, y, r = holes[0]
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (last, edge("circle", center=(x, y, 0), radius=r).one(last.Shape))
+        fillet.Radius = radius
+        doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        return last, fillet
+
+    def deleteHoleA(self, doc):
+        doc.Body.removeObject(doc.HoleA)
+        doc.removeObject("HoleA")
+        doc.recompute()
+
+    def testDeletedHoleBesideAnotherHoleBreaks(self):
+        """ops#167 (seed 272, gap 1): holes A and B, radius 2, at (8, 10) and (22, 10), a fillet
+        on A's bottom circle; A deleted. B's bottom circle is generated from the same bottom face
+        and was tier 1's survivor (overlap 0.62), resolved silently 14 mm away; with hole C
+        (radius 1 at (15, 4)) too, tier 2 took it with a warning. It comes from another hole:
+        the fillet breaks with B's bottom circle first and B's rim circle second. With
+        NamingSolver/Tier1SameMaker off, tier 1 takes B's circle as before."""
+        holeA, holeB = ("HoleA", 8, 10, 2), ("HoleB", 22, 10, 2)
+        for holes in ((holeA, holeB), (holeA, holeB, ("HoleC", 15, 4, 1))):
+            doc = self.newDocument()
+            last, fillet = self.filletedHoles(doc, holes, 0.5)
+
+            self.deleteHoleA(doc)
+
+            [bottom] = edge("circle", center=(22, 10, 0), radius=2).one(last.Shape)
+            [rim] = edge("circle", center=(22, 10, 10), radius=2).one(last.Shape)
+            self.assertBrokenNearest(fillet, bottom, 14.0)
+            [entry] = App.getReferenceReport(fillet)
+            self.assertEqual(entry["candidates"][1], rim)
+            self.assertAlmostEqual(entry["candidate_distances"][1], (14**2 + 10**2) ** 0.5, 6)
+
+        #   the switch off
+        self.guessSwitch("Tier1SameMaker", False)
+        doc = self.newDocument()
+        last, fillet = self.filletedHoles(doc, (holeA, holeB), 0.5)
+        self.deleteHoleA(doc)
+        [bottom] = edge("circle", center=(22, 10, 0), radius=2).one(last.Shape)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.Base[1], [bottom])
+        [entry] = App.getReferenceReport(fillet)
+        self.assertEqual((entry["status"], entry["tier"]), ("resolved", 1))
+
+    def testDeletedHoleNearAnotherHoleBreaks(self):
+        """ops#167, G2': holes A and B, radius 0.5, at (8, 10) and (9.5, 10), a fillet (radius
+        0.1) on A's bottom circle; A deleted. B's bottom circle is within G2's wide reach (1.87
+        mm) and shares a source with A's (the block's sketch, through the face both cut), but
+        not A's maker: no guess. The fillet breaks with B's bottom circle first at 1.5 mm and
+        B's rim second. With NamingSolver/GuessAnySource on, G2 takes B's circle."""
+        holes = (("HoleA", 8, 10, 0.5), ("HoleB", 9.5, 10, 0.5))
+        for anySource in (False, True):
+            if anySource:
+                self.guessSwitch("GuessAnySource", True)
+            doc = self.newDocument()
+            last, fillet = self.filletedHoles(doc, holes, 0.1)
+
+            self.deleteHoleA(doc)
+
+            [bottom] = edge("circle", center=(9.5, 10, 0), radius=0.5).one(last.Shape)
+            if anySource:
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                [entry] = App.getReferenceReport(fillet)
+                self.assertEqual((entry["status"], entry["guess_kind"]), ("guessed", "geometric"))
+                self.assertEqual(fillet.Base[1], [bottom])
+            else:
+                [rim] = edge("circle", center=(9.5, 10, 10), radius=0.5).one(last.Shape)
+                self.assertBrokenNearest(fillet, bottom, 1.5)
+                [entry] = App.getReferenceReport(fillet)
+                self.assertEqual(entry["candidates"][1], rim)
+                self.assertAlmostEqual(
+                    entry["candidate_distances"][1], (1.5**2 + 10**2) ** 0.5, 6
+                )
+
     def openIndexOnly(self):
         """The fillet's reference saved as an index-only missing reference (`?EdgeN`, no shadow:
         no name to solve from, ops#123), its fingerprint kept; the file opened again with the
