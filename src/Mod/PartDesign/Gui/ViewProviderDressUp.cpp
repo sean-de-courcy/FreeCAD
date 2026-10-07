@@ -172,6 +172,11 @@ void ViewProviderDressUp::updatePreview()
 
 void ViewProviderDressUp::setErrorState(bool error)
 {
+    // FreeCAD-CH (ops#196)
+    if (!pcPreviewShape) {
+        return;
+    }
+
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
 
     // FreeCAD-CH (ops#150 W5): without an error, the opacity slider's (was the theme's)
