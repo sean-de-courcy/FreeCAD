@@ -86,16 +86,26 @@ void PropertyExpressionContainer::slotRelabelDocument(const App::Document& doc)
 
 void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property& prop, const char* oldName)
 {
-    for (auto container : _ExprContainers) {
-        container->onRenameDynamicProperty(prop, oldName);
+    // FreeCAD-CH (ops#177): iterate a copy. Under a transaction the renames below make undo copies
+    // of the containers they change, and those copies join _ExprContainers while it is iterated.
+    // A copy has no container and is the undo state: it isn't renamed.
+    const auto containers = _ExprContainers;
+    for (auto container : containers) {
+        if (container->getContainer()) {
+            container->onRenameDynamicProperty(prop, oldName);
+        }
     }
 }
 
 void PropertyExpressionContainer::slotMoveDynamicProperty(const App::Property& prop,
                                                           const App::DocumentObject& targetObj)
 {
-    for (auto container : _ExprContainers) {
-        container->onMoveDynamicProperty(prop, targetObj);
+    // FreeCAD-CH (ops#177): as in slotRenameDynamicProperty.
+    const auto containers = _ExprContainers;
+    for (auto container : containers) {
+        if (container->getContainer()) {
+            container->onMoveDynamicProperty(prop, targetObj);
+        }
     }
 }
 

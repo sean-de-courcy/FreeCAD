@@ -29,6 +29,7 @@
 #include "DocumentObject.h"
 #include "Expression.h"
 #include "ObjectIdentifier.h"
+#include "PropertyExpressionEngine.h"
 #include "VarSet.h"
 
 using namespace App;
@@ -117,6 +118,57 @@ bool VariableLookup::isVariable(const DocumentObject* obj, const std::string& na
         }
     }
     return false;
+}
+
+std::vector<VariableUse> VariableLookup::uses(const Property* prop)
+{
+    std::vector<VariableUse> result;
+    auto holder = prop ? freecad_cast<DocumentObject*>(prop->getContainer()) : nullptr;
+    if (!holder || !holder->isAttachedToDocument()) {
+        return result;
+    }
+    auto usesProp = [prop](const Expression* expr) {
+        if (!expr) {
+            return false;
+        }
+        for (const auto& [id, hidden] : expr->getIdentifiers()) {
+            if (id.getProperty() == prop) {
+                return true;
+            }
+        }
+        return false;
+    };
+    std::vector<DocumentObject*> users {holder};
+    for (auto obj : holder->getInList()) {
+        if (std::find(users.begin(), users.end(), obj) == users.end()) {
+            users.push_back(obj);
+        }
+    }
+    for (auto user : users) {
+        if (!user || !user->isAttachedToDocument()) {
+            continue;
+        }
+        std::vector<Property*> props;
+        user->getPropertyList(props);
+        for (auto userProp : props) {
+            // The ExpressionEngine, and a sheet's cells.
+            auto container = freecad_cast<PropertyExpressionContainer*>(userProp);
+            if (!container) {
+                continue;
+            }
+            for (const auto& [id, expr] : container->getExpressions()) {
+                if (usesProp(expr)) {
+                    result.push_back({user, id});
+                }
+            }
+        }
+    }
+    return result;
+}
+
+std::string VariableUse::toString() const
+{
+    return std::string(user->getNameInDocument()) + "." + path.toString();
 }
 
 namespace

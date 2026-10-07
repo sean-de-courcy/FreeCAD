@@ -274,7 +274,8 @@ class TestResolution(VariablesBase):
     def test_dependencies(self):
         """T10 (part). Expressions written with `#Width` depend on the VarSet like full paths do.
 
-        The uses helper's exact oracle ({Box.Length, Sheet.B1}) is PR 2's (ops#152 section 7).
+        The uses helper's exact oracle ({Box.Length, Sheet.B1}) is the gtest
+        VariableDisplay.usesCoverSheetCells (Spreadsheet_tests_run): the helper has no Python API.
         """
         varSet = self.addVarSet(Width=20)
         box = self.addBox()
@@ -321,14 +322,15 @@ class TestSaveAndRename(VariablesBase):
         self.assertAlmostEqual(self.doc.getObject("Box2").Shape.Volume, 20 * 10 * 35)
 
     def test_rename(self):
-        """T8. A rename reaches `#`-written expressions, other documents too.
-
-        Without a transaction (ops#177, see test_rename_sheet_cell); the undo half is checked with
-        ops#177's fix.
-        """
+        """T8. A rename reaches `#`-written expressions, sheet cells and other documents, as one
+        undo step (ops#177: under a transaction it raised TypeError when a feature expression and a
+        sheet cell both used the property)."""
+        self.doc.UndoMode = 1
         varSet = self.addVarSet(Width=20)
         box = self.addBox()
         box.setExpression("Length", "#Width * 2")
+        sheet = self.addSheet()
+        sheet.set("B1", "=#Width")
         other = FreeCAD.newDocument("VarRenameOther")
         self.extraDocs.append(other)
         otherBox = other.addObject("Part::Box", "Box")
@@ -341,25 +343,21 @@ class TestSaveAndRename(VariablesBase):
         other.recompute()
         self.assertAlmostEqual(otherBox.Length.Value, 20)
 
+        self.doc.openTransaction("Rename")
         varSet.renameProperty("Width", "BoxWidth")
+        self.doc.commitTransaction()
         self.doc.recompute()
         self.assertEqual(expressionText(box, "Length"), "VarSet.BoxWidth * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.BoxWidth")
         self.assertEqual(expressionText(otherBox, "Length"), f"{self.doc.Name}#VarSet.BoxWidth")
         self.assertAlmostEqual(box.Length.Value, 40)
+        self.assertAlmostEqual(sheet.B1.Value, 20)
 
-    def test_rename_sheet_cell(self):
-        """T8. A rename reaches a sheet cell.
-
-        Without a transaction: under one, the rename raises TypeError in stock code (ops#177), on
-        some platforms even with the sheet alone. The undo half is checked with ops#177's fix.
-        """
-        varSet = self.addVarSet(Width=20)
-        sheet = self.addSheet()
-        sheet.set("B1", "=#Width")
+        self.doc.undo()
         self.doc.recompute()
+        self.assertTrue(hasattr(varSet, "Width"))
+        self.assertFalse(hasattr(varSet, "BoxWidth"))
+        self.assertEqual(expressionText(box, "Length"), "VarSet.Width * 2")
         self.assertEqual(sheet.getContents("B1"), "=VarSet.Width")
-
-        varSet.renameProperty("Width", "BoxWidth")
-        self.doc.recompute()
-        self.assertEqual(sheet.getContents("B1"), "=VarSet.BoxWidth")
+        self.assertAlmostEqual(box.Length.Value, 40)
         self.assertAlmostEqual(sheet.B1.Value, 20)

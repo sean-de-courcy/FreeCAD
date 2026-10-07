@@ -339,6 +339,30 @@ TEST_F(VariableDisplay, listVariablesWithAliases)
     EXPECT_FALSE(App::VariableLookup::isVariable(fresh, "A2"));
 }
 
+// T10: the uses helper finds property expressions and sheet cells alike.
+TEST_F(VariableDisplay, usesCoverSheetCells)
+{
+    box->setExpression(
+        App::ObjectIdentifier(*length),
+        std::shared_ptr<App::Expression>(App::Expression::parse(box, "#Width * 2"))
+    );
+    sheet->setCell("B1", "=VarSet.Width");
+    sheet->setCell("B2", "=Sheet.Depth * 2");  // uses another variable
+    doc->recompute();
+
+    std::set<std::string> uses;
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        uses.insert(use.toString());
+    }
+    EXPECT_EQ(uses, (std::set<std::string> {"Box.Length", "Sheet.B1"}));
+    // DocumentObject::getPropertyUses, for comparison, misses the cell.
+    std::set<std::string> stock;
+    for (const auto& id : varSet->getPropertyUses(width)) {
+        stock.insert(id.toString());
+    }
+    EXPECT_EQ(stock.count("B1"), 0U);
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers)

@@ -32,13 +32,15 @@
 #include <Base/Type.h>
 #include <FCGlobal.h>
 
+#include "ObjectIdentifier.h"
+
 namespace App
 {
 
 class Document;
 class DocumentObject;
 class Expression;
-class ObjectIdentifier;
+class Property;
 
 /// A named variable of a document: a VarSet property or a Spreadsheet alias (FreeCAD-CH, ops#152).
 struct AppExport VariableRef
@@ -48,6 +50,16 @@ struct AppExport VariableRef
 
     /// The full path an expression uses for it, e.g. "VarSet.Width" or "Sheet.Depth".
     std::string path() const;
+};
+
+/// An expression that uses a variable: @a path is a property of @a user, or a cell of a sheet.
+struct AppExport VariableUse
+{
+    const DocumentObject* user = nullptr;
+    ObjectIdentifier path;
+
+    /// E.g. "Box.Length" or "Sheet.B1".
+    std::string toString() const;
 };
 
 /** The objects that hold variables for `#name` in expressions (FreeCAD-CH, ops#152).
@@ -72,6 +84,10 @@ public:
 
     /// Whether @a obj holds a variable named @a name.
     static bool isVariable(const DocumentObject* obj, const std::string& name);
+
+    /// Every expression that uses @a prop: properties' expressions and Spreadsheet cells alike
+    /// (DocumentObject::getPropertyUses misses the cells), of its object and its InList.
+    static std::vector<VariableUse> uses(const Property* prop);
 };
 
 /** While alive, Expression::toString(persistent = false) on this thread writes a reference to a
