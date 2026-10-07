@@ -843,6 +843,15 @@ App::DocumentObject* ObjectIdentifier::getDocumentObject(const App::Document* do
     }
 }
 
+// FreeCAD-CH (ops#152): the owner's internal name, empty while an undo/redo transaction holds it
+// (detached). Renames and moves visit such owners' expressions, whose references to their own
+// properties (`A1` in a deleted sheet's cell, `Width` in a Box's) resolve here: a null name crashed.
+static const char* ownerNameInDocument(const DocumentObject* owner)
+{
+    const char* name = owner->getNameInDocument();
+    return name ? name : "";
+}
+
 void ObjectIdentifier::resolve(ResolveResults& results) const
 {
     if (!owner) {
@@ -906,7 +915,7 @@ void ObjectIdentifier::resolve(ResolveResults& results) const
         if (components.size() == 1 || (components.size() > 1 && !components[0].isSimple())) {
             /* Yes -- then this must be a property, so we get the document object's name from the
              * owner */
-            results.resolvedDocumentObjectName = String(owner->getNameInDocument(), false, true);
+            results.resolvedDocumentObjectName = String(ownerNameInDocument(owner), false, true);
             results.resolvedDocumentObject = owner;
             results.propertyName = components[0].name.getString();
             results.propertyIndex = 0;
@@ -946,7 +955,7 @@ void ObjectIdentifier::resolve(ResolveResults& results) const
                         results.resolvedDocumentName =
                             String(results.resolvedDocument->getName(), false, true);
                         results.resolvedDocumentObjectName =
-                            String(owner->getNameInDocument(), false, true);
+                            String(ownerNameInDocument(owner), false, true);
                         results.resolvedDocumentObject = owner;
                         results.resolvedSubObject = sobj;
                         results.propertyIndex = 0;
@@ -959,9 +968,10 @@ void ObjectIdentifier::resolve(ResolveResults& results) const
                 results.resolvedDocumentName =
                     String(results.resolvedDocument->getName(), false, true);
                 results.resolvedDocumentObjectName =
-                    String(owner->getNameInDocument(), false, true);
-                results.resolvedDocumentObject =
-                    owner->getDocument()->getObject(owner->getNameInDocument());
+                    String(ownerNameInDocument(owner), false, true);
+                results.resolvedDocumentObject = owner->isAttachedToDocument()
+                    ? owner->getDocument()->getObject(owner->getNameInDocument())
+                    : nullptr;
                 results.propertyIndex = 0;
                 results.propertyName = components[results.propertyIndex].name.getString();
                 results.getProperty(*this);
@@ -1888,7 +1898,9 @@ void ObjectIdentifier::resolveAmbiguity()
 void ObjectIdentifier::resolveAmbiguity(const ResolveResults& result)
 {
 
-    if (!result.resolvedDocumentObject) {
+    // FreeCAD-CH (ops#152): a detached object has no name to write (setDocumentObjectName
+    // throws); keep the path as written, as resolveAmbiguity() does for a detached owner.
+    if (!result.resolvedDocumentObject || !result.resolvedDocumentObject->isAttachedToDocument()) {
         return;
     }
 
