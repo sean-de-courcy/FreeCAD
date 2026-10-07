@@ -156,19 +156,85 @@ private Q_SLOTS:
         QCOMPARE(edit->text(), QStringLiteral("VarSet.Width"));
     }
 
-    // A VarSet that depends on the bound object isn't offered: using it would make a cycle.
+    // A VarSet that depends on the bound object isn't offered: using it would make a cycle. One
+    // that doesn't still is.
     void holderDependingOnTheOwnerIsLeftOut()
     {
-        auto varSet = mainDoc->getObject("VarSet");
-        varSet->setExpression(
-            App::ObjectIdentifier::parse(varSet, "Depth"),
-            App::ExpressionPtr(App::Expression::parse(varSet, "Owner.Float * 1 mm"))
-        );
+        auto independent = mainDoc->addObject("App::VarSet", "VarSet001");
+        addLength(independent, "Height", 7.0);
+        makeDependOnOwner(mainDoc->getObject("VarSet"));
         edit->setDocumentObject(owner);
-        QCOMPARE(typeAndList(QStringLiteral("#")), QStringList());
+        QCOMPARE(typeAndList(QStringLiteral("#")), QStringList({QStringLiteral("#Height")}));
+    }
+
+    // A name two VarSets hold, one of them left out as above: the other is offered with its full
+    // path, since `#Width` would still be ambiguous.
+    void ambiguousNameWithOneHolderLeftOut()
+    {
+        auto more = mainDoc->addObject("App::VarSet", "VarSet001");
+        addLength(more, "Width", 5.0);
+        makeDependOnOwner(more);
+        edit->setDocumentObject(owner);
+        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList({QStringLiteral("VarSet.Width")}));
+    }
+
+    // The rows follow variables added, renamed and removed while the line edit exists.
+    void rowsFollowVariableChanges()
+    {
+        auto varSet = mainDoc->getObject("VarSet");
+        QCOMPARE(sortedRows(QStringLiteral("#")), QStringList({QStringLiteral("#Depth"), QStringLiteral("#Width")}));
+        addLength(varSet, "Length", 3.0);
+        QCOMPARE(
+            sortedRows(QStringLiteral("#")),
+            QStringList({QStringLiteral("#Depth"), QStringLiteral("#Length"), QStringLiteral("#Width")})
+        );
+        QVERIFY(varSet->renameDynamicProperty(varSet->getPropertyByName("Length"), "Span"));
+        QCOMPARE(
+            sortedRows(QStringLiteral("#")),
+            QStringList({QStringLiteral("#Depth"), QStringLiteral("#Span"), QStringLiteral("#Width")})
+        );
+        QVERIFY(varSet->removeDynamicProperty("Span"));
+        QCOMPARE(sortedRows(QStringLiteral("#")), QStringList({QStringLiteral("#Depth"), QStringLiteral("#Width")}));
+    }
+
+    // Exact Match: `#` matches the start of a name only. Toggling it with the same text changes
+    // the rows (they were kept from the other mode).
+    void exactMatchModeForVariables()
+    {
+        QCOMPARE(typeAndList(QStringLiteral("#idt")), QStringList({QStringLiteral("#Width")}));
+        edit->setExactMatch(true);
+        edit->getCompleter()->slotUpdate(QStringLiteral("#idt"), 4);
+        QCOMPARE(currentRows(), QStringList());
+        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList({QStringLiteral("#Width")}));
+    }
+
+    // An unclosed `<<#Wi` is a string; deleting the `<<` makes it a variable name, whose rows
+    // aren't the string's.
+    void hashAfterDeletedQuoteOffersTheVariable()
+    {
+        edit->getCompleter()->slotUpdate(QStringLiteral("<<#Wi"), 5);
+        edit->getCompleter()->slotUpdate(QStringLiteral("#Wi"), 3);
+        QCOMPARE(currentRows(), QStringList({QStringLiteral("#Width")}));
+    }
+
+    // Where only objects are wanted (noProperty), `#` offers no variables.
+    void noPropertyOffersNoVariables()
+    {
+        edit->setNoProperty(true);
+        QCOMPARE(typeAndList(QStringLiteral("#Wi")), QStringList());
     }
 
 private:
+    // Gives `holder` an expression using the owner, so the owner can't use `holder`.
+    static void makeDependOnOwner(App::DocumentObject* holder)
+    {
+        const char* name = holder->getPropertyByName("Depth") ? "Depth" : "Width";
+        holder->setExpression(
+            App::ObjectIdentifier::parse(holder, name),
+            App::ExpressionPtr(App::Expression::parse(holder, "Owner.Float * 1 mm"))
+        );
+    }
+
     static void addLength(App::DocumentObject* obj, const char* name, double value)
     {
         auto prop = obj->addDynamicProperty("App::PropertyLength", name);
@@ -201,11 +267,24 @@ private:
         if (edit->text() != text) {
             return {QStringLiteral("typed text is ") + edit->text()};
         }
+        return currentRows();
+    }
+
+    // The full path of every row the completer offers now, in the popup's order.
+    QStringList currentRows() const
+    {
         auto completer = edit->getCompleter();
         QStringList rows;
         for (int row = 0; completer->setCurrentRow(row); ++row) {
             rows << completer->currentCompletion();
         }
+        return rows;
+    }
+
+    QStringList sortedRows(const QString& text)
+    {
+        QStringList rows = typeAndList(text);
+        rows.sort();
         return rows;
     }
 

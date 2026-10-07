@@ -39,9 +39,9 @@
 #include <App/ExpressionParser.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Property.h>
-#include <App/PropertyStandard.h>
-#include <App/PropertyUnits.h>
-#include <App/VariableLookup.h>
+#include <App/PropertyStandard.h>  // FreeCAD-CH (ops#152)
+#include <App/PropertyUnits.h>     // FreeCAD-CH (ops#152)
+#include <App/VariableLookup.h>    // FreeCAD-CH (ops#152)
 #include <Gui/Application.h>
 #include <Gui/MainWindow.h>
 #include <Base/Tools.h>
@@ -899,7 +899,8 @@ public:
             Match match {
                 useLabel ? candidate.labelCompletion : candidate.completion,
                 score,
-                candidate.priority
+                candidate.priority,
+                QString()  // FreeCAD-CH (ops#152): Match::display
             };
             if (matches.size() < maxFuzzyCompletions) {
                 matches.push_back(match);
@@ -916,6 +917,7 @@ public:
         beginResetModel();
         fuzzyMode = true;
         fuzzyFilter = text;
+        variableFilter.clear();  // FreeCAD-CH (ops#152)
         fuzzyMatches.swap(matches);
         endResetModel();
     }
@@ -925,7 +927,10 @@ public:
     // more than one object completes to each holder's full path, since `#name` would be an error.
     void setVariableFilter(const QString& prefix, bool startsWithOnly)
     {
-        if (fuzzyMode && fuzzyFilter == prefix) {
+        // The rows depend on the mode too, and stay apart from setFuzzyFilter's: an unclosed
+        // `<<#Wi` is a fuzzy filter "#Wi" until the `<<` is deleted.
+        if (fuzzyMode && !variableFilter.isNull() && variableFilter == prefix
+            && variableStartsWithOnly == startsWithOnly) {
             return;
         }
 
@@ -950,7 +955,9 @@ public:
 
         beginResetModel();
         fuzzyMode = true;
-        fuzzyFilter = prefix;
+        fuzzyFilter.clear();
+        variableFilter = prefix;
+        variableStartsWithOnly = startsWithOnly;
         fuzzyMatches.swap(matches);
         endResetModel();
     }
@@ -999,7 +1006,7 @@ private:
         QString labelCompletion;
         QString labelSearchText;
         MatchPriority priority = MatchPriority::Other;
-        QString display;
+        QString display;  // FreeCAD-CH (ops#152)
     };
 
     void invalidate()
@@ -1017,10 +1024,11 @@ private:
         inList.clear();
         fuzzyCandidates.clear();
         fuzzyCandidatesInitialized = false;
-        variableCandidates.clear();
-        variableCandidatesInitialized = false;
+        variableCandidates.clear();               // FreeCAD-CH (ops#152)
+        variableCandidatesInitialized = false;    // FreeCAD-CH (ops#152)
         fuzzyMatches.clear();
         fuzzyFilter.clear();
+        variableFilter = QString();  // FreeCAD-CH (ops#152)
         endResetModel();
     }
 
@@ -1106,6 +1114,8 @@ private:
         }
     }
 
+    // The value shown in a variable's row: quantities, numbers and strings. Other types
+    // (PropertyBool, PropertyEnumeration, PropertyPlacement, ...) show only name and holder.
     static QString variableValue(const App::Property* prop)
     {
         if (auto quantity = freecad_cast<const App::PropertyQuantity*>(prop)) {
@@ -1183,9 +1193,11 @@ private:
     std::string currentDoc;
     std::string currentObj;
     QList<Candidate> fuzzyCandidates;
-    QList<Candidate> variableCandidates;
+    QList<Candidate> variableCandidates;  // FreeCAD-CH (ops#152)
     QList<Match> fuzzyMatches;
     QString fuzzyFilter;
+    QString variableFilter;  // FreeCAD-CH (ops#152): setVariableFilter's prefix (null: none)
+    bool variableStartsWithOnly = false;  // FreeCAD-CH (ops#152): and its mode
     QString contextPrefix;
     const App::Property* contextProperty = nullptr;
     std::vector<App::ObjectIdentifier> contextPaths;
@@ -1193,7 +1205,7 @@ private:
     bool checkInList = true;
     bool dirty = true;
     bool fuzzyCandidatesInitialized = false;
-    bool variableCandidatesInitialized = false;
+    bool variableCandidatesInitialized = false;  // FreeCAD-CH (ops#152)
     bool fuzzyMode = false;
     std::vector<fastsignals::scoped_connection> connections;
 };
