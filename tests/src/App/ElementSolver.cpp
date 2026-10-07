@@ -5351,7 +5351,9 @@ TEST(SolveOwner, unknownSourceKeepsTheOthersRequired)
     EXPECT_EQ(outcome.status, SolveStatus::Broken);
     EXPECT_EQ(outcome.evidence, "no candidate; tier 1's 1 survivor lost the old element's source");
     EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge12"}));
-    //   only unknown sources on the old name: T1' can't judge, tier 1 decides
+    //   only unknown sources on the old name: T1' can't judge, tier 1 decides. Deliberate
+    //   (ops#183): the silent tier-1 resolution is the behaviour before T1', which can only drop
+    //   a candidate for a source the old name is known to have.
     auto onUnknownFace = [&](const std::string& cylinderSource) {
         return generated({lowFace({unknown}), generated({cylinderSource}, 41, "XTR", 'F')},
                          41,
