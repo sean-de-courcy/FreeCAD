@@ -2454,3 +2454,103 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.opacitySlider().setValue(60)
         pump(0.05)
         self.assertAlmostEqual(self.previewTransparencies(fillet)[0], 0.4, places=5)
+
+    # -- ops#186: a pending "Select reference..." by the other paths ------------------------------
+
+    def multiTransform(self, typeName):
+        """The bumps in a MultiTransform of one sub-feature (linear along X, or mirrored in YZ),
+        its sub-task open."""
+        first, second = self.bumps()
+        multi = self.doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = [first, second]
+        self.body.addObject(multi)
+        sub = self.doc.addObject(typeName, typeName.split("::")[1])
+        if typeName == "PartDesign::LinearPattern":
+            sub.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+            sub.Length = 2
+            sub.Occurrences = 2
+        else:
+            sub.MirrorPlane = (models.originFeature(self.body, "YZ_Plane"), [""])
+        self.body.addObject(sub)
+        multi.Transformations = [sub]
+        self.doc.recompute()
+        self.assertAlmostEqual(multi.Shape.Volume, 1004, places=6)
+        [field] = self.edit(multi)
+        transforms = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listTransformFeatures")
+        transforms.setCurrentRow(0)
+        transforms.activated.emit(transforms.currentIndex())
+        pump(0.3)
+        return multi, sub, field
+
+    def testPatternReferencePickPendingThenOk(self):
+        """ops#186 (2): "Select reference..." chosen and OK pressed without a pick: the
+        direction stays."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        self.edit(pattern)
+        self.selectReference("comboDirection")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertIsNotNone(pattern.Direction, "OK cleared the direction")
+        self.assertEqual(pattern.Direction[0].Name, models.originFeature(self.body, "X_Axis").Name)
+
+    def testMultiTransformSubTaskPickPendingThenOk(self):
+        """ops#186 (2): the sub-task's "Select reference..." chosen, then its OK: the sub-pattern's
+        direction stays."""
+        multi, linear, field = self.multiTransform("PartDesign::LinearPattern")
+        self.selectReference("comboDirection")
+        ok = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonOK")
+        ok.click()
+        pump(0.3)
+        self.assertIsNotNone(linear.Direction, "the sub-task's OK cleared the direction")
+        self.assertEqual(linear.Direction[0].Name, models.originFeature(self.body, "X_Axis").Name)
+
+    def testPatternPickTakenByTheReferencesPanel(self):
+        """ops#186 (3): the direction a guessed edge of the redrawn pad (listed by the References
+        panel); "Select reference..." chosen, then the panel's Re-pick takes the selection: the
+        combo shows the edge again, and OK keeps it."""
+        body, pad = self.redrawnPad()
+        frontTop = edge("line", direction=X, through=(0, 0, 10))
+        [edgeName] = frontTop.one(pad.Shape)
+        pattern = self.doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [pad]
+        pattern.Direction = (pad, [edgeName])
+        pattern.Length = 30
+        pattern.Occurrences = 2
+        body.addObject(pattern)
+        self.doc.recompute()
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.redraw()
+        self.doc.recompute()
+        self.edit(pattern)
+        tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+        self.assertTrue(tree is not None and tree.isVisible(), "no References panel")
+        combo, index = self.selectReference("comboDirection")
+        tree.setCurrentItem(tree.topLevelItem(0))
+        pick = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonPick")
+        pick.click()
+        pump(0.3)
+        self.assertNotEqual(combo.currentIndex(), index, "the combo stays on the pick")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertIsNotNone(pattern.Direction, "OK cleared the direction")
+        self.assertEqual(pattern.Direction[0].Name, pad.Name)
+
+    def testMirroredUpdateViewOffPickPending(self):
+        """ops#186 (4): "Update view" off, "Select reference..." chosen, the Originals field
+        armed: the combo shows the plane again, and OK keeps it."""
+        first, second = self.bumps()
+        mirrored = self.pattern("PartDesign::Mirrored", [first])
+        [field] = self.edit(mirrored)
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(False)
+        pump(0.1)
+        combo, index = self.selectReference("comboPlane")
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() != index), "the combo stays on the pick")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertIsNotNone(mirrored.MirrorPlane, "OK cleared the plane")
+        self.assertEqual(
+            mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "YZ_Plane").Name
+        )
