@@ -229,6 +229,7 @@ void ViewProvider::unsetEdit(int ModNum)
     }
 }
 
+// FreeCAD-CH (ops#150 W5): the preview overlay's opacity, set by the Preview box's slider
 double ViewProvider::previewOpacity()
 {
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
@@ -279,6 +280,7 @@ void ViewProvider::attachPreview()
 
     pcPreviewRoot->addChild(pcToolPreview);
 
+    // FreeCAD-CH (ops#150 W5): both opacities follow the slider (the tool's was the theme's)
     updatePreviewOpacity();
 }
 

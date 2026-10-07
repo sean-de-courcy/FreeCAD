@@ -149,6 +149,7 @@ void ViewProviderDressUp::highlightReferences(const bool on)
     }
 }
 
+// FreeCAD-CH (ops#150 W5): the opacity slider
 void ViewProviderDressUp::updatePreviewOpacity()
 {
     ViewProvider::updatePreviewOpacity();
@@ -162,6 +163,7 @@ void ViewProviderDressUp::setErrorState(bool error)
 {
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
 
+    // FreeCAD-CH (ops#150 W5): without an error, the opacity slider's (was the theme's)
     const float opacity = static_cast<float>(
         error ? styleParameterManager->resolve(StyleParameters::PreviewErrorOpacity).value
               : previewOpacity()

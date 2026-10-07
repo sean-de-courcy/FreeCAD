@@ -467,6 +467,7 @@ void ViewProviderBoolean::attachPreview()
     pcPreviewRoot->addChild(this->pcBasePreviewToggle);
 }
 
+// FreeCAD-CH (ops#150 W5): the opacity slider reaches the tool and base shapes too
 void ViewProviderBoolean::updatePreviewOpacity()
 {
     ViewProvider::updatePreviewOpacity();
@@ -485,6 +486,7 @@ void ViewProviderBoolean::updatePreviewOpacity()
 
 void ViewProviderBoolean::updatePreview()
 {
+    // FreeCAD-CH (ops#150 W5): scaled by the opacity slider (was the theme's alone)
     const double toolTransparency = 1.0 - previewToolOpacity();
 
     auto boolean = getObject<PartDesign::Boolean>();

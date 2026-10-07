@@ -156,9 +156,13 @@ void TaskMultiTransformParameters::slotDeletedObject(const Gui::ViewProviderDocu
 
 void TaskMultiTransformParameters::cancelReferencePick()
 {
-    // A sub-task whose sub-feature was deleted has nothing to show (ops#186)
+    // A sub-task whose sub-feature was deleted has nothing to show, but its pick mode still
+    // ends (ops#186)
     if (subTask && subFeature) {
         subTask->cancelReferencePick();
+    }
+    else if (subTask) {
+        subTask->exitSelectionMode();
     }
     exitSelectionMode();
 }
