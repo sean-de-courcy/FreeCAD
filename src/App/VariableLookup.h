@@ -58,8 +58,10 @@ struct AppExport VariableUse
     const DocumentObject* user = nullptr;
     ObjectIdentifier path;
 
-    /// E.g. "Box.Length" or "Sheet.B1".
-    std::string toString() const;
+    /** E.g. "Box.Length" or "Sheet.B1", and "Other#Box.Length" for a user outside @a home
+     * (no @a home: always with the document). A user detached since uses() gives only the path.
+     */
+    std::string toString(const Document* home = nullptr) const;
 };
 
 /** The objects that hold variables for `#name` in expressions (FreeCAD-CH, ops#152).
@@ -86,7 +88,9 @@ public:
     static bool isVariable(const DocumentObject* obj, const std::string& name);
 
     /// Every expression that uses @a prop: properties' expressions and Spreadsheet cells alike
-    /// (DocumentObject::getPropertyUses misses the cells), of its object and its InList.
+    /// (DocumentObject::getPropertyUses misses the cells), of its object and its InList, other
+    /// documents included. A use through an App::Link to the holder isn't found: the Link, not
+    /// the user, is in the InList.
     static std::vector<VariableUse> uses(const Property* prop);
 };
 

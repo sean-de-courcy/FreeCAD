@@ -166,9 +166,14 @@ std::vector<VariableUse> VariableLookup::uses(const Property* prop)
     return result;
 }
 
-std::string VariableUse::toString() const
+std::string VariableUse::toString(const Document* home) const
 {
-    return std::string(user->getNameInDocument()) + "." + path.toString();
+    if (!user || !user->isAttachedToDocument()) {
+        return path.toString();
+    }
+    const std::string name = user->getDocument() == home ? std::string(user->getNameInDocument())
+                                                          : user->getFullName();
+    return name + "." + path.toString();
 }
 
 namespace

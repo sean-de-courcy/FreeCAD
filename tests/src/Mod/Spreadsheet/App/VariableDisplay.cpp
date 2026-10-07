@@ -352,7 +352,7 @@ TEST_F(VariableDisplay, usesCoverSheetCells)
 
     std::set<std::string> uses;
     for (const auto& use : App::VariableLookup::uses(width)) {
-        uses.insert(use.toString());
+        uses.insert(use.toString(doc));
     }
     EXPECT_EQ(uses, (std::set<std::string> {"Box.Length", "Sheet.B1"}));
     // DocumentObject::getPropertyUses, for comparison, misses the cell.
@@ -361,6 +361,54 @@ TEST_F(VariableDisplay, usesCoverSheetCells)
         stock.insert(id.toString());
     }
     EXPECT_EQ(stock.count("B1"), 0U);
+}
+
+// fork PR 148 review: the VarSet's own expressions and another document's count too, and
+// an unused variable has no uses.
+TEST_F(VariableDisplay, usesCoverOwnExpressionsAndOtherDocuments)
+{
+    auto depth = static_cast<App::PropertyLength*>(
+        varSet->addDynamicProperty("App::PropertyLength", "Depth")
+    );
+    auto unused = varSet->addDynamicProperty("App::PropertyLength", "Unused");
+    varSet->setExpression(
+        App::ObjectIdentifier(*depth),
+        std::shared_ptr<App::Expression>(App::Expression::parse(varSet, "Width * 3"))
+    );
+    // An expression may reference another document only once both are saved.
+    auto doc2 = otherDocument("uses2");
+    auto otherBox = doc2->addObject("App::DocumentObjectGroup", "Box");
+    auto otherLength = static_cast<App::PropertyLength*>(
+        otherBox->addDynamicProperty("App::PropertyLength", "Length")
+    );
+    const std::string path1 = Base::FileInfo::getTempFileName("uses1") + ".FCStd";
+    const std::string path2 = Base::FileInfo::getTempFileName("uses2") + ".FCStd";
+    ASSERT_TRUE(doc->saveAs(path1.c_str()));
+    ASSERT_TRUE(doc2->saveAs(path2.c_str()));
+    otherBox->setExpression(
+        App::ObjectIdentifier(*otherLength),
+        std::shared_ptr<App::Expression>(
+            App::Expression::parse(otherBox, std::string(doc->getName()) + "#VarSet.Width")
+        )
+    );
+    doc->recompute();
+    doc2->recompute();
+
+    std::set<std::string> uses;
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        uses.insert(use.toString(doc));
+    }
+    EXPECT_EQ(
+        uses,
+        (std::set<std::string> {"VarSet.Depth", std::string(doc2->getName()) + "#Box.Length"})
+    );
+    EXPECT_TRUE(App::VariableLookup::uses(unused).empty());
+    // Without a home document every use names its document.
+    for (const auto& use : App::VariableLookup::uses(width)) {
+        EXPECT_EQ(use.toString().find(use.user->getDocument()->getName()), 0U);
+    }
+    std::remove(path1.c_str());
+    std::remove(path2.c_str());
 }
 
 // fork PR 147 review: a `#` in a label isn't a document part.
