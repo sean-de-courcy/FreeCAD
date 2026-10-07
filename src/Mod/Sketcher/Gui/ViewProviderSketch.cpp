@@ -3953,8 +3953,16 @@ void ViewProviderSketch::onChanged(const App::Property* prop)
 
     if (prop == &ShapeAppearance) {
         pcSketchFaces->color.setValue(Base::convertTo<SbColor>(ShapeAppearance.getDiffuseColor()));
-        pcSketchFaces->transparency.setValue(ShapeAppearance.getTransparency());
+        setRegionEmphasis(regionEmphasis);
     }
+}
+
+void SketcherGui::ViewProviderSketch::setRegionEmphasis(bool on)
+{
+    regionEmphasis = on;
+    const float saved = ShapeAppearance.getTransparency();
+    // Half as transparent: the default 0.8 draws at 0.4
+    pcSketchFaces->transparency.setValue(on ? saved / 2.0F : saved);
 }
 
 void SketcherGui::ViewProviderSketch::updateColorPropertiesVisibility()

@@ -91,6 +91,13 @@ public:
         /// element of any object the gate takes, or a datum or origin plane or line, or with
         /// Options::wholeObject an object. A pick replaces it.
         SingleElement,
+        /// A profile (PropertyLinkSub): an object, whole or by its elements (a sketch's regions
+        /// or edges, faces of the solid before). A pick of another object, or of an object
+        /// whole, replaces it; a pick of an element of the linked object adds it or takes it
+        /// out, and taking out the last one leaves the object whole. Options::target is what
+        /// shows while armed besides the object (the solid before), and may be null; the gate
+        /// is Options::accept alone.
+        Profile,
     };
     /// Turns a pick into what is written: the object and its subs (a copy of another body's
     /// element, a datum's coordinate system). False: nothing is written.
@@ -239,6 +246,13 @@ private:
     {
         return options.kind == Kind::SingleElement;
     }
+    bool isProfile() const
+    {
+        return options.kind == Kind::Profile;
+    }
+    /// The object a list's entries are written on: the one the property links, the target
+    /// while there is none.
+    App::DocumentObject* listObject() const;
     /// The subs as the property stores them (mapped names kept).
     std::vector<std::string> storedSubs() const;
     /// The property's value as the field's undo keeps it: the object, and per sub its mapped
@@ -268,6 +282,14 @@ private:
     void pick(App::DocumentObject* obj, const std::string& sub);
     /// A single entry's pick: replaces the entry.
     void pickSingle(const Gui::SelectionChanges& msg);
+    /// A profile's pick: an element of the linked object toggles, anything else replaces it.
+    void pickProfile(const Gui::SelectionChanges& msg);
+    /// A profile's linked object whole again (its entries all go).
+    void useWhole();
+    /// A sketch without regions (MakeInternals off) gets them, in the edit's transaction.
+    void makeRegions();
+    /// A profile on a sketch that makes no regions.
+    bool lacksRegions() const;
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());

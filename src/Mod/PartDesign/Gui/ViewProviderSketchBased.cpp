@@ -53,7 +53,7 @@ ViewProviderSketchBased::ViewProviderSketchBased()
     pcProfileToggle->addChild(annotation);
 
     const auto updateProfileVisibility = [this]() {
-        pcProfileToggle->on = hGrp->GetBool("ShowProfilePreview", true);
+        pcProfileToggle->on = profileEmphasis || hGrp->GetBool("ShowProfilePreview", true);
     };
 
     handlers.addHandler(hGrp, "ShowProfilePreview", [updateProfileVisibility](const Gui::ParamKey*) {
@@ -93,6 +93,12 @@ void ViewProviderSketchBased::attach(App::DocumentObject* pcObject)
 
     // we want the profile to be the same color as the preview
     pcProfileShape->color.connectFrom(&pcPreviewShape->color);
+}
+
+void ViewProviderSketchBased::setProfileEmphasis(bool on)
+{
+    profileEmphasis = on;
+    pcProfileToggle->on = on || hGrp->GetBool("ShowProfilePreview", true);
 }
 
 void ViewProviderSketchBased::updateProfileShape()

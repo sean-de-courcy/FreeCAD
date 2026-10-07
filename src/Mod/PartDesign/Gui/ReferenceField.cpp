@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <optional>
 
 #include <QAction>
 #include <QApplication>
@@ -45,15 +46,18 @@
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <App/PropertyLinks.h>
+#include <App/PropertyStandard.h>
 #include <App/ReferenceReport.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
+#include <Gui/Command.h>
 #include <Gui/Document.h>
 #include <Gui/Tools.h>
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/Gui/ReferenceHighlighter.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
@@ -152,9 +156,12 @@ public:
                 return false;
             }
         }
-        else if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
-            notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
-            return false;
+        else if (kind != ReferenceField::Kind::Profile) {
+            // A profile's gate is its accept test alone (an object of the body, or its elements)
+            if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
+                notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
+                return false;
+            }
         }
         std::string why;
         if (accept && !accept(obj, sub, why)) {
@@ -361,6 +368,12 @@ App::DocumentObject* ReferenceField::target() const
     return obj && obj->isAttachedToDocument() ? obj : nullptr;
 }
 
+App::DocumentObject* ReferenceField::listObject() const
+{
+    App::DocumentObject* linked = linkedObject();
+    return linked ? linked : target();
+}
+
 std::vector<std::string> ReferenceField::storedSubs() const
 {
     std::vector<std::string> subs;
@@ -400,7 +413,7 @@ void ReferenceField::setArmed(bool on)
     if (on) {
         App::DocumentObject* support = target();
         // A single entry can take a datum or origin plane with nothing to show
-        if (!isEnabled() || busy || (!support && !isSingle())) {
+        if (!isEnabled() || busy || (!support && options.kind == Kind::Elements)) {
             return;
         }
         if (group) {
@@ -488,6 +501,26 @@ void ReferenceField::reload()
             slots.resize(1);
         }
     }
+    else if (isProfile()) {
+        // The linked object's elements, or the object whole: one entry, for which there is no
+        // slot (index -1)
+        std::erase_if(slots, [](const App::ReferenceReport::Slot& slot) {
+            return bareElement(slot.sub).empty();
+        });
+        App::DocumentObject* linked = linkedObject();
+        if (slots.empty() && linked) {
+            App::ReferenceReport::Slot slot;
+            slot.property = propertyNameStr;
+            slot.index = -1;
+            slot.obj = linked;
+            slots.push_back(std::move(slot));
+        }
+        for (auto& slot : slots) {
+            if (!slot.obj) {
+                slot.obj = linked;
+            }
+        }
+    }
     else {
         // A list's object-only entry (an up-to-shape's whole shape) isn't an element
         std::erase_if(slots, [](const App::ReferenceReport::Slot& slot) {
@@ -495,7 +528,8 @@ void ReferenceField::reload()
         });
     }
 
-    int currentIndex = -1;
+    // A profile's whole object is index -1
+    std::optional<int> currentIndex;
     if (QListWidgetItem* current = entryList->currentItem()) {
         currentIndex = current->data(IndexRole).toInt();
     }
@@ -515,10 +549,15 @@ void ReferenceField::reload()
         const bool broken = Data::hasMissingElement(slot.sub.c_str())
             || (row && row->status == "broken");
         QString text = QString::fromStdString(element);
-        if (isSingle() && slot.obj) {
-            // The object varies: `Pad:Face6`, or `DatumPlane` alone
+        if ((isSingle() || isProfile()) && slot.obj) {
+            // The object varies: `Pad:Face6`, or `DatumPlane` alone; a profile's `Sketch (whole)`
             const QString name = QString::fromUtf8(slot.obj->Label.getValue());
-            text = element.empty() ? name : QStringLiteral("%1:%2").arg(name, text);
+            if (!element.empty()) {
+                text = QStringLiteral("%1:%2").arg(name, text);
+            }
+            else {
+                text = isProfile() ? tr("%1 (whole)").arg(name) : name;
+            }
         }
         QStringList tip;
         if (broken) {
@@ -639,6 +678,10 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
         pickSingle(msg);
         return;
     }
+    if (isProfile()) {
+        pickProfile(msg);
+        return;
+    }
     if (obj != target() || Base::Tools::isNullOrEmpty(msg.pSubName)) {
         return;
     }
@@ -718,6 +761,71 @@ void ReferenceField::pickSingle(const Gui::SelectionChanges& msg)
     }
 }
 
+void ReferenceField::pickProfile(const Gui::SelectionChanges& msg)
+{
+    App::DocumentObject* obj = owner()->getDocument()->getObject(msg.pObjectName);
+    const std::string sub = msg.pSubName ? msg.pSubName : "";
+    App::DocumentObject* linked = linkedObject();
+    if (obj == linked && !sub.empty()) {
+        pick(obj, sub);  // an element of the profile: added or taken out, or a re-pick's
+        return;
+    }
+    {
+        Base::StateLocker lock(busy, true);
+        Gui::Selection().clearSelection();
+    }
+    message.clear();
+    repickIndex = -1;
+    // Another object, or the object whole: the profile is replaced
+    if (obj != linked || !storedSubs().empty()) {
+        std::vector<std::string> subs;
+        if (!sub.empty()) {
+            subs.push_back(sub);
+        }
+        write(obj, subs);
+    }
+    else {
+        updateLook();
+    }
+}
+
+void ReferenceField::useWhole()
+{
+    App::DocumentObject* linked = linkedObject();
+    if (linked && !storedSubs().empty()) {
+        write(linked, {});
+    }
+}
+
+bool ReferenceField::lacksRegions() const
+{
+    App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
+    auto makeInternals = linked
+        ? freecad_cast<App::PropertyBool*>(linked->getPropertyByName("MakeInternals"))
+        : nullptr;
+    return makeInternals && !makeInternals->getValue();
+}
+
+void ReferenceField::makeRegions()
+{
+    App::DocumentObject* linked = linkedObject();
+    if (!linked || !lacksRegions()) {
+        return;
+    }
+    // A change of the sketch, not of the field's property: no step of the field's undo, and
+    // Cancel takes it back with the edit
+    const std::string command = Gui::Command::getObjectCmd(linked) + ".MakeInternals = True";
+    QString error;
+    bool done = false;
+    {
+        Base::StateLocker lock(busy, true);
+        done = ReferenceActions::run(owner(), command, &error);
+    }
+    message = done ? QString() : error;
+    reload();
+    highlight(armed);
+}
+
 ReferenceField::Snapshot ReferenceField::snapshot() const
 {
     Snapshot value;
@@ -754,8 +862,7 @@ void ReferenceField::write(const std::vector<std::string>& subs, bool undoable)
     // The object the property links, which the writers pass back: a dress-up's Base can name
     // the feature before the one its picks come from (BaseFeature after Body::insertObject), and
     // the entries' records go along only with the same object
-    App::DocumentObject* linked = linkedObject();
-    write(linked ? linked : target(), subs, undoable);
+    write(listObject(), subs, undoable);
 }
 
 void ReferenceField::write(App::DocumentObject* obj,
@@ -887,6 +994,8 @@ void ReferenceField::removeSelected()
     if (indexes.empty() && entryList->currentItem()) {
         indexes.push_back(entryList->currentItem()->data(IndexRole).toInt());
     }
+    // A profile's whole object isn't removed: the profile is required
+    std::erase_if(indexes, [](int index) { return index < 0; });
     if (indexes.empty()) {
         return;
     }
@@ -962,6 +1071,13 @@ void ReferenceField::updateLook()
                 tr("Re-pick %1: pick the element that replaces it in the 3D view.").arg(element)
             );
         }
+        else if (lacksRegions()) {
+            hint->setText(
+                tr("Select %1 in the 3D view. The sketch makes no regions: right-click here and "
+                   "choose Make regions to pick them.")
+                    .arg(options.kinds.toLower())
+            );
+        }
         else {
             hint->setText(tr("Select %1 in the 3D view.").arg(options.kinds.toLower()));
         }
@@ -996,7 +1112,8 @@ void ReferenceField::highlight(bool on, const std::string& extra)
     // A single entry is coloured on its own object (a face of the base, not a datum plane)
     App::DocumentObject* support = nullptr;
     if (on) {
-        support = isSingle() ? (options.wholeObject ? nullptr : linkedObject()) : target();
+        support = isSingle() ? (options.wholeObject ? nullptr : linkedObject())
+                             : (isProfile() ? linkedObject() : target());
     }
     auto feature = freecad_cast<Part::Feature*>(support);
     if (!feature) {
@@ -1077,7 +1194,7 @@ void ReferenceField::highlight(bool on, const std::string& extra)
 
 void ReferenceField::zoomTo(const std::string& element)
 {
-    App::DocumentObject* support = isSingle() ? linkedObject() : target();
+    App::DocumentObject* support = (isSingle() || isProfile()) ? linkedObject() : target();
     if (!support || element.empty()) {
         return;
     }
@@ -1133,14 +1250,16 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
     menu->setObjectName(QStringLiteral("entryMenu"));
     menu->setAttribute(Qt::WA_DeleteOnClose);
 
+    // A profile's whole object has no slot: nothing to remove, repair or zoom to
+    const bool whole = item && item->data(IndexRole).toInt() < 0;
     QAction* remove = menu->addAction(tr("Remove"));
     remove->setShortcut(QKeySequence(Gui::QtTools::deleteKeySequence()));
     remove->setShortcutContext(Qt::WidgetShortcut);
     remove->setShortcutVisibleInContextMenu(true);
-    remove->setEnabled(item || !entryList->selectedItems().isEmpty());
+    remove->setEnabled(!whole && (item || !entryList->selectedItems().isEmpty()));
     connect(remove, &QAction::triggered, this, [this]() { removeSelected(); });
 
-    if (item) {
+    if (item && !whole) {
         const int index = item->data(IndexRole).toInt();
         const App::ReferenceRow* row = rowOf(item);
         const std::string sub = item->data(SubRole).toString().toStdString();
@@ -1176,6 +1295,20 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
         connect(zoom, &QAction::triggered, this, [this, element = bareElement(sub)]() {
             zoomTo(element);
         });
+    }
+    if (isProfile()) {
+        if (!storedSubs().empty() && freecad_cast<Part::Part2DObject*>(linkedObject())) {
+            QAction* useWholeAction = menu->addAction(tr("Use whole sketch"));
+            useWholeAction->setToolTip(
+                tr("The profile is the whole sketch again, not its regions")
+            );
+            connect(useWholeAction, &QAction::triggered, this, [this]() { useWhole(); });
+        }
+        if (lacksRegions()) {
+            QAction* make = menu->addAction(tr("Make regions"));
+            make->setToolTip(tr("The sketch makes its regions, so that they can be picked"));
+            connect(make, &QAction::triggered, this, [this]() { makeRegions(); });
+        }
     }
     bool separated = false;
     for (const auto& action : menuActions) {
