@@ -2243,3 +2243,108 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(multi), [first.Name])
         self.assertEqual(linear.Direction[0].Name, xAxis.Name)
         self.assertVolume(multi, 1003)
+
+        # the sub-pattern's OK keeps its direction: the pick the field ended left no null entry
+        ok = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonOK")
+        self.assertTrue(ok.isVisible())
+        ok.click()
+        pump(0.3)
+        self.assertEqual(linear.Direction[0].Name, xAxis.Name)
+        self.assertVolume(multi, 1003)
+
+    # -- PR 154's review (round 1) ---------------------------------------------------------------
+
+    def selectReference(self, comboName):
+        """The panel's "Select reference..." entry chosen, as a user does."""
+        [combo] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()
+        ]
+        [index] = [i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")]
+        self.choose(combo, index)
+        self.assertEqual(combo.currentIndex(), index)
+        return combo, index
+
+    def referencePickThenOk(self, typeName, comboName, linkName, linked):
+        """The field armed during a "Select reference..." pick ends the pick: the combo shows the
+        link again, and OK keeps it (it wrote None before)."""
+        first, second = self.bumps()
+        pattern = self.pattern(typeName, [first])
+        [field] = self.edit(pattern)
+        combo, index = self.selectReference(comboName)
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() != index), "the combo stays on the pick")
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        link = getattr(pattern, linkName)
+        self.assertIsNotNone(link, linkName + " was cleared")
+        self.assertEqual(link[0].Name, models.originFeature(self.body, linked).Name)
+        self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)
+
+    def testLinearReferencePickThenOk(self):
+        self.referencePickThenOk("PartDesign::LinearPattern", "comboDirection", "Direction", "X_Axis")
+
+    def testMirroredReferencePickThenOk(self):
+        self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
+
+    def testPatternOriginalsLabelRenamed(self):
+        """A listed original renamed while the panel is open shows its new Label (and the other
+        one no longer needs its name)."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.assertEqual(texts(field), ["Bump ({})".format(first.Name), "Bump ({})".format(second.Name)])
+        second.Label = "Knob"
+        self.assertTrue(waitFor(lambda: texts(field) == ["Bump", "Knob"]), texts(field))
+
+    def testPatternOriginalsRefusals(self):
+        """A feature of another body and a feature after the pattern are refused; the Originals
+        stay."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        later = self.doc.addObject("PartDesign::AdditiveBox", "Later")
+        self.body.addObject(later)
+        other = self.doc.addObject("PartDesign::Body", "OtherBody")
+        foreign = self.doc.addObject("PartDesign::AdditiveBox", "Foreign")
+        other.addObject(foreign)
+        foreign.Placement = App.Placement(App.Vector(50, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(later.isValid() and foreign.isValid())
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+        for refused in (foreign, later):
+            self.pick(refused, "")
+            self.assertEqual(self.originalNames(pattern), [first.Name], refused.Name)
+            self.assertEqual(self.names(field), [first.Name], refused.Name)
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+
+    def testPatternOriginalDeletedWhileOpen(self):
+        """An original deleted while the panel is open leaves the list."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.assertEqual(self.names(field), [first.Name, second.Name])
+        name = second.Name
+        self.body.removeObject(second)
+        self.doc.removeObject(name)
+        self.assertTrue(waitFor(lambda: self.names(field) == [first.Name]), self.names(field))
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+
+    def testPatternCancelAfterModeSwitch(self):
+        """Switched to the whole body, then Cancel: the pattern transforms its originals again,
+        and they're all there."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        radio = Gui.getMainWindow().findChild(QtWidgets.QRadioButton, "radioTransformBody")
+        radio.click()
+        self.assertTrue(waitFor(lambda: not field.isEnabled()), "the field isn't greyed")
+        self.assertEqual(pattern.TransformMode, "Whole shape")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertEqual(pattern.TransformMode, "Features")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.doc.recompute()
+        self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)
