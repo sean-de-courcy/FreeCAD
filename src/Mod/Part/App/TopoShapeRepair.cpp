@@ -7,6 +7,7 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -17,6 +18,7 @@
 #include <gp_Pnt.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -33,10 +35,11 @@ namespace Part
 namespace
 {
 
-// findSubShapesWithSharedVertex()'s default tolerance, for the faces' centres
+// The largest relative difference of two faces' areas that are the same face, and of their
+// centres, relative to the face's size (the square root of its area)
+constexpr double relativeTolerance = 1e-9;
+// The least distance of the centres: findSubShapesWithSharedVertex()'s default tolerance
 constexpr double tolerance = 1e-7;
-// The largest relative difference of two faces' areas that are the same face
-constexpr double areaTolerance = 1e-9;
 
 // What tells a face apart when its vertices don't: its kind of surface, area and centre. The
 // surface itself can't be compared: the repair builds new ones, which Geometry::isSame() tells
@@ -62,8 +65,9 @@ struct FaceKey
     bool same(const FaceKey& other) const
     {
         return !surface.isBad() && surface == other.surface
-            && std::abs(area - other.area) <= areaTolerance * std::max(area, 1.0)
-            && centre.Distance(other.centre) <= tolerance;
+            && std::abs(area - other.area) <= relativeTolerance * std::max(area, 1.0)
+            && centre.Distance(other.centre)
+            <= std::max(tolerance, relativeTolerance * std::sqrt(area));
     }
 };
 
@@ -79,15 +83,113 @@ int theOneLike(const TopoShape& shape, const TopoShape& element, TopAbs_ShapeEnu
     return std::stoi(names.front().substr(TopoShape::shapeName(type).size()));
 }
 
+// The elements of a type of a shape and their boundaries (the edges of a face, the vertices of an
+// edge), by index
+struct Bounds
+{
+    // the boundary of each element (from 1)
+    std::vector<std::set<int>> of;
+    // the elements at each element of a boundary
+    std::map<int, std::vector<int>> at;
+
+    Bounds(const TopoShape& shape, TopAbs_ShapeEnum type, TopAbs_ShapeEnum boundary)
+        : of(shape.countSubShapes(type) + 1)
+    {
+        for (int index = 1; index < static_cast<int>(of.size()); ++index) {
+            for (TopExp_Explorer it(shape.getSubShape(type, index), boundary); it.More();
+                 it.Next()) {
+                of[index].insert(shape.findShape(it.Current()));
+            }
+            for (const int element : of[index]) {
+                at[element].push_back(index);
+            }
+        }
+    }
+};
+
+// theOneLike() for the element \a index of \a shape whose boundary all has a match in \a other
+// (\a matches, by index): the one element of \a other bounded by exactly the elements they match
+// that has the element's geometry and vertices too, or 0. theOneLike() compares the element with
+// every element at its first vertex, looking for that vertex among all of them, and splits a
+// face's wires for each face it compares: on a solid with many holes most faces touch one with
+// hundreds of edges, and the cost grows with the square of the holes (ops#190: 100 pockets, 408
+// faces, 15 s).
+int theOneBoundedAlike(
+    const TopoShape& other,
+    const Bounds& otherBounds,
+    const TopoShape& shape,
+    const Bounds& shapeBounds,
+    TopAbs_ShapeEnum type,
+    int index,
+    const std::map<int, int>& matches
+)
+{
+    std::set<int> bounding;
+    for (const int element : shapeBounds.of[index]) {
+        const auto match = matches.find(element);
+        if (match == matches.end()) {
+            return 0;
+        }
+        bounding.insert(match->second);
+    }
+    if (bounding.empty()) {
+        return 0;
+    }
+    const auto candidates = otherBounds.at.find(*bounding.begin());
+    if (candidates == otherBounds.at.end()) {
+        return 0;
+    }
+    const auto element = shape.getSubTopoShape(type, index);
+    int found = 0;
+    for (const int j : candidates->second) {
+        if (otherBounds.of[j] == bounding
+            && other.getSubTopoShape(type, j).findSubShapesWithSharedVertex(element).size() == 1) {
+            if (found) {
+                return 0;
+            }
+            found = j;
+        }
+    }
+    return found;
+}
+
 // The element of \a before that each element of \a after of \a type is, by index: one-to-one
 // matches only, checked from both sides (an element of \a before that two elements of \a after
 // match is neither's, and an element of \a after that matches one of \a before which matches
-// another of \a after too is not that one's).
-std::map<int, int> matchesOf(const TopoShape& before, const TopoShape& after, TopAbs_ShapeEnum type)
+// another of \a after too is not that one's). \a bounds are the matches of the type below
+// (vertices for edges, edges for faces): an element whose boundary all matched is compared only
+// with the elements that boundary bounds.
+std::map<int, int> matchesOf(
+    const TopoShape& before,
+    const TopoShape& after,
+    TopAbs_ShapeEnum type,
+    const std::map<int, int>& bounds
+)
 {
     const auto count = static_cast<int>(after.countSubShapes(type));
     std::map<int, int> found;
+    std::optional<Bounds> boundsBefore;
+    std::optional<Bounds> boundsAfter;
+    std::map<int, int> boundsBack;
+    if (type != TopAbs_VERTEX) {
+        const auto boundary = type == TopAbs_FACE ? TopAbs_EDGE : TopAbs_VERTEX;
+        boundsBefore.emplace(before, type, boundary);
+        boundsAfter.emplace(after, type, boundary);
+        for (const auto& [i, j] : bounds) {
+            boundsBack[j] = i;
+        }
+    }
     for (int i = 1; i <= count; ++i) {
+        if (boundsBefore) {
+            const Bounds& inBefore = *boundsBefore;
+            const Bounds& inAfter = *boundsAfter;
+            const int j = theOneBoundedAlike(before, inBefore, after, inAfter, type, i, bounds);
+            if (j > 0
+                && theOneBoundedAlike(after, inAfter, before, inBefore, type, j, boundsBack) == i) {
+                found[i] = j;
+                continue;
+            }
+        }
         const int j = theOneLike(before, after.getSubTopoShape(type, i), type);
         if (j > 0 && theOneLike(after, before.getSubTopoShape(type, j), type) == i) {
             found[i] = j;
@@ -96,12 +198,15 @@ std::map<int, int> matchesOf(const TopoShape& before, const TopoShape& after, To
     if (type == TopAbs_FACE) {
         // A face the repair split an edge of has another vertex: the same kind of surface, area
         // and centre, again one to one among the faces left over on both sides
+        std::set<int> matched;
+        for (const auto& [i, j] : found) {
+            matched.insert(j);
+        }
         std::map<int, FaceKey> leftBefore;
         for (int j = 1; j <= static_cast<int>(before.countSubShapes(type)); ++j) {
-            leftBefore.emplace(j, FaceKey(before.getSubTopoShape(type, j)));
-        }
-        for (const auto& [i, j] : found) {
-            leftBefore.erase(j);
+            if (!matched.count(j)) {
+                leftBefore.emplace(j, FaceKey(before.getSubTopoShape(type, j)));
+            }
         }
         std::map<int, FaceKey> leftAfter;
         for (int i = 1; i <= count; ++i) {
@@ -153,9 +258,11 @@ struct Renamed
 void renameAsBefore(TopoShape& shape, const TopoShape& before)
 {
     std::vector<Renamed> elements;
+    std::map<int, int> below;
     for (const auto type : {TopAbs_VERTEX, TopAbs_EDGE, TopAbs_FACE}) {
         const auto& typeName = TopoShape::shapeName(type);
-        const auto matches = matchesOf(before, shape, type);
+        const auto matches = matchesOf(before, shape, type, below);
+        below = matches;
         const auto count = static_cast<int>(shape.countSubShapes(type));
         for (int i = 1; i <= count; ++i) {
             Renamed renamed;
@@ -219,11 +326,8 @@ void warnKept(const char* why)
 
 }  // namespace
 
-bool fixKeepingNames(TopoShape& shape)
+bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
 {
-    // The shape as it was, names included: a deep copy, because fix() changes sub-shapes in place
-    TopoShape before(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
-    before.makeElementCopy(shape);
     if (!shape.fix()) {
         return false;
     }
@@ -248,6 +352,29 @@ bool fixKeepingNames(TopoShape& shape)
         warnKept("unknown exception");
     }
     return true;
+}
+
+bool fixKeepingNames(TopoShape& shape)
+{
+    // The shape as it was, names included: a deep copy, because fix() changes sub-shapes in
+    // place. A copy that fails costs the names, not the repair.
+    TopoShape before(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    try {
+        before.makeElementCopy(shape);
+    }
+    catch (const Standard_Failure& e) {
+        warnKept(e.GetMessageString());
+        return shape.fix();
+    }
+    catch (const Base::Exception& e) {
+        warnKept(e.what());
+        return shape.fix();
+    }
+    catch (const std::exception& e) {
+        warnKept(e.what());
+        return shape.fix();
+    }
+    return fixKeepingNames(shape, before);
 }
 
 }  // namespace Part
