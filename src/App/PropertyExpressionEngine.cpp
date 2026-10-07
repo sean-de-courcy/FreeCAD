@@ -100,12 +100,8 @@ void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property&
 void PropertyExpressionContainer::slotMoveDynamicProperty(const App::Property& prop,
                                                           const App::DocumentObject& targetObj)
 {
-    // FreeCAD-CH (ops#177): as in slotRenameDynamicProperty.
-    const auto containers = _ExprContainers;
-    for (auto container : containers) {
-        if (container->getContainer()) {
-            container->onMoveDynamicProperty(prop, targetObj);
-        }
+    for (auto container : _ExprContainers) {
+        container->onMoveDynamicProperty(prop, targetObj);
     }
 }
 

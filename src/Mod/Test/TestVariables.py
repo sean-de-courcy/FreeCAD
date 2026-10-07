@@ -361,3 +361,10 @@ class TestSaveAndRename(VariablesBase):
         self.assertEqual(sheet.getContents("B1"), "=VarSet.Width")
         self.assertAlmostEqual(box.Length.Value, 40)
         self.assertAlmostEqual(sheet.B1.Value, 20)
+
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertTrue(hasattr(varSet, "BoxWidth"))
+        self.assertEqual(expressionText(box, "Length"), "VarSet.BoxWidth * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.BoxWidth")
+        self.assertAlmostEqual(box.Length.Value, 40)
