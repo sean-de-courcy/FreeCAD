@@ -81,7 +81,7 @@ struct DistanceResult
     Base::Vector3d minFrom, minTo;
     bool hasMax = false;
     double max = 0.0;
-    bool maxExact = false;  // false: a lower bound within the sampling deflection
+    bool maxExact = false;  // false: a lower bound (sampled, then refined locally)
     Base::Vector3d maxFrom, maxTo;
     bool hasCenter = false;
     double center = 0.0;

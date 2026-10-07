@@ -46,6 +46,9 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
+#include <BRepGProp_Domain.hxx>
+#include <BRepGProp_Face.hxx>
+#include <BRepGProp_Vinert.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <gp_Pln.hxx>
@@ -1171,7 +1174,8 @@ namespace
 {
 using Clock = std::chrono::steady_clock;
 
-// Stops OCCT's algorithms at a deadline (through Message_ProgressScope::More)
+// Stops OCCT's algorithms at a deadline (through Message_ProgressScope::More); the loops below
+// check it per edge and face
 class Deadline: public Message_ProgressIndicator
 {
 public:
@@ -1198,33 +1202,116 @@ bool isDegenerated(const TopoDS_Shape& edge)
     return BRep_Tool::Degenerated(TopoDS::Edge(edge));
 }
 
-// The subshapes of the highest dimension, as one compound
-TopoDS_Shape highestDimension(const TopoDS_Shape& shape, TopAbs_ShapeEnum& type)
+// Whether Extrema finds a point's extrema on the curve or surface analytically (else it samples)
+bool isAnalytic(GeomAbs_CurveType type)
 {
-    for (TopAbs_ShapeEnum t : {TopAbs_SOLID, TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-        TopTools_IndexedMapOfShape map;
-        TopExp::MapShapes(shape, t, map);
-        if (map.IsEmpty()) {
-            continue;
-        }
-        type = t;
-        if (map.Extent() == 1) {
-            return map(1);
-        }
-        BRep_Builder builder;
-        TopoDS_Compound compound;
-        builder.MakeCompound(compound);
-        for (int i = 1; i <= map.Extent(); ++i) {
-            builder.Add(compound, map(i));
-        }
-        return compound;
+    switch (type) {
+        case GeomAbs_Line:
+        case GeomAbs_Circle:
+        case GeomAbs_Ellipse:
+        case GeomAbs_Hyperbola:
+        case GeomAbs_Parabola:
+            return true;
+        default:
+            return false;
     }
-    type = TopAbs_SHAPE;
-    return {};
 }
 
-// A circle's or a sphere's center, else the center of mass of the highest-dimension subshapes
-bool centerOf(const TopoDS_Shape& shape, gp_Pnt& center)
+bool isAnalytic(GeomAbs_SurfaceType type)
+{
+    switch (type) {
+        case GeomAbs_Plane:
+        case GeomAbs_Cylinder:
+        case GeomAbs_Cone:
+        case GeomAbs_Sphere:
+        case GeomAbs_Torus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The center of mass of the shape's subshapes of the highest dimension, one face or edge at a
+// time so the deadline is checked in between. A solid's volume integral is taken over its faces
+// against one common point, as BRepGProp::VolumeProperties does
+bool centerOfMass(const TopoDS_Shape& shape, const Deadline& deadline, gp_Pnt& center)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) {
+        return false;
+    }
+    double x0 {}, y0 {}, z0 {}, x1 {}, y1 {}, z1 {};
+    box.Get(x0, y0, z0, x1, y1, z1);
+    const gp_Pnt location((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+    GProp_GProps total(location);
+
+    TopTools_IndexedMapOfShape faces, edges;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    if (TopExp_Explorer(shape, TopAbs_SOLID).More()) {
+        BRepGProp_Vinert vinert;
+        vinert.SetLocation(location);
+        for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+            for (TopExp_Explorer ex(solids.Current(), TopAbs_FACE); ex.More(); ex.Next()) {
+                if (deadline.expired()) {
+                    return false;
+                }
+                const TopoDS_Face& face = TopoDS::Face(ex.Current());
+                BRepGProp_Face gface(face);
+                if (BRep_Tool::NaturalRestriction(face)) {
+                    vinert.Perform(gface);
+                }
+                else {
+                    BRepGProp_Domain domain(face);
+                    vinert.Perform(gface, domain);
+                }
+                total.Add(vinert);
+            }
+        }
+    }
+    else if (!faces.IsEmpty()) {
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (deadline.expired()) {
+                return false;
+            }
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(faces(i), props);
+            total.Add(props);
+        }
+    }
+    else if (!edges.IsEmpty()) {
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            if (deadline.expired()) {
+                return false;
+            }
+            GProp_GProps props;
+            BRepGProp::LinearProperties(edges(i), props);
+            total.Add(props);
+        }
+    }
+    else {
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+        if (vertices.IsEmpty()) {
+            return false;
+        }
+        gp_XYZ sum;
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            sum += BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))).XYZ();
+        }
+        center = gp_Pnt(sum / vertices.Extent());
+        return true;
+    }
+    if (std::abs(total.Mass()) <= Precision::Confusion()) {
+        return false;
+    }
+    center = total.CentreOfMass();
+    return true;
+}
+
+// A circle's or a sphere's center, else the center of mass
+bool centerOf(const TopoDS_Shape& shape, const Deadline& deadline, gp_Pnt& center)
 {
     if (shape.ShapeType() == TopAbs_EDGE && !isDegenerated(shape)) {
         BRepAdaptor_Curve curve(TopoDS::Edge(shape));
@@ -1240,38 +1327,7 @@ bool centerOf(const TopoDS_Shape& shape, gp_Pnt& center)
             return true;
         }
     }
-    TopAbs_ShapeEnum type {};
-    TopoDS_Shape part = highestDimension(shape, type);
-    if (part.IsNull()) {
-        return false;
-    }
-    GProp_GProps props;
-    switch (type) {
-        case TopAbs_SOLID:
-            BRepGProp::VolumeProperties(part, props);
-            break;
-        case TopAbs_FACE:
-            BRepGProp::SurfaceProperties(part, props);
-            break;
-        case TopAbs_EDGE:
-            BRepGProp::LinearProperties(part, props);
-            break;
-        default: {
-            TopTools_IndexedMapOfShape vertices;
-            TopExp::MapShapes(part, TopAbs_VERTEX, vertices);
-            gp_XYZ sum;
-            for (int i = 1; i <= vertices.Extent(); ++i) {
-                sum += BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))).XYZ();
-            }
-            center = gp_Pnt(sum / vertices.Extent());
-            return true;
-        }
-    }
-    if (props.Mass() <= Precision::Confusion()) {
-        return false;
-    }
-    center = props.CentreOfMass();
-    return true;
+    return centerOfMass(shape, deadline, center);
 }
 
 // Only planes and lines: the farthest pair is a pair of vertices
@@ -1293,12 +1349,20 @@ bool isPolyhedral(const TopoDS_Shape& shape)
 
 // Points among which the farthest pair of two shapes lies, up to the sampling: the vertices,
 // samples on curved edges, and a grid on faces whose interior can hold an extreme point of the
-// convex hull (not planes, cylinders, cones or extrusions, whose rulings end on the boundary)
-std::vector<gp_Pnt> maxCandidates(const TopoDS_Shape& shape, double deflection)
+// convex hull (not planes, cylinders, cones or extrusions, whose rulings end on the boundary).
+// Above the limit every k-th point is kept, and decimated says so. False if the deadline passed
+bool maxCandidates(
+    const TopoDS_Shape& shape,
+    double deflection,
+    const Deadline& deadline,
+    std::vector<gp_Pnt>& points,
+    bool& decimated
+)
 {
     constexpr std::size_t limit = 2000;
     constexpr int grid = 16;
-    std::vector<gp_Pnt> points;
+    points.clear();
+    decimated = false;
     TopTools_IndexedMapOfShape map;
     TopExp::MapShapes(shape, TopAbs_VERTEX, map);
     for (int i = 1; i <= map.Extent(); ++i) {
@@ -1307,6 +1371,9 @@ std::vector<gp_Pnt> maxCandidates(const TopoDS_Shape& shape, double deflection)
     map.Clear();
     TopExp::MapShapes(shape, TopAbs_EDGE, map);
     for (int i = 1; i <= map.Extent(); ++i) {
+        if (deadline.expired()) {
+            return false;
+        }
         if (isDegenerated(map(i))) {
             continue;
         }
@@ -1322,6 +1389,9 @@ std::vector<gp_Pnt> maxCandidates(const TopoDS_Shape& shape, double deflection)
     map.Clear();
     TopExp::MapShapes(shape, TopAbs_FACE, map);
     for (int i = 1; i <= map.Extent(); ++i) {
+        if (deadline.expired()) {
+            return false;
+        }
         const TopoDS_Face& face = TopoDS::Face(map(i));
         BRepAdaptor_Surface surface(face);
         switch (surface.GetType()) {
@@ -1347,6 +1417,7 @@ std::vector<gp_Pnt> maxCandidates(const TopoDS_Shape& shape, double deflection)
         }
     }
     if (points.size() > limit) {
+        decimated = true;
         std::vector<gp_Pnt> fewer;
         fewer.reserve(limit);
         const double step = static_cast<double>(points.size()) / limit;
@@ -1355,12 +1426,22 @@ std::vector<gp_Pnt> maxCandidates(const TopoDS_Shape& shape, double deflection)
         }
         points.swap(fewer);
     }
-    return points;
+    return true;
 }
 
 // The point of the shape farthest from p: at a vertex, or at a stationary point inside an edge
-// or a face (all extrema of the distance from p, maxima included)
-double farthestOn(const TopoDS_Shape& shape, const gp_Pnt& p, gp_Pnt& farthest)
+// or a face (all extrema of the distance from p, maxima included). exact turns false when an
+// extremum search threw or sampled (a curve or surface Extrema has no analytic solution for).
+// An analytic search that isn't done found no extremum inside the bounds, or infinitely many
+// (p on an axis), whose farthest points then lie on the boundary too: exact stays.
+// Returns -1 if the deadline passed
+double farthestOn(
+    const TopoDS_Shape& shape,
+    const gp_Pnt& p,
+    const Deadline& deadline,
+    gp_Pnt& farthest,
+    bool& exact
+)
 {
     double best = -1.0;
     auto consider = [&](const gp_Pnt& q) {
@@ -1379,36 +1460,47 @@ double farthestOn(const TopoDS_Shape& shape, const gp_Pnt& p, gp_Pnt& farthest)
     map.Clear();
     TopExp::MapShapes(shape, TopAbs_EDGE, map);
     for (int i = 1; i <= map.Extent(); ++i) {
+        if (deadline.expired()) {
+            return -1.0;
+        }
         if (isDegenerated(map(i))) {
             continue;
         }
+        const TopoDS_Edge& edge = TopoDS::Edge(map(i));
         try {
-            BRepExtrema_ExtPC ext(vertex, TopoDS::Edge(map(i)));
+            BRepExtrema_ExtPC ext(vertex, edge);
+            if (!isAnalytic(BRepAdaptor_Curve(edge).GetType())) {
+                exact = false;
+            }
             for (int n = 1; ext.IsDone() && n <= ext.NbExt(); ++n) {
                 consider(ext.Point(n));
             }
         }
         catch (const Standard_Failure&) {
+            exact = false;
         }
     }
     map.Clear();
     TopExp::MapShapes(shape, TopAbs_FACE, map);
     for (int i = 1; i <= map.Extent(); ++i) {
+        if (deadline.expired()) {
+            return -1.0;
+        }
+        const TopoDS_Face& face = TopoDS::Face(map(i));
         try {
-            BRepExtrema_ExtPF ext(vertex, TopoDS::Face(map(i)), Extrema_ExtFlag_MAX);
+            BRepExtrema_ExtPF ext(vertex, face, Extrema_ExtFlag_MAX);
+            if (!isAnalytic(BRepAdaptor_Surface(face).GetType())) {
+                exact = false;
+            }
             for (int n = 1; ext.IsDone() && n <= ext.NbExt(); ++n) {
                 consider(ext.Point(n));
             }
         }
         catch (const Standard_Failure&) {
+            exact = false;
         }
     }
     return best < 0.0 ? -1.0 : std::sqrt(best);
-}
-
-Base::Vector3d toVector(const gp_Pnt& p)
-{
-    return Base::Vector3d(p.X(), p.Y(), p.Z());
 }
 }  // namespace
 
@@ -1423,8 +1515,8 @@ void Measurement::setReferences3D(
 }
 
 // FreeCAD-CH (ops#153): min (BRepExtrema), max (candidate pairs, then a local refinement) and
-// center distances between the two references, within timeLimitMs (all OCCT work is checked
-// against the deadline, except a center of mass, which is checked before)
+// center distances between the two references, within timeLimitMs: BRepExtrema stops at the
+// deadline, and every other step checks it per edge or face
 DistanceResult Measurement::distances(int timeLimitMs) const
 {
     DistanceResult result;
@@ -1438,8 +1530,8 @@ DistanceResult Measurement::distances(int timeLimitMs) const
     if (a.IsNull() || b.IsNull()) {
         return result;
     }
-    Handle(Deadline) deadline =
-        new Deadline(Clock::now() + std::chrono::milliseconds(std::max(timeLimitMs, 0)));
+    const auto limit = std::chrono::milliseconds(std::max(timeLimitMs, 0));
+    Handle(Deadline) deadline = new Deadline(Clock::now() + limit);
     auto timedOut = [&]() {
         result.timedOut = deadline->expired();
         return result.timedOut;
@@ -1459,33 +1551,37 @@ DistanceResult Measurement::distances(int timeLimitMs) const
     result.hasMin = true;
     result.min = extrema.Value();
     result.inside = extrema.InnerSolution();
-    result.minFrom = toVector(extrema.PointOnShape1(1));
-    result.minTo = toVector(extrema.PointOnShape2(1));
+    result.minFrom = toVector3d(extrema.PointOnShape1(1));
+    result.minTo = toVector3d(extrema.PointOnShape2(1));
 
     // Center
-    if (timedOut()) {
-        return result;
-    }
     gp_Pnt centerA, centerB;
-    if (centerOf(a, centerA) && centerOf(b, centerB)) {
+    if (centerOf(a, *deadline, centerA) && centerOf(b, *deadline, centerB)) {
         result.hasCenter = true;
         result.center = centerA.Distance(centerB);
-        result.centerFrom = toVector(centerA);
-        result.centerTo = toVector(centerB);
+        result.centerFrom = toVector3d(centerA);
+        result.centerTo = toVector3d(centerB);
+    }
+    if (timedOut()) {
+        return result;
     }
 
     // Max: the farthest pair of candidates, then from it, twice, the farthest point on the other
-    // shape. Exact when both are polyhedral (the pair is two vertices) or one is a vertex (the
-    // farthest point from it is found exactly)
-    if (timedOut()) {
-        return result;
-    }
+    // shape. Exact when both are polyhedral and all their vertices are candidates (the pair is
+    // two vertices), or when one is a vertex and the farthest point on the other is found
+    // analytically
     Bnd_Box box;
     BRepBndLib::Add(a, box);
     BRepBndLib::Add(b, box);
-    const double deflection = std::max(std::sqrt(box.SquareExtent()) * 1e-3, Precision::Confusion());
-    const std::vector<gp_Pnt> pointsA = maxCandidates(a, deflection);
-    const std::vector<gp_Pnt> pointsB = maxCandidates(b, deflection);
+    const double deflection =
+        std::max(std::sqrt(box.SquareExtent()) * 1e-3, Precision::Confusion());
+    std::vector<gp_Pnt> pointsA, pointsB;
+    bool decimatedA = false, decimatedB = false;
+    if (!maxCandidates(a, deflection, *deadline, pointsA, decimatedA)
+        || !maxCandidates(b, deflection, *deadline, pointsB, decimatedB)) {
+        timedOut();
+        return result;
+    }
     double best = -1.0;
     gp_Pnt p, q;
     for (const gp_Pnt& pa : pointsA) {
@@ -1505,31 +1601,33 @@ DistanceResult Measurement::distances(int timeLimitMs) const
         return result;
     }
     best = std::sqrt(best);
+    bool exactA = true, exactB = true;
     for (int i = 0; i < 2; ++i) {
         gp_Pnt farther;
-        double d = farthestOn(b, p, farther);
+        double d = farthestOn(b, p, *deadline, farther, exactB);
+        if (timedOut()) {
+            return result;
+        }
         if (d > best) {
             best = d;
             q = farther;
         }
+        d = farthestOn(a, q, *deadline, farther, exactA);
         if (timedOut()) {
             return result;
         }
-        d = farthestOn(a, q, farther);
         if (d > best) {
             best = d;
             p = farther;
         }
-        if (timedOut()) {
-            return result;
-        }
     }
     result.hasMax = true;
     result.max = best;
-    result.maxFrom = toVector(p);
-    result.maxTo = toVector(q);
-    result.maxExact = a.ShapeType() == TopAbs_VERTEX || b.ShapeType() == TopAbs_VERTEX
-        || (isPolyhedral(a) && isPolyhedral(b));
+    result.maxFrom = toVector3d(p);
+    result.maxTo = toVector3d(q);
+    const bool polyhedral = !decimatedA && !decimatedB && isPolyhedral(a) && isPolyhedral(b);
+    result.maxExact = polyhedral || (a.ShapeType() == TopAbs_VERTEX && exactB)
+        || (b.ShapeType() == TopAbs_VERTEX && exactA);
     return result;
 }
 
@@ -1552,7 +1650,8 @@ SumResult Measurement::sums() const
             case TopAbs_EDGE:
                 ++result.edges;
                 if (!isDegenerated(shape)) {
-                    result.length += GCPnts_AbscissaPoint::Length(BRepAdaptor_Curve(TopoDS::Edge(shape)));
+                    BRepAdaptor_Curve curve(TopoDS::Edge(shape));
+                    result.length += GCPnts_AbscissaPoint::Length(curve);
                 }
                 break;
             case TopAbs_FACE: {

@@ -184,8 +184,8 @@ def quickMeasureModel(doc):
     """Designed shapes for Quick Measure (ops#153), each with known distances:
     - boxes A (10 mm cube at the origin) and B (10 mm cube at x = 20);
     - a sphere S, r = 5 at the origin, and a vertex P at (20, 0, 0);
-    - a cylinder Z, r = 5, h = 10 on the z axis at x = 100, and a vertex Q on its axis at
-      z = -10;
+    - a cylinder Z, r = 5, h = 10, axis along z through (100, 0, 0), and a vertex Q at
+      (101, 0, -10), off the axis;
     - two arcs r = 3, a quarter each, centered at (0, 50, 0) and (8, 56, 0) (centers 10 apart);
     - a 2 mm cube I at (4, 4, 4), inside A;
     - two B-spline spheres r = 5 at (0, -50, 0) and (20, -50, 0).
@@ -204,7 +204,7 @@ def quickMeasureModel(doc):
     feature("S", Part.makeSphere(5))
     feature("P", Part.Vertex(App.Vector(20, 0, 0)))
     feature("Z", Part.makeCylinder(5, 10, App.Vector(100, 0, 0)))
-    feature("Q", Part.Vertex(App.Vector(100, 0, -10)))
+    feature("Q", Part.Vertex(App.Vector(101, 0, -10)))
     for name, center in (("Arc1", App.Vector(0, 50, 0)), ("Arc2", App.Vector(8, 56, 0))):
         circle = Part.Circle(center, App.Vector(0, 0, 1), 3)
         feature(name, Part.ArcOfCircle(circle, 0, math.pi / 2).toShape())
@@ -260,10 +260,76 @@ class TestQuickMeasureDistances(unittest.TestCase):
 
     def testPointToCylinderFace(self):
         result = self.measure(("Q", "Vertex1"), ("Z", "Face1")).distances()
-        self.assertAlmostEqual(result["Min"], 125**0.5)  # the bottom rim
-        self.assertAlmostEqual(result["Max"], 425**0.5)  # the top rim
+        self.assertAlmostEqual(result["Min"], 116**0.5)  # (105, 0, 0) on the bottom rim
+        self.assertAlmostEqual(result["Max"], 436**0.5)  # (95, 0, 10) on the top rim
         self.assertTrue(result["MaxExact"])
-        self.assertAlmostEqual(result["Center"], 15)  # the face's center of mass, z = 5
+        self.assertAlmostEqual(result["Center"], 226**0.5)  # the face's center of mass, z = 5
+
+    def testLinkWithPlacement(self):
+        """Review round 1: a Link with its own placement measures in global coordinates."""
+        link = self.doc.addObject("App::Link", "L")
+        link.LinkedObject = self.doc.getObject("A")
+        link.Placement.Base = App.Vector(40, 0, 0)
+        self.doc.recompute()
+        result = self.measure(("L", "Face1"), ("B", "Face2")).distances()  # x = 40 and x = 30
+        self.assertAlmostEqual(result["Min"], 10)
+        self.assertAlmostEqual(result["Max"], 300**0.5)
+        self.assertAlmostEqual(result["Center"], 10)
+        result = self.measure(("L", ""), ("B", "")).distances()
+        self.assertAlmostEqual(result["Min"], 10)
+        self.assertAlmostEqual(result["Max"], 1100**0.5)
+        self.assertAlmostEqual(result["Center"], 20)
+
+    def testDecimatedMaxIsApproximate(self):
+        """Review round 1: above 2000 candidates every k-th is kept, so even a polyhedral pair's
+        Max is no longer exact."""
+        import math
+
+        import Part
+
+        points = [
+            App.Vector(5 * math.cos(t), 5 * math.sin(t), 0)
+            for t in (2 * math.pi * i / 2100 for i in range(2100))
+        ]
+        polygon = self.doc.addObject("Part::Feature", "Polygon")
+        polygon.Shape = Part.makePolygon(points + points[:1])
+        self.doc.recompute()
+        result = self.measure(("Polygon", ""), ("B", "")).distances()
+        self.assertFalse(result["MaxExact"])
+        # The circle's point opposite (30, 10, 10) in xy: ((sqrt(1000) + 5)^2 + 10^2)^0.5
+        self.assertLessEqual(result["Max"], ((1000**0.5 + 5) ** 2 + 100) ** 0.5 + 1e-6)
+        self.assertGreater(result["Max"], ((1000**0.5 + 5) ** 2 + 100) ** 0.5 - 0.01)
+
+    def testPointToBSplineMaxIsApproximate(self):
+        """Review round 1: Extrema samples a B-spline face, so Max isn't exact."""
+        result = self.measure(("P", "Vertex1"), ("N1", "Face1")).distances()
+        self.assertFalse(result["MaxExact"])
+        self.assertAlmostEqual(result["Max"], 2900**0.5 + 5, delta=0.05)
+
+    def testTimeLimitBoundsBSplineBodies(self):
+        """Review round 1: the time limit bounds every step, not only BRepExtrema. Two bodies of
+        fused spheres made B-spline take about 0.75 s unbounded (Windows); at each limit, the
+        measure returns within it plus one face's step, whichever step it stops in."""
+        import time
+
+        import Part
+
+        for name, x in (("F1", 0), ("F2", 30)):
+            body = Part.makeSphere(5, App.Vector(x, 100, 0))
+            for i in range(6):
+                center = App.Vector(x + 4 * (i % 3 - 1), 100 + 4 * (i // 3) - 2, 4)
+                body = body.fuse(Part.makeSphere(3, center))
+            obj = self.doc.addObject("Part::Feature", name)
+            obj.Shape = body.removeSplitter().toNurbs()
+        self.doc.recompute()
+        for limit in (50, 150, 300, 600):
+            with self.subTest(limit=limit):
+                measurement = self.measure(("F1", ""), ("F2", ""))
+                start = time.monotonic()
+                result = measurement.distances(limit)
+                elapsed = time.monotonic() - start
+                self.assertLess(elapsed, limit / 1000 + 0.1)
+                self.assertTrue("Max" not in result or not result["MaxExact"])
 
     def testArcCenters(self):
         result = self.measure(("Arc1", "Edge1"), ("Arc2", "Edge1")).distances()

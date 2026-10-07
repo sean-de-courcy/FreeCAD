@@ -113,6 +113,8 @@ void QuickMeasure::processSelection()
 void QuickMeasure::tryMeasureSelection()
 {
     Gui::Document* doc = Gui::Application::Instance->activeDocument();
+    // FreeCAD-CH (ops#153): nothing of the last selection stays if this one throws
+    showResult(QString(), {});
     measurement->clear();
     if (doc && Gui::Control().activeDialog(nullptr) == nullptr) {
         // we (still) have a doc and are not in a tool dialog where the user needs to click on stuff
@@ -289,10 +291,10 @@ void QuickMeasure::printResult()
             showMin = std::abs(result.min - measurement->lineLineDistance())
                 > Precision::Confusion();
         }
-        if (!result.hasMin) {
+        if (!result.hasMin && result.timedOut) {
             parts << tr("Min: %1").arg(QString(QChar(0x2013)));
         }
-        else if (showMin) {
+        else if (result.hasMin && showMin) {
             parts << tr("Min: %1").arg(lengthStr(result.min));
         }
         if (result.hasMax) {
