@@ -814,7 +814,7 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
         return false;
     }
     message = tr(
-        "The profile keeps its last face: pick another face of the solid first, or "
+        "The profile keeps its last element: pick another element of the solid first, or "
         "another profile."
     );
     updateLook();

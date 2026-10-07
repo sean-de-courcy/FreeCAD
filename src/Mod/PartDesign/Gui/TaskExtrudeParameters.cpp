@@ -134,8 +134,11 @@ TaskExtrudeParameters::TaskExtrudeParameters(
 TaskExtrudeParameters::~TaskExtrudeParameters()
 {
     // A dialog closed other than by OK or Cancel (resetEdit(), Control.closeDialog()) leaves the
-    // profile field armed: what it showed goes back as on a disarm
-    if (shownProfile.getObject() || emphasizedProfile.getObject() || hiddenSelf) {
+    // profile field armed: what it showed goes back as on a disarm (a solid's faces show only
+    // the profile preview)
+    auto vp = getViewObject<ViewProviderSketchBased>();
+    if (shownProfile.getObject() || emphasizedProfile.getObject() || hiddenSelf
+        || (vp && vp->isProfileEmphasis())) {
         try {
             showProfileTarget(false);
         }
