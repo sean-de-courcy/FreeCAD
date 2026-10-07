@@ -1327,3 +1327,158 @@ class TestReferenceFieldGui(unittest.TestCase):
         [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
         self.pick(pad, other)
         self.assertTrue(waitFor(lambda: states(field) == ["broken", "exact"]), states(field))
+
+    # -- PR 142 review round ------------------------------------------------------------------------
+
+    def testPickAfterAnInsertKeepsTheCandidates(self):
+        """Finding 1: the Boss fillet (its entry broken, with candidates), a pocket inserted
+        before it while it had no shape, without the solver: Body.insertObject can't relink Base
+        (ops#82), so BaseFeature is the pocket and Base still names the pad; the dialog can't
+        move Base onto the pocket either (the broken entry resolves to nothing there). Another
+        edge picked: the broken entry keeps its mapped name and its candidates (Use)."""
+        pad, fillet = self.boss()
+        body = pad.getParent()
+        notch = models.sketch(self.doc, "Notch", models.rectangle(5, 3, 7, 5), body, z=10)
+        pocket = self.doc.addObject("PartDesign::Pocket", "Pocket")
+        self.doc.ReferenceSolver = False
+        body.insertObject(pocket, pad, True)
+        self.doc.ReferenceSolver = True
+        pocket.Profile = notch
+        pocket.Length = 2
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertEqual(fillet.BaseFeature, pocket)
+        self.assertEqual(fillet.Base[0], pad)
+        [field] = self.edit(fillet)
+        self.assertEqual(fillet.Base[0], pad)
+        self.assertEqual(states(field), ["broken"])
+        menu = openMenu(field, 0)
+        self.assertIn("Use", menuActions(menu))
+        menu.close()
+        pump()
+
+        self.arm(field, byFocus=False)
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pocket.Shape)
+        self.pick(pocket, other)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 2), texts(field))
+        self.assertEqual(states(field), ["broken", "exact"])
+        menu = openMenu(field, 0)
+        self.assertIn("Use", menuActions(menu), "the broken entry lost its candidates")
+        menu.close()
+        pump()
+
+    def testHiddenFieldLeavesItsRowsToThePanel(self):
+        """Finding 2: the second pad's up-to-face is a guess, in its field; the pad switched to
+        a length hides the field, and the References panel lists UpToFace again."""
+        pad, second = self.redrawnSecondPad()
+        [field] = self.edit(second)
+        self.assertEqual(field.objectName(), "fieldUpToFace")
+        self.assertEqual(self.listedRows(), ["ReferenceAxis[0]"])
+        self.padModeBox().setCurrentIndex(0)
+        pump(0.2)
+        self.assertFalse(field.isVisible())
+        self.assertTrue(
+            waitFor(lambda: "UpToFace[0]" in (self.listedRows() or [])), self.listedRows()
+        )
+        self.padModeBox().setCurrentIndex(3)
+        pump(0.2)
+        self.assertTrue(
+            waitFor(lambda: self.listedRows() == ["ReferenceAxis[0]"]), self.listedRows()
+        )
+
+    def testExpandedFromKeptAcrossAPick(self):
+        """`from` survives a write that changes the count: a fillet on the block's front top
+        edge, a rib moved across it (the reference expands into two pieces); in the dialog the
+        back top edge is added. The rib moved back, the pieces merge into the one edge again,
+        which needs their `from`: two entries, the front edge and the back one."""
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 20, 10), body)
+        models.pad(body, profile, 10)
+        ribSketch = models.sketch(self.doc, "RibSketch", models.rectangle(8, 3, 12, 7), body)
+        rib = models.pad(body, ribSketch, 12, name="Rib")
+        self.doc.recompute()
+        front = edge("line", direction=X, through=(0, 0, 10))
+        back = edge("line", direction=X, through=(0, 10, 10))
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (rib, front.one(rib.Shape))
+        fillet.Radius = 1
+        self.doc.recompute()
+        models.moveRectangle(ribSketch, 8, -3, 12, 3)
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Base[1]), 2)
+
+        [field] = self.edit(fillet)
+        self.assertEqual(len(entries(field).findItems("*", QtCore.Qt.MatchWildcard)), 2)
+        self.arm(field, byFocus=False)
+        [backEdge] = back.one(rib.Shape)
+        self.pick(rib, backEdge)
+        self.assertTrue(waitFor(lambda: len(fillet.Base[1]) == 3), fillet.Base)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        pump()
+
+        models.moveRectangle(ribSketch, 8, 3, 12, 7)
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(
+            sorted(fillet.Base[1]), sorted(front.one(rib.Shape) + back.one(rib.Shape))
+        )
+
+    def testSingleEntryCtrlZ(self):
+        """Ctrl+Z / Ctrl+Y in a single-entry field: the up-to-face steps back to the lower plane
+        and forward to the higher one."""
+        box, pad = self.padOnBox()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=True)
+        self.pick(self.high, "")
+        self.assertLink(pad.UpToFace, self.high, [])
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: pad.UpToFace[0] == self.low), pad.UpToFace)
+        self.assertEqual(texts(field), [self.low.Label])
+        key(QtCore.Qt.Key_Y, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: pad.UpToFace[0] == self.high), pad.UpToFace)
+        self.assertVolume(pad, 1028)
+
+    def testTypeSwitchWhileArmedRemovesTheGate(self):
+        """The face field armed, the pad switched to a length: the field disarms, its gate goes
+        (a pick of the plane selects it), UpToFace stays."""
+        box, pad = self.padOnBox()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.padModeBox().setCurrentIndex(0)
+        pump(0.2)
+        self.assertFalse(armed(field))
+        self.pick(self.high, "")
+        self.assertEqual(selected(self.doc), [(self.high.Name, [])])
+        self.assertLink(pad.UpToFace, self.low, [])
+
+    def choose(self, combo, index):
+        """An entry of a combo box chosen through its popup, as a user does."""
+        combo.showPopup()
+        pump(0.2)
+        view = combo.view()
+        rect = view.visualRect(view.model().index(index, 0))
+        QtTest.QTest.mouseClick(
+            view.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center()
+        )
+        pump(0.2)
+
+    def testDirectionFieldDisarmsThroughThePopup(self):
+        """The direction box's "Select reference" chosen in its popup arms the hidden field;
+        the sketch normal chosen there again disarms it without a pick."""
+        box, pad = self.padOnBox(toFace=False)
+        self.edit(pad, count=0)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "directionCB")
+        self.choose(combo, 1)
+        field = findField("fieldReferenceAxis")
+        self.assertTrue(waitFor(lambda: armed(field)), "the direction field isn't armed")
+        self.choose(combo, 0)
+        self.assertTrue(waitFor(lambda: not armed(field)), "the direction field stays armed")
+        self.assertEqual(combo.currentIndex(), 0)
+        [vertical] = VERTICAL.one(box.Shape)
+        self.pick(box, vertical)
+        self.assertNotEqual(pad.ReferenceAxis[1] if pad.ReferenceAxis else [], [vertical])
+        self.assertVolume(pad, 1012)
