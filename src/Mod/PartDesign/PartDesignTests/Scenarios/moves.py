@@ -3,8 +3,10 @@
 """Moved elements (ops#105): a sketch edit moves a referenced element while its geometry ID, and
 so its name, stays. A reference whose element moved while another element took its place is
 ambiguous (its name says one, the geometry the other), and the reference solver breaks it,
-naming both. An element that moved alone keeps its reference. Without the solver the name
-decides: the reference follows the moved element (listed in ops105-moved-exact.txt)."""
+naming both. An element that moved alone keeps its reference, and so does one whose old place
+only its own twin holds, another copy of the same sketch geometry (ops#168: a lift by a feature's
+own height). Without the solver the name decides: the reference follows the moved element
+(listed in ops105-moved-exact.txt)."""
 
 import os
 import shutil
@@ -14,6 +16,7 @@ import FreeCAD as App
 
 from .harness import (
     Broken,
+    Chamfered,
     ExternalCoincides,
     Filleted,
     Scenario,
@@ -395,8 +398,9 @@ class PocketRimRaisedByItsDepth(Scenario):
     """A block (0..20 x 0..20, 10 high) with a pocket (5..15 x 5..15, 3 deep) from its top, a
     fillet (0.5) on the pocket's left rim edge (x = 5, z = 10). The block is raised by the
     pocket's depth (10 -> 13): the rim edge moves up to z = 13 and the floor's left edge now lies
-    where it was (z = 10). By the rule, that is another element at the old place: the solver
-    breaks the reference, naming both (ops#105; the random sequences don't draw this edit)."""
+    where it was (z = 10). The floor's edge is the rim's own twin, a copy of the same sketch
+    line, so the rim edge moved with its pocket and keeps its fillet (ops#168; ops#105 broke
+    it)."""
 
     area = "moves"
     MULTI = True
@@ -407,9 +411,7 @@ class PocketRimRaisedByItsDepth(Scenario):
         return edge("line", direction=Y, through=(5, 0, z), contains=(5, 10, z))
 
     def rimEdge(self):
-        if self.edited:
-            return Broken(self.leftEdgeAt(10), self.leftEdgeAt(13))
-        return self.leftEdgeAt(10)
+        return self.leftEdgeAt(13 if self.edited else 10)
 
     def build(self, doc):
         body = m.body(doc)
@@ -429,4 +431,44 @@ class PocketRimRaisedByItsDepth(Scenario):
 
     def edit(self, doc):
         doc.Pad.Length = 13
+        self.edited = True
+
+
+class BossRaisedByItsHeight(Scenario):
+    """A block (0..20 x 0..20, 10 high) with a boss (5..10 x 5..10, 2.5 high) padded from a
+    sketch on its top face, a chamfer (0.5) on the boss's top right edge (x = 10, z = 12.5). The
+    block is raised by the boss's height (10 -> 12.5): the top edge moves up to z = 15 and the
+    boss's bottom right edge, the sketch line itself, now lies where it was. It is the top edge's
+    own twin (ops#168, random seed 267): the chamfer stays on the top edge, with no break and no
+    guess. BossesTradePlaces is the mirror that still breaks."""
+
+    area = "moves"
+    MULTI = True
+    REFS = ("boss_edge",)
+    edited = False
+
+    def rightEdgeAt(self, z):
+        return edge("line", direction=Y, through=(10, 0, z), contains=(10, 7.5, z))
+
+    def bossEdge(self):
+        return self.rightEdgeAt(15 if self.edited else 12.5)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 20), body)
+        pad = m.pad(body, profile, 10)
+        doc.recompute()
+        square = m.sketch(doc, "BossSketch", m.rectangle(5, 5, 10, 10), body)
+        top = face("plane", normal=Z, through=(0, 0, 10))
+        square.AttachmentSupport = [(pad, self.names(pad, top)[0])]
+        square.MapMode = "FlatFace"
+        boss = m.pad(body, square, 2.5, "Boss")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (boss, self.names(boss, self.bossEdge()))
+        chamfer.Size = 0.5
+        self.ref("boss_edge", chamfer, "Base", self.bossEdge, Chamfered(0.5))
+
+    def edit(self, doc):
+        doc.Pad.Length = 12.5
         self.edited = True
