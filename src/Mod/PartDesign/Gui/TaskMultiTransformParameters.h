@@ -62,6 +62,8 @@ public:
     ~TaskMultiTransformParameters() override;
 
     void apply() override;
+    /// Also the sub-task's pending pick, while its sub-feature exists (ops#186).
+    void cancelReferencePick() override;
 
     /// Return the currently active subFeature
     PartDesign::Transformed* getSubFeature()
@@ -91,9 +93,6 @@ private:
 
     /** Notifies when the object is about to be removed. */
     void slotDeletedObject(const Gui::ViewProviderDocumentObject& Obj) override;
-
-    /// The open sub-task's reference pick ends too: it would take the Originals field's picks.
-    void endPickModes() override;
 
     void updateUI();
     void closeSubTask();

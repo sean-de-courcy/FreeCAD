@@ -115,9 +115,11 @@ void TaskMirroredParameters::updateUI()
     if (blockUpdate) {
         return;
     }
-    blockUpdate = true;
-
     auto pcMirrored = getObject<PartDesign::Mirrored>();
+    if (!pcMirrored) {
+        return;
+    }
+    blockUpdate = true;
 
     if (planeLinks.setCurrentLink(pcMirrored->MirrorPlane) == -1) {
         // failed to set current, because the link isn't in the list yet
@@ -159,7 +161,11 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
 void TaskMirroredParameters::cancelReferencePick()
 {
     exitSelectionMode();
+    // updateUI() returns while blockUpdate is set, which "Update view" off sets too (ops#186)
+    const bool blocked = blockUpdate;
+    blockUpdate = false;
     updateUI();
+    blockUpdate = blocked;
 }
 
 void TaskMirroredParameters::onPlaneChanged(int /*num*/)

@@ -484,7 +484,8 @@ TaskDlgTransformedParameters::TaskDlgTransformedParameters(ViewProviderTransform
 
 bool TaskDlgTransformedParameters::accept()
 {
-    parameter->exitSelectionMode();
+    // A pending "Select reference..." would leave its combo on the empty entry (ops#186)
+    parameter->cancelReferencePick();
     parameter->apply();
 
     return TaskDlgFeatureParameters::accept();
