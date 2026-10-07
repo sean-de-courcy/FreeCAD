@@ -29,7 +29,6 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Mod/PartDesign/App/FeaturePipe.h>
-#include <Mod/Part/Gui/ReferenceHighlighter.h>
 
 #include "ViewProviderPipe.h"
 #include "TaskPipeParameters.h"
@@ -81,74 +80,6 @@ void ViewProviderPipe::setupContextMenu(QMenu* menu, QObject* receiver, const ch
 TaskDlgFeatureParameters* ViewProviderPipe::getEditDialog()
 {
     return new TaskDlgPipeParameters(this, false);
-}
-
-void ViewProviderPipe::highlightReferences(ViewProviderPipe::Reference mode, bool on)
-{
-    PartDesign::Pipe* pcPipe = getObject<PartDesign::Pipe>();
-
-    switch (mode) {
-        case Spine:
-            highlightReferences(
-                dynamic_cast<Part::Feature*>(pcPipe->Spine.getValue()),
-                pcPipe->Spine.getSubValuesStartsWith("Edge"),
-                on
-            );
-            break;
-        case AuxiliarySpine:
-            highlightReferences(
-                dynamic_cast<Part::Feature*>(pcPipe->AuxiliarySpine.getValue()),
-                pcPipe->AuxiliarySpine.getSubValuesStartsWith("Edge"),
-                on
-            );
-            break;
-        case Profile:
-            highlightReferences(
-                dynamic_cast<Part::Feature*>(pcPipe->Profile.getValue()),
-                pcPipe->Profile.getSubValuesStartsWith("Edge"),
-                on
-            );
-            break;
-        default:
-            break;
-    }
-}
-
-void ViewProviderPipe::highlightReferences(
-    Part::Feature* base,
-    const std::vector<std::string>& edges,
-    bool on
-)
-{
-    if (!base) {
-        return;
-    }
-
-    PartGui::ViewProviderPart* svp = dynamic_cast<PartGui::ViewProviderPart*>(
-        Gui::Application::Instance->getViewProvider(base)
-    );
-    if (!svp) {
-        return;
-    }
-
-    std::vector<Base::Color>& edgeColors = originalLineColors[base->getID()];
-
-    if (on) {
-        if (edgeColors.empty()) {
-            edgeColors = svp->LineColorArray.getValues();
-            std::vector<Base::Color> colors = edgeColors;
-
-            PartGui::ReferenceHighlighter highlighter(base->Shape.getValue(), svp->LineColor.getValue());
-            highlighter.getEdgeColors(edges, colors);
-            svp->LineColorArray.setValues(colors);
-        }
-    }
-    else {
-        if (!edgeColors.empty()) {
-            svp->LineColorArray.setValues(edgeColors);
-            edgeColors.clear();
-        }
-    }
 }
 
 QIcon ViewProviderPipe::getIcon() const

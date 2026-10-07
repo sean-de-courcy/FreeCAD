@@ -39,7 +39,6 @@ class Property;
 
 namespace Gui
 {
-class ButtonGroup;
 class ViewProvider;
 }  // namespace Gui
 
@@ -49,42 +48,6 @@ namespace PartDesignGui
 class Ui_TaskPipeParameters;
 class Ui_TaskPipeOrientation;
 class Ui_TaskPipeScaling;
-
-/// Convenience class to maintain states between the various task boxes for pipe
-class StateHandlerTaskPipe
-{
-public:
-    enum SelectionModes
-    {
-        none = 0,
-        refProfile,
-        refSpine,
-        refSpineEdgeAdd,
-        refSpineEdgeRemove,
-        refAuxSpine,
-        refAuxSpineEdgeAdd,
-        refAuxSpineEdgeRemove
-    };
-
-public:
-    StateHandlerTaskPipe()
-    {
-        selectionMode = SelectionModes::none;
-    }
-    ~StateHandlerTaskPipe() = default;
-
-    // only keeping getter because task boxes shouldn't need to change this
-    // and task dialog is already friend
-    enum SelectionModes getSelectionMode()
-    {
-        return selectionMode;
-    }
-
-private:
-    enum SelectionModes selectionMode;
-    friend class TaskDlgPipeParameters;
-};
-
 
 class TaskPipeParameters: public TaskSketchBasedParameters
 {
@@ -100,31 +63,27 @@ public:
 
     bool accept();
     void onReferenceSelectionTaken() override;
+    /// The profile and the path (ops#150 W8).
+    std::vector<ReferenceField*> referenceFields() const override;
 
 private Q_SLOTS:
     void onTangentChanged(bool checked);
     void onTransitionChanged(int);
-    void onProfileButton(bool checked);
-    void onDeleteEdge();
-
-protected:
-    void removeFromListWidget(QListWidget* w, QString name);
-    bool referenceSelected(const Gui::SelectionChanges& msg) const;
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
-    void updateUI();
-    void clearButtons();
-    void exitSelectionMode();
+    void createFields();
     void setVisibilityOfSpineAndProfile();
 
-    /// The spine, the profile and the auxiliary spine shown for the edit (ops#162 B13).
+    /// The spine, the profile and the auxiliary spine shown for the edit, also those picked
+    /// during it (ops#162 B13).
     EditVisibility shown;
 
 private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskPipeParameters> ui;
-    StateHandlerTaskPipe* stateHandler;
+    ReferenceField* profileField = nullptr;
+    ReferenceField* spineField = nullptr;
     friend class TaskDlgPipeParameters;
 };
 
@@ -141,6 +100,8 @@ public:
     ~TaskPipeOrientation() override;
 
     void onReferenceSelectionTaken() override;
+    /// The auxiliary path, shown in Mode Auxiliary (ops#150 W8).
+    std::vector<ReferenceField*> referenceFields() const override;
 
 private Q_SLOTS:
     void onOrientationChanged(int);
@@ -148,21 +109,19 @@ private Q_SLOTS:
     void onClearButton();
     void onCurvilinearChanged(bool checked);
     void onBinormalChanged(double);
-    void onDeleteItem();
-
-protected:
-    void removeFromListWidget(QListWidget* w, QString name);
-    bool referenceSelected(const Gui::SelectionChanges& msg) const;
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
-    void clearButtons();
-    void exitSelectionMode();
+    void createAuxiliarySpineField();
+
+    /// The auxiliary paths picked during the edit, shown; put back as they were when the dialog
+    /// closes (the one the pipe had is TaskPipeParameters')
+    EditVisibility shown;
 
 private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskPipeOrientation> ui;
-    StateHandlerTaskPipe* stateHandler;
+    ReferenceField* auxiliarySpineField = nullptr;
     friend class TaskDlgPipeParameters;
 };
 
@@ -191,7 +150,6 @@ private:
 private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskPipeScaling> ui;
-    StateHandlerTaskPipe* stateHandler;
     ReferenceField* sectionsField = nullptr;
     /// The sections shown for the edit, also those picked during it (ops#162 B13).
     EditVisibility shown;
@@ -213,16 +171,10 @@ public:
     /// is called by the framework if the dialog is rejected (Cancel)
     bool reject() override;
 
-protected Q_SLOTS:
-    void onButtonToggled(QAbstractButton* button, bool checked);
-
 protected:
     TaskPipeParameters* parameter;
     TaskPipeOrientation* orientation;
     TaskPipeScaling* scaling;
-
-    Gui::ButtonGroup* buttonGroup;
-    StateHandlerTaskPipe* stateHandler;
 };
 
 }  // namespace PartDesignGui

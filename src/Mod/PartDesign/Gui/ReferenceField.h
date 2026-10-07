@@ -154,6 +154,9 @@ public:
         /// refuses (a pipe takes a point only as the last section).
         std::function<bool(const std::vector<App::PropertyLinkSubList::SubSet>&, std::string& why)>
             checkSections;
+        /// Profile: a path of edges (a pipe's spine), not a profile: no regions to make, and the
+        /// menu and messages speak of edges.
+        bool path = false;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
