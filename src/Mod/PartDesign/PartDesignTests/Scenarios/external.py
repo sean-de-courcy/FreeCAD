@@ -347,8 +347,10 @@ class ExternalHoleRemovedNearAnother(ExternalHoleRemoved):
 class ExternalHoleCircleRedrawn(Scenario):
     """The control for ExternalHoleRemoved: hole A alone (radius 2 at (8, 10)); its circle is
     deleted from its sketch and drawn again at (8.5, 10), a new geometry ID. The new bottom
-    circle is made by the same hole, so the solver's tier 1 keeps it (overlap 0.62, its only
-    structural candidate) and the reference follows it. Without the solver it breaks."""
+    circle is made by the same hole, but from another sketch circle, as another hole's of the
+    same sketch would be (FilletHoleCircleDeletedBesideAnother), so tier 1 no longer takes it
+    (ops#173): G2 does, from the same sketch and hole within its reach, with a warning
+    (decision 20). Without the solver it breaks."""
 
     area = "external geometry"
     REFS = ("hole_bottom",)

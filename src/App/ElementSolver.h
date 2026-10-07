@@ -557,6 +557,14 @@ struct AppExport SolveInput
     /// pick. Without it, another feature's element that embeds the same face (another hole's
     /// edge on the face both cut) survives tier 1. Off for comparison runs only.
     bool sameMaker = true;
+    /// Tier 1 keeps only candidates that kept the old element's sources (ops#173): a candidate
+    /// that isn't in the old name's ancestry, a piece of it or from its IDX source, and lost one
+    /// of the old name's source geometries (for a tag and type of its innermost sources, no
+    /// source sharing one of their reference IDs) is no structural candidate. A top face keeps
+    /// its profile while one line of it remains; another hole cut from the same sketch keeps
+    /// the maker but has another circle, and so does a circle redrawn with a new geometry ID;
+    /// only geometry tells them apart (tier 3, G2). Off for comparison runs only.
+    bool sameSource = true;
     /// The target is in error (a failed feature passing its input through, ops#126): nothing is
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;

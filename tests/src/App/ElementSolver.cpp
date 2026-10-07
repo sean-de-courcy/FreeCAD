@@ -2378,10 +2378,12 @@ TEST(SolveOwner, indexSourceAcrossOpCodes)
         = fingerprint('F', "Plane", 40, Base::Vector3d(10, 30, 10), Base::Vector3d(0, 0, 1));
     measure(input, {{"Face6", m.wholeFp}, {"Face12", otherTop}}, nullptr);
 
-    //   without a fingerprint the IDX source doesn't count: Face12 alone, without evidence
+    //   without a fingerprint the IDX source doesn't count: Face12 alone, which lost the old
+    //   face's source (T1', ops#173)
     auto outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
-    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+    EXPECT_EQ(outcomes[0].evidence, "no candidate; tier 1's 1 survivor lost the old element's source");
+    EXPECT_EQ(outcomes[0].candidateRoles, std::vector<std::string> {"other source"});
 
     //   tier 2 agrees with the whole face: it replaces the other survivor, at tier 1, although
     //   its size and centre changed (tier 3 would reject it)
@@ -2556,11 +2558,12 @@ TEST(SolveOwner, expandOnePieceIsAnExpansion)
 TEST(SolveOwner, expandedPiecesAreOneNode)
 {
     // Another reference whose only candidate is one of the pieces: the piece set and that piece
-    // can't both be used, so neither is forced.
+    // can't both be used, so neither is forced. (Its old face has the pieces' source, line 1, or
+    // T1' wouldn't keep the piece for it, ops#173.)
     SplitFace names;
     auto input = names.input({});
     input.entries[0].policy = Data::SolvePolicy::Expand;
-    const auto otherOld = generated({sketchEdge(3)}, 7, "Extrude", 'F', 2);
+    const auto otherOld = generated({sketchEdge(1)}, 7, "Extrude", 'F', 2);
     input.entries.push_back(missing(otherOld, "Face", {names.first}));
 
     auto outcomes = Data::solveOwner(input);
@@ -5128,8 +5131,9 @@ TEST(SolveOwner, anotherMakersElementIsNoStructuralCandidate)
     EXPECT_EQ(outcomes[0].candidates.front(), "Edge3");
     EXPECT_NEAR(outcomes[0].candidateDistances.front(), 8.46, 1e-9);
 
-    //   without T1: today's result, tier 2 among the two survivors
+    //   without T1 (and T1', ops#173): ops#167's before, tier 2 among the two survivors
     input.sameMaker = false;
+    input.sameSource = false;
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
     EXPECT_EQ(outcomes[0].element, "Edge3");
@@ -5143,6 +5147,7 @@ TEST(SolveOwner, anotherMakersElementIsNoStructuralCandidate)
     EXPECT_EQ(outcomes[0].element, "Edge3");
     EXPECT_EQ(outcomes[0].tier, 1);
     input.sameMaker = true;
+    input.sameSource = true;
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
     EXPECT_NE(outcomes[0].evidence.find("tier 1's 1 survivor has another maker"), std::string::npos)
@@ -5169,10 +5174,60 @@ TEST(SolveOwner, anotherMakersElementIsNoStructuralCandidate)
     EXPECT_EQ(outcomes[0].guessKind, "geometric");
 }
 
-TEST(SolveOwner, sameMakersElementStaysAStructuralCandidate)
+TEST(SolveOwner, redrawnCircleIsFoundByGeometry)
 {
     // ops#167's control: the hole's circle redrawn in its own sketch (a new geometry ID, the
-    // same sketch and hole) keeps the maker, so tier 1 takes it as before, 0.5 mm over.
+    // same sketch and hole) keeps the maker, so T1 keeps it. It lost the old circle's source
+    // (g1), so T1' (ops#173) drops it: geometry decides, as for another hole's circle.
+    auto circle = [](double x) {
+        const Base::Vector3d axis(0, 0, 1);
+        const double length = 4 * std::numbers::pi;
+        return fingerprint('E', "Circle", length, Base::Vector3d(x, 10, 0), axis, {2.0});
+    };
+    SolveInput input;
+    input.diagonal = 40.0;  // strict reach 0.4, wide 2
+    input.pool["Edge"] = {element("Edge3", {holeBottomCircle(40, 41, 2)})};
+    measure(input, {{"Edge3", circle(8.5)}}, nullptr);
+    input.entries = {missing(holeBottomCircle(40, 41), "Edge")};
+    input.entries[0].fingerprint = circle(8);
+
+    //   0.5 mm over, beyond the strict reach: broken with it as the candidate...
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_NE(outcomes[0].evidence.find("tier 1's 1 survivor lost the old element's source"),
+              std::string::npos)
+        << outcomes[0].evidence;
+    ASSERT_FALSE(outcomes[0].candidates.empty());
+    EXPECT_EQ(outcomes[0].candidates.front(), "Edge3");
+    EXPECT_NEAR(outcomes[0].candidateDistances.front(), 0.5, 1e-9);
+    //   ... and, with the guess rules, G2's warned pick (the same sketch and hole, policy D)
+    input.guess = true;
+    input.guessNoStructure = true;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_EQ(outcomes[0].guessKind, "geometric");
+    //   redrawn at its place: tier 3 takes it
+    measure(input, {{"Edge3", circle(8.2)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_EQ(outcomes[0].tier, 3);
+    //   without T1': tier 1 takes it, as after ops#167
+    measure(input, {{"Edge3", circle(8.5)}}, nullptr);
+    input.sameSource = false;
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
+    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_EQ(outcomes[0].tier, 1);
+}
+
+TEST(SolveOwner, anotherCircleOfTheSameSketchIsNoStructuralCandidate)
+{
+    // ops#173: one pocket (41) cut two holes from circles g1 and g2 of its sketch (40); g1 is
+    // deleted. Hole 2's bottom circle, 14 mm away, has the maker and shares the block's face, so
+    // it was tier 1's only survivor and resolved silently. It lost the old circle's source:
+    // broken, with it ranked.
     auto circle = [](double x) {
         const Base::Vector3d axis(0, 0, 1);
         const double length = 4 * std::numbers::pi;
@@ -5180,15 +5235,64 @@ TEST(SolveOwner, sameMakersElementStaysAStructuralCandidate)
     };
     SolveInput input;
     input.diagonal = 40.0;
-    input.pool["Edge"] = {element("Edge3", {holeBottomCircle(40, 41, 2)})};
-    measure(input, {{"Edge3", circle(8.5)}}, nullptr);
-    input.entries = {missing(holeBottomCircle(40, 41), "Edge")};
+    input.guess = true;
+    input.guessNoStructure = true;
+    input.pool["Edge"] = {element("Edge12", {holeBottomCircle(40, 41, 2)})};
+    measure(input, {{"Edge12", circle(22)}}, nullptr);
+    input.entries = {missing(holeBottomCircle(40, 41, 1), "Edge")};
     input.entries[0].fingerprint = circle(8);
 
     auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence.rfind("no structural candidate, tier 3 found none", 0), 0U)
+        << outcomes[0].evidence;
+    EXPECT_NE(outcomes[0].evidence.find("tier 1's 1 survivor lost the old element's source"),
+              std::string::npos)
+        << outcomes[0].evidence;
+    ASSERT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Edge12"}));
+    EXPECT_NEAR(outcomes[0].candidateDistances.front(), 14.0, 1e-9);
+    //   without a saved fingerprint: no candidate, never resolved
+    input.entries[0].fingerprint = ElementFingerprint();
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].evidence, "no candidate; tier 1's 1 survivor lost the old element's source");
+    //   without T1': the silent tier-1 resolution onto the other hole
+    input.entries[0].fingerprint = circle(8);
+    input.sameSource = false;
+    outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
-    EXPECT_EQ(outcomes[0].element, "Edge3");
+    EXPECT_EQ(outcomes[0].element, "Edge12");
     EXPECT_EQ(outcomes[0].tier, 1);
+    //   within G2's reach (1.5 mm), the same sketch and maker: policy D's warned guess
+    input.sameSource = true;
+    measure(input, {{"Edge12", circle(9.5)}}, nullptr);
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Guessed);
+    EXPECT_EQ(outcomes[0].guessKind, "geometric");
+}
+
+TEST(SolveOwner, keptSourcesStayStructural)
+{
+    // T1' keeps what still has the old element's sources: the old circle itself after an edit of
+    // the block (a later section on the same name is in its ancestry), and a piece of it.
+    const auto old = holeBottomCircle(40, 41, 1);
+    auto circle = [](double x) {
+        const Base::Vector3d axis(0, 0, 1);
+        return fingerprint('E', "Circle", 4 * std::numbers::pi, Base::Vector3d(x, 10, 0), axis, {2.0});
+    };
+    SolveInput input;
+    input.diagonal = 40.0;
+    input.pool["Edge"] = {
+        element("Edge5", {piece(old, 90, "FUS", 1, 'E', {sketchEdge(9)})}),
+        element("Edge12", {holeBottomCircle(40, 41, 2)}),
+    };
+    measure(input, {{"Edge5", circle(8)}, {"Edge12", circle(22)}}, nullptr);
+    input.entries = {missing(old, "Edge")};
+    input.entries[0].fingerprint = circle(8);
+    auto outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);  // a split under One
+    EXPECT_EQ(outcomes[0].evidence.rfind("split into 1 pieces", 0), 0U) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates.front(), "Edge5");
 }
 
 TEST(SolveOwner, guessThePieceAtTheSavedCentre)

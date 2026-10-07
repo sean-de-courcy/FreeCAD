@@ -249,6 +249,70 @@ bool piecesOfOne(std::string_view a, std::string_view b)
     return NameAncestry::isPieceOf(a, whole) && NameAncestry::isPieceOf(b, whole);
 }
 
+// An innermost source section (walkLineage()): its tag, element type and reference IDs.
+struct SourceSection
+{
+    std::string tag;
+    char type;
+    std::vector<std::string> ids;
+};
+
+// The innermost source sections of \a name; false if one has no tag or no reference ID (the
+// sources are unknown).
+bool sourceSectionsOf(std::string_view name, std::vector<SourceSection>& sources)
+{
+    return !walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
+        if (!source) {
+            return false;
+        }
+        std::vector<std::string> ids;
+        for (const auto& id : section.referenceIDs) {
+            if (!id.empty() && id != Data::EMPTY_VALUE) {
+                ids.push_back(id);
+            }
+        }
+        if (!hasTag(section) || ids.empty()) {
+            return true;
+        }
+        sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
+        return false;
+    });
+}
+
+// True if the element named \a names lost one of \a old's sources (ops#173): for some source
+// geometry of the old name (a tag and type, e.g. a sketch's edges), no name of the element has a
+// source of that tag and type sharing a reference ID with the old name's. A hole's circle comes
+// from the cut face's sketch and its own circle (`g0`) of the hole's sketch; another hole of that
+// sketch comes from `g1` there, so it lost the hole's sketch. A top face whose profile line was
+// redrawn keeps the other lines, and a sketch vertex keeps its source while one of its lines does
+// (`g1v2,g2v1` and `g1v2,g7v1`). False when either side's sources are unknown.
+bool lostASource(const std::vector<std::string>& names, const std::vector<SourceSection>& old)
+{
+    if (old.empty()) {
+        return false;
+    }
+    auto sharesAnId = [](const SourceSection& a, const SourceSection& b) {
+        return a.tag == b.tag && a.type == b.type
+            && std::any_of(a.ids.begin(), a.ids.end(), [&](const auto& id) {
+                   return std::find(b.ids.begin(), b.ids.end(), id) != b.ids.end();
+               });
+    };
+    return std::none_of(names.begin(), names.end(), [&](const auto& name) {
+        std::vector<SourceSection> sources;
+        if (!sourceSectionsOf(name, sources)) {
+            return true;
+        }
+        // every source geometry (tag and type) of the old name keeps one of its IDs
+        return std::all_of(old.begin(), old.end(), [&](const SourceSection& o) {
+            return std::any_of(sources.begin(), sources.end(), [&](const SourceSection& s) {
+                return std::any_of(old.begin(), old.end(), [&](const SourceSection& t) {
+                    return t.tag == o.tag && t.type == o.type && sharesAnId(s, t);
+                });
+            });
+        });
+    });
+}
+
 }  // namespace
 
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
@@ -2556,9 +2620,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromOverlap;
         std::set<int> fromNames;
         std::set<int> inAncestry;
-        // Tier 1's candidates that T1 dropped, made by another maker (ops#167): for the evidence,
-        // and listed last on a break (ops#174).
+        // Tier 1's candidates that T1 dropped, made by another maker (ops#167), and that T1'
+        // dropped, which lost one of the old element's sources (ops#173): for the evidence, and
+        // listed last on a break (ops#174).
         std::vector<int> otherMaker;
+        std::vector<int> otherSource;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
         std::set<int> fromIndex;
@@ -2688,14 +2754,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
     };
     // Why structure didn't decide, when T1 dropped tier 1's candidates (ops#167).
     auto otherMakerText = [](const GroupState& state) {
-        const auto n = state.otherMaker.size();
-        if (n == 0) {
-            return std::string();
+        std::string text;
+        if (const auto n = state.otherMaker.size()) {
+            text = n == 1 ? std::string("; tier 1's 1 survivor has another maker")
+                          : "; tier 1's " + std::to_string(n) + " survivors have another maker";
         }
-        return n == 1 ? std::string("; tier 1's 1 survivor has another maker")
-                      : "; tier 1's " + std::to_string(n) + " survivors have another maker";
+        if (const auto n = state.otherSource.size()) {
+            text += n == 1
+                ? std::string("; tier 1's 1 survivor lost the old element's source")
+                : "; tier 1's " + std::to_string(n) + " survivors lost the old element's source";
+        }
+        return text;
     };
-    // The survivors T1 dropped, last on a break (ops#174), in the room left of eight
+    // The survivors T1 and T1' dropped, last on a break (ops#174), in the room left of eight
     // candidates: never taken automatically, offered to the user's pick. \a listed: those the
     // break listed already.
     auto listDropped = [&listByDistance](GroupState& state, const std::vector<int>& listed) {
@@ -2713,6 +2784,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             return n < 8 ? 8 - n : std::size_t(0);
         };
         listByDistance(state, unlisted(state.otherMaker), "other maker", room());
+        listByDistance(state, unlisted(state.otherSource), "other source", room());
     };
 
     MatchGraph graph;
@@ -2835,6 +2907,30 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         state.otherMaker.push_back(*it);
                         it = all.erase(it);
                     }
+                }
+            }
+        }
+        // T1' (ops#173): a candidate must keep the old element's sources. Another hole cut by
+        // the same pocket from another circle of its sketch shares the maker and the cut face,
+        // as fully as a redraw of the hole's own circle does; it is no structural evidence that
+        // the old element is still there. Without it, geometry decides (tier 3, G2 under policy
+        // D: same source tag and maker, within reach, with a warning) or the entry breaks with
+        // the candidates ranked. The old name's ancestry, its pieces and the IDX source stay.
+        std::vector<SourceSection> oldSources;
+        if (input.sameSource && !oldName.empty() && sourceSectionsOf(oldName, oldSources)) {
+            for (auto it = all.begin(); it != all.end();) {
+                const auto& names = pool.elements[*it].names;
+                const bool kept = state.inAncestry.count(*it) || state.fromIndex.count(*it)
+                    || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                           return NameAncestry::isPieceOf(n, oldName)
+                               || NameAncestry::isIndexPieceOf(n, oldName);
+                       });
+                if (!kept && lostASource(names, oldSources)) {
+                    state.otherSource.push_back(*it);
+                    it = all.erase(it);
+                }
+                else {
+                    ++it;
                 }
             }
         }
