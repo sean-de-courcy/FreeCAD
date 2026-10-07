@@ -403,6 +403,8 @@ private:
     bool busy = false;
     bool reloadPending = false;
     bool coveragePending = false;
+    /// A drop's order is written once, after the drop (H1: it moves several rows one by one).
+    bool dragPending = false;
     Gui::SelectionGate* gate = nullptr;
     /// The slot a Re-pick replaces, or -1.
     int repickIndex = -1;

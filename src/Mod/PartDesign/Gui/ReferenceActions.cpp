@@ -238,7 +238,8 @@ void EditVisibility::restore()
     // An object gone with the edit (Cancel undid its creation) is skipped
     for (const auto& [objT, visible] : shown) {
         App::DocumentObject* obj = objT.getObject();
-        if (Gui::ViewProvider* vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr) {
+        Gui::ViewProvider* vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr;
+        if (vp) {
             vp->setVisible(visible);
         }
     }

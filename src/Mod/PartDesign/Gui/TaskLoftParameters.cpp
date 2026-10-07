@@ -36,6 +36,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
+#include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureLoft.h>
 
@@ -65,6 +66,22 @@ QString loftTaskTitle(ViewProviderLoft* view)
 {
     return isSubtractiveLoft(view) ? TaskLoftParameters::tr("Subtractive Loft Parameters")
                                    : TaskLoftParameters::tr("Additive Loft Parameters");
+}
+
+// A whole object picked as a section or a profile (a tree pick): a sketch or a shape of wires or
+// points. A solid or a datum gives no section whole: one of its faces does (ops#150)
+bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
+{
+    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
+        return true;
+    }
+    if (obj->isDerivedFrom<Part::Datum>()
+        || Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
+               .hasSubShape(TopAbs_SOLID)) {
+        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
+        return false;
+    }
+    return true;
 }
 
 // A sketch is taken whole, unless one of its points is picked: the loft takes the whole sketch for
@@ -105,7 +122,7 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
         child->blockSignals(true);
     }
 
-    // The profile and the sections show for the edit; OK and Cancel put them back (B13)
+    // The profile and the sections show for the edit; OK and Cancel put them back (ops#162 B13)
     PartDesign::Loft* loft = LoftView->getObject<PartDesign::Loft>();
     shown.show(loft->Profile.getValue());
     for (App::DocumentObject* obj : loft->Sections.getValues()) {
@@ -130,12 +147,12 @@ TaskLoftParameters::~TaskLoftParameters() = default;
 void TaskLoftParameters::createFields()
 {
     App::DocumentObjectT loftT(getObject());
-    auto isShape = [](App::DocumentObject* obj, std::string& why) {
+    auto isShape = [](App::DocumentObject* obj, const char* sub, std::string& why) {
         if (!obj || !obj->isDerivedFrom<Part::Feature>()) {
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
             return false;
         }
-        return true;
+        return wholeObjectFits(obj, sub, why);
     };
 
     // The profile: one sketch, sketch point or face (Q8 (a): its own field, above the sections)
@@ -146,12 +163,14 @@ void TaskLoftParameters::createFields()
     profile.removable = false;
     profile.label = tr("Profile");
     profile.kinds = tr("A sketch, a sketch point or a face");
-    profile.accept = [loftT, isShape](App::DocumentObject* obj, const char*, std::string& why) {
-        if (!isShape(obj, why)) {
+    profile.accept = [loftT, isShape](App::DocumentObject* obj, const char* sub, std::string& why) {
+        if (!isShape(obj, sub, why)) {
             return false;
         }
         auto loft = freecad_cast<PartDesign::Loft*>(loftT.getObject());
-        if (loft && std::ranges::find(loft->Sections.getValues(), obj) != loft->Sections.getValues().end()) {
+        if (loft
+            && std::ranges::find(loft->Sections.getValues(), obj)
+                != loft->Sections.getValues().end()) {
             why = QT_TR_NOOP("This is a section of the loft: the profile can't be one too.");
             return false;
         }
@@ -167,7 +186,8 @@ void TaskLoftParameters::createFields()
         return obj != nullptr;
     };
     auto profileSelf = std::make_shared<QPointer<ReferenceField>>();
-    auto writeProfile = [this, profileSelf](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+    auto writeProfile = [this, profileSelf](App::DocumentObject* obj,
+                                            const std::vector<std::string>& subs) {
         if (*profileSelf) {
             (*profileSelf)->assign(obj, subs);
         }
@@ -178,14 +198,16 @@ void TaskLoftParameters::createFields()
     *profileSelf = profileField;
     profileField->takePlaceOf(ui->profileFieldPlaceholder);
 
-    // The sections, in the loft's order (B8, B11, B12, B21)
+    // The sections, in the loft's order (ops#162 B8, B11, B12, B21)
     ReferenceField::Options sections;
     sections.kind = ReferenceField::Kind::Sections;
     sections.noDependents = true;
     sections.label = tr("Sections");
     sections.kinds = tr("Sketches, sketch points or faces");
-    sections.accept = [loftT, isShape](App::DocumentObject* obj, const char*, std::string& why) {
-        if (!isShape(obj, why)) {
+    sections.accept = [loftT, isShape](App::DocumentObject* obj,
+                                       const char* sub,
+                                       std::string& why) {
+        if (!isShape(obj, sub, why)) {
             return false;
         }
         auto loft = freecad_cast<PartDesign::Loft*>(loftT.getObject());
@@ -196,7 +218,8 @@ void TaskLoftParameters::createFields()
         return true;
     };
     auto sectionsSelf = std::make_shared<QPointer<ReferenceField>>();
-    auto writeSections = [this, sectionsSelf](const std::vector<App::PropertyLinkSubList::SubSet>& list) {
+    using SubSets = std::vector<App::PropertyLinkSubList::SubSet>;
+    auto writeSections = [this, sectionsSelf](const SubSets& list) {
         if (*sectionsSelf) {
             (*sectionsSelf)->assign(list);
         }
@@ -299,6 +322,14 @@ bool TaskDlgLoftParameters::accept()
     }
 
     return false;
+}
+
+bool TaskDlgLoftParameters::reject()
+{
+    // What the edit showed goes back first: the abort that follows shows a new loft's profile
+    // again, and a restore after it (the panel's destructor) would hide it (ops#150)
+    parameter->restoreVisibility();
+    return TaskDlgSketchBasedParameters::reject();
 }
 
 //==== calls from the TaskView ===============================================================

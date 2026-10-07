@@ -109,12 +109,6 @@ void ViewProviderPipe::highlightReferences(ViewProviderPipe::Reference mode, boo
                 on
             );
             break;
-        case Section: {
-            std::vector<App::DocumentObject*> sections = pcPipe->Sections.getValues();
-            for (auto it : sections) {
-                highlightReferences(dynamic_cast<Part::Feature*>(it), std::vector<std::string>(), on);
-            }
-        } break;
         default:
             break;
     }

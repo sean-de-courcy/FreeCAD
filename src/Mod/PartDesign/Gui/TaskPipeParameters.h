@@ -118,7 +118,7 @@ private:
     void exitSelectionMode();
     void setVisibilityOfSpineAndProfile();
 
-    /// The spine, the profile and the auxiliary spine shown for the edit (B13).
+    /// The spine, the profile and the auxiliary spine shown for the edit (ops#162 B13).
     EditVisibility shown;
 
 private:
@@ -193,7 +193,7 @@ private:
     std::unique_ptr<Ui_TaskPipeScaling> ui;
     StateHandlerTaskPipe* stateHandler;
     ReferenceField* sectionsField = nullptr;
-    /// The sections shown for the edit, also those picked during it (B13).
+    /// The sections shown for the edit, also those picked during it (ops#162 B13).
     EditVisibility shown;
     friend class TaskDlgPipeParameters;
 };
@@ -211,6 +211,7 @@ public:
     /// is called by the framework if the dialog is accepted (Ok)
     bool accept() override;
     /// is called by the framework if the dialog is rejected (Cancel)
+    bool reject() override;
 
 protected Q_SLOTS:
     void onButtonToggled(QAbstractButton* button, bool checked);

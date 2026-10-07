@@ -38,6 +38,7 @@
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/Origin.h>
+#include <Base/Tools.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
@@ -45,6 +46,8 @@
 #include <Gui/Tools.h>
 #include <Gui/ViewProvider.h>
 #include <Gui/Widgets.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeaturePipe.h>
 
@@ -95,6 +98,22 @@ QString pipeScalingTitle(ViewProviderPipe* view)
 {
     return isSubtractivePipe(view) ? TaskPipeScaling::tr("Subtractive Pipe Section Transformation")
                                    : TaskPipeScaling::tr("Additive Pipe Section Transformation");
+}
+
+// A whole object picked as a section or a profile (a tree pick): a sketch or a shape of wires or
+// points. A solid or a datum gives no section whole: one of its faces does (ops#150)
+bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
+{
+    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
+        return true;
+    }
+    if (obj->isDerivedFrom<Part::Datum>()
+        || Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
+               .hasSubShape(TopAbs_SOLID)) {
+        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
+        return false;
+    }
+    return true;
 }
 }  // namespace
 
@@ -152,7 +171,7 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
     PartDesign::Pipe* pipe = PipeView->getObject<PartDesign::Pipe>();
 
     // make sure the user sees all important things and load the values; what is shown goes
-    // back as it was when the dialog closes, on OK and Cancel (B13)
+    // back as it was when the dialog closes, on OK and Cancel (ops#162 B13)
     // first the spine
     if (pipe->Spine.getValue()) {
         shown.show(pipe->Spine.getValue());
@@ -464,7 +483,7 @@ void TaskPipeParameters::exitSelectionMode()
 
 void TaskPipeParameters::setVisibilityOfSpineAndProfile()
 {
-    // As when the pipe was opened; the sections are the Scaling panel's (B13: they took the
+    // As when the pipe was opened; the sections are the Scaling panel's (ops#162 B13: they took the
     // profile's state)
     shown.restore();
 }
@@ -943,7 +962,7 @@ TaskPipeScaling::TaskPipeScaling(ViewProviderPipe* PipeView, bool /*newObj*/, QW
 
     this->groupLayout()->addWidget(proxy);
 
-    // The sections show for the edit, each put back as it was when the dialog closes (B13)
+    // The sections show for the edit, each put back as it was when the dialog closes (ops#162 B13)
     PartDesign::Pipe* pipe = PipeView->getObject<PartDesign::Pipe>();
     for (App::DocumentObject* obj : pipe->Sections.getValues()) {
         shown.show(obj);
@@ -955,7 +974,7 @@ TaskPipeScaling::TaskPipeScaling(ViewProviderPipe* PipeView, bool /*newObj*/, QW
         ui->comboBoxScaling->setCurrentIndex(pipe->Transformation.getValue());
     }
     // The blocked box doesn't turn the page (its .ui connection): a multisection pipe opened on
-    // the Constant page, its sections out of sight
+    // the Constant page, its sections out of sight (ops#150)
     ui->stackedWidget->setCurrentIndex(pipe->Transformation.getValue());
     createSectionsField();
 
@@ -978,9 +997,12 @@ void TaskPipeScaling::createSectionsField()
     options.noDependents = true;
     options.label = tr("Sections");
     options.kinds = tr("Sketches, sketch points or faces");
-    options.accept = [pipeT](App::DocumentObject* obj, const char*, std::string& why) {
+    options.accept = [pipeT](App::DocumentObject* obj, const char* sub, std::string& why) {
         if (!obj || !obj->isDerivedFrom<Part::Feature>()) {
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
+            return false;
+        }
+        if (!wholeObjectFits(obj, sub, why)) {
             return false;
         }
         auto pipe = freecad_cast<PartDesign::Pipe*>(pipeT.getObject());
@@ -1030,9 +1052,9 @@ void TaskPipeScaling::createSectionsField()
 
 bool TaskPipeScaling::isPointSection(const App::PropertyLinkSubList::SubSet& section)
 {
-    // A point of a sketch, or a shape of points only
+    // A point of a sketch, or a shape of points only; a sub may be mapped or missing
     for (const auto& sub : section.second) {
-        if (boost::starts_with(sub, "Vertex")) {
+        if (ReferenceActions::subElementType(sub) == "Vertex") {
             return true;
         }
     }
@@ -1046,7 +1068,8 @@ bool TaskPipeScaling::isPointSection(const App::PropertyLinkSubList::SubSet& sec
             section.first,
             Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
         );
-        return !shape.isNull() && !shape.hasSubShape(TopAbs_EDGE) && shape.hasSubShape(TopAbs_VERTEX);
+        return !shape.isNull() && !shape.hasSubShape(TopAbs_EDGE)
+            && shape.hasSubShape(TopAbs_VERTEX);
     }
     catch (const Base::Exception&) {
         return false;
@@ -1199,6 +1222,15 @@ void TaskDlgPipeParameters::onButtonToggled(QAbstractButton* button, bool checke
 bool TaskDlgPipeParameters::accept()
 {
     return parameter->accept();
+}
+
+bool TaskDlgPipeParameters::reject()
+{
+    // What the edit showed goes back first: the abort that follows shows a new pipe's profile
+    // again, and a restore after it (the panels' destructors) would hide it (ops#150)
+    parameter->shown.restore();
+    scaling->shown.restore();
+    return TaskDlgSketchBasedParameters::reject();
 }
 
 

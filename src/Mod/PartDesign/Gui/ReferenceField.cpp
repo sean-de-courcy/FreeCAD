@@ -294,7 +294,10 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     if (isSections()) {
         entryList->setDragDropMode(QAbstractItemView::InternalMove);
         entryList->setDefaultDropAction(Qt::MoveAction);
-        connect(entryList->model(), &QAbstractItemModel::rowsMoved, this, &ReferenceField::sectionsDragged);
+        connect(entryList->model(),
+                &QAbstractItemModel::rowsMoved,
+                this,
+                &ReferenceField::sectionsDragged);
     }
     entryList->installEventFilter(this);
     entryList->viewport()->installEventFilter(this);
@@ -575,11 +578,11 @@ void ReferenceField::reload()
         }
     }
     // An entry's state, look and tooltip: broken (red), guessed (yellow) or exact
-    auto decorate = [this](QListWidgetItem* item,
-                           QString text,
-                           const std::string& element,
-                           bool broken,
-                           const App::ReferenceRow* row) {
+    auto decorate = [](QListWidgetItem* item,
+                       QString text,
+                       const std::string& element,
+                       bool broken,
+                       const App::ReferenceRow* row) {
         QStringList tip;
         if (broken) {
             item->setData(StateRole, QStringLiteral("broken"));
@@ -793,7 +796,8 @@ void ReferenceField::slotChangedObject(const App::DocumentObject& obj, const App
     else if ((isObjects() || isSections()) && &prop == &obj.Label) {
         // A listed object renamed: its row shows the new Label (PR 154 review)
         std::vector<App::DocumentObject*> objs = linkedObjects();
-        if (auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr) {
+        auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr;
+        if (list) {
             objs = list->getValues();
         }
         if (std::ranges::find(objs, &obj) != objs.end()) {
@@ -1024,7 +1028,8 @@ void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
     std::string sub = msg.pSubName ? msg.pSubName : "";
     // A sketch is a section whole, unless one of its points is picked: the feature takes the
     // whole sketch for any other element of it (Loft::getSectionShape)
-    if (obj->isDerivedFrom<Part::Part2DObject>() && !boost::starts_with(bareElement(sub), "Vertex")) {
+    if (obj->isDerivedFrom<Part::Part2DObject>()
+        && !boost::starts_with(bareElement(sub), "Vertex")) {
         sub.clear();
     }
     auto list = freecad_cast<App::PropertyLinkSubList*>(property());
@@ -1033,7 +1038,8 @@ void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
     }
     if (repickIndex >= 0) {
         const std::vector<App::DocumentObject*> objs = list->getValues();
-        if (repickIndex < static_cast<int>(objs.size()) && objs[repickIndex] == obj && !sub.empty()) {
+        if (repickIndex < static_cast<int>(objs.size()) && objs[repickIndex] == obj
+            && !sub.empty()) {
             pick(obj, sub);  // the References panel's re-pick of the element
             return;
         }
@@ -1130,15 +1136,18 @@ void ReferenceField::writeSections(const std::vector<App::PropertyLinkSubList::S
 
 void ReferenceField::sectionsDragged()
 {
-    if (busy) {
+    if (busy || dragPending) {
         return;
     }
-    // The entries' new order; written after the drop, which still works on the items
-    std::vector<int> order;
-    for (int i = 0; i < entryList->count(); ++i) {
-        order.push_back(entryList->item(i)->data(SectionRole).toInt());
-    }
-    QTimer::singleShot(0, this, [this, order]() {
+    // A drop of several entries moves them one row at a time, each move signalled: one write,
+    // after the drop, in the order the items have then
+    dragPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        dragPending = false;
+        std::vector<int> order;
+        for (int i = 0; i < entryList->count(); ++i) {
+            order.push_back(entryList->item(i)->data(SectionRole).toInt());
+        }
         const std::vector<App::PropertyLinkSubList::SubSet> sections = storedSections();
         std::vector<App::PropertyLinkSubList::SubSet> moved;
         for (int index : order) {
@@ -1321,7 +1330,10 @@ void ReferenceField::write(App::DocumentObject* obj,
 
 void ReferenceField::write(const Snapshot& value, bool undoable)
 {
-    if (!property() || (isObjects() ? !objectsWriter : (isSections() ? !sectionsWriter : !writer))) {
+    const bool hasWriter = isObjects()
+        ? bool(objectsWriter)
+        : (isSections() ? bool(sectionsWriter) : bool(writer));
+    if (!property() || !hasWriter) {
         return;
     }
     if (undoable) {
@@ -1630,6 +1642,11 @@ void ReferenceField::highlight(bool on, const std::string& extra)
             vp->unsetHighlightedFaces();
             vp->unsetHighlightedEdges();
             vp->unsetHighlightedPoints();
+            // unsetHighlightedEdges draws every edge in the line colour: per-edge colours back
+            // (PR 163 review 11)
+            if (vp->LineColorArray.getSize() > 1) {
+                vp->LineColorArray.touch();
+            }
         }
     }
     highlightedTargets.clear();
@@ -1793,7 +1810,6 @@ void ReferenceField::zoomTo(const std::string& element, App::DocumentObject* obj
     App::DocumentObject* support = (isSingle() || isProfile()) ? linkedObject() : target();
     if (obj) {
         // A section: its object, whole or its element
-        support = obj;
         Part::TopoShape shape = Part::Feature::getTopoShape(
             obj,
             Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
@@ -1970,7 +1986,8 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
         QAction* zoom = menu->addAction(tr("Zoom to"));
         zoom->setEnabled(!Data::hasMissingElement(sub.c_str()));
         App::DocumentObjectT section;
-        if (auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr) {
+        auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr;
+        if (list) {
             if (index >= 0 && index < static_cast<int>(list->getValues().size())) {
                 section = list->getValues()[index];
             }

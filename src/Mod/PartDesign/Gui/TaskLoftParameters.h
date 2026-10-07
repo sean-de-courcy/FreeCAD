@@ -80,7 +80,8 @@ private:
 
     ReferenceField* profileField = nullptr;
     ReferenceField* sectionsField = nullptr;
-    /// What the edit shows: the profile and the sections, also those picked during it (B13).
+    /// What the edit shows: the profile and the sections, also those picked during it
+    /// (ops#162 B13).
     EditVisibility shown;
 };
 
@@ -95,6 +96,8 @@ public:
 
     /// is called by the framework if the dialog is accepted (Ok)
     bool accept() override;
+    /// is called by the framework if the dialog is rejected (Cancel)
+    bool reject() override;
 
 protected:
     TaskLoftParameters* parameter;
