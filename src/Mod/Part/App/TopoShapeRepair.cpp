@@ -3,6 +3,7 @@
 #include "TopoShapeRepair.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <exception>
 #include <map>
@@ -328,6 +329,7 @@ void warnKept(const char* why)
 
 bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
 {
+    assert(&shape != &before);
     if (!shape.fix()) {
         return false;
     }
@@ -352,29 +354,6 @@ bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
         warnKept("unknown exception");
     }
     return true;
-}
-
-bool fixKeepingNames(TopoShape& shape)
-{
-    // The shape as it was, names included: a deep copy, because fix() changes sub-shapes in
-    // place. A copy that fails costs the names, not the repair.
-    TopoShape before(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
-    try {
-        before.makeElementCopy(shape);
-    }
-    catch (const Standard_Failure& e) {
-        warnKept(e.GetMessageString());
-        return shape.fix();
-    }
-    catch (const Base::Exception& e) {
-        warnKept(e.what());
-        return shape.fix();
-    }
-    catch (const std::exception& e) {
-        warnKept(e.what());
-        return shape.fix();
-    }
-    return fixKeepingNames(shape, before);
 }
 
 }  // namespace Part

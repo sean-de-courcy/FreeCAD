@@ -1032,8 +1032,9 @@ class TestTopologicalNamingProblem(unittest.TestCase):
 
     def testChamferRepairKeepsTheNamesScaled(self):
         """ops#190: as testChamferRepairKeepsTheNames, the model 100 times larger (block 2000 x
-        2000 x 1000, hole radius 200 at (1000, 300), chamfer 100): the faces the repair split an
-        edge of are told apart by their centres, within a tolerance relative to their size."""
+        2000 x 1000, hole radius 200 at (1000, 300), chamfer 100): guards the repair at a 100x
+        scale. The centres differ by about 1e-13 here, so the old absolute tolerance holds too; the
+        relative centre tolerance only matters at much larger sizes."""
         self.repairKeepsTheNames("Chamfer", 100)
 
     def testFilletRepairKeepsTheNamesScaled(self):

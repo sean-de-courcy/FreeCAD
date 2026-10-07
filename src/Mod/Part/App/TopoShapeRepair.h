@@ -29,13 +29,12 @@ class TopoShape;
  * Fillet and Chamfer); TopoShape::makeElementWires() and the boolean maker's invalid inputs call
  * fix() as it is.
  *
+ * \a before is the shape as it was before the repair, names included. It must share no
+ * sub-shapes with \a shape (make it with TopoShape::makeElementCopy()), since fix() changes them
+ * in place; passing a shape that does, or \a shape itself, is undefined (the same object
+ * asserts).
+ *
  * @return fix()'s result: true if the shape was repaired.
- */
-PartExport bool fixKeepingNames(TopoShape& shape);
-
-/** fixKeepingNames() for a caller that holds the shape as it was before the repair: \a before,
- * names included, sharing no sub-shapes with \a shape (TopoShape::makeElementCopy()), since
- * fix() changes them in place. It saves the copy the other overload makes.
  */
 PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
 
