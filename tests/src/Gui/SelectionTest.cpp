@@ -11,6 +11,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <Gui/Selection/Selection.h>
+#include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 
 namespace
@@ -58,6 +59,7 @@ protected:
 
     void TearDown() override
     {
+        Gui::setUserSelectionFilter({});
         Gui::Selection().rmvSelectionGate();
         Gui::Selection().clearSelection();
         if (App::GetApplication().getDocument(_docName.c_str())) {
@@ -108,6 +110,26 @@ TEST_F(SelectionTest, testSelectionUsesActiveGateWithoutKeepingRejectionReason)
     EXPECT_EQ(gate->notAllowedReason, "existing reason");
     EXPECT_FALSE(Gui::Selection().hasPreselection());
     EXPECT_FALSE(Gui::Selection().hasSelection(_docName.c_str(), Gui::ResolveMode::NoResolve));
+}
+
+// FreeCAD-CH (ops#147 review, M1): with only the user's filter on, a pick that it refuses must
+// look past the front object, which the pick policy does only for candidates with a gate
+TEST_F(SelectionTest, userFilterCountsAsSelectionGate)
+{
+    EXPECT_FALSE(Gui::Selection().hasSelectionGate(_doc));
+    Gui::setUserSelectionFilter("SELECT App::FeatureTest SUBELEMENT Face");
+    EXPECT_TRUE(Gui::Selection().hasSelectionGate(_doc));
+    Gui::setUserSelectionFilter({});
+    EXPECT_FALSE(Gui::Selection().hasSelectionGate(_doc));
+}
+
+// FreeCAD-CH (ops#147 review, M3): the user's filter restricts only element picks on shapes;
+// a whole object and an object that isn't a Part::Feature or an App::Link pass
+TEST_F(SelectionTest, userFilterPassesWholeObjectsAndOtherObjects)
+{
+    Gui::setUserSelectionFilter("SELECT App::FeatureTest SUBELEMENT Face");
+    EXPECT_TRUE(Gui::Selection().testSelection(_doc, _allowedObject));
+    EXPECT_TRUE(Gui::Selection().testSelection(_doc, _allowedObject, "Edge1"));
 }
 
 TEST(SelectionPickPolicyTest, canFinalizeSinglePickWhenNoGateIsInstalled)

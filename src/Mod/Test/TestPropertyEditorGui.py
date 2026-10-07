@@ -133,11 +133,12 @@ class TestPropertyEditorGui(unittest.TestCase):
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 
-    def openValueEditor(self, *path):
+    def openValueEditor(self, *path, objects=None):
         """Opens the editor of the value at path (row names, e.g. "Offset", "x") with F2, as a
-        user does; returns the editor widget."""
+        user does, with objects (default: the VarSet) selected; returns the editor widget."""
         Gui.Selection.clearSelection()
-        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        for obj in objects or [self.obj]:
+            Gui.Selection.addSelection(self.doc.Name, obj.Name)
         pump(1.0)
         editor = self.dataEditor()
         model = editor.model()
@@ -161,6 +162,12 @@ class TestPropertyEditorGui(unittest.TestCase):
         widget = editor.indexWidget(value)
         self.assertIsNotNone(widget, "no editor for %s" % (path,))
         return widget
+
+    def openOuter(self):
+        """A transaction someone else opened and already wrote in: the editor books none of its
+        own (a transaction only booked, with nothing written yet, it replaces)."""
+        self.doc.openTransaction("Outer")
+        self.obj.Label2 = self.obj.Label2 + "."
 
     def typeThenEscape(self, widget, text):
         QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
@@ -192,8 +199,7 @@ class TestPropertyEditorGui(unittest.TestCase):
             for outer in (False, True):
                 with self.subTest(path=path, outer=outer):
                     if outer:
-                        # A transaction someone else opened: the editor books none of its own
-                        self.doc.openTransaction("Outer")
+                        self.openOuter()
                     undos = self.doc.UndoCount
                     widget = self.openValueEditor(*path)
                     self.typeThenEscape(widget, text)
@@ -213,3 +219,43 @@ class TestPropertyEditorGui(unittest.TestCase):
         pump(0.3)
         self.assertEqual(self.obj.Width, 9)
         self.assertEqual(self.doc.UndoCount, undos + 1)
+
+    def testEscapeKeepsDialogValue(self):
+        """Review M2: an editor that writes on a dialog's OK (a color's button) keeps the value
+        after Esc, and its Edit transaction is committed. Only editors that write as they are
+        typed revert."""
+        self.obj.addProperty("App::PropertyColor", "Tint", "Variables")
+        self.obj.Tint = (0.0, 0.0, 1.0)
+        undos = self.doc.UndoCount
+        widget = self.openValueEditor("Tint")
+        # As the color dialog's OK does (ColorButton::onColorChosen)
+        widget.setProperty("color", QtGui.QColor(255, 0, 0))
+        QtCore.QMetaObject.invokeMethod(widget, "changed")
+        pump(0.2)
+        self.assertEqual(tuple(self.obj.Tint)[:3], (1.0, 0.0, 0.0))
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+        pump(0.3)
+        self.assertEqual(tuple(self.obj.Tint)[:3], (1.0, 0.0, 0.0), "Esc undid the dialog's OK")
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+
+    def testEscapeWithSeveralObjects(self):
+        """Review L3: without a transaction of its own to abort (here inside another one), Esc
+        writes the old value back to every selected object only when they all had it. Two
+        VarSets of the same Width get it back; of different Widths, neither gets the first one's."""
+        other = self.doc.addObject("App::VarSet", "Other")
+        other.addProperty("App::PropertyInteger", "Width", "Variables")
+        for otherWidth, after in ((5, (5, 5)), (6, (9, 9))):
+            with self.subTest(otherWidth=otherWidth):
+                self.obj.Width = 5
+                other.Width = otherWidth
+                self.openOuter()
+                widget = self.openValueEditor("Width", objects=[self.obj, other])
+                QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+                QtTest.QTest.keyClicks(widget, "9")
+                pump(0.2)
+                self.assertEqual((self.obj.Width, other.Width), (9, 9), "typing wrote nothing")
+                QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+                pump(0.3)
+                self.assertEqual((self.obj.Width, other.Width), after)
+                self.doc.commitTransaction()

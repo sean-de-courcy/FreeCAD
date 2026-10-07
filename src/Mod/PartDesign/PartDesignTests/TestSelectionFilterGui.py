@@ -40,6 +40,7 @@ import FreeCADGui as Gui
 import Part
 
 from PySide import QtCore, QtWidgets
+from PySide6 import QtTest
 
 VERTEX, EDGE, FACE, NONE = range(4)  # Part_SelectFilter's entries
 
@@ -119,8 +120,11 @@ class TestSelectionFilterGui(unittest.TestCase):
             Gui.Control.closeDialog()
             pump()
         Gui.Selection.clearSelection()
+        # The filter has no Python access: check it is off, so it can't leak into later classes
+        filterOff = self.selectable(self.pad, "Face1") and self.selectable(self.pad, "Edge1")
         App.closeDocument(self.doc.Name)
         pump()
+        self.assertTrue(filterOff, "the filter is still on")
 
     def selectable(self, obj, sub):
         """Whether a pick of obj.sub is taken by the selection (then cleared again)."""
@@ -129,6 +133,19 @@ class TestSelectionFilterGui(unittest.TestCase):
         taken = any(sub in s.SubElementNames for s in Gui.Selection.getSelectionEx(self.doc.Name))
         Gui.Selection.clearSelection()
         return taken
+
+    def objectSelectable(self, obj):
+        """Whether a pick of the whole object (as in the tree) is taken, then cleared again."""
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, obj.Name)
+        taken = any(s.ObjectName == obj.Name for s in Gui.Selection.getSelectionEx(self.doc.Name))
+        Gui.Selection.clearSelection()
+        return taken
+
+    def filterButton(self):
+        return Gui.getMainWindow().statusBar().findChild(
+            QtWidgets.QToolButton, "userSelectionFilterButton"
+        )
 
     def assertEdgeFilterOn(self, obj):
         self.assertTrue(self.selectable(obj, "Edge1"), "the edge filter refuses an edge")
@@ -161,6 +178,83 @@ class TestSelectionFilterGui(unittest.TestCase):
         setFilter(NONE)
         self.assertTrue(self.selectable(self.pad, "Face1"))
         self.assertTrue(self.selectable(self.pad, "Edge1"))
+
+    def testFilterPassesNonElementPicks(self):
+        """Review M3 (the user's answer): the filter restricts only element picks on shapes. With
+        the face filter on, an origin plane, a datum plane, the whole sketch and the whole Pad
+        are taken, as a Mirror's plane or a tree selection picks them; the Pad's edge is not."""
+        datum = self.body.newObject("PartDesign::Plane", "DatumPlane")
+        datum.AttachmentSupport = (self.body.Origin.OriginFeatures[4], [""])  # XZ_Plane
+        datum.MapMode = "FlatFace"
+        self.doc.recompute()
+        setFilter(FACE)
+        self.assertFalse(self.selectable(self.pad, "Edge1"), "the face filter is off")
+        for obj in (self.body.Origin.OriginFeatures[3], datum, self.sketch, self.pad):
+            with self.subTest(obj.Name):
+                self.assertTrue(self.objectSelectable(obj), "a whole object is refused")
+        self.assertTrue(self.selectable(datum, "Face1"), "a datum's element is refused")
+
+    def testStatusBarShowsAndClearsFilter(self):
+        """Review M3: while a filter is on, the status bar shows it as a button, in any workbench;
+        a click removes the filter and hides the button."""
+        setFilter(FACE)
+        button = self.filterButton()
+        self.assertIsNotNone(button, "no filter button in the status bar")
+        self.assertFalse(button.isHidden())
+        self.assertIn("faces", button.text())
+        setFilter(EDGE)
+        self.assertIn("edges", button.text())
+        button.click()
+        pump(0.05)
+        self.assertTrue(button.isHidden())
+        self.assertTrue(self.selectable(self.pad, "Face1"), "the click left the filter on")
+
+    def clickAt(self, point):
+        """A left click in the 3D view where the world point shows."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        x, y = view.getPointOnViewport(point)
+        _, height = view.getSize()
+        scale = viewport.devicePixelRatioF()
+        at = QtCore.QPoint(int(round(x / scale)), int(round((height - y - 1) / scale)))
+        QtTest.QTest.mouseClick(viewport, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+        pump(0.2)
+        return [
+            (s.ObjectName, sub)
+            for s in Gui.Selection.getSelectionEx(self.doc.Name)
+            for sub in (s.SubElementNames or [""])
+        ]
+
+    def testFilterPicksThroughFrontObject(self):
+        """Review M1: a pick the filter refuses on the front object goes on to what lies behind
+        it. Seen from the top, a 4 x 4 x 1 plate floats 5 above the top edge (y = 0) of a 10 mm
+        cube; a click on the plate over that edge selects the plate's face without a filter, and
+        the cube's edge with the edge filter on (the plate's faces are refused)."""
+        self.body.ViewObject.Visibility = False
+        cube = self.doc.addObject("Part::Box", "Cube")
+        cube.Placement.Base = App.Vector(20, 0, 0)
+        plate = self.doc.addObject("Part::Box", "Plate")
+        plate.Length, plate.Width, plate.Height = 4, 4, 1
+        plate.Placement.Base = App.Vector(23, -2, 15)
+        self.doc.recompute()
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.viewTop()
+        view.fitAll()
+        pump(0.3)
+        target = App.Vector(25, 0, 16)
+
+        picked = self.clickAt(target)
+        Gui.Selection.clearSelection()
+        if not picked:
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+        self.assertEqual(picked, [("Plate", "Face6")])
+
+        setFilter(EDGE)
+        picked = self.clickAt(target)
+        Gui.Selection.clearSelection()
+        self.assertEqual(len(picked), 1, picked)
+        self.assertEqual(picked[0][0], "Cube", "the pick stopped at the front object")
+        self.assertTrue(picked[0][1].startswith("Edge"), picked)
 
     def testFilterSurvivesOperations(self):
         """28305: the filter stays on after a Fillet's dialog and a Pad's dialog are closed."""
