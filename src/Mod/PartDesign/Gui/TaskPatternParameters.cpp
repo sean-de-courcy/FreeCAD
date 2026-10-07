@@ -333,6 +333,14 @@ void TaskPatternParameters::onReferenceSelectionTaken()
     }
 }
 
+void TaskPatternParameters::cancelReferencePick()
+{
+    if (selectionMode != SelectionMode::None) {
+        exitReferenceSelectionMode();
+    }
+    updateUI();
+}
+
 void TaskPatternParameters::onUpdateView(bool on)
 {
     // This might be less relevant now if recomputes are triggered by parametersChanged
@@ -351,11 +359,6 @@ void TaskPatternParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
     // Handle selection ONLY when in reference selection mode
     if (selectionMode == SelectionMode::None || msg.Type != Gui::SelectionChanges::AddSelection) {
-        return;
-    }
-
-    if (originalSelected(msg)) {
-        exitSelectionMode();
         return;
     }
 

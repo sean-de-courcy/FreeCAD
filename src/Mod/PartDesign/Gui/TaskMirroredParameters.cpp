@@ -138,11 +138,6 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
         return;
     }
 
-    if (originalSelected(msg)) {
-        exitSelectionMode();
-        return;
-    }
-
     auto pcMirrored = getObject<PartDesign::Mirrored>();
 
     std::vector<std::string> mirrorPlanes;
@@ -159,6 +154,12 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
         updateUI();
     }
     exitSelectionMode();
+}
+
+void TaskMirroredParameters::cancelReferencePick()
+{
+    exitSelectionMode();
+    updateUI();
 }
 
 void TaskMirroredParameters::onPlaneChanged(int /*num*/)

@@ -92,6 +92,9 @@ private:
     /** Notifies when the object is about to be removed. */
     void slotDeletedObject(const Gui::ViewProviderDocumentObject& Obj) override;
 
+    /// The open sub-task's reference pick ends too: it would take the Originals field's picks.
+    void endPickModes() override;
+
     void updateUI();
     void closeSubTask();
     void moveTransformFeature(int increment);

@@ -98,6 +98,11 @@ public:
         /// shows while armed besides the object (the solid before), and may be null; the gate
         /// is Options::accept alone.
         Profile,
+        /// A list of objects (PropertyLinkList: a pattern's Originals): a pick of an object, or
+        /// of any element of it, adds the object or takes it out. Options::target is what shows
+        /// while armed; the gate is Options::accept and noDependents. Written through an
+        /// ObjectsWriter.
+        Objects,
     };
     /// Turns a pick into what is written: the object and its subs (a copy of another body's
     /// element, a datum's coordinate system). False: nothing is written.
@@ -135,11 +140,19 @@ public:
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
         std::function<void(App::DocumentObject* obj, const std::vector<std::string>& subs)>;
+    /// Writes a list of objects (Kind::Objects).
+    using ObjectsWriter = std::function<void(const std::vector<App::DocumentObject*>& objs)>;
 
     ReferenceField(App::DocumentObject* owner,
                    const char* property,
                    Options options,
                    Writer write,
+                   QWidget* parent = nullptr);
+    /// A field of Kind::Objects.
+    ReferenceField(App::DocumentObject* owner,
+                   const char* property,
+                   Options options,
+                   ObjectsWriter write,
                    QWidget* parent = nullptr);
     ~ReferenceField() override;
 
@@ -149,7 +162,7 @@ public:
     }
     /// Arms or disarms the field; arming disarms the group's other fields.
     void setArmed(bool on);
-    /// The entries' subs, old-style (`?Edge5` when missing).
+    /// The entries' subs, old-style (`?Edge5` when missing); a list of objects' names.
     std::vector<std::string> entries() const;
     /// Lists the property again, with the states.
     void reload();
@@ -237,7 +250,8 @@ private:
     {
         return ownerT.getObject();
     }
-    /// The property: a PropertyLinkSub or a PropertyLinkSubList, or null.
+    /// The property: a PropertyLinkSub or a PropertyLinkSubList (a PropertyLinkList for
+    /// Kind::Objects), or null.
     App::PropertyLinkBase* property() const;
     App::DocumentObject* target() const;
     /// The object the property links (a list's, when it links one).
@@ -250,6 +264,12 @@ private:
     {
         return options.kind == Kind::Profile;
     }
+    bool isObjects() const
+    {
+        return options.kind == Kind::Objects;
+    }
+    /// Kind::Objects: the objects the property lists.
+    std::vector<App::DocumentObject*> linkedObjects() const;
     /// The object a list's entries are written on: the one the property links, the target
     /// while there is none.
     App::DocumentObject* listObject() const;
@@ -268,6 +288,8 @@ private:
         std::vector<std::string> froms;
         /// The reference solver's report on the subs (a broken one's candidates), by index.
         std::vector<App::ReferenceReport::Entry> report;
+        /// Kind::Objects: the objects listed.
+        std::vector<App::DocumentObjectT> objects;
     };
     Snapshot snapshot() const;
     /// Writes \a subs of the target through the writer and lists them; \a undoable: a step of
@@ -277,6 +299,10 @@ private:
     void write(App::DocumentObject* obj, const std::vector<std::string>& subs, bool undoable = true);
     /// Writes \a value with its records as they are (the field's undo and redo).
     void write(const Snapshot& value, bool undoable);
+    /// Kind::Objects: writes \a objs (a step of the field's undo when \a undoable).
+    void writeObjects(const std::vector<App::DocumentObject*>& objs, bool undoable = true);
+    /// Kind::Objects: a pick adds \a obj, or takes it out when it is listed.
+    void pickObject(App::DocumentObject* obj);
     /// Records the current value as a step of the field's undo.
     void pushUndo();
     void pick(App::DocumentObject* obj, const std::string& sub);
@@ -310,6 +336,7 @@ private:
     std::string propertyNameStr;
     Options options;
     Writer writer;
+    ObjectsWriter objectsWriter;
     QPointer<ReferenceFieldGroup> group;
 
     QLabel* label = nullptr;

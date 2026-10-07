@@ -205,6 +205,9 @@ protected:
     /// onReferenceSelectionTaken). A dialog whose panels aren't TaskFeatureParameters adds its own.
     virtual void referencesRepaired();
     virtual void referenceSelectionTaken();
+    /// The reference fields of the dialog's panels (TaskFeatureParameters::referenceFields). A
+    /// dialog whose panels aren't TaskFeatureParameters adds theirs.
+    virtual std::vector<ReferenceField*> panelFields();
 
     PartDesignGui::TaskPreviewParameters* preview;
     /// The feature's guessed, partly resolved or broken references, at the top; null if none

@@ -60,6 +60,7 @@ public:
     void onReferencesRepaired() override;
 
     void apply() override;
+    void cancelReferencePick() override;
 
 protected:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;

@@ -41,6 +41,11 @@ Designed models, each built by the test:
   a separate rectangle B 30..40 x 0..10; Pad 5. Its regions: A minus the disk (200 - 4 pi), the
   disk (4 pi), B (100). The whole sketch pads 5 (300 - 4 pi) (A's hole stays); B alone 500; the
   disk alone 20 pi; all three 1500 (the hole filled).
+- Pattern (W4): the box moved to -5..5 x -5..5 x 0..10, and two 1 x 1 x 1 additive boxes on its
+  top of one Label, "Bump": the first at (1, 1), the second at (1, -3). A pattern of both adds one
+  copy of each, 2 mm^3, all on the box's top and apart: linear along X, length 2 (copies at x 3);
+  polar about Z, 360 degrees in 2 (at x -2); mirrored in the YZ plane (at x -2). The volume is
+  1002 plus 1 per bump patterned.
 
 Keys go through the window (QTest's QWindow overload), so the shortcut map sees them as it sees a
 user's. Each arming test also has a twin that arms through the field's `armed` property, so that a
@@ -61,6 +66,7 @@ from PartDesignTests.Scenarios.harness import X, Z, edge, face
 from PartDesignTests.TestDressUpDeleteKeyGui import focus, pump, taskButton, waitFor
 
 STATE_ROLE = QtCore.Qt.UserRole + 1
+SUB_ROLE = QtCore.Qt.UserRole + 2
 FILLET_CUT = (1 - math.pi / 4) * 10  # r = 1, L = 10
 # The highlight's colours (rounded): an entry, the current entry, and the highlighter's colour for
 # a whole object, which no entry should show.
@@ -1935,3 +1941,410 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: states(field) == ["guessed", "exact"]), states(field))
         self.assertEqual(warned(), {0})
         self.assertVolume(pad, 500 + 20 * math.pi)
+
+    # -- W4: a pattern's Originals (T17, B6; T1-T6) -------------------------------------------------
+
+    def bumps(self, ys=(1, -3)):
+        """The Pattern model: the box at -5..5 x -5..5 and a 1 x 1 x 1 bump on its top at x 1 and
+        each of ys, all labelled "Bump" (duplicate Labels allowed while they are made)."""
+        box = self.box()
+        box.Placement = App.Placement(App.Vector(-5, -5, 0), App.Rotation())
+        prefs = App.ParamGet("User parameter:BaseApp/Preferences/Document")
+        duplicates = prefs.GetBool("DuplicateLabels", False)
+        prefs.SetBool("DuplicateLabels", True)
+        bumps = []
+        try:
+            for y in ys:
+                bump = self.doc.addObject("PartDesign::AdditiveBox", "Bump")
+                self.body.addObject(bump)
+                for prop in ("Length", "Width", "Height"):
+                    setattr(bump, prop, 1)
+                bump.Placement = App.Placement(App.Vector(1, y, 10), App.Rotation())
+                bump.Label = "Bump"
+                bumps.append(bump)
+        finally:
+            prefs.SetBool("DuplicateLabels", duplicates)
+        self.doc.recompute()
+        self.assertEqual({b.Label for b in bumps}, {"Bump"})
+        self.assertEqual(len({b.Name for b in bumps}), len(bumps))
+        self.assertAlmostEqual(bumps[-1].Shape.Volume, 1000 + len(bumps), places=6)
+        return bumps
+
+    def pattern(self, typeName, originals, transformBody=False):
+        """A pattern of the bumps, as the Pattern model places its copies. It joins the body with
+        its Originals set: a pattern of the tool shapes with none counts as a MultiTransform's
+        step and gets no base feature, so an empty one joins as a pattern of the whole body and
+        is switched back."""
+        pattern = self.doc.addObject(typeName, typeName.split("::")[1])
+        if typeName == "PartDesign::LinearPattern":
+            pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+            pattern.Length = 2
+            pattern.Occurrences = 2
+        elif typeName == "PartDesign::PolarPattern":
+            pattern.Axis = (models.originFeature(self.body, "Z_Axis"), [""])
+            pattern.Angle = 360
+            pattern.Occurrences = 2
+        elif typeName == "PartDesign::Mirrored":
+            pattern.MirrorPlane = (models.originFeature(self.body, "YZ_Plane"), [""])
+        elif typeName == "PartDesign::Scaled":
+            pattern.Factor = 2
+            pattern.Occurrences = 2
+        pattern.Originals = originals
+        if transformBody or not originals:
+            pattern.TransformMode = "Whole shape"
+        self.body.addObject(pattern)
+        if not transformBody and not originals:
+            pattern.TransformMode = "Features"
+        self.doc.recompute()
+        self.assertIsNotNone(pattern.BaseFeature)
+        return pattern
+
+    def names(self, field):
+        """The objects a list of objects shows, by name."""
+        refs = entries(field)
+        return [refs.item(i).data(SUB_ROLE) for i in range(refs.count())]
+
+    def originalNames(self, pattern):
+        return [o.Name for o in pattern.Originals]
+
+    def panelSpinBox(self, field):
+        """A spin box of the panel that holds the field."""
+        panel = field
+        while not panel.metaObject().className().startswith("PartDesignGui::Task"):
+            panel = panel.parentWidget()
+        spins = [s for s in panel.findChildren(QtWidgets.QAbstractSpinBox) if s.isVisible()]
+        self.assertTrue(spins, "no spin box in the panel")
+        return spins[0]
+
+    def testPatternOriginalsArmOnOpen(self):
+        """T1: an edit of a linear pattern with no originals arms its Originals field (no Add and
+        Remove buttons); a pick of a bump in the tree adds it. (A pattern that opens with none
+        doesn't recompute until the edit ends: the edit's roll-back point takes it for a
+        MultiTransform's step, ops#182; so no volume here.)"""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [])
+        [field] = self.edit(pattern)
+        self.assertEqual(field.objectName(), "fieldOriginals")
+        self.assertTrue(waitFor(lambda: armed(field)), "the empty Originals field isn't armed")
+        for name in ("buttonAddFeature", "buttonRemoveFeature"):
+            self.assertIsNone(Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, name))
+
+        self.pick(first, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertEqual(self.names(field), [first.Name])
+        self.assertEqual(texts(field), ["Bump"])
+        self.assertTrue(armed(field))
+
+    def testPatternOriginalsPicksToggle(self):
+        """T2: with the field armed, a pick of a face of the second bump adds it, a pick of the
+        first (in the tree: the object alone) takes it out. The volume follows (1 mm^3 per bump
+        patterned). A pick of the origin's plane is refused."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        [field] = self.edit(pattern)
+        self.assertFalse(armed(field), "a complete pattern opens armed")
+        self.arm(field, byFocus=True)
+        self.assertVolume(pattern, 1003)
+
+        self.pick(second, "Face6")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.assertVolume(pattern, 1004)
+
+        self.pick(first, "")
+        self.assertEqual(self.originalNames(pattern), [second.Name])
+        self.assertEqual(self.names(field), [second.Name])
+        self.assertVolume(pattern, 1003)
+        self.assertTrue(armed(field))
+
+        self.pick(models.originFeature(self.body, "XY_Plane"), "")
+        self.assertEqual(self.originalNames(pattern), [second.Name])
+        self.assertIn("adds or removes material", statusText())
+
+    def testPatternOriginalsOfOneLabel(self):
+        """T17, B6: two originals of one Label, which the list tells apart by their names. The
+        second taken out, by a pick or by Delete on its row, is the one that goes, from the
+        property and from the list; picked again, it comes back in the body's order."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)
+        [field] = self.edit(pattern)
+        self.assertFalse(armed(field), "a complete pattern opens armed")
+        self.assertEqual(texts(field), [f"Bump ({first.Name})", f"Bump ({second.Name})"])
+
+        self.arm(field, byFocus=True)
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertEqual(self.names(field), [first.Name])
+        self.assertEqual(texts(field), ["Bump"])
+        self.assertVolume(pattern, 1003)
+
+        self.pick(second, "")
+        self.pick(first, "")
+        self.pick(first, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.names(field) == [first.Name]), self.names(field))
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertVolume(pattern, 1003)
+
+    def testPatternOriginalsDisarmAndStayArmed(self):
+        """T3, T4: with the focus in the 3D view the field stays armed and takes a pick; a spin box
+        of the panel disarms it, and a pick then leaves the Originals alone."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+        self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
+        pump(0.2)
+        self.assertTrue(armed(field), "the 3D view's focus disarmed the field")
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+
+        self.assertTrue(focus(self.panelSpinBox(field)), "the spin box doesn't take the focus")
+        self.assertTrue(waitFor(lambda: not armed(field)), "still armed with a spin box focused")
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.assertVolume(pattern, 1004)
+
+    def testPatternOriginalsEscDisarmsThenCancels(self):
+        """T5: Esc disarms the field and the dialog stays; the next Esc cancels, and the Originals
+        are what they were before the edit."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=True)
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.assertTrue(focus(entries(field)))
+
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+        )
+        self.doc.recompute()
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+
+    def testPatternOriginalsDeleteTwo(self):
+        """T6: two of three originals selected, Delete: both go; OK makes one undo step, and undo
+        brings them back."""
+        bumps = self.bumps(ys=(1, -3, -1))
+        pattern = self.pattern("PartDesign::LinearPattern", bumps)
+        self.assertAlmostEqual(pattern.Shape.Volume, 1006, places=6)
+        undoCount = self.doc.UndoCount
+        [field] = self.edit(pattern)
+        self.assertEqual(self.names(field), [b.Name for b in bumps])
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        clickRow(field, 2, QtCore.Qt.ControlModifier)
+        self.assertEqual(len(entries(field).selectedItems()), 2)
+        self.assertEqual(Gui.Selection.getSelectionEx(self.doc.Name), [])
+
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.names(field) == [bumps[1].Name]), self.names(field))
+        self.assertEqual(self.originalNames(pattern), [bumps[1].Name])
+        self.assertVolume(pattern, 1004)
+
+        ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+        ok.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertEqual(self.doc.UndoCount, undoCount + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(self.originalNames(pattern), [b.Name for b in bumps])
+        self.assertAlmostEqual(pattern.Shape.Volume, 1006, places=6)
+
+    def patternKind(self, typeName, volumes):
+        """The Originals field in another pattern's panel: listed, and a pick takes the second
+        bump out (volumes: before and after; None: the copy overlaps, only the property)."""
+        first, second = self.bumps()
+        pattern = self.pattern(typeName, [first, second])
+        if volumes:
+            self.assertAlmostEqual(pattern.Shape.Volume, volumes[0], places=6)
+        [field] = self.edit(pattern)
+        self.assertEqual(field.objectName(), "fieldOriginals")
+        self.assertEqual(self.names(field), [first.Name, second.Name])
+        self.arm(field, byFocus=False)
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertEqual(self.names(field), [first.Name])
+        if volumes:
+            self.assertVolume(pattern, volumes[1])
+
+    def testPolarPatternOriginals(self):
+        self.patternKind("PartDesign::PolarPattern", (1004, 1003))
+
+    def testMirroredOriginals(self):
+        self.patternKind("PartDesign::Mirrored", (1004, 1003))
+
+    def testScaledOriginals(self):
+        self.patternKind("PartDesign::Scaled", None)
+
+    def testPatternModeSwitchArmsTheEmptyField(self):
+        """The whole body transformed: the field is greyed and doesn't arm; switching to the tool
+        shapes with none listed arms it, and a pick adds the bump."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [], transformBody=True)
+        [field] = self.edit(pattern)
+        pump(0.3)
+        self.assertFalse(field.isEnabled())
+        self.assertFalse(armed(field))
+        radio = Gui.getMainWindow().findChild(QtWidgets.QRadioButton, "radioTransformToolShapes")
+        radio.click()
+        self.assertTrue(waitFor(lambda: armed(field)), "the field isn't armed after the switch")
+        self.pick(first, "")
+        self.assertEqual(pattern.TransformMode, "Features")
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertVolume(pattern, 1003)
+
+    def testMultiTransformOriginals(self):
+        """The MultiTransform's panel has the field; its linear sub-pattern's "Select reference"
+        takes the selection (the field disarms), and the field armed again ends that pick: the next
+        pick changes the Originals, not the sub-pattern's direction."""
+        first, second = self.bumps()
+        multi = self.doc.addObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = [first, second]
+        self.body.addObject(multi)
+        linear = self.doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        xAxis = models.originFeature(self.body, "X_Axis")
+        linear.Direction = (xAxis, [""])
+        linear.Length = 2
+        linear.Occurrences = 2
+        self.body.addObject(linear)
+        multi.Transformations = [linear]
+        self.doc.recompute()
+        self.assertAlmostEqual(multi.Shape.Volume, 1004, places=6)
+
+        [field] = self.edit(multi)
+        self.assertEqual(self.names(field), [first.Name, second.Name])
+        transforms = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listTransformFeatures")
+        transforms.setCurrentRow(0)
+        transforms.activated.emit(transforms.currentIndex())
+        pump(0.3)
+        combos = [
+            c
+            for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "comboDirection")
+            if c.isVisible()
+        ]
+        self.assertEqual(len(combos), 1, "the sub-pattern's panel isn't open")
+        self.arm(field, byFocus=False)
+        self.choose(combos[0], combos[0].count() - 1)
+        self.assertTrue(waitFor(lambda: not armed(field)), "the sub-pattern's pick left it armed")
+
+        self.arm(field, byFocus=False)
+        self.pick(second, "Face6")
+        self.assertEqual(self.originalNames(multi), [first.Name])
+        self.assertEqual(linear.Direction[0].Name, xAxis.Name)
+        self.assertVolume(multi, 1003)
+
+        # the sub-pattern's OK keeps its direction: the pick the field ended left no null entry
+        ok = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonOK")
+        self.assertTrue(ok.isVisible())
+        ok.click()
+        pump(0.3)
+        self.assertEqual(linear.Direction[0].Name, xAxis.Name)
+        self.assertVolume(multi, 1003)
+
+    # -- PR 154's review (round 1) ---------------------------------------------------------------
+
+    def selectReference(self, comboName):
+        """The panel's "Select reference..." entry chosen, as a user does."""
+        [combo] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()
+        ]
+        [index] = [i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")]
+        self.choose(combo, index)
+        self.assertEqual(combo.currentIndex(), index)
+        return combo, index
+
+    def referencePickThenOk(self, typeName, comboName, linkName, linked):
+        """The field armed during a "Select reference..." pick ends the pick: the combo shows the
+        link again, and OK keeps it (it wrote None before)."""
+        first, second = self.bumps()
+        pattern = self.pattern(typeName, [first])
+        [field] = self.edit(pattern)
+        combo, index = self.selectReference(comboName)
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() != index), "the combo stays on the pick")
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        link = getattr(pattern, linkName)
+        self.assertIsNotNone(link, linkName + " was cleared")
+        self.assertEqual(link[0].Name, models.originFeature(self.body, linked).Name)
+        self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)
+
+    def testLinearReferencePickThenOk(self):
+        self.referencePickThenOk("PartDesign::LinearPattern", "comboDirection", "Direction", "X_Axis")
+
+    def testMirroredReferencePickThenOk(self):
+        self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
+
+    def testPatternOriginalsLabelRenamed(self):
+        """A listed original renamed while the panel is open shows its new Label (and the other
+        one no longer needs its name)."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.assertEqual(texts(field), ["Bump ({})".format(first.Name), "Bump ({})".format(second.Name)])
+        second.Label = "Knob"
+        self.assertTrue(waitFor(lambda: texts(field) == ["Bump", "Knob"]), texts(field))
+
+    def testPatternOriginalsRefusals(self):
+        """A feature of another body and a feature after the pattern are refused; the Originals
+        stay."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first])
+        later = self.doc.addObject("PartDesign::AdditiveBox", "Later")
+        self.body.addObject(later)
+        other = self.doc.addObject("PartDesign::Body", "OtherBody")
+        foreign = self.doc.addObject("PartDesign::AdditiveBox", "Foreign")
+        other.addObject(foreign)
+        foreign.Placement = App.Placement(App.Vector(50, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(later.isValid() and foreign.isValid())
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+        for refused in (foreign, later):
+            self.pick(refused, "")
+            self.assertEqual(self.originalNames(pattern), [first.Name], refused.Name)
+            self.assertEqual(self.names(field), [first.Name], refused.Name)
+        self.pick(second, "")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+
+    def testPatternOriginalDeletedWhileOpen(self):
+        """An original deleted while the panel is open leaves the list."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.assertEqual(self.names(field), [first.Name, second.Name])
+        name = second.Name
+        self.body.removeObject(second)
+        self.doc.removeObject(name)
+        self.assertTrue(waitFor(lambda: self.names(field) == [first.Name]), self.names(field))
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+
+    def testPatternCancelAfterModeSwitch(self):
+        """Switched to the whole body, then Cancel: the pattern transforms its originals again,
+        and they're all there."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        radio = Gui.getMainWindow().findChild(QtWidgets.QRadioButton, "radioTransformBody")
+        radio.click()
+        self.assertTrue(waitFor(lambda: not field.isEnabled()), "the field isn't greyed")
+        self.assertEqual(pattern.TransformMode, "Whole shape")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertEqual(pattern.TransformMode, "Features")
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.doc.recompute()
+        self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)

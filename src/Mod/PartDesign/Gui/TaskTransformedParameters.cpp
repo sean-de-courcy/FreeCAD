@@ -25,6 +25,7 @@
 
 #include <QAction>
 #include <QListWidget>
+#include <QTimer>
 
 
 #include <App/Application.h>
@@ -46,6 +47,7 @@
 #include "ui_TaskTransformedParameters.h"
 #include "TaskTransformedParameters.h"
 #include "TaskMultiTransformParameters.h"
+#include "ReferenceField.h"
 #include "ReferenceSelection.h"
 
 
@@ -94,33 +96,36 @@ void TaskTransformedParameters::setupUI()
     ui->setupUi(proxy);
     QMetaObject::connectSlotsByName(this);
 
-    connect(
-        ui->buttonAddFeature,
-        &QToolButton::toggled,
-        this,
-        &TaskTransformedParameters::onButtonAddFeature
-    );
-    connect(
-        ui->buttonRemoveFeature,
-        &QToolButton::toggled,
-        this,
-        &TaskTransformedParameters::onButtonRemoveFeature
-    );
-
-    // Create context menu
-    auto action = new QAction(tr("Remove"), this);
-    action->setShortcut(Gui::QtTools::deleteKeySequence());
-
-    // display shortcut behind the context menu entry
-    action->setShortcutVisibleInContextMenu(true);
-    ui->listWidgetFeatures->addAction(action);
-    connect(action, &QAction::triggered, this, &TaskTransformedParameters::onFeatureDeleted);
-    ui->listWidgetFeatures->setContextMenuPolicy(Qt::ActionsContextMenu);
-
     connect(ui->checkBoxUpdateView, &QCheckBox::toggled, this, &TaskTransformedParameters::onUpdateView);
 
     // Get the feature data
     auto pcTransformed = getObject<PartDesign::Transformed>();
+
+    // The Originals: a pick of a feature in the tree adds it or takes it out (a pick in the 3D
+    // view takes the base feature shown there)
+    // (ops#150 W4; B6: the entries are objects, not Labels)
+    ReferenceField::Options options;
+    options.kind = ReferenceField::Kind::Objects;
+    options.target = [this]() { return getBaseObject(); };
+    options.accept = [this](App::DocumentObject* obj, const char* /*sub*/, std::string& why) {
+        return acceptOriginal(obj, why);
+    };
+    // Not the pattern, nor a feature after it
+    options.noDependents = true;
+    options.kinds = tr("Features");
+    options.label = tr("Features to transform");
+    originalsField = new ReferenceField(
+        pcTransformed,
+        "Originals",
+        std::move(options),
+        ReferenceField::ObjectsWriter([this](const std::vector<App::DocumentObject*>& objs) {
+            writeOriginals(objs);
+        }),
+        ui->groupFeatureList
+    );
+    originalsField->list()->setMaximumHeight(120);
+    originalsField->takePlaceOf(ui->originalsPlaceholder);
+    connect(originalsField, &ReferenceField::arming, this, [this]() { endPickModes(); });
 
     using Mode = PartDesign::Transformed::Mode;
 
@@ -138,17 +143,6 @@ void TaskTransformedParameters::setupUI()
         case Mode::Features:
             ui->radioTransformToolShapes->setChecked(true);
             break;
-    }
-
-    std::vector<App::DocumentObject*> originals = pcTransformed->getSortedOriginals();
-    // Fill data into dialog elements
-    for (auto obj : originals) {
-        if (obj) {
-            auto item = new QListWidgetItem();
-            item->setText(QString::fromUtf8(obj->Label.getValue()));
-            item->setData(Qt::UserRole, QString::fromLatin1(obj->getNameInDocument()));
-            ui->listWidgetFeatures->addItem(item);
-        }
     }
 
     setupParameterUI(ui->featureUI);  // create parameter UI widgets
@@ -171,22 +165,9 @@ void TaskTransformedParameters::changeEvent(QEvent* event)
     }
 }
 
-void TaskTransformedParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
+void TaskTransformedParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
 {
-    if (originalSelected(msg)) {
-        exitSelectionMode();
-    }
-}
-
-void TaskTransformedParameters::clearButtons()
-{
-    if (insideMultiTransform) {
-        parentTask->clearButtons();
-    }
-    else {
-        ui->buttonAddFeature->setChecked(false);
-        ui->buttonRemoveFeature->setChecked(false);
-    }
+    // The Originals field takes its own picks; the subclasses take their references
 }
 
 int TaskTransformedParameters::getUpdateViewTimeout() const
@@ -194,67 +175,46 @@ int TaskTransformedParameters::getUpdateViewTimeout() const
     return 500;
 }
 
-void TaskTransformedParameters::addObject(App::DocumentObject* obj)
+std::vector<ReferenceField*> TaskTransformedParameters::referenceFields() const
 {
-    QString label = QString::fromUtf8(obj->Label.getValue());
-    QString objectName = QString::fromLatin1(obj->getNameInDocument());
-
-    auto item = new QListWidgetItem();
-    item->setText(label);
-    item->setData(Qt::UserRole, objectName);
-    ui->listWidgetFeatures->addItem(item);
-}
-
-void TaskTransformedParameters::removeObject(App::DocumentObject* obj)
-{
-    QString label = QString::fromUtf8(obj->Label.getValue());
-    removeItemFromListWidget(ui->listWidgetFeatures, label);
-}
-
-bool TaskTransformedParameters::originalSelected(const Gui::SelectionChanges& msg)
-{
-    if (msg.Type == Gui::SelectionChanges::AddSelection
-        && ((selectionMode == SelectionMode::AddFeature)
-            || (selectionMode == SelectionMode::RemoveFeature))) {
-
-        if (strcmp(msg.pDocName, getObject()->getDocument()->getName()) != 0) {
-            return false;
-        }
-
-        PartDesign::Transformed* pcTransformed = getObject();
-        App::DocumentObject* selectedObject = pcTransformed->getDocument()->getObject(msg.pObjectName);
-        if (selectedObject->isDerivedFrom<PartDesign::FeatureAddSub>()) {
-
-            // Do the same like in TaskDlgTransformedParameters::accept() but without doCommand
-            std::vector<App::DocumentObject*> originals = pcTransformed->getSortedOriginals();
-            const auto or_iter = std::ranges::find(originals, selectedObject);
-            if (selectionMode == SelectionMode::AddFeature) {
-                if (or_iter == originals.end()) {
-                    originals.push_back(selectedObject);
-                    addObject(selectedObject);
-                }
-                else {
-                    return false;  // duplicate selection
-                }
-            }
-            else {
-                if (or_iter != originals.end()) {
-                    originals.erase(or_iter);
-                    removeObject(selectedObject);
-                }
-                else {
-                    return false;
-                }
-            }
-            setupTransaction();
-            pcTransformed->Originals.setValues(originals);
-            recomputeFeature();
-
-            return true;
-        }
+    if (originalsField) {
+        return {originalsField};
     }
+    return {};
+}
 
-    return false;
+bool TaskTransformedParameters::acceptOriginal(App::DocumentObject* obj, std::string& why) const
+{
+    if (!obj->isDerivedFrom<PartDesign::FeatureAddSub>()) {
+        why = QT_TR_NOOP("Pick a feature that adds or removes material.");
+        return false;
+    }
+    PartDesign::Transformed* pcTransformed = getObject();
+    PartDesign::Body* body = pcTransformed ? pcTransformed->getFeatureBody() : nullptr;
+    if (body && PartDesign::Body::findBodyOf(obj) != body) {
+        why = QT_TR_NOOP("Pick a feature of the pattern's body.");
+        return false;
+    }
+    return true;
+}
+
+void TaskTransformedParameters::writeOriginals(const std::vector<App::DocumentObject*>& objs)
+{
+    PartDesign::Transformed* pcTransformed = getObject();
+    if (!pcTransformed) {
+        return;
+    }
+    // In the body's order, as getSortedOriginals() gives them
+    std::vector<App::DocumentObject*> originals = objs;
+    if (PartDesign::Body* body = pcTransformed->getFeatureBody()) {
+        const std::vector<App::DocumentObject*>& group = body->Group.getValues();
+        std::ranges::stable_sort(originals, {}, [&group](App::DocumentObject* obj) {
+            return std::ranges::find(group, obj) - group.begin();
+        });
+    }
+    setupTransaction();
+    pcTransformed->Originals.setValues(originals);
+    recomputeFeature();
 }
 
 void TaskTransformedParameters::setupTransaction()
@@ -296,94 +256,26 @@ void TaskTransformedParameters::onModeChanged(int mode_id)
         return;
     }
 
+    // The transaction first, so that Cancel takes the switch back (PR 154 review)
+    setupTransaction();
     auto pcTransformed = getObject<PartDesign::Transformed>();
     pcTransformed->TransformMode.setValue(mode_id);
 
     using Mode = PartDesign::Transformed::Mode;
     Mode const mode = static_cast<Mode>(mode_id);
 
+    // The Originals field is greyed while the whole body is transformed; its entries stay, as the
+    // property keeps them
     ui->groupFeatureList->setEnabled(mode == Mode::Features);
-    if (mode == Mode::WholeShape) {
-        ui->listWidgetFeatures->clear();
-    }
-    setupTransaction();
     recomputeFeature();
-}
-
-void TaskTransformedParameters::onButtonAddFeature(bool checked)
-{
-    if (checked) {
-        hideObject();
-        showBase();
-        selectionMode = SelectionMode::AddFeature;
-        Gui::Selection().clearSelection();
-    }
-    else {
-        exitSelectionMode();
-    }
-
-    ui->buttonRemoveFeature->setDisabled(checked);
-}
-
-// Make sure only some feature before the given one is visible
-void TaskTransformedParameters::checkVisibility()
-{
-    auto feat = getObject();
-    auto body = feat->getFeatureBody();
-    if (!body) {
-        return;
-    }
-    auto inset = feat->getInListEx(true);
-    inset.emplace(feat);
-    for (auto obj : body->Group.getValues()) {
-        if (!obj->Visibility.getValue() || !obj->isDerivedFrom<PartDesign::Feature>()) {
-            continue;
-        }
-        if (inset.count(obj) > 0) {
-            break;
-        }
-        return;
-    }
-    FCMD_OBJ_SHOW(getBaseObject());
-}
-
-void TaskTransformedParameters::onButtonRemoveFeature(bool checked)
-{
-    if (checked) {
-        checkVisibility();
-        selectionMode = SelectionMode::RemoveFeature;
-        Gui::Selection().clearSelection();
-    }
-    else {
-        exitSelectionMode();
-    }
-
-    ui->buttonAddFeature->setDisabled(checked);
-}
-
-void TaskTransformedParameters::onFeatureDeleted()
-{
-    PartDesign::Transformed* pcTransformed = getObject();
-    std::vector<App::DocumentObject*> originals = pcTransformed->getSortedOriginals();
-    int currentRow = ui->listWidgetFeatures->currentRow();
-    if (currentRow < 0) {
-        Base::Console().error("PartDesign Pattern: No feature selected for removing.\n");
-        return;  // no current row selected
-    }
-    originals.erase(originals.begin() + currentRow);
-    setupTransaction();
-    pcTransformed->Originals.setValues(originals);
-    ui->listWidgetFeatures->model()->removeRow(currentRow);
-    recomputeFeature();
-}
-
-void TaskTransformedParameters::removeItemFromListWidget(QListWidget* widget, const QString& itemstr)
-{
-    QList<QListWidgetItem*> items = widget->findItems(itemstr, Qt::MatchExactly);
-    if (!items.empty()) {
-        for (auto item : items) {
-            delete widget->takeItem(widget->row(item));
-        }
+    // The tool shapes chosen with none listed: the field arms for the first pick
+    if (mode == Mode::Features && originalsField && originalsField->entries().empty()) {
+        QTimer::singleShot(0, originalsField, [field = originalsField]() {
+            field->setArmed(true);
+            if (field->isArmed()) {
+                field->list()->setFocus(Qt::OtherFocusReason);
+            }
+        });
     }
 }
 
@@ -560,7 +452,6 @@ void TaskTransformedParameters::showBase()
 void TaskTransformedParameters::exitSelectionMode()
 {
     try {
-        clearButtons();
         selectionMode = SelectionMode::None;
         Gui::Selection().rmvSelectionGate();
     }
@@ -612,6 +503,17 @@ void TaskDlgTransformedParameters::referencesRepaired()
     if (parameter) {
         parameter->onReferencesRepaired();
     }
+}
+
+std::vector<ReferenceField*> TaskDlgTransformedParameters::panelFields()
+{
+    std::vector<ReferenceField*> fields = TaskDlgFeatureParameters::panelFields();
+    if (parameter) {
+        for (ReferenceField* field : parameter->referenceFields()) {
+            fields.push_back(field);
+        }
+    }
+    return fields;
 }
 
 void TaskDlgTransformedParameters::referenceSelectionTaken()
