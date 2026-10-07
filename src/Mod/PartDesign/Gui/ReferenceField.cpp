@@ -252,7 +252,7 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
         entryList->setSelectionMode(QAbstractItemView::ExtendedSelection);
         entryList->setToolTip(
             isObjects()
-                ? tr("Click here, then pick in the 3D view or the tree: a pick adds a feature or "
+                ? tr("Click here, then pick features in the tree: a pick adds a feature or "
                      "takes it out.\n"
                      "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
                 : tr("Click here, then pick in the 3D view: a pick adds an element or takes it "
@@ -692,6 +692,13 @@ void ReferenceField::slotChangedObject(const App::DocumentObject& obj, const App
             redoStack.clear();
         }
         scheduleReload();
+    }
+    else if (isObjects() && &prop == &obj.Label) {
+        // A listed object renamed: its row shows the new Label (PR 154 review)
+        const auto objs = linkedObjects();
+        if (std::ranges::find(objs, &obj) != objs.end()) {
+            scheduleReload();
+        }
     }
 }
 
@@ -1225,7 +1232,7 @@ void ReferenceField::updateLook()
         }
         else if (isObjects()) {
             hint->setText(
-                tr("Select %1 in the 3D view or the tree.").arg(options.kinds.toLower())
+                tr("Select %1 in the tree.").arg(options.kinds.toLower())
             );
         }
         else {

@@ -101,7 +101,8 @@ void TaskTransformedParameters::setupUI()
     // Get the feature data
     auto pcTransformed = getObject<PartDesign::Transformed>();
 
-    // The Originals: a pick of a feature, in the 3D view or the tree, adds it or takes it out
+    // The Originals: a pick of a feature in the tree adds it or takes it out (a pick in the 3D
+    // view takes the base feature shown there)
     // (ops#150 W4; B6: the entries are objects, not Labels)
     ReferenceField::Options options;
     options.kind = ReferenceField::Kind::Objects;
@@ -255,6 +256,8 @@ void TaskTransformedParameters::onModeChanged(int mode_id)
         return;
     }
 
+    // The transaction first, so that Cancel takes the switch back (PR 154 review)
+    setupTransaction();
     auto pcTransformed = getObject<PartDesign::Transformed>();
     pcTransformed->TransformMode.setValue(mode_id);
 
@@ -264,7 +267,6 @@ void TaskTransformedParameters::onModeChanged(int mode_id)
     // The Originals field is greyed while the whole body is transformed; its entries stay, as the
     // property keeps them
     ui->groupFeatureList->setEnabled(mode == Mode::Features);
-    setupTransaction();
     recomputeFeature();
     // The tool shapes chosen with none listed: the field arms for the first pick
     if (mode == Mode::Features && originalsField && originalsField->entries().empty()) {

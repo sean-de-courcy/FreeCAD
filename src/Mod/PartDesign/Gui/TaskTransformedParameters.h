@@ -103,6 +103,13 @@ public:
         exitSelectionMode();
     }
 
+    /// A "Select reference..." pick ends unfinished: the pick mode ends and the combo shows the
+    /// property's link again, so that OK doesn't write the combo's empty entry (PR 154 review).
+    virtual void cancelReferencePick()
+    {
+        exitSelectionMode();
+    }
+
     /// The Originals field (ops#150 W4); none inside a MultiTransform.
     std::vector<ReferenceField*> referenceFields() const;
 
@@ -133,7 +140,7 @@ protected:
     /// MultiTransform's sub-task's), since they would take its picks.
     virtual void endPickModes()
     {
-        exitSelectionMode();
+        cancelReferencePick();
     }
 
     /// Recompute either this feature or the parent MultiTransform feature

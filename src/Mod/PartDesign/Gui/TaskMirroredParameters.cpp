@@ -156,6 +156,12 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
     exitSelectionMode();
 }
 
+void TaskMirroredParameters::cancelReferencePick()
+{
+    exitSelectionMode();
+    updateUI();
+}
+
 void TaskMirroredParameters::onPlaneChanged(int /*num*/)
 {
     if (blockUpdate) {

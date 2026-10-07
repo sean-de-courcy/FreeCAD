@@ -157,7 +157,7 @@ void TaskMultiTransformParameters::slotDeletedObject(const Gui::ViewProviderDocu
 void TaskMultiTransformParameters::endPickModes()
 {
     if (subTask) {
-        subTask->exitSelectionMode();
+        subTask->cancelReferencePick();
     }
     exitSelectionMode();
 }

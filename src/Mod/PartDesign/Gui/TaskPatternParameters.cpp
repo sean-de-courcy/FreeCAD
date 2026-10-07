@@ -333,6 +333,14 @@ void TaskPatternParameters::onReferenceSelectionTaken()
     }
 }
 
+void TaskPatternParameters::cancelReferencePick()
+{
+    if (selectionMode != SelectionMode::None) {
+        exitReferenceSelectionMode();
+    }
+    updateUI();
+}
+
 void TaskPatternParameters::onUpdateView(bool on)
 {
     // This might be less relevant now if recomputes are triggered by parametersChanged
