@@ -146,7 +146,8 @@ bool usedAlike(App::DocumentObject* obj,
 }
 
 // The profile or a section as the pipe takes it: a sketch whole unless a point
-std::vector<std::string> sectionElements(App::DocumentObject* obj, const std::vector<std::string>& subs)
+std::vector<std::string> sectionElements(App::DocumentObject* obj,
+                                         const std::vector<std::string>& subs)
 {
     std::vector<std::string> elements;
     for (const std::string& sub : subs) {

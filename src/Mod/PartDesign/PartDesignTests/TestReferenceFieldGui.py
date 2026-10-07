@@ -3652,6 +3652,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(block, "Face1")
         self.assertEqual(pipe.Spine[0].Name, "Spine")
         self.assertIn("edge", statusText().lower())
+        # The profile sketch's own edge is another use of it, as in stock: taken
+        self.pick(self.rodProfile, "Edge1")
+        self.assertLink(pipe.Spine, self.rodProfile, ["Edge1"])
 
     def testPipeSpineDeleteRemovesAllSelected(self):
         """B11, B12: no Object / Add edge / Remove edge buttons on the Pipe's panels; Delete on
@@ -3705,12 +3708,15 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testPipeAuxiliarySpineField(self):
         """T33: Mode Auxiliary shows the field titled "Auxiliary path"; an edge picked sets
         AuxiliarySpine (along the spine's first edge, the pipe is the 2 x 2 x 10 prism still,
-        40: the auxiliary path is parallel); the profile, spine and auxiliary spine fields share
-        one armed field across the panels; Delete on the edge leaves the sketch whole, Delete on
-        the whole entry clears it."""
+        40, axis-aligned: the auxiliary path is parallel); the profile, spine and auxiliary spine
+        fields share one armed field across the panels; Delete on the edge leaves the sketch
+        whole, Delete on the whole entry clears it."""
         pipe = self.rod("Constant")
         aux = self.auxiliarySketch()
         pipe.Spine = (self.spine, ["Edge1"])
+        # Curvilinear, the sweep is approximated: 0.12 % under 40, and its sides bulge to
+        # y = +-1.758; without it the prism is exact
+        pipe.AuxiliaryCurvilinear = False
         self.doc.recompute()
         self.edit(pipe, count=2)
         field = findField("fieldAuxiliarySpine")
@@ -3724,11 +3730,15 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(aux, "Edge1")
         self.assertLink(pipe.AuxiliarySpine, aux, ["Edge1"])
         self.assertEqual(pipe.Mode, "Auxiliary")
-        # The Auxiliary sweep is approximated: along both edges it comes out 0.7 % under the
-        # prism's 120, along one edge 0.12 % under the prism's 40 (39.951 on Windows)
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
-        self.assertAlmostEqual(pipe.Shape.Volume / 40, 1, delta=2e-3)
+        self.assertAlmostEqual(pipe.Shape.Volume / 40, 1, delta=1e-3)
+        # The volume alone doesn't show the orientation: the prism stays axis-aligned, 2 x 2 x 10
+        box = pipe.Shape.BoundBox
+        for got, want in zip(
+            (box.XMin, box.XMax, box.YMin, box.YMax, box.ZMin, box.ZMax), (-1, 1, -1, 1, 0, 10)
+        ):
+            self.assertAlmostEqual(got, want, delta=1e-3)
         spine = self.spineField()
         self.arm(spine, byFocus=False)
         self.assertFalse(armed(field), "two armed fields")

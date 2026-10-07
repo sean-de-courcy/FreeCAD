@@ -82,7 +82,8 @@ public:
     /// A whole object picked (no \a sub) as a loft's profile or section: a sketch, or a shape of
     /// wires or points (a datum point too), which the loft takes whole (Loft::getSectionShape). A
     /// solid, or a datum line or plane, gives none whole: \a why says to pick one of its faces.
-    /// A pipe takes a whole object only when it is a sketch (its own gate, PR 166 review).
+    /// Not the pipe's: Pipe::execute takes no whole object but a sketch, so its gates refuse
+    /// the others.
     static bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why);
 };
 
