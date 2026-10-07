@@ -209,13 +209,63 @@ bool runEdit(
     return true;
 }
 
+/// Whether @a text has a '#' that the parser resolves as a variable, as App's rewriteVariableRefs
+/// finds them: one followed by an identifier start, outside a `<<...>>` string and not after a
+/// word. `#Width` has one; `Part #3`, `# of`, `#1`, `Lot#A` and `<<a #b>>` don't.
+bool hasVariableRef(const QString& text)
+{
+    auto isPart = [](QChar c) {
+        return c == u'_' || c == u'@' || c.isLetterOrNumber() || c.isMark();
+    };
+    enum class Prev
+    {
+        Other,
+        Word
+    } prev = Prev::Other;
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        QChar c = text[i];
+        if (c == u' ' || c == u'\t' || c == u'\n' || c == u'\r') {
+            continue;
+        }
+        if (c == u'<' && i + 1 < text.size() && text[i + 1] == u'<') {
+            // A string, as the lexer takes one: up to `>>`, with backslash escapes, on one line.
+            qsizetype end = -1;
+            for (qsizetype j = i + 2; j < text.size(); ++j) {
+                if (text[j] == u'\\') {
+                    ++j;
+                }
+                else if (text[j] == u'\n') {
+                    break;
+                }
+                else if (text[j] == u'>') {
+                    if (j + 1 < text.size() && text[j + 1] == u'>') {
+                        end = j + 2;
+                    }
+                    break;
+                }
+            }
+            prev = end < 0 ? Prev::Other : Prev::Word;  // The rewriter's String acts as a Word.
+            i = end < 0 ? i + 1 : end - 1;
+            continue;
+        }
+        if (c == u'#' && prev == Prev::Other && i + 1 < text.size()
+            && (text[i + 1] == u'_' || text[i + 1].isLetter())) {
+            return true;
+        }
+        prev = isPart(c) ? Prev::Word : Prev::Other;
+    }
+    return false;
+}
+
 /// Whether @a text, typed for an alias or a String or Bool variable, is meant as an expression:
-/// it starts with '=', or it parses and either uses `#name` or names only things that exist, more
+/// it starts with '=', or it uses `#name`, or it parses and names only things that exist, more
 /// than a bare name or path. Any other text is stored as it is: `steel` edited to `bronze` stays a
 /// text, not a reference to nothing, and so do `Part #3` and a single word like `Label` (ops#188).
+/// A `#name` that doesn't resolve (`#Widht`, or one held by two variables) makes it an expression
+/// too, so its error is shown rather than the text stored.
 bool isExpressionText(const App::DocumentObject* owner, const std::string& text)
 {
-    if (text.starts_with('=')) {
+    if (text.starts_with('=') || hasVariableRef(QString::fromStdString(text))) {
         return true;
     }
     std::shared_ptr<App::Expression> expr;
@@ -224,9 +274,6 @@ bool isExpressionText(const App::DocumentObject* owner, const std::string& text)
     }
     catch (const Base::Exception&) {
         return false;
-    }
-    if (text.find('#') != std::string::npos) {
-        return true;
     }
     if (freecad_cast<App::VariableExpression*>(expr.get())) {
         return false;  // A bare name or path: `=Label` or `#Width` makes it a reference.
@@ -538,7 +585,8 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
     }
     if (as == As::Expression && (alias || isString || isBool) && !isExpressionText(obj, typed)) {
         if (isBool) {
-            error = tr("%1 is True or False, or an expression.").arg(QString::fromStdString(name));
+            error = tr("%1 is True or False, or an expression: start it with '=', or use #name.")
+                        .arg(QString::fromStdString(name));
             return false;
         }
         as = As::Text;
@@ -648,6 +696,8 @@ QWidget* VariablesDelegate::createEditor(
     }
     auto editor = new ExpressionLineEdit(parent);
     editor->setObjectName(QStringLiteral("expressionEditor"));
+    // Its validator refuses a leading '=' and strips it, but '=' makes a text a reference here.
+    editor->setValidator(nullptr);
     if (App::DocumentObject* obj = VariablesModel::holder(index)) {
         editor->setDocumentObject(obj);
     }

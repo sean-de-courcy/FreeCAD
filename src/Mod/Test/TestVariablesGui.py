@@ -307,19 +307,30 @@ class TestVariablesGui(unittest.TestCase):
             pump(0.3)
             return counter.count
 
-        # The baseline (ops#185): a change the hook ignores, a value, repaints as much as no
-        # change at all. Each change below must repaint more than that.
-        baseline = max(
-            repainted(lambda: None), repainted(lambda: setattr(self.varSet, "Width", 25))
-        )
-
-        self.doc.openTransaction("Delete Other")
-        self.assertGreater(repainted(lambda: self.doc.removeObject("Other")), baseline, "delete")
+        # Each change is compared with one of the same kind that changes no names (ops#185, fork
+        # PR 158 review): a delete, its undo and a change to a sheet repaint by themselves.
+        spare = self.doc.addObject("App::FeaturePython", "Spare")
+        self.doc.recompute()
+        pump(0.3)
+        counts = {}
+        self.doc.openTransaction("Delete Spare")
+        counts["delete, no names"] = repainted(lambda: self.doc.removeObject(spare.Name))
         self.doc.commitTransaction()
-        self.assertGreater(repainted(self.doc.undo), baseline, "undo of the delete")
+        counts["undo, no names"] = repainted(self.doc.undo)
+        self.doc.openTransaction("Delete Other")
+        counts["delete"] = repainted(lambda: self.doc.removeObject("Other"))
+        self.doc.commitTransaction()
+        counts["undo"] = repainted(self.doc.undo)
         self.assertIsNotNone(self.doc.getObject("Other"))
-        self.assertGreater(repainted(lambda: sheet.setAlias("A1", "Depth")), baseline, "alias")
+        counts["sheet, no names"] = repainted(lambda: sheet.setColumnWidth("A", 120))
+        counts["alias"] = repainted(lambda: sheet.setAlias("A1", "Depth"))
         editor.viewport().removeEventFilter(counter)
+        for change, control in (
+            ("delete", "delete, no names"),
+            ("undo", "undo, no names"),
+            ("alias", "sheet, no names"),
+        ):
+            self.assertGreater(counts[change], counts[control], "%s: %s" % (change, counts))
 
     def test_live_ambiguity_change(self):
         """G15. A sheet alias `Width` makes the name ambiguous: the Length row falls back to the

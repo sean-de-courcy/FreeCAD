@@ -669,12 +669,49 @@ class TestVariablesPanelGui(unittest.TestCase):
         doc.recompute()
         self.assertEqual(self.sheet.get("B1"), "Part #3")
 
-        # Set on the model: in the editor, Return would accept the completer's "Label".
-        self.assertTrue(self.model().setData(self.cell("VarSet", "Finish", EXPRESSION), "=Label"))
+        # Through the editor, whose validator would strip the '=' (fork PR 158 review).
+        self.commit("VarSet", "Finish", EXPRESSION, "=Label")
         self.assertEqual(expressionText(self.varSet, "Finish"), "Label")
+        self.commit("VarSet", "Finish", EXPRESSION, "=<<Part #3>>")
+        self.assertEqual(expressionText(self.varSet, "Finish"), "<<Part #3>>")
+        self.commit("Sheet", "Material", EXPRESSION, "=Label")
+        self.assertEqual(self.sheet.getContents("B1"), "=Label")
 
         self.commit("VarSet", "Hollow", EXPRESSION, " True")
         self.assertTrue(self.varSet.Hollow)
+
+    def test_text_values_unresolved_hash(self):
+        """A '#' where the parser resolves a variable makes the text an expression: an unknown
+        `#Widht` and an ambiguous `#Width` show their error, for a String and an alias alike.
+        A '#' anywhere else leaves it text (fork PR 158 review)."""
+        doc = self.standardDocument()
+        self.sheet.set("B1", "steel")
+        self.sheet.setAlias("B1", "Material")
+        self.varSet.addProperty("App::PropertyString", "Finish")
+        self.varSet.Finish = "matte"
+        doc.recompute()
+
+        other = doc.addObject("App::VarSet", "Other")
+        other.addProperty("App::PropertyLength", "Width")
+        doc.recompute()
+        for source, name in (("VarSet", "Finish"), ("Sheet", "Material")):
+            for text, error in (("#Widht", "Widht"), ("#Width", "ambiguous")):
+                undoCount = doc.UndoCount
+                self.commit(source, name, EXPRESSION, text)
+                self.assertEqual(doc.UndoCount, undoCount, text)
+                self.assertTrue(self.message.isVisible(), text)
+                self.assertIn(error, self.message.text(), text)
+                QTest.keyClick(self.tree.indexWidget(self.tree.currentIndex()), QtCore.Qt.Key_Escape)
+                pump(0.2)
+        self.assertEqual(self.varSet.Finish, "matte")
+        self.assertIsNone(expressionText(self.varSet, "Finish"))
+        doc.recompute()
+        self.assertEqual(self.sheet.get("B1"), "steel")
+
+        for text in ("# of", "#1", "Lot#A", "Part #A"):
+            self.commit("VarSet", "Finish", EXPRESSION, text)
+            self.assertEqual(self.varSet.Finish, text)
+            self.assertIsNone(expressionText(self.varSet, "Finish"), text)
 
     def test_collapsed_per_document(self):
         """A header collapsed in one document stays collapsed there, and a header for an object
