@@ -23,6 +23,7 @@
 
 #include <algorithm>  // FreeCAD-CH (ops#146)
 
+#include <QAbstractSpinBox>  // FreeCAD-CH (ops#146)
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -30,6 +31,7 @@
 #include <QPainter>
 #include <QTimer>
 #include <QKeyEvent>
+#include <QKeySequence>  // FreeCAD-CH (ops#146)
 #include <QLineEdit>  // FreeCAD-CH (ops#146)
 
 #include <App/Property.h>  // FreeCAD-CH (ops#146)
@@ -202,21 +204,53 @@ bool PropertyItemDelegate::editorEvent(
     return QItemDelegate::editorEvent(event, model, option, index);
 }
 
-// FreeCAD-CH (ops#146): whether a key changes what is typed (not one that ends the edit, moves
-// the focus or only holds a modifier)
-static bool isTypingKey(const QKeyEvent* event)
+// FreeCAD-CH (ops#146): whether a key or wheel event into the editor changes what it holds: a key
+// that types or deletes, not one that ends the edit, moves the cursor or the focus, copies or only
+// holds a modifier; the up/down keys and the wheel only in a spin box, which they step; nothing
+// in a read-only line edit. So a row whose dialog writes keeps it after Esc (review round 3, L-g)
+static bool changesEditor(QObject* o, QEvent* ev)
 {
-    switch (event->key()) {
+    if (auto lineEdit = qobject_cast<QLineEdit*>(o); lineEdit && lineEdit->isReadOnly()) {
+        return false;
+    }
+    const bool spinBox = qobject_cast<QAbstractSpinBox*>(o)
+        || (o->parent() && qobject_cast<QAbstractSpinBox*>(o->parent()));
+    if (ev->type() == QEvent::Wheel) {
+        return spinBox;
+    }
+    auto event = static_cast<const QKeyEvent*>(ev);
+    if (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::SelectAll)) {
+        return false;
+    }
+    const int key = event->key();
+    if (key >= Qt::Key_F1 && key <= Qt::Key_F35) {
+        return false;
+    }
+    switch (key) {
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            return spinBox;
         case Qt::Key_Escape:
         case Qt::Key_Return:
         case Qt::Key_Enter:
         case Qt::Key_Tab:
         case Qt::Key_Backtab:
+        case Qt::Key_Left:
+        case Qt::Key_Right:
+        case Qt::Key_Home:
+        case Qt::Key_End:
+        case Qt::Key_Insert:
+        case Qt::Key_Menu:
         case Qt::Key_Shift:
         case Qt::Key_Control:
         case Qt::Key_Alt:
         case Qt::Key_AltGr:
         case Qt::Key_Meta:
+        case Qt::Key_CapsLock:
+        case Qt::Key_NumLock:
+        case Qt::Key_ScrollLock:
             return false;
         default:
             return true;
@@ -233,7 +267,7 @@ bool PropertyItemDelegate::eventFilter(QObject* o, QEvent* ev)
         if (parentEditor && widget && parentEditor->activeEditor
             && (widget == parentEditor->activeEditor
                 || parentEditor->activeEditor->isAncestorOf(widget))
-            && (ev->type() == QEvent::Wheel || isTypingKey(static_cast<QKeyEvent*>(ev)))) {
+            && changesEditor(o, ev)) {
             parentEditor->editTyped = true;
         }
     }

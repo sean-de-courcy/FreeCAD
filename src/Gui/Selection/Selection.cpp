@@ -616,12 +616,14 @@ namespace
 constexpr const char* userFilterItemId = "userSelectionFilterButton";
 
 /// Removes the filter as "No Selection Filters" does, so Part's toolbar icon follows and a macro
-/// records it; directly when Part's commands aren't loaded
+/// records it. Directly when the command can't run: Part's commands aren't loaded, or no 3D view
+/// is active (the command needs one), where the button must still work (review round 3, M-A).
 void clearUserFilter()
 {
     if (Gui::Application::Instance) {
-        if (Gui::Command* cmd
-            = Gui::Application::Instance->commandManager().getCommandByName("Part_SelectFilter")) {
+        Gui::Command* cmd
+            = Gui::Application::Instance->commandManager().getCommandByName("Part_SelectFilter");
+        if (cmd && cmd->getAction() && cmd->isActive()) {
             cmd->invoke(3);
             return;
         }
@@ -651,6 +653,8 @@ void showUserFilter()
         QObject::connect(button, &QToolButton::clicked, [] { clearUserFilter(); });
         userFilterButton = button;
     }
+    // Registered anew with each filter, so hiding it from the status bar's context menu lasts only
+    // until the filter changes (persistentVisibility is off)
     if (userFilterText.empty()) {
         mainWindow->removeStatusBarItem(userFilterItemId);
         userFilterButton->hide();
