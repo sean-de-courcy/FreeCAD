@@ -123,6 +123,8 @@ public:
         bool noDependents = false;
         /// Armed when the dialog opens while it is empty.
         bool required = true;
+        /// SingleElement: Delete may clear it; an axis can't be empty (PR 159 review).
+        bool removable = true;
         /// What it takes: "Edges, faces". The label, and the hint while armed.
         QString kinds;
         /// The label when it isn't the kinds: "Neutral plane".
@@ -433,8 +435,9 @@ public:
                    ReferenceField::Writer write,
                    QObject* parent = nullptr);
 
-    /// Fills the box: the choices, then "Select reference...".
-    void setChoices(const std::vector<Choice>& choices);
+    /// Fills the box: the choices, then \a selectReference ("Select reference...", in the
+    /// panel's translation context).
+    void setChoices(const std::vector<Choice>& choices, const QString& selectReference);
     /// Shows the property: its choice, or "Select reference..." with the field under the box.
     void refresh();
     ReferenceField* field() const

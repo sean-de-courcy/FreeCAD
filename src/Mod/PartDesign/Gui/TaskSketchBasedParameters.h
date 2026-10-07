@@ -93,11 +93,13 @@ protected:
     QString make2DLabel(const App::DocumentObject* section, const std::vector<std::string>& subValues);
 
     /// An up-to-face or start reference field (ops#150 W2, W6): a face, or a datum, origin or
-    /// coordinate system's plane (linked through the system); a sketch whole is refused (B20).
-    /// \a target shows while it is armed.
+    /// coordinate system's plane (linked through the system). \a target shows while it is armed.
+    /// \a refuseWholeSketch for an up-to-face (B20): a start reference takes a sketch whole, as
+    /// the plane it lies in (ProfileBased::getStartReferenceOffset, Revolved's start angle).
     static ReferenceField::Options faceFieldOptions(
         const QString& label,
-        std::function<App::DocumentObject*()> target
+        std::function<App::DocumentObject*()> target,
+        bool refuseWholeSketch
     );
     /// While \a field is armed the profile shows, so that its lines can be picked (an axis;
     /// ops#150 W6, B18).

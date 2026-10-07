@@ -139,9 +139,11 @@ void TaskSketchBasedParameters::updateReferenceName(
     lineEdit->setProperty("FaceName", QByteArray(subName.c_str()));
 }
 
+// ops#150 W2, W6
 ReferenceField::Options TaskSketchBasedParameters::faceFieldOptions(
     const QString& label,
-    std::function<App::DocumentObject*()> target
+    std::function<App::DocumentObject*()> target,
+    bool refuseWholeSketch
 )
 {
     ReferenceField::Options options;
@@ -152,14 +154,17 @@ ReferenceField::Options TaskSketchBasedParameters::faceFieldOptions(
     options.noDependents = true;
     options.label = label;
     options.kinds = tr("A face or a plane");
-    // A sketch whole passes the face gate but gives no face (B20)
-    options.accept = [](App::DocumentObject* obj, const char* sub, std::string& why) {
-        if (obj && obj->isDerivedFrom<Part::Part2DObject>() && Base::Tools::isNullOrEmpty(sub)) {
-            why = QT_TR_NOOP("A whole sketch isn't a face: pick a face or a plane");
-            return false;
-        }
-        return true;
-    };
+    // A sketch whole passes the face gate but gives an up-to-face no face (B20)
+    if (refuseWholeSketch) {
+        options.accept = [](App::DocumentObject* obj, const char* sub, std::string& why) {
+            if (obj && obj->isDerivedFrom<Part::Part2DObject>()
+                && Base::Tools::isNullOrEmpty(sub)) {
+                why = QT_TR_NOOP("A whole sketch isn't a face: pick a face or a plane");
+                return false;
+            }
+            return true;
+        };
+    }
     // A plane of a coordinate system is linked through the system, a datum or origin plane
     // whole (as the face pick did)
     options.resolve = [](const Gui::SelectionChanges& msg,
@@ -185,6 +190,7 @@ ReferenceField::Options TaskSketchBasedParameters::faceFieldOptions(
     return options;
 }
 
+// ops#150 W6
 void TaskSketchBasedParameters::showProfileWhileArmed(ReferenceField* field)
 {
     // The lambda holds what it needs: the panel may be gone when the field disarms
@@ -206,6 +212,15 @@ void TaskSketchBasedParameters::showProfileWhileArmed(ReferenceField* field)
         if (vp && !vp->isShow()) {
             vp->show();
             *shown = profile;
+        }
+    });
+    // A dialog closed while the field is armed (resetEdit, closeDialog) never disarms it: the
+    // profile it showed hides when the field goes
+    QObject::connect(field, &QObject::destroyed, [shown]() {
+        if (auto profile = shown->getObject()) {
+            if (auto vp = Gui::Application::Instance->getViewProvider(profile)) {
+                vp->hide();
+            }
         }
     });
 }

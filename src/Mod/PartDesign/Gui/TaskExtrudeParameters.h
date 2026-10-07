@@ -264,7 +264,8 @@ private:
     /// A single-entry field of a face or plane (an up-to-face, the start reference).
     ReferenceField* createFaceField(QWidget* placeholder,
                                     const char* property,
-                                    const QString& label);
+                                    const QString& label,
+                                    bool refuseWholeSketch);
     /// Arms \a field and gives it the focus, once the dialog is up (a mode just chosen).
     void armField(ReferenceField* field);
     /// The solid before the feature: shown while a field is armed.

@@ -217,6 +217,7 @@ void TaskHelixParameters::createAxisField()
         return helix ? helix->getBaseObject(/*silent=*/true) : nullptr;
     };
     axis.required = false;
+    axis.removable = false;
     axis.once = true;
     axis.label = tr("Picked axis");
     axis.kinds = tr("A straight or circular edge, or a line");
@@ -227,9 +228,11 @@ void TaskHelixParameters::createAxisField()
         return getReferencedSelection(getObject(), msg, obj, subs) && obj;
     };
     auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
-    auto write = [this, axisSelf](App::DocumentObject* obj, const std::vector<std::string>& picked) {
+    auto write = [this, axisSelf](App::DocumentObject* obj,
+                                  const std::vector<std::string>& picked) {
         // A line or an origin axis is linked whole as {""}: getAxis() takes no axis from no subs
-        const std::vector<std::string> subs = picked.empty() ? std::vector<std::string> {""} : picked;
+        const std::vector<std::string> subs =
+            picked.empty() ? std::vector<std::string> {""} : picked;
         if (*axisSelf) {
             (*axisSelf)->assign(obj, subs);
         }
@@ -275,8 +278,9 @@ void TaskHelixParameters::fillAxisCombo(bool forceRefill)
     addSketchAxes(choices);
     addPartAxes(choices);
     // A link that is none of these shows in the row under the box (B19)
-    axisCombo->setChoices(choices);
+    axisCombo->setChoices(choices, tr("Select reference…"));
 }
+
 void TaskHelixParameters::addSketchAxes(std::vector<ReferenceCombo::Choice>& choices)
 {
     auto profile = getObject<PartDesign::ProfileBased>();
@@ -291,6 +295,7 @@ void TaskHelixParameters::addSketchAxes(std::vector<ReferenceCombo::Choice>& cho
         }
     }
 }
+
 void TaskHelixParameters::addPartAxes(std::vector<ReferenceCombo::Choice>& choices)
 {
     auto profile = getObject<PartDesign::ProfileBased>();
@@ -306,6 +311,7 @@ void TaskHelixParameters::addPartAxes(std::vector<ReferenceCombo::Choice>& choic
         }
     }
 }
+
 void TaskHelixParameters::onReferencesRepaired()
 {
     fillAxisCombo(false);
@@ -509,6 +515,7 @@ void TaskHelixParameters::writeAxis(App::DocumentObject* obj, const std::vector<
         e.reportException();
     }
 }
+
 void TaskHelixParameters::onModeChanged(int index)
 {
     propMode->setValue(index);
@@ -619,6 +626,7 @@ void TaskHelixParameters::apply()  // NOLINT
     FCMD_OBJ_CMD(tobj, "LeftHanded = " << (propLeftHanded->getValue() ? 1 : 0));
     FCMD_OBJ_CMD(tobj, "Reversed = " << (propReversed->getValue() ? 1 : 0));
 }
+
 void TaskHelixParameters::setupGizmos(ViewProviderHelix* vp)
 {
     if (!GizmoContainer::isEnabled()) {

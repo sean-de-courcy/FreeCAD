@@ -1141,6 +1141,11 @@ void ReferenceField::removeSelected()
         return;
     }
     if (isSingle()) {
+        if (!options.removable) {
+            message = tr("The reference can't be empty: pick another one.");
+            updateLook();
+            return;
+        }
         write(nullptr, {});
         return;
     }
@@ -1868,9 +1873,11 @@ ReferenceCombo::ReferenceCombo(QComboBox* combo,
             refresh();
         }
     });
+    // Written by the field itself (its undo and redo, a menu action): the same (PR 159 review)
+    connect(field, &ReferenceField::picked, this, &ReferenceCombo::refresh);
 }
 
-void ReferenceCombo::setChoices(const std::vector<Choice>& list)
+void ReferenceCombo::setChoices(const std::vector<Choice>& list, const QString& selectReference)
 {
     if (!combo) {
         return;
@@ -1886,7 +1893,7 @@ void ReferenceCombo::setChoices(const std::vector<Choice>& list)
             combo->addItem(choice.text);
             choices.emplace_back(choice.object, choice.sub);
         }
-        combo->addItem(tr("Select reference…"));
+        combo->addItem(selectReference);
     }
     refresh();
 }

@@ -157,8 +157,12 @@ void TaskRevolutionParameters::createFields()
         auto revolved = getObject<PartDesign::ProfileBased>();
         return revolved ? revolved->getBaseObject(/*silent=*/true) : nullptr;
     };
-    // The start reference and the up-to-faces: a face or a plane (ops#150 W6; B20)
-    auto faceField = [this, baseSolid](QWidget* placeholder, const char* property, const QString& label) {
+    // The start reference and the up-to-faces: a face or a plane (ops#150 W6). Only an
+    // up-to-face refuses a sketch whole (B20): a start reference takes the sketch's plane.
+    auto faceField = [this, baseSolid](QWidget* placeholder,
+                                       const char* property,
+                                       const QString& label,
+                                       bool refuseWholeSketch) {
         auto self = std::make_shared<QPointer<ReferenceField>>();
         auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
             if (*self) {
@@ -167,14 +171,18 @@ void TaskRevolutionParameters::createFields()
             recomputeFeature();
             setGizmoPositions();
         };
-        auto field = new ReferenceField(getObject(), property, faceFieldOptions(label, baseSolid), write, proxy);
+        auto options = faceFieldOptions(label, baseSolid, refuseWholeSketch);
+        auto field = new ReferenceField(getObject(), property, options, write, proxy);
         *self = field;
         field->takePlaceOf(placeholder);
         return field;
     };
-    startField = faceField(ui->startReferenceFieldPlaceholder, "StartReference", tr("Start reference"));
-    m_side1.faceField = faceField(ui->faceFieldPlaceholder, "UpToFace", tr("Face"));
-    m_side2.faceField = faceField(ui->faceFieldPlaceholder2, "UpToFace2", tr("Face"));
+    startField = faceField(ui->startReferenceFieldPlaceholder,
+                           "StartReference",
+                           tr("Start reference"),
+                           /*refuseWholeSketch=*/false);
+    m_side1.faceField = faceField(ui->faceFieldPlaceholder, "UpToFace", tr("Face"), true);
+    m_side2.faceField = faceField(ui->faceFieldPlaceholder2, "UpToFace2", tr("Face"), true);
 
     // The axis: the box's choices, and a picked edge or line in the row under it, through the
     // cross-body question as before
@@ -183,6 +191,7 @@ void TaskRevolutionParameters::createFields()
     axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
     axis.target = baseSolid;
     axis.required = false;
+    axis.removable = false;
     axis.once = true;
     axis.label = tr("Picked axis");
     axis.kinds = tr("A straight or circular edge, or a line");
@@ -193,21 +202,23 @@ void TaskRevolutionParameters::createFields()
         return getReferencedSelection(getObject(), msg, obj, subs) && obj;
     };
     auto axisSelf = std::make_shared<QPointer<ReferenceField>>();
-    auto writeAxis = [this, axisSelf](App::DocumentObject* obj, const std::vector<std::string>& picked) {
+    auto writeField = [this, axisSelf](App::DocumentObject* obj,
+                                       const std::vector<std::string>& picked) {
         // A line or an origin axis is linked whole as {""}: getAxis() takes no axis from no subs
-        const std::vector<std::string> subs = picked.empty() ? std::vector<std::string> {""} : picked;
+        const std::vector<std::string> subs =
+            picked.empty() ? std::vector<std::string> {""} : picked;
         if (*axisSelf) {
             (*axisSelf)->assign(obj, subs);
         }
-        this->writeAxis(obj, subs);
+        writeAxis(obj, subs);
     };
     // The box is filled by fillAxisCombo (the .ui's entries are placeholders)
     ui->axis->clear();
-    auto axisField = new ReferenceField(getObject(), "ReferenceAxis", axis, writeAxis, proxy);
+    auto axisField = new ReferenceField(getObject(), "ReferenceAxis", axis, writeField, proxy);
     *axisSelf = axisField;
     axisField->takePlaceOf(ui->axisFieldPlaceholder);
     axisField->hide();
-    axisCombo = new ReferenceCombo(ui->axis, axisField, propReferenceAxis, writeAxis, this);
+    axisCombo = new ReferenceCombo(ui->axis, axisField, propReferenceAxis, writeField, this);
     // The profile's lines can be picked while the row is armed
     showProfileWhileArmed(axisField);
 }
@@ -215,8 +226,8 @@ void TaskRevolutionParameters::createFields()
 std::vector<ReferenceField*> TaskRevolutionParameters::referenceFields() const
 {
     std::vector<ReferenceField*> fields;
-    for (ReferenceField* field :
-         {startField, m_side1.faceField, m_side2.faceField, axisCombo ? axisCombo->field() : nullptr}) {
+    ReferenceField* axisField = axisCombo ? axisCombo->field() : nullptr;
+    for (ReferenceField* field : {startField, m_side1.faceField, m_side2.faceField, axisField}) {
         if (field) {
             fields.push_back(field);
         }
@@ -244,6 +255,7 @@ void TaskRevolutionParameters::armField(ReferenceField* field)
         }
     });
 }
+
 void TaskRevolutionParameters::updateStartUI()
 {
     const auto mode = static_cast<StartMode>(ui->startMode->currentIndex());
@@ -260,6 +272,7 @@ void TaskRevolutionParameters::updateStartUI()
         }
     }
 }
+
 void TaskRevolutionParameters::createSideControllers()
 {
     auto rev = getObject<PartDesign::Revolved>();
@@ -297,6 +310,7 @@ void TaskRevolutionParameters::onReferencesRepaired()
 {
     fillAxisCombo(false);
 }
+
 void TaskRevolutionParameters::translateModeList(QComboBox* box, int index)
 {
     box->clear();
@@ -345,9 +359,9 @@ void TaskRevolutionParameters::fillAxisCombo(bool forceRefill)
         choices.push_back({QObject::tr("Vertical sketch axis"), pcSketch, "V_Axis"});
         choices.push_back({QObject::tr("Horizontal sketch axis"), pcSketch, "H_Axis"});
         for (int i = 0; i < pcSketch->getAxisCount(); i++) {
-            choices.push_back(
-                {QObject::tr("Construction line %1").arg(i + 1), pcSketch, "Axis" + std::to_string(i)}
-            );
+            choices.push_back({QObject::tr("Construction line %1").arg(i + 1),
+                               pcSketch,
+                               "Axis" + std::to_string(i)});
         }
     }
 
@@ -365,8 +379,9 @@ void TaskRevolutionParameters::fillAxisCombo(bool forceRefill)
     }
 
     // A link that is none of these shows in the row under the box (B19)
-    axisCombo->setChoices(choices);
+    axisCombo->setChoices(choices, tr("Select reference…"));
 }
+
 void TaskRevolutionParameters::updateSideUI(
     const SideController& side,
     Mode mode,
@@ -493,6 +508,7 @@ void TaskRevolutionParameters::onStartModeChanged(int type)
     recomputeFeature();
     setGizmoPositions();
 }
+
 void TaskRevolutionParameters::onStartOffsetChanged(double angle)
 {
     getObject<PartDesign::Revolved>()->StartOffset.setValue(angle);
@@ -517,11 +533,8 @@ void TaskRevolutionParameters::writeAxis(
     try {
         // A picked axis turns the revolution as a chosen one does
         bool reversed = propReversed->getValue();
-        if (auto revolution = freecad_cast<PartDesign::Revolution*>(pcRevolution)) {
-            reversed = revolution->suggestReversed();
-        }
-        if (auto groove = freecad_cast<PartDesign::Groove*>(pcRevolution)) {
-            reversed = groove->suggestReversed();
+        if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
+            reversed = revolved->suggestReversed();
         }
         if (reversed != propReversed->getValue()) {
             propReversed->setValue(reversed);
@@ -536,6 +549,7 @@ void TaskRevolutionParameters::writeAxis(
         e.reportException();
     }
 }
+
 void TaskRevolutionParameters::onModeChangedSide1(int index)
 {
     onModeChanged(index, Side::First);
@@ -690,6 +704,7 @@ void TaskRevolutionParameters::apply()
         FCMD_OBJ_CMD(tobj, "UpToFace2 = None");
     }
 }
+
 void TaskRevolutionParameters::setupGizmos(ViewProvider* vp)
 {
     if (!GizmoContainer::isEnabled()) {
