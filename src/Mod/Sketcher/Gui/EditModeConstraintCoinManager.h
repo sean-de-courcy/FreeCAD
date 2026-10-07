@@ -168,6 +168,10 @@ public:
 
     SoSeparator* getConstraintIdSeparator(int i) const;
 
+    /// The centre of constraint i's datum label text, in sketch coordinates. False if constraint
+    /// i has no datum label drawn.
+    bool getDatumLabelTextCenter(int i, Base::Vector3d& center) const;
+
     void createEditModeInventorNodes();
 
 private:

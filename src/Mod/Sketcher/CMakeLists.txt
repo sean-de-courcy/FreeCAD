@@ -44,6 +44,8 @@ if(BUILD_GUI)
           SketcherTests/TestSketchMissingExternalGui.py
           SketcherTests/TestSketchBrokenExternalTreeGui.py
           SketcherTests/TestSketchEditCameraGui.py
+          SketcherTests/TestDimensionInPlaceGui.py
+          SketcherTests/TestSketchCameraOnEditGui.py
     )
 endif(BUILD_GUI)
 

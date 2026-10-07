@@ -2308,3 +2308,8 @@ SoSeparator* EditModeCoinManager::getRootEditNode()
 {
     return editModeScenegraphNodes.EditRoot;
 }
+
+bool EditModeCoinManager::getDatumLabelTextCenter(int constrId, Base::Vector3d& center) const
+{
+    return pEditModeConstraintCoinManager->getDatumLabelTextCenter(constrId, center);
+}

@@ -485,6 +485,7 @@ void SketcherSettingsDisplay::saveSettings()
     ui->viewScalingFactor->onSave();
     ui->SegmentsPerGeometry->onSave();
     ui->dialogOnDistanceConstraint->onSave();
+    ui->dimensionValueInPlace->onSave();
     ui->continueMode->onSave();
     ui->constraintMode->onSave();
     ui->checkBoxHideUnits->onSave();
@@ -496,6 +497,7 @@ void SketcherSettingsDisplay::saveSettings()
     ui->checkBoxTVHideDependent->onSave();
     ui->checkBoxTVShowLinks->onSave();
     ui->checkBoxTVShowSupport->onSave();
+    ui->checkBoxOrientViewOnEdit->onSave();
     ui->checkBoxTVRestoreCamera->onSave();
     ui->checkBoxTVForceOrtho->onSave();
     ui->checkBoxTVSectionView->onSave();
@@ -511,6 +513,8 @@ void SketcherSettingsDisplay::loadSettings()
     ui->viewScalingFactor->onRestore();
     ui->SegmentsPerGeometry->onRestore();
     ui->dialogOnDistanceConstraint->onRestore();
+    ui->dimensionValueInPlace->onRestore();
+    ui->dimensionValueInPlace->setEnabled(ui->dialogOnDistanceConstraint->isChecked());
     ui->continueMode->onRestore();
     ui->constraintMode->onRestore();
     ui->checkBoxHideUnits->onRestore();
@@ -522,6 +526,7 @@ void SketcherSettingsDisplay::loadSettings()
     ui->checkBoxTVHideDependent->onRestore();
     ui->checkBoxTVShowLinks->onRestore();
     ui->checkBoxTVShowSupport->onRestore();
+    ui->checkBoxOrientViewOnEdit->onRestore();
     ui->checkBoxTVRestoreCamera->onRestore();
     ui->checkBoxTVForceOrtho->onRestore();
     this->ui->checkBoxTVForceOrtho->setEnabled(this->ui->checkBoxTVRestoreCamera->isChecked());

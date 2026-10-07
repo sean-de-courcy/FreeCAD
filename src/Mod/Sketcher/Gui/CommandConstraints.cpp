@@ -41,8 +41,6 @@
 
 #include <BRepBndLib.hxx>
 
-#include <boost/range/adaptor/reversed.hpp>
-
 #include <App/Application.h>
 #include <Base/Tools.h>
 #include <Base/Tools2D.h>
@@ -433,16 +431,16 @@ void finishDatumConstraint(Gui::Command* cmd,
         vp->draw(false, false);// Redraw
     }
 
-    bool show = hGrp->GetBool("ShowDialogOnDistanceConstraint", true);
-
-    // Ask for the value of the distance immediately
-    if (show && isDriving) {
-        EditDatumDialog editDatumDialog(cmd->transactionID(), sketch, ConStr.size() - 1);
+    // Ask for the value of the distance immediately. askDatumValues closes the transaction.
+    if (isDriving) {
+        int transactionID = cmd->transactionID();
         cmd->resetTransactionID();
-        editDatumDialog.exec();
+        askDatumValues(sketch,
+                       {static_cast<int>(lastConstraintIndex)},
+                       transactionID,
+                       DatumRequest::NewConstraints);
     }
     else {
-        // no dialog was shown so commit the command
         cmd->commitCommand();
     }
 
@@ -2875,26 +2873,12 @@ protected:
             return;
         }
 
-        // Ask for the value of datum constraints
+        // Ask for the values of the dimensions, in placement order (a lock's DistanceX, then its
+        // DistanceY). askDatumValues closes the transaction once, so the placement is one undo
+        // step.
+        askDatumValues(Obj, cstrIndexes, currentTransactionID, DatumRequest::NewConstraints);
+
         ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Sketcher");
-        bool show = hGrp->GetBool("ShowDialogOnDistanceConstraint", true);
-        const std::vector<Sketcher::Constraint*>& ConStr = Obj->Constraints.getValues();
-
-        bool commandHandledInEditDatum = false;
-        for (int index : cstrIndexes | boost::adaptors::reversed) {
-            if (show && ConStr[index]->isDimensional() && ConStr[index]->isDriving) {
-                commandHandledInEditDatum = true;
-                EditDatumDialog editDatumDialog(currentTransactionID, sketchgui, index);
-                editDatumDialog.exec();
-                if (!editDatumDialog.isSuccess()) {
-                    break;
-                }
-            }
-        }
-
-        if (!commandHandledInEditDatum) {
-            commitCommand();
-        }
 
         // This code enables the continuous creation mode.
         bool continuousMode = hGrp->GetBool("ContinuousCreationMode", true);

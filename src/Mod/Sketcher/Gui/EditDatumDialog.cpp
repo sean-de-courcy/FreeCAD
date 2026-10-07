@@ -27,14 +27,22 @@
 #include <Inventor/sensors/SoSensor.h>
 #include <QApplication>
 #include <QDialog>
+#include <QHBoxLayout>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <functional>
 
 
 #include <Base/Tools.h>
 #include <Gui/Application.h>
+#include <App/Expression.h>
+#include <App/ExpressionParser.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Notifications.h>
+#include <Gui/PrefWidgets.h>
+#include <Gui/QuantitySpinBox.h>
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
 #include <Gui/Document.h>
@@ -77,6 +85,147 @@ bool SketcherGui::checkConstraintName(const Sketcher::SketchObject* sketch, std:
 }
 
 
+namespace
+{
+
+/// The popup of EditDatumDialog::execInPlace. A click outside closes a popup through reject():
+/// that applies valid input, or keeps the current value. Esc doesn't come here (eventFilter).
+class DatumInPlacePopup: public QDialog
+{
+public:
+    DatumInPlacePopup(QWidget* parent, std::function<bool()> apply)
+        : QDialog(parent, Qt::Popup | Qt::FramelessWindowHint)
+        , apply(std::move(apply))
+    {}
+
+    void reject() override
+    {
+        done(apply() ? EditDatumDialog::InPlaceApplied : EditDatumDialog::InPlaceKept);
+    }
+
+private:
+    std::function<bool()> apply;
+};
+
+/// Whether an expression refers to a property, e.g. a spreadsheet alias, rather than being a
+/// plain value like "10+5" or "2*3 in".
+bool refersToProperty(const App::Expression* expr)
+{
+    return expr && !expr->getIdentifiers().empty();
+}
+
+/// Places a widget centred on a point, inside a rectangle.
+void placeCentred(QWidget* widget, const QPoint& centre, const QRect& area)
+{
+    QSize size = widget->size();
+    int x = centre.x() - size.width() / 2;
+    int y = centre.y() - size.height() / 2;
+    x = std::max(area.left(), std::min(x, area.right() - size.width()));
+    y = std::max(area.top(), std::min(y, area.bottom() - size.height()));
+    widget->move(x, y);
+}
+
+void finishDatumTransaction(Sketcher::SketchObject* sketch, int transactionID)
+{
+    Gui::Command::commitCommand(transactionID);
+
+    // As in EditDatumDialog::accepted: see the work-around noted there.
+    sketch->ExpressionEngine.execute();
+    sketch->solve();
+    tryAutoRecompute(sketch);
+}
+
+}  // namespace
+
+void SketcherGui::askDatumValues(
+    Sketcher::SketchObject* sketch,
+    const std::vector<int>& constrIds,
+    int transactionID,
+    DatumRequest request
+)
+{
+    ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher"
+    );
+    bool newConstraints = request == DatumRequest::NewConstraints;
+    bool show = !newConstraints || hGrp->GetBool("ShowDialogOnDistanceConstraint", true);
+    bool inPlace = hGrp->GetBool("DimensionValueInPlace", true);
+
+    std::vector<int> ids;
+    const std::vector<Sketcher::Constraint*>& constraints = sketch->Constraints.getValues();
+    for (int id : constrIds) {
+        if (id >= 0 && id < static_cast<int>(constraints.size())
+            && constraints[id]->isDimensional() && constraints[id]->isDriving) {
+            ids.push_back(id);
+        }
+    }
+
+    auto closeUnchanged = [&]() {
+        // New constraints stay as placed; an existing one is unchanged.
+        if (newConstraints) {
+            Gui::Command::commitCommand(transactionID);
+        }
+        else {
+            Gui::Command::abortCommand(transactionID);
+        }
+    };
+
+    if (!show || ids.empty()) {
+        closeUnchanged();
+        return;
+    }
+
+    if (sketch->hasConflicts()) {
+        Gui::TranslatedUserWarning(
+            sketch,
+            QObject::tr("Dimensional constraint"),
+            QObject::tr(
+                "Not allowed to edit the datum because the "
+                "sketch contains conflicting constraints"
+            )
+        );
+        closeUnchanged();
+        return;
+    }
+
+    if (!inPlace) {
+        for (int id : ids) {
+            EditDatumDialog dialog(transactionID, sketch, id);
+            dialog.setCommitOnAccept(false);
+            if (dialog.exec() != QDialog::Accepted || !dialog.isSuccess()) {
+                // Cancel and a failed value have aborted already, as the dialog always did.
+                Gui::Command::abortCommand(transactionID);
+                return;
+            }
+        }
+        finishDatumTransaction(sketch, transactionID);
+        return;
+    }
+
+    bool kept = false;
+    std::size_t current = 0;
+    while (current < ids.size()) {
+        EditDatumDialog field(transactionID, sketch, ids[current]);
+        int result = field.execInPlace(current + 1 < ids.size(), current > 0);
+        if (result == EditDatumDialog::InPlaceNext) {
+            ++current;
+        }
+        else if (result == EditDatumDialog::InPlacePrevious) {
+            --current;
+        }
+        else {
+            kept = result == EditDatumDialog::InPlaceKept;
+            break;
+        }
+    }
+
+    if (kept && !newConstraints) {
+        Gui::Command::abortCommand(transactionID);
+        return;
+    }
+    finishDatumTransaction(sketch, transactionID);
+}
+
 EditDatumDialog::EditDatumDialog(int tid, ViewProviderSketch* vp, int ConstrNbr)
     : ConstrNbr(ConstrNbr)
     , success(false)
@@ -90,6 +239,7 @@ EditDatumDialog::EditDatumDialog(int tid, ViewProviderSketch* vp, int ConstrNbr)
 EditDatumDialog::EditDatumDialog(int tid, Sketcher::SketchObject* pcSketch, int ConstrNbr)
     : sketch(pcSketch)
     , ConstrNbr(ConstrNbr)
+    , success(false)
     , transactionID(tid)
 {
     const std::vector<Sketcher::Constraint*>& Constraints = sketch->Constraints.getValues();
@@ -98,6 +248,64 @@ EditDatumDialog::EditDatumDialog(int tid, Sketcher::SketchObject* pcSketch, int 
 
 EditDatumDialog::~EditDatumDialog()
 {}
+
+void EditDatumDialog::setCommitOnAccept(bool commit)
+{
+    commitOnAccept = commit;
+}
+
+void EditDatumDialog::setupValueEdit(QString& title, QString& label)
+{
+    Base::Quantity init_val;
+    double datum = Constr->getValue();
+
+    valueEdit->setEntryName(QByteArray("DatumValue"));
+    if (Constr->Type == Sketcher::Angle) {
+        datum = Base::toDegrees<double>(datum);
+        title = tr("Insert Angle");
+        init_val.setUnit(Base::Unit::Angle);
+        label = tr("Angle");
+        valueEdit->setParamGrpPath(QByteArray("User parameter:BaseApp/History/SketcherAngle"));
+    }
+    else if (Constr->Type == Sketcher::Radius) {
+        title = tr("Insert Radius");
+        init_val.setUnit(Base::Unit::Length);
+        label = tr("Radius");
+        valueEdit->setParamGrpPath(QByteArray("User parameter:BaseApp/History/SketcherLength"));
+    }
+    else if (Constr->Type == Sketcher::Diameter) {
+        title = tr("Insert Diameter");
+        init_val.setUnit(Base::Unit::Length);
+        label = tr("Diameter");
+        valueEdit->setParamGrpPath(QByteArray("User parameter:BaseApp/History/SketcherLength"));
+    }
+    else if (Constr->Type == Sketcher::Weight) {
+        title = tr("Insert Weight");
+        label = tr("Weight");
+        valueEdit->setParamGrpPath(QByteArray("User parameter:BaseApp/History/SketcherWeight"));
+    }
+    else if (Constr->Type == Sketcher::SnellsLaw) {
+        title = tr("Refractive Index Ratio", "Constraint_SnellsLaw");
+        label = tr("Ratio n2/n1:", "Constraint_SnellsLaw");
+        valueEdit->setParamGrpPath(
+            QByteArray("User parameter:BaseApp/History/SketcherRefrIndexRatio")
+        );
+        valueEdit->setSingleStep(0.05);
+    }
+    else {
+        title = tr("Insert Length");
+        init_val.setUnit(Base::Unit::Length);
+        label = tr("Length");
+        valueEdit->setParamGrpPath(QByteArray("User parameter:BaseApp/History/SketcherLength"));
+    }
+
+    init_val.setValue(datum);
+
+    valueEdit->setValue(init_val);
+    valueEdit->pushToHistory();
+    valueEdit->selectNumber();
+    valueEdit->bind(sketch->Constraints.createPath(ConstrNbr));
+}
 
 int EditDatumDialog::exec(bool atCursor)
 {
@@ -113,81 +321,34 @@ int EditDatumDialog::exec(bool atCursor)
                     "sketch contains conflicting constraints"
                 )
             );
+            // Close the caller's transaction: nothing has changed.
+            Gui::Command::abortCommand(transactionID);
             return QDialog::Rejected;
         }
-
-        Base::Quantity init_val;
 
         QDialog dlg(Gui::getMainWindow());
         if (!ui_ins_datum) {
             ui_ins_datum.reset(new Ui_InsertDatum);
             ui_ins_datum->setupUi(&dlg);
         }
-        double datum = Constr->getValue();
+        valueEdit = ui_ins_datum->labelEdit;
 
         bool showRadiusDiameterBtns = Constr->Type == Sketcher::Radius
             || Constr->Type == Sketcher::Diameter;
         ui_ins_datum->rbRadius->setVisible(showRadiusDiameterBtns);
         ui_ins_datum->rbDiameter->setVisible(showRadiusDiameterBtns);
-
-        ui_ins_datum->labelEdit->setEntryName(QByteArray("DatumValue"));
-        if (Constr->Type == Sketcher::Angle) {
-            datum = Base::toDegrees<double>(datum);
-            dlg.setWindowTitle(tr("Insert Angle"));
-            init_val.setUnit(Base::Unit::Angle);
-            ui_ins_datum->label->setText(tr("Angle"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherAngle")
-            );
-        }
-        else if (Constr->Type == Sketcher::Radius) {
-            dlg.setWindowTitle(tr("Insert Radius"));
-            init_val.setUnit(Base::Unit::Length);
-            ui_ins_datum->label->setText(tr("Radius"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherLength")
-            );
+        if (Constr->Type == Sketcher::Radius) {
             ui_ins_datum->rbRadius->setChecked(true);
         }
         else if (Constr->Type == Sketcher::Diameter) {
-            dlg.setWindowTitle(tr("Insert Diameter"));
-            init_val.setUnit(Base::Unit::Length);
-            ui_ins_datum->label->setText(tr("Diameter"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherLength")
-            );
             ui_ins_datum->rbDiameter->setChecked(true);
         }
-        else if (Constr->Type == Sketcher::Weight) {
-            dlg.setWindowTitle(tr("Insert Weight"));
-            ui_ins_datum->label->setText(tr("Weight"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherWeight")
-            );
-        }
-        else if (Constr->Type == Sketcher::SnellsLaw) {
-            dlg.setWindowTitle(tr("Refractive Index Ratio", "Constraint_SnellsLaw"));
-            ui_ins_datum->label->setText(tr("Ratio n2/n1:", "Constraint_SnellsLaw"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherRefrIndexRatio")
-            );
-            ui_ins_datum->labelEdit->setSingleStep(0.05);
-        }
-        else {
-            dlg.setWindowTitle(tr("Insert Length"));
-            init_val.setUnit(Base::Unit::Length);
-            ui_ins_datum->label->setText(tr("Length"));
-            ui_ins_datum->labelEdit->setParamGrpPath(
-                QByteArray("User parameter:BaseApp/History/SketcherLength")
-            );
-        }
 
-        init_val.setValue(datum);
-
-        ui_ins_datum->labelEdit->setValue(init_val);
-        ui_ins_datum->labelEdit->pushToHistory();
-        ui_ins_datum->labelEdit->selectNumber();
-        ui_ins_datum->labelEdit->bind(sketch->Constraints.createPath(ConstrNbr));
+        QString title;
+        QString label;
+        setupValueEdit(title, label);
+        dlg.setWindowTitle(title);
+        ui_ins_datum->label->setText(label);
         ui_ins_datum->name->setText(QString::fromStdString(Constr->Name));
 
         ui_ins_datum->cbDriving->setChecked(!Constr->isDriving);
@@ -227,6 +388,194 @@ int EditDatumDialog::exec(bool atCursor)
     }
 
     return QDialog::Rejected;
+}
+
+int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
+{
+    if (!Constr->isDimensional()) {
+        return InPlaceKept;
+    }
+
+    DatumInPlacePopup popup(Gui::getMainWindow(), [this]() { return applyInPlace(); });
+    popup.setObjectName(QStringLiteral("SketcherDatumInPlace"));
+    popup.setAttribute(Qt::WA_NoMouseReplay);  // the click that closes it does nothing else
+
+    auto* layout = new QHBoxLayout(&popup);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* box = new Gui::PrefQuantitySpinBox(&popup);
+    box->setObjectName(QStringLiteral("SketcherDatumInPlaceValue"));
+    box->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    box->setFrame(false);
+    layout->addWidget(box);
+    valueEdit = box;
+
+    QString title;
+    QString label;
+    setupValueEdit(title, label);
+    box->setToolTip(label);
+
+    QFontMetrics metrics(box->font());
+    box->setMinimumWidth(std::max(80, metrics.horizontalAdvance(box->text()) + 24));
+    popup.adjustSize();
+
+    inPlacePopup = &popup;
+    inPlaceHasNext = hasNext;
+    inPlaceHasPrevious = hasPrevious;
+    box->installEventFilter(this);
+    if (auto* edit = box->findChild<QLineEdit*>()) {
+        edit->installEventFilter(this);
+    }
+
+    QPoint centre;
+    QRect area;
+    auto* vp = freecad_cast<ViewProviderSketch*>(
+        Gui::Application::Instance->getViewProvider(sketch)
+    );
+    if (!vp || !vp->getConstraintLabelScreenPos(ConstrNbr, centre, area)) {
+        // The label isn't drawn: at the cursor, inside the main window, as the dialog does.
+        centre = QCursor::pos();
+        area = Gui::getMainWindow()->geometry();
+    }
+    placeCentred(&popup, centre, area);
+
+    popup.show();
+    box->setFocus();
+    box->selectNumber();
+    int result = popup.exec();
+
+    inPlacePopup = nullptr;
+    valueEdit = nullptr;
+    return result;
+}
+
+bool EditDatumDialog::eventFilter(QObject* watched, QEvent* event)
+{
+    if (!inPlacePopup
+        || (event->type() != QEvent::KeyPress && event->type() != QEvent::ShortcutOverride)) {
+        return QObject::eventFilter(watched, event);
+    }
+
+    auto* keyEvent = static_cast<QKeyEvent*>(event);
+    int key = keyEvent->key();
+    bool fieldKey = key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Tab
+        || key == Qt::Key_Backtab || key == Qt::Key_Escape;
+    if (!fieldKey) {
+        return QObject::eventFilter(watched, event);
+    }
+    if (event->type() == QEvent::ShortcutOverride) {
+        // These keys belong to the field, not to the Sketcher's shortcuts.
+        event->accept();
+        return true;
+    }
+
+    QDialog* popup = inPlacePopup;
+    if (key == Qt::Key_Escape) {
+        popup->done(InPlaceKept);
+    }
+    else if (key == Qt::Key_Backtab) {
+        if (inPlaceHasPrevious && applyInPlace()) {
+            popup->done(InPlacePrevious);
+        }
+    }
+    else if (applyInPlace()) {
+        popup->done(key == Qt::Key_Tab && inPlaceHasNext ? InPlaceNext : InPlaceApplied);
+    }
+    return true;
+}
+
+bool EditDatumDialog::applyInPlace()
+{
+    if (!valueEdit) {
+        return false;
+    }
+
+    try {
+        applyValue();
+        valueEdit->setStyleSheet(QString());
+        return true;
+    }
+    catch (const Base::Exception& e) {
+        if (sketch->noRecomputes) {  // as in accepted(): the solver's information may be stale
+            sketch->solve();
+        }
+        valueEdit->setStyleSheet(QStringLiteral("color: red;"));
+        valueEdit->setToolTip(QString::fromUtf8(e.what()));
+        return false;
+    }
+}
+
+void EditDatumDialog::applyValue()
+{
+    if (valueEdit->hasExpression()) {
+        // A formula from the formula editor ('=').
+        valueEdit->apply();
+        return;
+    }
+
+    QString text = valueEdit->text().trimmed();
+    std::shared_ptr<App::Expression> expr;
+    try {
+        expr = App::ExpressionParser::parse(sketch, text.toUtf8().constData());
+    }
+    catch (const Base::Exception&) {
+        // Not an expression as it stands, e.g. a value in the user's locale: the field reads it.
+    }
+
+    if (refersToProperty(expr.get())) {
+        // A spreadsheet alias or another property: link to it. Its value goes through setDatum
+        // first, which refuses values the constraint can't take.
+        App::ExpressionPtr result = expr->eval();
+        auto* number = freecad_cast<App::NumberExpression*>(result.get());
+        if (!number) {
+            throw Base::ValueError("The expression doesn't give a number");
+        }
+        Base::Quantity quantity = number->getQuantity();
+        if (Constr->Type == Sketcher::Angle && quantity.isDimensionless()) {
+            quantity.setUnit(Base::Unit::Angle);  // degrees, as the expression engine reads it
+        }
+        auto unitString = Base::Tools::escapeQuotesFromString(quantity.getUnit().getString());
+        Gui::cmdAppObjectArgs(
+            sketch,
+            "setDatum(%i,App.Units.Quantity('%.12g %s'))",
+            ConstrNbr,
+            quantity.getValue(),
+            unitString
+        );
+
+        std::string exprString = Base::Tools::escapedUnicodeFromUtf8(expr->toString().c_str());
+        exprString = Base::Tools::escapeQuotesFromString(exprString);
+        Gui::cmdAppObjectArgs(
+            sketch,
+            "setExpression('%s', u'%s')",
+            sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
+            exprString
+        );
+        return;
+    }
+
+    if (!valueEdit->hasValidInput()) {
+        throw Base::ValueError("Invalid value");
+    }
+
+    Base::Quantity newQuant = valueEdit->value();
+    if (Constr->Type != Sketcher::SnellsLaw && Constr->Type != Sketcher::Weight
+        && newQuant.isDimensionless()) {
+        throw Base::ValueError("Invalid value");
+    }
+
+    valueEdit->pushToHistory();
+    double newDatum = newQuant.getValue();
+    auto unitString = Base::Tools::escapeQuotesFromString(newQuant.getUnit().getString());
+
+    performAutoScale(newDatum);
+
+    Gui::cmdAppObjectArgs(
+        sketch,
+        "setDatum(%i,App.Units.Quantity('%.8g %s'))",
+        ConstrNbr,
+        newDatum,
+        unitString
+    );
 }
 
 void EditDatumDialog::typeChanged(bool checked)
@@ -311,6 +660,12 @@ void EditDatumDialog::accepted()
                     ConstrNbr,
                     constraintName.c_str()
                 );
+            }
+
+            if (!commitOnAccept) {
+                // The caller commits once for all its constraints (askDatumValues).
+                success = true;
+                return;
             }
 
             Gui::Command::commitCommand(transactionID);
