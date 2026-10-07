@@ -8,6 +8,8 @@ from SketcherTests.TestAutoScaleNamesGui import TestAutoScaleNamesGui
 from SketcherTests.TestSketchMissingExternalGui import TestSketchMissingExternalGui
 from SketcherTests.TestSketchBrokenExternalTreeGui import TestSketchBrokenExternalTreeGui
 from SketcherTests.TestSketchEditCameraGui import TestSketchEditCameraGui
+from SketcherTests.TestDimensionInPlaceGui import TestDimensionInPlaceGui
+from SketcherTests.TestSketchCameraOnEditGui import TestSketchCameraOnEditGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -21,5 +23,7 @@ from SketcherTests.TestSketchEditCameraGui import TestSketchEditCameraGui
     and TestSketchMissingExternalGui
     and TestSketchBrokenExternalTreeGui
     and TestSketchEditCameraGui
+    and TestDimensionInPlaceGui
+    and TestSketchCameraOnEditGui
     else False
 )

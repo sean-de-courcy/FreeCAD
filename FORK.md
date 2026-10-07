@@ -165,7 +165,8 @@ names it.
 | `fix/161-broken-external-flag-nits` | fix | ops#161 | - | `integration` `5cf6c77dc9` | `0883f369ce` (fork PR 137), 2026-10-06 | the sketch's broken-link tooltip: one walk of the links per hover, and the elements named as old names |
 | `fix/158-parked-target-id` | fix | ops#158 | - | `integration` `8361a07aaf` | `640c4fba6b` (fork PR 135), 2026-10-07 | never (fork feature) |
 | `fix/166-parked-marking-nits` | fix | ops#166 | - | `integration` `0883f369ce` | `699c57a8cc` (fork PR 136), 2026-10-07 | never (fork feature) |
-| `fix/165-rt-target-id` | fix | ops#165 | - | fork PR 135 `5c70af9d49` | (fork PR 138) | never (fork feature) |
+| `fix/165-rt-target-id` | fix | ops#165 | - | fork PR 135 `5c70af9d49` | `5071d55b23` (fork PR 138), 2026-10-07 | never (fork feature) |
+| `feat/145-dimension-in-place` | feat | ops#145 | - | `integration` `640c4fba6b` | (fork PR 139) | never (fork feature). Changes upstream behaviour: opening a sketch no longer turns or fits the view by default (`OrientViewOnEdit`), a new dimension's value is typed at its label and Esc keeps the measured value (`DimensionValueInPlace`), the Dimension tool asks in placement order. Outside Sketcher: `Part/Gui/ViewProviderGridExtension.cpp` (grid guards). Upstream edits to `EditDatumDialog::exec` and `ViewProviderSketch::setEditViewer` will conflict |
 
 ## Fork-only commits in carried topics
 

@@ -309,6 +309,10 @@ public:
     SoSeparator* getRootEditNode();
     //@}
 
+    /// The centre of a constraint's datum label text, in sketch coordinates. False if the
+    /// constraint has no datum label drawn.
+    bool getDatumLabelTextCenter(int constrId, Base::Vector3d& center) const;
+
     /** @name update coin colors*/
     //@{
     void updateColor();

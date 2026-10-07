@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <cmath>
 #include <limits>
 
 #include <Inventor/nodes/SoCamera.h>
@@ -342,10 +343,14 @@ void GridExtensionP::createGridPart(
     grid->vertexProperty = vts;
 
     float gridDimension = 1.5 * camMaxDimension;
-    int vlines = static_cast<int>(gridDimension / computedGridValue);  // total number of vertical lines
-    int nlines = 2 * vlines;                                           // total number of lines
+    float vlinesExact = gridDimension / computedGridValue;
+    // A non-finite or huge ratio (e.g. an infinite camera height) must not reach the int
+    // conversion: it overflowed, and the loops below wrote outside the vertex array (ops#145).
+    bool tooDense = !(vlinesExact >= 0.0f && vlinesExact <= 1000.0f);
+    int vlines = tooDense ? 0 : static_cast<int>(vlinesExact);  // total number of vertical lines
+    int nlines = 2 * vlines;                                    // total number of lines
 
-    if (nlines > 2000) {
+    if (tooDense || nlines > 2000) {
         if (!isTooManySegmentsNotified) {
             Base::Console().warning(
                 "The grid is too dense, so it is being disabled. Consider zooming in or changing "
@@ -361,6 +366,15 @@ void GridExtensionP::createGridPart(
         isTooManySegmentsNotified = false;
     }
 
+    // The line offsets below are ints too: no grid for a camera centre they can't hold.
+    Base::Vector3d camCenterOnSketch = getCamCenterInSketchCoordinates();
+    const double maxOffset = 1e9;
+    if (!(std::fabs(camCenterOnSketch.x / computedGridValue) < maxOffset
+          && std::fabs(camCenterOnSketch.y / computedGridValue) < maxOffset)) {
+        Gui::coinRemoveAllChildren(GridRoot);
+        return;
+    }
+
     // set the grid indices
     grid->numVertices.setNum(nlines);
     auto* vertices = grid->numVertices.startEditing();
@@ -374,7 +388,6 @@ void GridExtensionP::createGridPart(
     SbVec3f* vertex_coords = vts->vertex.startEditing();
 
     float minX, minY, maxX, maxY;
-    Base::Vector3d camCenterOnSketch = getCamCenterInSketchCoordinates();
     minX = static_cast<float>(camCenterOnSketch.x);
     minY = static_cast<float>(camCenterOnSketch.y);
 

@@ -3040,6 +3040,28 @@ SoSeparator* EditModeConstraintCoinManager::getConstraintIdSeparator(int i) cons
     return dynamic_cast<SoSeparator*>(editModeScenegraphNodes.constrGroup->getChild(i));
 }
 
+bool EditModeConstraintCoinManager::getDatumLabelTextCenter(int i, Base::Vector3d& center) const
+{
+    if (i < 0 || i >= editModeScenegraphNodes.constrGroup->getNumChildren()) {
+        return false;
+    }
+
+    SoSeparator* sep = getConstraintIdSeparator(i);
+    auto labelIndex = static_cast<int>(ConstraintNodePosition::DatumLabelIndex);
+    if (!sep || sep->getNumChildren() <= labelIndex) {
+        return false;
+    }
+
+    auto* label = dynamic_cast<SoDatumLabel*>(sep->getChild(labelIndex));
+    if (!label || label->pnts.getNum() < 2) {
+        return false;
+    }
+
+    SbVec3f point = label->getLabelTextCenter();
+    center = Base::Vector3d(point[0], point[1], point[2]);
+    return true;
+}
+
 void EditModeConstraintCoinManager::createEditModeInventorNodes()
 {
     // group node for the Constraint visual +++++++++++++++++++++++++++++++++++

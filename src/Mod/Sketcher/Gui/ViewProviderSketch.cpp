@@ -870,6 +870,35 @@ void ViewProviderSketch::moveCursorToSketchPoint(Base::Vector2d point)
     QCursor::setPos(newPos);
 }
 
+bool ViewProviderSketch::getConstraintLabelScreenPos(int constrId,
+                                                     QPoint& globalPos,
+                                                     QRect& viewRect) const
+{
+    if (!isInEditMode() || !editCoinManager) {
+        return false;
+    }
+
+    Base::Vector3d center;
+    if (!editCoinManager->getDatumLabelTextCenter(constrId, center)) {
+        return false;
+    }
+
+    auto* view = qobject_cast<Gui::View3DInventor*>(getActiveView());
+    if (!view) {
+        return false;
+    }
+    Gui::View3DInventorViewer* viewer = view->getViewer();
+
+    Base::Vector3d pnt;
+    getEditingPlacement().multVec(center, pnt);
+    SbVec2s onViewport = viewer->getPointOnViewport(
+        SbVec3f(static_cast<float>(pnt.x), static_cast<float>(pnt.y), static_cast<float>(pnt.z)));
+
+    globalPos = viewer->mapToGlobal(viewer->toQPoint(onViewport));
+    viewRect = QRect(viewer->mapToGlobal(QPoint(0, 0)), viewer->size());
+    return true;
+}
+
 void ViewProviderSketch::ensureFocus()
 {
     Gui::MDIView* mdi = Gui::Application::Instance->activeDocument()->getActiveView();
@@ -1692,8 +1721,9 @@ void ViewProviderSketch::editDoubleClicked()
             if (Constr->isDimensional()) {
                 int tid = getDocument()->openCommand(
                     QT_TRANSLATE_NOOP("Command", "Modify sketch constraints"));
-                EditDatumDialog editDatumDialog(tid, this, id);
-                editDatumDialog.exec();
+                // The value field at the label, or the dialog (DimensionValueInPlace). It closes
+                // the transaction.
+                askDatumValues(getSketchObject(), {id}, tid, DatumRequest::ExistingConstraint);
             }
             else if (Constr->Type == Sketcher::Text) {
                 EditTextDialog editTextDialog(this, id);
@@ -4692,18 +4722,27 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
 
     SbRotation rot((float)tmp[0], (float)tmp[1], (float)tmp[2], (float)tmp[3]);
 
-    // Will the sketch be visible from the new position (#0000957)?
-    //
-    SoCamera* camera = viewer->getSoRenderManager()->getCamera();
-    SbVec3f curdir;// current view direction
-    camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), curdir);
-    SbVec3f plnpos = Base::convertTo<SbVec3f>(plm.getPosition());
-    camera->position.setValue(plnpos - camera->focalDistance.getValue() * curdir);
-    viewer->setCameraOrientation(rot);
-    if (getSketchObject()->Geometry.getSize() > 0 || getSketchObject()->ExternalGeometry.getSize() > 0) {
-        std::vector<App::SubObjectT> objs;
-        objs.emplace_back(getObject(), "");
-        viewer->viewObjects(objs);
+    // Turning the view to the sketch is a preference, off by default: the view then doesn't
+    // move at all on edit (no turn, no fit). Sketcher_ViewSketch turns it on demand.
+    bool orientView = App::GetApplication()
+                          .GetParameterGroupByPath(
+                              "User parameter:BaseApp/Preferences/Mod/Sketcher/General")
+                          ->GetBool("OrientViewOnEdit", false);
+    if (orientView) {
+        // Will the sketch be visible from the new position (#0000957)?
+        //
+        SoCamera* camera = viewer->getSoRenderManager()->getCamera();
+        SbVec3f curdir;// current view direction
+        camera->orientation.getValue().multVec(SbVec3f(0, 0, -1), curdir);
+        SbVec3f plnpos = Base::convertTo<SbVec3f>(plm.getPosition());
+        camera->position.setValue(plnpos - camera->focalDistance.getValue() * curdir);
+        viewer->setCameraOrientation(rot);
+        if (getSketchObject()->Geometry.getSize() > 0
+            || getSketchObject()->ExternalGeometry.getSize() > 0) {
+            std::vector<App::SubObjectT> objs;
+            objs.emplace_back(getObject(), "");
+            viewer->viewObjects(objs);
+        }
     }
 
     viewer->setEditing(true);
@@ -4718,6 +4757,13 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
     cameraSensor.setData(camSensorData);
     cameraSensor.setDeleteCallback(&ViewProviderSketch::camSensDeleteCB, camSensorData);
     cameraSensor.attach(viewer->getCamera());
+
+    // The axes' length, the grid and the viewing side follow the camera. Without
+    // OrientViewOnEdit the camera may not change until the user moves the view, so
+    // set them for the current camera now (ops#145).
+    if (auto* camera = viewer->getSoRenderManager()->getCamera()) {
+        onCameraChanged(camera);
+    }
 
     blockContextMenu = false;
 

@@ -76,6 +76,8 @@ class SoRayPickAction;
 
 class SoImage;
 class QImage;
+class QPoint;
+class QRect;
 class QColor;
 
 class SoText2;
@@ -754,6 +756,11 @@ public:
         std::vector<std::string>& subElementNames,
         Base::Vector3d& pickedPoint
     );
+
+    /// Where the text of a constraint's datum label is on the screen (global coordinates), and
+    /// the 3D view's rectangle (global coordinates). False when the sketch isn't in edit or the
+    /// label isn't drawn.
+    bool getConstraintLabelScreenPos(int constrId, QPoint& globalPos, QRect& viewRect) const;
 
     /** @name Attorneys for collaboration with helper classes */
     //@{
