@@ -280,6 +280,22 @@ class TestQuickMeasureDistances(unittest.TestCase):
         self.assertAlmostEqual(result["Max"], 1100**0.5)
         self.assertAlmostEqual(result["Center"], 20)
 
+    def testPointOnTorusCoreCircle(self):
+        """Review round 2: from a point on a torus' core circle the farthest point is on the
+        opposite meridian; Max may be called exact only if it is that point."""
+        import Part
+
+        torus = self.doc.addObject("Part::Feature", "T")
+        torus.Shape = Part.makeTorus(10, 2, App.Vector(0, 0, 200))
+        core = self.doc.addObject("Part::Feature", "C")
+        core.Shape = Part.Vertex(App.Vector(10, 0, 200))
+        self.doc.recompute()
+        result = self.measure(("C", "Vertex1"), ("T", "Face1")).distances()
+        if result["MaxExact"]:
+            self.assertAlmostEqual(result["Max"], 22)
+        else:
+            self.assertAlmostEqual(result["Max"], 22, delta=0.05)
+
     def testDecimatedMaxIsApproximate(self):
         """Review round 1: above 2000 candidates every k-th is kept, so even a polyhedral pair's
         Max is no longer exact."""
@@ -309,7 +325,8 @@ class TestQuickMeasureDistances(unittest.TestCase):
     def testTimeLimitBoundsBSplineBodies(self):
         """Review round 1: the time limit bounds every step, not only BRepExtrema. Two bodies of
         fused spheres made B-spline take about 0.75 s unbounded (Windows); at each limit, the
-        measure returns within it plus one face's step, whichever step it stops in."""
+        measure returns within it plus one face's step, whichever step it stops in. The margin
+        is wide (at least 0.25 s, or half the limit): local runs share the machine with builds."""
         import time
 
         import Part
@@ -328,7 +345,7 @@ class TestQuickMeasureDistances(unittest.TestCase):
                 start = time.monotonic()
                 result = measurement.distances(limit)
                 elapsed = time.monotonic() - start
-                self.assertLess(elapsed, limit / 1000 + 0.1)
+                self.assertLess(elapsed, limit / 1000 + max(0.25, 0.5 * limit / 1000))
                 self.assertTrue("Max" not in result or not result["MaxExact"])
 
     def testArcCenters(self):

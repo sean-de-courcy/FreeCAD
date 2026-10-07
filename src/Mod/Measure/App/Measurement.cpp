@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
 
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
@@ -41,6 +42,7 @@
 #include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -1259,7 +1261,8 @@ bool centerOfMass(const TopoDS_Shape& shape, const Deadline& deadline, gp_Pnt& c
                 }
                 const TopoDS_Face& face = TopoDS::Face(ex.Current());
                 BRepGProp_Face gface(face);
-                if (BRep_Tool::NaturalRestriction(face)) {
+                // As BRepGProp: the whole surface's domain when the face has no wires
+                if (!TopoDS_Iterator(face).More()) {
                     vinert.Perform(gface);
                 }
                 else {
@@ -1429,79 +1432,132 @@ bool maxCandidates(
     return true;
 }
 
-// The point of the shape farthest from p: at a vertex, or at a stationary point inside an edge
-// or a face (all extrema of the distance from p, maxima included). exact turns false when an
-// extremum search threw or sampled (a curve or surface Extrema has no analytic solution for).
-// An analytic search that isn't done found no extremum inside the bounds, or infinitely many
-// (p on an axis), whose farthest points then lie on the boundary too: exact stays.
-// Returns -1 if the deadline passed
-double farthestOn(
-    const TopoDS_Shape& shape,
-    const gp_Pnt& p,
-    const Deadline& deadline,
-    gp_Pnt& farthest,
-    bool& exact
-)
+// The point of a shape farthest from a given point: at a vertex, or at a stationary point inside
+// an edge or a face (all extrema of the distance from the point, maxima included). The edge and
+// face searches are set up once per shape and reused for each point (a B-spline face's sampling
+// grid is the costly part). exact turns false when a search threw or sampled (a curve or surface
+// Extrema has no analytic solution for). An analytic search that isn't done found no extremum
+// inside the bounds, or infinitely many (the point on an axis), whose farthest points then lie
+// on the boundary too, except on a torus: a point on its core circle has an isolated maximum on
+// the opposite meridian, which only that search finds
+class FarthestPoint
 {
-    double best = -1.0;
-    auto consider = [&](const gp_Pnt& q) {
-        const double d = p.SquareDistance(q);
-        if (d > best) {
-            best = d;
-            farthest = q;
+public:
+    // False if the deadline passed
+    bool init(const TopoDS_Shape& shape, const Deadline& deadline)
+    {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, TopAbs_VERTEX, map);
+        for (int i = 1; i <= map.Extent(); ++i) {
+            vertices.push_back(BRep_Tool::Pnt(TopoDS::Vertex(map(i))));
         }
+        map.Clear();
+        TopExp::MapShapes(shape, TopAbs_EDGE, map);
+        for (int i = 1; i <= map.Extent(); ++i) {
+            if (deadline.expired()) {
+                return false;
+            }
+            if (isDegenerated(map(i))) {
+                continue;
+            }
+            const TopoDS_Edge& edge = TopoDS::Edge(map(i));
+            try {
+                if (!isAnalytic(BRepAdaptor_Curve(edge).GetType())) {
+                    exact = false;
+                }
+                auto search = std::make_unique<BRepExtrema_ExtPC>();
+                search->Initialize(edge);
+                edgeSearches.push_back(std::move(search));
+            }
+            catch (const Standard_Failure&) {
+                exact = false;
+            }
+        }
+        map.Clear();
+        TopExp::MapShapes(shape, TopAbs_FACE, map);
+        for (int i = 1; i <= map.Extent(); ++i) {
+            if (deadline.expired()) {
+                return false;
+            }
+            const TopoDS_Face& face = TopoDS::Face(map(i));
+            try {
+                const GeomAbs_SurfaceType type = BRepAdaptor_Surface(face).GetType();
+                if (!isAnalytic(type)) {
+                    exact = false;
+                }
+                auto search = std::make_unique<BRepExtrema_ExtPF>();
+                search->Initialize(face, Extrema_ExtFlag_MAX);
+                faceSearches.push_back({face, type == GeomAbs_Torus, std::move(search)});
+            }
+            catch (const Standard_Failure&) {
+                exact = false;
+            }
+        }
+        return true;
+    }
+
+    // The distance to the farthest point, or -1 if the deadline passed
+    double find(const gp_Pnt& p, const Deadline& deadline, gp_Pnt& farthest)
+    {
+        double best = -1.0;
+        auto consider = [&](const gp_Pnt& q) {
+            const double d = p.SquareDistance(q);
+            if (d > best) {
+                best = d;
+                farthest = q;
+            }
+        };
+        for (const gp_Pnt& q : vertices) {
+            consider(q);
+        }
+        const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(p);
+        for (auto& search : edgeSearches) {
+            if (deadline.expired()) {
+                return -1.0;
+            }
+            try {
+                search->Perform(vertex);
+                for (int n = 1; search->IsDone() && n <= search->NbExt(); ++n) {
+                    consider(search->Point(n));
+                }
+            }
+            catch (const Standard_Failure&) {
+                exact = false;
+            }
+        }
+        for (auto& search : faceSearches) {
+            if (deadline.expired()) {
+                return -1.0;
+            }
+            try {
+                search.ext->Perform(vertex, search.face);
+                if (!search.ext->IsDone() && search.torus) {
+                    exact = false;
+                }
+                for (int n = 1; search.ext->IsDone() && n <= search.ext->NbExt(); ++n) {
+                    consider(search.ext->Point(n));
+                }
+            }
+            catch (const Standard_Failure&) {
+                exact = false;
+            }
+        }
+        return best < 0.0 ? -1.0 : std::sqrt(best);
+    }
+
+    bool exact = true;
+
+private:
+    struct FaceSearch
+    {
+        TopoDS_Face face;
+        bool torus;
+        std::unique_ptr<BRepExtrema_ExtPF> ext;
     };
-    TopTools_IndexedMapOfShape map;
-    TopExp::MapShapes(shape, TopAbs_VERTEX, map);
-    for (int i = 1; i <= map.Extent(); ++i) {
-        consider(BRep_Tool::Pnt(TopoDS::Vertex(map(i))));
-    }
-    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(p);
-    map.Clear();
-    TopExp::MapShapes(shape, TopAbs_EDGE, map);
-    for (int i = 1; i <= map.Extent(); ++i) {
-        if (deadline.expired()) {
-            return -1.0;
-        }
-        if (isDegenerated(map(i))) {
-            continue;
-        }
-        const TopoDS_Edge& edge = TopoDS::Edge(map(i));
-        try {
-            BRepExtrema_ExtPC ext(vertex, edge);
-            if (!isAnalytic(BRepAdaptor_Curve(edge).GetType())) {
-                exact = false;
-            }
-            for (int n = 1; ext.IsDone() && n <= ext.NbExt(); ++n) {
-                consider(ext.Point(n));
-            }
-        }
-        catch (const Standard_Failure&) {
-            exact = false;
-        }
-    }
-    map.Clear();
-    TopExp::MapShapes(shape, TopAbs_FACE, map);
-    for (int i = 1; i <= map.Extent(); ++i) {
-        if (deadline.expired()) {
-            return -1.0;
-        }
-        const TopoDS_Face& face = TopoDS::Face(map(i));
-        try {
-            BRepExtrema_ExtPF ext(vertex, face, Extrema_ExtFlag_MAX);
-            if (!isAnalytic(BRepAdaptor_Surface(face).GetType())) {
-                exact = false;
-            }
-            for (int n = 1; ext.IsDone() && n <= ext.NbExt(); ++n) {
-                consider(ext.Point(n));
-            }
-        }
-        catch (const Standard_Failure&) {
-            exact = false;
-        }
-    }
-    return best < 0.0 ? -1.0 : std::sqrt(best);
-}
+    std::vector<gp_Pnt> vertices;
+    std::vector<std::unique_ptr<BRepExtrema_ExtPC>> edgeSearches;
+    std::vector<FaceSearch> faceSearches;
+};
 }  // namespace
 
 // FreeCAD-CH (ops#153)
@@ -1601,10 +1657,14 @@ DistanceResult Measurement::distances(int timeLimitMs) const
         return result;
     }
     best = std::sqrt(best);
-    bool exactA = true, exactB = true;
+    FarthestPoint onA, onB;
+    if (!onA.init(a, *deadline) || !onB.init(b, *deadline)) {
+        timedOut();
+        return result;
+    }
     for (int i = 0; i < 2; ++i) {
         gp_Pnt farther;
-        double d = farthestOn(b, p, *deadline, farther, exactB);
+        double d = onB.find(p, *deadline, farther);
         if (timedOut()) {
             return result;
         }
@@ -1612,7 +1672,7 @@ DistanceResult Measurement::distances(int timeLimitMs) const
             best = d;
             q = farther;
         }
-        d = farthestOn(a, q, *deadline, farther, exactA);
+        d = onA.find(q, *deadline, farther);
         if (timedOut()) {
             return result;
         }
@@ -1626,8 +1686,8 @@ DistanceResult Measurement::distances(int timeLimitMs) const
     result.maxFrom = toVector3d(p);
     result.maxTo = toVector3d(q);
     const bool polyhedral = !decimatedA && !decimatedB && isPolyhedral(a) && isPolyhedral(b);
-    result.maxExact = polyhedral || (a.ShapeType() == TopAbs_VERTEX && exactB)
-        || (b.ShapeType() == TopAbs_VERTEX && exactA);
+    result.maxExact = polyhedral || (a.ShapeType() == TopAbs_VERTEX && onB.exact)
+        || (b.ShapeType() == TopAbs_VERTEX && onA.exact);
     return result;
 }
 
