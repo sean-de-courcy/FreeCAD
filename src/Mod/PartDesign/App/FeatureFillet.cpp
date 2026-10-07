@@ -37,6 +37,7 @@
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Mod/Part/App/TopoShape.h>
+#include <Mod/Part/App/TopoShapeRepair.h>
 
 #include "FeatureFillet.h"
 
@@ -129,12 +130,13 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // into invalid solids, and edited sub-shapes shared with the base shape in place (ops#12).
         // The repair works on a copy. A result it can't make valid, or that loses solids in the
         // repair (ShapeFix can turn a solid into a valid open shell), fails the feature, as it did
-        // up to 0.21, instead of breaking the features after it.
+        // up to 0.21, instead of breaking the features after it. The elements it doesn't change
+        // keep their names (ops#168).
         if (!BRepAlgo::IsValid(aLarg, shape.getShape(), Standard_False, Standard_False)
             && !shape.isValid()) {
             TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
             repaired.makeElementCopy(shape);
-            if (!repaired.fix()
+            if (!Part::fixKeepingNames(repaired)
                 || repaired.countSubShapes(TopAbs_SOLID) != shape.countSubShapes(TopAbs_SOLID)) {
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")

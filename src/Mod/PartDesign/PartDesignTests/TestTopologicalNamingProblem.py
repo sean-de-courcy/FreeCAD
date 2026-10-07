@@ -32,7 +32,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 import TestSketcherApp
-from PartDesignTests.Scenarios import harness
+from PartDesignTests.Scenarios import harness, models
 
 
 class TestTopologicalNamingProblem(unittest.TestCase):
@@ -916,6 +916,98 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertLess(helix.Shape.Volume, pad.Shape.Volume - 1e-3)
         self.assertNamesDistinct(helix.Shape)
         self.helixSideFacesFromProfile(helix.AddSubShape, helix, sketch)
+
+    def dressUpTangentToHole(self, kind):
+        """A block 0..20 x 0..20, 10 high; a hole through it at (10, 3), radius 2; a dress-up of
+        size 1 on the block's top front edge, whose inner edge on the top face (y = 1) is tangent
+        to the hole. OCCT's result is invalid there, and the dress-up repairs it (ops#168).
+        Returns (the hole, the dress-up)."""
+        doc = self.Doc
+        doc.HistoryAlgorithm = "V2"
+        body = models.body(doc)
+        profile = models.sketch(doc, "Profile", models.rectangle(0, 0, 20, 20), body)
+        models.pad(body, profile, 10)
+        sketch = models.sketch(doc, "HoleSketch", [models.circle(10, 3, 2)], body, z=10)
+        hole = models.pocketThroughAll(body, sketch, "Hole")
+        doc.recompute()
+        front = harness.edge("line", direction=App.Vector(1, 0, 0), through=(0, 0, 10))
+        dress = body.newObject("PartDesign::" + kind, kind)
+        dress.Base = (hole, front.one(hole.Shape))
+        if kind == "Fillet":
+            dress.Radius = 1
+        else:
+            dress.Size = 1
+        doc.recompute()
+        self.assertTrue(dress.isValid(), dress.getStatusString())
+        return hole, dress
+
+    def assertBlockFacesKeepTheirNames(self, hole, dress):
+        """The block's top, back, left, right and bottom faces have the same names on the
+        dress-up as on the hole."""
+        Z, X, Y = App.Vector(0, 0, 1), App.Vector(1, 0, 0), App.Vector(0, 1, 0)
+        faces = {
+            "top": harness.face("plane", normal=Z, through=(0, 0, 10)),
+            "back": harness.face("plane", normal=Y, through=(0, 20, 0)),
+            "left": harness.face("plane", normal=-X, through=(0, 0, 0)),
+            "right": harness.face("plane", normal=X, through=(20, 0, 0)),
+            "bottom": harness.face("plane", normal=-Z, through=(0, 0, 0)),
+        }
+        for label, predicate in faces.items():
+            names = [
+                obj.Shape.getElementMappedName(predicate.one(obj.Shape)[0]) for obj in (hole, dress)
+            ]
+            self.assertEqual(names[1], names[0], label)
+
+    def assertRepaired(self, dress):
+        """The repair's mark (ops#168), so that the test can't pass on a dress-up OCCT got right:
+        the top face's boundary has a vertex at the tangent point (10, 1, 10), which splits its
+        edge along y = 1 in two. Returns the names of the two halves."""
+        top = harness.face("plane", normal=App.Vector(0, 0, 1), through=(0, 0, 10))
+        face = dress.Shape.getElement(top.one(dress.Shape)[0])
+        tangent = App.Vector(10, 1, 10)
+        self.assertTrue(
+            any(v.Point.distanceToPoint(tangent) < 1e-6 for v in face.Vertexes),
+            "no vertex at the tangent point: the dress-up wasn't repaired",
+        )
+        halves = self.edgesAlongTheTangent(dress)
+        self.assertEqual(len(halves), 2, "the edge along y = 1 isn't split")
+        return [dress.Shape.getElementMappedName(name) for name in halves]
+
+    def edgesAlongTheTangent(self, dress):
+        """The top face's edges along y = 1 (the dress-up's edge on it)."""
+        indexes = models.edgesWhere(
+            dress.Shape, lambda c: abs(c.y - 1) < 1e-6 and abs(c.z - 10) < 1e-6
+        )
+        return [f"Edge{i}" for i in indexes]
+
+    def repairKeepsTheNames(self, kind):
+        """The dress-up repaired at the tangency keeps the block's names; after the hole's radius
+        2 -> 1.5 (no tangency, no repair) the names are the same. The halves of the split edge
+        don't carry the name the whole edge has without the repair: they match no element of
+        the shape before the repair, so they keep the repair's names."""
+        hole, dress = self.dressUpTangentToHole(kind)
+        halves = self.assertRepaired(dress)
+        self.assertBlockFacesKeepTheirNames(hole, dress)
+        g = self.Doc.HoleSketch.Geometry
+        g[0].Radius = 1.5
+        self.Doc.HoleSketch.Geometry = g
+        self.Doc.recompute()
+        self.assertTrue(dress.isValid(), dress.getStatusString())
+        self.assertBlockFacesKeepTheirNames(hole, dress)
+        [whole] = self.edgesAlongTheTangent(dress)
+        self.assertNotIn(dress.Shape.getElementMappedName(whole), halves)
+
+    def testChamferRepairKeepsTheNames(self):
+        """ops#168: a chamfer whose result OCCT gets wrong (tangent to a hole) and the dress-up
+        repairs keeps the names of the faces the repair didn't change, the top face among them,
+        whose boundary got a vertex at the tangent point. Before, the repair named every element
+        anew (`MAK`), so a reference to the top face went missing when the tangency went away.
+        After the hole's radius 2 -> 1.5 (no repair), the names are the same."""
+        self.repairKeepsTheNames("Chamfer")
+
+    def testFilletRepairKeepsTheNames(self):
+        """ops#168: as testChamferRepairKeepsTheNames, with a fillet of radius 1."""
+        self.repairKeepsTheNames("Fillet")
 
     def testPartDesignElementMapPocket(self):
         # Arrange

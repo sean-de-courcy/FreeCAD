@@ -593,6 +593,8 @@ SET(Part_SRCS
     TopoShapeExpansion.cpp
     TopoShapeMapper.h
     TopoShapeMapper.cpp
+    TopoShapeRepair.cpp
+    TopoShapeRepair.h
     NamingHash.h
     NameSetOrder.h
     TopoShapeOpCode.h
