@@ -150,7 +150,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         through the popup's window (shortcut map first, as a user's key). Any other modal
         window is rejected, so a failure doesn't hang the run. Returns the state, whose "seen"
         list records, per step, the popup's id, its global centre, the field's text and tooltip
-        and whether the popup was still open after the key."""
+        and whether the popup was still open after the key. (Python may reuse a closed popup's
+        id for the next one: compare ids only while the first is still open.)"""
         state = {
             "stop": False,
             "seen": [],
@@ -454,7 +455,6 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         )
         self.wait_answered(state, 2)
 
-        self.assertNotEqual(state["seen"][0]["popup"], state["seen"][1]["popup"])
         self.assertAlmostEqual(self.constraints_of("DistanceX")[0].Value, 3.0, places=9)
         self.assertAlmostEqual(self.constraints_of("DistanceY")[0].Value, 4.0, places=9)
         self.assert_point(self.point(), 3, 4)
@@ -507,24 +507,31 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         return state
 
     def test_d9_dialog_lock_is_one_step(self):
-        """D9 with the dialog (DimensionValueInPlace off): the lock's two dialogs come in
-        placement order (DistanceX, then DistanceY), and both values land in the placement's
-        one undo step. Before ops#145 the first dialog committed, and the second value was set
-        outside any transaction."""
+        """D9 with the dialog (DimensionValueInPlace off): both of the lock's values (3 and 3,
+        so their order doesn't matter here; D9 checks it) land in the placement's one undo
+        step: undo goes back to (2, 1), redo to (3, 3). Before ops#145 the first dialog
+        committed, and the second value was set outside any transaction, so redo lost it."""
         self.set_param(SKETCHER_PARAMS, "Bool", "DimensionValueInPlace", False)
-        state = self.place_lock(None, arm=lambda: self.answer_dialogs(["3 mm", "4 mm"]))
+        state = self.place_lock(None, arm=lambda: self.answer_dialogs(["3 mm", "3 mm"]))
         self.assertTrue(
             self.wait_until(lambda: len(state["answered"]) == 2, 6000),
             "Expected two dialogs",
         )
         self.flush_gui(100)
 
-        self.assert_point(self.point(), 3, 4)
+        self.assert_point(self.point(), 3, 3)
         self.assert_one_undo_step()
 
         self.doc.undo()
         self.assertEqual(len(self.sketch.Constraints), 0)
         self.assert_point(self.point(), 2, 1)
+
+        self.doc.redo()
+        values = sorted(c.Value for c in self.sketch.Constraints if c.Type.startswith("Distance"))
+        self.assertEqual(len(values), 2)
+        self.assertAlmostEqual(values[0], 3.0, places=9)
+        self.assertAlmostEqual(values[1], 3.0, places=9)
+        self.assert_point(self.point(), 3, 3)
 
     def test_d11_dimension_tool_radius(self):
         """D11: the Dimension tool on a circle of radius 5 (radius mode), 7 and Enter: r = 7."""
