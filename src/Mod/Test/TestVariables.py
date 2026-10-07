@@ -355,16 +355,124 @@ class TestSaveAndRename(VariablesBase):
 
         self.doc.undo()
         self.doc.recompute()
+        other.recompute()
         self.assertTrue(hasattr(varSet, "Width"))
         self.assertFalse(hasattr(varSet, "BoxWidth"))
+        self.assertEqual(expressionText(box, "Length"), "VarSet.Width * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.Width")
+        self.assertEqual(expressionText(otherBox, "Length"), f"{self.doc.Name}#VarSet.Width")
+        self.assertAlmostEqual(box.Length.Value, 40)
+        self.assertAlmostEqual(sheet.B1.Value, 20)
+        self.assertAlmostEqual(otherBox.Length.Value, 20)
+
+        self.doc.redo()
+        self.doc.recompute()
+        other.recompute()
+        self.assertTrue(hasattr(varSet, "BoxWidth"))
+        self.assertEqual(expressionText(box, "Length"), "VarSet.BoxWidth * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.BoxWidth")
+        self.assertEqual(expressionText(otherBox, "Length"), f"{self.doc.Name}#VarSet.BoxWidth")
+        self.assertAlmostEqual(box.Length.Value, 40)
+        self.assertAlmostEqual(otherBox.Length.Value, 20)
+
+    def buildSheetHistory(self):
+        """A VarSet variable used by a Box and a sheet cell, and a committed transaction that
+        edited the sheet, so the undo stack holds a copy of the sheet's cells."""
+        self.doc.UndoMode = 1
+        varSet = self.addVarSet(Width=20)
+        target = self.addVarSet("Target")
+        box = self.addBox()
+        box.setExpression("Length", "#Width * 2")
+        sheet = self.addSheet()
+        sheet.set("B1", "=#Width")
+        self.doc.recompute()
+        self.doc.openTransaction("Edit sheet")
+        sheet.set("A1", "5")
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        return varSet, target, box, sheet
+
+    def test_rename_with_sheet_undo_history(self):
+        """ops#179: a sheet's undo copy made every rename raise TypeError, with or without a
+        transaction (PropertySheet built ObjectIdentifier(*this) for a copy with no owner)."""
+        varSet, _, box, sheet = self.buildSheetHistory()
+        varSet.renameProperty("Width", "W2")
+        self.assertEqual(expressionText(box, "Length"), "VarSet.W2 * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.W2")
+
+        self.doc.openTransaction("Rename")
+        varSet.renameProperty("W2", "W3")
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(expressionText(box, "Length"), "VarSet.W3 * 2")
+        self.assertEqual(sheet.getContents("B1"), "=VarSet.W3")
+        self.assertAlmostEqual(box.Length.Value, 40)
+        self.assertAlmostEqual(sheet.B1.Value, 20)
+
+    def test_move_with_sheet_undo_history(self):
+        """ops#179, the move slot: the same copy made every move raise TypeError."""
+        varSet, target, box, sheet = self.buildSheetHistory()
+        varSet.moveProperty("Width", target)
+        self.assertEqual(expressionText(box, "Length"), "Target.Width * 2")
+        self.assertEqual(sheet.getContents("B1"), "=Target.Width")
+
+        self.doc.openTransaction("Move")
+        target.moveProperty("Width", varSet)
+        self.doc.commitTransaction()
+        self.doc.recompute()
         self.assertEqual(expressionText(box, "Length"), "VarSet.Width * 2")
         self.assertEqual(sheet.getContents("B1"), "=VarSet.Width")
         self.assertAlmostEqual(box.Length.Value, 40)
         self.assertAlmostEqual(sheet.B1.Value, 20)
 
-        self.doc.redo()
+    def test_rename_without_transaction_reaches_undo_states(self):
+        """fork PR 148 review: a rename outside a transaction can't be undone, so the undo
+        states already recorded must follow it: undoing an earlier change restores an expression
+        that uses the new name."""
+        self.doc.UndoMode = 1
+        varSet = self.addVarSet(Width=20)
+        box = self.addBox()
+        self.doc.openTransaction("Length")
+        box.setExpression("Length", "#Width * 2")
+        self.doc.commitTransaction()
+        self.doc.openTransaction("Height")
+        box.setExpression("Height", "#Width")
+        self.doc.commitTransaction()
         self.doc.recompute()
-        self.assertTrue(hasattr(varSet, "BoxWidth"))
+
+        varSet.renameProperty("Width", "BoxWidth")
+        self.doc.undo()
+        self.doc.recompute()
         self.assertEqual(expressionText(box, "Length"), "VarSet.BoxWidth * 2")
-        self.assertEqual(sheet.getContents("B1"), "=VarSet.BoxWidth")
+        self.assertIsNone(expressionText(box, "Height"))
+        self.assertTrue(box.isValid())
         self.assertAlmostEqual(box.Length.Value, 40)
+
+    def test_rename_in_application_transaction_with_redo_elsewhere(self):
+        """fork PR 148 review: under an application transaction, renaming changes another
+        document's expression, which opens a transaction there and clears its redo stack, freeing
+        undo copies the rename was about to visit."""
+        varSet = self.addVarSet(Width=20)
+        other = FreeCAD.newDocument("VarRenameRedo")
+        self.extraDocs.append(other)
+        other.UndoMode = 1
+        otherBox = other.addObject("Part::Box", "Box")
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        self.doc.saveAs(os.path.join(self.tempDir, "variables.FCStd"))
+        other.saveAs(os.path.join(self.tempDir, "other.FCStd"))
+        otherBox.setExpression("Length", f"{self.doc.Name}#VarSet.Width")
+        other.openTransaction("Height")
+        otherBox.setExpression("Height", f"{self.doc.Name}#VarSet.Width / 2")
+        other.commitTransaction()
+        other.undo()
+        self.assertEqual(other.RedoCount, 1)
+
+        FreeCAD.setActiveTransaction("Rename")
+        try:
+            varSet.renameProperty("Width", "BoxWidth")
+        finally:
+            FreeCAD.closeActiveTransaction()
+        self.assertEqual(other.RedoCount, 0)
+        self.assertEqual(expressionText(otherBox, "Length"), f"{self.doc.Name}#VarSet.BoxWidth")
+        other.recompute()
+        self.assertAlmostEqual(otherBox.Length.Value, 20)

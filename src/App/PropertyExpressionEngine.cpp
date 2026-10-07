@@ -23,6 +23,8 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <cstdint>
+#include <map>
 #include <boost/graph/topological_sort.hpp>
 #include <boost/unordered/unordered_map.hpp>
 #include <boost_graph_adjacency_list.hpp>
@@ -49,7 +51,26 @@ namespace sp = std::placeholders;
 
 TYPESYSTEM_SOURCE_ABSTRACT(App::PropertyExpressionContainer, App::PropertyXLinkContainer)
 
-static std::set<PropertyExpressionContainer*> _ExprContainers;
+// FreeCAD-CH (ops#177, ops#179): every living container, undo/redo copies included, with the
+// serial number it got when it was made. The slots below visit a snapshot taken before they start,
+// and skip an entry that is gone or whose address now belongs to a newer container: visiting one
+// container can make undo copies (they hold the state from before this change, so they must not
+// be visited) or, under an application transaction, clear another document's redo stack (whose
+// copies are then freed).
+static std::map<PropertyExpressionContainer*, std::uint64_t> _ExprContainers;
+static std::uint64_t _ExprContainerSerial;
+
+template<class Function>
+static void forEachExpressionContainer(Function visit)
+{
+    const auto containers = _ExprContainers;
+    for (const auto& [container, serial] : containers) {
+        auto it = _ExprContainers.find(container);
+        if (it != _ExprContainers.end() && it->second == serial) {
+            visit(container);
+        }
+    }
+}
 
 PropertyExpressionContainer::PropertyExpressionContainer()
 {
@@ -63,7 +84,7 @@ PropertyExpressionContainer::PropertyExpressionContainer()
         GetApplication().signalMoveDynamicProperty.connect(
             PropertyExpressionContainer::slotMoveDynamicProperty);
     }
-    _ExprContainers.insert(this);
+    _ExprContainers[this] = ++_ExprContainerSerial;
 }
 
 PropertyExpressionContainer::~PropertyExpressionContainer()
@@ -78,31 +99,27 @@ void PropertyExpressionContainer::slotRelabelDocument(const App::Document& doc)
     // because document relabel is not undoable/redoable.
 
     if (doc.getOldLabel() != doc.Label.getValue()) {
-        for (auto prop : _ExprContainers) {
+        forEachExpressionContainer([&doc](PropertyExpressionContainer* prop) {
             prop->onRelabeledDocument(doc);
-        }
+        });
     }
 }
 
 void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property& prop, const char* oldName)
 {
-    // FreeCAD-CH (ops#177): iterate a copy. Under a transaction the renames below make undo copies
-    // of the containers they change, and those copies join _ExprContainers while it is iterated.
-    // A copy has no container and is the undo state: it isn't renamed.
-    const auto containers = _ExprContainers;
-    for (auto container : containers) {
-        if (container->getContainer()) {
-            container->onRenameDynamicProperty(prop, oldName);
-        }
-    }
+    // Copies too: undoing the rename renames the property back, and the undo states it passes
+    // through must use the name current then.
+    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
+        container->onRenameDynamicProperty(prop, oldName);
+    });
 }
 
 void PropertyExpressionContainer::slotMoveDynamicProperty(const App::Property& prop,
                                                           const App::DocumentObject& targetObj)
 {
-    for (auto container : _ExprContainers) {
+    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
         container->onMoveDynamicProperty(prop, targetObj);
-    }
+    });
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////

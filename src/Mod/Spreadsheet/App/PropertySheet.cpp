@@ -1700,7 +1700,14 @@ void PropertySheet::renameObjectIdentifiers(
     const std::map<App::ObjectIdentifier, App::ObjectIdentifier>& paths
 )
 {
-    RenameObjectIdentifierExpressionVisitor<PropertySheet> v {*this, paths, *this};
+    // FreeCAD-CH (ops#179): an undo/redo copy has no container, and ObjectIdentifier(*this) throws
+    // for it. Its expressions belong to the same sheet, so name the sheet's cells instead.
+    if (!getContainer() && !owner) {
+        return;
+    }
+    const ObjectIdentifier ownerId = getContainer() ? ObjectIdentifier(*this)
+                                                    : ObjectIdentifier(owner->cells);
+    RenameObjectIdentifierExpressionVisitor<PropertySheet> v {*this, paths, ownerId};
     for (auto& c : data) {
         c.second->visit(v);
         if (v.changed()) {
