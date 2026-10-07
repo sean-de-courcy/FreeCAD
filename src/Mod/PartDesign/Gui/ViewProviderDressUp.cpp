@@ -149,14 +149,22 @@ void ViewProviderDressUp::highlightReferences(const bool on)
     }
 }
 
+void ViewProviderDressUp::updatePreviewOpacity()
+{
+    ViewProvider::updatePreviewOpacity();
+    // The error state keeps its own opacity
+    if (auto* obj = getObject()) {
+        setErrorState(obj->isError());
+    }
+}
+
 void ViewProviderDressUp::setErrorState(bool error)
 {
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
 
     const float opacity = static_cast<float>(
-        styleParameterManager
-            ->resolve(error ? StyleParameters::PreviewErrorOpacity : StyleParameters::PreviewShapeOpacity)
-            .value
+        error ? styleParameterManager->resolve(StyleParameters::PreviewErrorOpacity).value
+              : previewOpacity()
     );
 
     pcPreviewShape->transparency = 1.0F - opacity;

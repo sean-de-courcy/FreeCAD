@@ -52,6 +52,7 @@ public:
 public Q_SLOTS:
     void onShowPreviewChanged(bool show);
     void onShowFinalChanged(bool show);
+    void onOpacityChanged(int percent);
 
 private:
     ViewProvider* vp;

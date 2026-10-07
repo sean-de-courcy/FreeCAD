@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <cmath>
+
 #include <QApplication>
 #include <QMessageBox>
 
@@ -64,6 +66,12 @@ TaskPreviewParameters::TaskPreviewParameters(ViewProvider* vp, QWidget* parent)
 
     ui->showFinalCheckBox->setChecked(vp->isVisible());
     ui->showTransparentPreviewCheckBox->setChecked(vp->isPreviewEnabled());
+    // The overlay's opacity (ops#150 W5): one setting for every feature, applied to this one now
+    // since another dialog may have changed it
+    ui->opacitySlider->setValue(static_cast<int>(std::lround(ViewProvider::previewOpacity() * 100)));
+    ui->opacitySlider->setEnabled(vp->isPreviewEnabled());
+    vp->updatePreviewOpacity();
+    connect(ui->opacitySlider, &QSlider::valueChanged, this, &TaskPreviewParameters::onOpacityChanged);
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     connect(
@@ -109,6 +117,13 @@ void TaskPreviewParameters::onShowFinalChanged(bool show)
 void TaskPreviewParameters::onShowPreviewChanged(bool show)
 {
     vp->showPreview(show);
+    ui->opacitySlider->setEnabled(show);
+}
+
+void TaskPreviewParameters::onOpacityChanged(int percent)
+{
+    hGrp->SetInt("Opacity", percent);
+    vp->updatePreviewOpacity();
 }
 
 TaskFeatureParameters::TaskFeatureParameters(
