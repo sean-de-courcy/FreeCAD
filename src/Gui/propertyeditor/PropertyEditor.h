@@ -146,6 +146,8 @@ private:
     void setEditorMode(const QModelIndex& parent, int start, int end);
     void closeTransaction();
     void revertEdit();  // FreeCAD-CH (ops#146)
+    // FreeCAD-CH (ops#146): the expressions bound to the row's properties, as text
+    static std::string rowExpressions(const QModelIndex& index);
     void recomputeDocument(App::Document*);
     std::unordered_set<App::Property*> acquireSelectedProperties() const;
     void removeProperties(const std::unordered_set<App::Property*>& props);
@@ -200,6 +202,10 @@ private:
     QPointer<QWidget> activeEditor;
     QPersistentModelIndex editingIndex;
     QVariant editingValue;  // FreeCAD-CH (ops#146): the edited value before editing, for Esc
+    // FreeCAD-CH (ops#146): a key or the wheel went into the editor, which wrote as it went
+    bool editTyped = false;
+    // FreeCAD-CH (ops#146): the row's expression when the editor opened
+    std::string editingExpression;
     int removingRows = 0;
 
     friend class Gui::PropertyView;

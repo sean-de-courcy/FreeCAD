@@ -27,9 +27,9 @@
 #include <set>
 
 #include <QApplication>
-#include <QPointer>
-#include <QStatusBar>
-#include <QToolButton>
+#include <QPointer>     // FreeCAD-CH (ops#147)
+#include <QStatusBar>   // FreeCAD-CH (ops#147)
+#include <QToolButton>  // FreeCAD-CH (ops#147)
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -46,6 +46,7 @@
 #include "Selection.h"
 #include "SelectionObject.h"
 #include "Application.h"
+#include "Command.h"  // FreeCAD-CH (ops#147)
 #include "Document.h"
 #include "Macro.h"
 #include "MainWindow.h"
@@ -557,7 +558,8 @@ namespace
 {
 /// The user's filter restricts only element picks on shapes (ops#147 review, M3): a whole
 /// object, a datum, and an object that is neither a Part::Feature nor an App::Link pass, so
-/// origin planes, sketches in the tree and other workbenches' pickers aren't refused.
+/// origin planes, datums and whole objects picked in the tree aren't refused. Element picks on
+/// shapes stay filtered, whoever asks for them (Fillet, CAM, Assembly, Surface).
 class UserFilterGate: public Gui::SelectionFilterGate
 {
 public:
@@ -608,10 +610,28 @@ Gui::SelectionGate* activeUserFilter()
 }
 }  // namespace
 
+// FreeCAD-CH (ops#147 review, M3): the filter in the status bar
 namespace
 {
+constexpr const char* userFilterItemId = "userSelectionFilterButton";
+
+/// Removes the filter as "No Selection Filters" does, so Part's toolbar icon follows and a macro
+/// records it; directly when Part's commands aren't loaded
+void clearUserFilter()
+{
+    if (Gui::Application::Instance) {
+        if (Gui::Command* cmd
+            = Gui::Application::Instance->commandManager().getCommandByName("Part_SelectFilter")) {
+            cmd->invoke(3);
+            return;
+        }
+    }
+    Gui::setUserSelectionFilter({});
+}
+
 /// The status bar shows the user's filter while it is on, as a button that removes it, so it
-/// can be seen and cleared in any workbench (ops#147 review, M3)
+/// can be seen and cleared in any workbench. The item is registered only while a filter is on:
+/// the status bar's relayout shows every registered item (review N1).
 void showUserFilter()
 {
     Gui::MainWindow* mainWindow = Gui::getMainWindow();
@@ -627,16 +647,24 @@ void showUserFilter()
                 "The 3D view selects only these elements. Click to remove the selection filter."
             )
         );
-        QObject::connect(button, &QToolButton::clicked, [] { Gui::setUserSelectionFilter({}); });
+        button->setObjectName(QString::fromLatin1(userFilterItemId));
+        QObject::connect(button, &QToolButton::clicked, [] { clearUserFilter(); });
+        userFilterButton = button;
+    }
+    if (userFilterText.empty()) {
+        mainWindow->removeStatusBarItem(userFilterItemId);
+        userFilterButton->hide();
+        return;
+    }
+    if (userFilterButton->isHidden()) {
         mainWindow->addStatusBarItem(
-            button,
-            {.id = "userSelectionFilterButton",
+            userFilterButton,
+            {.id = userFilterItemId,
              .title = QCoreApplication::translate("SelectionFilter", "Selection filter"),
              .slot = Gui::StatusBarSlot::Right,
              .order = 450,
              .persistentVisibility = false}
         );
-        userFilterButton = button;
     }
     QString kinds;
     if (userFilterText.find("SUBELEMENT Vertex") != std::string::npos) {
@@ -654,7 +682,7 @@ void showUserFilter()
     userFilterButton->setText(
         QCoreApplication::translate("SelectionFilter", "Filter: %1 (click to clear)").arg(kinds)
     );
-    userFilterButton->setVisible(!userFilterText.empty());
+    userFilterButton->show();
 }
 }  // namespace
 

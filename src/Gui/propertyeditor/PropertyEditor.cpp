@@ -30,7 +30,6 @@
 #include <QHeaderView>
 #include <QMenu>
 #include <QPainter>
-#include <QAbstractSpinBox>
 #include <QActionGroup>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -38,6 +37,8 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/DocumentObject.h>  // FreeCAD-CH (ops#146)
+#include <App/Expression.h>      // FreeCAD-CH (ops#146)
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/Command.h>
@@ -494,6 +495,30 @@ void PropertyEditor::revertEdit()
     }
 }
 
+std::string PropertyEditor::rowExpressions(const QModelIndex& index)
+{
+    std::string text;
+    auto item = index.isValid() ? static_cast<PropertyItem*>(index.internalPointer()) : nullptr;
+    while (item && item->getPropertyData().empty()) {
+        item = item->parent();
+    }
+    if (!item) {
+        return text;
+    }
+    for (App::Property* prop : item->getPropertyData()) {
+        auto obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
+        if (!obj) {
+            continue;
+        }
+        for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+            if (expression && path.getProperty() == prop) {
+                text += path.toString() + '=' + expression->toString() + ';';
+            }
+        }
+    }
+    return text;
+}
+
 void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint)
 {
     if (closingEditor) {
@@ -511,12 +536,15 @@ void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEdit
         return;
     }
 
-    // FreeCAD-CH (ops#146): only an editor that writes as it is typed (the number rows); the
-    // others write on a pick or a dialog's OK, which Esc mustn't undo
-    if (hint == QAbstractItemDelegate::RevertModelCache
-        && qobject_cast<QAbstractSpinBox*>(editor)) {
-        revertEdit();
+    // FreeCAD-CH (ops#146): only what was typed into the editor (numbers and lists write as they
+    // are typed). A value from a pick or a dialog's OK (a color, a file, the f(x) dialog's
+    // expression) stays: the expression is checked as well, since '=' is typed to open it.
+    if (hint == QAbstractItemDelegate::RevertModelCache && editTyped) {
+        if (rowExpressions(editingIndex) == editingExpression) {
+            revertEdit();
+        }
     }
+    editTyped = false;
     closeTransaction();
 
     // If we are not removing rows, then QTreeView::closeEditor() does nothing

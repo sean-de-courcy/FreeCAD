@@ -21,7 +21,7 @@
  *                                                                         *
  ***************************************************************************/
 
-#include <algorithm>
+#include <algorithm>  // FreeCAD-CH (ops#146)
 
 #include <QApplication>
 #include <QCheckBox>
@@ -30,8 +30,9 @@
 #include <QPainter>
 #include <QTimer>
 #include <QKeyEvent>
+#include <QLineEdit>  // FreeCAD-CH (ops#146)
 
-#include <App/Property.h>
+#include <App/Property.h>  // FreeCAD-CH (ops#146)
 #include <Base/Tools.h>
 
 #include "PropertyItemDelegate.h"
@@ -201,8 +202,44 @@ bool PropertyItemDelegate::editorEvent(
     return QItemDelegate::editorEvent(event, model, option, index);
 }
 
+// FreeCAD-CH (ops#146): whether a key changes what is typed (not one that ends the edit, moves
+// the focus or only holds a modifier)
+static bool isTypingKey(const QKeyEvent* event)
+{
+    switch (event->key()) {
+        case Qt::Key_Escape:
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:
+        case Qt::Key_Backtab:
+        case Qt::Key_Shift:
+        case Qt::Key_Control:
+        case Qt::Key_Alt:
+        case Qt::Key_AltGr:
+        case Qt::Key_Meta:
+            return false;
+        default:
+            return true;
+    }
+}
+
 bool PropertyItemDelegate::eventFilter(QObject* o, QEvent* ev)
 {
+    // FreeCAD-CH (ops#146): note a key or the wheel that goes into the open editor, which writes
+    // as it goes, so Esc reverts it (PropertyEditor::closeEditor)
+    if (ev->type() == QEvent::KeyPress || ev->type() == QEvent::Wheel) {
+        auto parentEditor = qobject_cast<PropertyEditor*>(this->parent());
+        auto widget = qobject_cast<QWidget*>(o);
+        if (parentEditor && widget && parentEditor->activeEditor
+            && (widget == parentEditor->activeEditor
+                || parentEditor->activeEditor->isAncestorOf(widget))
+            && (ev->type() == QEvent::Wheel || isTypingKey(static_cast<QKeyEvent*>(ev)))) {
+            parentEditor->editTyped = true;
+        }
+    }
+    if (o->property("fcTypingWatch").toBool()) {
+        return false;  // a line edit inside the editor, watched for typing only
+    }
     if (ev->type() == QEvent::KeyPress) {
         auto* checkBox = qobject_cast<QCheckBox*>(o);
         if (checkBox) {
@@ -348,8 +385,15 @@ QWidget* PropertyItemDelegate::createEditor(
                 w->installEventFilter(const_cast<PropertyItemDelegate*>(this));
             }
         }
+        // FreeCAD-CH (ops#146): a list's line edit inside the editor gets the keys; watch it
+        for (auto lineEdit : editor->findChildren<QLineEdit*>()) {
+            lineEdit->setProperty("fcTypingWatch", true);
+            lineEdit->installEventFilter(const_cast<PropertyItemDelegate*>(this));
+        }
         parentEditor->activeEditor = editor;
         parentEditor->editingIndex = index;
+        parentEditor->editTyped = false;  // FreeCAD-CH (ops#146)
+        parentEditor->editingExpression = PropertyEditor::rowExpressions(index);
         // FreeCAD-CH (ops#146): the value Esc writes back without a transaction to abort. It
         // goes to every selected object, so only when they all had it.
         const PropertyItem* owner = childItem;
