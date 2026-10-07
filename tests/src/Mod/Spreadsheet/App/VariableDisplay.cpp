@@ -363,6 +363,52 @@ TEST_F(VariableDisplay, usesCoverSheetCells)
     EXPECT_EQ(stock.count("B1"), 0U);
 }
 
+// fork PR 147 review: a `#` in a label isn't a document part.
+TEST_F(VariableDisplay, documentPartOnlyOutsideStrings)
+{
+    varSet->Label.setValue("a#b");
+    EXPECT_EQ(display(box, "<<a#b>>.Width * 2"), "#Width * 2");
+    // The owner's own document named explicitly: the parser already drops it from the stored
+    // text (stock behaviour), so the reference is an ordinary one and shows short.
+    auto named = parse(box, std::string(doc->getName()) + "#VarSet.Width");
+    EXPECT_EQ(named->toString(true), "VarSet.Width");
+    EXPECT_EQ(App::toDisplayString(named.get()), "#Width");
+}
+
+TEST_F(VariableDisplay, indexSubPath)
+{
+    auto list = static_cast<App::PropertyFloatList*>(
+        varSet->addDynamicProperty("App::PropertyFloatList", "List")
+    );
+    list->setValues({4.0, 5.0});
+    auto expr = parse(box, "VarSet.List[1]");
+    EXPECT_EQ(App::toDisplayString(expr.get()), "#List[1]");
+    auto back = parse(box, "#List[1]");
+    EXPECT_EQ(back->toString(true), "VarSet.List[1]");
+    EXPECT_EQ(back->eval()->toString(), expr->eval()->toString());
+}
+
+TEST_F(VariableDisplay, ambiguousInsideTheVarSet)
+{
+    EXPECT_EQ(display(varSet, "Width + 1 mm"), "#Width + 1 mm");
+    sheet->setCell("C1", "5 mm");
+    sheet->setAlias(App::CellAddress("C1"), "Width");
+    EXPECT_EQ(display(varSet, "Width + 1 mm"), "Width + 1 mm");
+}
+
+TEST_F(VariableDisplay, nestedDisplayLeavesOuterList)
+{
+    auto outerExpr = parse(box, "VarSet.Width * 2");
+    auto innerExpr = parse(box, "Sheet.Depth");
+    App::VariableDisplayScope outer;
+    EXPECT_EQ(outerExpr->toString(), "#Width * 2");
+    Pairs inner;
+    EXPECT_EQ(App::toDisplayString(innerExpr.get(), &inner), "#Depth");
+    EXPECT_EQ(inner, (Pairs {{"#Depth", "Sheet.Depth"}}));
+    EXPECT_EQ(outer.shortened(), (Pairs {{"#Width", "VarSet.Width"}}));
+    EXPECT_EQ(App::VariableDisplayScope::current(), &outer);
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers)

@@ -174,7 +174,26 @@ std::string VariableUse::toString() const
 namespace
 {
 thread_local VariableDisplayScope* currentScope = nullptr;
+
+// Whether an identifier's text names a document: a `#` outside `<<...>>` (a label may hold one).
+bool namesDocument(const std::string& text)
+{
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '#') {
+            return true;
+        }
+        if (text.compare(i, 2, "<<") == 0) {
+            for (i += 2; i < text.size() && text.compare(i, 2, ">>") != 0; ++i) {
+                if (text[i] == '\\') {
+                    ++i;
+                }
+            }
+            ++i;  // the second `>`
+        }
+    }
+    return false;
 }
+}  // namespace
 
 VariableDisplayScope::VariableDisplayScope()
     : _previous(currentScope)
@@ -198,8 +217,9 @@ std::string VariableDisplayScope::shortForm(const DocumentObject* owner, const O
         return {};
     }
     const std::string& text = var.toString();
-    if (text.find('#') != std::string::npos) {
-        return {};  // names a document
+    // getDocumentName() can't tell: it falls back to the owner's document.
+    if (namesDocument(text)) {
+        return {};
     }
     auto holder = var.getDocumentObject();
     if (!holder || holder->getDocument() != owner->getDocument()) {

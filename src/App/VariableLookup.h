@@ -98,6 +98,10 @@ public:
  * `<<Variables>>.Width`, `.Width`). A bare name is kept as written, except in the VarSet itself,
  * where `#Width` is stored as `Width`. Everything else is written as today, and
  * toString(persistent = true) never shortens. Scopes nest; each restores the previous one.
+ *
+ * Keep a scope short-lived, around one display call: the name counts are taken at the first
+ * variable reference and kept for the scope's life, keyed by Document*, so a scope held across
+ * document changes would judge uniqueness on stale counts.
  */
 class AppExport VariableDisplayScope
 {
