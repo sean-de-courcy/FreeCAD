@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <locale>
 #include <map>
@@ -257,12 +258,14 @@ struct SourceSection
     std::vector<std::string> ids;
 };
 
-// The innermost source sections of \a name; false if one has no tag or no reference ID (the
-// sources are unknown).
-bool sourceSectionsOf(std::string_view name, std::vector<SourceSection>& sources)
+// The known innermost source sections of \a name: those with a tag and a reference ID. A source
+// without either is unknown and left out, so that one such source doesn't hide the others (PR
+// 149's review).
+std::vector<SourceSection> knownSourcesOf(std::string_view name)
 {
-    return !walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
-        if (!source) {
+    std::vector<SourceSection> sources;
+    walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
+        if (!source || !hasTag(section)) {
             return false;
         }
         std::vector<std::string> ids;
@@ -271,12 +274,36 @@ bool sourceSectionsOf(std::string_view name, std::vector<SourceSection>& sources
                 ids.push_back(id);
             }
         }
-        if (!hasTag(section) || ids.empty()) {
-            return true;
+        if (!ids.empty()) {
+            sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
         }
-        sources.push_back({section.iterationTag, section.elementType, std::move(ids)});
         return false;
     });
+    return sources;
+}
+
+// The sources T1' asks of a candidate for \a oldName's element (PR 149's review): those of the
+// inputs its maker made itself (a hole circle's cylinder, extruded by the pocket from the hole's
+// circle), not those of an earlier feature's element it was made from (the block's bottom face
+// the pocket cut), so that a redrawn block profile keeps the hole's circles. All the old name's
+// known sources when no input is the maker's own (a pad's edge, made from sketch lines).
+std::vector<SourceSection> requiredSourcesOf(std::string_view oldName)
+{
+    const std::string maker = NameAncestry::makerTag(oldName);
+    const auto sections = NameAncestry::splitSections(oldName);
+    std::vector<SourceSection> own;
+    if (!maker.empty() && !sections.empty()) {
+        for (const auto& input : decodeSection(sections.front()).linkedNames) {
+            if (!input.empty() && input != Data::EMPTY_VALUE
+                && NameAncestry::makerTag(input) == maker) {
+                auto sources = knownSourcesOf(input);
+                own.insert(own.end(),
+                           std::make_move_iterator(sources.begin()),
+                           std::make_move_iterator(sources.end()));
+            }
+        }
+    }
+    return own.empty() ? knownSourcesOf(oldName) : own;
 }
 
 // True if the element named \a names lost one of \a old's sources (ops#173): for some source
@@ -285,7 +312,8 @@ bool sourceSectionsOf(std::string_view name, std::vector<SourceSection>& sources
 // from the cut face's sketch and its own circle (`g0`) of the hole's sketch; another hole of that
 // sketch comes from `g1` there, so it lost the hole's sketch. A top face whose profile line was
 // redrawn keeps the other lines, and a sketch vertex keeps its source while one of its lines does
-// (`g1v2,g2v1` and `g1v2,g7v1`). False when either side's sources are unknown.
+// (`g1v2,g2v1` and `g1v2,g7v1`). Only known sources count (knownSourcesOf()): false when the old
+// name has none; a name of the element without any can't be judged and keeps them.
 bool lostASource(const std::vector<std::string>& names, const std::vector<SourceSection>& old)
 {
     if (old.empty()) {
@@ -298,8 +326,8 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
                });
     };
     return std::none_of(names.begin(), names.end(), [&](const auto& name) {
-        std::vector<SourceSection> sources;
-        if (!sourceSectionsOf(name, sources)) {
+        const auto sources = knownSourcesOf(name);
+        if (sources.empty()) {
             return true;
         }
         // every source geometry (tag and type) of the old name keeps one of its IDs
@@ -714,7 +742,9 @@ bool NameAncestry::isIndexPieceOf(std::string_view name, std::string_view oldNam
 std::vector<int> NameAncestry::structuralSurvivors(
     std::string_view oldName,
     const std::vector<std::string>& candidates,
-    double gap
+    double gap,
+    double bandTop,
+    double* bestOut
 )
 {
     // Overlaps are ratios of small integers; the slack keeps best - gap from excluding a
@@ -737,12 +767,16 @@ std::vector<int> NameAncestry::structuralSurvivors(
         );
         best = std::max(best, overlaps.back());
     }
+    if (bestOut) {
+        *bestOut = best;
+    }
     std::vector<int> survivors;
     if (best <= 0.0) {
         return survivors;
     }
+    const double top = std::max(best, bandTop);
     for (std::size_t i = 0; i < candidates.size(); ++i) {
-        if (overlaps[i] > 0.0 && overlaps[i] >= best - gap - slack) {
+        if (overlaps[i] > 0.0 && overlaps[i] >= top - gap - slack) {
             survivors.push_back(static_cast<int>(i));
         }
     }
@@ -2767,13 +2801,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         return text;
     };
     // The survivors T1 and T1' dropped, last on a break (ops#174), in the room left of eight
-    // candidates: never taken automatically, offered to the user's pick. \a listed: those the
-    // break listed already.
-    auto listDropped = [&listByDistance](GroupState& state, const std::vector<int>& listed) {
+    // candidates: never taken automatically, offered to the user's pick. Those the break listed
+    // already aren't listed again (a tier-3 pick T1' dropped). The same feature's elements first:
+    // they are the likelier pick (PR 149's review).
+    auto listDropped = [&listByDistance](GroupState& state) {
         auto unlisted = [&](const std::vector<int>& dropped) {
+            const auto& listed = state.outcome.candidates;
             std::vector<int> rest;
             for (int k : dropped) {
-                if (std::find(listed.begin(), listed.end(), k) == listed.end()) {
+                const auto& index = state.pool->elements[k].index;
+                if (std::find(listed.begin(), listed.end(), index) == listed.end()) {
                     rest.push_back(k);
                 }
             }
@@ -2783,13 +2820,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto n = state.outcome.candidates.size();
             return n < 8 ? 8 - n : std::size_t(0);
         };
-        listByDistance(state, unlisted(state.otherMaker), "other maker", room());
         listByDistance(state, unlisted(state.otherSource), "other source", room());
+        listByDistance(state, unlisted(state.otherMaker), "other maker", room());
     };
 
     MatchGraph graph;
     std::map<int, int> nodeOfId;              // element ID -> graph candidate
     std::map<int, int> representativeOfNode;  // equivalent candidates -> representative's ID
+    // Per pool and maker: whether each element has the maker in its lineage (-1: not known yet).
+    // Many entries share a maker, and the lineage walk isn't cached (PR 149's review).
+    std::map<std::pair<const Pool*, std::string>, std::vector<signed char>> lineageMakers;
+    std::vector<signed char> noMaker;
 
     for (auto& [key, members] : groups) {
         GroupState& state = states.emplace_back();
@@ -2814,12 +2855,19 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // are left out before tier 1's band and top agreement narrow the survivors, so that none
         // of them evicts a same-maker survivor (ops#174); their own survivors are the evidence.
         const std::string maker = input.sameMaker ? NameAncestry::makerTag(oldName) : std::string();
+        auto& madeBy = maker.empty() ? noMaker : lineageMakers[{&pool, maker}];
+        madeBy.resize(pool.elements.size(), -1);
         auto fromMaker = [&](int k) {
-            const auto& names = pool.elements[k].names;
-            return maker.empty() || state.inAncestry.count(k)
-                || std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                       return NameAncestry::hasLineageTag(n, maker);
-                   });
+            if (maker.empty() || state.inAncestry.count(k)) {
+                return true;
+            }
+            if (madeBy[k] < 0) {
+                const auto& names = pool.elements[k].names;
+                madeBy[k] = std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                    return NameAncestry::hasLineageTag(n, maker);
+                });
+            }
+            return madeBy[k] > 0;
         };
         std::vector<std::string> flatNames;
         std::vector<int> flatElements;
@@ -2851,11 +2899,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 
         std::set<int> otherMaker;
         if (!oldName.empty() && input.source != Tier1Source::Names) {
-            for (int i : ancestry.structuralSurvivors(oldName, flatNames, input.gap)) {
+            double best = 0.0;
+            for (int i : ancestry.structuralSurvivors(oldName, flatNames, input.gap, 0.0, &best)) {
                 state.fromOverlap.insert(flatElements[i]);
             }
+            // Another maker's survivors within the band of both sets' best, as they were before
+            // T1 left them out: not every element of the other maker that shares a node (PR
+            // 149's review).
             if (!otherNames.empty()) {
-                for (int i : ancestry.structuralSurvivors(oldName, otherNames, input.gap)) {
+                for (int i : ancestry.structuralSurvivors(oldName, otherNames, input.gap, best)) {
                     otherMaker.insert(otherElements[i]);
                 }
             }
@@ -2928,8 +2980,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         // the old element is still there. Without it, geometry decides (tier 3, G2 under policy
         // D: same source tag and maker, within reach, with a warning) or the entry breaks with
         // the candidates ranked. The old name's ancestry, its pieces and the IDX source stay.
-        std::vector<SourceSection> oldSources;
-        if (input.sameSource && !oldName.empty() && sourceSectionsOf(oldName, oldSources)) {
+        // Only the sources of what the maker made itself count (requiredSourcesOf()).
+        const auto oldSources = input.sameSource && !oldName.empty()
+            ? requiredSourcesOf(oldName)
+            : std::vector<SourceSection>();
+        if (!oldSources.empty()) {
             for (auto it = all.begin(); it != all.end();) {
                 const auto& names = pool.elements[*it].names;
                 const bool kept = state.inAncestry.count(*it) || state.fromIndex.count(*it)
@@ -3033,7 +3088,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     + " different results for the consumer";
                 listCandidates(state, pieces);
                 listCandidates(state, others);
-                listDropped(state, {});
+                listDropped(state);
                 continue;
             }
             int representative = *std::min_element(pieces.begin(), pieces.end(), [&](int a, int b) {
@@ -3059,7 +3114,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.evidence = "split into " + std::to_string(pieces.size()) + " pieces";
                 listCandidates(state, pieces);
                 listCandidates(state, others);
-                listDropped(state, {});
+                listDropped(state);
                 continue;
             }
             state.guessKind = "piece";
@@ -3177,7 +3232,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         state.outcome.evidence = "no structural candidate, tier 3 found none: "
                             + describeNearest(nearest) + otherSource + otherMakerText(state);
                         listByDistance(state, agree, "geometric");
-                        listDropped(state, agree);
+                        listDropped(state);
                         continue;
                     }
                     const int pick = agree[wide.index];
@@ -3205,7 +3260,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         if (state.candidates.empty()) {
             state.decided = true;
             state.outcome.evidence = "no candidate" + otherMakerText(state);
-            listDropped(state, {});
+            listDropped(state);
             continue;
         }
 
@@ -3412,7 +3467,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 listCandidates(state, state.listed, state.geometric ? "geometric" : nullptr);
             }
             if (state.outcome.status == SolveStatus::Broken) {
-                listDropped(state, {});
+                listDropped(state);
             }
         }
         for (int member : *state.members) {

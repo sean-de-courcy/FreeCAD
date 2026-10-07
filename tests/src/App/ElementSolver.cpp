@@ -5273,8 +5273,9 @@ TEST(SolveOwner, anotherCircleOfTheSameSketchIsNoStructuralCandidate)
 
 TEST(SolveOwner, keptSourcesStayStructural)
 {
-    // T1' keeps what still has the old element's sources: the old circle itself after an edit of
-    // the block (a later section on the same name is in its ancestry), and a piece of it.
+    // T1' keeps what still has the old element's sources: a piece of the old circle (a later
+    // section on the same name), whatever its sources. The keep path of lostASource() is
+    // blockProfileRedrawnKeepsTheHoleCircle's.
     const auto old = holeBottomCircle(40, 41, 1);
     auto circle = [](double x) {
         const Base::Vector3d axis(0, 0, 1);
@@ -5293,6 +5294,95 @@ TEST(SolveOwner, keptSourcesStayStructural)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);  // a split under One
     EXPECT_EQ(outcomes[0].evidence.rfind("split into 1 pieces", 0), 0U) << outcomes[0].evidence;
     EXPECT_EQ(outcomes[0].candidates.front(), "Edge5");
+}
+
+namespace
+{
+
+// A hole's bottom circle as holeBottomCircle(), cut from a block face drawn by \a blockLines of
+// sketch 5 and the cylinder of edge \a geoId of sketch 40 (\a cylinderSources added).
+std::string holeCircleOn(const std::vector<int>& blockLines,
+                         int geoId,
+                         const std::vector<std::string>& cylinderSources = {})
+{
+    std::vector<std::string> edges;
+    for (int line : blockLines) {
+        edges.push_back(sketchEdge(line));
+    }
+    std::vector<std::string> sources {sketchEdge(geoId, 40)};
+    sources.insert(sources.end(), cylinderSources.begin(), cylinderSources.end());
+    return generated({lowFace(edges), generated(sources, 41, "XTR", 'F')}, 41, "CUT", 'E');
+}
+
+}  // namespace
+
+TEST(SolveOwner, blockProfileRedrawnKeepsTheHoleCircle)
+{
+    // PR 149's review (Medium 1): T1' asks only for the sources of the inputs the old element's
+    // maker made itself, the hole's cylinder (41, from g1 of the hole's sketch 40), not those of
+    // the block's face it cut. The block's profile redrawn, one line (g9 for g1) or all of them
+    // (g9..g12), the hole's circle keeps g1 and stays tier 1's; the other hole's (g2) doesn't.
+    // Requiring the face's sources too dropped the circle after a full redraw: geometry's warned
+    // pick, or a break without a fingerprint.
+    for (const std::vector<int>& lines : {std::vector<int> {9, 2, 3, 4}, {9, 10, 11, 12}}) {
+        SolveInput input;
+        input.pool["Edge"] = {
+            element("Edge7", {holeCircleOn(lines, 1)}),
+            element("Edge12", {holeCircleOn(lines, 2)}),
+        };
+        input.entries = {missing(holeCircleOn({1, 2, 3, 4}, 1), "Edge")};
+        auto outcome = Data::solveOwner(input)[0];
+        EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+        EXPECT_EQ(outcome.element, "Edge7");
+        EXPECT_EQ(outcome.tier, 1);
+    }
+}
+
+TEST(SolveOwner, unknownSourceKeepsTheOthersRequired)
+{
+    // PR 149's review (Medium 2): a source without a reference ID beside the hole's circle is
+    // left out; the circle (g1) is still required. Before, one unknown source turned T1' off and
+    // the other hole's circle (g2) was tier 1's silently.
+    const auto unknown = section({}, {}, 7, "XTR", 0, 'E', {});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge12", {holeCircleOn({1, 2, 3, 4}, 2, {unknown})})};
+    input.entries = {missing(holeCircleOn({1, 2, 3, 4}, 1, {unknown}), "Edge")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.evidence, "no candidate; tier 1's 1 survivor lost the old element's source");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge12"}));
+    //   only unknown sources on the old name: T1' can't judge, tier 1 decides
+    auto onUnknownFace = [&](const std::string& cylinderSource) {
+        return generated({lowFace({unknown}), generated({cylinderSource}, 41, "XTR", 'F')},
+                         41,
+                         "CUT",
+                         'E');
+    };
+    input.pool["Edge"] = {element("Edge12", {onUnknownFace(sketchEdge(2, 40))})};
+    input.entries = {missing(onUnknownFace(unknown), "Edge")};
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge12");
+}
+
+TEST(SolveOwner, anotherMakerBelowTheBandIsNotListed)
+{
+    // PR 149's review (Medium 3): another maker's elements are measured against the band of the
+    // best of both sets, as before T1 left them out. The pad's bottom edge (7) shares only a
+    // sketch line with the old circle, far below the other hole's circle: it is no tier-1
+    // survivor, so it is neither evidence nor listed. Measured against its own set's best, it
+    // was both.
+    SolveInput input;
+    input.pool["Edge"] = {
+        element("Edge1", {generated({sketchEdge(1)}, 7, "XTR", 'E')}),
+        element("Edge12", {holeBottomCircle(40, 41, 2)}),
+    };
+    input.entries = {missing(holeBottomCircle(40, 41, 1), "Edge")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Broken);
+    EXPECT_EQ(outcome.evidence, "no candidate; tier 1's 1 survivor lost the old element's source");
+    EXPECT_EQ(outcome.candidates, (std::vector<std::string> {"Edge12"}));
+    EXPECT_EQ(outcome.candidateRoles, (std::vector<std::string> {"other source"}));
 }
 
 TEST(SolveOwner, anotherMakerEvictsNoSameMakerSurvivor)

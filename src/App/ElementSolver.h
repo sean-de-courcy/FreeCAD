@@ -163,11 +163,16 @@ public:
      * A candidate survives if its overlap with \a oldName is at least best - \a gap, where best is
      * the highest overlap and is above 0. If some survivors agree with \a oldName on the top
      * section (topAgrees()), those that don't are dropped. No survivors when best is 0.
+     *
+     * With \a bandTop, the band is measured from the higher of best and \a bandTop (the best of
+     * another set the candidates compete with, ops#174). \a best, if given, receives best.
      */
     std::vector<int> structuralSurvivors(
         std::string_view oldName,
         const std::vector<std::string>& candidates,
-        double gap
+        double gap,
+        double bandTop = 0.0,
+        double* best = nullptr
     );
 
 private:
@@ -560,7 +565,9 @@ struct AppExport SolveInput
     /// Tier 1 keeps only candidates that kept the old element's sources (ops#173): a candidate
     /// that isn't in the old name's ancestry, a piece of it or from its IDX source, and lost one
     /// of the old name's source geometries (for a tag and type of its innermost sources, no
-    /// source sharing one of their reference IDs) is no structural candidate. A top face keeps
+    /// source sharing one of their reference IDs) is no structural candidate. Only known sources
+    /// count, and only those of the inputs the old element's maker made itself when it has such
+    /// inputs (a hole circle's cylinder, not the block face it cut). A top face keeps
     /// its profile while one line of it remains; another hole cut from the same sketch keeps
     /// the maker but has another circle, and so does a circle redrawn with a new geometry ID;
     /// only geometry tells them apart (tier 3, G2). Off for comparison runs only.
