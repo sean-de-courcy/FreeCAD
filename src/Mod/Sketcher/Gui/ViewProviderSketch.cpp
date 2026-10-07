@@ -4721,6 +4721,13 @@ void ViewProviderSketch::setEditViewer(Gui::View3DInventorViewer* viewer, int Mo
     cameraSensor.setDeleteCallback(&ViewProviderSketch::camSensDeleteCB, camSensorData);
     cameraSensor.attach(viewer->getCamera());
 
+    // The axes' length, the grid and the viewing side follow the camera. Without
+    // OrientViewOnEdit the camera may not change until the user moves the view, so
+    // set them for the current camera now (ops#145).
+    if (auto* camera = viewer->getSoRenderManager()->getCamera()) {
+        onCameraChanged(camera);
+    }
+
     blockContextMenu = false;
 
     if (auto* window = viewer->window()->windowHandle()) {

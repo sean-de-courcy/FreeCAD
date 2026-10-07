@@ -342,10 +342,14 @@ void GridExtensionP::createGridPart(
     grid->vertexProperty = vts;
 
     float gridDimension = 1.5 * camMaxDimension;
-    int vlines = static_cast<int>(gridDimension / computedGridValue);  // total number of vertical lines
-    int nlines = 2 * vlines;                                           // total number of lines
+    float vlinesExact = gridDimension / computedGridValue;
+    // A non-finite or huge ratio (e.g. an infinite camera height) must not reach the int
+    // conversion: it overflowed, and the loops below wrote outside the vertex array (ops#145).
+    bool tooDense = !(vlinesExact >= 0.0f && vlinesExact <= 1000.0f);
+    int vlines = tooDense ? 0 : static_cast<int>(vlinesExact);  // total number of vertical lines
+    int nlines = 2 * vlines;                                    // total number of lines
 
-    if (nlines > 2000) {
+    if (tooDense || nlines > 2000) {
         if (!isTooManySegmentsNotified) {
             Base::Console().warning(
                 "The grid is too dense, so it is being disabled. Consider zooming in or changing "

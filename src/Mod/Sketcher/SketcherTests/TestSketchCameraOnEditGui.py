@@ -4,6 +4,7 @@
 Mod/Sketcher/General/OrientViewOnEdit, off by default. Off, opening a sketch doesn't move the
 view at all (no turn, no fit); Sketcher_ViewSketch turns it on demand."""
 
+import math
 import re
 
 import FreeCAD
@@ -188,3 +189,42 @@ class TestSketchCameraOnEditGui(SketcherGuiTestCase):
         self.set_edit()
         self.assert_camera_unchanged(before, self.camera())
         self.assertIsNotNone(helper)
+
+    def axis_points(self, name):
+        """The two ends of an edit-mode axis (sketch coordinates), read from the scene graph."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName(coin.SbName(name))
+        search.setInterest(coin.SoSearchAction.FIRST)
+        search.apply(self.view.getSceneGraph())
+        path = search.getPath()
+        self.assertIsNotNone(path, f"Expected the {name} node in edit mode")
+        points = coin.cast(path.getTail(), "SoCoordinate3").point
+        return [points[i].getValue() for i in range(points.getNum())]
+
+    def test_c5_axes_follow_the_unchanged_camera(self):
+        """C5: off, the camera doesn't move on edit, but the axes still span the view at once.
+        They were only sized on a camera change, so they kept uninitialised ends; fitAll
+        included them and set an infinite camera height, and the grid then wrote outside its
+        vertex array (the crash in the OVP tests)."""
+        self.set_param(GENERAL_PARAMS, "Bool", "OrientViewOnEdit", False)
+        self.add_line(V(0, 0, 0), V(10, 0, 0))
+        self.start_from_isometric()  # the line, and with it the sketch origin, in view
+
+        self.set_edit()
+        h_axis = self.axis_points("RootCrossHCoordinate")
+        v_axis = self.axis_points("RootCrossVCoordinate")
+        for point in h_axis + v_axis:
+            self.assertTrue(all(math.isfinite(c) for c in point), f"Axis end {point}")
+        h_min, h_max = sorted(p[0] for p in h_axis)
+        self.assertLess(h_min, 0.0, f"Expected the H axis to span the view, got {h_axis}")
+        self.assertGreater(h_max, 10.0, f"Expected the H axis to span the view, got {h_axis}")
+        v_min, v_max = sorted(p[1] for p in v_axis)
+        self.assertLess(v_min, 0.0, f"Expected the V axis to span the view, got {v_axis}")
+        self.assertGreater(v_max, 0.0, f"Expected the V axis to span the view, got {v_axis}")
+
+        self.view.fitAll()
+        self.flush_gui(100)
+        height = self.camera()["height"]
+        self.assertTrue(math.isfinite(height) and height < 1e6, f"Camera height {height}")
