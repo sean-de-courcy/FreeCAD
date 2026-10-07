@@ -136,7 +136,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
             && !shape.isValid()) {
             TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
             repaired.makeElementCopy(shape);
-            if (!Part::fixKeepingNames(repaired)
+            if (!Part::fixKeepingNames(repaired, shape)
                 || repaired.countSubShapes(TopAbs_SOLID) != shape.countSubShapes(TopAbs_SOLID)) {
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")

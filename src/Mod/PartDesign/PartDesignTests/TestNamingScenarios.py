@@ -33,7 +33,8 @@ scorecard's local run). Every verdict is printed as a `SCORE` line.
 The interning oracle (ops#6, Task 1): `test_<ref>_V2iOracle` runs the scenario in V2 and in V2i
 (V2 with InternNames on) and requires the same verdict, stored subs and expanded names after every
 step. It asserts equality with V2, not a correct verdict, so V2's known failures need no V2i
-entries. It runs by default, or when FREECAD_SCENARIO_CONFIGS lists V2i.
+entries. It runs by default, or when FREECAD_SCENARIO_CONFIGS lists V2i (the random sequences
+then run V2i as a configuration of their own, below).
 `test_<ref>_V2siOracle` does the same for the reference solver (V2s against V2si, the solver's
 tiers included); it runs only when FREECAD_SCENARIO_CONFIGS lists V2si (local runs).
 
@@ -41,8 +42,10 @@ The reference solver's determinism (ops#7): `SolverSeeded` runs the V2s scenario
 sequences in two child processes under two naming hash seeds, and their SCORE records must be equal.
 
 Randomized edit sequences (Scenarios/randomized.py): `RandomSequences.test_seed<NNNN>_<config>`,
-one test per seed and configuration, V2, V2multi and V2s. It passes when every reference is as
-expected after every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
+one test per seed and configuration, V2, V2multi and V2s; with FREECAD_SCENARIO_CONFIGS set, every
+listed configuration, V1, V2i and V2si included (no oracle there: their verdicts must be correct,
+and their known failures need entries). It passes when every reference is as expected after
+every step. By default seeds 1-4 with 8 steps each (CI); FREECAD_SCENARIO_SEEDS
 ("1-500", "3,7") and FREECAD_SCENARIO_STEPS change them, FREECAD_SCENARIO_REPLAY=<seed>:<steps>
 runs one seed, and FREECAD_SCENARIO_GAP=1 plans the close-spaced series (ops#127, N3 6.2).
 """
