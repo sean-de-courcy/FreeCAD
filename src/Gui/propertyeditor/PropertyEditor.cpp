@@ -476,6 +476,23 @@ void PropertyEditor::closeTransaction()
     }
 }
 
+// FreeCAD-CH (ops#146, upstream issue 30992): Esc reverts the edit. A number's editor writes the
+// property as it is typed, and Esc then committed the "Edit" transaction. The editor's own
+// transaction is aborted; without one (another was pending, or the View tab, which books none),
+// the value from before the edit is written back.
+void PropertyEditor::revertEdit()
+{
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (doc && transactionID != 0 && doc->getBookedTransactionID() == transactionID) {
+        doc->abortTransaction();
+        transactionID = 0;
+        return;
+    }
+    if (editingIndex.isValid() && editingValue.isValid()) {
+        model()->setData(editingIndex, editingValue, Qt::EditRole);
+    }
+}
+
 void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEditHint hint)
 {
     if (closingEditor) {
@@ -493,6 +510,9 @@ void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEdit
         return;
     }
 
+    if (hint == QAbstractItemDelegate::RevertModelCache) {
+        revertEdit();  // FreeCAD-CH (ops#146)
+    }
     closeTransaction();
 
     // If we are not removing rows, then QTreeView::closeEditor() does nothing

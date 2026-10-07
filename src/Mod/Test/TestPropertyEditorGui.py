@@ -13,12 +13,14 @@ To run tests:
     FreeCAD -t TestPropertyEditorGui
 """
 
+import sys
 import time
 import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
 from PySide import QtCore, QtGui, QtWidgets
+from PySide6 import QtTest
 
 
 def pump(seconds=0.5):
@@ -31,13 +33,14 @@ def pump(seconds=0.5):
         time.sleep(0.01)
 
 
-def findRow(model, parent, name):
+def findRow(model, parent, name, leaf=True):
     for row in range(model.rowCount(parent)):
         index = model.index(row, 0, parent)
-        # a group can have a property's name: take a leaf
-        if str(model.data(index)) == name and model.rowCount(index) == 0:
+        # a group can have a property's name: take a leaf, or a property with rows (a Vector)
+        hasRows = model.rowCount(index) != 0
+        if str(model.data(index)) == name and (not hasRows if leaf else hasRows and parent.isValid()):
             return index
-        found = findRow(model, index, name)
+        found = findRow(model, index, name, leaf)
         if found is not None:
             return found
     return None
@@ -126,3 +129,87 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.obj.Width = 7
         self.assertEqual(self.doc.UndoCount, undos)
         self.assertNotIn("Rename property", self.doc.UndoNames)
+
+    # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
+    # writes the property as it is typed, and Esc then committed the "Edit" transaction.
+
+    def openValueEditor(self, *path):
+        """Opens the editor of the value at path (row names, e.g. "Offset", "x") with F2, as a
+        user does; returns the editor widget."""
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        pump(1.0)
+        editor = self.dataEditor()
+        model = editor.model()
+        index = findRow(model, QtCore.QModelIndex(), path[0], leaf=len(path) == 1)
+        if len(path) > 1:
+            self.assertIsNotNone(index, "no %s row in the property view" % path[0])
+            editor.expand(index)
+            pump(0.2)
+            index = next(
+                model.index(row, 0, index)
+                for row in range(model.rowCount(index))
+                if str(model.data(model.index(row, 0, index))) == path[1]
+            )
+        self.assertIsNotNone(index, "no %s row in the property view" % (path,))
+        value = index.siblingAtColumn(1)
+        editor.setCurrentIndex(value)
+        editor.setFocus()
+        key = QtCore.Qt.Key_Return if sys.platform == "darwin" else QtCore.Qt.Key_F2
+        QtTest.QTest.keyClick(editor, key)
+        pump(0.3)
+        widget = editor.indexWidget(value)
+        self.assertIsNotNone(widget, "no editor for %s" % (path,))
+        return widget
+
+    def typeThenEscape(self, widget, text):
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, text)
+        pump(0.2)
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+        pump(0.3)
+
+    def testEscapeRevertsValue(self):
+        self.obj.addProperty("App::PropertyFloat", "Ratio", "Variables")
+        self.obj.Ratio = 1.5
+        self.obj.addProperty("App::PropertyLength", "Depth", "Variables")
+        self.obj.Depth = 10
+        self.obj.addProperty("App::PropertyAngle", "Tilt", "Variables")
+        self.obj.Tilt = 30
+        self.obj.addProperty("App::PropertyString", "Finish", "Variables")
+        self.obj.Finish = "matte"
+        self.obj.addProperty("App::PropertyVector", "Offset", "Variables")
+        self.obj.Offset = App.Vector(1, 2, 3)
+        cases = (
+            (("Width",), "9", lambda: self.obj.Width, 5),
+            (("Ratio",), "7.25", lambda: self.obj.Ratio, 1.5),
+            (("Depth",), "42", lambda: self.obj.Depth.Value, 10.0),
+            (("Tilt",), "45", lambda: self.obj.Tilt.Value, 30.0),
+            (("Finish",), "gloss", lambda: self.obj.Finish, "matte"),
+            (("Offset", "x"), "8", lambda: self.obj.Offset.x, 1.0),
+        )
+        for path, text, read, before in cases:
+            for outer in (False, True):
+                with self.subTest(path=path, outer=outer):
+                    if outer:
+                        # A transaction someone else opened: the editor books none of its own
+                        self.doc.openTransaction("Outer")
+                    undos = self.doc.UndoCount
+                    widget = self.openValueEditor(*path)
+                    self.typeThenEscape(widget, text)
+                    self.assertEqual(read(), before)
+                    if outer:
+                        self.doc.commitTransaction()
+                    else:
+                        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+                        self.assertEqual(self.doc.UndoCount, undos)
+
+    def testReturnStillCommits(self):
+        undos = self.doc.UndoCount
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "9")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(self.obj.Width, 9)
+        self.assertEqual(self.doc.UndoCount, undos + 1)

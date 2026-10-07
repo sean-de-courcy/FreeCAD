@@ -347,6 +347,7 @@ QWidget* PropertyItemDelegate::createEditor(
         }
         parentEditor->activeEditor = editor;
         parentEditor->editingIndex = index;
+        parentEditor->editingValue = index.data(Qt::EditRole);  // FreeCAD-CH (ops#146)
     }
 
     return editor;

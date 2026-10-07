@@ -20,6 +20,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <utility>
 #include <boost_graph_adjacency_list.hpp>
 #include <boost/graph/topological_sort.hpp>
 
@@ -240,6 +241,17 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                         // user hits ESC to cancel while still holding the mouse button while using
                         // some SoDragger. Therefore, we shall ignore ESC while any mouse button is
                         // pressed, until this Coin bug is fixed.
+                        // FreeCAD-CH (ops#146, upstream issue 23518): only a release whose press
+                        // this viewer saw. Esc that closes the expression editor opened with '='
+                        // in a task panel field is pressed there; focus then comes back to the
+                        // view, which got the release and closed the panel too.
+                        static const View3DInventorViewer* escapePressedIn = nullptr;
+                        if (press) {
+                            escapePressedIn = viewer;
+                        }
+                        else if (std::exchange(escapePressedIn, nullptr) != viewer) {
+                            break;
+                        }
                         if (!press) {
                             // react only on key release
                             // Let first selection mode terminate

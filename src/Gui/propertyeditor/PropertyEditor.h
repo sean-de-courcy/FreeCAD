@@ -145,6 +145,7 @@ private:
     void collapseAll();
     void setEditorMode(const QModelIndex& parent, int start, int end);
     void closeTransaction();
+    void revertEdit();  // FreeCAD-CH (ops#146)
     void recomputeDocument(App::Document*);
     std::unordered_set<App::Property*> acquireSelectedProperties() const;
     void removeProperties(const std::unordered_set<App::Property*>& props);
@@ -198,6 +199,7 @@ private:
 
     QPointer<QWidget> activeEditor;
     QPersistentModelIndex editingIndex;
+    QVariant editingValue;  // FreeCAD-CH (ops#146): the edited value before editing, for Esc
     int removingRows = 0;
 
     friend class Gui::PropertyView;
