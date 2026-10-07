@@ -119,6 +119,8 @@ struct DrawingParameters
     static SbColor SelectColor;             // Color used for selected geometry
     static SbColor CurveExternalColor;      // Color used for external geometry
     static SbColor CurveExternalDefiningColor;  // Color used for external defining geometry
+    static SbColor CurveParkedExternalColor;    // Color used for external geometry whose link a
+                                                // reorder set aside (FreeCAD-CH ops#131)
     static SbColor CurveDraftColor;             // Color used for construction geometry
     static SbColor FullyConstraintConstructionElementColor;  // Color used for a fully constrained
                                                              // construction element

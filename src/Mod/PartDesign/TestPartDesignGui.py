@@ -43,6 +43,7 @@ from PartDesignTests.TestPreviewPython import TestPreviewPython
 from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 from PartDesignTests.TestReferencePickerGui import TestReferencePickerGui
 from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
+from PartDesignTests.TestParkedMarkingGui import TestParkedMarkingGui
 from PartDesignTests.TestExpressionFieldsGui import TestExpressionFieldsGui
 
 

@@ -60,6 +60,7 @@
 #include "FeatureTransformed.h"
 #include "ShapeBinder.h"
 #include "FailureContinuation.h"
+#include "Retarget.h"
 
 
 namespace PartDesign
@@ -84,6 +85,8 @@ PyMOD_INIT_FUNC(_PartDesign)
 
     // A failure inside a Body passes through and the recompute goes on (ops#126)
     PartDesign::registerFailureContinuation();
+    // The sketch editor marks projections a reorder parked (ops#131)
+    PartDesign::registerParkedReferenceProvider();
     Base::Console().log("Loading Part Design module… done\n");
 
 

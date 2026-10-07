@@ -24,6 +24,7 @@
 
 #include <FCConfig.h>
 
+#include <map>
 #include <memory>
 
 #include <Inventor/SbVec3f.h>
@@ -40,6 +41,7 @@
 #include <Mod/Sketcher/App/GeoEnum.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
+#include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
@@ -158,6 +160,17 @@ void EditModeGeometryCoinManager::updateGeometryColor(
         return false;
     };
 
+    // External geometry whose link a reorder set aside (ops#131), asked once per GeoId
+    std::map<int, bool> parked;
+    auto isParked = [&](int GeoId) {
+        auto it = parked.find(GeoId);
+        if (it == parked.end()) {
+            auto sketch = viewProvider.getSketchObject();
+            it = parked.emplace(GeoId, !Sketcher::parkedReference(*sketch, GeoId).empty()).first;
+        }
+        return it->second;
+    };
+
     auto isCoincident = [&](int GeoId, Sketcher::PointPos PosId) {
         const std::vector<Sketcher::Constraint*>& constraints
             = ViewProviderSketchCoinAttorney::getConstraints(viewProvider);
@@ -246,6 +259,9 @@ void EditModeGeometryCoinManager::updateGeometryColor(
             if (isExternal) {
                 if (isCoincident(GeoId, PosId) && !issketchinvalid) {
                     pcolor[i] = drawingParameters.ConstrIcoColor;
+                }
+                else if (isParked(GeoId)) {
+                    pcolor[i] = drawingParameters.CurveParkedExternalColor;
                 }
                 else {
                     pcolor[i] = isExternalDefiningGeomPoint(GeoId)
@@ -504,6 +520,9 @@ void EditModeGeometryCoinManager::updateGeometryColor(
                     auto ref = egf->getRef();
                     if (egf->testFlag(ExternalGeometryExtension::Missing)) {
                         color[i] = drawingParameters.InvalidSketchColor;
+                    }
+                    else if (isParked(GeoId)) {
+                        color[i] = drawingParameters.CurveParkedExternalColor;
                     }
                     else {
                         color[i] = egf->testFlag(ExternalGeometryExtension::Defining)

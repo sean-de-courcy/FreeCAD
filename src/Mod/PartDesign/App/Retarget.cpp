@@ -25,6 +25,7 @@
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Mod/Part/App/PartFeature.h>
+#include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Body.h"
@@ -260,6 +261,16 @@ std::string projectionKey(const ParkedItem& item)
 {
     const std::string& sub = item.shadowNew.empty() ? item.sub : item.shadowNew;
     return item.target + "." + Data::newElementName(sub.c_str());
+}
+
+/// The element a parked item referred to, as the user knows it (`Edge3`)
+std::string parkedElement(const ParkedItem& item)
+{
+    std::string element = Data::oldElementName(item.sub.c_str());
+    if (Data::hasMissingElement(element.c_str())) {
+        element.erase(0, std::strlen(Data::MISSING_PREFIX));
+    }
+    return element;
 }
 
 std::vector<std::string> parkedLines(const App::DocumentObject* owner)
@@ -1795,10 +1806,7 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     std::ostringstream ss;
     if (item->extgeo) {
         // A projection parked in place (ops#131)
-        std::string element = Data::oldElementName(item->sub.c_str());
-        if (Data::hasMissingElement(element.c_str())) {
-            element.erase(0, std::strlen(Data::MISSING_PREFIX));
-        }
+        std::string element = parkedElement(*item);
         ss << item->property << " projects '" << targetLabel << "'";
         if (!element.empty()) {
             ss << " (" << element << ")";
@@ -1849,6 +1857,21 @@ bool hasParkedOriginals(const App::DocumentObject* obj)
         }
     }
     return false;
+}
+
+void registerParkedReferenceProvider()
+{
+    Sketcher::setParkedReferenceProvider([](const Sketcher::SketchObject& sketch, long id) {
+        for (const auto& line : parkedLines(&sketch)) {
+            auto item = ParkedItem::parse(line);
+            if (item && item->extgeo
+                && std::find(item->ids.begin(), item->ids.end(), id) != item->ids.end()) {
+                std::string element = parkedElement(*item);
+                return element.empty() ? item->target : item->target + "." + element;
+            }
+        }
+        return std::string();
+    });
 }
 
 }  // namespace PartDesign

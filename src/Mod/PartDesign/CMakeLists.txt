@@ -82,6 +82,7 @@ if(BUILD_GUI)
         PartDesignTests/TestProfileLinkDialog.py
         PartDesignTests/TestReferencePickerGui.py
         PartDesignTests/TestRollBackBarGui.py
+        PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestExpressionFieldsGui.py
     )
 endif(BUILD_GUI)

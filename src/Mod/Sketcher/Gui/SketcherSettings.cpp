@@ -751,6 +751,7 @@ void SketcherSettingsAppearance::saveSettings()
     ui->ConstructionColor->onSave();
     ui->ExternalColor->onSave();
     ui->ExternalDefiningColor->onSave();
+    ui->ParkedExternalColor->onSave();
     ui->InvalidSketchColor->onSave();
     ui->FullyConstrainedColor->onSave();
     ui->InternalAlignedGeoColor->onSave();
@@ -828,6 +829,7 @@ void SketcherSettingsAppearance::loadSettings()
     ui->ConstructionColor->onRestore();
     ui->ExternalColor->onRestore();
     ui->ExternalDefiningColor->onRestore();
+    ui->ParkedExternalColor->onRestore();
     ui->InvalidSketchColor->onRestore();
     ui->FullyConstrainedColor->onRestore();
     ui->InternalAlignedGeoColor->onRestore();
