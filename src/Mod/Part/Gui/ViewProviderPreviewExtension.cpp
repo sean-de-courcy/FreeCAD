@@ -281,7 +281,9 @@ void ViewProviderPreviewExtension::updatePreview()
 
 void ViewProviderPreviewExtension::updatePreviewShape(Part::TopoShape shape, SoPreviewShape* preview)
 {
-    if (shape.isNull() || preview == nullptr) {
+    // FreeCAD-CH (ops#148, upstream issue 24326): an empty shape clears the preview (it kept the
+    // last one, so a feature that stopped computing still showed its last good preview)
+    if (preview == nullptr) {
         return;
     }
 

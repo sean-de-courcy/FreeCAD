@@ -190,7 +190,8 @@ names it.
 | `fix/183-t1prime-followups` | fix | ops#183 | - | `integration` (`fix/173-multi-circle-tier1` `2c829d6ff0`) | `ec7262a329` (fork PR 161), 2026-10-07 | never (fork feature) |
 | `fix/169-known-failure-lists` | fix | ops#169 | - | `integration` `df1c89c675` | `0d70bced95` (fork PR 162), 2026-10-07 | never (fork feature) |
 | `feat/150-w7-loft-pipe-sections` | feat | ops#150 | - | `feat/150-w6-revolution-helix` `d5423e62b9` (stacked on fork PR 159) | `a949fff4df` (fork PR 163), 2026-10-07 | never (fork feature) |
-| `fix/190-fixkeepingnames-followups` | fix | ops#190, ops#195 | - | `integration` `0d70bced95` | (fork PR 164) | never (fork feature) |
+| `fix/190-fixkeepingnames-followups` | fix | ops#190, ops#195 | - | `integration` `0d70bced95` | `57bb8bfe3c` (fork PR 164), 2026-10-07 | never (fork feature) |
+| `fix/148-stale-previews` | fix | ops#148 | upstream issues 32414, 24326 | `integration` `ec7262a329` | (fork PR 165) | a new base fixes upstream issues 32414 and 24326 |
 
 ## Fork-only commits in carried topics
 

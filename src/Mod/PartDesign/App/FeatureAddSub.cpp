@@ -134,6 +134,13 @@ void FeatureAddSub::getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& s
 
 void FeatureAddSub::updatePreviewShape()
 {
+    // FreeCAD-CH (ops#148, upstream issue 24326): a feature that fails has no preview. Its
+    // AddSubShape is the last good one's (e.g. a Pad switched to "To last" with nothing below).
+    if (isError()) {
+        PreviewShape.setValue(TopoShape());
+        return;
+    }
+
     const auto notifyWarning = [](const QString& message) {
         Base::Console().translatedUserWarning(
             "Preview",

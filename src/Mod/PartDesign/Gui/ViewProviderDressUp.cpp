@@ -159,6 +159,17 @@ void ViewProviderDressUp::updatePreviewOpacity()
     }
 }
 
+// FreeCAD-CH (ops#148, upstream issue 32414): the error colour follows every recompute, not
+// only the panel's handlers that call hideOnError() ("Use all edges" didn't: the preview stayed
+// red after the feature computed)
+void ViewProviderDressUp::updatePreview()
+{
+    ViewProvider::updatePreview();
+    if (auto* obj = getObject()) {
+        setErrorState(obj->isError());
+    }
+}
+
 void ViewProviderDressUp::setErrorState(bool error)
 {
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();

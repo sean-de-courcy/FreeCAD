@@ -56,6 +56,8 @@ public:
     void setErrorState(bool error);
 
     void updatePreviewOpacity() override;
+    /// FreeCAD-CH (ops#148): the error state follows each preview update
+    void updatePreview() override;
 
     /**
      * Returns the feature Name associated with the view provider.
