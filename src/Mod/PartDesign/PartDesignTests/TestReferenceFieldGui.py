@@ -58,6 +58,12 @@ Designed models, each built by the test:
   cylinder), 42 pi up to the walls.
 - Coil (W6): the Ring's rectangle, a helix of pitch 5 and height 10 (two turns): 32 pi about Z,
   48 pi about the x = -1 line (the sweep is approximated: relative tolerance 1e-3).
+- Tower (W7): squares centred on Z, the profile 10 x 10 at z = 0, S1 20 x 20 at z = 10, S2 10 x 10
+  at z = 20. A loft passes through its sections: in the order [S1, S2] its slice at z = 10 is S1,
+  400; in the order [S2, S1] it isn't.
+- Rod (W7): a profile 2 x 2 at z = 0 swept along a spine of two lines along Z (10 and 20 long);
+  as a multisection pipe through S10 (4 x 4 at z = 10) and S30 (2 x 2 at z = 30) its slice at
+  z = 10 is 16.
 
 Keys go through the window (QTest's QWindow overload), so the shortcut map sees them as it sees a
 user's. Each arming test also has a twin that arms through the field's `armed` property, so that a
@@ -2903,21 +2909,23 @@ class TestReferenceFieldGui(unittest.TestCase):
         return sketch, helix
 
     def helixPreview(self):
-        """The additive helix's preview on (with it, the stock axis pick hid the profile), as the
-        test found it after."""
+        """The additive helix's preview on, restored after the test. With it on, the stock axis
+        pick hid the helix itself (startReferenceSelection is given the feature, not its profile)
+        and left a hidden profile hidden, so its lines couldn't be picked."""
         prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
         old = prefs.GetBool("AdditiveHelixPreview", False)
         prefs.SetBool("AdditiveHelixPreview", True)
         self.addCleanup(prefs.SetBool, "AdditiveHelixPreview", old)
 
     def testHelixAxisRow(self):
-        """T25, B18: with the preview on, the helix's axis row armed leaves the profile sketch
-        shown (the stock pick hid it while the preview is on, so its lines couldn't be picked);
-        the x = -1 line picked: 48 pi, the row disarmed; OK closes the dialog (B15's throw)."""
+        """T25, B18: with the preview on and the profile sketch hidden, the helix's axis row armed
+        shows it (the stock pick left it hidden); the x = -1 line picked: 48 pi, the row disarmed and the
+        sketch hidden again; OK closes the dialog (B15's throw)."""
         self.helixPreview()
         sketch, helix = self.coil()
         self.edit(helix, count=0)
-        self.assertTrue(sketch.ViewObject.isVisible(), "the edit doesn't show the sketch")
+        sketch.ViewObject.Visibility = False
+        pump(0.1)
         field = findField("fieldReferenceAxis")
         self.selectReference("axis")
         self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
@@ -2925,6 +2933,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(sketch.ViewObject.isVisible(), "the profile isn't shown")
         self.pick(self.lines[-1], "")
         self.assertTrue(waitFor(lambda: not armed(field)), "the row stays armed")
+        pump(0.2)
+        self.assertFalse(sketch.ViewObject.isVisible(), "the sketch stays shown after the pick")
         self.assertLink(helix.ReferenceAxis, self.lines[-1], [])
         self.doc.recompute()
         self.assertAlmostEqual(helix.Shape.Volume / (48 * math.pi), 1, delta=1e-3)
@@ -2947,7 +2957,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertLink(helix.ReferenceAxis, sketch, ["V_Axis"])
 
-    # -- PR 159 review round 1 ----------------------------------------------------------------------
+    # -- PR 159 review round 1 -----------------------------------------------------------------
 
     def testRevolutionStartReferenceWholeSketch(self):
         """Review (1): a whole sketch is a start reference again (its plane; only an up-to-face
@@ -2958,7 +2968,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         feature.Angle = 90
         self.doc.recompute()
         self.assertAlmostEqual(feature.Shape.Volume, 4 * math.pi, places=3)
-        plane = App.Rotation(App.Vector(0, 0, 1), 60).multiply(App.Rotation(App.Vector(1, 0, 0), 90))
+        plane = App.Rotation(App.Vector(0, 0, 1), 60).multiply(
+            App.Rotation(App.Vector(1, 0, 0), 90)
+        )
         reference = models.sketch(
             self.doc,
             "StartPlane",
@@ -3039,7 +3051,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump(0.1)
         self.assertFalse(armed(field))
         key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
-        self.assertTrue(waitFor(lambda: feature.ReferenceAxis[1] == ["V_Axis"]), feature.ReferenceAxis)
+        self.assertTrue(
+            waitFor(lambda: feature.ReferenceAxis[1] == ["V_Axis"]), feature.ReferenceAxis
+        )
         self.assertTrue(
             waitFor(lambda: combo.currentText() == "Vertical sketch axis"), combo.currentText()
         )
@@ -3065,8 +3079,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testReferencesPanelDisarmsTheAxisRow(self):
         """B15 (review 4): the axis row armed, the References panel takes the selection (its
-        selectionTaken, which its picks and highlights send first): the row disarms, the box shows
-        the axis there is, and OK closes."""
+        selectionTaken, which its picks and highlights send first): the row disarms; the guessed
+        axis, no choice of the box, stays in the row under "Select reference..."; OK closes."""
         feature = self.revolution()
         self.doc.HistoryAlgorithm = "V2"
         self.doc.ReferenceSolver = True
@@ -3091,6 +3105,470 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(QtCore.QMetaObject.invokeMethod(panel, "selectionTaken"))
         pump(0.2)
         self.assertFalse(armed(field), "the row stays armed")
+        # The guessed axis is no choice of the box: the box shows "Select reference...", the row
+        # under it holds the axis
+        self.assertTrue(self.axisCombo().currentText().startswith("Select reference"))
+        self.assertTrue(field.isVisible())
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertEqual(feature.ReferenceAxis[0].Name, "AxisSketch")
+    # -- W7: Loft and Pipe sections (T26-T30, T35; B8, B11-B14, B21) -------------------------------
+
+    def squareSketch(self, name, half, z):
+        """A square sketch centred on Z, side 2 x half, at height z."""
+        return models.sketch(
+            self.doc, name, models.rectangle(-half, -half, half, half), self.body, z=z
+        )
+
+    def tower(self, sections=(), labels=None):
+        """The Tower model: the profile 10 x 10 at z = 0, S1 20 x 20 at z = 10, S2 10 x 10 at
+        z = 20; a loft of the profile and the sections given (names, in order). With labels, the
+        sections are labelled so (DuplicateLabels on while they are made)."""
+        self.body = models.body(self.doc)
+        prefs = App.ParamGet("User parameter:BaseApp/Preferences/Document")
+        duplicates = prefs.GetBool("DuplicateLabels", False)
+        prefs.SetBool("DuplicateLabels", True)
+        try:
+            self.towerProfile = self.squareSketch("Profile", 5, 0)
+            self.s1 = self.squareSketch("S1", 10, 10)
+            self.s2 = self.squareSketch("S2", 5, 20)
+            if labels:
+                self.s1.Label, self.s2.Label = labels
+        finally:
+            prefs.SetBool("DuplicateLabels", duplicates)
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.towerProfile
+        named = {"S1": self.s1, "S2": self.s2}
+        loft.Sections = [(named[n], [""]) for n in sections]
+        self.doc.recompute()
+        return loft
+
+    def sliceArea(self, shape, z):
+        import Part
+
+        return sum(Part.Face(wire).Area for wire in shape.slice(App.Vector(0, 0, 1), z))
+
+    def assertThroughSection(self, feature, z, area):
+        """The feature is valid and its cross-section at z is the section's (it passes through
+        it)."""
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertAlmostEqual(self.sliceArea(feature.Shape, z), area, places=3)
+
+    def assertNotThroughSection(self, feature, z, area):
+        self.doc.recompute()
+        if feature.isValid():
+            self.assertNotAlmostEqual(self.sliceArea(feature.Shape, z), area, places=1)
+
+    def sectionNames(self, feature):
+        return [obj.Name for obj, subs in feature.Sections]
+
+    def sectionsField(self):
+        field = findField("fieldSections")
+        self.assertIsNotNone(field, "no sections field")
+        return field
+
+    def testLoftSectionsReorderByKey(self):
+        """T26, T35: a loft with no sections opens with its sections field armed; S2 picked before
+        S1 makes no loft through S1 (its slice at z = 10 isn't 400); Alt+Up on S1 puts it first:
+        [S1, S2], and the slice at z = 10 is S1's 20 x 20 = 400."""
+        loft = self.tower()
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
+        self.assertEqual(texts(findField("fieldProfile")), ["Profile"])
+        self.pick(self.s2, "")
+        self.pick(self.s1, "Edge2")  # an edge of a sketch: the sketch whole
+        self.assertEqual(self.sectionNames(loft), ["S2", "S1"])
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], [""]])
+        self.assertEqual(texts(field), ["1. S2", "2. S1"])
+        self.assertTrue(armed(field), "a pick disarmed the field")
+        self.assertNotThroughSection(loft, 10, 400)
+
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Up, QtCore.Qt.AltModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S1", "S2"]), loft.Sections)
+        self.assertEqual(texts(field), ["1. S1", "2. S2"])
+        self.assertEqual(entries(field).currentRow(), 0, "the moved entry isn't the current one")
+        self.assertThroughSection(loft, 10, 400)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(self.sectionNames(loft), ["S1", "S2"])
+        self.assertThroughSection(loft, 10, 400)
+
+    def testLoftSectionsReorderByDragAndMenu(self):
+        """T27: a drag (the list's rows moved) and the menu's Move up each reorder in one write;
+        Ctrl+Z steps back over each."""
+        loft = self.tower(("S2", "S1"))
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.assertEqual(texts(field), ["1. S2", "2. S1"])
+        model = entries(field).model()
+        self.assertTrue(model.moveRow(QtCore.QModelIndex(), 1, QtCore.QModelIndex(), 0))
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S1", "S2"]), loft.Sections)
+        self.assertTrue(waitFor(lambda: texts(field) == ["1. S1", "2. S2"]), texts(field))
+        self.assertThroughSection(loft, 10, 400)
+
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S2", "S1"]), loft.Sections)
+
+        menu = openMenu(field, 1)
+        actions = menuActions(menu)
+        self.assertFalse(actions["Move down"].isEnabled())
+        actions["Move up"].trigger()
+        menu.close()
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S1", "S2"]), loft.Sections)
+        self.assertThroughSection(loft, 10, 400)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S2", "S1"]), loft.Sections)
+        key(QtCore.Qt.Key_Y, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S1", "S2"]), loft.Sections)
+
+    def testLoftSectionsOfOneLabel(self):
+        """T28, B8: two sections of one Label; Delete on the second takes out that one (the old
+        list matched rows by label and the property by object, then wrote past its end on a
+        reorder); picked again and moved up, the list and the property agree."""
+        loft = self.tower(("S1", "S2"), labels=("Section", "Section"))
+        self.assertThroughSection(loft, 10, 400)
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.assertEqual(texts(field), ["1. Section", "2. Section"])
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S1"]), loft.Sections)
+        self.assertEqual(texts(field), ["1. Section"])
+        self.pick(self.s2, "")
+        self.assertEqual(self.sectionNames(loft), ["S1", "S2"])
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Up, QtCore.Qt.AltModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == ["S2", "S1"]), loft.Sections)
+        self.assertEqual(len(texts(field)), 2)
+        self.assertEqual([entries(field).item(i).toolTip() for i in range(2)], ["", ""])
+        self.assertTrue(Gui.Control.activeDialog())
+
+    def testLoftSectionPickTogglesAndReplaces(self):
+        """T29, B21: S1 picked again comes out of the list (the field stays armed); picked again
+        it is last; a point of it picked replaces its entry, not another one."""
+        loft = self.tower(("S1", "S2"))
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.arm(field, byFocus=True)
+        self.pick(self.s1, "")
+        self.assertEqual(self.sectionNames(loft), ["S2"])
+        self.assertTrue(armed(field), "a pick that removes disarmed the field")
+        self.pick(self.s1, "")
+        self.assertEqual(self.sectionNames(loft), ["S2", "S1"])
+        self.pick(self.s1, "Vertex1")
+        self.assertEqual(self.sectionNames(loft), ["S2", "S1"])
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Vertex1"]])
+        self.assertEqual(texts(field), ["1. S2", "2. S1:Vertex1"])
+        # The profile is no section, and a section no profile: refused with the reason
+        self.pick(self.towerProfile, "")
+        self.assertEqual(self.sectionNames(loft), ["S2", "S1"])
+        self.assertIn("profile", statusText().lower())
+
+    def testLoftProfileField(self):
+        """Q8 (a): the profile is its own field above the sections; a pick replaces it, a section
+        is refused as profile."""
+        loft = self.tower(("S1", "S2"))
+        self.edit(loft, count=2)
+        profile, sections = fields()
+        self.assertEqual(profile.objectName(), "fieldProfile")
+        self.assertEqual(sections.objectName(), "fieldSections")
+        self.arm(profile, byFocus=True)
+        self.pick(self.s1, "")
+        self.assertEqual(loft.Profile[0].Name, "Profile")
+        self.assertIn("section", statusText().lower())
+        other = self.squareSketch("Other", 5, -10)
+        self.doc.recompute()
+        self.pick(other, "Edge1")  # a sketch whole
+        self.assertLink(loft.Profile, other, [])
+        self.assertEqual(texts(profile), ["Other"])
+
+    def sketchColours(self, sketch):
+        vp = sketch.ViewObject
+        return list(vp.LineColorArray)
+
+    def testLoftHighlightLeavesLineColours(self):
+        """B14, PR 163 review 11: armed, the field colours the whole section S1 in the Coin nodes,
+        all four edges in the entries' colour; disarmed, and after the dialog closed while armed,
+        S1 is drawn in its own per-edge colours again. LineColorArray is never written."""
+        loft = self.tower(("S1", "S2"))
+        colours = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0)]
+        self.s1.ViewObject.LineColorArray = colours
+        before = self.sketchColours(self.s1)
+        pump(0.1)
+        self.assertEqual(self.edgeColours(self.s1), colours)
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+
+        def lit():
+            drawn = self.edgeColours(self.s1)
+            return len(drawn) == 4 and len(set(drawn)) == 1 and drawn[0] in (MAGENTA, CURRENT)
+
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lit), self.edgeColours(self.s1))
+        self.assertEqual(self.sketchColours(self.s1), before)
+        field.setProperty("armed", False)
+        pump(0.2)
+        self.assertEqual(self.edgeColours(self.s1), colours, "disarmed: not S1's own colours")
+        self.assertEqual(self.sketchColours(self.s1), before)
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lit), self.edgeColours(self.s1))
+        Gui.Control.closeDialog()
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertEqual(self.edgeColours(self.s1), colours, "closed: not S1's own colours")
+        self.assertEqual(self.sketchColours(self.s1), before)
+
+    def testLoftCancelRestoresVisibility(self):
+        """B13 (the loft too): the sections hidden before the edit show during it; Cancel hides
+        them again, a section picked during the edit included."""
+        loft = self.tower(("S1",))
+        for sketch in (self.towerProfile, self.s1, self.s2):
+            sketch.ViewObject.Visibility = False
+        # The transaction a double click opens: Cancel undoes the edit's writes through it
+        self.doc.openTransaction("Edit Loft")
+        self.edit(loft, count=2)
+        self.assertTrue(self.s1.ViewObject.Visibility)
+        field = self.sectionsField()
+        self.arm(field, byFocus=True)
+        self.pick(self.s2, "")
+        self.assertEqual(self.sectionNames(loft), ["S1", "S2"])
+        self.assertTrue(self.s2.ViewObject.Visibility, "a picked section isn't shown")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        self.assertEqual(self.sectionNames(loft), ["S1"])
+        self.assertFalse(self.s1.ViewObject.Visibility, "Cancel left the section shown")
+        self.assertFalse(self.s2.ViewObject.Visibility, "Cancel left the picked section shown")
+
+    def testNewLoftArmsItsSections(self):
+        """T35: PartDesign_AdditiveLoft on a selected sketch makes a loft with that profile and
+        opens its dialog with the sections field armed."""
+        self.body = models.body(self.doc)
+        profile = self.squareSketch("Profile", 5, 0)
+        self.doc.recompute()
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand("PartDesign_AdditiveLoft")
+        self.assertTrue(waitFor(lambda: len(fields()) == 2), "the loft's fields")
+        settle()
+        field = self.sectionsField()
+        self.assertTrue(waitFor(lambda: armed(field)), "the new loft's sections aren't armed")
+        loft = self.doc.getObject("AdditiveLoft")
+        self.assertEqual(loft.Profile[0].Name, "Profile")
+        self.assertEqual(loft.Sections, [])
+
+    def rod(self, transformation="Multisection"):
+        """The Rod model: the profile 2 x 2 centred on Z at z = 0; a spine sketch in the XZ plane
+        of two lines along Z, 10 and 20 long; the sections 4 x 4 at z = 10 (S10) and 2 x 2 at
+        z = 30 (S30); a pipe of the profile along the whole spine, with no sections yet."""
+        self.body = models.body(self.doc)
+        self.rodProfile = self.squareSketch("Profile", 1, 0)
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        self.spine = models.sketch(
+            self.doc, "Spine", models.polyline([(0, 0), (0, 10), (0, 30)]), self.body, placement=xz
+        )
+        self.s10 = self.squareSketch("S10", 2, 10)
+        self.s30 = self.squareSketch("S30", 1, 30)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.rodProfile
+        pipe.Spine = self.spine
+        pipe.Transformation = transformation
+        self.doc.recompute()
+        return pipe
+
+    def testPipeSectionsReorderAndPointLast(self):
+        """T30, T35: a multisection pipe opens on its page, the empty sections field armed; S30
+        picked before S10, then Alt+Up on S10: [S10, S30], the slice at z = 10 is S10's 4 x 4 =
+        16. (The sweep places each section where it lies on the spine: [S30, S10] slices so too,
+        so the order isn't told from the shape here.) A point of S30 replaces it, last; moved up
+        it is refused with the reason (only the last section can be a point)."""
+        pipe = self.rod()
+        self.edit(pipe, count=1)
+        field = self.sectionsField()
+        self.assertTrue(field.isVisible(), "the multisection page isn't shown")
+        self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
+        self.pick(self.s30, "")
+        self.pick(self.s10, "")
+        self.assertEqual(self.sectionNames(pipe), ["S30", "S10"])
+        self.assertEqual(texts(field), ["1. S30", "2. S10"])
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Up, QtCore.Qt.AltModifier)
+        self.assertTrue(waitFor(lambda: self.sectionNames(pipe) == ["S10", "S30"]), pipe.Sections)
+        self.assertThroughSection(pipe, 10, 16)
+
+        self.pick(self.s30, "Vertex1")
+        self.assertEqual([list(subs) for obj, subs in pipe.Sections], [[""], ["Vertex1"]])
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Up, QtCore.Qt.AltModifier)
+        pump(0.2)
+        self.assertEqual(self.sectionNames(pipe), ["S10", "S30"])
+        status = field.findChild(QtWidgets.QLabel, "status")
+        self.assertIn("last section", status.text())
+        self.assertEqual(texts(field), ["1. S10", "2. S30:Vertex1"])
+
+    def testPipeDeleteRemovesAllSelected(self):
+        """B11, B12: no Remove Section toggle; Delete removes every selected section."""
+        pipe = self.rod()
+        pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
+        self.assertThroughSection(pipe, 10, 16)
+        self.edit(pipe, count=1)
+        buttons = Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
+        self.assertFalse([b for b in buttons if b.text() == "Remove Section"])
+        field = self.sectionsField()
+        clickRow(field, 0)
+        clickRow(field, 1, QtCore.Qt.ControlModifier)
+        self.assertEqual(len(entries(field).selectedItems()), 2)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: pipe.Sections == []), pipe.Sections)
+
+    def testPipeConstantModeArmsOnMultisection(self):
+        """T35 for the pipe: a constant pipe's sections field is hidden and not armed; switching to
+        Multisection arms it (it has no sections)."""
+        pipe = self.rod("Constant")
+        self.edit(pipe, count=0)
+        field = findField("fieldSections")
+        self.assertFalse(field.isVisible())
+        self.assertFalse(armed(field))
+        box = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "comboBoxScaling")
+        self.choose(box, 1)
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "not armed on Multisection"
+        )
+        self.pick(self.s10, "")
+        self.assertEqual(self.sectionNames(pipe), ["S10"])
+
+    def pipeVisibility(self, ok):
+        """B13: the sections each go back to their own visibility when the dialog closes, not to
+        the profile's; on Cancel the spine and the profile too."""
+        pipe = self.rod()
+        pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
+        self.doc.recompute()
+        self.rodProfile.ViewObject.Visibility = True
+        self.spine.ViewObject.Visibility = False
+        self.s10.ViewObject.Visibility = False
+        self.s30.ViewObject.Visibility = True
+        self.edit(pipe, count=1)
+        self.assertTrue(self.s10.ViewObject.Visibility)
+        self.assertTrue(self.spine.ViewObject.Visibility)
+        button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
+        taskButton(button).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog didn't close")
+        pump(0.2)
+        self.assertFalse(self.s10.ViewObject.Visibility, "a hidden section is shown after")
+        self.assertTrue(self.s30.ViewObject.Visibility, "a shown section is hidden after")
+        self.assertFalse(self.spine.ViewObject.Visibility, "the spine is shown after")
+
+    def testPipeOkRestoresSectionVisibility(self):
+        self.pipeVisibility(ok=True)
+
+    def testPipeCancelRestoresVisibility(self):
+        self.pipeVisibility(ok=False)
+
+    # -- PR 163 review round 1 ----------------------------------------------------------------
+
+    def testLoftSectionsDragOfTwo(self):
+        """H1: two entries dropped together. Qt's drop moves them one row at a time, each move
+        signalled, before any event runs: S1 and S2 of [S3, S1, S2] dropped on top give
+        [S1, S2, S3] in one write (the slice at z = 10 is S1's 20 x 20 = 400), and one Ctrl+Z puts
+        back [S3, S1, S2]."""
+        loft = self.tower()
+        s3 = self.squareSketch("S3", 5, 30)
+        loft.Sections = [(s3, [""]), (self.s1, [""]), (self.s2, [""])]
+        self.doc.recompute()
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.assertEqual(texts(field), ["1. S3", "2. S1", "3. S2"])
+        refs = entries(field)
+        refs.item(1).setSelected(True)
+        refs.item(2).setSelected(True)
+        model = refs.model()
+        # As QListWidget::dropEvent moves rows 1 and 2 to the top: row 1 to 0, then row 2 to 1
+        self.assertTrue(model.moveRow(QtCore.QModelIndex(), 1, QtCore.QModelIndex(), 0))
+        self.assertTrue(model.moveRow(QtCore.QModelIndex(), 2, QtCore.QModelIndex(), 1))
+        self.assertTrue(
+            waitFor(lambda: self.sectionNames(loft) == ["S1", "S2", "S3"]), loft.Sections
+        )
+        pump(0.2)
+        self.assertEqual(self.sectionNames(loft), ["S1", "S2", "S3"])
+        self.assertTrue(waitFor(lambda: texts(field) == ["1. S1", "2. S2", "3. S3"]), texts(field))
+        self.assertThroughSection(loft, 10, 400)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(
+            waitFor(lambda: self.sectionNames(loft) == ["S3", "S1", "S2"]), loft.Sections
+        )
+
+    def newFeatureCancelled(self, command, name):
+        """H2: the command on a shown sketch makes the feature and hides the sketch; Cancel
+        removes the feature and the sketch is shown again, as before the command."""
+        self.body = models.body(self.doc)
+        profile = self.squareSketch("Profile", 5, 0)
+        self.doc.recompute()
+        self.assertTrue(profile.ViewObject.Visibility)
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand(command)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no dialog")
+        settle()
+        self.assertIsNotNone(self.doc.getObject(name))
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertIsNone(self.doc.getObject(name), "Cancel left the feature")
+        self.assertTrue(profile.ViewObject.Visibility, "Cancel left the profile hidden")
+
+    def testNewLoftCancelShowsTheProfile(self):
+        self.newFeatureCancelled("PartDesign_AdditiveLoft", "AdditiveLoft")
+
+    def testNewPipeCancelShowsTheProfile(self):
+        self.newFeatureCancelled("PartDesign_AdditivePipe", "AdditivePipe")
+
+    def testLoftCancelRestoresVisibilityItself(self):
+        """Review 11: testLoftCancelRestoresVisibility with no transaction for Cancel to abort
+        (setEdit alone), so only the dialog puts the visibility back: the profile and the
+        sections hidden before the edit, the picked one included, are hidden after."""
+        loft = self.tower(("S1",))
+        for sketch in (self.towerProfile, self.s1, self.s2):
+            sketch.ViewObject.Visibility = False
+        self.edit(loft, count=2)
+        self.assertTrue(self.s1.ViewObject.Visibility)
+        self.assertTrue(self.towerProfile.ViewObject.Visibility)
+        field = self.sectionsField()
+        self.arm(field, byFocus=False)
+        self.pick(self.s2, "")
+        self.assertTrue(self.s2.ViewObject.Visibility, "a picked section isn't shown")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertFalse(self.towerProfile.ViewObject.Visibility, "Cancel left the profile shown")
+        self.assertFalse(self.s1.ViewObject.Visibility, "Cancel left the section shown")
+        self.assertFalse(self.s2.ViewObject.Visibility, "Cancel left the picked section shown")
+
+    def testLoftRefusesAWholeSolid(self):
+        """Review 9: a solid picked whole (in the tree) is no section: refused with the reason;
+        one of its faces is taken."""
+        loft = self.tower(("S1",))
+        block = self.doc.addObject("Part::Box", "Block")
+        block.Placement = App.Placement(App.Vector(-5, -5, 40), App.Rotation())
+        self.doc.recompute()
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.arm(field, byFocus=False)
+        self.pick(block, "")
+        self.assertEqual(self.sectionNames(loft), ["S1"])
+        self.assertIn("whole solid", statusText().lower())
+        self.pick(block, "Face6")  # its top, at z = 50
+        self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])

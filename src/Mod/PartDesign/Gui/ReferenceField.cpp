@@ -76,6 +76,11 @@ namespace
 constexpr int IndexRole = Qt::UserRole;
 constexpr int StateRole = Qt::UserRole + 1;
 constexpr int SubRole = Qt::UserRole + 2;
+// A section's position in the list (Kind::Sections; IndexRole is its first sub's)
+constexpr int SectionRole = Qt::UserRole + 3;
+// The colour the highlighter gives an entry, for a whole section's edges
+const Base::Color entryColor(1.0F, 0.0F, 1.0F);
+const Base::Color currentColor(0.0F, 0.75F, 1.0F);
 
 QPointer<ReferenceField> armedFieldPtr;
 
@@ -120,6 +125,7 @@ public:
         , noDependents(options.noDependents)
         , kind(options.kind)
         , wholeObject(options.wholeObject)
+        , acceptOnly(options.acceptOnly)
     {}
     ~ReferenceFieldGate() override
     {
@@ -159,9 +165,10 @@ public:
                 return false;
             }
         }
-        else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects) {
+        else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects
+                 && kind != ReferenceField::Kind::Sections && !acceptOnly) {
             // A profile's gate is its accept test alone (an object of the body, or its elements),
-            // and so is a list of objects'
+            // and so are a list of objects' and a list of sections'
             if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
                 notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
                 return false;
@@ -191,6 +198,7 @@ private:
     bool noDependents;
     ReferenceField::Kind kind;
     bool wholeObject;
+    bool acceptOnly;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -253,7 +261,12 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     else {
         entryList->setSelectionMode(QAbstractItemView::ExtendedSelection);
         entryList->setToolTip(
-            isObjects()
+            isSections()
+                ? tr("Click here, then pick sections in the 3D view or the tree: a pick adds a "
+                     "section, takes it out, or changes the element of its object.\n"
+                     "Drag the entries, or Alt+Up / Alt+Down, to change the order.\n"
+                     "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
+            : isObjects()
                 ? tr("Click here, then pick features in the tree: a pick adds a feature or "
                      "takes it out.\n"
                      "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
@@ -278,6 +291,14 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     status->hide();
     layout->addWidget(status);
 
+    if (isSections()) {
+        entryList->setDragDropMode(QAbstractItemView::InternalMove);
+        entryList->setDefaultDropAction(Qt::MoveAction);
+        connect(entryList->model(),
+                &QAbstractItemModel::rowsMoved,
+                this,
+                &ReferenceField::sectionsDragged);
+    }
     entryList->installEventFilter(this);
     entryList->viewport()->installEventFilter(this);
     connect(entryList, &QListWidget::customContextMenuRequested, this, &ReferenceField::showMenu);
@@ -313,6 +334,16 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     : ReferenceField(owner, property, std::move(options), Writer(), parent)
 {
     objectsWriter = std::move(write);
+}
+
+ReferenceField::ReferenceField(App::DocumentObject* owner,
+                               const char* property,
+                               Options options,
+                               SectionsWriter write,
+                               QWidget* parent)
+    : ReferenceField(owner, property, std::move(options), Writer(), parent)
+{
+    sectionsWriter = std::move(write);
 }
 
 ReferenceField::~ReferenceField()
@@ -546,6 +577,107 @@ void ReferenceField::reload()
             }
         }
     }
+    // An entry's state, look and tooltip: broken (red), guessed (yellow) or exact
+    auto decorate = [](QListWidgetItem* item,
+                       QString text,
+                       const std::string& element,
+                       bool broken,
+                       const App::ReferenceRow* row) {
+        QStringList tip;
+        if (broken) {
+            item->setData(StateRole, QStringLiteral("broken"));
+            text = tr("%1 (missing)").arg(text);
+            item->setBackground(QColor(255, 0, 0, 70));
+            item->setIcon(Gui::BitmapFactory().pixmap("overlay_error"));
+            tip << tr("%1 is missing.").arg(QString::fromStdString(element));
+            if (row && !row->candidates.empty()) {
+                tip << tr("Candidates (right-click, Use):");
+                for (const auto& candidate : row->candidates) {
+                    tip << QStringLiteral("  %1  %2").arg(QString::fromStdString(candidate.index),
+                                                          distanceText(candidate.distance));
+                }
+            }
+        }
+        else if (row) {
+            item->setData(StateRole, QStringLiteral("guessed"));
+            item->setBackground(QColor(255, 200, 0, 90));
+            item->setIcon(Gui::BitmapFactory().pixmap("overlay_warning"));
+            tip << QString::fromStdString(row->headline.empty() ? row->evidence : row->headline);
+            if (row->hasOriginal && !row->originalIndex.empty()) {
+                tip << tr("Originally %1").arg(QString::fromStdString(row->originalIndex));
+            }
+            for (const auto& alternative : row->alternatives) {
+                tip << QStringLiteral("  %1  %2").arg(QString::fromStdString(alternative.index),
+                                                      distanceText(alternative.distance));
+            }
+        }
+        else {
+            item->setData(StateRole, QStringLiteral("exact"));
+        }
+        item->setText(text);
+        if (!tip.isEmpty()) {
+            item->setToolTip(tip.join(QLatin1Char('\n')));
+        }
+    };
+
+    if (isSections()) {
+        // One entry per section, numbered in the property's order; each carries its position,
+        // never matched by label (B8). A section's state is its subs'.
+        std::vector<App::DocumentObject*> objs;
+        std::vector<std::string> subs;
+        if (auto list = freecad_cast<App::PropertyLinkSubList*>(property())) {
+            objs = list->getValues();
+            subs = list->getSubValues(false);
+        }
+        const int current = entryList->currentItem()
+            ? entryList->currentItem()->data(SectionRole).toInt()
+            : -1;
+        QSignalBlocker block(entryList);
+        entryList->clear();
+        int section = 0;
+        for (std::size_t first = 0; first < objs.size() && first < subs.size(); ++section) {
+            std::size_t end = first + 1;
+            while (end < objs.size() && objs[end] == objs[first]) {
+                ++end;
+            }
+            App::DocumentObject* obj = objs[first];
+            QStringList elements;
+            bool broken = false;
+            const App::ReferenceRow* row = nullptr;
+            for (std::size_t i = first; i < end; ++i) {
+                if (std::string element = bareElement(subs[i]); !element.empty()) {
+                    elements << QString::fromStdString(element);
+                }
+                broken = broken || Data::hasMissingElement(subs[i].c_str());
+                for (const auto& r : rows) {
+                    if (r.index == static_cast<int>(i)) {
+                        row = &r;
+                        broken = broken || r.status == "broken";
+                    }
+                }
+            }
+            QString text = obj ? QString::fromUtf8(obj->Label.getValue()) : QString();
+            if (!elements.isEmpty()) {
+                text += QStringLiteral(":") + elements.join(QStringLiteral(", "));
+            }
+            auto item = new QListWidgetItem(entryList);
+            item->setData(IndexRole, static_cast<int>(first));
+            item->setData(SectionRole, section);
+            item->setData(SubRole, QString::fromStdString(subs[first]));
+            const std::string element =
+                elements.isEmpty() ? std::string() : elements.front().toStdString();
+            decorate(item, text, element, broken, row);
+            item->setText(QStringLiteral("%1. %2").arg(section + 1).arg(item->text()));
+            if (section == current) {
+                entryList->setCurrentItem(item);
+            }
+            first = end;
+        }
+        block.unblock();
+        updateLook();
+        return;
+    }
+
     std::ranges::sort(slots, {}, &App::ReferenceReport::Slot::index);
     if (isSingle()) {
         // One entry: the linked object with its element, or the object alone (a datum, a whole
@@ -623,41 +755,7 @@ void ReferenceField::reload()
                 text = isProfile() ? tr("%1 (whole)").arg(name) : name;
             }
         }
-        QStringList tip;
-        if (broken) {
-            item->setData(StateRole, QStringLiteral("broken"));
-            text = tr("%1 (missing)").arg(text);
-            item->setBackground(QColor(255, 0, 0, 70));
-            item->setIcon(Gui::BitmapFactory().pixmap("overlay_error"));
-            tip << tr("%1 is missing.").arg(QString::fromStdString(element));
-            if (row && !row->candidates.empty()) {
-                tip << tr("Candidates (right-click, Use):");
-                for (const auto& candidate : row->candidates) {
-                    tip << QStringLiteral("  %1  %2").arg(QString::fromStdString(candidate.index),
-                                                          distanceText(candidate.distance));
-                }
-            }
-        }
-        else if (row) {
-            item->setData(StateRole, QStringLiteral("guessed"));
-            item->setBackground(QColor(255, 200, 0, 90));
-            item->setIcon(Gui::BitmapFactory().pixmap("overlay_warning"));
-            tip << QString::fromStdString(row->headline.empty() ? row->evidence : row->headline);
-            if (row->hasOriginal && !row->originalIndex.empty()) {
-                tip << tr("Originally %1").arg(QString::fromStdString(row->originalIndex));
-            }
-            for (const auto& alternative : row->alternatives) {
-                tip << QStringLiteral("  %1  %2").arg(QString::fromStdString(alternative.index),
-                                                      distanceText(alternative.distance));
-            }
-        }
-        else {
-            item->setData(StateRole, QStringLiteral("exact"));
-        }
-        item->setText(text);
-        if (!tip.isEmpty()) {
-            item->setToolTip(tip.join(QLatin1Char('\n')));
-        }
+        decorate(item, text, element, broken, row);
         if (slot.index == currentIndex) {
             entryList->setCurrentItem(item);
         }
@@ -695,9 +793,13 @@ void ReferenceField::slotChangedObject(const App::DocumentObject& obj, const App
         }
         scheduleReload();
     }
-    else if (isObjects() && &prop == &obj.Label) {
+    else if ((isObjects() || isSections()) && &prop == &obj.Label) {
         // A listed object renamed: its row shows the new Label (PR 154 review)
-        const auto objs = linkedObjects();
+        std::vector<App::DocumentObject*> objs = linkedObjects();
+        auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr;
+        if (list) {
+            objs = list->getValues();
+        }
         if (std::ranges::find(objs, &obj) != objs.end()) {
             scheduleReload();
         }
@@ -719,7 +821,7 @@ void ReferenceField::slotDeletedDocument(const App::Document& doc)
             if (armedFieldPtr == this) {
                 armedFieldPtr = nullptr;
             }
-            highlightedTarget = App::DocumentObjectT();
+            highlightedTargets.clear();
             display.forget();
             Gui::SelectionGate* own = gate;
             gate = nullptr;
@@ -755,6 +857,10 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
     }
     if (isProfile()) {
         pickProfile(msg);
+        return;
+    }
+    if (isSections()) {
+        pickSection(msg);
         return;
     }
     if (obj != target() || Base::Tools::isNullOrEmpty(msg.pSubName)) {
@@ -899,6 +1005,192 @@ void ReferenceField::useWhole()
     }
 }
 
+std::vector<App::PropertyLinkSubList::SubSet> ReferenceField::storedSections() const
+{
+    // getSubListValues() gives the old-style names, not the stored ones
+    std::vector<App::PropertyLinkSubList::SubSet> sections;
+    if (auto list = freecad_cast<App::PropertyLinkSubList*>(property())) {
+        const std::vector<App::DocumentObject*>& objs = list->getValues();
+        const std::vector<std::string>& subs = list->getSubValues();
+        for (std::size_t i = 0; i < objs.size() && i < subs.size(); ++i) {
+            if (sections.empty() || sections.back().first != objs[i]) {
+                sections.emplace_back(objs[i], std::vector<std::string>());
+            }
+            sections.back().second.push_back(subs[i]);
+        }
+    }
+    return sections;
+}
+
+void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
+{
+    App::DocumentObject* obj = owner()->getDocument()->getObject(msg.pObjectName);
+    std::string sub = msg.pSubName ? msg.pSubName : "";
+    // A sketch is a section whole, unless one of its points is picked: the feature takes the
+    // whole sketch for any other element of it (Loft::getSectionShape)
+    if (obj->isDerivedFrom<Part::Part2DObject>()
+        && !boost::starts_with(bareElement(sub), "Vertex")) {
+        sub.clear();
+    }
+    auto list = freecad_cast<App::PropertyLinkSubList*>(property());
+    if (!list) {
+        return;
+    }
+    if (repickIndex >= 0) {
+        const std::vector<App::DocumentObject*> objs = list->getValues();
+        if (repickIndex < static_cast<int>(objs.size()) && objs[repickIndex] == obj
+            && !sub.empty()) {
+            pick(obj, sub);  // the References panel's re-pick of the element
+            return;
+        }
+        {
+            Base::StateLocker lock(busy, true);
+            Gui::Selection().clearSelection();
+        }
+        const App::DocumentObject* held =
+            repickIndex < static_cast<int>(objs.size()) ? objs[repickIndex] : nullptr;
+        message = tr("Re-pick takes an element of %1.")
+                      .arg(held ? QString::fromUtf8(held->Label.getValue()) : QString());
+        updateLook();
+        return;
+    }
+    {
+        Base::StateLocker lock(busy, true);
+        Gui::Selection().clearSelection();
+    }
+    message.clear();
+    // Old-style names, as the pick's, to tell the same element again
+    std::vector<App::PropertyLinkSubList::SubSet> sections = storedSections();
+    const std::vector<App::PropertyLinkSubList::SubSet> picked = list->getSubListValues(false);
+    auto found = std::ranges::find(picked, obj, &App::PropertyLinkSubList::SubSet::first);
+    if (found == picked.end()) {
+        sections.emplace_back(obj, std::vector<std::string> {sub});
+    }
+    else {
+        const auto index = static_cast<std::size_t>(found - picked.begin());
+        std::vector<std::string> held = found->second;
+        std::erase(held, std::string());
+        const bool same = sub.empty() ? held.empty() : held == std::vector<std::string> {sub};
+        if (same) {
+            sections.erase(sections.begin() + static_cast<std::ptrdiff_t>(index));
+        }
+        else {
+            sections[index].second = {sub};
+        }
+    }
+    writeSections(sections);
+}
+
+void ReferenceField::writeSections(const std::vector<App::PropertyLinkSubList::SubSet>& sections,
+                                   bool undoable)
+{
+    std::string why;
+    if (options.checkSections && !options.checkSections(sections, why)) {
+        message = QString::fromStdString(why);
+        reload();  // a refused drag shows the property's order again
+        return;
+    }
+    message.clear();
+    // Each kept sub takes its mapped name, records, fingerprint, `from` and report along,
+    // wherever its section moves; a new one has none
+    const Snapshot now = snapshot();
+    Snapshot value;
+    for (const auto& [obj, subs] : sections) {
+        if (subs.empty()) {
+            value.objects.emplace_back(obj);
+            value.subs.emplace_back();
+        }
+        for (const auto& sub : subs) {
+            value.objects.emplace_back(obj);
+            value.subs.push_back(sub);
+        }
+    }
+    const std::size_t count = value.subs.size();
+    value.shadows.resize(count);
+    value.records.resize(count);
+    value.fingerprints.resize(count);
+    value.froms.resize(count);
+    std::vector<bool> used(now.subs.size(), false);
+    for (std::size_t j = 0; j < count; ++j) {
+        for (std::size_t i = 0; i < now.subs.size() && i < now.objects.size(); ++i) {
+            if (used[i] || now.subs[i] != value.subs[j]
+                || now.objects[i].getObject() != value.objects[j].getObject()) {
+                continue;
+            }
+            used[i] = true;
+            value.shadows[j] = now.shadows[i];
+            value.records[j] = now.records[i];
+            value.fingerprints[j] = now.fingerprints[i];
+            value.froms[j] = now.froms[i];
+            for (const auto& entry : now.report) {
+                if (entry.index == static_cast<int>(i)) {
+                    value.report.push_back(entry);
+                    value.report.back().index = static_cast<int>(j);
+                }
+            }
+            break;
+        }
+    }
+    write(value, undoable);
+}
+
+void ReferenceField::sectionsDragged()
+{
+    if (busy || dragPending) {
+        return;
+    }
+    // A drop of several entries moves them one row at a time, each move signalled: one write,
+    // after the drop, in the order the items have then
+    dragPending = true;
+    QTimer::singleShot(0, this, [this]() {
+        dragPending = false;
+        std::vector<int> order;
+        for (int i = 0; i < entryList->count(); ++i) {
+            order.push_back(entryList->item(i)->data(SectionRole).toInt());
+        }
+        const std::vector<App::PropertyLinkSubList::SubSet> sections = storedSections();
+        std::vector<App::PropertyLinkSubList::SubSet> moved;
+        for (int index : order) {
+            if (index >= 0 && index < static_cast<int>(sections.size())) {
+                moved.push_back(sections[index]);
+            }
+        }
+        if (moved.size() != sections.size()) {
+            reload();  // the property changed meanwhile
+            return;
+        }
+        if (moved != sections) {
+            writeSections(moved);
+        }
+    });
+}
+
+void ReferenceField::moveCurrent(int step)
+{
+    QListWidgetItem* item = entryList->currentItem();
+    if (!isSections() || !item) {
+        return;
+    }
+    std::vector<App::PropertyLinkSubList::SubSet> sections = storedSections();
+    const int from = item->data(SectionRole).toInt();
+    const int to = from + step;
+    if (from < 0 || to < 0 || from >= static_cast<int>(sections.size())
+        || to >= static_cast<int>(sections.size())) {
+        return;
+    }
+    std::swap(sections[from], sections[to]);
+    writeSections(sections);
+    // The moved entry stays the current one, if the move was taken
+    if (storedSections() != sections) {
+        return;
+    }
+    for (int i = 0; i < entryList->count(); ++i) {
+        if (entryList->item(i)->data(SectionRole).toInt() == to) {
+            entryList->setCurrentRow(i, QItemSelectionModel::ClearAndSelect);
+        }
+    }
+}
+
 bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
 {
     App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
@@ -961,6 +1253,11 @@ ReferenceField::Snapshot ReferenceField::snapshot() const
             value.objects.emplace_back(obj);
         }
         return value;
+    }
+    if (auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(prop) : nullptr) {
+        for (App::DocumentObject* obj : list->getValues()) {
+            value.objects.emplace_back(obj);
+        }
     }
     if (prop) {
         value.report = App::ReferenceReport::get(prop);
@@ -1033,7 +1330,10 @@ void ReferenceField::write(App::DocumentObject* obj,
 
 void ReferenceField::write(const Snapshot& value, bool undoable)
 {
-    if (!property() || (isObjects() ? !objectsWriter : !writer)) {
+    const bool hasWriter = isObjects()
+        ? bool(objectsWriter)
+        : (isSections() ? bool(sectionsWriter) : bool(writer));
+    if (!property() || !hasWriter) {
         return;
     }
     if (undoable) {
@@ -1048,6 +1348,26 @@ void ReferenceField::write(const Snapshot& value, bool undoable)
         }
         Base::StateLocker lock(busy, true);
         objectsWriter(objs);
+    }
+    else if (isSections()) {
+        // The sections: a run of subs of one object each
+        std::vector<App::PropertyLinkSubList::SubSet> sections;
+        for (std::size_t i = 0; i < value.subs.size() && i < value.objects.size(); ++i) {
+            App::DocumentObject* obj = value.objects[i].getObject();
+            if (!obj) {
+                continue;
+            }
+            if (sections.empty() || sections.back().first != obj) {
+                sections.emplace_back(obj, std::vector<std::string>());
+            }
+            sections.back().second.push_back(value.subs[i]);
+        }
+        Base::StateLocker lock(busy, true);
+        pending = value;
+        valuePending = true;
+        sectionsWriter(sections);
+        valuePending = false;
+        pending = Snapshot();
     }
     else {
         Base::StateLocker lock(busy, true);
@@ -1102,6 +1422,45 @@ void ReferenceField::assign(App::DocumentObject* obj, const std::vector<std::str
     if (pending.subs.empty()) {
         return;
     }
+    assignPendingRecords(prop);
+}
+
+void ReferenceField::assign(const std::vector<App::PropertyLinkSubList::SubSet>& sections)
+{
+    auto list = freecad_cast<App::PropertyLinkSubList*>(property());
+    if (!list) {
+        return;
+    }
+    std::vector<App::DocumentObject*> objs;
+    std::vector<std::string> names;
+    for (const auto& [obj, subs] : sections) {
+        if (subs.empty()) {
+            objs.push_back(obj);
+            names.emplace_back();
+        }
+        for (const auto& sub : subs) {
+            objs.push_back(obj);
+            names.push_back(sub);
+        }
+    }
+    std::vector<App::DocumentObject*> pendingObjects;
+    for (const auto& objT : pending.objects) {
+        pendingObjects.push_back(objT.getObject());
+    }
+    // A writer passes what the field gave it; anything else is written as it comes
+    if (!valuePending || pending.subs != names || pendingObjects != objs) {
+        list->setSubListValues(sections);
+        return;
+    }
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows = pending.shadows;
+    list->setValues(std::move(objs), std::move(names), std::move(shadows));
+    if (!pending.subs.empty()) {
+        assignPendingRecords(list);
+    }
+}
+
+void ReferenceField::assignPendingRecords(App::PropertyLinkBase* prop)
+{
     visitLink(prop, [this](auto& link) {
         link.setElementRecords(std::vector<App::ElementRecords>(pending.records));
         link.setExpandedFroms(std::vector<std::string>(pending.froms));
@@ -1128,12 +1487,14 @@ void ReferenceField::replaceEntries(const std::vector<std::string>& subs)
 
 void ReferenceField::removeSelected()
 {
+    // A list of sections by position, the others by slot
+    const int role = isSections() ? SectionRole : IndexRole;
     std::vector<int> indexes;
     for (QListWidgetItem* item : entryList->selectedItems()) {
-        indexes.push_back(item->data(IndexRole).toInt());
+        indexes.push_back(item->data(role).toInt());
     }
     if (indexes.empty() && entryList->currentItem()) {
-        indexes.push_back(entryList->currentItem()->data(IndexRole).toInt());
+        indexes.push_back(entryList->currentItem()->data(role).toInt());
     }
     // A profile's whole object isn't removed: the profile is required
     std::erase_if(indexes, [](int index) { return index < 0; });
@@ -1158,6 +1519,16 @@ void ReferenceField::removeSelected()
             }
         }
         writeObjects(objs);
+        return;
+    }
+    if (isSections()) {
+        std::vector<App::PropertyLinkSubList::SubSet> sections = storedSections();
+        for (int index : indexes) {
+            if (index < static_cast<int>(sections.size())) {
+                sections.erase(sections.begin() + index);
+            }
+        }
+        writeSections(sections);
         return;
     }
     std::vector<std::string> stored = storedSubs();
@@ -1264,15 +1635,25 @@ void ReferenceField::highlight(bool on, const std::string& extra)
     // Off the element colours of the last target; on: the entries, the current one (and the
     // hovered candidate) in a second colour. The view provider's Coin nodes only: nothing in
     // the edit's transaction or the file (notes 10).
-    if (auto previous = highlightedTarget.getObject()) {
+    for (const auto& previous : highlightedTargets) {
         if (auto vp = freecad_cast<PartGui::ViewProviderPartExt*>(
-                Gui::Application::Instance->getViewProvider(previous)
+                Gui::Application::Instance->getViewProvider(previous.getObject())
             )) {
             vp->unsetHighlightedFaces();
             vp->unsetHighlightedEdges();
+            vp->unsetHighlightedPoints();
+            // unsetHighlightedEdges draws every edge in the line colour: per-edge colours back
+            // (PR 163 review 11)
+            if (vp->LineColorArray.getSize() > 1) {
+                vp->LineColorArray.touch();
+            }
         }
     }
-    highlightedTarget = App::DocumentObjectT();
+    highlightedTargets.clear();
+    if (on && isSections()) {
+        highlightSections();
+        return;
+    }
     // A single entry is coloured on its own object (a face of the base, not a datum plane)
     App::DocumentObject* support = nullptr;
     // A list of objects colours nothing: its entries are whole features
@@ -1319,7 +1700,6 @@ void ReferenceField::highlight(bool on, const std::string& extra)
         sort(extra, currentEdges, currentFaces);
     }
     const TopoDS_Shape& shape = feature->Shape.getValue();
-    const Base::Color currentColor(0.0F, 0.75F, 1.0F);
     // The highlighter paints every element when given no names: each list goes only when it has
     // some (the first one sizes the colours).
     try {
@@ -1354,12 +1734,104 @@ void ReferenceField::highlight(bool on, const std::string& extra)
     catch (const std::exception& e) {
         Base::Console().error("%s\n", e.what());
     }
-    highlightedTarget = feature;
+    highlightedTargets.emplace_back(feature);
 }
 
-void ReferenceField::zoomTo(const std::string& element)
+void ReferenceField::highlightSections()
+{
+    // Each section on its own object, the current one in the second colour; a whole one is all
+    // its edges (a sketch), an element that element. The view providers' Coin nodes only: no
+    // LineColorArray is written (B14).
+    for (int i = 0; i < entryList->count(); ++i) {
+        QListWidgetItem* item = entryList->item(i);
+        auto own = owner();
+        if (!own) {
+            return;
+        }
+        const std::string sub = item->data(SubRole).toString().toStdString();
+        if (Data::hasMissingElement(sub.c_str())) {
+            continue;
+        }
+        const int index = item->data(IndexRole).toInt();
+        auto list = freecad_cast<App::PropertyLinkSubList*>(property());
+        if (!list || index < 0 || index >= static_cast<int>(list->getValues().size())) {
+            continue;
+        }
+        auto feature = freecad_cast<Part::Feature*>(list->getValues()[index]);
+        auto vp = feature ? freecad_cast<PartGui::ViewProviderPartExt*>(
+                                Gui::Application::Instance->getViewProvider(feature)
+                            )
+                          : nullptr;
+        if (!vp) {
+            continue;
+        }
+        const Base::Color color = item == entryList->currentItem() ? currentColor : entryColor;
+        const std::string element = bareElement(sub);
+        const TopoDS_Shape& shape = feature->Shape.getValue();
+        try {
+            PartGui::ReferenceHighlighter highlighter(shape, vp->LineColor.getValue());
+            highlighter.setElementColor(color);
+            if (element.empty()) {
+                const auto edges = static_cast<std::size_t>(
+                    Part::TopoShape(shape).countSubShapes(TopAbs_EDGE)
+                );
+                vp->setHighlightedEdges(std::vector<Base::Color>(edges, color));
+            }
+            else if (boost::starts_with(element, "Vertex")) {
+                std::vector<Base::Color> colors = vp->PointColorArray.getValues();
+                highlighter.getVertexColors({element}, colors);
+                vp->setHighlightedPoints(colors);
+            }
+            else if (boost::starts_with(element, "Edge")) {
+                std::vector<Base::Color> colors = vp->LineColorArray.getValues();
+                highlighter.getEdgeColors({element}, colors);
+                vp->setHighlightedEdges(colors);
+            }
+            else if (boost::starts_with(element, "Face")) {
+                std::vector<App::Material> materials = vp->ShapeAppearance.getValues();
+                PartGui::ReferenceHighlighter faces(shape, vp->ShapeAppearance.getDiffuseColor());
+                faces.setElementColor(color);
+                faces.getFaceMaterials({element}, materials);
+                vp->setHighlightedFaces(materials);
+            }
+        }
+        catch (const Standard_Failure& e) {
+            Base::Console().error("OCC error: %s\n", e.GetMessageString());
+        }
+        catch (const std::exception& e) {
+            Base::Console().error("%s\n", e.what());
+        }
+        highlightedTargets.emplace_back(feature);
+    }
+}
+
+void ReferenceField::zoomTo(const std::string& element, App::DocumentObject* obj)
 {
     App::DocumentObject* support = (isSingle() || isProfile()) ? linkedObject() : target();
+    if (obj) {
+        // A section: its object, whole or its element
+        Part::TopoShape shape = Part::Feature::getTopoShape(
+            obj,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+                | (element.empty() ? Part::ShapeOption::NoFlag : Part::ShapeOption::NeedSubElement),
+            element.empty() ? nullptr : element.c_str()
+        );
+        if (shape.isNull()) {
+            return;
+        }
+        Base::BoundBox3d box = shape.getBoundBox();
+        Gui::Document* doc = Gui::Application::Instance->getDocument(obj->getDocument());
+        auto view = doc ? qobject_cast<Gui::View3DInventor*>(doc->getActiveView()) : nullptr;
+        if (view) {
+            view->getViewer()->viewBoundBox(SbBox3f(static_cast<float>(box.MinX),
+                                                    static_cast<float>(box.MinY),
+                                                    static_cast<float>(box.MinZ),
+                                                    static_cast<float>(box.MaxX),
+                                                    static_cast<float>(box.MaxY),
+                                                    static_cast<float>(box.MaxZ)));
+        }
+        return;
+    }
     if (isObjects()) {
         // The entry is an object (its name): its shape
         auto own = owner();
@@ -1447,7 +1919,33 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
     remove->setEnabled(!whole && (item || !entryList->selectedItems().isEmpty()));
     connect(remove, &QAction::triggered, this, [this]() { removeSelected(); });
 
-    if (item && isObjects()) {
+    if (isSections() && item) {
+        const int section = item->data(SectionRole).toInt();
+        QAction* up = menu->addAction(tr("Move up"));
+        up->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Up));
+        up->setShortcutVisibleInContextMenu(true);
+        up->setEnabled(section > 0);
+        connect(up, &QAction::triggered, this, [this]() { moveCurrent(-1); });
+        QAction* down = menu->addAction(tr("Move down"));
+        down->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Down));
+        down->setShortcutVisibleInContextMenu(true);
+        down->setEnabled(section < entryList->count() - 1);
+        connect(down, &QAction::triggered, this, [this]() { moveCurrent(1); });
+    }
+    const bool wholeSection = isSections() && item
+        && bareElement(item->data(SubRole).toString().toStdString()).empty();
+    if (wholeSection) {
+        // A sketch or a shape whole: nothing to accept, use or re-pick
+        QAction* zoom = menu->addAction(tr("Zoom to"));
+        const int index = item->data(IndexRole).toInt();
+        connect(zoom, &QAction::triggered, this, [this, index]() {
+            auto list = freecad_cast<App::PropertyLinkSubList*>(property());
+            if (list && index < static_cast<int>(list->getValues().size())) {
+                zoomTo(std::string(), list->getValues()[index]);
+            }
+        });
+    }
+    else if (item && isObjects()) {
         // An object is listed or not: nothing to accept, use or re-pick
         QAction* zoom = menu->addAction(tr("Zoom to"));
         connect(zoom, &QAction::triggered, this, [this, name = item->data(SubRole).toString()]() {
@@ -1487,8 +1985,15 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
 
         QAction* zoom = menu->addAction(tr("Zoom to"));
         zoom->setEnabled(!Data::hasMissingElement(sub.c_str()));
-        connect(zoom, &QAction::triggered, this, [this, element = bareElement(sub)]() {
-            zoomTo(element);
+        App::DocumentObjectT section;
+        auto list = isSections() ? freecad_cast<App::PropertyLinkSubList*>(property()) : nullptr;
+        if (list) {
+            if (index >= 0 && index < static_cast<int>(list->getValues().size())) {
+                section = list->getValues()[index];
+            }
+        }
+        connect(zoom, &QAction::triggered, this, [this, element = bareElement(sub), section]() {
+            zoomTo(element, section.getObject());
         });
     }
     if (isProfile()) {
@@ -1616,7 +2121,7 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
             bool own = Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))
                 || ke->matches(QKeySequence::Undo) || matchesRedo(ke)
-                || (armed && ke->key() == Qt::Key_Escape);
+                || (armed && ke->key() == Qt::Key_Escape) || isSectionMove(ke);
             for (const auto& action : menuActions) {
                 own = own || (action && Gui::QtTools::matches(ke, action->shortcut()));
             }
@@ -1642,6 +2147,10 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             }
             if (armed && ke->key() == Qt::Key_Escape) {
                 setArmed(false);
+                return true;
+            }
+            if (isSectionMove(ke)) {
+                moveCurrent(ke->key() == Qt::Key_Up ? -1 : 1);
                 return true;
             }
             for (const auto& action : menuActions) {
@@ -1670,6 +2179,13 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             break;
     }
     return QWidget::eventFilter(watched, event);
+}
+
+bool ReferenceField::isSectionMove(const QKeyEvent* ke) const
+{
+    const Qt::KeyboardModifiers modifiers = ke->modifiers() & ~Qt::KeypadModifier;
+    return isSections() && modifiers == Qt::AltModifier
+        && (ke->key() == Qt::Key_Up || ke->key() == Qt::Key_Down);
 }
 
 bool ReferenceField::coversProperty() const

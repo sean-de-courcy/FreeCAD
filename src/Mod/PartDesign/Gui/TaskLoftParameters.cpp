@@ -23,23 +23,26 @@
  ***************************************************************************/
 
 
-#include <QAction>
+#include <algorithm>
+#include <memory>
 
+#include <QPointer>
 
-#include <App/Application.h>
+#include <boost/algorithm/string/predicate.hpp>
+
 #include <App/Document.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
-#include <Gui/Tools.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureLoft.h>
 
 #include "ui_TaskLoftParameters.h"
 #include "TaskLoftParameters.h"
 #include "TaskSketchBasedParameters.h"
-
-Q_DECLARE_METATYPE(App::PropertyLinkSubList::SubSet)
 
 using namespace PartDesignGui;
 using namespace Gui;
@@ -64,6 +67,33 @@ QString loftTaskTitle(ViewProviderLoft* view)
     return isSubtractiveLoft(view) ? TaskLoftParameters::tr("Subtractive Loft Parameters")
                                    : TaskLoftParameters::tr("Additive Loft Parameters");
 }
+
+// A whole object picked as a section or a profile (a tree pick): a sketch or a shape of wires or
+// points. A solid or a datum gives no section whole: one of its faces does (ops#150)
+bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
+{
+    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
+        return true;
+    }
+    if (obj->isDerivedFrom<Part::Datum>()
+        || Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
+               .hasSubShape(TopAbs_SOLID)) {
+        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
+        return false;
+    }
+    return true;
+}
+
+// A sketch is taken whole, unless one of its points is picked: the loft takes the whole sketch for
+// any other element of it (Loft::getSectionShape)
+std::string sectionElement(App::DocumentObject* obj, const char* sub)
+{
+    std::string element = Base::Tools::isNullOrEmpty(sub) ? std::string() : std::string(sub);
+    if (obj && obj->isDerivedFrom<Part::Part2DObject>() && !boost::starts_with(element, "Vertex")) {
+        element.clear();
+    }
+    return element;
+}
 }  // namespace
 
 TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj*/, QWidget* parent)
@@ -76,12 +106,6 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
     QMetaObject::connectSlotsByName(this);
 
     // clang-format off
-    connect(ui->buttonProfileBase, &QToolButton::toggled,
-            this, &TaskLoftParameters::onProfileButton);
-    connect(ui->buttonRefAdd, &QToolButton::toggled,
-            this, &TaskLoftParameters::onRefButtonAdd);
-    connect(ui->buttonRefRemove, &QToolButton::toggled,
-            this, &TaskLoftParameters::onRefButtonRemove);
     connect(ui->checkBoxRuled, &QCheckBox::toggled,
             this, &TaskLoftParameters::onRuled);
     connect(ui->checkBoxClosed, &QCheckBox::toggled,
@@ -89,23 +113,6 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
     connect(ui->checkBoxUpdateView, &QCheckBox::toggled,
             this, &TaskLoftParameters::onUpdateView);
     // clang-format on
-
-    // Create context menu
-    QAction* remove = new QAction(tr("Remove"), this);
-    remove->setShortcut(Gui::QtTools::deleteKeySequence());
-
-    // display shortcut behind the context menu entry
-    remove->setShortcutVisibleInContextMenu(true);
-    ui->listWidgetReferences->addAction(remove);
-    ui->listWidgetReferences->setContextMenuPolicy(Qt::ActionsContextMenu);
-    connect(remove, &QAction::triggered, this, &TaskLoftParameters::onDeleteSection);
-
-    connect(
-        ui->listWidgetReferences->model(),
-        &QAbstractListModel::rowsMoved,
-        this,
-        &TaskLoftParameters::indexesMoved
-    );
 
     this->groupLayout()->addWidget(proxy);
 
@@ -115,26 +122,11 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
         child->blockSignals(true);
     }
 
-    // add the profiles
+    // The profile and the sections show for the edit; OK and Cancel put them back (ops#162 B13)
     PartDesign::Loft* loft = LoftView->getObject<PartDesign::Loft>();
-    App::DocumentObject* profile = loft->Profile.getValue();
-    if (profile) {
-        Gui::Application::Instance->showViewProvider(profile);
-
-        // TODO: if it is a single vertex of a sketch, use that subshape's name
-        QString label = make2DLabel(profile, loft->Profile.getSubValues());
-        ui->profileBaseEdit->setText(label);
-    }
-
-    for (auto& subSet : loft->Sections.getSubListValues()) {
-        Gui::Application::Instance->showViewProvider(subSet.first);
-
-        // TODO: if it is a single vertex of a sketch, use that subshape's name
-        QString label = make2DLabel(subSet.first, subSet.second);
-        QListWidgetItem* item = new QListWidgetItem();
-        item->setText(label);
-        item->setData(Qt::UserRole, QVariant::fromValue(subSet));
-        ui->listWidgetReferences->addItem(item);
+    shown.show(loft->Profile.getValue());
+    for (App::DocumentObject* obj : loft->Sections.getValues()) {
+        shown.show(obj);
     }
 
     // get options
@@ -146,10 +138,117 @@ TaskLoftParameters::TaskLoftParameters(ViewProviderLoft* LoftView, bool /*newObj
         child->blockSignals(false);
     }
 
+    createFields();
     updateUI();
 }
 
 TaskLoftParameters::~TaskLoftParameters() = default;
+
+void TaskLoftParameters::createFields()
+{
+    App::DocumentObjectT loftT(getObject());
+    auto isShape = [](App::DocumentObject* obj, const char* sub, std::string& why) {
+        if (!obj || !obj->isDerivedFrom<Part::Feature>()) {
+            why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
+            return false;
+        }
+        return wholeObjectFits(obj, sub, why);
+    };
+
+    // The profile: one sketch, sketch point or face (Q8 (a): its own field, above the sections)
+    ReferenceField::Options profile;
+    profile.kind = ReferenceField::Kind::SingleElement;
+    profile.acceptOnly = true;
+    profile.noDependents = true;
+    profile.removable = false;
+    profile.label = tr("Profile");
+    profile.kinds = tr("A sketch, a sketch point or a face");
+    profile.accept = [loftT, isShape](App::DocumentObject* obj, const char* sub, std::string& why) {
+        if (!isShape(obj, sub, why)) {
+            return false;
+        }
+        auto loft = freecad_cast<PartDesign::Loft*>(loftT.getObject());
+        if (loft
+            && std::ranges::find(loft->Sections.getValues(), obj)
+                != loft->Sections.getValues().end()) {
+            why = QT_TR_NOOP("This is a section of the loft: the profile can't be one too.");
+            return false;
+        }
+        return true;
+    };
+    profile.resolve = [](const Gui::SelectionChanges& msg,
+                         App::DocumentObject*& obj,
+                         std::vector<std::string>& subs) {
+        subs.clear();
+        if (std::string element = sectionElement(obj, msg.pSubName); !element.empty()) {
+            subs.push_back(element);
+        }
+        return obj != nullptr;
+    };
+    auto profileSelf = std::make_shared<QPointer<ReferenceField>>();
+    auto writeProfile = [this, profileSelf](App::DocumentObject* obj,
+                                            const std::vector<std::string>& subs) {
+        if (*profileSelf) {
+            (*profileSelf)->assign(obj, subs);
+        }
+        shown.show(obj);
+        recomputeFeature();
+    };
+    profileField = new ReferenceField(getObject(), "Profile", profile, writeProfile, proxy);
+    *profileSelf = profileField;
+    profileField->takePlaceOf(ui->profileFieldPlaceholder);
+
+    // The sections, in the loft's order (ops#162 B8, B11, B12, B21)
+    ReferenceField::Options sections;
+    sections.kind = ReferenceField::Kind::Sections;
+    sections.noDependents = true;
+    sections.label = tr("Sections");
+    sections.kinds = tr("Sketches, sketch points or faces");
+    sections.accept = [loftT, isShape](App::DocumentObject* obj,
+                                       const char* sub,
+                                       std::string& why) {
+        if (!isShape(obj, sub, why)) {
+            return false;
+        }
+        auto loft = freecad_cast<PartDesign::Loft*>(loftT.getObject());
+        if (loft && obj == loft->Profile.getValue()) {
+            why = QT_TR_NOOP("This is the loft's profile: it can't be a section too.");
+            return false;
+        }
+        return true;
+    };
+    auto sectionsSelf = std::make_shared<QPointer<ReferenceField>>();
+    using SubSets = std::vector<App::PropertyLinkSubList::SubSet>;
+    auto writeSections = [this, sectionsSelf](const SubSets& list) {
+        if (*sectionsSelf) {
+            (*sectionsSelf)->assign(list);
+        }
+        for (const auto& section : list) {
+            shown.show(section.first);
+        }
+        recomputeFeature();
+        updateUI();
+    };
+    sectionsField = new ReferenceField(
+        getObject(),
+        "Sections",
+        sections,
+        ReferenceField::SectionsWriter(writeSections),
+        proxy
+    );
+    *sectionsSelf = sectionsField;
+    sectionsField->takePlaceOf(ui->sectionsFieldPlaceholder);
+}
+
+std::vector<ReferenceField*> TaskLoftParameters::referenceFields() const
+{
+    return {profileField, sectionsField};
+}
+
+void TaskLoftParameters::restoreVisibility()
+{
+    shown.restore();
+}
 
 void TaskLoftParameters::updateUI()
 {
@@ -162,182 +261,9 @@ void TaskLoftParameters::updateUI()
     }
 }
 
-void TaskLoftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
+void TaskLoftParameters::onSelectionChanged(const Gui::SelectionChanges& /*msg*/)
 {
-    if (selectionMode == none) {
-        return;
-    }
-
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (referenceSelected(msg)) {
-            App::Document* document = App::GetApplication().getDocument(msg.pDocName);
-            App::DocumentObject* object = document ? document->getObject(msg.pObjectName) : nullptr;
-            if (object) {
-                // TODO: if it is a single vertex of a sketch, use that subshape's name
-                QString label = make2DLabel(object, {msg.pSubName});
-                if (selectionMode == refProfile) {
-                    ui->profileBaseEdit->setText(label);
-                }
-                else if (selectionMode == refAdd) {
-                    QListWidgetItem* item = new QListWidgetItem();
-                    item->setText(label);
-                    item->setData(
-                        Qt::UserRole,
-                        QVariant::fromValue(
-                            std::make_pair(object, std::vector<std::string>(1, msg.pSubName))
-                        )
-                    );
-                    ui->listWidgetReferences->addItem(item);
-                }
-                else if (selectionMode == refRemove) {
-                    removeFromListWidget(ui->listWidgetReferences, label);
-                }
-            }
-
-            clearButtons();
-            recomputeFeature();
-        }
-
-        clearButtons();
-        exitSelectionMode();
-        updateUI();
-    }
-}
-
-bool TaskLoftParameters::referenceSelected(const Gui::SelectionChanges& msg) const
-{
-
-    if (msg.Type == Gui::SelectionChanges::AddSelection && selectionMode != none) {
-
-        if (strcmp(msg.pDocName, getObject()->getDocument()->getName()) != 0) {
-            return false;
-        }
-
-        // not allowed to reference ourself
-        const char* fname = getObject()->getNameInDocument();
-        if (strcmp(msg.pObjectName, fname) == 0) {
-            return false;
-        }
-
-        // every selection needs to be a profile in itself, hence currently only full objects are
-        // supported, not individual edges of a part
-
-        // change the references
-        auto loft = getObject<PartDesign::Loft>();
-        App::Document* doc = loft->getDocument();
-        App::DocumentObject* obj = doc->getObject(msg.pObjectName);
-
-        if (selectionMode == refProfile) {
-            auto view = getViewObject<ViewProviderLoft>();
-            view->highlightReferences(ViewProviderLoft::Profile, false);
-            loft->Profile.setValue(obj, {msg.pSubName});
-            return true;
-        }
-
-        if (selectionMode == refAdd || selectionMode == refRemove) {
-            // now check the sections
-            std::vector<App::DocumentObject*> refs = loft->Sections.getValues();
-            const auto f = std::ranges::find(refs, obj);
-
-            if (selectionMode == refAdd) {
-                if (f != refs.end()) {
-                    return false;  // duplicate selection
-                }
-
-                loft->Sections.addValue(obj, {msg.pSubName});
-            }
-            else if (selectionMode == refRemove) {
-                if (f == refs.end()) {
-                    return false;
-                }
-
-                loft->Sections.removeValue(obj);
-            }
-
-            return true;
-        }
-    }
-
-    return false;
-}
-
-void TaskLoftParameters::removeFromListWidget(QListWidget* widget, QString name)
-{
-
-    QList<QListWidgetItem*> items = widget->findItems(name, Qt::MatchExactly);
-    if (!items.empty()) {
-        for (auto it : items) {
-            QListWidgetItem* item = widget->takeItem(widget->row(it));
-            delete item;
-        }
-    }
-}
-
-void TaskLoftParameters::onDeleteSection()
-{
-    // Delete the selected profile
-    int row = ui->listWidgetReferences->currentRow();
-    QListWidgetItem* item = ui->listWidgetReferences->takeItem(row);
-    if (item) {
-        QByteArray data(
-            item->data(Qt::UserRole).value<App::PropertyLinkSubList::SubSet>().first->getNameInDocument()
-        );
-        delete item;
-
-        // search inside the list of sections
-        if (const auto loft = getObject<PartDesign::Loft>()) {
-            std::vector<App::DocumentObject*> refs = loft->Sections.getValues();
-            App::DocumentObject* obj = loft->getDocument()->getObject(data.constData());
-            if (const auto f = std::ranges::find(refs, obj); f != refs.end()) {
-                loft->Sections.removeValue(obj);
-
-                recomputeFeature();
-                updateUI();
-            }
-        }
-    }
-}
-
-void TaskLoftParameters::indexesMoved()
-{
-    QAbstractItemModel* model = qobject_cast<QAbstractItemModel*>(sender());
-    if (!model) {
-        return;
-    }
-
-    if (auto loft = getObject<PartDesign::Loft>()) {
-        auto originals = loft->Sections.getSubListValues();
-
-        int rows = model->rowCount();
-        for (int i = 0; i < rows; i++) {
-            QModelIndex index = model->index(i, 0);
-            originals[i] = index.data(Qt::UserRole).value<App::PropertyLinkSubList::SubSet>();
-        }
-
-        loft->Sections.setSubListValues(originals);
-        recomputeFeature();
-        updateUI();
-    }
-}
-
-void TaskLoftParameters::clearButtons(const selectionModes notThis)
-{
-    if (notThis != refProfile) {
-        ui->buttonProfileBase->setChecked(false);
-    }
-    if (notThis != refAdd) {
-        ui->buttonRefAdd->setChecked(false);
-    }
-    if (notThis != refRemove) {
-        ui->buttonRefRemove->setChecked(false);
-    }
-}
-
-void TaskLoftParameters::exitSelectionMode()
-{
-    selectionMode = none;
-    Gui::Selection().clearSelection();
-    this->blockSelection(true);
+    // The fields take the picks
 }
 
 void TaskLoftParameters::changeEvent(QEvent* /*e*/)
@@ -357,38 +283,6 @@ void TaskLoftParameters::onRuled(bool val)
         loft->Ruled.setValue(val);
         recomputeFeature();
     }
-}
-
-void TaskLoftParameters::setSelectionMode(selectionModes mode, bool checked)
-{
-    if (checked) {
-        clearButtons(mode);
-        Gui::Selection().clearSelection();
-        selectionMode = mode;
-        this->blockSelection(false);
-    }
-    else {
-        Gui::Selection().clearSelection();
-        selectionMode = none;
-    }
-
-    auto view = getViewObject<ViewProviderLoft>();
-    view->highlightReferences(ViewProviderLoft::Both, checked);
-}
-
-void TaskLoftParameters::onProfileButton(bool checked)
-{
-    setSelectionMode(refProfile, checked);
-}
-
-void TaskLoftParameters::onRefButtonAdd(bool checked)
-{
-    setSelectionMode(refAdd, checked);
-}
-
-void TaskLoftParameters::onRefButtonRemove(bool checked)
-{
-    setSelectionMode(refRemove, checked);
 }
 
 
@@ -412,11 +306,13 @@ TaskDlgLoftParameters::~TaskDlgLoftParameters() = default;
 bool TaskDlgLoftParameters::accept()
 {
     if (auto loft = getObject<PartDesign::Loft>()) {
-        getViewObject<ViewProviderLoft>()->highlightReferences(ViewProviderLoft::Both, false);
-
         // First verify that the loft can be built and then hide the sections as otherwise
         // they will remain hidden if the loft's recompute fails
         if (TaskDlgSketchBasedParameters::accept()) {
+            // What the edit showed goes back as it was (a section taken out of the list
+            // included), then the profile and the sections are hidden, as OK always did
+            parameter->restoreVisibility();
+            Gui::cmdAppObjectHide(loft->Profile.getValue());
             for (App::DocumentObject* obj : loft->Sections.getValues()) {
                 Gui::cmdAppObjectHide(obj);
             }
@@ -426,6 +322,14 @@ bool TaskDlgLoftParameters::accept()
     }
 
     return false;
+}
+
+bool TaskDlgLoftParameters::reject()
+{
+    // What the edit showed goes back first: the abort that follows shows a new loft's profile
+    // again, and a restore after it (the panel's destructor) would hide it (ops#150)
+    parameter->restoreVisibility();
+    return TaskDlgSketchBasedParameters::reject();
 }
 
 //==== calls from the TaskView ===============================================================

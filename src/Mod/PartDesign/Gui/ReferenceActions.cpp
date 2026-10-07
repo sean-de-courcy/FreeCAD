@@ -20,6 +20,7 @@
  *                                                                         *
  **************************************************************************/
 
+#include <algorithm>
 #include <sstream>
 
 #include <QCoreApplication>
@@ -210,4 +211,37 @@ void TargetDisplay::forget()
 {
     shownTarget = App::DocumentObjectT();
     hiddenFeature = App::DocumentObjectT();
+}
+
+EditVisibility::~EditVisibility()
+{
+    restore();
+}
+
+void EditVisibility::show(App::DocumentObject* obj)
+{
+    Gui::ViewProvider* vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr;
+    if (!vp) {
+        return;
+    }
+    const bool known = std::ranges::any_of(shown, [obj](const auto& entry) {
+        return entry.first.getObject() == obj;
+    });
+    if (!known) {
+        shown.emplace_back(obj, vp->isShow());
+    }
+    vp->show();
+}
+
+void EditVisibility::restore()
+{
+    // An object gone with the edit (Cancel undid its creation) is skipped
+    for (const auto& [objT, visible] : shown) {
+        App::DocumentObject* obj = objT.getObject();
+        Gui::ViewProvider* vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr;
+        if (vp) {
+            vp->setVisible(visible);
+        }
+    }
+    shown.clear();
 }

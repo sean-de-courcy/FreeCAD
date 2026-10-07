@@ -39,8 +39,7 @@ public:
     {
         Spine,
         AuxiliarySpine,
-        Profile,
-        Section
+        Profile
     };
 
     /// constructor

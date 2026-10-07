@@ -23,6 +23,8 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <QString>
 
@@ -102,6 +104,26 @@ public:
 private:
     App::DocumentObjectT shownTarget;
     App::DocumentObjectT hiddenFeature;
+};
+
+/** The objects a dialog shows for its edit (a loft's or a pipe's sections), each with its
+ * visibility before: restore() puts each one back, on OK and Cancel alike (ops#150 B13).
+ */
+class EditVisibility
+{
+public:
+    EditVisibility() = default;
+    EditVisibility(const EditVisibility&) = delete;
+    EditVisibility& operator=(const EditVisibility&) = delete;
+    ~EditVisibility();
+
+    /// Shows \a obj; its visibility is recorded the first time.
+    void show(App::DocumentObject* obj);
+    /// Each object shown back as it was; nothing is recorded after it.
+    void restore();
+
+private:
+    std::vector<std::pair<App::DocumentObjectT, bool>> shown;
 };
 
 }  // namespace PartDesignGui
