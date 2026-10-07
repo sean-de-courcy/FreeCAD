@@ -231,7 +231,21 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
             auto ke = static_cast<const SoKeyboardEvent*>(ev);
             const SbBool press = ke->getState() == SoButtonEvent::DOWN ? true : false;
             switch (ke->getKey()) {
-                case SoKeyboardEvent::ESCAPE:
+                case SoKeyboardEvent::ESCAPE: {
+                    // FreeCAD-CH (ops#146, upstream issue 23518): only a release whose press
+                    // this viewer saw. Esc that closes the expression editor opened with '='
+                    // in a task panel field is pressed there; focus then comes back to the
+                    // view, which got the release and closed the panel too. Kept before the
+                    // other paths, and every release clears it, so a press that one of them
+                    // takes leaves nothing behind.
+                    static const View3DInventorViewer* escapePressedIn = nullptr;
+                    bool pressedHere = true;
+                    if (press) {
+                        escapePressedIn = viewer;
+                    }
+                    else {
+                        pressedHere = std::exchange(escapePressedIn, nullptr) == viewer;
+                    }
                     if (self->keyPressed(press, ke->getKey())) {
                         node->setHandled();
                     }
@@ -241,18 +255,7 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                         // user hits ESC to cancel while still holding the mouse button while using
                         // some SoDragger. Therefore, we shall ignore ESC while any mouse button is
                         // pressed, until this Coin bug is fixed.
-                        // FreeCAD-CH (ops#146, upstream issue 23518): only a release whose press
-                        // this viewer saw. Esc that closes the expression editor opened with '='
-                        // in a task panel field is pressed there; focus then comes back to the
-                        // view, which got the release and closed the panel too.
-                        static const View3DInventorViewer* escapePressedIn = nullptr;
-                        if (press) {
-                            escapePressedIn = viewer;
-                        }
-                        else if (std::exchange(escapePressedIn, nullptr) != viewer) {
-                            break;
-                        }
-                        if (!press) {
+                        if (!press && pressedHere) {
                             // react only on key release
                             // Let first selection mode terminate
                             Gui::Document* doc = Gui::Application::Instance->activeDocument();
@@ -281,6 +284,7 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                         FC_WARN("Release all mouse buttons before exiting editing");
                     }
                     break;
+                }
                 default:
                     // call the virtual method
                     if (self->keyPressed(press, ke->getKey())) {

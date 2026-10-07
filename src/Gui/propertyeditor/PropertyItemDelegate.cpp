@@ -21,6 +21,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -29,6 +31,7 @@
 #include <QTimer>
 #include <QKeyEvent>
 
+#include <App/Property.h>
 #include <Base/Tools.h>
 
 #include "PropertyItemDelegate.h"
@@ -347,7 +350,20 @@ QWidget* PropertyItemDelegate::createEditor(
         }
         parentEditor->activeEditor = editor;
         parentEditor->editingIndex = index;
-        parentEditor->editingValue = index.data(Qt::EditRole);  // FreeCAD-CH (ops#146)
+        // FreeCAD-CH (ops#146): the value Esc writes back without a transaction to abort. It
+        // goes to every selected object, so only when they all had it.
+        const PropertyItem* owner = childItem;
+        while (owner && owner->getPropertyData().empty()) {
+            owner = owner->parent();
+        }
+        bool same = owner != nullptr;
+        if (owner) {
+            const auto& props = owner->getPropertyData();
+            same = std::ranges::all_of(props, [&props](const App::Property* prop) {
+                return prop->isSame(*props.front());
+            });
+        }
+        parentEditor->editingValue = same ? index.data(Qt::EditRole) : QVariant();
     }
 
     return editor;

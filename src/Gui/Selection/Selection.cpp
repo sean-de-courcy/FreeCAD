@@ -27,6 +27,9 @@
 #include <set>
 
 #include <QApplication>
+#include <QPointer>
+#include <QStatusBar>
+#include <QToolButton>
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -552,8 +555,34 @@ bool SelectionSingleton::needPickedList() const
 // FreeCAD-CH (ops#147): the user's selection filter (SelectionFilter.h), apart from ActiveGate.
 namespace
 {
+/// The user's filter restricts only element picks on shapes (ops#147 review, M3): a whole
+/// object, a datum, and an object that is neither a Part::Feature nor an App::Link pass, so
+/// origin planes, sketches in the tree and other workbenches' pickers aren't refused.
+class UserFilterGate: public Gui::SelectionFilterGate
+{
+public:
+    using SelectionFilterGate::SelectionFilterGate;
+
+    bool allow(App::Document* doc, App::DocumentObject* obj, const char* sub) override
+    {
+        if (!obj || Base::Tools::isNullOrEmpty(sub)) {
+            return true;
+        }
+        // By name: Gui doesn't link Part
+        const Base::Type feature = Base::Type::fromName("Part::Feature");
+        const Base::Type datum = Base::Type::fromName("Part::Datum");
+        const bool shape = (!feature.isBad() && obj->isDerivedFrom(feature))
+            || obj->isDerivedFrom<App::Link>();
+        if (!shape || (!datum.isBad() && obj->isDerivedFrom(datum))) {
+            return true;
+        }
+        return SelectionFilterGate::allow(doc, obj, sub);
+    }
+};
+
 std::string userFilterText;
 std::unique_ptr<Gui::SelectionFilterGate> userFilterGate;
+QPointer<QToolButton> userFilterButton;
 // What Python's addSelectionGate(filter) uses, which Part_SelectFilter called before
 constexpr ResolveMode userFilterResolve = ResolveMode::OldStyleElement;
 
@@ -579,17 +608,73 @@ Gui::SelectionGate* activeUserFilter()
 }
 }  // namespace
 
+namespace
+{
+/// The status bar shows the user's filter while it is on, as a button that removes it, so it
+/// can be seen and cleared in any workbench (ops#147 review, M3)
+void showUserFilter()
+{
+    Gui::MainWindow* mainWindow = Gui::getMainWindow();
+    if (!mainWindow) {
+        return;
+    }
+    if (!userFilterButton) {
+        auto* button = new QToolButton(mainWindow->statusBar());
+        button->setAutoRaise(true);
+        button->setToolTip(
+            QCoreApplication::translate(
+                "SelectionFilter",
+                "The 3D view selects only these elements. Click to remove the selection filter."
+            )
+        );
+        QObject::connect(button, &QToolButton::clicked, [] { Gui::setUserSelectionFilter({}); });
+        mainWindow->addStatusBarItem(
+            button,
+            {.id = "userSelectionFilterButton",
+             .title = QCoreApplication::translate("SelectionFilter", "Selection filter"),
+             .slot = Gui::StatusBarSlot::Right,
+             .order = 450,
+             .persistentVisibility = false}
+        );
+        userFilterButton = button;
+    }
+    QString kinds;
+    if (userFilterText.find("SUBELEMENT Vertex") != std::string::npos) {
+        kinds = QCoreApplication::translate("SelectionFilter", "vertices");
+    }
+    else if (userFilterText.find("SUBELEMENT Edge") != std::string::npos) {
+        kinds = QCoreApplication::translate("SelectionFilter", "edges");
+    }
+    else if (userFilterText.find("SUBELEMENT Face") != std::string::npos) {
+        kinds = QCoreApplication::translate("SelectionFilter", "faces");
+    }
+    else {
+        kinds = QString::fromStdString(userFilterText);
+    }
+    userFilterButton->setText(
+        QCoreApplication::translate("SelectionFilter", "Filter: %1 (click to clear)").arg(kinds)
+    );
+    userFilterButton->setVisible(!userFilterText.empty());
+}
+}  // namespace
+
 void Gui::setUserSelectionFilter(const std::string& filter)
 {
     // A filter that doesn't parse throws here, before the old one is dropped
-    auto gate = filter.empty() ? nullptr : std::make_unique<SelectionFilterGate>(filter.c_str());
+    auto gate = filter.empty() ? nullptr : std::make_unique<UserFilterGate>(filter.c_str());
     userFilterGate = std::move(gate);
     userFilterText = filter;
-}
+    showUserFilter();
 
-const std::string& Gui::userSelectionFilter()
-{
-    return userFilterText;
+    // The forbidden cursor of a refused preselection goes with the old filter, as in
+    // rmvSelectionGate() (review L2)
+    if (Gui::Application::Instance) {
+        if (Gui::Document* doc = Gui::Application::Instance->activeDocument()) {
+            if (Gui::MDIView* mdi = doc->getActiveView()) {
+                mdi->restoreOverrideCursor();
+            }
+        }
+    }
 }
 
 SelectionSingleton::SelectionAllowance SelectionSingleton::isSelectionAllowed(const _SelObj& sel)
@@ -962,7 +1047,9 @@ bool SelectionSingleton::hasSelectionGate(App::Document* /*pDoc*/) const
 
     // auto foundContext = docSelectionContext.find(pDoc);
     // return foundContext != docSelectionContext.end() && foundContext->second.gate;
-    return ActiveGate != nullptr;
+    // FreeCAD-CH (ops#147 review, M1): the user's filter too, so a pick it refuses looks past the
+    // front object (SelectionPickPolicy::canFinalizeSinglePick)
+    return ActiveGate != nullptr || activeUserFilter() != nullptr;
 }
 
 int SelectionSingleton::setPreselect(

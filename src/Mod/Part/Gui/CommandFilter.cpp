@@ -232,7 +232,9 @@ void PartCmdEdgeSelection::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     // FreeCAD-CH (ops#147)
-    Gui::setUserSelectionFilter("SELECT Part::Feature SUBELEMENT Edge SELECT App::Link SUBELEMENT Edge");
+    Gui::setUserSelectionFilter(
+        "SELECT Part::Feature SUBELEMENT Edge SELECT App::Link SUBELEMENT Edge"
+    );
 }
 
 

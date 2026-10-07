@@ -30,6 +30,7 @@
 #include <QHeaderView>
 #include <QMenu>
 #include <QPainter>
+#include <QAbstractSpinBox>
 #include <QActionGroup>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -510,8 +511,11 @@ void PropertyEditor::closeEditor(QWidget* editor, QAbstractItemDelegate::EndEdit
         return;
     }
 
-    if (hint == QAbstractItemDelegate::RevertModelCache) {
-        revertEdit();  // FreeCAD-CH (ops#146)
+    // FreeCAD-CH (ops#146): only an editor that writes as it is typed (the number rows); the
+    // others write on a pick or a dialog's OK, which Esc mustn't undo
+    if (hint == QAbstractItemDelegate::RevertModelCache
+        && qobject_cast<QAbstractSpinBox*>(editor)) {
+        revertEdit();
     }
     closeTransaction();
 
