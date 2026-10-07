@@ -387,32 +387,29 @@ class TestReferencePickerGui(unittest.TestCase):
         self.assertEqual(fillet.Base[1], [corner])
         self.assertEqual(App.getReferenceReport(fillet), [])
 
-    def redrawnDraft(self):
-        """The redrawn pad and a draft on its front face, the bottom face its neutral plane: after
-        the redraw both references are found again by geometry. Returns (pad, draft)."""
-        body, pad = self.redrawnPad()
-        draft = body.newObject("PartDesign::Draft", "Draft")
-        draft.Base = (pad, face(normal=(0, -1, 0)).one(pad.Shape))
-        draft.NeutralPlane = (pad, face(normal=(0, 0, -1)).one(pad.Shape))
-        draft.Angle = 2
-        self.doc.recompute()
-        self.assertTrue(draft.isValid(), draft.getStatusString())
-        self.redraw()
-        self.assertTrue(draft.isValid(), draft.getStatusString())
-        self.assertIn("Warning", draft.State)
-        return pad, draft
-
     def testRowClickEndsTheFieldsPicking(self):
-        """Review B2, with the faces field (ops#150): the draft's own dialog, the faces field
-        armed. A click on the panel's row highlights the element it holds; the field disarms first
-        and doesn't take the element as its own pick (it would have taken it out of Base)."""
-        pad, draft = self.redrawnDraft()
-        base = list(draft.Base[1])
-        Gui.ActiveDocument.setEdit(draft)
+        """Review B2, with the reference fields (ops#150): a second pad up to the first one's top
+        face, along its vertical edge at (20, 0); after the redraw both are guesses. In its own
+        dialog the face is in its field and the edge, whose field is hidden, in the panel. The
+        face field armed, a click on the panel's row highlights the edge; the field disarms
+        first and doesn't take the element as its pick (it would have replaced the face)."""
+        body, pad = self.redrawnPad()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), body)
+        second = models.pad(body, square, 5, name="Second")
+        second.Type = "UpToFace"
+        second.UpToFace = (pad, face(normal=(0, 0, 1)).one(pad.Shape))
+        second.ReferenceAxis = (pad, edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape))
+        self.doc.recompute()
+        self.assertTrue(second.isValid(), second.getStatusString())
+        self.redraw()
+        self.assertTrue(second.isValid(), second.getStatusString())
+        upToFace = (second.UpToFace[0].Name, list(second.UpToFace[1]))
+        Gui.ActiveDocument.setEdit(second)
         pump()
         panel = Panel(self)
-        self.assertEqual([r[0] for r in panel.rows()], ["NeutralPlane[0]"])
+        self.assertEqual([r[0] for r in panel.rows()], ["ReferenceAxis[0]"])
         [field] = fields()
+        self.assertEqual(field.objectName(), "fieldUpToFace")
         field.setProperty("armed", True)
         pump()
         self.assertTrue(armed(field))
@@ -422,11 +419,11 @@ class TestReferencePickerGui(unittest.TestCase):
         panel.tree.setCurrentItem(panel.tree.topLevelItem(0))
         pump()
         self.assertFalse(armed(field))
-        self.assertEqual(draft.Base[1], base)
+        self.assertEqual((second.UpToFace[0].Name, list(second.UpToFace[1])), upToFace)
         self.assertTrue(Gui.Selection.getSelectionEx(self.doc.Name))
 
         self.close(QtWidgets.QDialogButtonBox.Ok)
-        self.assertEqual(draft.Base[1], base)
+        self.assertEqual((second.UpToFace[0].Name, list(second.UpToFace[1])), upToFace)
 
     def testCancelUndoesTheRepairAndAListEdit(self):
         """ops#130 (review M5): the fillet's own dialog opened with no transaction booked, as

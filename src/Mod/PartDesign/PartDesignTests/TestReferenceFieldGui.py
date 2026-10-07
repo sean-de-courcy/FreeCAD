@@ -1163,6 +1163,9 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testPadEscDisarmsThenCancels(self):
         """T5: Esc disarms the face field, the next Esc cancels: UpToFace is the lower plane."""
         box, pad = self.padOnBox()
+        # The edit opened as a double click opens it, in a command Cancel aborts (the Pad's panel
+        # opens none of its own)
+        self.doc.openTransaction("Edit Pad")
         [field] = self.edit(pad)
         self.arm(field, byFocus=True)
         self.pick(self.high, "")
@@ -1278,3 +1281,49 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not armed(field)), "the direction field stays armed")
         self.assertIn(vertical, combo.currentText())
         self.assertVolume(pad, 1012)
+
+    # -- Records kept across writes (PR 140 verification) ------------------------------------------
+
+    def redrawnTwoEdgeFillet(self):
+        """The redrawn pad and a fillet on two vertical edges, (0, 0) first and (20, 0) second:
+        after the redraw both are guesses."""
+        body, pad = self.redrawnPad()
+        first = edge("line", direction=Z, through=(0, 0, 0))
+        corner = edge("line", direction=Z, through=(20, 0, 0))
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, first.one(pad.Shape) + corner.one(pad.Shape))
+        fillet.Radius = 1
+        self.doc.recompute()
+        self.redraw()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        return pad, fillet
+
+    def testGuessMovesWithItsEntry(self):
+        """The entry before a guessed one deleted: the second guess moves up with its entry
+        (index 0 now) and stays guessed; the reference report has it at its new index only."""
+        pad, fillet = self.redrawnTwoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed", "guessed"])
+        second = fillet.Base[1][1]
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed"]), states(field))
+        self.assertEqual(fillet.Base[1], [second])
+        rows = {(e["property"], e["index"]) for e in App.getReferenceReport(fillet)}
+        self.assertEqual(rows, {("Base", 0)})
+
+    def testMarkBrokenSurvivesAPick(self):
+        """Mark broken on the guessed entry, then another edge picked: the rejection stays (the
+        entry broken), not dropped by the write."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Mark broken"].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: states(field) == ["broken"]), states(field))
+        self.arm(field, byFocus=False)
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        self.pick(pad, other)
+        self.assertTrue(waitFor(lambda: states(field) == ["broken", "exact"]), states(field))
