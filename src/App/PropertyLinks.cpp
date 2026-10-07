@@ -3465,6 +3465,21 @@ void PropertyLinkSub::setElementRecords(std::vector<ElementRecords>&& records)
     hasSetValue();
 }
 
+std::vector<std::string> PropertyLinkSub::getExpandedFroms() const
+{
+    auto froms = _ExpandedFrom;
+    froms.resize(_cSubList.size());
+    return froms;
+}
+
+void PropertyLinkSub::setExpandedFroms(std::vector<std::string>&& froms)
+{
+    aboutToSetValue();
+    _ExpandedFrom = std::move(froms);
+    _ExpandedFrom.resize(_cSubList.size());
+    hasSetValue();
+}
+
 void PropertyLinkSub::setElementFingerprint(std::size_t index, const std::string& fingerprint)
 {
     if (index >= _cSubList.size()) {
@@ -4697,6 +4712,21 @@ void PropertyLinkSubList::setElementRecords(std::vector<ElementRecords>&& record
     aboutToSetValue();
     _Records = std::move(records);
     _Records.resize(_lSubList.size());
+    hasSetValue();
+}
+
+std::vector<std::string> PropertyLinkSubList::getExpandedFroms() const
+{
+    auto froms = _ExpandedFrom;
+    froms.resize(_lSubList.size());
+    return froms;
+}
+
+void PropertyLinkSubList::setExpandedFroms(std::vector<std::string>&& froms)
+{
+    aboutToSetValue();
+    _ExpandedFrom = std::move(froms);
+    _ExpandedFrom.resize(_lSubList.size());
     hasSetValue();
 }
 
@@ -6591,6 +6621,21 @@ void PropertyXLink::setElementRecords(std::vector<ElementRecords>&& records)
     aboutToSetValue();
     _Records = std::move(records);
     _Records.resize(_SubList.size());
+    hasSetValue();
+}
+
+std::vector<std::string> PropertyXLink::getExpandedFroms() const
+{
+    auto froms = _ExpandedFrom;
+    froms.resize(_SubList.size());
+    return froms;
+}
+
+void PropertyXLink::setExpandedFroms(std::vector<std::string>&& froms)
+{
+    aboutToSetValue();
+    _ExpandedFrom = std::move(froms);
+    _ExpandedFrom.resize(_SubList.size());
     hasSetValue();
 }
 

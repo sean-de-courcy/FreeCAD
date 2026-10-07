@@ -24,7 +24,10 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+
 #include <QAction>
+#include <QLabel>
 #include <QKeyEvent>
 #include <QListWidget>
 #include <QMessageBox>
@@ -46,6 +49,7 @@
 
 #include "ui_TaskDraftParameters.h"
 #include "TaskDraftParameters.h"
+#include "ReferenceField.h"
 
 using namespace PartDesignGui;
 using namespace Gui;
@@ -88,142 +92,91 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
             this, &TaskDraftParameters::onAngleChanged);
     connect(ui->checkReverse, &QCheckBox::toggled,
             this, &TaskDraftParameters::onReversedChanged);
-    connect(ui->buttonPlane, &QToolButton::toggled,
-            this, &TaskDraftParameters::onButtonPlane);
-    connect(ui->buttonLine, &QToolButton::toggled,
-            this, &TaskDraftParameters::onButtonLine);
     // clang-format on
 
-    App::DocumentObject* ref = pcDraft->NeutralPlane.getValue();
-    std::vector<std::string> strings = pcDraft->NeutralPlane.getSubValues();
-    ui->linePlane->setText(getRefStr(ref, strings));
-
-    ref = pcDraft->PullDirection.getValue();
-    strings = pcDraft->PullDirection.getSubValues();
-    ui->lineLine->setText(getRefStr(ref, strings));
+    // The neutral plane and the pull direction: one reference each, a pick replaces it (ops#150)
+    planeField = createSingleField(ui->planeFieldPlaceholder,
+                                   "NeutralPlane",
+                                   AllowSelection::EDGE | AllowSelection::FACE | AllowSelection::PLANAR,
+                                   tr("Neutral plane"),
+                                   tr("A planar face, a straight edge or a plane"));
+    lineField = createSingleField(ui->lineFieldPlaceholder,
+                                  "PullDirection",
+                                  AllowSelection::EDGE | AllowSelection::PLANAR,
+                                  tr("Pull direction"),
+                                  tr("A straight edge or a line"));
+    // The two labels lined up
+    auto labelOf = [](ReferenceField* field) {
+        return field->findChild<QLabel*>(QStringLiteral("label"));
+    };
+    const int width = std::max(labelOf(planeField)->sizeHint().width(),
+                               labelOf(lineField)->sizeHint().width());
+    labelOf(planeField)->setMinimumWidth(width);
+    labelOf(lineField)->setMinimumWidth(width);
 
     hideOnError();
 
     setupGizmos(DressUpView);
 }
 
-void TaskDraftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
+ReferenceField* TaskDraftParameters::createSingleField(QWidget* placeholder,
+                                                       const char* property,
+                                                       AllowSelectionFlags flags,
+                                                       const QString& label,
+                                                       const QString& kinds)
 {
-    // executed when the user selected something in the CAD object
-    // adds/deletes the selection accordingly
-
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == plane) {
-            auto pcDraft = getObject<PartDesign::Draft>();
-            std::vector<std::string> planes;
-            App::DocumentObject* selObj {};
-            getReferencedSelection(pcDraft, msg, selObj, planes);
-            if (!selObj) {
-                return;
-            }
-            setupTransaction();
-            pcDraft->NeutralPlane.setValue(selObj, planes);
-            ui->linePlane->setText(getRefStr(selObj, planes));
-
-            pcDraft->getDocument()->recomputeFeature(pcDraft);
-            // highlight existing references for possible further selections
-            getDressUpView()->highlightReferences(true);
-            // hide the draft if there was a computation error
-            hideOnError();
-            setGizmoPositions();
+    ReferenceField::Options options;
+    options.kind = ReferenceField::Kind::SingleElement;
+    options.flags = flags;
+    // The base shows while the field is armed; datum and origin planes and lines go too
+    options.target = [this]() -> App::DocumentObject* {
+        return getBase();
+    };
+    options.required = false;
+    options.label = label;
+    options.kinds = kinds;
+    // Another body's element through the copy or cross-reference question, as before
+    options.resolve = [this](const Gui::SelectionChanges& msg,
+                             App::DocumentObject*& obj,
+                             std::vector<std::string>& subs) {
+        obj = nullptr;
+        return getReferencedSelection(getObject(), msg, obj, subs) && obj;
+    };
+    const std::string name = property;
+    auto write = [this, name](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        auto draft = getObject<PartDesign::Draft>();
+        if (!draft) {
+            return;
         }
-        else if (selectionMode == line) {
-            auto pcDraft = getObject<PartDesign::Draft>();
-            std::vector<std::string> edges;
-            App::DocumentObject* selObj = nullptr;
-            getReferencedSelection(pcDraft, msg, selObj, edges);
-            if (!selObj) {
-                return;
-            }
-            setupTransaction();
-            pcDraft->PullDirection.setValue(selObj, edges);
-            ui->lineLine->setText(getRefStr(selObj, edges));
+        setupTransaction();
+        (name == "NeutralPlane" ? planeField : lineField)->assign(obj, subs);
+        draft->recomputeFeature();
+        // hide the draft if there was a computation error
+        hideOnError();
+        setGizmoPositions();
+    };
+    auto field = new ReferenceField(getObject(), property, options, write, proxy);
+    field->takePlaceOf(placeholder);
+    return field;
+}
 
-            pcDraft->getDocument()->recomputeFeature(pcDraft);
-            // highlight existing references for possible further selections
-            getDressUpView()->highlightReferences(true);
-            // hide the draft if there was a computation error
-            hideOnError();
-            setGizmoPositions();
+std::vector<ReferenceField*> TaskDraftParameters::referenceFields() const
+{
+    std::vector<ReferenceField*> fields = TaskDressUpParameters::referenceFields();
+    for (ReferenceField* field : {planeField, lineField}) {
+        if (field) {
+            fields.push_back(field);
         }
     }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
+    return fields;
+}
+
+void TaskDraftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
+{
+    if (msg.Type == Gui::SelectionChanges::ClrSelection) {
         // TODO: the gizmo position should be only recalculated when the feature associated
         // with the gizmo is removed from the list
         setGizmoPositions();
-    }
-}
-
-void TaskDraftParameters::setButtons(const selectionModes mode)
-{
-    QSignalBlocker blockLine(ui->buttonLine);
-    QSignalBlocker blockPlane(ui->buttonPlane);
-    ui->buttonLine->setChecked(mode == line);
-    ui->buttonPlane->setChecked(mode == plane);
-}
-
-void TaskDraftParameters::onButtonPlane(bool checked)
-{
-    if (checked) {
-        disarmBaseField();
-        setButtons(plane);
-        getViewObject()->showPreviousFeature(true);
-        selectionMode = plane;
-        Gui::Selection().clearSelection();
-        Gui::Selection().addSelectionGate(new ReferenceSelection(
-            this->getBase(),
-            AllowSelection::EDGE | AllowSelection::FACE | AllowSelection::PLANAR
-        ));
-    }
-}
-
-void TaskDraftParameters::onButtonLine(bool checked)
-{
-    if (checked) {
-        disarmBaseField();
-        setButtons(line);
-        getViewObject()->showPreviousFeature(true);
-        selectionMode = line;
-        Gui::Selection().clearSelection();
-        Gui::Selection().addSelectionGate(
-            new ReferenceSelection(this->getBase(), AllowSelection::EDGE | AllowSelection::PLANAR)
-        );
-    }
-}
-
-void TaskDraftParameters::getPlane(App::DocumentObject*& obj, std::vector<std::string>& sub) const
-{
-    sub = std::vector<std::string>(1, "");
-    QStringList parts = ui->linePlane->text().split(QChar::fromLatin1(':'));
-    obj = getObject()->getDocument()->getObject(parts[0].toStdString().c_str());
-    if (parts.size() > 1) {
-        sub[0] = parts[1].toStdString();
-    }
-}
-
-void TaskDraftParameters::onReferencesRepaired()
-{
-    TaskDressUpParameters::onReferencesRepaired();
-    auto draft = getObject<PartDesign::Draft>();
-    if (!draft) {
-        return;
-    }
-    ui->linePlane->setText(getRefStr(draft->NeutralPlane.getValue(), draft->NeutralPlane.getSubValues()));
-    ui->lineLine->setText(getRefStr(draft->PullDirection.getValue(), draft->PullDirection.getSubValues()));
-}
-
-void TaskDraftParameters::getLine(App::DocumentObject*& obj, std::vector<std::string>& sub) const
-{
-    sub = std::vector<std::string>(1, "");
-    QStringList parts = ui->lineLine->text().split(QChar::fromLatin1(':'));
-    obj = getObject()->getDocument()->getObject(parts[0].toStdString().c_str());
-    if (parts.size() > 1) {
-        sub[0] = parts[1].toStdString();
     }
 }
 
@@ -231,7 +184,7 @@ void TaskDraftParameters::onAngleChanged(double angle)
 {
     if (auto draft = getObject<PartDesign::Draft>()) {
         // a value edit ends the picking, gate and display included (B3)
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         draft->Angle.setValue(angle);
         draft->recomputeFeature();
@@ -248,7 +201,7 @@ double TaskDraftParameters::getAngle() const
 void TaskDraftParameters::onReversedChanged(const bool reversed)
 {
     if (auto draft = getObject<PartDesign::Draft>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         draft->Reversed.setValue(reversed);
         draft->recomputeFeature();
@@ -395,42 +348,11 @@ bool TaskDlgDraftParameters::accept()
 
     parameter->apply();
 
-    std::vector<std::string> strings;
-    App::DocumentObject* obj = nullptr;
-    TaskDraftParameters* draftparameter = static_cast<TaskDraftParameters*>(parameter);
-    auto draft = getObject<PartDesign::Draft>();
-    // Written only when the panel changed them: written again with plain names, they would drop
-    // a guess record without a warning (ops#127).
-    auto unchanged = [](const App::PropertyLinkSub& prop,
-                        const App::DocumentObject* linked,
-                        std::vector<std::string> subs) {
-        std::erase(subs, std::string());
-        return prop.getValue() == linked
-            && (prop.getSubValues(false) == subs || prop.getSubValues(true) == subs);
-    };
-
-    draftparameter->getPlane(obj, strings);
-    std::string neutralPlane = buildLinkSingleSubPythonStr(obj, strings);
-    const bool planeUnchanged = draft && unchanged(draft->NeutralPlane, obj, strings);
-
-    draftparameter->getLine(obj, strings);
-    std::string pullDirection = buildLinkSingleSubPythonStr(obj, strings);
-    const bool lineUnchanged = draft && unchanged(draft->PullDirection, obj, strings);
-
+    // The neutral plane and the pull direction are written by their fields as they are picked
+    // (ops#150), their guess records kept (ops#127)
+    auto draftparameter = static_cast<TaskDraftParameters*>(parameter);
     FCMD_OBJ_CMD(tobj, "Angle = " << draftparameter->getAngle());
     FCMD_OBJ_CMD(tobj, "Reversed = " << draftparameter->getReversed());
-    if (neutralPlane.empty()) {
-        neutralPlane = "None";
-    }
-    if (!planeUnchanged) {
-        FCMD_OBJ_CMD(tobj, "NeutralPlane = " << neutralPlane);
-    }
-    if (pullDirection.empty()) {
-        pullDirection = "None";
-    }
-    if (!lineUnchanged) {
-        FCMD_OBJ_CMD(tobj, "PullDirection = " << pullDirection);
-    }
 
     return TaskDlgDressUpParameters::accept();
 }

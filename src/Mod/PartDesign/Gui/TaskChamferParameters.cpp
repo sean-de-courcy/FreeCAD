@@ -156,7 +156,7 @@ void TaskChamferParameters::onCheckBoxUseAllEdgesToggled(bool checked)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
         if (checked) {
-            setSelectionMode(none);
+            disarmFields();
         }
 
         baseField->setEnabled(!checked);
@@ -173,7 +173,7 @@ void TaskChamferParameters::onBaseChanged()
 void TaskChamferParameters::onTypeChanged(int index)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
-        setSelectionMode(none);
+        disarmFields();
         chamfer->ChamferType.setValue(index);
         ui->stackedWidget->setCurrentIndex(index);
         ui->flipDirection->setEnabled(index != 0);  // Enable if type is not "Equal distance"
@@ -186,7 +186,7 @@ void TaskChamferParameters::onTypeChanged(int index)
 void TaskChamferParameters::onSizeChanged(double len)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         chamfer->Size.setValue(len);
         chamfer->recomputeFeature();
@@ -198,7 +198,7 @@ void TaskChamferParameters::onSizeChanged(double len)
 void TaskChamferParameters::onSize2Changed(double len)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         chamfer->Size2.setValue(len);
         chamfer->recomputeFeature();
@@ -210,7 +210,7 @@ void TaskChamferParameters::onSize2Changed(double len)
 void TaskChamferParameters::onAngleChanged(double angle)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         chamfer->Angle.setValue(angle);
         chamfer->recomputeFeature();
@@ -222,7 +222,7 @@ void TaskChamferParameters::onAngleChanged(double angle)
 void TaskChamferParameters::onFlipDirection(bool flip)
 {
     if (auto chamfer = getObject<PartDesign::Chamfer>()) {
-        setSelectionMode(none);
+        disarmFields();
         setupTransaction();
         chamfer->FlipDirection.setValue(flip);
         chamfer->recomputeFeature();

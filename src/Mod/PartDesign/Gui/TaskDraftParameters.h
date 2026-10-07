@@ -26,6 +26,9 @@
 
 #pragma once
 
+#include <QFlags>
+
+#include "EnumFlags.h"
 #include "TaskDressUpParameters.h"
 #include "ViewProviderDraft.h"
 
@@ -49,28 +52,33 @@ public:
     ~TaskDraftParameters() override;
 
     void apply() override;
-    /// The neutral plane and pull direction show their properties again (ops#127).
-    void onReferencesRepaired() override;
+    /// The faces, the neutral plane and the pull direction (ops#150).
+    std::vector<ReferenceField*> referenceFields() const override;
 
     double getAngle() const;
     bool getReversed() const;
     const std::vector<std::string> getFaces() const;
-    void getPlane(App::DocumentObject*& obj, std::vector<std::string>& sub) const;
-    void getLine(App::DocumentObject*& obj, std::vector<std::string>& sub) const;
 
 private Q_SLOTS:
     void onAngleChanged(double angle);
     void onReversedChanged(bool reversed);
-    void onButtonPlane(bool checked);
-    void onButtonLine(bool checked);
 
 protected:
-    void setButtons(selectionModes mode) override;
     void changeEvent(QEvent* e) override;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 
 private:
+    /// A single-entry field for \a property in place of \a placeholder: an element of the base,
+    /// or a datum or origin plane or line, through the cross-body question.
+    ReferenceField* createSingleField(QWidget* placeholder,
+                                      const char* property,
+                                      AllowSelectionFlags flags,
+                                      const QString& label,
+                                      const QString& kinds);
+
     std::unique_ptr<Ui_TaskDraftParameters> ui;
+    ReferenceField* planeField = nullptr;
+    ReferenceField* lineField = nullptr;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
     Gui::RotationGizmo* angleGizmo = nullptr;

@@ -127,7 +127,7 @@ void TaskThicknessParameters::onSelectionChanged(const Gui::SelectionChanges& ms
 PartDesign::Thickness* TaskThicknessParameters::onBeforeChange()
 {
     // a value edit ends the picking, gate and display included (B3)
-    setSelectionMode(none);
+    disarmFields();
     setupTransaction();
     return getObject<PartDesign::Thickness>();
 }

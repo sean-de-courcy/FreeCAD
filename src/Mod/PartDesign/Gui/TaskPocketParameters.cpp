@@ -121,11 +121,8 @@ void TaskPocketParameters::onModeChanged(int index, Side side)
             // could be a circular one around the sketch
             // Also note: Because of the code at the beginning of Pocket::execute() which is used
             // to detect broken legacy parts, we must set the length to zero here!
+            // An empty face field arms in updateUI() (ops#150)
             sideCtrl.Type->setValue("UpToFace");
-            if (sideCtrl.lineFaceName->text().isEmpty()) {
-                sideCtrl.buttonFace->setChecked(true);
-                handleLineFaceNameClick(sideCtrl.lineFaceName);  // sets placeholder text
-            }
             break;
         case Mode::ToShape:
             sideCtrl.Type->setValue("UpToShape");

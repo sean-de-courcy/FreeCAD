@@ -69,10 +69,10 @@ public:
         return transactionID;
     }
 
-    /// The list shows Base again (ops#127).
+    /// The fields show their properties again (ops#127).
     void onReferencesRepaired() override;
     void onReferenceSelectionTaken() override;
-    /// The Base field (ops#150).
+    /// The Base field, and a subclass's own (ops#150).
     std::vector<ReferenceField*> referenceFields() const override;
 
 protected:
@@ -87,23 +87,8 @@ protected:
     void hideOnError();
     void addAllEdges();
     void updateFeature(PartDesign::DressUp* pcDressUp, const std::vector<std::string>& refs);
-    /// Ends the field's picking: a value edit, or another pick mode of the panel.
-    void disarmBaseField();
-
-protected:
-    /// The panel's own pick modes besides the Base field (Draft's neutral plane and pull
-    /// direction).
-    enum selectionModes
-    {
-        none,
-        plane,
-        line
-    };
-    void setSelectionMode(selectionModes mode);
-    virtual void setButtons(const selectionModes mode)
-    {
-        Q_UNUSED(mode)
-    }
+    /// Ends the fields' picking: a value edit (B3).
+    void disarmFields();
 
     ViewProviderDressUp* getDressUpView() const;
 
@@ -113,7 +98,6 @@ protected:
     QAction* addAllEdgesAction;
 
     bool allowFaces, allowEdges;
-    selectionModes selectionMode;
     int transactionID;
 
 private:

@@ -1099,6 +1099,12 @@ public:
     std::vector<ElementRecords> getElementRecords() const;
     /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
     void setElementRecords(std::vector<ElementRecords>&& records);
+    /// The old name each expanded reference came from (`from`, Task 2 PR 7), one per sub (empty:
+    /// none)
+    std::vector<std::string> getExpandedFroms() const;
+    /// Sets every sub's `from` (padded or cut to the subs' count), keeping the rest (FreeCAD-CH,
+    /// ops#150: a reference field's write keeps them for the entries it keeps)
+    void setExpandedFroms(std::vector<std::string>&& froms);
     /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
     /// back), keeping the rest
     void setElementFingerprint(std::size_t index, const std::string& fingerprint);
@@ -1314,6 +1320,12 @@ public:
     std::vector<ElementRecords> getElementRecords() const;
     /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
     void setElementRecords(std::vector<ElementRecords>&& records);
+    /// The old name each expanded reference came from (`from`, Task 2 PR 7), one per sub (empty:
+    /// none)
+    std::vector<std::string> getExpandedFroms() const;
+    /// Sets every sub's `from` (padded or cut to the subs' count), keeping the rest (FreeCAD-CH,
+    /// ops#150: a reference field's write keeps them for the entries it keeps)
+    void setExpandedFroms(std::vector<std::string>&& froms);
     /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
     /// back), keeping the rest
     void setElementFingerprint(std::size_t index, const std::string& fingerprint);
@@ -1567,6 +1579,12 @@ public:
     std::vector<ElementRecords> getElementRecords() const;
     /// Sets every sub's records (padded or cut to the subs' count), keeping the rest
     void setElementRecords(std::vector<ElementRecords>&& records);
+    /// The old name each expanded reference came from (`from`, Task 2 PR 7), one per sub (empty:
+    /// none)
+    std::vector<std::string> getExpandedFroms() const;
+    /// Sets every sub's `from` (padded or cut to the subs' count), keeping the rest (FreeCAD-CH,
+    /// ops#150: a reference field's write keeps them for the entries it keeps)
+    void setExpandedFroms(std::vector<std::string>&& froms);
     /// Sets sub \a index's fingerprint text (ops#127: a re-target's restore puts the original's
     /// back), keeping the rest
     void setElementFingerprint(std::size_t index, const std::string& fingerprint);

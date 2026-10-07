@@ -81,17 +81,28 @@ class ReferenceField: public QWidget, public Gui::SelectionObserver, public App:
     Q_PROPERTY(QString state READ state)
 
 public:
-    /// What the field holds. W1 has Elements; the later kinds (notes 11.3) build on it.
+    /// What the field holds (notes 11.3 adds the later kinds).
     enum class Kind
     {
-        Elements,  ///< a list of elements of the target (PropertyLinkSub)
+        /// A list of elements of the target (PropertyLinkSub or PropertyLinkSubList): a pick
+        /// adds an element or takes it out.
+        Elements,
+        /// One reference (PropertyLinkSub, or a PropertyLinkSubList holding one object): an
+        /// element of any object the gate takes, or a datum or origin plane or line, or with
+        /// Options::wholeObject an object. A pick replaces it.
+        SingleElement,
     };
+    /// Turns a pick into what is written: the object and its subs (a copy of another body's
+    /// element, a datum's coordinate system). False: nothing is written.
+    using Resolver = std::function<
+        bool(const Gui::SelectionChanges& msg, App::DocumentObject*& obj, std::vector<std::string>& subs)>;
     struct Options
     {
         Kind kind = Kind::Elements;
         /// What the gate lets through (ReferenceSelection's flags).
         AllowSelectionFlags flags;
-        /// The object picks come from; null: none (the field doesn't arm).
+        /// Elements: the object picks come from (null: the field doesn't arm). SingleElement:
+        /// the object shown while armed, and the gate's support (null: the active body's).
         std::function<App::DocumentObject*()> target;
         /// The field's own test, after the flags; \a why says what it refuses.
         std::function<bool(App::DocumentObject*, const char* sub, std::string& why)> accept;
@@ -99,8 +110,20 @@ public:
         bool noDependents = false;
         /// Armed when the dialog opens while it is empty.
         bool required = true;
-        /// What it takes, for its label: "Edges, faces".
+        /// What it takes: "Edges, faces". The label, and the hint while armed.
         QString kinds;
+        /// The label when it isn't the kinds: "Neutral plane".
+        QString label;
+        /// SingleElement: a pick takes the picked element's object, whole.
+        bool wholeObject = false;
+        /// SingleElement: what a pick writes; by default the picked object and element.
+        Resolver resolve;
+        /// Disarms after a pick: a hidden field the panel arms for one pick (the direction
+        /// box's "Select reference").
+        bool once = false;
+        /// The References panel leaves out the property's rows while the field is enabled; a
+        /// hidden field doesn't (they would be shown nowhere).
+        bool covers = true;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
@@ -136,6 +159,19 @@ public:
     {
         return options.required;
     }
+    /// Required or not now (a face field while its side goes up to a face).
+    void setRequired(bool on)
+    {
+        options.required = on;
+    }
+    /// Whether the References panel leaves out the property's rows now.
+    bool coversProperty() const
+    {
+        return options.covers && isEnabled();
+    }
+    /// Takes \a placeholder's place in its parent's layout and deletes it (a `.ui` file's
+    /// placeholder widget).
+    void takePlaceOf(QWidget* placeholder);
     /// The owner's document, or null.
     App::Document* ownerDocument() const
     {
@@ -193,30 +229,44 @@ private:
     {
         return ownerT.getObject();
     }
-    App::PropertyLinkSub* property() const;
+    /// The property: a PropertyLinkSub or a PropertyLinkSubList, or null.
+    App::PropertyLinkBase* property() const;
     App::DocumentObject* target() const;
+    /// The object the property links (a list's, when it links one).
+    App::DocumentObject* linkedObject() const;
+    bool isSingle() const
+    {
+        return options.kind == Kind::SingleElement;
+    }
     /// The subs as the property stores them (mapped names kept).
     std::vector<std::string> storedSubs() const;
-    /// The property's value as the field's undo keeps it: per sub, its mapped name (the shadow:
-    /// a missing element's is only there), element records and fingerprint.
+    /// The property's value as the field's undo keeps it: the object, and per sub its mapped
+    /// name (the shadow: a missing element's is only there), element records, fingerprint and
+    /// `from`.
     struct Snapshot
     {
+        App::DocumentObjectT object;
         std::vector<std::string> subs;
         std::vector<App::PropertyLinkBase::ShadowSub> shadows;
         std::vector<App::ElementRecords> records;
         std::vector<std::string> fingerprints;
+        std::vector<std::string> froms;
         /// The reference solver's report on the subs (a broken one's candidates), by index.
         std::vector<App::ReferenceReport::Entry> report;
     };
     Snapshot snapshot() const;
-    /// Writes \a subs through the writer and lists them; \a undoable: a step of the field's undo.
-    /// The entries kept from the current value keep their records.
+    /// Writes \a subs of the target through the writer and lists them; \a undoable: a step of
+    /// the field's undo. The entries kept from the current value keep their records.
     void write(const std::vector<std::string>& subs, bool undoable = true);
+    /// The same for \a obj's \a subs (a single entry, whose object changes).
+    void write(App::DocumentObject* obj, const std::vector<std::string>& subs, bool undoable = true);
     /// Writes \a value with its records as they are (the field's undo and redo).
     void write(const Snapshot& value, bool undoable);
     /// Records the current value as a step of the field's undo.
     void pushUndo();
     void pick(App::DocumentObject* obj, const std::string& sub);
+    /// A single entry's pick: replaces the entry.
+    void pickSingle(const Gui::SelectionChanges& msg);
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());
