@@ -47,6 +47,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
+#include <Gui/VariableDisplay.h>  // FreeCAD-CH (ops#152)
 #include <Gui/Notifications.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionObject.h>
@@ -435,7 +436,8 @@ public:
             App::PropertyExpressionEngine::ExpressionInfo expr_info = sketch->getExpression(path);
 
             if (expr_info.expression)
-                return QString::fromStdString(expr_info.expression->toString());
+                // FreeCAD-CH (ops#152): variables as #Name, with where each lives
+                return Gui::expressionToolTipText(expr_info.expression.get());
             else
                 return QVariant();
         }

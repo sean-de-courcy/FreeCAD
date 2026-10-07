@@ -181,7 +181,8 @@ names it.
 | `fix/163-undo-dynamic-props` | fix | ops#163 | upstream issue 32285 (upstream commit f4665aa7b5) | `integration` `ab57bc30de` | `92fbbe9288` (fork PR 150), 2026-10-07 | a new base fixes upstream issue 32285 |
 | `feat/152-completion` | feat | ops#152 | - | `integration` (after fork PRs 145, 146) | `74cabd709a` (fork PR 152), 2026-10-07 | never (fork feature); refit when upstream changes `ExpressionCompleter`'s fuzzy model |
 | `fix/173-multi-circle-tier1` | fix | ops#173, ops#174 | - | `integration` (`fix/168-own-twin-lift` `f911f50fc3`) | `e31de021cc` (fork PR 149), 2026-10-07 | never (fork feature) |
-| `feat/152-panel` | feat | ops#152 | - | `fix/152-uses-undo` `07b3b5894e` (stacked on fork PR 148) | (fork PR 155) | never (fork feature); refit when upstream changes `DockWindowManager`, `MainWindow::setupDockWindows`, `StdWorkbench::setupDockWindows` or `DlgAddProperty` |
+| `feat/152-panel` | feat | ops#152 | - | `fix/152-uses-undo` `07b3b5894e` (stacked on fork PR 148) | `7b0de5eea3` (fork PR 155), 2026-10-07 | never (fork feature); refit when upstream changes `DockWindowManager`, `MainWindow::setupDockWindows`, `StdWorkbench::setupDockWindows` or `DlgAddProperty` |
+| `feat/152-display-gui` | feat | ops#152 | - | `integration` `dbd0b40f6f` | (fork PR 153) | never (fork feature); refit when upstream changes the display sites (`PropertyItem.cpp`, `SheetModel.cpp`, `SheetTableView.cpp`, `InputField.cpp`, `ViewProviderSketch.cpp`; section 8.3) |
 
 ## Fork-only commits in carried topics
 

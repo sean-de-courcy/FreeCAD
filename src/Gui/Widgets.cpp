@@ -55,6 +55,7 @@
 #include "PrefWidgets.h"
 #include "QuantitySpinBox_p.h"
 #include "Tools.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 #include "Dialogs/ui_DlgTreeWidget.h"
 #include "MainWindow.h"
 
@@ -1646,7 +1647,8 @@ void ExpLineEdit::onChange()
         QPalette p(palette());
         p.setColor(QPalette::Text, Qt::lightGray);
         setPalette(p);
-        iconLabel->setExpressionText(QString::fromStdString(getExpression()->toString()));
+        // FreeCAD-CH (ops#152)
+        iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
     }
     else {
         setReadOnly(false);
@@ -1678,7 +1680,8 @@ void ExpLineEdit::resizeEvent(QResizeEvent* event)
             QPalette p(palette());
             p.setColor(QPalette::Text, Qt::lightGray);
             setPalette(p);
-            iconLabel->setExpressionText(QString::fromStdString(getExpression()->toString()));
+            // FreeCAD-CH (ops#152)
+            iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
         }
         else {
             setReadOnly(false);

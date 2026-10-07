@@ -38,6 +38,7 @@
 #include "BitmapFactory.h"
 #include "Command.h"
 #include "QuantitySpinBox_p.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 
 
 using namespace Gui;
@@ -131,7 +132,7 @@ void InputField::bind(const App::ObjectIdentifier& _path)
         std::shared_ptr<const Expression> expr(docObj->getExpression(getPath()).expression);
 
         if (expr) {
-            newInput(QString::fromStdString(expr->toString()));
+            newInput(expressionDisplayText(expr.get()));  // FreeCAD-CH (ops#152)
         }
     }
 
@@ -179,7 +180,7 @@ void InputField::updateText(const Base::Quantity& quant)
         );
 
         if (e) {
-            setText(QString::fromStdString(e->toString()));
+            setText(expressionDisplayText(e.get()));  // FreeCAD-CH (ops#152)
             return;
         }
     }
@@ -270,11 +271,17 @@ void InputField::newInput(const QString& text)
         fixup(input);
 
         if (isBound()) {
-            std::shared_ptr<Expression> e(
-                ExpressionParser::parse(getPath().getDocumentObject(), input.toUtf8())
-            );
+            // FreeCAD-CH (ops#152): the shown text of the current expression (`#Width`, set by
+            // bind() and updateText()) keeps it. Parsed back, a label or a `.Width` reference would
+            // come back in another form and rewrite the expression with nobody editing.
+            std::shared_ptr<Expression> current = getExpression();
+            if (!current || input != expressionDisplayText(current.get())) {
+                std::shared_ptr<Expression> e(
+                    ExpressionParser::parse(getPath().getDocumentObject(), input.toUtf8())
+                );
 
-            setExpression(e);
+                setExpression(e);
+            }
 
             std::unique_ptr<Expression> evalRes(getExpression()->eval());
 

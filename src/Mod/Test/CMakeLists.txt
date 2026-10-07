@@ -37,6 +37,7 @@ SET(Test_SRCS
     TestViewProviderLink.py
     TestVariables.py
     TestPropertyEditorGui.py
+    TestVariablesGui.py
 )
 
 SET(TestData_SRCS

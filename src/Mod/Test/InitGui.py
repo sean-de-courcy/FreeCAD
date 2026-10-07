@@ -107,4 +107,5 @@ FreeCAD.__unit_test__ += [
     "TestCoinNodeSnapshots",
     "TestViewProviderLink",
     "TestPropertyEditorGui",
+    "TestVariablesGui",
 ]

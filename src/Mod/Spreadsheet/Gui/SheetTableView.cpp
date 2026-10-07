@@ -619,8 +619,13 @@ void SheetTableView::_copySelection(const std::vector<App::Range>& ranges, bool 
     QString selectedText;
     for (int i = minRow; i <= maxRow; i++) {
         for (int j = minCol; j <= maxCol; j++) {
-            QModelIndex index = model()->index(i, j);
-            QString cell = index.data(Qt::EditRole).toString();
+            // FreeCAD-CH (ops#152): the stored text, not the editor's (#Name): it leaves the session
+            QString cell;
+            if (auto stored = sheet->getCell(App::CellAddress(i, j))) {
+                std::string content;
+                stored->getStringContent(content);
+                cell = QString::fromStdString(content);
+            }
             if (!cell.isEmpty() && cell.at(0) == QLatin1Char('\'')) {
                 cell.remove(0, 1);
             }

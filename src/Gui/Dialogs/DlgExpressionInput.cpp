@@ -49,6 +49,7 @@
 #include "Tools.h"
 #include "ExpressionBinding.h"
 #include "BitmapFactory.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 #include "ViewProviderDocumentObject.h"
 
 using namespace App;
@@ -86,7 +87,8 @@ DlgExpressionInput::DlgExpressionInput(
     connect(discardBtn, &QPushButton::clicked, this, &DlgExpressionInput::setDiscarded);
 
     if (expression) {
-        ui->expression->setPlainText(QString::fromStdString(expression->toString()));
+        // FreeCAD-CH (ops#152): variables as #Name; the text is parsed back with the same owner
+        ui->expression->setPlainText(expressionDisplayText(expression.get()));
     }
     else {
         QVariant text = parent->property("text");
@@ -357,6 +359,13 @@ void DlgExpressionInput::checkExpression(const QString& text)
     std::shared_ptr<Expression> expr(
         ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData())
     );
+
+    // FreeCAD-CH (ops#152): the shown text of the stored expression keeps it, so OK with the text
+    // unchanged doesn't rewrite a label or a `.Width` reference into the form it parses back to.
+    if (std::shared_ptr<Expression> stored = path.getDocumentObject()->getExpression(path).expression;
+        stored && text == expressionDisplayText(stored.get())) {
+        expr = stored->copy();
+    }
 
     if (expr) {
         std::string error = path.getDocumentObject()->ExpressionEngine.validateExpression(path, expr);

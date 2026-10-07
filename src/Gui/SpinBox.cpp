@@ -41,6 +41,7 @@
 #include "Command.h"
 #include "Dialogs/DlgExpressionInput.h"
 #include "QuantitySpinBox_p.h"
+#include "VariableDisplay.h"  // FreeCAD-CH (ops#152)
 #include "Widgets.h"
 
 
@@ -279,7 +280,8 @@ void ExpressionSpinBox::showExpression(Number number)
         p.setColor(QPalette::Text, Qt::lightGray);
         lineedit->setPalette(p);
     }
-    iconLabel->setExpressionText(QString::fromStdString(getExpression()->toString()));
+    // FreeCAD-CH (ops#152): variables as #Name, with where each lives
+    iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
 }
 
 void ExpressionSpinBox::clearExpression()
