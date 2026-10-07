@@ -718,6 +718,9 @@ void ReferenceField::pick(App::DocumentObject* obj, const std::string& sub)
     else {
         stored.push_back(sub);
     }
+    if (refusesLastElement(stored)) {
+        return;
+    }
     write(stored);
 }
 
@@ -774,8 +777,15 @@ void ReferenceField::pickProfile(const Gui::SelectionChanges& msg)
         Base::StateLocker lock(busy, true);
         Gui::Selection().clearSelection();
     }
+    if (repickIndex >= 0) {
+        // A re-pick replaces one entry: another object, or the object whole, would replace the
+        // profile and drop every entry with its records
+        message = tr("Re-pick takes an element of %1.")
+                      .arg(linked ? QString::fromUtf8(linked->Label.getValue()) : QString());
+        updateLook();
+        return;
+    }
     message.clear();
-    repickIndex = -1;
     // Another object, or the object whole: the profile is replaced
     if (obj != linked || !storedSubs().empty()) {
         std::vector<std::string> subs;
@@ -795,6 +805,20 @@ void ReferenceField::useWhole()
     if (linked && !storedSubs().empty()) {
         write(linked, {});
     }
+}
+
+bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
+{
+    App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
+    if (!linked || !stored.empty() || linked->isDerivedFrom<Part::Part2DObject>()) {
+        return false;
+    }
+    message = tr(
+        "The profile keeps its last face: pick another face of the solid first, or "
+        "another profile."
+    );
+    updateLook();
+    return true;
 }
 
 bool ReferenceField::lacksRegions() const
@@ -1010,6 +1034,9 @@ void ReferenceField::removeSelected()
             stored.erase(stored.begin() + index);
         }
     }
+    if (refusesLastElement(stored)) {
+        return;
+    }
     write(stored);
 }
 
@@ -1198,11 +1225,14 @@ void ReferenceField::zoomTo(const std::string& element)
     if (!support || element.empty()) {
         return;
     }
-    Part::TopoShape shape = Part::Feature::getTopoShape(
+    // Through the object's sub-object lookup: a sketch's regions (InternalFace3) aren't in its
+    // Shape
+    Part::TopoShape sub = Part::Feature::getTopoShape(
         support,
         Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            | Part::ShapeOption::NeedSubElement,
+        element.c_str()
     );
-    Part::TopoShape sub = shape.getSubTopoShape(element.c_str(), /* silent = */ true);
     if (sub.isNull()) {
         return;
     }

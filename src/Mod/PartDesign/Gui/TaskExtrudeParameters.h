@@ -123,7 +123,7 @@ public:
         const std::string& pixmapname,
         const QString& parname
     );
-    ~TaskExtrudeParameters() override = default;
+    ~TaskExtrudeParameters() override;
 
     void saveHistory() override;
 
@@ -251,8 +251,12 @@ private:
     /// The profile and its regions (ops#150 W3).
     void createProfileField();
     /// Sets AllowMultiFace when the profile gets subs (a command): an older feature without it
-    /// ignores a sketch's subs and pads the whole sketch (ops#162 B7). True if it was set.
+    /// ignores a sketch's subs and pads the whole sketch (ops#162 B7). Without subs it goes back
+    /// to the value the dialog opened with (undo, Use whole sketch, the last region taken out).
+    /// True if it was changed.
     bool allowMultiFace(bool hasSubs);
+    /// AllowMultiFace when the dialog opened.
+    bool savedAllowMultiFace = false;
     /// While the profile field is armed: the sketch shown with its regions stronger, the profile
     /// preview shown, and the feature hidden when nothing comes before it; off, as they were.
     void showProfileTarget(bool on);

@@ -131,6 +131,19 @@ TaskExtrudeParameters::TaskExtrudeParameters(
     this->groupLayout()->addWidget(proxy);
 }
 
+TaskExtrudeParameters::~TaskExtrudeParameters()
+{
+    // A dialog closed other than by OK or Cancel (resetEdit(), Control.closeDialog()) leaves the
+    // profile field armed: what it showed goes back as on a disarm
+    if (shownProfile.getObject() || emphasizedProfile.getObject() || hiddenSelf) {
+        try {
+            showProfileTarget(false);
+        }
+        catch (...) {
+        }
+    }
+}
+
 void TaskExtrudeParameters::setupDialog()
 {
     createSideControllers();
@@ -318,8 +331,13 @@ void TaskExtrudeParameters::createProfileField()
     profile.accept = [this](App::DocumentObject* obj, const char* sub, std::string& why) {
         return acceptProfile(getObject(), baseSolid(), obj, sub, why);
     };
+    // A sketch attached to the feature itself would make a cycle (as the start and up-to fields)
+    profile.noDependents = true;
     profile.label = tr("Profile");
     profile.kinds = tr("A sketch, its regions or edges, or faces of the solid");
+    if (auto profileBased = getObject<PartDesign::ProfileBased>()) {
+        savedAllowMultiFace = profileBased->AllowMultiFace.getValue();
+    }
     auto self = std::make_shared<QPointer<ReferenceField>>();
     auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
         // In the same command: without it the subs of a sketch are ignored (ops#162 B7)
@@ -355,10 +373,13 @@ void TaskExtrudeParameters::createProfileField()
 bool TaskExtrudeParameters::allowMultiFace(bool hasSubs)
 {
     auto profileBased = getObject<PartDesign::ProfileBased>();
-    if (!hasSubs || !profileBased || profileBased->AllowMultiFace.getValue()) {
+    // Without subs the value the dialog opened with: an older feature's whole sketch goes on
+    // through its old face maker
+    const bool wanted = hasSubs || savedAllowMultiFace;
+    if (!profileBased || profileBased->AllowMultiFace.getValue() == wanted) {
         return false;
     }
-    FCMD_OBJ_CMD(profileBased, "AllowMultiFace = True");
+    FCMD_OBJ_CMD(profileBased, "AllowMultiFace = " << (wanted ? "True" : "False"));
     return true;
 }
 

@@ -290,6 +290,9 @@ private:
     void makeRegions();
     /// A profile on a sketch that makes no regions.
     bool lacksRegions() const;
+    /// A profile of a solid's faces whose last element \a stored would take out: refused, with
+    /// a message (the solid whole is no profile).
+    bool refusesLastElement(const std::vector<std::string>& stored);
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());
