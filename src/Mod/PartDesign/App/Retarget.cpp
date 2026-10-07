@@ -12,18 +12,21 @@
 #include <set>
 #include <sstream>
 
+#include <App/Application.h>
 #include <App/ComplexGeoData.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolverBatch.h>
 #include <App/Expression.h>
+#include <App/MergeDocuments.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyExpressionEngine.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/Reader.h>
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -144,13 +147,17 @@ std::string unescapeField(const std::string& text)
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
 /// <position>`, then `|<guess>|<orig>|<alt>[|<orig fp>]` when it has a guess record), a sketch's
 /// projection parked in place (`extgeo|`, the same fields, then `|<type>|<ids>` before the guess
-/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`)
+/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
+/// since ops#158, its ID: `Pad2#17` (object names have no `#`; a line without the ID still reads)
 struct ParkedItem
 {
     bool expression = false;
     bool extgeo = false;  // a projection: its geometries stay in the sketch without the link
     std::string property;  // the property, or the expression's path
     std::string target;    // the name of the object it refers to
+    long targetId = 0;     // its ID (getID()), 0 in lines written before ops#158, -1 when it
+                           // is in another document (left behind by an import, see
+                           // importParkedLines)
     std::string sub;
     std::string shadowNew;
     std::string shadowOld;
@@ -165,12 +172,13 @@ struct ParkedItem
     {
         std::ostringstream ss;
         if (expression) {
-            ss << "expr|" << escapeField(property) << '|' << escapeField(target) << '|'
+            ss << "expr|" << escapeField(property) << '|' << escapeField(targetField()) << '|'
                << escapeField(text);
         }
         else {
             ss << (extgeo ? "extgeo|" : "link|") << escapeField(property) << '|'
-               << escapeField(target) << '|' << escapeField(sub) << '|' << escapeField(shadowNew)
+               << escapeField(targetField()) << '|' << escapeField(sub) << '|'
+               << escapeField(shadowNew)
                << '|' << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
             if (extgeo) {
                 ss << '|' << type << '|';
@@ -189,6 +197,37 @@ struct ParkedItem
         return ss.str();
     }
 
+    std::string targetField() const
+    {
+        return targetId != 0 ? target + "#" + std::to_string(targetId) : target;
+    }
+
+    void setTarget(const std::string& field)
+    {
+        target = field;
+        targetId = 0;
+        auto hash = field.rfind('#');
+        if (hash == std::string::npos || hash + 1 == field.size()) {
+            return;
+        }
+        try {
+            std::size_t used = 0;
+            long id = std::stol(field.substr(hash + 1), &used);
+            if (used == field.size() - hash - 1 && id != 0) {
+                target = field.substr(0, hash);
+                targetId = id > 0 ? id : -1;
+            }
+        }
+        catch (...) {
+        }
+    }
+
+    void setTarget(const App::DocumentObject* obj)
+    {
+        target = obj->getNameInDocument();
+        targetId = obj->getID();
+    }
+
     static std::optional<ParkedItem> parse(const std::string& line)
     {
         std::vector<std::string> fields;
@@ -205,7 +244,7 @@ struct ParkedItem
         if (fields.size() == 4 && fields[0] == "expr") {
             item.expression = true;
             item.property = fields[1];
-            item.target = fields[2];
+            item.setTarget(fields[2]);
             item.text = fields[3];
             return item;
         }
@@ -216,7 +255,7 @@ struct ParkedItem
                 || fields.size() == base + 4)) {
             item.extgeo = fields[0] == "extgeo";
             item.property = fields[1];
-            item.target = fields[2];
+            item.setTarget(fields[2]);
             item.sub = fields[3];
             item.shadowNew = fields[4];
             item.shadowOld = fields[5];
@@ -300,6 +339,18 @@ void writeParkedLines(App::DocumentObject* owner, const std::vector<std::string>
     if (prop) {
         prop->setValues(lines);
     }
+}
+
+/// The object a parked item refers to: the one of that name, if it is the same object
+/// (ops#158: a new object can take a deleted one's name); null when it was deleted, or left in
+/// another document
+App::DocumentObject* parkedTarget(const App::Document* doc, const ParkedItem& item)
+{
+    auto obj = doc ? doc->getObject(item.target.c_str()) : nullptr;
+    if (obj && item.targetId != 0 && obj->getID() != item.targetId) {
+        return nullptr;
+    }
+    return obj;
 }
 
 // -- A link property as the rule sees it ---------------------------------------------------------
@@ -857,7 +908,7 @@ private:
                 if (items[i].expression || items[i].property != prop->getName()) {
                     continue;
                 }
-                auto target = doc->getObject(items[i].target.c_str());
+                auto target = parkedTarget(doc, items[i]);
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
@@ -978,7 +1029,7 @@ private:
             item.ids = unit.ids;
         }
         if (unit.subs.empty()) {
-            item.target = unit.obj->getNameInDocument();
+            item.setTarget(unit.obj);
             newLines.push_back(item.line());
         }
         else {
@@ -989,7 +1040,16 @@ private:
                 if (!s.record.empty() && !keys.insert(recordKey(s.record)).second) {
                     continue;
                 }
-                item.target = s.record.empty() ? unit.obj->getNameInDocument() : s.record.target;
+                // A record's object exists here: decide() ends a record whose object is gone
+                auto doc = unit.obj->getDocument();
+                auto source = s.record.empty() ? unit.obj : doc->getObject(s.record.target.c_str());
+                if (source) {
+                    item.setTarget(source);
+                }
+                else {
+                    item.target = s.record.target;
+                    item.targetId = 0;
+                }
                 item.sub = entry.sub;
                 item.shadowNew = entry.shadow.newName;
                 item.shadowOld = entry.shadow.oldName;
@@ -1218,7 +1278,7 @@ private:
                     ParkedItem item;
                     item.expression = true;
                     item.property = path.toString();
-                    item.target = dep.first->getNameInDocument();
+                    item.setTarget(dep.first);
                     item.text = expr->toString(true);
                     plan.parkPaths.insert(item.property);
                     plan.lines.push_back(item.line());
@@ -1234,7 +1294,7 @@ private:
                 kept.push_back(line);
                 continue;
             }
-            auto target = doc->getObject(item->target.c_str());
+            auto target = parkedTarget(doc, *item);
             if (target && x && readsLater(target, x)) {
                 kept.push_back(line);
                 continue;
@@ -1791,7 +1851,7 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
         why = "A reference was set aside by a reorder";
         return true;
     }
-    auto target = doc->getObject(item->target.c_str());
+    auto target = parkedTarget(doc, *item);
     std::string targetLabel = target ? target->Label.getValue() : item->target;
     // The feature it now comes after: the earliest solid whose inputs include obj
     std::string userLabel;
@@ -1857,6 +1917,129 @@ bool hasParkedOriginals(const App::DocumentObject* obj)
         }
     }
     return false;
+}
+
+namespace
+{
+
+/// Import, merge and paste (ops#158): readObjects gives the imported objects new IDs and, where a
+/// name is taken, new names, so an imported owner's lines would name an object that is gone, or
+/// another one. Each line whose object came in with it (the object saved under that name with that
+/// ID) is rewritten to name the copy (and to put the reference back by its index), and so are the
+/// objects an expression's text names. A line whose object didn't come in keeps naming it: in a
+/// copy within the document it is still there, under its name and ID; from anywhere else it is
+/// in another document, and an object of that name here is another one, whatever its ID.
+void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
+{
+    // The imported objects by the name each was saved under, with the ID it had there
+    std::map<std::string, std::pair<App::DocumentObject*, long>> saved;
+    for (auto obj : objs) {
+        if (auto source = App::importedSource(obj)) {
+            saved[source->name] = {obj, source->id};
+        }
+    }
+    for (auto owner : objs) {
+        auto source = App::importedSource(owner);
+        if (!source || !owner->isAttachedToDocument()) {
+            continue;
+        }
+        auto doc = owner->getDocument();
+        // A copy's names end in `@<document>`, the document it was copied from (exportObjects); a
+        // saved project's (merge) don't
+        auto at = source->name.find('@');
+        const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
+        const bool sameDocument = suffix == std::string("@") + doc->getName();
+        // The copy of the owner's object of that name, if it is that object (id; 0 takes any)
+        auto copyOf = [&](const std::string& name, long id) -> App::DocumentObject* {
+            auto it = saved.find(name + suffix);
+            if (id < 0 || it == saved.end() || (id > 0 && it->second.second != id)) {
+                return nullptr;
+            }
+            return it->second.first;
+        };
+        auto lines = parkedLines(owner);
+        bool changed = false;
+        for (auto& line : lines) {
+            auto item = ParkedItem::parse(line);
+            if (!item) {
+                continue;
+            }
+            if (auto copy = copyOf(item->target, item->targetId)) {
+                item->setTarget(copy);
+                // The mapped name's tags are the source objects' IDs, which the copies don't
+                // have: the reference goes back by its index, as an imported link's does
+                item->shadowNew.clear();
+            }
+            else if (!sameDocument) {
+                item->targetId = -1;
+            }
+            if (item->expression) {
+                try {
+                    // The objects the text names without a document resolve here: to the copies
+                    // that kept their names, or to this document's objects (or the originals,
+                    // within the document) where a copy was renamed. A reference into another
+                    // document stays as it is. The parse doesn't rename them
+                    std::unique_ptr<App::Expression> expr(
+                        App::Expression::parse(owner, item->text));
+                    std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> renames;
+                    for (const auto& dep : expr->getDeps(App::Expression::DepAll)) {
+                        auto obj = dep.first;
+                        if (!obj || !obj->isAttachedToDocument() || obj->getDocument() != doc) {
+                            continue;
+                        }
+                        auto copy = copyOf(obj->getNameInDocument(), 0);
+                        if (copy && copy != obj) {
+                            renames.emplace_back(obj, copy);
+                        }
+                    }
+                    // One at a time, each before the one whose copy it renames (X001 to X002
+                    // before X to X001), so that no name is renamed twice
+                    while (!renames.empty()) {
+                        auto next = std::find_if(renames.begin(), renames.end(), [&](auto& r) {
+                            return std::none_of(renames.begin(), renames.end(), [&](auto& o) {
+                                return o.first == r.second;
+                            });
+                        });
+                        if (next == renames.end()) {
+                            next = renames.begin();
+                        }
+                        if (auto replaced = expr->replaceObject(owner, next->first, next->second)) {
+                            expr = std::move(replaced);
+                        }
+                        renames.erase(next);
+                    }
+                    item->text = expr->toString(true);
+                }
+                catch (const Base::Exception& e) {
+                    FC_WARN(owner->getFullName() << ": a parked expression could not be read on "
+                                                    "import: " << e.what());
+                }
+            }
+            auto rewritten = item->line();
+            if (rewritten != line) {
+                line = rewritten;
+                changed = true;
+            }
+        }
+        if (changed) {
+            writeParkedLines(owner, lines);
+        }
+    }
+}
+
+}  // namespace
+
+void registerParkedImport()
+{
+    auto watch = [](App::Document& doc) {
+        doc.signalImportObjects.connect(&importParkedLines);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
 }
 
 void registerParkedReferenceProvider()

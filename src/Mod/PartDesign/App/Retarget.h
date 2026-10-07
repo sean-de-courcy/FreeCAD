@@ -45,4 +45,8 @@ bool hasParkedOriginals(const App::DocumentObject* obj);
 /// Sketcher::parkedReference() reads the sketch's parking record through it
 void registerParkedReferenceProvider();
 
+/// Rewrites the parked lines of imported, merged and pasted objects to name the copies of their
+/// objects (ops#158): watches every document's signalImportObjects
+void registerParkedImport();
+
 }  // namespace PartDesign

@@ -87,6 +87,8 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerFailureContinuation();
     // The sketch editor marks projections a reorder parked (ops#131)
     PartDesign::registerParkedReferenceProvider();
+    // Parked lines follow their objects through import, merge and paste (ops#158)
+    PartDesign::registerParkedImport();
     Base::Console().log("Loading Part Design module… done\n");
 
 

@@ -162,7 +162,8 @@ names it.
 | `carry/144-upstream-gui-fixes` | carry | ops#144 | `upstream PR 32611`: `69b04222cc` (main `6c90c20d38`; cherry-picked unchanged as `0b85071ed6`; its `[[nodiscard]]` commit `2cc82e4449` left out), `upstream PR 32478`: main `07b2d9973d` (as `6c5db7d14d`), `upstream PR 32813`: main `d36eff15a0` (as `7134d0d3be`); fork-only `47abc0c028`, `2d12a4fac7` | `integration` `872ffe8fc1` | `5cf6c77dc9` (fork PR 130), 2026-10-06 | a new base contains main `6c90c20d38`, `07b2d9973d` and `d36eff15a0` |
 | `fix/159-expression-field-followups` | fix | ops#159, ops#157, ops#156 | - | `integration` `872ffe8fc1` | `076ad63187` (fork PR 132), 2026-10-06 | upstream's quantity fields show a unitless expression result in their unit and Std_Edit opens an edit transaction; the ops#155 refresh's own follow-ups leave with ops#155 |
 | `fix/164-delete-guard-second-view` | fix | ops#164 | - | `integration` `9759c05714` | `d902dc50ae` (fork PR 134), 2026-10-06 | upstream's Std_Delete finds an edit shown in another view and deletes the rest of a mixed in-edit selection |
-| `fix/161-broken-external-flag-nits` | fix | ops#161 | - | `integration` `5cf6c77dc9` | (fork PR 137) | the sketch's broken-link tooltip: one walk of the links per hover, and the elements named as old names |
+| `fix/161-broken-external-flag-nits` | fix | ops#161 | - | `integration` `5cf6c77dc9` | `0883f369ce` (fork PR 137), 2026-10-06 | the sketch's broken-link tooltip: one walk of the links per hover, and the elements named as old names |
+| `fix/158-parked-target-id` | fix | ops#158 | - | `integration` `8361a07aaf` | (fork PR 135) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
