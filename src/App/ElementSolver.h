@@ -137,6 +137,19 @@ public:
      */
     static std::vector<std::string> sourceTags(std::string_view name);
 
+    /** The maker of \a name (ops#167): the iteration tag of its first section, the feature or
+     * sketch that made the element. Later sections are what later features did to it. Empty for
+     * an empty name or a first section without a tag.
+     */
+    static std::string makerTag(std::string_view name);
+
+    /** True if \a tag is in \a name's lineage (ops#167): the tag of its first section and,
+     * recursively, the tag of every section of every name that section links, i.e. how the
+     * element was made. Later sections and connected elements (neighbours) are not followed, as
+     * in sourceTags(). False for an empty tag.
+     */
+    static bool hasLineageTag(std::string_view name, std::string_view tag);
+
     /** Tier 1's survivors among \a candidates, as indices into it, in increasing order.
      *
      * A candidate survives if its overlap with \a oldName is at least best - \a gap, where best is
@@ -530,6 +543,12 @@ struct AppExport SolveInput
     /// (sourceTags(), a line redrawn in the same sketch); with this, any pick is. For comparison
     /// runs.
     bool guessAnySource = false;
+    /// Tier 1 keeps only candidates made by the old element's maker (ops#167): a candidate that
+    /// isn't in the old name's ancestry needs the old name's maker (NameAncestry::makerTag())
+    /// in the lineage of one of its names (NameAncestry::hasLineageTag()), and so does G2's
+    /// pick. Without it, another feature's element that embeds the same face (another hole's
+    /// edge on the face both cut) survives tier 1. Off for comparison runs only.
+    bool sameMaker = true;
     /// The target is in error (a failed feature passing its input through, ops#126): nothing is
     /// guessed against it (N2's never list, N10).
     bool targetFailed = false;

@@ -729,6 +729,8 @@ bool solveElementReferences(DocumentObject* feature,
     bool guess = true;
     bool guessNoStructure = true;
     bool guessAnySource = false;
+    // T1 and G2' (ops#167), on by default
+    bool sameMaker = true;
     double diagonal = 0.0;
     std::string maplessTag;
     std::map<std::string, std::vector<std::string>> nameMatches;  // by old name
@@ -911,6 +913,8 @@ bool solveElementReferences(DocumentObject* feature,
             guessNoStructure = solverParameters()->GetBool("GuessNoStructure", true);
             // G2 without the same-source test (N3 5.2), for comparison runs
             guessAnySource = solverParameters()->GetBool("GuessAnySource", false);
+            // Tier 1 and G2 only from the old element's maker (ops#167), off for comparison runs
+            sameMaker = solverParameters()->GetBool("Tier1SameMaker", true);
             if (auto prop = geo->getPropertyOfGeometry()) {
                 if (auto data = prop->getComplexData()) {
                     diagonal = data->getBoundBox().CalcDiagonalLength();
@@ -1223,6 +1227,7 @@ bool solveElementReferences(DocumentObject* feature,
         input.guess = guess;
         input.guessNoStructure = guessNoStructure;
         input.guessAnySource = guessAnySource;
+        input.sameMaker = sameMaker;
         // Nothing is guessed against a failed feature passing its input through (N2's N10)
         input.targetFailed = feature->isError();
         input.fingerprintOf = fingerprintOf;
