@@ -31,6 +31,7 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
 #include <Gui/MainWindow.h>
+#include <Gui/Selection/SelectionFilter.h>
 #include <Gui/View3DInventor.h>
 
 //===============================================================================
@@ -202,7 +203,10 @@ PartCmdVertexSelection::PartCmdVertexSelection()
 void PartCmdVertexSelection::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    doCommand(Command::Gui, "Gui.Selection.addSelectionGate('SELECT Part::Feature SUBELEMENT Vertex SELECT App::Link SUBELEMENT Vertex')");
+    // FreeCAD-CH (ops#147): the user's filter, which task panels' gates leave alone
+    Gui::setUserSelectionFilter(
+        "SELECT Part::Feature SUBELEMENT Vertex SELECT App::Link SUBELEMENT Vertex"
+    );
 }
 
 
@@ -227,7 +231,8 @@ PartCmdEdgeSelection::PartCmdEdgeSelection()
 void PartCmdEdgeSelection::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    doCommand(Command::Gui, "Gui.Selection.addSelectionGate('SELECT Part::Feature SUBELEMENT Edge SELECT App::Link SUBELEMENT Edge')");
+    // FreeCAD-CH (ops#147)
+    Gui::setUserSelectionFilter("SELECT Part::Feature SUBELEMENT Edge SELECT App::Link SUBELEMENT Edge");
 }
 
 
@@ -252,11 +257,11 @@ PartCmdFaceSelection::PartCmdFaceSelection()
 void PartCmdFaceSelection::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    doCommand(
-        Command::Gui,
-        "Gui.Selection.addSelectionGate('SELECT Part::Feature SUBELEMENT Face "
+    // FreeCAD-CH (ops#147)
+    Gui::setUserSelectionFilter(
+        "SELECT Part::Feature SUBELEMENT Face "
         "SELECT App::Link SUBELEMENT Face "
-        "SELECT Part::Part2DObject SUBELEMENT InternalFace')"
+        "SELECT Part::Part2DObject SUBELEMENT InternalFace"
     );
 }
 
@@ -282,7 +287,8 @@ PartCmdRemoveSelectionGate::PartCmdRemoveSelectionGate()
 void PartCmdRemoveSelectionGate::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    doCommand(Command::Gui, "Gui.Selection.removeSelectionGate()");
+    // FreeCAD-CH (ops#147): the user's filter only; a task panel's gate stays
+    Gui::setUserSelectionFilter({});
 }
 
 void CreatePartSelectCommands()

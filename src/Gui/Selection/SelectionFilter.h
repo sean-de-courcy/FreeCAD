@@ -141,6 +141,16 @@ protected:
     SelectionFilter* Filter;
 };
 
+/** FreeCAD-CH (ops#147, upstream issues 28305, 26645): the user's selection filter, which Part's
+ * filter toolbar (Part_SelectFilter) sets. It is kept apart from the selection gate, which task
+ * panels install, replace and remove, so it stays on until the user changes it, and a pick must
+ * pass both. It doesn't apply while a sketch is in edit.
+ * @a filter is a SelectionFilter string; an empty one removes the filter.
+ */
+GuiExport void setUserSelectionFilter(const std::string& filter);
+/// The user's selection filter string, empty when there is none
+GuiExport const std::string& userSelectionFilter();
+
 /**
  * A wrapper around a Python class that implements the SelectionGate interface
  * @author Werner Mayer

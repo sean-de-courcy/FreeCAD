@@ -549,20 +549,69 @@ bool SelectionSingleton::needPickedList() const
     return _needPickedList;
 }
 
+// FreeCAD-CH (ops#147): the user's selection filter (SelectionFilter.h), apart from ActiveGate.
+namespace
+{
+std::string userFilterText;
+std::unique_ptr<Gui::SelectionFilterGate> userFilterGate;
+// What Python's addSelectionGate(filter) uses, which Part_SelectFilter called before
+constexpr ResolveMode userFilterResolve = ResolveMode::OldStyleElement;
+
+/// The user's filter if it applies now: it is set, and no sketch is in edit, where the sketch's
+/// own vertices, edges and constraints are picked.
+Gui::SelectionGate* activeUserFilter()
+{
+    if (!userFilterGate) {
+        return nullptr;
+    }
+    if (Gui::Application::Instance) {
+        if (Gui::Document* doc = Gui::Application::Instance->editDocument()) {
+            if (Gui::ViewProvider* vp = doc->getInEdit()) {
+                // By name: SketcherGui may not be loaded
+                Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+                if (!sketch.isBad() && vp->isDerivedFrom(sketch)) {
+                    return nullptr;
+                }
+            }
+        }
+    }
+    return userFilterGate.get();
+}
+}  // namespace
+
+void Gui::setUserSelectionFilter(const std::string& filter)
+{
+    // A filter that doesn't parse throws here, before the old one is dropped
+    auto gate = filter.empty() ? nullptr : std::make_unique<SelectionFilterGate>(filter.c_str());
+    userFilterGate = std::move(gate);
+    userFilterText = filter;
+}
+
+const std::string& Gui::userSelectionFilter()
+{
+    return userFilterText;
+}
+
 SelectionSingleton::SelectionAllowance SelectionSingleton::isSelectionAllowed(const _SelObj& sel)
 {
-    if (!ActiveGate) {
-        return {.allowed = true, .reason = ""};
-    }
-    const char* subelement = nullptr;
-    auto pObject
-        = getObjectOfType(sel, App::DocumentObject::getClassTypeId(), gateResolve, &subelement);
+    // FreeCAD-CH (ops#147): the gate, then the user's filter
+    const std::pair<SelectionGate*, ResolveMode> gates[] = {
+        {ActiveGate, gateResolve},
+        {activeUserFilter(), userFilterResolve},
+    };
+    for (auto [gate, resolve] : gates) {
+        if (!gate) {
+            continue;
+        }
+        const char* subelement = nullptr;
+        auto pObject
+            = getObjectOfType(sel, App::DocumentObject::getClassTypeId(), resolve, &subelement);
 
-
-    if (!ActiveGate->allow(pObject ? pObject->getDocument() : sel.pDoc, pObject, subelement)) {
-        std::string copyNotAllowedReason = ActiveGate->notAllowedReason;
-        ActiveGate->notAllowedReason.clear();
-        return {.allowed = false, .reason = copyNotAllowedReason};
+        if (!gate->allow(pObject ? pObject->getDocument() : sel.pDoc, pObject, subelement)) {
+            std::string copyNotAllowedReason = gate->notAllowedReason;
+            gate->notAllowedReason.clear();
+            return {.allowed = false, .reason = copyNotAllowedReason};
+        }
     }
     return {.allowed = true, .reason = ""};
 }
@@ -862,7 +911,7 @@ bool SelectionSingleton::testSelection(
         return false;
     }
 
-    if (!ActiveGate) {
+    if (!ActiveGate && !activeUserFilter()) {  // FreeCAD-CH (ops#147)
         return true;
     }
 
@@ -878,18 +927,31 @@ bool SelectionSingleton::testSelection(
         return false;
     }
 
-    const char* subelement = nullptr;
-    auto gateObject
-        = getObjectOfType(temp, App::DocumentObject::getClassTypeId(), gateResolve, &subelement);
+    // FreeCAD-CH (ops#147): the gate, then the user's filter
+    const std::pair<SelectionGate*, ResolveMode> gates[] = {
+        {ActiveGate, gateResolve},
+        {activeUserFilter(), userFilterResolve},
+    };
+    for (auto [gate, resolve] : gates) {
+        if (!gate) {
+            continue;
+        }
+        const char* subelement = nullptr;
+        auto gateObject
+            = getObjectOfType(temp, App::DocumentObject::getClassTypeId(), resolve, &subelement);
 
-    std::string notAllowedReason = ActiveGate->notAllowedReason;
-    bool allowed = ActiveGate->allow(
-        gateObject ? gateObject->getDocument() : temp.pDoc,
-        gateObject,
-        subelement
-    );
-    ActiveGate->notAllowedReason = notAllowedReason;
-    return allowed;
+        std::string notAllowedReason = gate->notAllowedReason;
+        bool allowed = gate->allow(
+            gateObject ? gateObject->getDocument() : temp.pDoc,
+            gateObject,
+            subelement
+        );
+        gate->notAllowedReason = notAllowedReason;
+        if (!allowed) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SelectionSingleton::hasSelectionGate(App::Document* /*pDoc*/) const
@@ -929,7 +991,15 @@ int SelectionSingleton::setPreselect(
 
     rmvPreselect();
 
-    if (ActiveGate && signal != SelectionChanges::MsgSource::Internal) {
+    // FreeCAD-CH (ops#147): the gate, then the user's filter
+    const std::pair<SelectionGate*, ResolveMode> gates[] = {
+        {ActiveGate, gateResolve},
+        {activeUserFilter(), userFilterResolve},
+    };
+    for (auto [gate, resolve] : gates) {
+        if (!gate || signal == SelectionChanges::MsgSource::Internal) {
+            continue;
+        }
         App::Document* pDoc = getDocument(pDocName);
         if (!pDoc || !pObjectName) {
             return 0;
@@ -941,14 +1011,14 @@ int SelectionSingleton::setPreselect(
         }
 
         const char* subelement = pSubName;
-        if (gateResolve != ResolveMode::NoResolve) {
+        if (resolve != ResolveMode::NoResolve) {
             auto& newElementName = elementName.newName;
             auto& oldElementName = elementName.oldName;
             pObject = App::GeoFeature::resolveElement(pObject, pSubName, elementName);
             if (!pObject) {
                 return 0;
             }
-            if (gateResolve > ResolveMode::OldStyleElement) {
+            if (resolve > ResolveMode::OldStyleElement) {
                 subelement = !newElementName.empty() ? newElementName.c_str()
                                                      : oldElementName.c_str();
             }
@@ -956,10 +1026,10 @@ int SelectionSingleton::setPreselect(
                 subelement = oldElementName.c_str();
             }
         }
-        if (!ActiveGate->allow(pObject->getDocument(), pObject, subelement)) {
+        if (!gate->allow(pObject->getDocument(), pObject, subelement)) {
             QString msg;
-            if (ActiveGate->notAllowedReason.length() > 0) {
-                msg = QObject::tr(ActiveGate->notAllowedReason.c_str());
+            if (gate->notAllowedReason.length() > 0) {
+                msg = QObject::tr(gate->notAllowedReason.c_str());
             }
             else {
                 msg = QCoreApplication::translate("SelectionFilter", "Not allowed:");
@@ -1149,7 +1219,7 @@ void SelectionSingleton::rmvPreselect(bool signal)
     hy = 0;
     hz = 0;
 
-    if (ActiveGate && getMainWindow()) {
+    if ((ActiveGate || userFilterGate) && getMainWindow()) {  // FreeCAD-CH (ops#147)
         Gui::MDIView* mdi = Gui::Application::Instance->activeDocument()->getActiveView();
         mdi->restoreOverrideCursor();
     }
