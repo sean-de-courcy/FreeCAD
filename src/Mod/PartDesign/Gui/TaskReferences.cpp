@@ -349,6 +349,10 @@ void TaskReferences::refresh(bool highlightCurrent)
     }
     header->setText(text);
     updateButtons();
+    // Back when a refresh (a document undo, a field disabled) lists rows again
+    if (hideWhenEmpty) {
+        setVisible(!rows.empty());
+    }
     if (highlightCurrent) {
         highlight(current);
     }

@@ -219,12 +219,14 @@ void TaskDlgFeatureParameters::open()
         }
     });
     fieldGroup->setPanels(Content);
-    // What the fields show stays in the fields; the panel goes when nothing is left (3.5, Q3)
+    // What the fields show stays in the fields; the panel shows only while something is left
+    // (3.5, Q3), and the rows of a field that is disabled come back to it
     if (references) {
+        references->setHideWhenEmpty(true);
         references->setCoveredProperties(fieldGroup->properties());
-        if (!references->hasListedRows()) {
-            references->hide();
-        }
+        connect(fieldGroup, &ReferenceFieldGroup::propertiesChanged, references, [this]() {
+            references->setCoveredProperties(fieldGroup->properties());
+        });
     }
     fieldGroup->armFirstEmpty();
 }

@@ -33,6 +33,9 @@
 #include <fastsignals/signal.h>
 
 #include <App/DocumentObserver.h>
+#include <App/ElementRecords.h>
+#include <App/PropertyLinks.h>
+#include <App/ReferenceReport.h>
 #include <App/ReferenceRepair.h>
 #include <Gui/Selection/Selection.h>
 
@@ -45,10 +48,6 @@ class QListWidget;
 class QListWidgetItem;
 class QMenu;
 
-namespace App
-{
-class PropertyLinkSub;
-}
 
 namespace PartDesignGui
 {
@@ -151,6 +150,14 @@ public:
     /// while the field has the focus (Add All Edges).
     void addMenuAction(QAction* action);
 
+    /// For the panel's writer: sets the property to  obj and  subs, the entries this change
+    /// keeps with their mapped names, element records (guess, rejection) and fingerprints, which
+    /// a plain setValue() drops (a missing element's candidates go with its mapped name). Called
+    /// between the writer's transaction and its recompute.
+    void assign(App::DocumentObject* obj, const std::vector<std::string>& subs);
+    /// Writes  subs (stored style) as one step of the field's undo (Add All Edges).
+    void replaceEntries(const std::vector<std::string>& subs);
+
     /// Removes the selected entries.
     void removeSelected();
     /// The field's own undo and redo of its changes.
@@ -168,6 +175,8 @@ Q_SIGNALS:
     void arming();
     /// The field wrote the property.
     void picked();
+    /// The field was enabled or disabled: whether it shows its property's states changed.
+    void coverageChanged();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -188,8 +197,25 @@ private:
     App::DocumentObject* target() const;
     /// The subs as the property stores them (mapped names kept).
     std::vector<std::string> storedSubs() const;
+    /// The property's value as the field's undo keeps it: per sub, its mapped name (the shadow:
+    /// a missing element's is only there), element records and fingerprint.
+    struct Snapshot
+    {
+        std::vector<std::string> subs;
+        std::vector<App::PropertyLinkBase::ShadowSub> shadows;
+        std::vector<App::ElementRecords> records;
+        std::vector<std::string> fingerprints;
+        /// The reference solver's report on the subs (a broken one's candidates), by index.
+        std::vector<App::ReferenceReport::Entry> report;
+    };
+    Snapshot snapshot() const;
     /// Writes \a subs through the writer and lists them; \a undoable: a step of the field's undo.
+    /// The entries kept from the current value keep their records.
     void write(const std::vector<std::string>& subs, bool undoable = true);
+    /// Writes \a value with its records as they are (the field's undo and redo).
+    void write(const Snapshot& value, bool undoable);
+    /// Records the current value as a step of the field's undo.
+    void pushUndo();
     void pick(App::DocumentObject* obj, const std::string& sub);
 
     void updateLook();
@@ -224,8 +250,11 @@ private:
     int repickIndex = -1;
     /// The property's reference rows that need the user (App::referenceRows).
     std::vector<App::ReferenceRow> rows;
-    std::vector<std::vector<std::string>> undoStack;
-    std::vector<std::vector<std::string>> redoStack;
+    std::vector<Snapshot> undoStack;
+    std::vector<Snapshot> redoStack;
+    /// What assign() gives the written subs besides their names, while write() runs.
+    Snapshot pending;
+    bool valuePending = false;
     /// The target shown while armed, and the one its entries are coloured on.
     TargetDisplay display;
     App::DocumentObjectT highlightedTarget;
@@ -249,7 +278,8 @@ public:
     /// The dialog's panels: a focus there, outside the fields, disarms.
     void setPanels(const std::vector<QWidget*>& panels);
     std::vector<ReferenceField*> fields() const;
-    /// The properties the fields show.
+    /// The properties the fields show: those of the enabled fields (a disabled field can't act on
+    /// its entries, so the References panel lists them).
     std::set<std::string> properties() const;
 
     /// Arms the first empty required field (Q2), once the dialog shows.
@@ -257,6 +287,10 @@ public:
     void disarm();
     /// Called by a field about to arm: the others disarm.
     void fieldArming(ReferenceField* field);
+
+Q_SIGNALS:
+    /// properties() changed: a field was enabled or disabled.
+    void propertiesChanged();
 
 private:
     void onFocusChanged(QWidget* old, QWidget* now);

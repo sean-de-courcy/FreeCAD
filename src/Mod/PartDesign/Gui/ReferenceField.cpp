@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 #include <QAction>
 #include <QApplication>
@@ -483,6 +484,12 @@ void ReferenceField::slotChangedObject(const App::DocumentObject& obj, const App
 {
     const char* name = obj.getPropertyName(&prop);
     if (&obj == owner() && name && propertyNameStr == name) {
+        // Changed by something else (a document undo, a script): the field's steps no longer
+        // lead back to what the user had
+        if (!busy) {
+            undoStack.clear();
+            redoStack.clear();
+        }
         scheduleReload();
     }
 }
@@ -563,24 +570,116 @@ void ReferenceField::pick(App::DocumentObject* obj, const std::string& sub)
     write(stored);
 }
 
+ReferenceField::Snapshot ReferenceField::snapshot() const
+{
+    Snapshot value;
+    if (auto prop = property()) {
+        value.subs = prop->getSubValues();
+        value.shadows = prop->getShadowSubs();
+        value.records = prop->getElementRecords();
+        value.fingerprints = prop->getElementFingerprints();
+        value.report = App::ReferenceReport::get(prop);
+    }
+    const std::size_t count = value.subs.size();
+    value.shadows.resize(count);
+    value.records.resize(count);
+    value.fingerprints.resize(count);
+    return value;
+}
+
+void ReferenceField::pushUndo()
+{
+    undoStack.push_back(snapshot());
+    redoStack.clear();
+}
+
 void ReferenceField::write(const std::vector<std::string>& subs, bool undoable)
+{
+    // Each kept entry takes its mapped name, records and fingerprint along, wherever it moves;
+    // a new one has none
+    const Snapshot now = snapshot();
+    Snapshot value;
+    value.subs = subs;
+    value.shadows.resize(subs.size());
+    value.records.resize(subs.size());
+    value.fingerprints.resize(subs.size());
+    std::vector<bool> used(now.subs.size(), false);
+    for (std::size_t j = 0; j < subs.size(); ++j) {
+        for (std::size_t i = 0; i < now.subs.size(); ++i) {
+            if (!used[i] && now.subs[i] == subs[j]) {
+                used[i] = true;
+                value.shadows[j] = now.shadows[i];
+                value.records[j] = now.records[i];
+                value.fingerprints[j] = now.fingerprints[i];
+                for (const auto& entry : now.report) {
+                    if (entry.index == static_cast<int>(i)) {
+                        value.report.push_back(entry);
+                        value.report.back().index = static_cast<int>(j);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    write(value, undoable);
+}
+
+void ReferenceField::write(const Snapshot& value, bool undoable)
 {
     if (!writer || !property()) {
         return;
     }
     if (undoable) {
-        undoStack.push_back(storedSubs());
-        redoStack.clear();
+        pushUndo();
     }
     {
         Base::StateLocker lock(busy, true);
-        writer(target(), subs);
+        pending = value;
+        valuePending = true;
+        writer(target(), value.subs);
+        valuePending = false;
+        pending = Snapshot();
     }
     reload();
     if (armed) {
         highlight(true);
     }
     Q_EMIT picked();
+}
+
+void ReferenceField::assign(App::DocumentObject* obj, const std::vector<std::string>& subs)
+{
+    auto prop = property();
+    if (!prop) {
+        return;
+    }
+    if (!valuePending || pending.subs != subs) {
+        prop->setValue(obj, subs);
+        return;
+    }
+    // Where a kept entry has no mapped name, it is found again from its sub, as a new one is
+    prop->setValue(obj,
+                   std::vector<std::string>(pending.subs),
+                   std::vector<App::PropertyLinkBase::ShadowSub>(pending.shadows));
+    prop->setElementRecords(std::vector<App::ElementRecords>(pending.records));
+    for (std::size_t i = 0; i < pending.fingerprints.size(); ++i) {
+        if (!pending.fingerprints[i].empty()) {
+            prop->setElementFingerprint(i, pending.fingerprints[i]);
+        }
+    }
+    // The setter dropped the report; what it said of the kept entries still holds
+    std::map<std::string, std::vector<App::ReferenceReport::Entry>> byTarget;
+    for (const auto& entry : pending.report) {
+        byTarget[entry.target].push_back(entry);
+    }
+    for (auto& [name, entries] : byTarget) {
+        App::ReferenceReport::replace(prop, name, std::move(entries));
+    }
+}
+
+void ReferenceField::replaceEntries(const std::vector<std::string>& subs)
+{
+    write(subs);
 }
 
 void ReferenceField::removeSelected()
@@ -610,10 +709,10 @@ bool ReferenceField::undo()
     if (undoStack.empty()) {
         return false;
     }
-    redoStack.push_back(storedSubs());
-    std::vector<std::string> subs = std::move(undoStack.back());
+    redoStack.push_back(snapshot());
+    Snapshot value = std::move(undoStack.back());
     undoStack.pop_back();
-    write(subs, false);
+    write(value, false);
     return true;
 }
 
@@ -622,10 +721,10 @@ bool ReferenceField::redo()
     if (redoStack.empty()) {
         return false;
     }
-    undoStack.push_back(storedSubs());
-    std::vector<std::string> subs = std::move(redoStack.back());
+    undoStack.push_back(snapshot());
+    Snapshot value = std::move(redoStack.back());
     redoStack.pop_back();
-    write(subs, false);
+    write(value, false);
     return true;
 }
 
@@ -735,21 +834,31 @@ void ReferenceField::highlight(bool on, const std::string& extra)
     }
     const TopoDS_Shape& shape = feature->Shape.getValue();
     const Base::Color currentColor(0.0F, 0.75F, 1.0F);
+    // The highlighter paints every element when given no names: each list goes only when it has
+    // some (the first one sizes the colours).
     try {
         if (!edges.empty() || !currentEdges.empty()) {
             std::vector<Base::Color> colors = vp->LineColorArray.getValues();
             PartGui::ReferenceHighlighter highlighter(shape, vp->LineColor.getValue());
-            highlighter.getEdgeColors(edges, colors);
+            if (!edges.empty()) {
+                highlighter.getEdgeColors(edges, colors);
+            }
             highlighter.setElementColor(currentColor);
-            highlighter.getEdgeColors(currentEdges, colors);
+            if (!currentEdges.empty()) {
+                highlighter.getEdgeColors(currentEdges, colors);
+            }
             vp->setHighlightedEdges(colors);
         }
         if (!faces.empty() || !currentFaces.empty()) {
             std::vector<App::Material> materials = vp->ShapeAppearance.getValues();
             PartGui::ReferenceHighlighter highlighter(shape, vp->ShapeAppearance.getDiffuseColor());
-            highlighter.getFaceMaterials(faces, materials);
+            if (!faces.empty()) {
+                highlighter.getFaceMaterials(faces, materials);
+            }
             highlighter.setElementColor(currentColor);
-            highlighter.getFaceMaterials(currentFaces, materials);
+            if (!currentFaces.empty()) {
+                highlighter.getFaceMaterials(currentFaces, materials);
+            }
             vp->setHighlightedFaces(materials);
         }
     }
@@ -919,9 +1028,15 @@ void ReferenceField::runAction(const std::string& command)
     }
     QString error;
     bool done = false;
+    // A step of the field's undo, as a pick is
+    Snapshot before = snapshot();
     {
         Base::StateLocker lock(busy, true);
         done = ReferenceActions::run(own, command, &error);
+    }
+    if (done) {
+        undoStack.push_back(std::move(before));
+        redoStack.clear();
     }
     message = done ? QString() : error;
     reload();
@@ -1028,8 +1143,11 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
 void ReferenceField::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
-    if (event->type() == QEvent::EnabledChange && !isEnabled() && armed) {
-        setArmed(false);
+    if (event->type() == QEvent::EnabledChange) {
+        if (!isEnabled() && armed) {
+            setArmed(false);
+        }
+        Q_EMIT coverageChanged();
     }
 }
 
@@ -1068,6 +1186,7 @@ void ReferenceFieldGroup::addField(ReferenceField* field)
     }
     fieldList.emplace_back(field);
     field->setGroup(this);
+    connect(field, &ReferenceField::coverageChanged, this, &ReferenceFieldGroup::propertiesChanged);
 }
 
 void ReferenceFieldGroup::setPanels(const std::vector<QWidget*>& widgets)
@@ -1093,7 +1212,9 @@ std::set<std::string> ReferenceFieldGroup::properties() const
 {
     std::set<std::string> result;
     for (ReferenceField* field : fields()) {
-        result.insert(field->propertyName());
+        if (field->isEnabled()) {
+            result.insert(field->propertyName());
+        }
     }
     return result;
 }

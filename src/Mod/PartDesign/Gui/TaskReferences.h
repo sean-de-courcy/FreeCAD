@@ -74,6 +74,11 @@ public:
     static bool hasRows(const App::DocumentObject* obj);
     /// Leaves out the references of these properties: the dialog's fields show them.
     void setCoveredProperties(std::set<std::string> properties);
+    /// The panel shows only while it lists a reference (a dialog with reference fields).
+    void setHideWhenEmpty(bool on)
+    {
+        hideWhenEmpty = on;
+    }
     /// Whether the panel lists any reference now.
     bool hasListedRows() const
     {
@@ -141,6 +146,7 @@ private:
     std::vector<App::DocumentObjectT> rowObjects;
     /// The properties the dialog's fields show.
     std::set<std::string> covered;
+    bool hideWhenEmpty = false;
     bool refreshPending = false;
 
     QLabel* header = nullptr;

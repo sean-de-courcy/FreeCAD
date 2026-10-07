@@ -185,15 +185,22 @@ void TaskDressUpParameters::addAllEdges()
                     Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
     )
                     .countSubShapes(TopAbs_EDGE);
-    auto subValues = pcDressUp->Base.getSubValues(false);
+    const auto oldStyle = pcDressUp->Base.getSubValues(false);
+    // The entries there stay as stored (their records with them); the missing edges follow
+    auto subValues = pcDressUp->Base.getSubValues();
     std::size_t len = subValues.size();
     for (int i = 0; i < count; ++i) {
         std::string name = "Edge" + std::to_string(i + 1);
-        if (std::find(subValues.begin(), subValues.begin() + len, name) == subValues.begin() + len) {
+        if (std::ranges::find(oldStyle, name) == oldStyle.end()) {
             subValues.push_back(name);
         }
     }
     if (subValues.size() == len) {
+        return;
+    }
+    // Through the field: one step of its undo, and the list shows them (B5)
+    if (baseField) {
+        baseField->replaceEntries(subValues);
         return;
     }
     try {
@@ -205,10 +212,6 @@ void TaskDressUpParameters::addAllEdges()
     catch (Base::Exception& e) {
         e.reportException();
     }
-    // The list shows them (B5)
-    if (baseField) {
-        baseField->reload();
-    }
     onBaseChanged();
 }
 
@@ -218,7 +221,13 @@ void TaskDressUpParameters::updateFeature(
 )
 {
     setupTransaction();
-    pcDressUp->Base.setValue(pcDressUp->Base.getValue(), refs);
+    // Through the field, the entries it keeps keep their guess and rejection records
+    if (baseField) {
+        baseField->assign(pcDressUp->Base.getValue(), refs);
+    }
+    else {
+        pcDressUp->Base.setValue(pcDressUp->Base.getValue(), refs);
+    }
     pcDressUp->recomputeFeature();
     hideOnError();
 }
