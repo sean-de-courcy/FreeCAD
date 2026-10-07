@@ -101,6 +101,11 @@ public:
     /// Get the last transaction ID.
     static int getLastID();
 
+    // FreeCAD-CH (ops#152): open the transaction that a change in `doc` would open now (one booked
+    // for it, or the application's), which clears its redo stack. For a change to an object that
+    // an undo/redo transaction holds: opened during that change, the redo stack could free it.
+    static void openPendingTransaction(Document& doc);
+
     /// Check if the transaction list is empty.
     bool isEmpty() const;
 

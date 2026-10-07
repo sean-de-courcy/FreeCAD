@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <boost/graph/topological_sort.hpp>
 #include <boost/unordered/unordered_map.hpp>
 #include <boost_graph_adjacency_list.hpp>
@@ -40,6 +41,7 @@
 
 #include "PropertyExpressionEngine.h"
 #include "ExpressionVisitors.h"
+#include "Transactions.h"  // FreeCAD-CH (ops#152)
 
 
 FC_LOG_LEVEL_INIT("App", true);
@@ -70,6 +72,36 @@ static void forEachExpressionContainer(Function visit)
             visit(container);
         }
     }
+}
+
+// FreeCAD-CH (ops#152): visit the containers with `change`, as above. A container whose owner an
+// undo/redo transaction holds (detached, still alive) needs care: changing it opens a transaction
+// in the owner's document when one is booked there (an application transaction), and opening one
+// clears that document's redo stack, which can free the owner in the middle of the change. So the
+// change is tried on a copy first, and if it changes anything that transaction is opened before
+// the real change; a container freed by it is then skipped like any other.
+template<class Change>
+static void changeEachExpressionContainer(Change change)
+{
+    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
+        auto owner = freecad_cast<DocumentObject*>(container->getContainer());
+        if (owner && !owner->isAttachedToDocument() && owner->getDocument()) {
+            const auto serial = _ExprContainers[container];
+            std::unique_ptr<Property> copy(container->Copy());
+            copy->purgeTouched();
+            change(static_cast<PropertyExpressionContainer*>(copy.get()));
+            if (!copy->isTouched()) {
+                return;
+            }
+            copy.reset();
+            Transaction::openPendingTransaction(*owner->getDocument());
+            auto it = _ExprContainers.find(container);
+            if (it == _ExprContainers.end() || it->second != serial) {
+                return;
+            }
+        }
+        change(container);
+    });
 }
 
 PropertyExpressionContainer::PropertyExpressionContainer()
@@ -109,7 +141,7 @@ void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property&
 {
     // Copies too: undoing the rename renames the property back, and the undo states it passes
     // through must use the name current then.
-    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
+    changeEachExpressionContainer([&](PropertyExpressionContainer* container) {
         container->onRenameDynamicProperty(prop, oldName);
     });
 }
@@ -117,7 +149,7 @@ void PropertyExpressionContainer::slotRenameDynamicProperty(const App::Property&
 void PropertyExpressionContainer::slotMoveDynamicProperty(const App::Property& prop,
                                                           const App::DocumentObject& targetObj)
 {
-    forEachExpressionContainer([&](PropertyExpressionContainer* container) {
+    changeEachExpressionContainer([&](PropertyExpressionContainer* container) {
         container->onMoveDynamicProperty(prop, targetObj);
     });
 }

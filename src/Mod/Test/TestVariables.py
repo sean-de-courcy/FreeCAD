@@ -451,7 +451,9 @@ class TestSaveAndRename(VariablesBase):
     def test_rename_in_application_transaction_with_redo_elsewhere(self):
         """fork PR 148 review: under an application transaction, renaming changes another
         document's expression, which opens a transaction there and clears its redo stack, freeing
-        undo copies the rename was about to visit."""
+        undo copies the rename was about to visit. Without the snapshot check this fails only
+        when the freed copies come after otherBox's engine in the container map's (pointer)
+        order."""
         varSet = self.addVarSet(Width=20)
         other = FreeCAD.newDocument("VarRenameRedo")
         self.extraDocs.append(other)
@@ -476,3 +478,110 @@ class TestSaveAndRename(VariablesBase):
         self.assertEqual(expressionText(otherBox, "Length"), f"{self.doc.Name}#VarSet.BoxWidth")
         other.recompute()
         self.assertAlmostEqual(otherBox.Length.Value, 20)
+
+    def test_rename_changing_object_only_redo_holds(self):
+        """fork PR 148 round 2: objects that only another document's redo stack holds (their
+        creation undone) use the variable. Under an application transaction, changing one opened
+        a transaction there, which cleared that redo stack and freed the object in the middle of
+        its change. Now that transaction is opened before the change, and the freed objects are
+        skipped. Without the fix this reads freed memory, which crashes only sometimes."""
+        varSet = self.addVarSet(Width=20)
+        other = FreeCAD.newDocument("VarRenameRedoHeld")
+        self.extraDocs.append(other)
+        other.UndoMode = 1
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        self.doc.saveAs(os.path.join(self.tempDir, "variables.FCStd"))
+        other.saveAs(os.path.join(self.tempDir, "other.FCStd"))
+        other.openTransaction("Boxes")
+        for i in range(3):
+            box = other.addObject("Part::Box", f"Box{i}")
+            box.setExpression("Length", f"{self.doc.Name}#VarSet.Width")
+        del box
+        other.commitTransaction()
+        other.undo()
+        self.assertEqual(len(other.Objects), 0)
+        self.assertEqual(other.RedoCount, 1)
+
+        FreeCAD.setActiveTransaction("Rename")
+        try:
+            varSet.renameProperty("Width", "BoxWidth")
+        finally:
+            FreeCAD.closeActiveTransaction()
+        self.assertEqual(other.RedoCount, 0)
+        self.assertEqual(len(other.Objects), 0)
+        self.assertAlmostEqual(varSet.BoxWidth.Value, 20)
+
+    def test_rename_unchanged_object_redo_holds_keeps_redo(self):
+        """The same, for an object in the redo stack that doesn't use the variable: nothing
+        changes there, so no transaction opens and the redo stack stays."""
+        varSet = self.addVarSet(Width=20)
+        other = FreeCAD.newDocument("VarRenameRedoKept")
+        self.extraDocs.append(other)
+        other.UndoMode = 1
+        other.openTransaction("Box")
+        box = other.addObject("Part::Box", "Box")
+        box.setExpression("Length", "Width * 2")
+        del box
+        other.commitTransaction()
+        other.undo()
+        self.assertEqual(other.RedoCount, 1)
+
+        FreeCAD.setActiveTransaction("Rename")
+        try:
+            varSet.renameProperty("Width", "BoxWidth")
+        finally:
+            FreeCAD.closeActiveTransaction()
+        self.assertEqual(other.RedoCount, 1)
+        other.redo()
+        self.assertEqual(expressionText(other.getObject("Box"), "Length"), "Width * 2")
+
+    def buildDeletedSheet(self):
+        """A VarSet variable used by a Box and a sheet cell (and a cell using that cell), then the
+        sheet deleted in a transaction: the undo stack holds it, detached."""
+        self.doc.UndoMode = 1
+        varSet = self.addVarSet(Width=20)
+        target = self.addVarSet("Target")
+        box = self.addBox()
+        box.setExpression("Length", "#Width * 2")
+        sheet = self.addSheet()
+        sheet.set("A1", "=#Width")
+        sheet.set("A2", "=A1 * 3")
+        self.doc.recompute()
+        self.doc.openTransaction("Delete sheet")
+        self.doc.removeObject("Sheet")
+        self.doc.commitTransaction()
+        self.assertIsNone(self.doc.getObject("Sheet"))
+        return varSet, target, box
+
+    def checkRestoredSheet(self, a1):
+        sheet = self.doc.getObject("Sheet")
+        self.assertIsNotNone(sheet)
+        self.assertEqual(sheet.getContents("A1"), a1)
+        self.assertEqual(sheet.getContents("A2"), "=A1 * 3")
+        self.doc.recompute()
+        self.assertAlmostEqual(sheet.A2.Value, 60)
+
+    def test_rename_after_deleting_sheet_in_transaction(self):
+        """fork PR 148 round 2: naming the deleted sheet's cells threw "invalid object", so every
+        rename (and move) stopped half way, leaving later containers unrenamed."""
+        varSet, _, box = self.buildDeletedSheet()
+        self.doc.openTransaction("Rename")
+        varSet.renameProperty("Width", "W2")
+        self.doc.commitTransaction()
+        self.assertEqual(expressionText(box, "Length"), "VarSet.W2 * 2")
+
+        self.doc.undo()
+        self.assertEqual(expressionText(box, "Length"), "VarSet.Width * 2")
+        self.doc.undo()
+        self.checkRestoredSheet("=VarSet.Width")
+
+    def test_rename_and_move_reach_deleted_sheet(self):
+        """The same without transactions: the rename and the move reach the deleted sheet's
+        cells, so undoing the delete brings back a sheet that uses the new path."""
+        varSet, target, box = self.buildDeletedSheet()
+        varSet.renameProperty("Width", "W2")
+        varSet.moveProperty("W2", target)
+        self.assertEqual(expressionText(box, "Length"), "Target.W2 * 2")
+
+        self.doc.undo()
+        self.checkRestoredSheet("=Target.W2")

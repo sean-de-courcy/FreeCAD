@@ -52,7 +52,12 @@ struct AppExport VariableRef
     std::string path() const;
 };
 
-/// An expression that uses a variable: @a path is a property of @a user, or a cell of a sheet.
+/** An expression that uses a variable: @a path is a property of @a user, or a cell of a sheet.
+ *
+ * It holds plain pointers: use it right away and drop it before the next document change, since
+ * deleting @a user (or closing its document) leaves it dangling. Detaching @a user (removed in a
+ * transaction) is fine: toString() then gives only the path.
+ */
 struct AppExport VariableUse
 {
     const DocumentObject* user = nullptr;

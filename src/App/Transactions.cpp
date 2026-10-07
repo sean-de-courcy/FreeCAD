@@ -46,6 +46,12 @@ TYPESYSTEM_SOURCE(App::Transaction, Base::Persistence)
 //**************************************************************************
 // Construction/Destruction
 
+// FreeCAD-CH (ops#152)
+void Transaction::openPendingTransaction(Document& doc)
+{
+    doc._checkTransaction(nullptr, nullptr, __LINE__);
+}
+
 Transaction::Transaction(int id)
 {
     if (!id) {
