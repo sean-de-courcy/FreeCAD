@@ -31,6 +31,7 @@
 
 #include "TaskFeatureParameters.h"
 #include "EnumFlags.h"
+#include "ReferenceField.h"
 
 class QLineEdit;
 
@@ -90,6 +91,17 @@ protected:
     /// Create a label for the 2D feature: the objects name if it's already 2D,
     /// or the subelement's name if the object is a solid.
     QString make2DLabel(const App::DocumentObject* section, const std::vector<std::string>& subValues);
+
+    /// An up-to-face or start reference field (ops#150 W2, W6): a face, or a datum, origin or
+    /// coordinate system's plane (linked through the system); a sketch whole is refused (B20).
+    /// \a target shows while it is armed.
+    static ReferenceField::Options faceFieldOptions(
+        const QString& label,
+        std::function<App::DocumentObject*()> target
+    );
+    /// While \a field is armed the profile shows, so that its lines can be picked (an axis;
+    /// ops#150 W6, B18).
+    void showProfileWhileArmed(ReferenceField* field);
 
 private:
     Gui::ViewProvider* previouslyVisibleViewProvider {nullptr};

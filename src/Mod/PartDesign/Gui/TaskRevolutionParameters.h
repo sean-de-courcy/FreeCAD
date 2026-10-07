@@ -69,44 +69,37 @@ public:
     ~TaskRevolutionParameters() override;
 
     void apply() override;
-    /// The axis and face widgets show their properties again (ops#127).
+    /// The axis box shows its property again (ops#127); the fields reload themselves.
     void onReferencesRepaired() override;
+    /// The fields disarm through their group; the panel has no pick mode of its own (B15).
+    void onReferenceSelectionTaken() override;
+    /// The start reference, each side's up-to-face and the picked axis (ops#150 W6).
+    std::vector<ReferenceField*> referenceFields() const override;
 
     /**
-     * @brief fillAxisCombo fills the combo and selects the item according to
-     * current value of revolution object's axis reference.
-     * @param forceRefill if true, the combo box will be completely refilled. If
-     * false, the current value of revolution object's axis will be added to the
-     * list (if necessary), and selected. If the list is empty, it will be refilled anyway.
+     * @brief fillAxisCombo fills the axis box with the sketch's and the body's axes; with
+     * \a forceRefill false it only shows the property again, unless it is still empty.
      */
     void fillAxisCombo(bool forceRefill = false);
-    void addAxisToCombo(
-        App::DocumentObject* linkObj,
-        const std::string& linkSubname,
-        const QString& itemText
-    );
 
 private Q_SLOTS:
     void onAngleChanged(double);
     void onAngle2Changed(double);
-    void onAxisChanged(int);
     void onReversed(bool);
     void onStartModeChanged(int);
     void onStartOffsetChanged(double);
-    void onSelectStartReferenceToggle(bool);
     void onModeChangedSide1(int);
     void onModeChangedSide2(int);
     void onSidesModeChanged(int);
 
 protected:
+    /// The picks go to the fields
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void changeEvent(QEvent* event) override;
-    void getReferenceAxis(App::DocumentObject*& obj, std::vector<std::string>& sub) const;
     bool getReversed() const;
     int getMode() const;
     int getMode2() const;
     int getSidesMode() const;
-    QString getFaceName(QLineEdit* lineEdit) const;
     void setupDialog();
 
     enum class SidesMode
@@ -129,14 +122,6 @@ protected:
         Reference,
     };
 
-    enum class SelectionMode
-    {
-        None,
-        Face,
-        StartReference,
-        Axis,
-    };
-
     enum class Mode
     {
         Angle,
@@ -153,8 +138,8 @@ private:
         QComboBox* changeMode = nullptr;
         QLabel* labelAngle = nullptr;
         Gui::QuantitySpinBox* angleEdit = nullptr;
-        QAbstractButton* buttonFace = nullptr;
-        QLineEdit* lineFaceName = nullptr;
+        /// The up-to-face (ops#150 W6)
+        ReferenceField* faceField = nullptr;
 
         App::PropertyEnumeration* Type = nullptr;
         App::PropertyAngle* Angle = nullptr;
@@ -180,44 +165,32 @@ private:
 
 private:
     void createSideControllers();
+    void createFields();
+    /// Writes a picked or chosen axis, and Reversed as the axis suggests.
+    void writeAxis(App::DocumentObject* obj, const std::vector<std::string>& subs);
+    /// Arms \a field once its mode's widgets show (a mode chosen with the field empty).
+    void armField(ReferenceField* field);
     void setupSideDialog(SideController& side);
-    void updateUpToFaceName(SideController& side);
     void connectSignals();
     void updateUI(Side side);
     void updateWholeUI(Side side);
     void updateStartUI();
-    void updateStartReferenceName();
     void updateSideUI(const SideController& side, Mode mode, bool isParentVisible, bool setFocus);
     void translateModeList(QComboBox* box, int index);
     void translateSidesList(int index);
-    // TODO: This is common with extrude. Maybe send to superclass.
-    void translateFaceName(QLineEdit* lineEdit);
-    void handleLineFaceNameClick(QLineEdit* lineEdit);
-    void handleLineFaceNameNo(QLineEdit* lineEdit);
-    void clearFaceName(QLineEdit* lineEdit);
     void onModeChanged(int index, Side side);
-    void onButtonFace(bool pressed, Side side);
-    void onFaceName(const QString& text, Side side);
-    void setSelectionMode(SelectionMode mode, Side side = Side::First);
     Gui::ViewProviderCoordinateSystem* getOriginView() const;
 
 private:
     std::unique_ptr<Ui_TaskRevolutionParameters> ui;
     QWidget* proxy;
     bool isGroove;
-    SelectionMode selectionMode;
-    Side activeSelectionSide;
     double defaultGizmoMultFactor;
 
-    /**
-     * @brief axesInList is the list of links corresponding to axis combo; must
-     * be kept in sync with the combo. A special value of zero-pointer link is
-     * for "Select axis" item.
-     *
-     * It is a list of pointers, because properties prohibit assignment. Use new
-     * when adding stuff, and delete when removing stuff.
-     */
-    std::vector<std::unique_ptr<App::PropertyLinkSub>> axesInList;
+    /// The start reference (ops#150 W6)
+    ReferenceField* startField = nullptr;
+    /// The axis box and its picked axis's row (ops#150 W6)
+    ReferenceCombo* axisCombo = nullptr;
 
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
     Gui::RadialGizmo* rotationGizmo = nullptr;
