@@ -2975,8 +2975,17 @@ Py::Object VariableExpression::_getPyValue() const {
 void VariableExpression::_toString(std::ostream &ss, bool persistent,int) const {
     if(persistent)
         ss << var.toPersistentString();
-    else
+    else {
+        // FreeCAD-CH (ops#152): inside a VariableDisplayScope, a variable is written as #Name.
+        if (auto scope = VariableDisplayScope::current()) {
+            std::string text = scope->shortForm(owner, var);
+            if (!text.empty()) {
+                ss << text;
+                return;
+            }
+        }
         ss << var.toString();
+    }
 }
 
 ExpressionPtr VariableExpression::simplify() const
