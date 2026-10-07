@@ -133,16 +133,19 @@ class TestPropertyEditorGui(unittest.TestCase):
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 
-    def openValueEditor(self, *path, objects=None):
+    def openValueEditor(self, *path, objects=None, leaf=None):
         """Opens the editor of the value at path (row names, e.g. "Offset", "x") with F2, as a
-        user does, with objects (default: the VarSet) selected; returns the editor widget."""
+        user does, with objects (default: the VarSet) selected; returns the editor widget. A
+        one-name path is a leaf row unless leaf is False (a Placement's own row)."""
         Gui.Selection.clearSelection()
         for obj in objects or [self.obj]:
             Gui.Selection.addSelection(self.doc.Name, obj.Name)
         pump(1.0)
         editor = self.dataEditor()
         model = editor.model()
-        index = findRow(model, QtCore.QModelIndex(), path[0], leaf=len(path) == 1)
+        index = findRow(
+            model, QtCore.QModelIndex(), path[0], leaf=len(path) == 1 if leaf is None else leaf
+        )
         if len(path) > 1:
             self.assertIsNotNone(index, "no %s row in the property view" % path[0])
             editor.expand(index)
@@ -299,3 +302,24 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(self.obj.Tags, ["a", "b"])
         self.assertEqual(self.doc.getBookedTransactionID(), 0)
         self.assertEqual(self.doc.UndoCount, undos)
+
+    def testEscapeKeepsDialogValueAfterArrowKey(self):
+        """Review round 3 (L-g): cursor keys in a File row's line edit aren't typing. The file
+        its dialog then picks stays after Esc."""
+        self.obj.addProperty("App::PropertyFile", "Source", "Variables")
+        self.obj.Source = "C:/old.txt"
+        widget = self.openValueEditor("Source")
+        lineEdit = widget.findChild(QtWidgets.QLineEdit)
+        self.assertIsNotNone(lineEdit, "no line edit in the file's editor")
+        for key in (QtCore.Qt.Key_End, QtCore.Qt.Key_Left, QtCore.Qt.Key_Home):
+            QtTest.QTest.keyClick(lineEdit, key)
+        # As the file dialog's OK does (FileChooser::chooseFile)
+        widget.setProperty("fileName", "C:/new.txt")
+        QtCore.QMetaObject.invokeMethod(
+            widget, "fileNameSelected", QtCore.Q_ARG(str, "C:/new.txt")
+        )
+        pump(0.2)
+        self.assertEqual(self.obj.Source, "C:/new.txt", "the pick wrote nothing")
+        QtTest.QTest.keyClick(lineEdit, QtCore.Qt.Key_Escape)
+        pump(0.3)
+        self.assertEqual(self.obj.Source, "C:/new.txt", "Esc undid the dialog's pick")

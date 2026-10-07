@@ -212,6 +212,26 @@ class TestSelectionFilterGui(unittest.TestCase):
         self.assertTrue(button.isHidden())
         self.assertTrue(self.selectable(self.pad, "Face1"), "the click left the filter on")
 
+    def testStatusBarButtonClearsOutsideA3DView(self):
+        """Review round 3 (M-A): with a spreadsheet's view in front (no 3D view active, where
+        Part_SelectFilter can't run), the button still clears the filter."""
+        import SpreadsheetGui  # noqa: F401  the sheet's view
+
+        setFilter(FACE)
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        self.doc.recompute()
+        sheet.ViewObject.doubleClicked()
+        pump(0.3)
+        self.assertFalse(
+            hasattr(Gui.activeView(), "getCameraNode"), "the 3D view is still the active view"
+        )
+        button = self.filterButton()
+        self.assertFalse(button.isHidden())
+        button.click()
+        pump(0.05)
+        self.assertTrue(button.isHidden())
+        self.assertTrue(self.selectable(self.pad, "Edge1"), "the click left the filter on")
+
     def testStatusBarButtonStaysHiddenAfterRelayout(self):
         """Review round 2 (N1): the status bar shows every registered item again whenever an item
         is added or removed (a workbench's first activation adds some). The cleared filter's
