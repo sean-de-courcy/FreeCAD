@@ -316,6 +316,29 @@ TEST_F(VariableDisplay, saveInsideScope)
     }
 }
 
+// listVariables reads the alias map: an alias counts before its sheet's first recompute.
+TEST_F(VariableDisplay, listVariablesWithAliases)
+{
+    auto fresh = freecad_cast<Spreadsheet::Sheet*>(doc->addObject("Spreadsheet::Sheet", "Fresh"));
+    fresh->setCell("A2", "7 mm");
+    fresh->setAlias(App::CellAddress("A2"), "Gap");
+    fresh->setCell("A1", "8 mm");
+    fresh->setAlias(App::CellAddress("A1"), "Gap0");
+    ASSERT_EQ(fresh->getPropertyByName("A2"), nullptr);  // not recomputed yet
+
+    std::vector<std::string> paths;
+    for (const auto& ref : App::VariableLookup::listVariables(doc)) {
+        paths.push_back(ref.path());
+    }
+    // Objects in document order; a sheet's aliases in cell order.
+    EXPECT_EQ(
+        paths,
+        (std::vector<std::string> {"VarSet.Width", "VarSet.Pos", "Sheet.Depth", "Fresh.Gap0", "Fresh.Gap"})
+    );
+    EXPECT_TRUE(App::VariableLookup::isVariable(fresh, "Gap"));
+    EXPECT_FALSE(App::VariableLookup::isVariable(fresh, "A2"));
+}
+
 }  // namespace
 
 // NOLINTEND(readability-magic-numbers)

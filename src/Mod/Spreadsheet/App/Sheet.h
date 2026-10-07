@@ -190,6 +190,9 @@ public:
 
     std::string getAddressFromAlias(const std::string& alias) const;
 
+    /// FreeCAD-CH (ops#152): every alias, in cell order, read from the alias map.
+    std::vector<std::string> getAliases() const;
+
     bool isValidAlias(const std::string& candidate);
 
     void setSpans(App::CellAddress address, int rows, int columns);

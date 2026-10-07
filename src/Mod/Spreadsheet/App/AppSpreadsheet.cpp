@@ -71,16 +71,7 @@ PyMOD_INIT_FUNC(Spreadsheet)
             return !static_cast<const Spreadsheet::Sheet*>(obj)->getAddressFromAlias(name).empty();
         },
         [](const App::DocumentObject* obj) {
-            auto sheet = const_cast<Spreadsheet::Sheet*>(static_cast<const Spreadsheet::Sheet*>(obj));
-            std::vector<std::string> names;
-            for (const auto& address : sheet->getCells()->getUsedCells()) {
-                std::string alias;
-                const auto cell = sheet->getCell(address);
-                if (cell && cell->getAlias(alias)) {
-                    names.push_back(alias);
-                }
-            }
-            return names;
+            return static_cast<const Spreadsheet::Sheet*>(obj)->getAliases();
         }
     );
 
