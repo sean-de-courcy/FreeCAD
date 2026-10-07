@@ -2430,15 +2430,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         self.assertAlmostEqual(pocket.Shape.Volume, 988, places=3)
         self.edit(pocket, count=1)
-        transparencies = self.previewTransparencies(pocket)
-        self.assertEqual(len(transparencies), 2, "the pocket's preview has no tool shape")
-        self.assertAlmostEqual(transparencies[1], 0.95, places=5)
+
+        def tool():
+            """The tool shape's transparency: the preview's other shapes are the tool and the
+            profile's (no faces drawn: 1)."""
+            [shown] = [t for t in self.previewTransparencies(pocket)[1:] if t < 0.999]
+            return shown
+
+        self.assertAlmostEqual(tool(), 0.95, places=5)
 
         self.opacitySlider().setValue(60)
         pump(0.05)
-        transparencies = self.previewTransparencies(pocket)
-        self.assertAlmostEqual(transparencies[0], 0.4, places=5)
-        self.assertAlmostEqual(transparencies[1], 0.85, places=5)
+        self.assertAlmostEqual(self.previewTransparencies(pocket)[0], 0.4, places=5)
+        self.assertAlmostEqual(tool(), 0.85, places=5)
 
     def testPreviewOpacityDressUp(self):
         """W5: a fillet's preview (the dress-up's own opacity setting) takes the slider's 60 %."""
