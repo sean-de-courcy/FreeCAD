@@ -523,18 +523,16 @@ bool TaskPipeParameters::accept()
         }
     }
 
-    if (spine && !pcActiveBody->hasObject(spine) && !pcActiveBody->getOrigin()->hasObject(spine)) {
-        extReference = true;
-    }
-    else if (
-        auxSpine && !pcActiveBody->hasObject(auxSpine)
-        && !pcActiveBody->getOrigin()->hasObject(auxSpine)
-    ) {
+    // Outside the body and its origin; a missing link isn't (ops#170)
+    auto outside = [pcActiveBody](App::DocumentObject* obj) {
+        return obj && !pcActiveBody->hasObject(obj) && !pcActiveBody->getOrigin()->hasObject(obj);
+    };
+    if (outside(spine) || outside(auxSpine)) {
         extReference = true;
     }
     else {
         for (App::DocumentObject* obj : pipe->Sections.getValues()) {
-            if (!pcActiveBody->hasObject(obj) && !pcActiveBody->getOrigin()->hasObject(obj)) {
+            if (outside(obj)) {
                 extReference = true;
                 break;
             }
@@ -552,16 +550,16 @@ bool TaskPipeParameters::accept()
         }
 
         if (!dlg.radioXRef->isChecked()) {
-            if (!pcActiveBody->hasObject(spine) && !pcActiveBody->getOrigin()->hasObject(spine)) {
+            // FreeCAD-CH (ops#170): each spine on its own (both can be outside the body), and
+            // neither when missing (makeCopy(nullptr) put a null into the body after the commit)
+            if (outside(spine)) {
                 pipe->Spine.setValue(
                     PartDesignGui::TaskFeaturePick::makeCopy(spine, "", dlg.radioIndependent->isChecked()),
                     pipe->Spine.getSubValues()
                 );
                 copies.push_back(pipe->Spine.getValue());
             }
-            else if (
-                !pcActiveBody->hasObject(auxSpine) && !pcActiveBody->getOrigin()->hasObject(auxSpine)
-            ) {
+            if (outside(auxSpine)) {
                 pipe->AuxiliarySpine.setValue(
                     PartDesignGui::TaskFeaturePick::makeCopy(
                         auxSpine,
@@ -575,8 +573,7 @@ bool TaskPipeParameters::accept()
 
             std::vector<App::PropertyLinkSubList::SubSet> subSets;
             for (auto& subSet : pipe->Sections.getSubListValues()) {
-                if (!pcActiveBody->hasObject(subSet.first)
-                    && !pcActiveBody->getOrigin()->hasObject(subSet.first)) {
+                if (outside(subSet.first)) {
                     subSets.emplace_back(
                         PartDesignGui::TaskFeaturePick::makeCopy(
                             subSet.first,
@@ -693,6 +690,17 @@ TaskPipeOrientation::TaskPipeOrientation(ViewProviderPipe* PipeView, bool /*newO
 
     ui->comboBoxMode->setCurrentIndex(pipe->Mode.getValue());
     ui->curvilinear->setChecked(pipe->AuxiliaryCurvilinear.getValue());
+    {
+        // FreeCAD-CH (ops#170): the binormal as stored. The boxes kept their 0, and editing one
+        // wrote all three. Loading writes nothing.
+        const Base::Vector3d& binormal = pipe->Binormal.getValue();
+        QSignalBlocker blockX(ui->doubleSpinBoxX);
+        QSignalBlocker blockY(ui->doubleSpinBoxY);
+        QSignalBlocker blockZ(ui->doubleSpinBoxZ);
+        ui->doubleSpinBoxX->setValue(binormal.x);
+        ui->doubleSpinBoxY->setValue(binormal.y);
+        ui->doubleSpinBoxZ->setValue(binormal.z);
+    }
 
     // should be called after panel has become visible
     QMetaObject::invokeMethod(this, "updateUI", Qt::QueuedConnection, Q_ARG(int, pipe->Mode.getValue()));
@@ -742,6 +750,7 @@ void TaskPipeOrientation::onClearButton()
     if (auto view = getViewObject<ViewProviderPipe>()) {
         view->highlightReferences(ViewProviderPipe::AuxiliarySpine, false);
         getObject<PartDesign::Pipe>()->AuxiliarySpine.setValue(nullptr);
+        recomputeFeature();  // FreeCAD-CH (ops#170): as every other change in the panel
     }
 }
 
@@ -985,7 +994,11 @@ TaskPipeScaling::TaskPipeScaling(ViewProviderPipe* PipeView, bool /*newObj*/, QW
         ui->listWidgetReferences->addItem(item);
     }
 
-    ui->comboBoxScaling->setCurrentIndex(pipe->Transformation.getValue());
+    {
+        // Loading writes nothing (the slot recomputes, ops#170); updateUI is queued below
+        QSignalBlocker block(ui->comboBoxScaling);
+        ui->comboBoxScaling->setCurrentIndex(pipe->Transformation.getValue());
+    }
 
     // should be called after panel has become visible
     QMetaObject::invokeMethod(
@@ -1050,6 +1063,7 @@ void TaskPipeScaling::onScalingChanged(int idx)
     if (auto pipe = getObject<PartDesign::Pipe>()) {
         updateUI(idx);
         pipe->Transformation.setValue(idx);
+        recomputeFeature();  // FreeCAD-CH (ops#170): it waited for OK
     }
 }
 

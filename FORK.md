@@ -174,7 +174,8 @@ names it.
 | `feat/150-w3-profile-regions` | feat | ops#150 | - | `feat/150-w2-single-entry-fields` `10e7208c6e` (stacked on fork PR 142) | `99f0d46e4a` (fork PR 144), 2026-10-07 | never (fork feature) |
 | `feat/152-hashname` | feat | ops#152 | - | `integration` `4bcf3a3e1d` | `1f6ccc6636` (fork PR 146), 2026-10-07 | never (fork feature). Upstream edits to `ExpressionParser::parse` (`src/App/Expression.cpp`) or to `AppSpreadsheet.cpp`'s init will conflict |
 | `feat/152-display-app` | feat | ops#152 | - | `feat/152-hashname` `8977dcfb18` (fork PR 146) | `414b85b5c4` (fork PR 147), 2026-10-07 | never (fork feature). Upstream edits to `VariableExpression::_toString` (`src/App/Expression.cpp`) will conflict |
-| `carry/152-fuzzy-autocomplete` | carry | ops#152 | `upstream PR 30531`: main `2b815ef77d` (cherry-picked unchanged as `10710a6ebc`) | `integration` `4bcf3a3e1d` | (fork PR 145) | a new base contains main `2b815ef77d` |
+| `carry/152-fuzzy-autocomplete` | carry | ops#152 | `upstream PR 30531`: main `2b815ef77d` (cherry-picked unchanged as `10710a6ebc`) | `integration` `4bcf3a3e1d` | `0620397821` (fork PR 145), 2026-10-07 | a new base contains main `2b815ef77d` |
+| `fix/170-pipe-hole-helix-panels` | fix | ops#170 | - | `integration` `ab57bc30de` | (fork PR 151) | upstream fixes all seven (W6-W9 keep the behaviour, ops#150) |
 
 ## Fork-only commits in carried topics
 

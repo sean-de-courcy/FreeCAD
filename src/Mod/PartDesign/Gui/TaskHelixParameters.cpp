@@ -509,13 +509,6 @@ void TaskHelixParameters::onAxisChanged(int num)
         return;
     }
 
-    App::DocumentObject* oldRefAxis = propReferenceAxis->getValue();
-    std::vector<std::string> oldSubRefAxis = propReferenceAxis->getSubValues();
-    std::string oldRefName;
-    if (!oldSubRefAxis.empty()) {
-        oldRefName = oldSubRefAxis.front();
-    }
-
     App::PropertyLinkSub& lnk = *(axesInList[num]);
     if (!lnk.getValue()) {
         // enter reference selection mode
@@ -540,24 +533,9 @@ void TaskHelixParameters::onAxisChanged(int num)
     }
 
     try {
-        App::DocumentObject* newRefAxis = propReferenceAxis->getValue();
-        const std::vector<std::string>& newSubRefAxis = propReferenceAxis->getSubValues();
-        std::string newRefName;
-        if (!newSubRefAxis.empty()) {
-            newRefName = newSubRefAxis.front();
-        }
-
-        if (oldRefAxis != newRefAxis || oldSubRefAxis.size() != newSubRefAxis.size()
-            || oldRefName != newRefName) {
-            bool reversed = propReversed->getValue();
-            if (reversed != propReversed->getValue()) {
-                propReversed->setValue(reversed);
-                ui->checkBoxReversed->blockSignals(true);
-                ui->checkBoxReversed->setChecked(reversed);
-                ui->checkBoxReversed->blockSignals(false);
-            }
-        }
-
+        // FreeCAD-CH (ops#170): no "suggest reversed" here. Revolution's block was copied with a
+        // test of the value against itself (never true); a helix has no rule for it, its
+        // profile's normal says nothing about which way along the axis to go.
         recomputeFeature();
         updateStatus();
 

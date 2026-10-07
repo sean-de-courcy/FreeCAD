@@ -84,6 +84,7 @@ if(BUILD_GUI)
         PartDesignTests/TestRollBackBarGui.py
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestExpressionFieldsGui.py
+        PartDesignTests/TestPanelFixesGui.py
         PartDesignTests/TestDressUpDeleteKeyGui.py
         PartDesignTests/TestReferenceFieldGui.py
     )
