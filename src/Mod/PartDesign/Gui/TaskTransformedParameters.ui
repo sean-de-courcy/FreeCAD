@@ -71,38 +71,7 @@
        <number>0</number>
       </property>
       <item>
-       <layout class="QHBoxLayout" name="horizontalLayout">
-        <item>
-         <widget class="QPushButton" name="buttonAddFeature">
-          <property name="text">
-           <string>Add Feature</string>
-          </property>
-          <property name="checkable">
-           <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QPushButton" name="buttonRemoveFeature">
-          <property name="text">
-           <string>Remove Feature</string>
-          </property>
-          <property name="checkable">
-           <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </item>
-      <item>
-       <widget class="QListWidget" name="listWidgetFeatures">
-        <property name="maximumSize">
-         <size>
-          <width>16777215</width>
-          <height>120</height>
-         </size>
-        </property>
-       </widget>
+       <widget class="QWidget" name="originalsPlaceholder" native="true"/>
       </item>
      </layout>
     </widget>
@@ -125,9 +94,6 @@
  <tabstops>
   <tabstop>radioTransformBody</tabstop>
   <tabstop>radioTransformToolShapes</tabstop>
-  <tabstop>buttonAddFeature</tabstop>
-  <tabstop>buttonRemoveFeature</tabstop>
-  <tabstop>listWidgetFeatures</tabstop>
   <tabstop>checkBoxUpdateView</tabstop>
  </tabstops>
  <resources/>

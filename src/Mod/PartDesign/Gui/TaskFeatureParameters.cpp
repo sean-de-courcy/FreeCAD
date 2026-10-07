@@ -213,11 +213,9 @@ TaskDlgFeatureParameters::~TaskDlgFeatureParameters() = default;
 void TaskDlgFeatureParameters::open()
 {
     TaskDialog::open();
-    forEachParameters([this](TaskFeatureParameters* param) {
-        for (ReferenceField* field : param->referenceFields()) {
-            fieldGroup->addField(field);
-        }
-    });
+    for (ReferenceField* field : panelFields()) {
+        fieldGroup->addField(field);
+    }
     fieldGroup->setPanels(Content);
     // What the fields show stays in the fields; the panel shows only while something is left
     // (3.5, Q3), and the rows of a field that is disabled come back to it
@@ -229,6 +227,17 @@ void TaskDlgFeatureParameters::open()
         });
     }
     fieldGroup->armFirstEmpty();
+}
+
+std::vector<ReferenceField*> TaskDlgFeatureParameters::panelFields()
+{
+    std::vector<ReferenceField*> fields;
+    forEachParameters([&fields](TaskFeatureParameters* param) {
+        for (ReferenceField* field : param->referenceFields()) {
+            fields.push_back(field);
+        }
+    });
+    return fields;
 }
 
 void TaskDlgFeatureParameters::referencesRepaired()

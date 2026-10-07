@@ -154,6 +154,14 @@ void TaskMultiTransformParameters::slotDeletedObject(const Gui::ViewProviderDocu
     TaskTransformedParameters::slotDeletedObject(Obj);
 }
 
+void TaskMultiTransformParameters::endPickModes()
+{
+    if (subTask) {
+        subTask->exitSelectionMode();
+    }
+    exitSelectionMode();
+}
+
 void TaskMultiTransformParameters::closeSubTask()
 {
     if (subTask) {

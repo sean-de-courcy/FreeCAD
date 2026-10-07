@@ -61,6 +61,7 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/Gui/ReferenceHighlighter.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
+#include <Mod/PartDesign/App/FeatureAddSub.h>
 
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
@@ -156,8 +157,9 @@ public:
                 return false;
             }
         }
-        else if (kind != ReferenceField::Kind::Profile) {
-            // A profile's gate is its accept test alone (an object of the body, or its elements)
+        else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects) {
+            // A profile's gate is its accept test alone (an object of the body, or its elements),
+            // and so is a list of objects'
             if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
                 notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
                 return false;
@@ -249,8 +251,13 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     else {
         entryList->setSelectionMode(QAbstractItemView::ExtendedSelection);
         entryList->setToolTip(
-            tr("Click here, then pick in the 3D view: a pick adds an element or takes it out.\n"
-               "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
+            isObjects()
+                ? tr("Click here, then pick in the 3D view or the tree: a pick adds a feature or "
+                     "takes it out.\n"
+                     "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
+                : tr("Click here, then pick in the 3D view: a pick adds an element or takes it "
+                     "out.\n"
+                     "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
         );
         layout->addWidget(label);
         layout->addWidget(entryList);
@@ -294,6 +301,16 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
         attachDocument(owner->getDocument());
     }
     reload();
+}
+
+ReferenceField::ReferenceField(App::DocumentObject* owner,
+                               const char* property,
+                               Options options,
+                               ObjectsWriter write,
+                               QWidget* parent)
+    : ReferenceField(owner, property, std::move(options), Writer(), parent)
+{
+    objectsWriter = std::move(write);
 }
 
 ReferenceField::~ReferenceField()
@@ -349,10 +366,25 @@ App::PropertyLinkBase* ReferenceField::property() const
         return nullptr;
     }
     App::Property* prop = own->getPropertyByName(propertyNameStr.c_str());
-    if (freecad_cast<App::PropertyLinkSub*>(prop) || freecad_cast<App::PropertyLinkSubList*>(prop)) {
+    if (isObjects() ? freecad_cast<App::PropertyLinkList*>(prop) != nullptr
+                    : (freecad_cast<App::PropertyLinkSub*>(prop)
+                       || freecad_cast<App::PropertyLinkSubList*>(prop))) {
         return static_cast<App::PropertyLinkBase*>(prop);
     }
     return nullptr;
+}
+
+std::vector<App::DocumentObject*> ReferenceField::linkedObjects() const
+{
+    std::vector<App::DocumentObject*> objs;
+    if (auto list = freecad_cast<App::PropertyLinkList*>(property())) {
+        for (App::DocumentObject* obj : list->getValues()) {
+            if (obj && obj->isAttachedToDocument()) {
+                objs.push_back(obj);
+            }
+        }
+    }
+    return objs;
 }
 
 App::DocumentObject* ReferenceField::linkedObject() const
@@ -468,6 +500,36 @@ void ReferenceField::reload()
 {
     reloadPending = false;
     rows.clear();
+    if (isObjects()) {
+        // One entry per object, by its Label; objects of one Label are told apart by their
+        // names (B6). An object is there or not: no states.
+        const std::vector<App::DocumentObject*> objs = linkedObjects();
+        std::map<std::string, int> labels;
+        for (App::DocumentObject* obj : objs) {
+            ++labels[obj->Label.getValue()];
+        }
+        const int current = entryList->currentRow();
+        QSignalBlocker block(entryList);
+        entryList->clear();
+        for (std::size_t i = 0; i < objs.size(); ++i) {
+            const QString label = QString::fromUtf8(objs[i]->Label.getValue());
+            const QString name = QString::fromLatin1(objs[i]->getNameInDocument());
+            auto item = new QListWidgetItem(entryList);
+            item->setData(IndexRole, static_cast<int>(i));
+            item->setData(SubRole, name);
+            item->setData(StateRole, QStringLiteral("exact"));
+            item->setText(labels[objs[i]->Label.getValue()] > 1
+                              ? QStringLiteral("%1 (%2)").arg(label, name)
+                              : label);
+            item->setToolTip(name);
+        }
+        if (current >= 0 && current < entryList->count()) {
+            entryList->setCurrentRow(current);
+        }
+        block.unblock();
+        updateLook();
+        return;
+    }
     std::vector<App::ReferenceReport::Slot> slots;
     auto own = owner();
     if (own && own->isAttachedToDocument()) {
@@ -674,6 +736,10 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
         return;
     }
     // The gate let through only what the field takes
+    if (isObjects()) {
+        pickObject(obj);
+        return;
+    }
     if (isSingle()) {
         pickSingle(msg);
         return;
@@ -722,6 +788,23 @@ void ReferenceField::pick(App::DocumentObject* obj, const std::string& sub)
         return;
     }
     write(stored);
+}
+
+void ReferenceField::pickObject(App::DocumentObject* obj)
+{
+    {
+        Base::StateLocker lock(busy, true);
+        Gui::Selection().clearSelection();
+    }
+    message.clear();
+    std::vector<App::DocumentObject*> objs = linkedObjects();
+    if (auto found = std::ranges::find(objs, obj); found != objs.end()) {
+        objs.erase(found);
+    }
+    else {
+        objs.push_back(obj);
+    }
+    writeObjects(objs);
 }
 
 void ReferenceField::pickSingle(const Gui::SelectionChanges& msg)
@@ -864,6 +947,12 @@ ReferenceField::Snapshot ReferenceField::snapshot() const
         value.fingerprints = link.getElementFingerprints();
         value.froms = link.getExpandedFroms();
     });
+    if (prop && isObjects()) {
+        for (App::DocumentObject* obj : linkedObjects()) {
+            value.objects.emplace_back(obj);
+        }
+        return value;
+    }
     if (prop) {
         value.report = App::ReferenceReport::get(prop);
     }
@@ -935,13 +1024,23 @@ void ReferenceField::write(App::DocumentObject* obj,
 
 void ReferenceField::write(const Snapshot& value, bool undoable)
 {
-    if (!writer || !property()) {
+    if (!property() || (isObjects() ? !objectsWriter : !writer)) {
         return;
     }
     if (undoable) {
         pushUndo();
     }
-    {
+    if (isObjects()) {
+        std::vector<App::DocumentObject*> objs;
+        for (const auto& objT : value.objects) {
+            if (App::DocumentObject* obj = objT.getObject()) {
+                objs.push_back(obj);
+            }
+        }
+        Base::StateLocker lock(busy, true);
+        objectsWriter(objs);
+    }
+    else {
         Base::StateLocker lock(busy, true);
         pending = value;
         valuePending = true;
@@ -954,6 +1053,15 @@ void ReferenceField::write(const Snapshot& value, bool undoable)
         highlight(true);
     }
     Q_EMIT picked();
+}
+
+void ReferenceField::writeObjects(const std::vector<App::DocumentObject*>& objs, bool undoable)
+{
+    Snapshot value;
+    for (App::DocumentObject* obj : objs) {
+        value.objects.emplace_back(obj);
+    }
+    write(value, undoable);
 }
 
 void ReferenceField::assign(App::DocumentObject* obj, const std::vector<std::string>& subs)
@@ -1028,6 +1136,16 @@ void ReferenceField::removeSelected()
         return;
     }
     std::ranges::sort(indexes, std::greater<> {});
+    if (isObjects()) {
+        std::vector<App::DocumentObject*> objs = linkedObjects();
+        for (int index : indexes) {
+            if (index < static_cast<int>(objs.size())) {
+                objs.erase(objs.begin() + index);
+            }
+        }
+        writeObjects(objs);
+        return;
+    }
     std::vector<std::string> stored = storedSubs();
     for (int index : indexes) {
         if (index >= 0 && index < static_cast<int>(stored.size())) {
@@ -1105,6 +1223,11 @@ void ReferenceField::updateLook()
                     .arg(options.kinds.toLower())
             );
         }
+        else if (isObjects()) {
+            hint->setText(
+                tr("Select %1 in the 3D view or the tree.").arg(options.kinds.toLower())
+            );
+        }
         else {
             hint->setText(tr("Select %1 in the 3D view.").arg(options.kinds.toLower()));
         }
@@ -1138,7 +1261,8 @@ void ReferenceField::highlight(bool on, const std::string& extra)
     highlightedTarget = App::DocumentObjectT();
     // A single entry is coloured on its own object (a face of the base, not a datum plane)
     App::DocumentObject* support = nullptr;
-    if (on) {
+    // A list of objects colours nothing: its entries are whole features
+    if (on && !isObjects()) {
         support = isSingle() ? (options.wholeObject ? nullptr : linkedObject())
                              : (isProfile() ? linkedObject() : target());
     }
@@ -1222,17 +1346,37 @@ void ReferenceField::highlight(bool on, const std::string& extra)
 void ReferenceField::zoomTo(const std::string& element)
 {
     App::DocumentObject* support = (isSingle() || isProfile()) ? linkedObject() : target();
-    if (!support || element.empty()) {
+    if (isObjects()) {
+        // The entry is an object (its name): its shape
+        auto own = owner();
+        support = own && !element.empty() ? own->getDocument()->getObject(element.c_str()) : nullptr;
+    }
+    if (!support || (element.empty() && !isObjects())) {
         return;
     }
-    // Through the object's sub-object lookup: a sketch's regions (InternalFace3) aren't in its
-    // Shape
-    Part::TopoShape sub = Part::Feature::getTopoShape(
-        support,
-        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
-            | Part::ShapeOption::NeedSubElement,
-        element.c_str()
-    );
+    Part::TopoShape sub;
+    if (isObjects()) {
+        // A feature that adds or removes: what it adds or removes, not the whole solid after it
+        if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(support)) {
+            sub = addSub->AddSubShape.getShape();
+        }
+        if (sub.isNull()) {
+            sub = Part::Feature::getTopoShape(
+                support,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+        }
+    }
+    else {
+        // Through the object's sub-object lookup: a sketch's regions (InternalFace3) aren't in
+        // its Shape
+        sub = Part::Feature::getTopoShape(
+            support,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+                | Part::ShapeOption::NeedSubElement,
+            element.c_str()
+        );
+    }
     if (sub.isNull()) {
         return;
     }
@@ -1289,7 +1433,14 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
     remove->setEnabled(!whole && (item || !entryList->selectedItems().isEmpty()));
     connect(remove, &QAction::triggered, this, [this]() { removeSelected(); });
 
-    if (item && !whole) {
+    if (item && isObjects()) {
+        // An object is listed or not: nothing to accept, use or re-pick
+        QAction* zoom = menu->addAction(tr("Zoom to"));
+        connect(zoom, &QAction::triggered, this, [this, name = item->data(SubRole).toString()]() {
+            zoomTo(name.toStdString());
+        });
+    }
+    else if (item && !whole) {
         const int index = item->data(IndexRole).toInt();
         const App::ReferenceRow* row = rowOf(item);
         const std::string sub = item->data(SubRole).toString().toStdString();

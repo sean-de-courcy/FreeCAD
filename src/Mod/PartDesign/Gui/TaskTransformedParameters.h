@@ -103,7 +103,8 @@ public:
         exitSelectionMode();
     }
 
-    static void removeItemFromListWidget(QListWidget* widget, const QString& itemstr);
+    /// The Originals field (ops#150 W4); none inside a MultiTransform.
+    std::vector<ReferenceField*> referenceFields() const;
 
 protected:
     /** Setup the standalone UI.
@@ -128,10 +129,12 @@ protected:
     /// feature or with the parent feature (MultiTransform mode)
     App::DocumentObject* getSketchObject() const;
 
-    /** Handle adding/removing of selected features
-     * Returns true if a selected feature was added/removed.
-     */
-    bool originalSelected(const Gui::SelectionChanges& msg);
+    /// The Originals field is about to arm: the panel's pick modes end (its own, and a
+    /// MultiTransform's sub-task's), since they would take its picks.
+    virtual void endPickModes()
+    {
+        exitSelectionMode();
+    }
 
     /// Recompute either this feature or the parent MultiTransform feature
     void recomputeFeature();
@@ -179,9 +182,6 @@ protected:
 private Q_SLOTS:
     virtual void onUpdateView(bool /*unused*/) = 0;
 
-    void onButtonAddFeature(bool checked);
-    void onButtonRemoveFeature(bool checked);
-    void onFeatureDeleted();
     void onModeChanged(int mode_id);
 
 private:
@@ -194,10 +194,11 @@ private:
     /// Change translation of the parameter UI
     virtual void retranslateParameterUI(QWidget* widget) = 0;
 
-    void addObject(App::DocumentObject*);
-    void removeObject(App::DocumentObject*);
-    void clearButtons();
-    void checkVisibility();
+    /// The Originals field's writer: the objects in the body's order, in the edit's
+    /// transaction, then the recompute.
+    void writeOriginals(const std::vector<App::DocumentObject*>& objs);
+    /// Whether \a obj can be an original: a feature that adds or removes, in the pattern's body.
+    bool acceptOriginal(App::DocumentObject* obj, std::string& why) const;
 
     /// Return the base object of the base transformed object (see getTopTransformedObject())
     // Either through the ViewProvider or the currently active subFeature of the parentTask
@@ -209,8 +210,6 @@ protected:
     enum class SelectionMode
     {
         None,
-        AddFeature,
-        RemoveFeature,
         Reference
     };
 
@@ -230,6 +229,8 @@ private:
     /// Widget holding the transform task UI
     QWidget* proxy = nullptr;
     std::unique_ptr<Ui_TaskTransformedParameters> ui;
+    /// The Originals (ops#150 W4), in the place of the old Add/Remove buttons and list
+    ReferenceField* originalsField = nullptr;
 };
 
 /// simulation dialog for the TaskView
@@ -248,6 +249,8 @@ public:
 protected:
     void referencesRepaired() override;
     void referenceSelectionTaken() override;
+    /// The parameter panel isn't a TaskFeatureParameters: its Originals field is added here.
+    std::vector<ReferenceField*> panelFields() override;
 
     TaskTransformedParameters* parameter = nullptr;
     TaskTransformedMessages* message = nullptr;
