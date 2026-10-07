@@ -16,6 +16,10 @@ namespace Sketcher
 
 class SketchObject;
 
+/// The owner's property holding the record (a string list); the sketch editor redraws when it
+/// changes
+constexpr const char* ParkedRecordProperty = "ParkedReferences";
+
 /// "<object>.<element>" the external geometry with this Id was projected from while it is parked;
 /// empty when it isn't parked
 using ParkedReferenceProvider =

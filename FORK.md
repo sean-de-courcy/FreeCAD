@@ -163,7 +163,8 @@ names it.
 | `fix/159-expression-field-followups` | fix | ops#159, ops#157, ops#156 | - | `integration` `872ffe8fc1` | `076ad63187` (fork PR 132), 2026-10-06 | upstream's quantity fields show a unitless expression result in their unit and Std_Edit opens an edit transaction; the ops#155 refresh's own follow-ups leave with ops#155 |
 | `fix/164-delete-guard-second-view` | fix | ops#164 | - | `integration` `9759c05714` | `d902dc50ae` (fork PR 134), 2026-10-06 | upstream's Std_Delete finds an edit shown in another view and deletes the rest of a mixed in-edit selection |
 | `fix/161-broken-external-flag-nits` | fix | ops#161 | - | `integration` `5cf6c77dc9` | `0883f369ce` (fork PR 137), 2026-10-06 | the sketch's broken-link tooltip: one walk of the links per hover, and the elements named as old names |
-| `fix/158-parked-target-id` | fix | ops#158 | - | `integration` `8361a07aaf` | (fork PR 135) | never (fork feature) |
+| `fix/158-parked-target-id` | fix | ops#158 | - | `integration` `8361a07aaf` | `640c4fba6b` (fork PR 135), 2026-10-07 | never (fork feature) |
+| `fix/166-parked-marking-nits` | fix | ops#166 | - | `integration` `0883f369ce` | (fork PR 136) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

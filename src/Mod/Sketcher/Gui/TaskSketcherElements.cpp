@@ -2175,9 +2175,12 @@ void TaskSketcherElements::slotElementsChanged()
             // don't go one to one with the geometries (a face gives several, a parked one none).
             const std::string parked =
                 Sketcher::parkedReference(*sketchView->getSketchObject(), -j);
-            const QString reference = parked.empty()
+            // The reference is looked up (resolveElement) only when the list shows it (ops#166)
+            const QString reference = !parked.empty()
+                ? tr("parked: %1").arg(QString::fromStdString(parked))
+                : isNamingBoxChecked
                 ? QString::fromStdString(sketchView->getSketchObject()->getGeometryReference(-j))
-                : tr("parked: %1").arg(QString::fromStdString(parked));
+                : QString();
             if (isNamingBoxChecked) {
                 if (!reference.isEmpty()) {
                     linkname = IdInformation(true) + reference + QStringLiteral(")");
