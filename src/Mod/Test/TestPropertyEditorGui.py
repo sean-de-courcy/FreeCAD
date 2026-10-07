@@ -259,3 +259,43 @@ class TestPropertyEditorGui(unittest.TestCase):
                 pump(0.3)
                 self.assertEqual((self.obj.Width, other.Width), after)
                 self.doc.commitTransaction()
+
+    def testEscapeKeepsFormulaExpression(self):
+        """Review round 2 (N2): '=' typed in a number's editor opens the f(x) dialog, whose OK
+        sets the row's expression inside the editor's Edit transaction. Esc then keeps the
+        expression (it aborted the transaction, so the expression was gone)."""
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "7")
+        pump(0.2)
+        # As the dialog's OK does (ExpressionBinding::setExpression), in the editor's transaction
+        self.obj.setExpression("Width", "2 + 3")
+        pump(0.2)
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+        pump(0.3)
+        self.assertIn(("Width", "2 + 3"), self.obj.ExpressionEngine, "Esc removed the expression")
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+
+    def testEscapeRevertsTypedList(self):
+        """Review round 2 (L-a): a list row (StringList) writes as it is typed, in a line edit
+        inside its editor; Esc reverts it."""
+        self.obj.addProperty("App::PropertyStringList", "Tags", "Variables")
+        self.obj.Tags = ["a", "b"]
+        undos = self.doc.UndoCount
+        widget = self.openValueEditor("Tags")
+        lineEdit = widget if isinstance(widget, QtWidgets.QLineEdit) else widget.findChild(
+            QtWidgets.QLineEdit
+        )
+        self.assertIsNotNone(lineEdit, "no line edit in the list's editor")
+        lineEdit.setFocus()
+        # The line edit shows "[a<newline>b]" and writes while the brackets are kept
+        QtTest.QTest.keyClick(lineEdit, QtCore.Qt.Key_End)
+        QtTest.QTest.keyClick(lineEdit, QtCore.Qt.Key_Left)
+        QtTest.QTest.keyClicks(lineEdit, "c")
+        pump(0.2)
+        self.assertNotEqual(self.obj.Tags, ["a", "b"], "typing wrote nothing")
+        QtTest.QTest.keyClick(lineEdit, QtCore.Qt.Key_Escape)
+        pump(0.3)
+        self.assertEqual(self.obj.Tags, ["a", "b"])
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos)

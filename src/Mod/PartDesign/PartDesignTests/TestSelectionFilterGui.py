@@ -192,6 +192,9 @@ class TestSelectionFilterGui(unittest.TestCase):
         for obj in (self.body.Origin.OriginFeatures[3], datum, self.sketch, self.pad):
             with self.subTest(obj.Name):
                 self.assertTrue(self.objectSelectable(obj), "a whole object is refused")
+        # Round 2 (L-b): the edge filter, which would refuse a shape's face
+        setFilter(EDGE)
+        self.assertFalse(self.selectable(self.pad, "Face1"), "the edge filter is off")
         self.assertTrue(self.selectable(datum, "Face1"), "a datum's element is refused")
 
     def testStatusBarShowsAndClearsFilter(self):
@@ -208,6 +211,25 @@ class TestSelectionFilterGui(unittest.TestCase):
         pump(0.05)
         self.assertTrue(button.isHidden())
         self.assertTrue(self.selectable(self.pad, "Face1"), "the click left the filter on")
+
+    def testStatusBarButtonStaysHiddenAfterRelayout(self):
+        """Review round 2 (N1): the status bar shows every registered item again whenever an item
+        is added or removed (a workbench's first activation adds some). The cleared filter's
+        button stays hidden through that."""
+        setFilter(FACE)
+        setFilter(NONE)
+        button = self.filterButton()
+        self.assertIsNotNone(button, "no filter button in the status bar")
+        self.assertTrue(button.isHidden())
+        mainWindow = Gui.getMainWindow()
+        probe = QtWidgets.QLabel("probe")
+        mainWindow.addStatusBarItem(probe, id="selectionFilterProbe", title="Probe")
+        pump(0.05)
+        self.assertTrue(button.isHidden(), "adding an item showed the cleared filter's button")
+        mainWindow.removeStatusBarItem("selectionFilterProbe")
+        probe.deleteLater()
+        pump(0.05)
+        self.assertTrue(button.isHidden(), "removing an item showed the cleared filter's button")
 
     def clickAt(self, point):
         """A left click in the 3D view where the world point shows."""
