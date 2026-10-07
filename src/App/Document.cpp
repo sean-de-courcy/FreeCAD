@@ -128,7 +128,25 @@ struct DocumentNamingRevision
     bool older = false;
 };
 std::map<const Document*, DocumentNamingRevision> documentNamingRevisions;
+
+// The saved names and IDs of the objects each document's running import read (importedSource,
+// ops#158)
+std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
 }  // namespace
+
+std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
+{
+    auto doc = obj ? obj->getDocument() : nullptr;
+    auto it = importedSources.find(doc);
+    if (it == importedSources.end()) {
+        return {};
+    }
+    auto jt = it->second.find(obj);
+    if (jt == it->second.end()) {
+        return {};
+    }
+    return jt->second;
+}
 
 int App::forkNamingRevision()
 {
@@ -2084,6 +2102,11 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                 // use this name for the later access because an object with
                 // the given name may already exist
                 reader.addName(name.c_str(), obj->getNameInDocument());
+                if (testStatus(Status::Importing)) {
+                    importedSources[this][obj] = {
+                        name,
+                        reader.hasAttribute("id") ? reader.getAttribute<long>("id") : 0};
+                }
 
                 // restore touch/error status flags
                 if (reader.hasAttribute("Touched")) {
@@ -2185,6 +2208,16 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     Base::ObjectStatusLocker<Status, Document> restoreBit(Status::Restoring, this);
     Base::ObjectStatusLocker<Status, Document> restoreBit2(Status::Importing, this);
     ExpressionParser::ExpressionImporter expImporter(reader);
+    // The objects' saved names and IDs, known until the import ends (importedSource)
+    struct ForgetSources
+    {
+        const Document* doc;
+        ~ForgetSources()
+        {
+            importedSources.erase(doc);
+        }
+    } forgetSources {this};
+    importedSources.erase(this);
     // Remaps the imported interned names where needed (ops#6), until the maps are read
     std::optional<Data::NameRemap> remap;
     remap.emplace();

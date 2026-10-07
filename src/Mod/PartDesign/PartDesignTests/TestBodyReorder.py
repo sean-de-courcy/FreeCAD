@@ -1527,6 +1527,169 @@ class BodyReorderBase:
         self.recompute()
         self.assertValid(a, b)
 
+    def pasteInto(self, other, objects, dependencies=True):
+        """objects copied into other as Std_Copy and Std_Paste do, with their dependencies or
+        without; the names other had before."""
+        before = {o.Name for o in other.Objects}
+        other.copyObject(objects, dependencies)
+        return before
+
+    def mergeInto(self, other):
+        """self.doc saved and merged into other; the names other had before."""
+        self.tempDir = self.tempDir or tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "Merged.FCStd")
+        self.doc.saveCopy(path)
+        before = {o.Name for o in other.Objects}
+        other.mergeProject(path)
+        return before
+
+    def testParkedProjectionPastedWithoutNameClashes(self):
+        """RO11 parked, and the Body pasted into a document whose names it doesn't use: the copies
+        keep their names (not their IDs), and moved back, the projection goes onto the copy of
+        Pad2."""
+        other = self.otherDocument("Unrelated")
+
+        def copy(*specs):
+            before = self.pasteInto(other, [self.body])
+            return (other, *self.copiesIn(other, before, *specs))
+
+        self.parkedProjectionCopied(copy)
+        self.assertEqual(self.doc.getObjectsByLabel("Pad2")[0].Name, "Pad2")
+
+    def testParkedProjectionTargetLeftBehind(self):
+        """RO11 parked, then everything but Pad2 and its sketch pasted into a new document together
+        with another document's object named Pad2 (finding 3 of the review): the copied line names
+        Doc1's Pad2, which stayed behind, so it isn't put on the newcomer. Moved back, the
+        geometry is a missing reference, its constraints kept (as RO11f)."""
+        block, pad2, sketch, hole = self.projecting()
+        before = self.projection(sketch)
+        counts = (len(sketch.ExternalGeo), len(sketch.Constraints))
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        third = models.newDocument(f"BodyReorder{type(self).__name__}Third")
+        unrelated = third.addObject("App::FeaturePython", "Pad2")
+        unrelated.Label = "Unrelated"
+        other = self.otherDocument()
+        left = {pad2.Name, pad2.Profile[0].Name}
+        objects = [o for o in self.doc.Objects if o.Name not in left] + [unrelated]
+        before_names = self.pasteInto(other, objects, False)
+        self.doc = other
+        self.body, block, sketch, hole = self.copiesIn(
+            other,
+            before_names,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "Block"),
+            ("Sketcher::SketchObject", "Projecting"),
+            ("PartDesign::Pocket", "ProjectedHole"),
+        )
+        newcomer = other.getObject("Pad2")
+        self.assertEqual(newcomer.Label, "Unrelated")
+        self.recompute()
+        self.assertIn("projects 'Pad2'", sketch.getStatusString())
+
+        self.body.reorderObject([hole], block, True)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertEqual(self.projection(sketch)[0], before[0])
+        self.recompute()
+        self.assertTrue(Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing"))
+        self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+
+    def parkedOriginalNewcomerCopied(self, copy):
+        """RO8 with a newcomer (testParkedOriginalNameTakenByNewObject), then copy(other) puts the
+        Body into another document (finding 1 of the review): the copied line names the deleted
+        HoleC, not the copy of the newcomer that took its name. Moved below that copy, the
+        pattern's Originals stay empty and the line is dropped."""
+        block, a, b, c = self.chain()
+        pattern = self.body.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [c]
+        pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
+        pattern.Length = 4
+        pattern.Occurrences = 2
+        self.body.Tip = pattern
+        self.recompute()
+        self.body.reorderObject([pattern], b, True)
+        self.assertEqual(len(self.parked(pattern)), 1)
+        self.deleteFeature(c)
+        self.assertEqual(self.hole("HoleC", 12, 6).Name, "HoleC")
+        self.recompute()
+        other = self.otherDocument()
+        before = copy(other)
+        self.doc = other
+        self.body, newcomer, pattern = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pocket", "HoleC"),
+            ("PartDesign::LinearPattern", "Pattern"),
+        )
+        self.assertEqual(len(self.parked(pattern)), 1)
+        self.recompute()
+
+        self.body.reorderObject([pattern], newcomer, True)
+        self.assertEqual(pattern.Originals, [])
+        self.assertEqual(self.parked(pattern), [])
+
+    def testParkedOriginalNewcomerPasted(self):
+        self.parkedOriginalNewcomerCopied(lambda other: self.pasteInto(other, [self.body]))
+
+    def testParkedOriginalNewcomerMerged(self):
+        self.parkedOriginalNewcomerCopied(self.mergeInto)
+
+    def parkedExpressionReadingAnotherDocument(self, copy):
+        """RO9 with an expression that also reads another document's spreadsheet, and Block's
+        Length read from a spreadsheet of the same name in this document; copy(other) puts the
+        Body (with that spreadsheet) into a document whose objects take the names BossA, BossB and
+        Spreadsheet (finding 2 of the review: the other document's Spreadsheet was renamed to the
+        local copy's name, Spreadsheet001). Moved back, the copy of B reads the copy of BossA and
+        still the other document's spreadsheet: Length 5 * 4 / 4."""
+        params = models.newDocument(f"BodyReorder{type(self).__name__}Params")
+        for doc, w in ((params, 4), (self.doc, 8)):
+            sheet = doc.addObject("Spreadsheet::Sheet", "Spreadsheet")
+            sheet.set("A1", str(w))
+            sheet.setAlias("A1", "Side")
+            doc.recompute()
+        self.tempDir = self.tempDir or tempfile.mkdtemp()
+        # An expression into another document needs both saved
+        params.saveAs(os.path.join(self.tempDir, "Params.FCStd"))
+        self.doc.saveAs(os.path.join(self.tempDir, "Source.FCStd"))
+        block, a, b, c = self.chain()
+        block.setExpression("Length", "Spreadsheet.Side + 2")
+        b.setExpression("Length", f"BossA.Length * {params.Name}#Spreadsheet.Side / 4")
+        self.recompute()
+        self.assertAlmostEqual(b.Length.Value, 5)
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        other = self.otherDocument("BossA", "BossB", "Spreadsheet")
+        before = copy(other)
+        self.doc = other
+        self.body, a, b = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "BossA"),
+            ("PartDesign::Pad", "BossB"),
+        )
+        self.assertNotEqual(a.Name, "BossA")
+        other.saveAs(os.path.join(self.tempDir, "Other.FCStd"))
+        self.recompute()
+
+        self.body.reorderObject([b], a, True)
+        self.assertEqual(self.parked(b), [])
+        self.assertEqual(len(b.ExpressionEngine), 1)
+        text = b.ExpressionEngine[0][1]
+        self.assertIn(f"{a.Name}.Length", text)
+        self.assertIn(f"{params.Name}#Spreadsheet.Side", text)
+        self.recompute()
+        self.assertValid(a, b)
+        self.assertAlmostEqual(b.Length.Value, 5)
+
+    def testParkedExpressionReadingAnotherDocumentPasted(self):
+        self.parkedExpressionReadingAnotherDocument(lambda other: self.pasteInto(other, [self.body]))
+
+    def testParkedExpressionReadingAnotherDocumentMerged(self):
+        self.parkedExpressionReadingAnotherDocument(self.mergeInto)
+
 
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
     solver = False

@@ -25,6 +25,9 @@
 
 #pragma once
 
+#include <optional>
+#include <string>
+
 #include <Base/Persistence.h>
 #include <fastsignals/signal.h>
 
@@ -75,5 +78,18 @@ private:
     Connection connectExport;
     Connection connectImport;
 };
+
+/// What Document::importObjects read for an object it imported: the name it was saved under (a
+/// saved project's name, or `<name>@<document>` from a copy, see DocumentObject::getExportName)
+/// and the ID it had there (ops#158)
+struct ImportedSource
+{
+    std::string name;
+    long id = 0;
+};
+
+/// The saved name and ID of obj while the import that read it runs (from the restore of the
+/// objects' properties to signalFinishImportObjects); none for any other object
+AppExport std::optional<ImportedSource> importedSource(const DocumentObject* obj);
 
 }  // namespace App

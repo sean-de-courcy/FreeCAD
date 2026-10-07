@@ -19,6 +19,7 @@
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolverBatch.h>
 #include <App/Expression.h>
+#include <App/MergeDocuments.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyExpressionEngine.h>
 #include <App/PropertyLinks.h>
@@ -154,7 +155,9 @@ struct ParkedItem
     bool extgeo = false;  // a projection: its geometries stay in the sketch without the link
     std::string property;  // the property, or the expression's path
     std::string target;    // the name of the object it refers to
-    long targetId = 0;     // its ID (getID()), 0 in lines written before ops#158
+    long targetId = 0;     // its ID (getID()), 0 in lines written before ops#158, -1 when it
+                           // is in another document (left behind by an import, see
+                           // importParkedLines)
     std::string sub;
     std::string shadowNew;
     std::string shadowOld;
@@ -196,7 +199,7 @@ struct ParkedItem
 
     std::string targetField() const
     {
-        return targetId > 0 ? target + "#" + std::to_string(targetId) : target;
+        return targetId != 0 ? target + "#" + std::to_string(targetId) : target;
     }
 
     void setTarget(const std::string& field)
@@ -210,9 +213,9 @@ struct ParkedItem
         try {
             std::size_t used = 0;
             long id = std::stol(field.substr(hash + 1), &used);
-            if (used == field.size() - hash - 1 && id > 0) {
+            if (used == field.size() - hash - 1 && id != 0) {
                 target = field.substr(0, hash);
-                targetId = id;
+                targetId = id > 0 ? id : -1;
             }
         }
         catch (...) {
@@ -339,11 +342,12 @@ void writeParkedLines(App::DocumentObject* owner, const std::vector<std::string>
 }
 
 /// The object a parked item refers to: the one of that name, if it is the same object
-/// (ops#158: a new object can take a deleted one's name); null when it was deleted
+/// (ops#158: a new object can take a deleted one's name); null when it was deleted, or left in
+/// another document
 App::DocumentObject* parkedTarget(const App::Document* doc, const ParkedItem& item)
 {
     auto obj = doc ? doc->getObject(item.target.c_str()) : nullptr;
-    if (obj && item.targetId > 0 && obj->getID() != item.targetId) {
+    if (obj && item.targetId != 0 && obj->getID() != item.targetId) {
         return nullptr;
     }
     return obj;
@@ -1918,48 +1922,41 @@ bool hasParkedOriginals(const App::DocumentObject* obj)
 namespace
 {
 
-/// The copy an import made of the object saved as name, or null if it didn't come in. A saved
-/// project (merge) has plain names; copy and paste save `<name>@<document>`
-/// (Document::exportObjects), so each open document is tried; of two hits, the one from the
-/// document whose object of that name has the ID id (the original) wins
-App::DocumentObject* importedCopy(Base::XMLReader& reader,
-                                  const std::set<const App::DocumentObject*>& imported,
-                                  const App::Document* doc,
-                                  const std::string& name,
-                                  long id)
-{
-    auto copyOf = [&](const std::string& saved) -> App::DocumentObject* {
-        auto obj = doc->getObject(reader.getName(saved.c_str()));
-        return obj && imported.count(obj) ? obj : nullptr;
-    };
-    if (auto copy = copyOf(name)) {
-        return copy;
-    }
-    App::DocumentObject* found = nullptr;
-    for (auto source : App::GetApplication().getDocuments()) {
-        auto copy = copyOf(name + "@" + source->getName());
-        auto original = source->getObject(name.c_str());
-        if (copy && (!found || (id > 0 && original && original->getID() == id))) {
-            found = copy;
-        }
-    }
-    return found;
-}
-
 /// Import, merge and paste (ops#158): readObjects gives the imported objects new IDs and, where a
 /// name is taken, new names, so an imported owner's lines would name an object that is gone, or
-/// another one. Each line whose object came in with it is rewritten to name the copy (and to put
-/// the reference back by its index), and so are the objects an expression's text names. A line
-/// whose object stayed behind is kept as it is: an object of that name here is the same one only
-/// if its ID matches.
-void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& reader)
+/// another one. Each line whose object came in with it (the object saved under that name with that
+/// ID) is rewritten to name the copy (and to put the reference back by its index), and so are the
+/// objects an expression's text names. A line whose object didn't come in keeps naming it: in a
+/// copy within the document it is still there, under its name and ID; from anywhere else it is
+/// in another document, and an object of that name here is another one, whatever its ID.
+void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
 {
-    std::set<const App::DocumentObject*> imported(objs.begin(), objs.end());
+    // The imported objects by the name each was saved under, with the ID it had there
+    std::map<std::string, std::pair<App::DocumentObject*, long>> saved;
+    for (auto obj : objs) {
+        if (auto source = App::importedSource(obj)) {
+            saved[source->name] = {obj, source->id};
+        }
+    }
     for (auto owner : objs) {
-        if (!owner || !owner->isAttachedToDocument()) {
+        auto source = App::importedSource(owner);
+        if (!source || !owner->isAttachedToDocument()) {
             continue;
         }
         auto doc = owner->getDocument();
+        // A copy's names end in `@<document>`, the document it was copied from (exportObjects); a
+        // saved project's (merge) don't
+        auto at = source->name.find('@');
+        const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
+        const bool sameDocument = suffix == std::string("@") + doc->getName();
+        // The copy of the owner's object of that name, if it is that object (id; 0 takes any)
+        auto copyOf = [&](const std::string& name, long id) -> App::DocumentObject* {
+            auto it = saved.find(name + suffix);
+            if (id < 0 || it == saved.end() || (id > 0 && it->second.second != id)) {
+                return nullptr;
+            }
+            return it->second.first;
+        };
         auto lines = parkedLines(owner);
         bool changed = false;
         for (auto& line : lines) {
@@ -1967,31 +1964,49 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
             if (!item) {
                 continue;
             }
-            if (auto copy = importedCopy(reader, imported, doc, item->target, item->targetId)) {
+            if (auto copy = copyOf(item->target, item->targetId)) {
                 item->setTarget(copy);
                 // The mapped name's tags are the source objects' IDs, which the copies don't
                 // have: the reference goes back by its index, as an imported link's does
                 item->shadowNew.clear();
             }
+            else if (!sameDocument) {
+                item->targetId = -1;
+            }
             if (item->expression) {
                 try {
-                    // The parse renames the objects a saved project's names map (the reader is
-                    // the expression importer here); the objects it finds that didn't come in
-                    // are the original names of a copy
+                    // The objects the text names without a document resolve here: to the copies
+                    // that kept their names, or to this document's objects (or the originals,
+                    // within the document) where a copy was renamed. A reference into another
+                    // document stays as it is. The parse doesn't rename them
                     std::unique_ptr<App::Expression> expr(
                         App::Expression::parse(owner, item->text));
+                    std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> renames;
                     for (const auto& dep : expr->getDeps(App::Expression::DepAll)) {
                         auto obj = dep.first;
-                        if (!obj || imported.count(obj) || !obj->isAttachedToDocument()) {
+                        if (!obj || !obj->isAttachedToDocument() || obj->getDocument() != doc) {
                             continue;
                         }
-                        auto copy =
-                            importedCopy(reader, imported, doc, obj->getNameInDocument(), 0);
-                        if (copy) {
-                            if (auto replaced = expr->replaceObject(owner, obj, copy)) {
-                                expr = std::move(replaced);
-                            }
+                        auto copy = copyOf(obj->getNameInDocument(), 0);
+                        if (copy && copy != obj) {
+                            renames.emplace_back(obj, copy);
                         }
+                    }
+                    // One at a time, each before the one whose copy it renames (X001 to X002
+                    // before X to X001), so that no name is renamed twice
+                    while (!renames.empty()) {
+                        auto next = std::find_if(renames.begin(), renames.end(), [&](auto& r) {
+                            return std::none_of(renames.begin(), renames.end(), [&](auto& o) {
+                                return o.first == r.second;
+                            });
+                        });
+                        if (next == renames.end()) {
+                            next = renames.begin();
+                        }
+                        if (auto replaced = expr->replaceObject(owner, next->first, next->second)) {
+                            expr = std::move(replaced);
+                        }
+                        renames.erase(next);
                     }
                     item->text = expr->toString(true);
                 }
