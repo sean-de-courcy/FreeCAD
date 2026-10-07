@@ -169,7 +169,11 @@ std::string ReferenceActions::subElementType(const std::string& sub)
 
 bool ReferenceActions::wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
 {
-    if (!Base::Tools::isNullOrEmpty(sub) || !obj || obj->isDerivedFrom<Part::Part2DObject>()) {
+    if (!obj) {
+        why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
+        return false;
+    }
+    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
         return true;
     }
     const Part::TopoShape shape = Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink);

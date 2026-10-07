@@ -1197,6 +1197,20 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
     if (!linked || !stored.empty() || linked->isDerivedFrom<Part::Part2DObject>()) {
         return false;
     }
+    // A path of a wire's edges goes back to the wire whole, as a sketch's does (PR 166 review)
+    if (options.path) {
+        try {
+            const Part::TopoShape shape = Part::Feature::getTopoShape(
+                linked,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+            if (shape.hasSubShape(TopAbs_EDGE) && !shape.hasSubShape(TopAbs_FACE)) {
+                return false;
+            }
+        }
+        catch (const Base::Exception&) {
+        }
+    }
     message = options.path
         ? tr("The path keeps its last edge: pick another edge of the object first, or another "
              "object.")
@@ -1484,6 +1498,11 @@ void ReferenceField::assignPendingRecords(App::PropertyLinkBase* prop)
 void ReferenceField::replaceEntries(const std::vector<std::string>& subs)
 {
     write(subs);
+}
+
+void ReferenceField::clear()
+{
+    write(nullptr, {});
 }
 
 void ReferenceField::removeSelected()

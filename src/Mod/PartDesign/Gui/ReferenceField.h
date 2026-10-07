@@ -244,6 +244,8 @@ public:
     void assign(const std::vector<App::PropertyLinkSubList::SubSet>& sections);
     /// Writes \a subs (stored style) as one step of the field's undo (Add All Edges).
     void replaceEntries(const std::vector<std::string>& subs);
+    /// Empties the property as one step of the field's undo (an optional field's clear button).
+    void clear();
 
     /// Removes the selected entries.
     void removeSelected();

@@ -28,6 +28,7 @@
 #include <QMetaObject>
 
 
+#include <cstring>
 #include <memory>
 
 #include <QPointer>
@@ -37,6 +38,7 @@
 
 #include <App/Application.h>
 #include <App/DocumentObject.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Origin.h>
 #include <Base/Tools.h>
 #include <Gui/CommandT.h>
@@ -57,6 +59,7 @@
 
 #include "TaskPipeParameters.h"
 #include "TaskFeaturePick.h"
+#include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
 #include "Utils.h"
 
@@ -111,14 +114,101 @@ std::string sectionElement(App::DocumentObject* obj, const char* sub)
     return element;
 }
 
-bool isSection(PartDesign::Pipe* pipe, App::DocumentObject* obj)
+// An element's name, old style, in whichever form it is stored (`;g3;SKT.Edge3`, `Edge3`)
+std::string bareElement(const std::string& sub)
 {
-    const std::vector<App::DocumentObject*>& sections = pipe->Sections.getValues();
-    return std::ranges::find(sections, obj) != sections.end();
+    const char* element = Data::findElementName(sub.c_str());
+    return Data::oldElementName(element ? element : sub.c_str());
+}
+
+// Whether \a obj with \a element (empty: whole) is what \a linked and its \a used elements
+// already give the pipe: the object whole on both sides, or the same element. Other uses of one
+// object stay allowed, as in stock: a face of a solid as the profile and that solid's edges as
+// the path (PR 166 review, Medium 2)
+bool usedAlike(App::DocumentObject* obj,
+               const std::string& element,
+               App::DocumentObject* linked,
+               const std::vector<std::string>& used)
+{
+    if (!obj || obj != linked) {
+        return false;
+    }
+    std::vector<std::string> elements;
+    for (const std::string& sub : used) {
+        if (!sub.empty()) {
+            elements.push_back(bareElement(sub));
+        }
+    }
+    if (element.empty()) {
+        return elements.empty();
+    }
+    return std::ranges::find(elements, bareElement(element)) != elements.end();
+}
+
+// The profile or a section as the pipe takes it: a sketch whole unless a point
+std::vector<std::string> sectionElements(App::DocumentObject* obj, const std::vector<std::string>& subs)
+{
+    std::vector<std::string> elements;
+    for (const std::string& sub : subs) {
+        elements.push_back(sectionElement(obj, sub.c_str()));
+    }
+    return elements;
+}
+
+bool usedAsProfile(PartDesign::Pipe* pipe, App::DocumentObject* obj, const std::string& element)
+{
+    if (!pipe) {
+        return false;
+    }
+    App::DocumentObject* profile = pipe->Profile.getValue();
+    return usedAlike(obj, element, profile, sectionElements(profile, pipe->Profile.getSubValues()));
+}
+
+bool usedAsSection(PartDesign::Pipe* pipe, App::DocumentObject* obj, const std::string& element)
+{
+    if (!pipe) {
+        return false;
+    }
+    for (const auto& [section, subs] : pipe->Sections.getSubListValues()) {
+        if (usedAlike(obj, element, section, sectionElements(section, subs))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool usedAsPath(PartDesign::Pipe* pipe, App::DocumentObject* obj, const std::string& element)
+{
+    if (!pipe) {
+        return false;
+    }
+    if (usedAlike(obj, element, pipe->Spine.getValue(), pipe->Spine.getSubValues())) {
+        return true;
+    }
+    // The auxiliary path counts in Mode Auxiliary only: in another mode it is a leftover the pipe
+    // doesn't use
+    return std::strcmp(pipe->Mode.getValueAsString(), "Auxiliary") == 0
+        && usedAlike(obj,
+                     element,
+                     pipe->AuxiliarySpine.getValue(),
+                     pipe->AuxiliarySpine.getSubValues());
+}
+
+// The pipe takes a whole object as its profile or a section only when it is a sketch
+// (Pipe::execute; PR 166 review, Medium 1): a wire or a datum point whole would break it
+bool takesWhole(App::DocumentObject* obj, const char* sub, std::string& why)
+{
+    if (Base::Tools::isNullOrEmpty(sub) && !obj->isDerivedFrom<Part::Part2DObject>()) {
+        why = QT_TR_NOOP("A pipe takes a whole object only when it is a sketch: pick a point or a "
+                         "face of it.");
+        return false;
+    }
+    return true;
 }
 
 // A path: edges, or a whole object of edges or wires (a sketch, a wire), whose edges the pipe
-// joins into one wire (Pipe::buildPipePath); not the pipe's profile or one of its sections
+// joins into one wire (Pipe::buildPipePath); not what the pipe's profile or a section already
+// uses
 bool acceptPath(const App::DocumentObjectT& pipeT,
                 App::DocumentObject* obj,
                 const char* sub,
@@ -129,11 +219,12 @@ bool acceptPath(const App::DocumentObjectT& pipeT,
         return false;
     }
     auto pipe = freecad_cast<PartDesign::Pipe*>(pipeT.getObject());
-    if (pipe && obj == pipe->Profile.getValue()) {
+    const std::string element = Base::Tools::isNullOrEmpty(sub) ? std::string() : std::string(sub);
+    if (usedAsProfile(pipe, obj, element)) {
         why = QT_TR_NOOP("This is the pipe's profile: it can't be its path too.");
         return false;
     }
-    if (pipe && isSection(pipe, obj)) {
+    if (usedAsSection(pipe, obj, element)) {
         why = QT_TR_NOOP("This is a section of the pipe: it can't be its path too.");
         return false;
     }
@@ -233,15 +324,16 @@ void TaskPipeParameters::createFields()
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
             return false;
         }
-        if (!ReferenceActions::wholeObjectFits(obj, sub, why)) {
+        if (!takesWhole(obj, sub, why)) {
             return false;
         }
         auto pipe = freecad_cast<PartDesign::Pipe*>(pipeT.getObject());
-        if (pipe && (obj == pipe->Spine.getValue() || obj == pipe->AuxiliarySpine.getValue())) {
+        const std::string element = sectionElement(obj, sub);
+        if (usedAsPath(pipe, obj, element)) {
             why = QT_TR_NOOP("This is the pipe's path: it can't be its profile too.");
             return false;
         }
-        if (pipe && isSection(pipe, obj)) {
+        if (usedAsSection(pipe, obj, element)) {
             why = QT_TR_NOOP("This is a section of the pipe: the profile can't be one too.");
             return false;
         }
@@ -551,6 +643,11 @@ void TaskPipeOrientation::onOrientationChanged(int idx)
         pipe->Mode.setValue(idx);
         recomputeFeature();
     }
+    // Its page hides: an armed auxiliary path would take picks out of sight (PR 166 review). The
+    // constructor sets the mode before the field exists
+    if (idx != 3 && auxiliarySpineField) {
+        auxiliarySpineField->setArmed(false);
+    }
 }
 
 void TaskPipeOrientation::onReferenceSelectionTaken()
@@ -560,11 +657,9 @@ void TaskPipeOrientation::onReferenceSelectionTaken()
 
 void TaskPipeOrientation::onClearButton()
 {
+    // Through the field, as a step of its undo (PR 166 review); its writer recomputes (ops#170)
     auxiliarySpineField->setArmed(false);
-    if (auto pipe = getObject<PartDesign::Pipe>()) {
-        pipe->AuxiliarySpine.setValue(nullptr);
-        recomputeFeature();  // FreeCAD-CH (ops#170): as every other change in the panel
-    }
+    auxiliarySpineField->clear();
 }
 
 void TaskPipeOrientation::onCurvilinearChanged(bool checked)
@@ -671,15 +766,16 @@ void TaskPipeScaling::createSectionsField()
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
             return false;
         }
-        if (!ReferenceActions::wholeObjectFits(obj, sub, why)) {
+        if (!takesWhole(obj, sub, why)) {
             return false;
         }
         auto pipe = freecad_cast<PartDesign::Pipe*>(pipeT.getObject());
-        if (pipe && obj == pipe->Profile.getValue()) {
+        const std::string element = sectionElement(obj, sub);
+        if (usedAsProfile(pipe, obj, element)) {
             why = QT_TR_NOOP("This is the pipe's profile: it can't be a section too.");
             return false;
         }
-        if (pipe && (obj == pipe->Spine.getValue() || obj == pipe->AuxiliarySpine.getValue())) {
+        if (usedAsPath(pipe, obj, element)) {
             why = QT_TR_NOOP("This is the pipe's path: it can't be a section too.");
             return false;
         }
@@ -819,14 +915,21 @@ TaskDlgPipeParameters::~TaskDlgPipeParameters() = default;
 
 bool TaskDlgPipeParameters::accept()
 {
+    // As the base dialog's OK does first: no field or Re-pick takes a pick past this point
+    fieldGroup->disarm();
+    if (references) {
+        references->stopPick();
+    }
     if (!parameter->accept()) {
         return false;
     }
-    // What the edit showed goes back as it was, then the sections are hidden, as the loft's are
-    // (the user's answer to PR 163's review, Low 2; ops#150)
+    // What the edit showed goes back as it was, then the sections the pipe uses are hidden, as
+    // the loft's are (the user's answer to PR 163's review, Low 2; ops#150); a constant pipe's
+    // leftover sections stay as they were
     orientation->shown.restore();
     scaling->shown.restore();
-    if (auto pipe = getObject<PartDesign::Pipe>()) {
+    auto pipe = getObject<PartDesign::Pipe>();
+    if (pipe && pipe->Transformation.getValue() == 1) {
         for (App::DocumentObject* obj : pipe->Sections.getValues()) {
             Gui::cmdAppObjectHide(obj);
         }

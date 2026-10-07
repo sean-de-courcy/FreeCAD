@@ -79,9 +79,10 @@ public:
     static std::string elementType(const std::string& name);
     /// The element type of a stored sub: `Face` for `Pad.?Face3`, `Edge` for `;g3;SKT.Edge3`.
     static std::string subElementType(const std::string& sub);
-    /// A whole object picked (no \a sub) as a loft's or a pipe's profile or section: a sketch, or
-    /// a shape of wires or points (a datum point too). A solid, or a datum line or plane, gives
-    /// none whole: \a why says to pick one of its faces.
+    /// A whole object picked (no \a sub) as a loft's profile or section: a sketch, or a shape of
+    /// wires or points (a datum point too), which the loft takes whole (Loft::getSectionShape). A
+    /// solid, or a datum line or plane, gives none whole: \a why says to pick one of its faces.
+    /// A pipe takes a whole object only when it is a sketch (its own gate, PR 166 review).
     static bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why);
 };
 
