@@ -48,6 +48,7 @@
 #include <Base/Converter.h>
 
 #include "ui_TaskChamferParameters.h"
+#include "ReferenceField.h"
 #include "TaskChamferParameters.h"
 
 
@@ -68,16 +69,14 @@ TaskChamferParameters::TaskChamferParameters(ViewProviderDressUp* DressUpView, Q
     PartDesign::Chamfer* pcChamfer = DressUpView->getObject<PartDesign::Chamfer>();
 
     setUpUI(pcChamfer);
+    createBaseField(ui->baseFieldPlaceholder);
 
     bool useAllEdges = pcChamfer->UseAllEdges.getValue();
     ui->checkBoxUseAllEdges->setChecked(useAllEdges);
-    ui->buttonRefSel->setEnabled(!useAllEdges);
-    ui->listWidgetReferences->setEnabled(!useAllEdges);
-    QMetaObject::invokeMethod(ui->chamferSize, "setFocus", Qt::QueuedConnection);
-
-    std::vector<std::string> strings = pcChamfer->Base.getSubValues();
-    for (const auto& string : strings) {
-        ui->listWidgetReferences->addItem(QString::fromStdString(string));
+    baseField->setEnabled(!useAllEdges);
+    // A new chamfer's edges field takes the focus when the dialog opens (Q2)
+    if (!pcChamfer->Base.getSubValues().empty()) {
+        QMetaObject::invokeMethod(ui->chamferSize, "setFocus", Qt::QueuedConnection);
     }
 
     QMetaObject::connectSlotsByName(this);
@@ -93,36 +92,13 @@ TaskChamferParameters::TaskChamferParameters(ViewProviderDressUp* DressUpView, Q
             this, &TaskChamferParameters::onAngleChanged);
     connect(ui->flipDirection, &QCheckBox::toggled,
             this, &TaskChamferParameters::onFlipDirection);
-    connect(ui->buttonRefSel, &QToolButton::toggled,
-            this, &TaskChamferParameters::onButtonRefSel);
     connect(ui->checkBoxUseAllEdges, &QCheckBox::toggled,
             this, &TaskChamferParameters::onCheckBoxUseAllEdgesToggled);
-
-    // Create context menu
-    createDeleteAction(ui->listWidgetReferences);
-    connect(deleteAction, &QAction::triggered,
-            this, &TaskChamferParameters::onRefDeleted);
-
-    createAddAllEdgesAction(ui->listWidgetReferences);
-    connect(addAllEdgesAction, &QAction::triggered,
-            this, &TaskChamferParameters::onAddAllEdges);
-
-    connect(ui->listWidgetReferences, &QListWidget::currentItemChanged,
-            this, &TaskChamferParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemClicked,
-            this, &TaskChamferParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemDoubleClicked,
-            this, &TaskChamferParameters::doubleClicked);
     // clang-format on
 
+    createAddAllEdgesAction();
     setupGizmos(DressUpView);
-
-    if (strings.size() == 0) {
-        setSelectionMode(refSel);
-    }
-    else {
-        hideOnError();
-    }
+    hideOnError();
 }
 
 void TaskChamferParameters::setUpUI(PartDesign::Chamfer* pcChamfer)
@@ -169,12 +145,7 @@ void TaskChamferParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
     // executed when the user selected something in the CAD object
     // adds/deletes the selection accordingly
 
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == refSel) {
-            referenceSelected(msg, ui->listWidgetReferences);
-        }
-    }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
+    if (msg.Type == Gui::SelectionChanges::ClrSelection) {
         // TODO: the gizmo position should be only recalculated when the feature associated
         // with the gizmo is removed from the list
         setGizmoPositions();
@@ -188,28 +159,15 @@ void TaskChamferParameters::onCheckBoxUseAllEdgesToggled(bool checked)
             setSelectionMode(none);
         }
 
-        ui->buttonRefSel->setEnabled(!checked);
-        ui->listWidgetReferences->setEnabled(!checked);
+        baseField->setEnabled(!checked);
         chamfer->UseAllEdges.setValue(checked);
         chamfer->recomputeFeature();
     }
 }
 
-void TaskChamferParameters::setButtons(const selectionModes mode)
+void TaskChamferParameters::onBaseChanged()
 {
-    ui->buttonRefSel->setChecked(mode == refSel);
-    ui->buttonRefSel->setText(mode == refSel ? stopSelectionLabel() : startSelectionLabel());
-}
-
-void TaskChamferParameters::onRefDeleted()
-{
-    TaskDressUpParameters::deleteRef(ui->listWidgetReferences);
     setGizmoPositions();
-}
-
-void TaskChamferParameters::onAddAllEdges()
-{
-    TaskDressUpParameters::addAllEdges(ui->listWidgetReferences);
 }
 
 void TaskChamferParameters::onTypeChanged(int index)
@@ -304,7 +262,6 @@ TaskChamferParameters::~TaskChamferParameters()
 {
     try {
         Gui::Selection().clearSelection();
-        Gui::Selection().rmvSelectionGate();
     }
     catch (const Py::Exception&) {
         Base::PyException e;  // extract the Python error text
@@ -342,7 +299,7 @@ void TaskChamferParameters::apply()
     }
 
     // Alert user if he created an empty feature
-    if (ui->listWidgetReferences->count() == 0) {
+    if (getReferences().empty()) {
         Base::Console().warning(tr("Empty chamfer created!\n").toStdString().c_str());
     }
 }

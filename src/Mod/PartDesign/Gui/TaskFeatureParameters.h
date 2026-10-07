@@ -37,6 +37,8 @@ namespace PartDesignGui
 {
 
 class Ui_TaskPreviewParameters;
+class ReferenceField;
+class ReferenceFieldGroup;
 class TaskReferences;
 
 class TaskPreviewParameters: public Gui::TaskView::TaskBox
@@ -88,6 +90,12 @@ public:
     /// panel's own selection mode ends, so that it doesn't act on the panel's elements.
     virtual void onReferenceSelectionTaken()
     {}
+    /// The panel's reference fields (ops#150): the dialog keeps one of them armed at a time, and
+    /// its References panel leaves out what they show.
+    virtual std::vector<ReferenceField*> referenceFields() const
+    {
+        return {};
+    }
 
     void recomputeFeature();
 
@@ -170,6 +178,8 @@ public:
     bool accept() override;
     /// is called by the framework if the dialog is rejected (Cancel)
     bool reject() override;
+    /// The panels are in place: their reference fields join the group (ops#150).
+    void open() override;
 
     template<typename T = PartDesignGui::ViewProvider>
     T* getViewObject() const
@@ -200,6 +210,8 @@ protected:
     /// The feature's guessed, partly resolved or broken references, at the top; null if none
     /// (ops#127).
     PartDesignGui::TaskReferences* references = nullptr;
+    /// The panels' reference fields: one armed at a time (ops#150).
+    PartDesignGui::ReferenceFieldGroup* fieldGroup;
 
 private:
     /// Calls \a fn on each parameter panel.

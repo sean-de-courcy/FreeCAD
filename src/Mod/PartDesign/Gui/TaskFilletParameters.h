@@ -53,13 +53,11 @@ public:
 
 private Q_SLOTS:
     void onLengthChanged(double);
-    void onRefDeleted() override;
-    void onAddAllEdges();
+    void onBaseChanged() override;
     void onCheckBoxUseAllEdgesToggled(bool checked);
 
 protected:
     double getLength() const;
-    void setButtons(const selectionModes mode) override;
     void changeEvent(QEvent* e) override;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 

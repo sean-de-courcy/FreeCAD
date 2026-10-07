@@ -38,6 +38,7 @@
 
 #include "ui_TaskPreviewParameters.h"
 
+#include "ReferenceField.h"
 #include "TaskFeatureParameters.h"
 #include "TaskReferences.h"
 #include "TaskSketchBasedParameters.h"
@@ -188,6 +189,7 @@ void TaskFeatureParameters::recomputeFeature()
  *********************************************************************/
 TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* vp)
     : preview(new TaskPreviewParameters(vp))
+    , fieldGroup(new ReferenceFieldGroup(this))
     , vp(vp)
 {
     assert(vp);
@@ -208,6 +210,27 @@ TaskDlgFeatureParameters::TaskDlgFeatureParameters(PartDesignGui::ViewProvider* 
 
 TaskDlgFeatureParameters::~TaskDlgFeatureParameters() = default;
 
+void TaskDlgFeatureParameters::open()
+{
+    TaskDialog::open();
+    forEachParameters([this](TaskFeatureParameters* param) {
+        for (ReferenceField* field : param->referenceFields()) {
+            fieldGroup->addField(field);
+        }
+    });
+    fieldGroup->setPanels(Content);
+    // What the fields show stays in the fields; the panel shows only while something is left
+    // (3.5, Q3), and the rows of a field that is disabled come back to it
+    if (references) {
+        references->setHideWhenEmpty(true);
+        references->setCoveredProperties(fieldGroup->properties());
+        connect(fieldGroup, &ReferenceFieldGroup::propertiesChanged, references, [this]() {
+            references->setCoveredProperties(fieldGroup->properties());
+        });
+    }
+    fieldGroup->armFirstEmpty();
+}
+
 void TaskDlgFeatureParameters::referencesRepaired()
 {
     forEachParameters([](TaskFeatureParameters* param) { param->onReferencesRepaired(); });
@@ -215,6 +238,7 @@ void TaskDlgFeatureParameters::referencesRepaired()
 
 void TaskDlgFeatureParameters::referenceSelectionTaken()
 {
+    fieldGroup->disarm();
     forEachParameters([](TaskFeatureParameters* param) { param->onReferenceSelectionTaken(); });
 }
 
@@ -231,6 +255,7 @@ bool TaskDlgFeatureParameters::accept()
 {
     App::DocumentObject* feature = getObject();
     bool isUpdateBlocked = false;
+    fieldGroup->disarm();
     if (references) {
         references->stopPick();
     }
@@ -328,6 +353,7 @@ bool TaskDlgFeatureParameters::reject()
     // (at least in the body case)
     App::DocumentObject* previous = feature->getBaseObject(/* silent = */ true);
 
+    fieldGroup->disarm();
     if (references) {
         references->stopPick();
     }

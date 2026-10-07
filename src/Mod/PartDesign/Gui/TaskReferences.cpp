@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <sstream>
 
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -46,10 +45,9 @@
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProvider.h>
-#include <Mod/PartDesign/App/Body.h>
 
+#include "ReferenceActions.h"
 #include "TaskReferences.h"
-#include "ViewProviderBody.h"
 
 using namespace PartDesignGui;
 
@@ -68,45 +66,6 @@ enum Column
     OriginalColumn,
     EvidenceColumn,
 };
-
-// The element type of an element name: `Edge` for `Edge5` or `?Edge5`.
-std::string elementType(const std::string& name)
-{
-    std::string type;
-    for (char c : name) {
-        if (c == '?') {
-            continue;
-        }
-        if (c >= '0' && c <= '9') {
-            break;
-        }
-        type += c;
-    }
-    return type;
-}
-
-// The element type of a stored sub: `Face` for `Pad.?Face3`, `Edge` for `;g3;SKT.Edge3`.
-std::string subElementType(const std::string& sub)
-{
-    const char* element = Data::findElementName(sub.c_str());
-    return elementType(Data::oldElementName(element ? element : sub.c_str()));
-}
-
-// The element a row holds now, or empty if it is missing.
-std::string heldElement(const App::ReferenceRow& row)
-{
-    const char* element = Data::findElementName(row.sub.c_str());
-    if (!element || !element[0] || Data::hasMissingElement(element)) {
-        return {};
-    }
-    return element;
-}
-
-// A row with a record the user can still accept or reject.
-bool hasGuess(const App::ReferenceRow& row)
-{
-    return !row.guessKind.empty() && row.guessKind != "rejected";
-}
 
 QString stateText(const App::ReferenceRow& row)
 {
@@ -165,19 +124,6 @@ QString distanceText(double distance)
     return TaskReferences::tr("%1 mm from where it was").arg(distance, 0, 'g', 4);
 }
 
-// The Python string literal of an ASCII name.
-std::string quoted(const std::string& name)
-{
-    std::string text = "'";
-    for (char c : name) {
-        if (c == '\'' || c == '\\') {
-            text += '\\';
-        }
-        text += c;
-    }
-    return text + "'";
-}
-
 /// A re-pick's gate: elements of one type on one object.
 class PickGate: public Gui::SelectionGate
 {
@@ -200,7 +146,7 @@ public:
             notAllowedReason = QT_TR_NOOP("Pick an element of the reference's object.");
             return false;
         }
-        if (!sub || !sub[0] || (!type.empty() && elementType(sub) != type)) {
+        if (!sub || !sub[0] || (!type.empty() && ReferenceActions::elementType(sub) != type)) {
             notAllowedReason = QT_TR_NOOP("Pick an element of the reference's type.");
             return false;
         }
@@ -287,12 +233,21 @@ TaskReferences::~TaskReferences()
 {
     stopPick();
     clearHighlight();
-    restoreVisibility();
+    display.restore();
 }
 
 bool TaskReferences::hasRows(const App::DocumentObject* obj)
 {
     return obj && obj->isAttachedToDocument() && !App::referenceRows(obj).empty();
+}
+
+void TaskReferences::setCoveredProperties(std::set<std::string> properties)
+{
+    covered = std::move(properties);
+    // The highlight of a row the panel no longer lists goes with it
+    clearHighlight();
+    display.restore();
+    refresh();
 }
 
 void TaskReferences::refresh(bool highlightCurrent)
@@ -310,6 +265,10 @@ void TaskReferences::refresh(bool highlightCurrent)
 
     auto obj = owner.getObject();
     rows = obj ? App::referenceRows(obj) : std::vector<App::ReferenceRow> {};
+    // What the dialog's reference fields show stays there (ops#150, 3.5)
+    std::erase_if(rows, [this](const App::ReferenceRow& row) {
+        return covered.contains(row.property);
+    });
     rowObjects.clear();
     for (const auto& row : rows) {
         rowObjects.emplace_back(row.obj);
@@ -390,6 +349,10 @@ void TaskReferences::refresh(bool highlightCurrent)
     }
     header->setText(text);
     updateButtons();
+    // Back when a refresh (a document undo, a field disabled) lists rows again
+    if (hideWhenEmpty) {
+        setVisible(!rows.empty());
+    }
     if (highlightCurrent) {
         highlight(current);
     }
@@ -442,8 +405,7 @@ void TaskReferences::slotDeletedDocument(const App::Document& doc)
         rowObjects.clear();
         tree->clear();
         highlighted = App::SubObjectT();
-        shownTarget = App::DocumentObjectT();
-        hiddenFeature = App::DocumentObjectT();
+        display.forget();
         detachDocument();
         updateButtons();
     }
@@ -491,8 +453,8 @@ void TaskReferences::updateButtons()
     const QTreeWidgetItem* item = tree->currentItem();
     const App::ReferenceRow* row = rowOf(item);
     const bool isCandidate = item && item->parent();
-    const bool guess = row && hasGuess(*row);
-    buttonAccept->setEnabled(!picking && guess && !heldElement(*row).empty());
+    const bool guess = row && ReferenceActions::hasGuess(*row);
+    buttonAccept->setEnabled(!picking && guess && !ReferenceActions::heldElement(*row).empty());
     buttonUse->setEnabled(!picking && isCandidate && !item->data(ReferenceColumn, RejectedRole).toBool());
     buttonBroken->setEnabled(!picking && guess);
     buttonPick->setEnabled(row && targetOf(rowIndexOf(item)));
@@ -561,16 +523,16 @@ void TaskReferences::highlight(const QTreeWidgetItem* item)
     if (target) {
         element = item->parent()
             ? item->data(ReferenceColumn, CandidateRole).toString().toStdString()
-            : heldElement(rows[r]);
+            : ReferenceActions::heldElement(rows[r]);
     }
     changeSelection([&]() {
         Gui::Selection().clearSelection();
         highlighted = App::SubObjectT();
         if (!target) {
-            restoreVisibility();  // nothing left to show
+            display.restore();  // nothing left to show
             return;
         }
-        showTarget(target);
+        display.show(target);
         if (!element.empty()) {
             Gui::Selection().addSelection(
                 target->getDocument()->getName(),
@@ -601,46 +563,6 @@ void TaskReferences::clearHighlight()
     }
 }
 
-void TaskReferences::showTarget(App::DocumentObject* target)
-{
-    if (shownTarget.getObject() == target) {
-        return;
-    }
-    restoreVisibility();
-    Gui::ViewProvider* vp = Gui::Application::Instance->getViewProvider(target);
-    if (!vp || vp->isShow()) {
-        return;
-    }
-    // In a body only one solid shows: hide it while its predecessor is shown.
-    if (auto body = PartDesign::Body::findBodyOf(target)) {
-        auto bodyVp = Gui::Application::Instance->getViewProvider<ViewProviderBody>(body);
-        if (Gui::ViewProvider* shown = bodyVp ? bodyVp->getShownViewProvider() : nullptr) {
-            if (auto shownVp = freecad_cast<Gui::ViewProviderDocumentObject*>(shown)) {
-                hiddenFeature = shownVp->getObject();
-                shown->hide();
-            }
-        }
-    }
-    vp->show();
-    shownTarget = target;
-}
-
-void TaskReferences::restoreVisibility()
-{
-    if (auto target = shownTarget.getObject()) {
-        if (auto vp = Gui::Application::Instance->getViewProvider(target)) {
-            vp->hide();
-        }
-    }
-    if (auto feature = hiddenFeature.getObject()) {
-        if (auto vp = Gui::Application::Instance->getViewProvider(feature)) {
-            vp->show();
-        }
-    }
-    shownTarget = App::DocumentObjectT();
-    hiddenFeature = App::DocumentObjectT();
-}
-
 bool TaskReferences::run(const std::string& command)
 {
     auto obj = owner.getObject();
@@ -648,27 +570,10 @@ bool TaskReferences::run(const std::string& command)
         return false;
     }
     showMessage(QString(), false);
-    // In the caller's transaction; one of its own when there is none (a feature's dialog opened
-    // without one): Cancel undoes it either way.
-    App::Document* doc = obj->getDocument();
-    if (!doc->hasPendingTransaction() && doc->getBookedTransactionID() == App::NullTransaction) {
-        doc->openTransaction(QT_TRANSLATE_NOOP("Command", "Repair references"));
-    }
-    bool done = true;
-    try {
-        Gui::Command::runCommand(Gui::Command::Doc, command.c_str());
-    }
-    catch (const Base::Exception& e) {
-        showMessage(QString::fromUtf8(e.what()), true);
-        done = false;
-    }
-    if (done) {
-        try {
-            Gui::cmdAppDocument(obj->getDocument(), "recompute()");
-        }
-        catch (const Base::Exception& e) {
-            e.reportException();
-        }
+    QString error;
+    bool done = ReferenceActions::run(obj, command, &error);
+    if (!done && !error.isEmpty()) {
+        showMessage(error, true);
     }
     refresh();
     if (done) {
@@ -680,13 +585,10 @@ bool TaskReferences::run(const std::string& command)
 bool TaskReferences::acceptCurrent()
 {
     const App::ReferenceRow* row = rowOf(tree->currentItem());
-    if (!row || !hasGuess(*row)) {
+    if (!row || !ReferenceActions::hasGuess(*row)) {
         return false;
     }
-    std::ostringstream str;
-    str << "App.acceptReference(" << Gui::Command::getObjectCmd(owner.getObject()) << ", "
-        << quoted(row->property) << ", " << row->index << ")";
-    return run(str.str());
+    return run(ReferenceActions::acceptCommand(owner.getObject(), row->property, row->index));
 }
 
 bool TaskReferences::useCurrent()
@@ -697,22 +599,18 @@ bool TaskReferences::useCurrent()
         return false;
     }
     std::string candidate = item->data(ReferenceColumn, CandidateRole).toString().toStdString();
-    std::ostringstream str;
-    str << "App.repairReference(" << Gui::Command::getObjectCmd(owner.getObject()) << ", "
-        << quoted(row->property) << ", " << row->index << ", " << quoted(candidate) << ")";
-    return run(str.str());
+    return run(
+        ReferenceActions::useCommand(owner.getObject(), row->property, row->index, candidate)
+    );
 }
 
 bool TaskReferences::markCurrentBroken()
 {
     const App::ReferenceRow* row = rowOf(tree->currentItem());
-    if (!row || !hasGuess(*row)) {
+    if (!row || !ReferenceActions::hasGuess(*row)) {
         return false;
     }
-    std::ostringstream str;
-    str << "App.markReferenceBroken(" << Gui::Command::getObjectCmd(owner.getObject()) << ", "
-        << quoted(row->property) << ", " << row->index << ")";
-    return run(str.str());
+    return run(ReferenceActions::markBrokenCommand(owner.getObject(), row->property, row->index));
 }
 
 bool TaskReferences::startPick()
@@ -727,15 +625,15 @@ bool TaskReferences::startPick()
         buttonPick->setChecked(false);
         return false;
     }
-    std::string type = subElementType(row->originalIndex);
+    std::string type = ReferenceActions::subElementType(row->originalIndex);
     if (type.empty()) {
-        type = subElementType(row->sub);
+        type = ReferenceActions::subElementType(row->sub);
     }
     pickProperty = row->property;
     pickIndex = row->index;
     // Other selection modes of the dialog end first: they would remove this one's gate.
     changeSelection([this, target]() {
-        showTarget(target);
+        display.show(target);
         Gui::Selection().clearSelection();
         highlighted = App::SubObjectT();
     });
@@ -803,12 +701,10 @@ void TaskReferences::onSelectionChanged(const Gui::SelectionChanges& msg)
     int index = pickIndex;
     stopPick();
     highlighted = App::SubObjectT(picked, element.c_str());
-    std::ostringstream str;
-    str << "App.repairReference(" << Gui::Command::getObjectCmd(obj) << ", " << quoted(property)
-        << ", " << index << ", " << quoted(element) << ", True)";
+    std::string command = ReferenceActions::repickCommand(obj, property, index, element);
     // After this notification: selection changes made inside it (the highlight after the call)
     // reach the observers only once it is over, when the dialog's panels hear them again.
-    QTimer::singleShot(0, this, [this, command = str.str()]() { run(command); });
+    QTimer::singleShot(0, this, [this, command]() { run(command); });
 }
 
 /*********************************************************************

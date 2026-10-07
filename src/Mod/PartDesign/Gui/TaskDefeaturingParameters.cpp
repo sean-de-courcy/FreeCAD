@@ -46,57 +46,19 @@ TaskDefeaturingParameters::TaskDefeaturingParameters(ViewProviderDressUp* DressU
     ui->setupUi(proxy);
     this->groupLayout()->addWidget(proxy);
 
-    PartDesign::Defeaturing* pcDefeaturing = DressUpView->getObject<PartDesign::Defeaturing>();
-
-    std::vector<std::string> strings = pcDefeaturing->Base.getSubValues();
-    for (const auto& string : strings) {
-        ui->listWidgetReferences->addItem(QString::fromStdString(string));
-    }
-
-    // clang-format off
-    connect(ui->buttonRefSel, &QToolButton::toggled,
-            this, &TaskDefeaturingParameters::onButtonRefSel);
-
-    createDeleteAction(ui->listWidgetReferences);
-    connect(deleteAction, &QAction::triggered, this, &TaskDefeaturingParameters::onRefDeleted);
-
-    connect(ui->listWidgetReferences, &QListWidget::currentItemChanged,
-            this, &TaskDefeaturingParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemClicked,
-            this, &TaskDefeaturingParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemDoubleClicked,
-            this, &TaskDefeaturingParameters::doubleClicked);
-    // clang-format on
-
-    setSelectionMode(refSel);
+    createBaseField(ui->baseFieldPlaceholder);
     hideOnError();
 }
 
 void TaskDefeaturingParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == refSel) {
-            referenceSelected(msg, ui->listWidgetReferences);
-        }
-    }
-}
-
-void TaskDefeaturingParameters::setButtons(const selectionModes mode)
-{
-    ui->buttonRefSel->setChecked(mode == refSel);
-    ui->buttonRefSel->setText(mode == refSel ? stopSelectionLabel() : startSelectionLabel());
-}
-
-void TaskDefeaturingParameters::onRefDeleted()
-{
-    TaskDressUpParameters::deleteRef(ui->listWidgetReferences);
+    Q_UNUSED(msg)
 }
 
 TaskDefeaturingParameters::~TaskDefeaturingParameters()
 {
     try {
         Gui::Selection().clearSelection();
-        Gui::Selection().rmvSelectionGate();
     }
     catch (const Py::Exception&) {
         Base::PyException e;
@@ -114,7 +76,7 @@ void TaskDefeaturingParameters::changeEvent(QEvent* e)
 
 void TaskDefeaturingParameters::apply()
 {
-    if (ui->listWidgetReferences->count() == 0) {
+    if (getReferences().empty()) {
         std::string text = tr("Empty defeaturing created").toStdString();
         Base::Console().warning("%s\n", text.c_str());
     }

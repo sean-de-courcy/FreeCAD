@@ -149,23 +149,31 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         return feature
 
     def openList(self, feature):
-        """Opens the feature's dialog and clicks the list's first row, as a user would."""
+        """Opens the feature's dialog and clicks the first row of its reference field, as a user
+        would. The click arms the field (ops#150)."""
         Gui.getDocument(self.doc.Name).setEdit(feature.Name)
 
         def visibleLists():
+            # a closed dialog's field counts until its deferred delete (processEvents() leaves it)
+            QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
             return [
-                widget
-                for widget in Gui.getMainWindow().findChildren(
-                    QtWidgets.QListWidget, "listWidgetReferences"
-                )
-                if widget.isVisible()
+                widget.findChild(QtWidgets.QListWidget, "entries")
+                for widget in Gui.getMainWindow().findChildren(QtWidgets.QWidget)
+                if widget.metaObject().className() == "PartDesignGui::ReferenceField"
+                and widget.isVisible()
             ]
 
         # the first panel of a session takes longer to show (ops#164)
         self.assertTrue(waitFor(lambda: len(visibleLists()) == 1), "the dialog's reference list")
         self.assertTrue(Gui.Control.activeDialog(), "no dress-up dialog")
+        # the panel's queued focus on its value field lands first, and the last dialog's late
+        # switch back to the Model tab, which hides the task view off screen
+        pump(0.3)
+        Gui.Control.showTaskView()
+        pump(0.05)
         lists = visibleLists()
         refs = lists[0]
+        self.field = refs.parentWidget()
         self.assertEqual(self.rows(refs), EDGES)
         self.assertTrue(focus(refs), "the reference list doesn't take the focus")
         rect = refs.visualItemRect(refs.item(0))
@@ -175,11 +183,8 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
         pump(0.2)
         self.assertEqual(refs.currentRow(), 0)
         self.assertTrue(refs.hasFocus())
-        # the row's highlight: the edge, selected on the Body
-        self.assertEqual(
-            [(s.ObjectName, s.SubElementNames) for s in Gui.Selection.getSelectionEx(self.doc.Name)],
-            [("Body", ("Edge1",))],
-        )
+        # the row's highlight goes through the field's own colours, not the selection (ops#150)
+        self.assertEqual(Gui.Selection.getSelectionEx(self.doc.Name), [])
         return refs
 
     @staticmethod
@@ -312,10 +317,16 @@ class TestDressUpDeleteKeyGui(unittest.TestCase):
             self.assertIn(obj.Label, last)
 
     def testDeleteInViewKeepsBody(self):
-        """The row's highlight is selected and the focus is in the 3D view: the Body stays (it
-        was deleted, with everything in it)."""
+        """An edge of the Body is selected, as the row's highlight selected it before ops#150, and
+        the focus is in the 3D view: the Body stays (it was deleted, with everything in it)."""
         fillet = self.makeDressUp("PartDesign::Fillet", Radius=1)
         refs = self.openList(fillet)
+        self.field.setProperty("armed", False)  # its gate would refuse the Body
+        Gui.Selection.addSelection(self.doc.Name, "Body", "Edge1")
+        self.assertEqual(
+            [(s.ObjectName, s.SubElementNames) for s in Gui.Selection.getSelectionEx(self.doc.Name)],
+            [("Body", ("Edge1",))],
+        )
         undoCount = self.doc.UndoCount  # with the dialog's transaction
         warningsBefore = len(warnings())
         self.deleteInView()

@@ -23,6 +23,7 @@
 #pragma once
 
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,8 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
+
+#include "ReferenceActions.h"
 
 class QLabel;
 class QPushButton;
@@ -52,7 +55,8 @@ namespace PartDesignGui
  * transaction and recomputes the document.
  *
  * Shown on its own (TaskDlgReferences, the tree's "Repair references…") or at the top of the
- * feature's own task panel (TaskDlgFeatureParameters). Before it changes the selection, the
+ * feature's own task panel (TaskDlgFeatureParameters), where it leaves out the properties the
+ * dialog's reference fields show (ops#150). Before it changes the selection, the
  * dialog's selection modes end (selectionTaken()) and its other panels don't hear of the change.
  * It lists the rows again when the owner's links change or an object goes.
  */
@@ -68,6 +72,18 @@ public:
 
     /// Whether \a obj has a reference the panel would list.
     static bool hasRows(const App::DocumentObject* obj);
+    /// Leaves out the references of these properties: the dialog's fields show them.
+    void setCoveredProperties(std::set<std::string> properties);
+    /// The panel shows only while it lists a reference (a dialog with reference fields).
+    void setHideWhenEmpty(bool on)
+    {
+        hideWhenEmpty = on;
+    }
+    /// Whether the panel lists any reference now.
+    bool hasListedRows() const
+    {
+        return !rows.empty();
+    }
 
     /// Lists the owner's references again, keeping the current row where it still is, and
     /// highlights it if \a highlightCurrent.
@@ -121,8 +137,6 @@ private:
     void highlight(const QTreeWidgetItem* item);
     /// Removes the panel's highlight from the selection, if it is still there.
     void clearHighlight();
-    void showTarget(App::DocumentObject* target);
-    void restoreVisibility();
     /// Runs \a command (Python, on the App functions), recomputes, and lists the rows again.
     bool run(const std::string& command);
 
@@ -130,6 +144,9 @@ private:
     std::vector<App::ReferenceRow> rows;
     /// Each row's linked object, by name: rows[r].obj may be gone.
     std::vector<App::DocumentObjectT> rowObjects;
+    /// The properties the dialog's fields show.
+    std::set<std::string> covered;
+    bool hideWhenEmpty = false;
     bool refreshPending = false;
 
     QLabel* header = nullptr;
@@ -145,9 +162,8 @@ private:
     /// The reference a pick replaces.
     std::string pickProperty;
     int pickIndex = -1;
-    /// What showTarget() changed: the target it showed, and the feature it hid for it.
-    App::DocumentObjectT shownTarget;
-    App::DocumentObjectT hiddenFeature;
+    /// The target highlight() or a re-pick showed, and the feature it hid for it.
+    TargetDisplay display;
     /// The element highlight() selected.
     App::SubObjectT highlighted;
 };

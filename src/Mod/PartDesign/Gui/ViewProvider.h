@@ -101,6 +101,8 @@ protected:
     void setupContextMenu(QMenu* menu, QObject* receiver, const char* member) override;
     bool setEdit(int ModNum) override;
     void unsetEdit(int ModNum) override;
+    /// Esc in the 3D view with a reference field armed disarms it, and the edit stays (ops#150).
+    bool keyPressed(bool pressed, int key) override;
 
     void attachPreview() override;
     void updatePreview() override;

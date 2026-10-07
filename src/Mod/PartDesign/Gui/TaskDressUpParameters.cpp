@@ -25,11 +25,8 @@
 
 
 #include <QAction>
-#include <QApplication>
-#include <QKeyEvent>
-#include <QListWidget>
-#include <QListWidgetItem>
-#include <QTimer>
+#include <QLayout>
+#include <QWidget>
 
 
 #include <App/Application.h>
@@ -44,6 +41,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/Gui/ReferenceSelection.h>
 
+#include "ReferenceField.h"
 #include "TaskDressUpParameters.h"
 
 
@@ -63,7 +61,6 @@ TaskDressUpParameters::TaskDressUpParameters(
 )
     : TaskFeatureParameters(DressUpView, parent, DressUpView->featureIcon(), DressUpView->menuName)
     , proxy(nullptr)
-    , deleteAction(nullptr)
     , addAllEdgesAction(nullptr)
     , allowFaces(selectFaces)
     , allowEdges(selectEdges)
@@ -77,8 +74,10 @@ TaskDressUpParameters::TaskDressUpParameters(
 
 TaskDressUpParameters::~TaskDressUpParameters()
 {
-    // make sure to remove selection gate in all cases
-    Gui::Selection().rmvSelectionGate();
+    // The Base field removes its own gate; this one removes a plane or line pick's
+    if (selectionMode != none) {
+        Gui::Selection().rmvSelectionGate();
+    }
 }
 
 void TaskDressUpParameters::setupTransaction()
@@ -103,42 +102,75 @@ void TaskDressUpParameters::setupTransaction()
     transactionID = DressUpView->getObject()->getDocument()->openTransaction(n.c_str());
 }
 
-void TaskDressUpParameters::referenceSelected(const Gui::SelectionChanges& msg, QListWidget* widget)
+void TaskDressUpParameters::createBaseField(QWidget* placeholder)
 {
-    if (strcmp(msg.pDocName, DressUpView->getObject()->getDocument()->getName()) != 0) {
-        return;
+    ReferenceField::Options options;
+    options.flags.setFlag(AllowSelection::EDGE, allowEdges);
+    options.flags.setFlag(AllowSelection::FACE, allowFaces);
+    options.target = [this]() -> App::DocumentObject* {
+        return getBase();
+    };
+    if (allowEdges && allowFaces) {
+        options.kinds = tr("Edges, faces");
     }
-
-    Gui::Selection().clearSelection();
-
-    PartDesign::DressUp* pcDressUp = DressUpView->getObject<PartDesign::DressUp>();
-    App::DocumentObject* base = this->getBase();
-
-    // TODO: Must we make a copy here instead of assigning to const char* ?
-    const char* fname = base->getNameInDocument();
-    if (strcmp(msg.pObjectName, fname) != 0) {
-        return;
-    }
-
-    const std::string subName(msg.pSubName);
-    std::vector<std::string> refs = pcDressUp->Base.getSubValues();
-
-    if (const auto f = std::ranges::find(refs, subName); f != refs.end()) {
-        refs.erase(f);  // it's in the list. Remove it
-        removeItemFromListWidget(widget, msg.pSubName);
+    else if (allowFaces) {
+        options.kinds = tr("Faces");
     }
     else {
-        refs.push_back(subName);  // not yet in the list so we add it
-        widget->addItem(QString::fromStdString(msg.pSubName));
+        options.kinds = tr("Edges");
     }
+    auto write = [this](App::DocumentObject* /*target*/, const std::vector<std::string>& subs) {
+        if (ViewProviderDressUp* view = getDressUpView()) {
+            updateFeature(view->getObject<PartDesign::DressUp>(), subs);
+        }
+    };
+    baseField = new ReferenceField(getObject(), "Base", options, write, proxy);
+    if (QWidget* parent = placeholder->parentWidget(); parent && parent->layout()) {
+        delete parent->layout()->replaceWidget(placeholder, baseField);
+    }
+    placeholder->hide();
+    placeholder->deleteLater();
 
-    updateFeature(pcDressUp, refs);
+    // The panel's other pick modes end when the field arms: its gate replaces theirs
+    connect(baseField, &ReferenceField::arming, this, [this]() {
+        if (selectionMode != none) {
+            setSelectionMode(none);
+        }
+    });
+    connect(baseField, &ReferenceField::picked, this, [this]() { onBaseChanged(); });
 }
 
-void TaskDressUpParameters::addAllEdges(QListWidget* widget)
+void TaskDressUpParameters::createAddAllEdgesAction()
 {
-    Q_UNUSED(widget)
+    addAllEdgesAction = new QAction(tr("Add All Edges"), this);
+    addAllEdgesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
+    // display shortcut behind the context menu entry
+    addAllEdgesAction->setShortcutVisibleInContextMenu(true);
+    addAllEdgesAction->setShortcutContext(Qt::WidgetShortcut);
+    addAllEdgesAction->setStatusTip(tr("Adds all edges of the base to the list"));
+    connect(addAllEdgesAction, &QAction::triggered, this, [this]() { addAllEdges(); });
+    if (baseField) {
+        baseField->addMenuAction(addAllEdgesAction);
+    }
+}
 
+std::vector<ReferenceField*> TaskDressUpParameters::referenceFields() const
+{
+    if (!baseField) {
+        return {};
+    }
+    return {baseField};
+}
+
+void TaskDressUpParameters::disarmBaseField()
+{
+    if (baseField) {
+        baseField->setArmed(false);
+    }
+}
+
+void TaskDressUpParameters::addAllEdges()
+{
     if (DressUpView.expired()) {
         return;
     }
@@ -153,48 +185,34 @@ void TaskDressUpParameters::addAllEdges(QListWidget* widget)
                     Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
     )
                     .countSubShapes(TopAbs_EDGE);
-    auto subValues = pcDressUp->Base.getSubValues(false);
+    const auto oldStyle = pcDressUp->Base.getSubValues(false);
+    // The entries there stay as stored (their records with them); the missing edges follow
+    auto subValues = pcDressUp->Base.getSubValues();
     std::size_t len = subValues.size();
     for (int i = 0; i < count; ++i) {
         std::string name = "Edge" + std::to_string(i + 1);
-        if (std::find(subValues.begin(), subValues.begin() + len, name) == subValues.begin() + len) {
+        if (std::ranges::find(oldStyle, name) == oldStyle.end()) {
             subValues.push_back(name);
         }
     }
     if (subValues.size() == len) {
         return;
     }
+    // Through the field: one step of its undo, and the list shows them (B5)
+    if (baseField) {
+        baseField->replaceEntries(subValues);
+        return;
+    }
     try {
         setupTransaction();
         pcDressUp->Base.setValue(base, subValues);
+        pcDressUp->recomputeFeature();
+        hideOnError();
     }
     catch (Base::Exception& e) {
         e.reportException();
     }
-}
-
-void TaskDressUpParameters::deleteRef(QListWidget* widget)
-{
-    // delete any selections since the reference(s) being deleted might be highlighted
-    Gui::Selection().clearSelection();
-
-    // get the list of items to be deleted
-    QList<QListWidgetItem*> selectedList = widget->selectedItems();
-
-    PartDesign::DressUp* pcDressUp = DressUpView->getObject<PartDesign::DressUp>();
-    std::vector<std::string> refs = pcDressUp->Base.getSubValues();
-
-    // delete the selection backwards to assure the list index keeps valid for the deletion
-    QSignalBlocker block(widget);
-    for (int i = selectedList.count() - 1; i > -1; i--) {
-        // the ref index is the same as the listWidgetReferences index
-        // so we can erase using the row number of the element to be deleted
-        int rowNumber = widget->row(selectedList.at(i));
-        refs.erase(refs.begin() + rowNumber);
-        widget->model()->removeRow(rowNumber);
-    }
-
-    updateFeature(pcDressUp, refs);
+    onBaseChanged();
 }
 
 void TaskDressUpParameters::updateFeature(
@@ -202,208 +220,16 @@ void TaskDressUpParameters::updateFeature(
     const std::vector<std::string>& refs
 )
 {
-    if (selectionMode == refSel) {
-        DressUpView->highlightReferences(false);
-    }
-
     setupTransaction();
-    pcDressUp->Base.setValue(pcDressUp->Base.getValue(), refs);
-    pcDressUp->recomputeFeature();
-    if (selectionMode == refSel) {
-        DressUpView->highlightReferences(true);
+    // Through the field, the entries it keeps keep their guess and rejection records
+    if (baseField) {
+        baseField->assign(pcDressUp->Base.getValue(), refs);
     }
     else {
-        hideOnError();
+        pcDressUp->Base.setValue(pcDressUp->Base.getValue(), refs);
     }
-}
-
-void TaskDressUpParameters::onButtonRefSel(bool checked)
-{
-    setSelectionMode(checked ? refSel : none);
-}
-
-void TaskDressUpParameters::doubleClicked(QListWidgetItem* item)
-{
-    // executed when the user double-clicks on any item in the list
-    // shows the fillets as they are -> useful to switch out of selection mode
-
-    Q_UNUSED(item)
-    wasDoubleClicked = true;
-
-    // assure we are not in selection mode
-    setSelectionMode(none);
-
-    // enable next possible single-click event after double-click time passed
-    QTimer::singleShot(
-        QApplication::doubleClickInterval(),
-        this,
-        &TaskDressUpParameters::itemClickedTimeout
-    );
-}
-
-void TaskDressUpParameters::setSelection(QListWidgetItem* current)
-{
-    // executed when the user selected an item in the list (but double-clicked it)
-    // highlights the currently selected item
-
-    if (current == nullptr) {
-        setSelectionMode(none);
-        return;
-    }
-
-    if (!wasDoubleClicked) {
-        // we treat it as single-click event once the QApplication double-click time is passed
-        QTimer::singleShot(
-            QApplication::doubleClickInterval(),
-            this,
-            &TaskDressUpParameters::itemClickedTimeout
-        );
-
-        // name of the item
-        std::string subName = current->text().toStdString();
-        // get the document name
-        std::string docName = DressUpView->getObject()->getDocument()->getName();
-        // get the name of the body we are in
-        Part::BodyBase* body = PartDesign::Body::findBodyOf(DressUpView->getObject());
-        if (body) {
-            std::string objName = body->getNameInDocument();
-
-            // Enter selection mode
-            if (selectionMode == none) {
-                setSelectionMode(refSel);
-            }
-            else {
-                Gui::Selection().clearSelection();
-            }
-
-            // highlight the selected item
-            bool block = this->blockSelection(true);
-            tryAddSelection(docName, objName, subName);
-            this->blockSelection(block);
-        }
-    }
-}
-
-void TaskDressUpParameters::tryAddSelection(
-    const std::string& doc,
-    const std::string& obj,
-    const std::string& sub
-)
-{
-    try {
-        Gui::Selection().addSelection(doc.c_str(), obj.c_str(), sub.c_str(), 0, 0, 0);
-    }
-    catch (const Base::Exception& e) {
-        e.reportException();
-    }
-    catch (const Standard_Failure& e) {
-        Base::Console().error("OCC error: %s\n", e.GetMessageString());
-    }
-}
-
-QString TaskDressUpParameters::startSelectionLabel()
-{
-    return tr("Select");
-}
-
-QString TaskDressUpParameters::stopSelectionLabel()
-{
-    return tr("Confirm Selection");
-}
-
-void TaskDressUpParameters::itemClickedTimeout()
-{
-    // executed after double-click time passed
-    wasDoubleClicked = false;
-}
-
-void TaskDressUpParameters::createAddAllEdgesAction(QListWidget* parentList)
-{
-    // creates a context menu, a shortcut for it and connects it to a slot function
-
-    addAllEdgesAction = new QAction(tr("Add All Edges"), this);
-    addAllEdgesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")));
-    // display shortcut behind the context menu entry
-    addAllEdgesAction->setShortcutVisibleInContextMenu(true);
-    parentList->addAction(addAllEdgesAction);
-    addAllEdgesAction->setStatusTip(
-        tr("Adds all edges to the list box (only when in add selection mode)")
-    );
-    parentList->setContextMenuPolicy(Qt::ActionsContextMenu);
-}
-
-void TaskDressUpParameters::createDeleteAction(QListWidget* parentList)
-{
-    // creates a context menu, a shortcut for it and connects it to a slot function
-
-    deleteAction = new QAction(tr("Remove"), this);
-    deleteAction->setShortcut(Gui::QtTools::deleteKeySequence());
-    // only in the list: elsewhere in the window the key is Std_Delete's, not an ambiguous match
-    // between the two (ops#143)
-    deleteAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
-
-    // display shortcut behind the context menu entry
-    deleteAction->setShortcutVisibleInContextMenu(true);
-    parentList->addAction(deleteAction);
-    parentList->setContextMenuPolicy(Qt::ActionsContextMenu);
-    parentList->installEventFilter(this);
-}
-
-bool TaskDressUpParameters::event(QEvent* event)
-{
-    if (event->type() == QEvent::ShortcutOverride) {
-        QKeyEvent* kevent = static_cast<QKeyEvent*>(event);  // NOLINT
-        if (deleteAction && Gui::QtTools::matches(kevent, deleteAction->shortcut())) {
-            kevent->accept();
-            return true;
-        }
-        if (addAllEdgesAction && Gui::QtTools::matches(kevent, addAllEdgesAction->shortcut())) {
-            kevent->accept();
-            return true;
-        }
-    }
-
-    return TaskBox::event(event);
-}
-
-bool TaskDressUpParameters::eventFilter(QObject* watched, QEvent* event)
-{
-    if (event->type() == QEvent::KeyPress) {
-        auto* listWidget = qobject_cast<QListWidget*>(watched);
-        auto* keyEvent = static_cast<QKeyEvent*>(event);  // NOLINT
-        if (listWidget) {
-            const Qt::KeyboardModifiers ignoredModifiers = Qt::ShiftModifier | Qt::KeypadModifier;
-            if ((keyEvent->modifiers() & ~ignoredModifiers) == Qt::NoModifier
-                && (keyEvent->key() == Qt::Key_Down || keyEvent->key() == Qt::Key_Up)) {
-                const int row = listWidget->currentRow();
-                const int last = listWidget->count() - 1;
-                if (row >= 0
-                    && ((keyEvent->key() == Qt::Key_Down && row >= last)
-                        || (keyEvent->key() == Qt::Key_Up && row <= 0))) {
-                    keyEvent->accept();
-                    return true;
-                }
-            }
-        }
-    }
-
-    return TaskFeatureParameters::eventFilter(watched, event);
-}
-
-void TaskDressUpParameters::keyPressEvent(QKeyEvent* ke)
-{
-    if (deleteAction && deleteAction->isEnabled()
-        && Gui::QtTools::matches(ke, deleteAction->shortcut())) {
-        deleteAction->trigger();
-        return;
-    }
-    if (addAllEdgesAction && addAllEdgesAction->isEnabled()
-        && Gui::QtTools::matches(ke, addAllEdgesAction->shortcut())) {
-        addAllEdgesAction->trigger();
-        return;
-    }
-
-    TaskBox::keyPressEvent(ke);
+    pcDressUp->recomputeFeature();
+    hideOnError();
 }
 
 const std::vector<std::string> TaskDressUpParameters::getReferences() const
@@ -411,18 +237,6 @@ const std::vector<std::string> TaskDressUpParameters::getReferences() const
     PartDesign::DressUp* pcDressUp = DressUpView->getObject<PartDesign::DressUp>();
     std::vector<std::string> result = pcDressUp->Base.getSubValues();
     return result;
-}
-
-// TODO: This code is identical with TaskTransformedParameters::removeItemFromListWidget()
-void TaskDressUpParameters::removeItemFromListWidget(QListWidget* widget, const char* itemstr)
-{
-    QList<QListWidgetItem*> items = widget->findItems(QString::fromLatin1(itemstr), Qt::MatchExactly);
-    if (!items.empty()) {
-        for (auto item : items) {
-            QListWidgetItem* it = widget->takeItem(widget->row(item));
-            delete it;
-        }
-    }
 }
 
 void TaskDressUpParameters::hideOnError()
@@ -455,61 +269,31 @@ void TaskDressUpParameters::setSelectionMode(selectionModes mode)
     if (DressUpView.expired()) {
         return;
     }
-
+    // A value edit or another pick mode ends the field's picking too (B3)
+    disarmBaseField();
+    const bool wasPicking = selectionMode != none;
     selectionMode = mode;
     setButtons(mode);
-
-    if (mode == none) {
-        // remove any highlights and selections
+    // Its gate goes with it (B3, B4); the Base field's stays
+    if (mode == none && wasPicking) {
         DressUpView->highlightReferences(false);
-
-        if (previouslyShownViewProvider != nullptr) {
-            // restore the previously shown view provider
-            previouslyShownViewProvider->show();
-            previouslyShownViewProvider = nullptr;
-        }
+        Gui::Selection().rmvSelectionGate();
     }
-    else {
-        DressUpView->highlightReferences(true);
-
-        // selection must come from the previous feature, we also need to remember the currently
-        // shown so we can restore it later
-        previouslyShownViewProvider = DressUpView->getBodyViewProvider()->getShownViewProvider();
-        DressUpView->showPreviousFeature(true);
-    }
-    setSelectionGate();
     Gui::Selection().clearSelection();
 }
+
 void TaskDressUpParameters::onReferencesRepaired()
 {
-    auto list = findChild<QListWidget*>(QStringLiteral("listWidgetReferences"));
-    if (!list) {
-        return;
-    }
-    QSignalBlocker block(list);
-    list->clear();
-    for (const auto& ref : getReferences()) {
-        list->addItem(QString::fromStdString(ref));
+    if (baseField) {
+        baseField->reload();
     }
 }
 
 void TaskDressUpParameters::onReferenceSelectionTaken()
 {
+    disarmBaseField();
     if (selectionMode != none) {
         setSelectionMode(none);
-    }
-}
-
-void TaskDressUpParameters::setSelectionGate()
-{
-    if (selectionMode == none) {
-        Gui::Selection().rmvSelectionGate();
-    }
-    else {
-        AllowSelectionFlags allow;
-        allow.setFlag(AllowSelection::EDGE, allowEdges);
-        allow.setFlag(AllowSelection::FACE, allowFaces);
-        Gui::Selection().addSelectionGate(new ReferenceSelection(this->getBase(), allow));
     }
 }
 

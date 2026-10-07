@@ -15,28 +15,7 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
-    <widget class="QToolButton" name="buttonRefSel">
-     <property name="toolTip">
-      <string>Toggles between selection and preview mode</string>
-     </property>
-     <property name="text">
-      <string>Select</string>
-     </property>
-     <property name="checkable">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QListWidget" name="listWidgetReferences">
-     <property name="toolTip">
-      <string>- select an item to highlight it
-- double-click on an item to see the drafts</string>
-     </property>
-     <property name="selectionMode">
-      <enum>QAbstractItemView::ExtendedSelection</enum>
-     </property>
-    </widget>
+    <widget class="QWidget" name="baseFieldPlaceholder"/>
    </item>
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout_2">
@@ -113,9 +92,7 @@
     </widget>
    </item>
   </layout>
-  <zorder>buttonRefSel</zorder>
   <zorder>checkReverse</zorder>
-  <zorder>listWidgetReferences</zorder>
  </widget>
  <customwidgets>
   <customwidget>
@@ -125,8 +102,6 @@
   </customwidget>
  </customwidgets>
  <tabstops>
-  <tabstop>buttonRefSel</tabstop>
-  <tabstop>listWidgetReferences</tabstop>
   <tabstop>draftAngle</tabstop>
   <tabstop>buttonPlane</tabstop>
   <tabstop>linePlane</tabstop>

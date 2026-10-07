@@ -166,7 +166,8 @@ names it.
 | `fix/158-parked-target-id` | fix | ops#158 | - | `integration` `8361a07aaf` | `640c4fba6b` (fork PR 135), 2026-10-07 | never (fork feature) |
 | `fix/166-parked-marking-nits` | fix | ops#166 | - | `integration` `0883f369ce` | `699c57a8cc` (fork PR 136), 2026-10-07 | never (fork feature) |
 | `fix/165-rt-target-id` | fix | ops#165 | - | fork PR 135 `5c70af9d49` | `5071d55b23` (fork PR 138), 2026-10-07 | never (fork feature) |
-| `feat/145-dimension-in-place` | feat | ops#145 | - | `integration` `640c4fba6b` | (fork PR 139) | never (fork feature). Changes upstream behaviour: opening a sketch no longer turns or fits the view by default (`OrientViewOnEdit`), a new dimension's value is typed at its label and Esc keeps the measured value (`DimensionValueInPlace`), the Dimension tool asks in placement order. Outside Sketcher: `Part/Gui/ViewProviderGridExtension.cpp` (grid guards). Upstream edits to `EditDatumDialog::exec` and `ViewProviderSketch::setEditViewer` will conflict |
+| `feat/145-dimension-in-place` | feat | ops#145 | - | `integration` `640c4fba6b` | `4bcf3a3e1d` (fork PR 139), 2026-10-07 | never (fork feature). Changes upstream behaviour: opening a sketch no longer turns or fits the view by default (`OrientViewOnEdit`), a new dimension's value is typed at its label and Esc keeps the measured value (`DimensionValueInPlace`), the Dimension tool asks in placement order. Outside Sketcher: `Part/Gui/ViewProviderGridExtension.cpp` (grid guards). Upstream edits to `EditDatumDialog::exec` and `ViewProviderSketch::setEditViewer` will conflict |
+| `feat/150-w1-reference-field` | feat | ops#150 | - | `integration` `640c4fba6b` | (fork PR 140) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

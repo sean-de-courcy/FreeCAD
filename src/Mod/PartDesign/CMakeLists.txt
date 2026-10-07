@@ -85,6 +85,7 @@ if(BUILD_GUI)
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestExpressionFieldsGui.py
         PartDesignTests/TestDressUpDeleteKeyGui.py
+        PartDesignTests/TestReferenceFieldGui.py
     )
 endif(BUILD_GUI)
 
