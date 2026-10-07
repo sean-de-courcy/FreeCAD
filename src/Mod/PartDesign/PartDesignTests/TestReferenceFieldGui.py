@@ -46,6 +46,10 @@ Designed models, each built by the test:
   copy of each, 2 mm^3, all on the box's top and apart: linear along X, length 2 (copies at x 3);
   polar about Z, 360 degrees in 2 (at x -2); mirrored in the YZ plane (at x -2). The volume is
   1002 plus 1 per bump patterned.
+- Preview opacity (W5): the pad of padOnBox (a square on the box, 3 long); a pocket of the same
+  square, 3 deep; a fillet on the box's top front edge. The Preview box's slider sets the preview
+  shape's opacity, read back as its Coin node's transparency (1 - opacity); a pocket's tool shape
+  scales with it (the theme's 0.05 at the theme's 0.2, so 0.15 at 0.6).
 
 Keys go through the window (QTest's QWindow overload), so the shortcut map sees them as it sees a
 user's. Each arming test also has a twin that arms through the field's `armed` property, so that a
@@ -2348,3 +2352,101 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.doc.recompute()
         self.assertAlmostEqual(pattern.Shape.Volume, 1004, places=6)
+
+    # -- the preview's opacity (W5) -------------------------------------------------------------
+
+    def opacitySlider(self):
+        return Gui.getMainWindow().findChild(QtWidgets.QSlider, "opacitySlider")
+
+    def previewTransparencies(self, feature):
+        """The transparency of feature's preview shape, then of its other preview shapes (a
+        subtractive feature's tool) in scene order."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setType(coin.SoType.fromName("SoPreviewShape"))
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.setSearchingAll(True)
+        search.apply(feature.ViewObject.PreviewRootNode)
+        main = feature.ViewObject.PreviewShapeNode
+        others = [path.getTail() for path in search.getPaths()]
+        others = [node for node in others if node != main]
+        return [node.getField("transparency").getValue() for node in [main] + others]
+
+    def defaultOpacity(self):
+        """The preview parameters without a saved opacity (the theme's 0.2 applies), restored
+        after the test."""
+        params = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+        saved = params.GetInt("Opacity") if "Opacity" in params.GetInts() else None
+        params.RemInt("Opacity")
+
+        def restore():
+            if saved is None:
+                params.RemInt("Opacity")
+            else:
+                params.SetInt("Opacity", saved)
+
+        self.addCleanup(restore)
+        return params
+
+    def testPreviewOpacitySlider(self):
+        """W5 (Q7 a): the Preview box's slider starts at the theme's opacity (20 %); moved to 60 %
+        the pad's preview shape takes it at once (transparency 0.4) and the setting is saved; the
+        slider is off while the preview is; the next dialog opens with 60 %."""
+        params = self.defaultOpacity()
+        box, pad = self.padOnBox(toFace=False)
+        self.edit(pad, count=1)
+        slider = self.opacitySlider()
+        self.assertIsNotNone(slider, "the Preview box has no opacity slider")
+        self.assertEqual((slider.minimum(), slider.maximum(), slider.value()), (0, 100, 20))
+        self.assertAlmostEqual(self.previewTransparencies(pad)[0], 0.8, places=5)
+
+        slider.setValue(60)
+        pump(0.05)
+        self.assertAlmostEqual(self.previewTransparencies(pad)[0], 0.4, places=5)
+        self.assertEqual(params.GetInt("Opacity"), 60)
+
+        preview = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "showTransparentPreviewCheckBox")
+        preview.setChecked(False)
+        pump(0.05)
+        self.assertFalse(slider.isEnabled())
+        preview.setChecked(True)
+        pump(0.05)
+        self.assertTrue(slider.isEnabled())
+
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not fields()), "the dialog didn't close")
+        self.edit(pad, count=1)
+        self.assertEqual(self.opacitySlider().value(), 60)
+        self.assertAlmostEqual(self.previewTransparencies(pad)[0], 0.4, places=5)
+
+    def testPreviewOpacityPocketTool(self):
+        """W5: a pocket's tool shape scales with the slider: 0.05 at the theme's 20 %, 0.15 at
+        60 % (transparencies 0.95 and 0.85); its preview shape takes 60 % (0.4)."""
+        self.defaultOpacity()
+        self.box()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body, z=10)
+        pocket = models.pocket(self.body, square, 3)
+        self.doc.recompute()
+        self.assertAlmostEqual(pocket.Shape.Volume, 988, places=3)
+        self.edit(pocket, count=1)
+        transparencies = self.previewTransparencies(pocket)
+        self.assertEqual(len(transparencies), 2, "the pocket's preview has no tool shape")
+        self.assertAlmostEqual(transparencies[1], 0.95, places=5)
+
+        self.opacitySlider().setValue(60)
+        pump(0.05)
+        transparencies = self.previewTransparencies(pocket)
+        self.assertAlmostEqual(transparencies[0], 0.4, places=5)
+        self.assertAlmostEqual(transparencies[1], 0.85, places=5)
+
+    def testPreviewOpacityDressUp(self):
+        """W5: a fillet's preview (the dress-up's own opacity setting) takes the slider's 60 %."""
+        self.defaultOpacity()
+        box = self.box()
+        fillet = self.addFillet(box, TOP_FRONT.one(box.Shape))
+        self.edit(fillet, count=1)
+        self.assertAlmostEqual(self.previewTransparencies(fillet)[0], 0.8, places=5)
+        self.opacitySlider().setValue(60)
+        pump(0.05)
+        self.assertAlmostEqual(self.previewTransparencies(fillet)[0], 0.4, places=5)
