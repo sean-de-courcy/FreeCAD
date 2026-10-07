@@ -51,6 +51,7 @@
 #include <Gui/Selection/SelectionObject.h>
 #include <Gui/ViewProvider.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
+#include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "TaskSketcherElements.h"
@@ -264,6 +265,10 @@ public:
             auto size = listWidget()->iconSize();
 
             return QIcon(QPixmap(size));
+        }
+        // The delegate paints the label; give it to accessibility (and to tests) as well
+        if (role == Qt::AccessibleTextRole) {
+            return label;
         }
 
         return QListWidgetItem::data(role);
@@ -2129,11 +2134,6 @@ void TaskSketcherElements::slotElementsChanged()
     const std::vector<Part::Geometry*>& ext_vals =
         sketchView->getSketchObject()->getExternalGeometry();
 
-    const std::vector<App::DocumentObject*> linkobjs =
-        sketchView->getSketchObject()->ExternalGeometry.getValues();
-    const std::vector<std::string> linksubs =
-        sketchView->getSketchObject()->ExternalGeometry.getSubValues();
-
     int j = 1;
     for (std::vector<Part::Geometry*>::const_iterator it = ext_vals.begin(); it != ext_vals.end();
          ++it, ++i, ++j) {
@@ -2170,12 +2170,17 @@ void TaskSketcherElements::slotElementsChanged()
 
             QString linkname;
 
+            // A projection a reorder parked keeps its geometry without the link (ops#131): it
+            // names what it was projected from. Each geometry has its own reference; the links
+            // don't go one to one with the geometries (a face gives several, a parked one none).
+            const std::string parked =
+                Sketcher::parkedReference(*sketchView->getSketchObject(), -j);
+            const QString reference = parked.empty()
+                ? QString::fromStdString(sketchView->getSketchObject()->getGeometryReference(-j))
+                : tr("parked: %1").arg(QString::fromStdString(parked));
             if (isNamingBoxChecked) {
-                if (size_t(j - 3) < linkobjs.size() && size_t(j - 3) < linksubs.size()) {
-                    linkname = IdInformation(true)
-                        + QString::fromUtf8(linkobjs[j - 3]->getNameInDocument())
-                        + QStringLiteral(".") + QString::fromUtf8(linksubs[j - 3].c_str())
-                        + QStringLiteral(")");
+                if (!reference.isEmpty()) {
+                    linkname = IdInformation(true) + reference + QStringLiteral(")");
                 }
                 else {
                     linkname = IdInformation(false);
@@ -2225,6 +2230,9 @@ void TaskSketcherElements::slotElementsChanged()
                     : (isNamingBoxChecked ? (tr("Other") + linkname)
                                           : (QStringLiteral("%1-").arg(i - 2) + tr("Other"))),
                 sketchView);
+            if (!isNamingBoxChecked && !parked.empty()) {
+                itemN->label += QStringLiteral(" (%1)").arg(reference);
+            }
 
             ui->listWidgetElements->addItem(itemN);
 

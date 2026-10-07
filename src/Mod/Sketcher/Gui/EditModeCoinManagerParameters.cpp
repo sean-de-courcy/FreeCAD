@@ -83,6 +83,7 @@ SbColor DrawingParameters::SelectColor(0.0f, 171.0f / 255.0f, 1.0f);            
 SbColor DrawingParameters::PreselectSelectedColor(5.0f / 255.0f, 186.0f / 255.0f, 1.0f);    // #05BAFF -> (  5,186,255)
 SbColor DrawingParameters::CurveExternalColor(0.8f, 0.2f, 0.6f);                            // #CC3399 -> (204, 51,153)
 SbColor DrawingParameters::CurveExternalDefiningColor(0.8f, 0.2f, 0.6f);                    // #CC3399 -> (204, 51,153)
+SbColor DrawingParameters::CurveParkedExternalColor(0.6f, 0.48f, 0.56f);                    // #997A8F -> (153,122,143)
 SbColor DrawingParameters::CurveDraftColor(0.0f, 0.0f, 0.86f);                              // #0000DC -> (  0,  0,220)
 SbColor DrawingParameters::FullyConstraintConstructionElementColor(0.56f, 0.66f, 0.99f);    // #8FA9FD -> (143,169,253)
 // clang-format on

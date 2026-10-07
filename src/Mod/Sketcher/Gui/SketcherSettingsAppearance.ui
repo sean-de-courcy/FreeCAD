@@ -697,6 +697,39 @@
         </property>
        </widget>
       </item>
+      <item row="13" column="0">
+       <widget class="QLabel" name="labelParkedExternal">
+        <property name="text">
+         <string>Parked external geometry</string>
+        </property>
+       </widget>
+      </item>
+      <item row="13" column="1">
+       <widget class="Gui::PrefColorButton" name="ParkedExternalColor">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="toolTip">
+         <string>Color of external geometry whose link a reorder of the body set aside, in edit mode</string>
+        </property>
+        <property name="color" stdset="0">
+         <color>
+          <red>153</red>
+          <green>122</green>
+          <blue>143</blue>
+         </color>
+        </property>
+        <property name="prefEntry" stdset="0">
+         <cstring>ParkedExternalColor</cstring>
+        </property>
+        <property name="prefPath" stdset="0">
+         <cstring>View</cstring>
+        </property>
+       </widget>
+      </item>
       <item row="14" column="0">
        <widget class="QLabel" name="label_3">
         <property name="text">

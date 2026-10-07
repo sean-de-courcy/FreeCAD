@@ -77,6 +77,8 @@ SET(Features_SRCS
     Analyse.h
     PythonConverter.cpp
     PythonConverter.h
+    ParkedReference.cpp
+    ParkedReference.h
 )
 SOURCE_GROUP("Features" FILES ${Features_SRCS})
 
