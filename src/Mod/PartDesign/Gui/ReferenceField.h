@@ -164,11 +164,9 @@ public:
     {
         options.required = on;
     }
-    /// Whether the References panel leaves out the property's rows now.
-    bool coversProperty() const
-    {
-        return options.covers && isEnabled();
-    }
+    /// Whether the References panel leaves out the property's rows now: while the field is
+    /// enabled and shown in its panel (a field hidden with its mode or side shows nothing).
+    bool coversProperty() const;
     /// Takes \a placeholder's place in its parent's layout and deletes it (a `.ui` file's
     /// placeholder widget).
     void takePlaceOf(QWidget* placeholder);
@@ -215,6 +213,7 @@ Q_SIGNALS:
     void coverageChanged();
 
 protected:
+    bool event(QEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
     void changeEvent(QEvent* event) override;
 
@@ -224,6 +223,8 @@ private:
     void slotRecomputedObject(const App::DocumentObject& obj) override;
     void slotDeletedDocument(const App::Document& doc) override;
     void scheduleReload();
+    /// coverageChanged() once, after the event (a show or hide comes for each widget).
+    void scheduleCoverageChanged();
 
     App::DocumentObject* owner() const
     {
@@ -295,6 +296,7 @@ private:
     bool armed = false;
     bool busy = false;
     bool reloadPending = false;
+    bool coveragePending = false;
     Gui::SelectionGate* gate = nullptr;
     /// The slot a Re-pick replaces, or -1.
     int repickIndex = -1;
@@ -331,6 +333,8 @@ public:
     /// The properties the fields show: those of the enabled fields (a disabled field can't act on
     /// its entries, so the References panel lists them).
     std::set<std::string> properties() const;
+    /// One of the dialog's panels.
+    bool isPanel(const QWidget* widget) const;
 
     /// Arms the first empty required field (Q2), once the dialog shows.
     void armFirstEmpty();

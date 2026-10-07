@@ -751,7 +751,11 @@ void ReferenceField::pushUndo()
 
 void ReferenceField::write(const std::vector<std::string>& subs, bool undoable)
 {
-    write(target(), subs, undoable);
+    // The object the property links, which the writers pass back: a dress-up's Base can name
+    // the feature before the one its picks come from (BaseFeature after Body::insertObject), and
+    // the entries' records go along only with the same object
+    App::DocumentObject* linked = linkedObject();
+    write(linked ? linked : target(), subs, undoable);
 }
 
 void ReferenceField::write(App::DocumentObject* obj,
@@ -1340,6 +1344,52 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+bool ReferenceField::coversProperty() const
+{
+    if (!options.covers || !isEnabled()) {
+        return false;
+    }
+    // Hidden itself, or inside a hidden part of its panel (a mode's or a side's widgets); not
+    // whatever hides the whole panel (the task view behind another tab)
+    for (const QWidget* widget = this; widget && !widget->isWindow();
+         widget = widget->parentWidget()) {
+        if (group && group->isPanel(widget)) {
+            break;
+        }
+        if (widget->isHidden()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void ReferenceField::scheduleCoverageChanged()
+{
+    if (coveragePending) {
+        return;
+    }
+    coveragePending = true;
+    QTimer::singleShot(0, this, [this]() {
+        coveragePending = false;
+        Q_EMIT coverageChanged();
+    });
+}
+
+bool ReferenceField::event(QEvent* event)
+{
+    switch (event->type()) {
+        case QEvent::ShowToParent:
+        case QEvent::HideToParent:
+        case QEvent::Show:
+        case QEvent::Hide:
+            scheduleCoverageChanged();
+            break;
+        default:
+            break;
+    }
+    return QWidget::event(event);
+}
+
 void ReferenceField::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
@@ -1406,6 +1456,13 @@ std::vector<ReferenceField*> ReferenceFieldGroup::fields() const
         }
     }
     return result;
+}
+
+bool ReferenceFieldGroup::isPanel(const QWidget* widget) const
+{
+    return std::ranges::any_of(panels, [widget](const auto& panel) {
+        return panel.data() == widget;
+    });
 }
 
 std::set<std::string> ReferenceFieldGroup::properties() const

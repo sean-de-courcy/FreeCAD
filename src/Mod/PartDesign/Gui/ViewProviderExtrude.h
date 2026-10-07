@@ -38,8 +38,6 @@ class PartDesignGuiExport ViewProviderExtrude: public ViewProviderSketchBased
 public:
     ViewProviderExtrude() = default;
     ~ViewProviderExtrude() override = default;
-
-    void highlightShapeFaces(const std::vector<std::string>& faces);
 };
 
 

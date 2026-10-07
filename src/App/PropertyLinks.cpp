@@ -4715,6 +4715,10 @@ void PropertyLinkSubList::setElementRecords(std::vector<ElementRecords>&& record
     hasSetValue();
 }
 
+// Kept for the generic callers (the reference field's snapshot, ops#150): this property
+// doesn't keep `from`: nothing saves, restores or copies its _ExpandedFrom and the solver
+// gives it none (only PropertyLinkSub keeps it), so the getter gives empty names and what
+// the setter takes goes nowhere.
 std::vector<std::string> PropertyLinkSubList::getExpandedFroms() const
 {
     auto froms = _ExpandedFrom;
@@ -6624,6 +6628,10 @@ void PropertyXLink::setElementRecords(std::vector<ElementRecords>&& records)
     hasSetValue();
 }
 
+// Kept for the generic callers (the reference field's snapshot, ops#150): this property
+// doesn't keep `from`: nothing saves, restores or copies its _ExpandedFrom and the solver
+// gives it none (only PropertyLinkSub keeps it), so the getter gives empty names and what
+// the setter takes goes nowhere.
 std::vector<std::string> PropertyXLink::getExpandedFroms() const
 {
     auto froms = _ExpandedFrom;

@@ -260,7 +260,6 @@ void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
     side.faceField = createFaceField(facePlaceholder, first ? "UpToFace" : "UpToFace2", tr("Face"));
 
     // The up-to-shape: a whole shape; a pick of another one takes all its faces
-    App::PropertyLinkSubList* upToShape = side.UpToShape;
     QCheckBox* allFaces = side.checkBoxAllFaces;
     const char* shapeProperty = first ? "UpToShape" : "UpToShape2";
     ReferenceField::Options shape;
@@ -291,8 +290,13 @@ void TaskExtrudeParameters::createSideFields(SideController& side, Side which)
     // goes up to that then)
     ReferenceField::Options faces;
     faces.flags = AllowSelection::FACE;
-    faces.target = [this, upToShape]() -> App::DocumentObject* {
-        App::DocumentObject* obj = upToShape->getValue();
+    // Looked up each time: the feature can go while the panel is open (a script)
+    faces.target = [this, first]() -> App::DocumentObject* {
+        auto extrude = getObject<PartDesign::FeatureExtrude>();
+        if (!extrude) {
+            return nullptr;
+        }
+        App::DocumentObject* obj = (first ? extrude->UpToShape : extrude->UpToShape2).getValue();
         return obj ? obj : baseSolid();
     };
     faces.required = false;
