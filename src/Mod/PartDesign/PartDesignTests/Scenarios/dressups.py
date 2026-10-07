@@ -443,6 +443,54 @@ class DressUpInsertThenNotch(Scenario):
         doc.Profile.addGeometry(m.polyline([(8, 0), (8, 2), (12, 2), (12, 0), (20, 0)]), False)
 
 
+class ChamferTangentToHoleResized(Scenario):
+    """A block 0..20 x 0..20, 10 high; a hole through it at (10, 3), radius 2; a chamfer of size 1
+    on the block's top front edge, whose inner edge on the top face (y = 1) is tangent to the
+    hole; a sketch attached to the chamfer's top face. The hole's radius then goes 2 -> 1.5. OCCT's
+    chamfer is invalid at the tangency and the dress-up repairs it; the repair named every element
+    anew (`MAK`), so the sketch's reference to the top face went missing once the tangency went
+    away: V2 kept it by index, V2s broke it. Found by the randomized sequences (seed 290, gap 1,
+    ops#168). The repair now keeps the names of the elements it didn't change."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("sketch_top",)
+    KIND = "Chamfer"
+
+    def topFace(self):
+        return face("plane", normal=Z, through=(0, 0, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 20), body)
+        m.pad(body, profile, 10)
+        sketch = m.sketch(doc, "HoleSketch", [m.circle(10, 3, 2)], body, z=10)
+        hole = m.pocketThroughAll(body, sketch, "Hole")
+        doc.recompute()
+        dress = body.newObject("PartDesign::" + self.KIND, self.KIND)
+        dress.Base = (hole, self.names(hole, edge("line", direction=X, through=(0, 0, 10))))
+        if self.KIND == "Fillet":
+            dress.Radius = 1
+        else:
+            dress.Size = 1
+        doc.recompute()
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(dress, self.names(dress, self.topFace())[0])]
+        onTop.MapMode = "FlatFace"
+        self.ref("sketch_top", onTop, "AttachmentSupport", self.topFace, Attached())
+
+    def edit(self, doc):
+        geometry = doc.HoleSketch.Geometry
+        geometry[0].Radius = 1.5
+        doc.HoleSketch.Geometry = geometry
+
+
+class FilletTangentToHoleResized(ChamferTangentToHoleResized):
+    """As ChamferTangentToHoleResized, with a fillet of radius 1 (the same repair, ops#12)."""
+
+    KIND = "Fillet"
+
+
 # Missing faces (ops#60, ops#65): a draft or a defeaturing loses one of its faces. The feature
 # should fail, whatever the face's place in Base; it used to skip a missing face ("?Face3")
 # and stay valid without it.
