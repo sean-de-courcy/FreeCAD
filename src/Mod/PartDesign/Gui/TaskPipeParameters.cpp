@@ -46,7 +46,6 @@
 #include <Gui/Tools.h>
 #include <Gui/ViewProvider.h>
 #include <Gui/Widgets.h>
-#include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeaturePipe.h>
@@ -100,21 +99,6 @@ QString pipeScalingTitle(ViewProviderPipe* view)
                                    : TaskPipeScaling::tr("Additive Pipe Section Transformation");
 }
 
-// A whole object picked as a section or a profile (a tree pick): a sketch or a shape of wires or
-// points. A solid or a datum gives no section whole: one of its faces does (ops#150)
-bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
-{
-    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
-        return true;
-    }
-    if (obj->isDerivedFrom<Part::Datum>()
-        || Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
-               .hasSubShape(TopAbs_SOLID)) {
-        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
-        return false;
-    }
-    return true;
-}
 }  // namespace
 
 
@@ -1002,7 +986,7 @@ void TaskPipeScaling::createSectionsField()
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
             return false;
         }
-        if (!wholeObjectFits(obj, sub, why)) {
+        if (!ReferenceActions::wholeObjectFits(obj, sub, why)) {
             return false;
         }
         auto pipe = freecad_cast<PartDesign::Pipe*>(pipeT.getObject());

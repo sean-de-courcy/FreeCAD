@@ -2919,8 +2919,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testHelixAxisRow(self):
         """T25, B18: with the preview on and the profile sketch hidden, the helix's axis row armed
-        shows it (the stock pick left it hidden); the x = -1 line picked: 48 pi, the row disarmed and the
-        sketch hidden again; OK closes the dialog (B15's throw)."""
+        shows it (the stock pick left it hidden); the x = -1 line picked: 48 pi, the row disarmed
+        and the sketch hidden again; OK closes the dialog (B15's throw)."""
         self.helixPreview()
         sketch, helix = self.coil()
         self.edit(helix, count=0)
