@@ -1569,14 +1569,31 @@ DEF_STD_CMD_A(StdCmdDelete)
 namespace
 {
 // Std_Delete hands an object in edit its own selected sub-elements, for the Sketcher to delete
-// geometry. A PartDesign feature in edit deletes nothing that way (its onDelete does nothing in
-// edit, ops#143): its sub-elements take the general path, which keeps it and says so, and the
-// rest of the selection is still deleted (ops#160). Looked up by name: Gui doesn't link
-// PartDesignGui.
+// geometry. Part shapes, PartDesign features included, delete nothing that way: their onDelete is
+// about deleting the object itself (a PartDesign feature's does nothing in edit, ops#143). Their
+// sub-elements take the general path, which keeps the object and says so, and the rest of the
+// selection is still deleted (ops#160, ops#164). Looked up by name: Gui links neither PartGui nor
+// SketcherGui, whose sketch is a Part shape too.
 bool handsSubElementsToEdited(const ViewProviderDocumentObject* vpedit)
 {
-    const Base::Type partDesignFeature = Base::Type::fromName("PartDesignGui::ViewProvider");
-    return partDesignFeature.isBad() || !vpedit->isDerivedFrom(partDesignFeature);
+    const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+    if (!sketch.isBad() && vpedit->isDerivedFrom(sketch)) {
+        return true;
+    }
+    const Base::Type partShape = Base::Type::fromName("PartGui::ViewProviderPartExt");
+    return partShape.isBad() || !vpedit->isDerivedFrom(partShape);
+}
+
+void warnNotDeleted(const QStringList& editedLabels, const QStringList& keptLabels)
+{
+    if (keptLabels.isEmpty()) {
+        return;
+    }
+    const QString message
+        = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
+              .arg(editedLabels.join(QStringLiteral(", ")), keptLabels.join(QStringLiteral(", ")));
+    getMainWindow()->showStatus(MainWindow::Wrn, message);
+    Base::Console().warning("%s\n", message.toUtf8().constData());
 }
 }  // namespace
 
@@ -1671,12 +1688,29 @@ void StdCmdDelete::activated(int iMsg)
             vpedit->onDelete(subNames);
             docs.insert(edited->getDocument());
         }
-        // The rest of the selection goes the general way: it was skipped, silently (ops#164)
-        std::erase_if(sels, [&handed](const SelectionObject& sel) {
-            return std::ranges::any_of(handed, [&sel](const HandedToEdited& entry) {
-                return sel.getObject() == entry.obj;
-            });
-        });
+        // The hand-off is exclusive: the rest of the selection stays, e.g. a Pad clicked in the
+        // tree while a sketch is in edit (the Sketcher keeps tree clicks). It was skipped
+        // silently; now Std_Delete says so (ops#164)
+        if (!handed.empty()) {
+            QStringList editedLabels;
+            for (const auto& entry : handed) {
+                editedLabels << QString::fromUtf8(entry.obj->Label.getValue());
+            }
+            auto isHanded = [&handed](const App::DocumentObject* obj) {
+                return std::ranges::any_of(handed, [obj](const HandedToEdited& entry) {
+                    return entry.obj == obj;
+                });
+            };
+            QStringList keptLabels;
+            for (const auto& sel : sels) {
+                const App::DocumentObject* obj = sel.getObject();
+                if (obj && !isHanded(obj)) {
+                    keptLabels << QString::fromUtf8(obj->Label.getValue());
+                }
+            }
+            warnNotDeleted(editedLabels, keptLabels);
+            sels.clear();
+        }
 
         if (!sels.empty()) {
             std::set<QString> affectedLabels;
@@ -1733,17 +1767,14 @@ void StdCmdDelete::activated(int iMsg)
                 keptLabels << QString::fromUtf8(obj->Label.getValue());
                 return true;
             });
-            if (!keptLabels.isEmpty()) {
-                const QString message
-                    = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
-                          .arg(
-                              editedLabels.join(QStringLiteral(", ")),
-                              keptLabels.join(QStringLiteral(", "))
-                          );
-                getMainWindow()->showStatus(MainWindow::Wrn, message);
-                Base::Console().warning("%s\n", message.toUtf8().constData());
-            }
+            warnNotDeleted(editedLabels, keptLabels);
 
+            // A parent deleted too doesn't count as a dependency: it is looked up in sels, not in
+            // the live selection, which still holds the objects kept above (ops#164)
+            std::set<const App::DocumentObject*> deleting;
+            for (const auto& sel : sels) {
+                deleting.insert(sel.getObject());
+            }
             bool autoDeletion = true;
             bool forceDeletion = false;
             for (auto& sel : sels) {
@@ -1756,7 +1787,7 @@ void StdCmdDelete::activated(int iMsg)
                     continue;
                 }
                 for (auto parent : obj->getInList()) {
-                    if (!Selection().isSelected(parent)) {
+                    if (deleting.count(parent) == 0) {
                         ViewProvider* vp = Application::Instance->getViewProvider(parent);
                         if (vp && !vp->canDelete(obj)) {
                             autoDeletion = false;
