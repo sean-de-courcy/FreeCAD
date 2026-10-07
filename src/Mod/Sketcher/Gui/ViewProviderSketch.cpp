@@ -5025,13 +5025,18 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
     return PartGui::ViewProviderPart::onDelete(subList);
 }
 
-bool ViewProviderSketch::hasMissingExternalGeometry() const
+bool ViewProviderSketch::hasGeometryFlaggedMissing() const
 {
     const auto& externalGeometry = getSketchObject()->ExternalGeo.getValues();
     return std::ranges::any_of(externalGeometry, [](const Part::Geometry* geometry) {
         return ExternalGeometryFacade::getFacade(geometry)->testFlag(
             ExternalGeometryExtension::Missing);
-    }) || !brokenExternalLinks().isEmpty();
+    });
+}
+
+bool ViewProviderSketch::hasMissingExternalGeometry() const
+{
+    return hasGeometryFlaggedMissing() || !brokenExternalLinks().isEmpty();
 }
 
 // FreeCAD-CH (ops#144): a sketch whose external reference is gone fails before its external
@@ -5060,15 +5065,14 @@ QStringList ViewProviderSketch::brokenExternalLinks() const
 
 QString ViewProviderSketch::getToolTip() const
 {
-    if (!hasMissingExternalGeometry()) {
-        return {};
-    }
-    QString tip = tr("Missing external geometry");
+    // the links are walked once per hover (ops#161)
     const QStringList broken = brokenExternalLinks();
-    if (!broken.isEmpty()) {
-        tip += QStringLiteral(": ") + broken.join(QStringLiteral(", "));
+    if (broken.isEmpty()) {
+        return hasGeometryFlaggedMissing() ? tr("Missing external geometry") : QString();
     }
-    return tip;
+    // The names are the elements' old names: the source may have another Edge7 now (ops#161)
+    return tr("Missing external geometry, by old element name: %1")
+        .arg(broken.join(QStringLiteral(", ")));
 }
 
 QIcon ViewProviderSketch::mergeColorfulOverlayIcons(const QIcon& orig) const

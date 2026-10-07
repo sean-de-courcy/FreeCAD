@@ -20,6 +20,8 @@ from SketcherTests.TestSketchMissingExternal import add_lines, edge_between
 App = FreeCAD
 V = App.Vector
 FLAG = "Missing external geometry"
+# the elements by their old names: the source may have another Edge2 now (ops#161)
+BROKEN = FLAG + ", by old element name: "
 
 try:
     from PySide import QtWidgets
@@ -27,30 +29,40 @@ except ImportError:
     QtWidgets = None
 
 
-def treeToolTips(obj):
-    """The tooltips of obj's items in the tree views."""
+def treeToolTips(doc, obj):
+    """The tooltips of obj's items under doc's item in the tree views. Only doc's items: another
+    open document may hold objects with the same labels."""
     tips = []
     for tree in FreeCADGui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
         if tree.metaObject().className() != "Gui::TreeWidget":
             continue
-        it = QtWidgets.QTreeWidgetItemIterator(tree)
-        while it.value():
-            item = it.value()
-            if item.text(0) == obj.Label:
-                tips.append(item.toolTip(0))
-            it += 1
+        for i in range(tree.topLevelItemCount()):
+            docItem = tree.topLevelItem(i)
+            if docItem.text(0) != doc.Label:
+                continue
+            it = QtWidgets.QTreeWidgetItemIterator(docItem)
+            while it.value():
+                item = it.value()
+                if item is not docItem and item.text(0) == obj.Label:
+                    tips.append(item.toolTip(0))
+                it += 1
     return tips
 
 
 class TestSketchBrokenExternalTreeGui(SketcherGuiTestCase):
     def setUp(self):
         super().setUp()
+        if QtWidgets is None:
+            self.skipTest("needs PySide")
         self.doc = App.newDocument("TestSketchBrokenExternalTreeGui")
+        # the document's item is found by its label: the name is unique among open documents
+        self.doc.Label = self.doc.Name
 
     def flagOf(self, sketch):
         self.flush_gui(100)
-        tips = treeToolTips(sketch)
+        tips = treeToolTips(self.doc, sketch)
         self.assertTrue(tips, "no tree item for " + sketch.Label)
+        self.assertEqual(len(set(tips)), 1, "the sketch's tree items differ: " + repr(tips))
         return tips[0]
 
     def testMissingPadEdgeFlagged(self):
@@ -79,7 +91,7 @@ class TestSketchBrokenExternalTreeGui(SketcherGuiTestCase):
         add_lines(profile, [(20, 0), (25, 10), (20, 20)])
         self.doc.recompute()
         self.assertFalse(sketch.isValid())
-        self.assertEqual(self.flagOf(sketch), f"{FLAG}: Pad.{top}")
+        self.assertEqual(self.flagOf(sketch), f"{BROKEN}Pad.{top}")
 
     def testSourceToggledToConstructionFlagged(self):
         """Upstream issue 32102: Dest projects Source's second line (x = 10); toggling that line
@@ -99,7 +111,7 @@ class TestSketchBrokenExternalTreeGui(SketcherGuiTestCase):
         self.doc.recompute()
         self.assertEqual(len(source.Shape.Edges), 1)
         self.assertFalse(dest.isValid())
-        self.assertEqual(self.flagOf(dest), f"{FLAG}: Source.Edge2")
+        self.assertEqual(self.flagOf(dest), f"{BROKEN}Source.Edge2")
         # the flag goes when the link is repaired: the line is defining again
         source.toggleConstruction(1)
         self.doc.recompute()

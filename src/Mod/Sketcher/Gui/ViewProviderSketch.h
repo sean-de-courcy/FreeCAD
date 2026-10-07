@@ -836,7 +836,9 @@ protected:
     ) const override;
 
 private:
+    /// External geometry flagged Missing, or a broken external link
     bool hasMissingExternalGeometry() const;
+    bool hasGeometryFlaggedMissing() const;
     /// The external links whose element is gone, as "Label.Edge2" (FreeCAD-CH, ops#144)
     QStringList brokenExternalLinks() const;
 
