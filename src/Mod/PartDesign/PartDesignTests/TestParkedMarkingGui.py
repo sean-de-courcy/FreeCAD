@@ -43,6 +43,17 @@ def processEvents(seconds=0.0):
         time.sleep(0.01)
 
 
+def waitFor(condition, timeout=5.0):
+    """Pumps events until condition() holds, or the timeout passes (instead of fixed waits, which
+    pass for nothing on a slow machine)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if condition():
+            return True
+        processEvents(0.05)
+    return bool(condition())
+
+
 def rgb(packed):
     return tuple(((packed >> shift) & 0xFF) / 255.0 for shift in (24, 16, 8))
 
@@ -71,8 +82,7 @@ class TestParkedMarkingGui(unittest.TestCase):
 
     def tearDown(self):
         if Gui.ActiveDocument and Gui.ActiveDocument.getInEdit():
-            Gui.ActiveDocument.resetEdit()
-            processEvents(0.1)
+            self.close()
         for name in list(App.listDocuments()):
             if name.startswith("ParkedMarkingGui"):
                 App.closeDocument(name)
@@ -124,17 +134,25 @@ class TestParkedMarkingGui(unittest.TestCase):
 
     def edit(self, sketch):
         Gui.ActiveDocument.setEdit(sketch.Name)
-        processEvents(0.3)
+        self.assertTrue(
+            waitFor(lambda: self.elementsList() is not None and len(self.lineLabels()) == 1),
+            "the Elements list",
+        )
+        self.assertTrue(waitFor(lambda: self.colours("CurvesMaterials")), "the editor's scene")
 
     def close(self):
         Gui.ActiveDocument.resetEdit()
-        processEvents(0.1)
+        self.assertTrue(waitFor(lambda: not Gui.ActiveDocument.getInEdit()), "still in edit")
+
+    def elementsList(self):
+        return Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listWidgetElements")
 
     def lineLabels(self):
         """The Elements list's texts of the lines (the circle is the sketch's only other
         element)."""
-        widget = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listWidgetElements")
-        self.assertIsNotNone(widget, "the Elements list")
+        widget = self.elementsList()
+        if widget is None:
+            return []
         # The list's delegate paints each item's label, which the item gives as its accessible text
         role = QtCore.Qt.AccessibleTextRole
         texts = [widget.item(i).data(role) or "" for i in range(widget.count())]
@@ -163,9 +181,20 @@ class TestParkedMarkingGui(unittest.TestCase):
         want = rgb(packed)
         return sum(1 for c in colours if all(abs(a - b) < 1e-3 for a, b in zip(c, want)))
 
+    def marked(self):
+        """The colours of the projected line and its end points: parked, external."""
+        curves = self.colours("CurvesMaterials")
+        points = self.colours("PointsMaterials_")
+        return (
+            (self.count(curves, PARKED), self.count(curves, EXTERNAL)),
+            (self.count(points, PARKED), self.count(points, EXTERNAL)),
+        )
+
     def assertMarked(self, parked):
         """The projected line (two end points, nothing on them) in the parked colour, or in the
-        external one."""
+        external one; the editor redraws after events, so this waits for it."""
+        want = ((1, 0), (2, 0)) if parked else ((0, 1), (0, 2))
+        waitFor(lambda: self.marked() == want)
         curves = self.colours("CurvesMaterials")
         points = self.colours("PointsMaterials_")
         self.assertEqual(
@@ -177,12 +206,30 @@ class TestParkedMarkingGui(unittest.TestCase):
             (2, 0) if parked else (0, 2),
         )
 
+    def assertLabel(self, mark):
+        """The line's one label ends with mark, or, with mark None, has no parked mark."""
+
+        def shown():
+            labels = self.lineLabels()
+            if len(labels) != 1:
+                return False
+            return labels[0].endswith(mark) if mark else "parked" not in labels[0]
+
+        waitFor(shown)
+        labels = self.lineLabels()
+        self.assertEqual(len(labels), 1)
+        if mark:
+            self.assertTrue(labels[0].endswith(mark), labels[0])
+        else:
+            self.assertNotIn("parked", labels[0])
+
     def assertExtendedLabel(self, reference):
         """The line's one label, "Line(ExternalEdge1#ID-3, <reference>)", with "#VL<n>" after
         the ID when the sketch has several visual layers."""
+        pattern = r"Line\(ExternalEdge1#ID-3(#VL\d+)?, " + re.escape(reference) + r"\)"
+        waitFor(lambda: any(re.match("^" + pattern + "$", t) for t in self.lineLabels()))
         labels = self.lineLabels()
         self.assertEqual(len(labels), 1)
-        pattern = r"Line\(ExternalEdge1#ID-3(#VL\d+)?, " + re.escape(reference) + r"\)"
         self.assertRegex(labels[0], "^" + pattern + "$")
 
     # -- the tests ---------------------------------------------------------------------------------
@@ -245,3 +292,49 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.edit(sketch)
         self.assertTrue(self.lineLabels()[0].endswith(f" (parked: Pad2.{edge})"))
         self.assertMarked(parked=True)
+
+    def testParkedWhileTheEditorIsOpen(self):
+        """Parked, undone, redone and moved back with the sketch open in the editor: the colour
+        and the Elements list follow each step (the parked record is written after the geometry
+        has been drawn)."""
+        self.setParameter(ELEMENTS, "ExtendedNaming", False)
+        block, pad2, sketch, hole, edge = self.projecting()
+        self.doc.UndoMode = 1
+        self.edit(sketch)
+        self.assertLabel(None)
+        self.assertMarked(parked=False)
+        mark = f" (parked: Pad2.{edge})"
+
+        self.doc.openTransaction("Move")
+        self.park(hole)
+        self.doc.commitTransaction()
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertTrue(Gui.ActiveDocument.getInEdit())
+        self.assertLabel(mark)
+        self.assertMarked(parked=True)
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        self.assertTrue(Gui.ActiveDocument.getInEdit())
+        self.assertLabel(None)
+        self.assertMarked(parked=False)
+
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(sketch.ExternalGeometry, [])
+        self.assertTrue(Gui.ActiveDocument.getInEdit())
+        self.assertLabel(mark)
+        self.assertMarked(parked=True)
+
+        self.body.reorderObject([hole], pad2, True)
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIs(sketch.ExternalGeometry[0][0], pad2)
+        self.assertTrue(Gui.ActiveDocument.getInEdit())
+        self.assertLabel(None)
+        self.assertMarked(parked=False)
+        # What uses the sketch computes once the edit ends
+        self.close()
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())

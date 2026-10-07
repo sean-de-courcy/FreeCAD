@@ -46,6 +46,7 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QTextStream>
+#include <QTimer>
 #include <QToolTip>
 #include <QWindow>
 
@@ -57,6 +58,8 @@
 
 #include <fmt/format.h>
 
+#include <App/Application.h>
+#include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
@@ -81,6 +84,7 @@
 #include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
+#include <Mod/Sketcher/App/ParkedReference.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
 
@@ -126,6 +130,34 @@ bool isFiniteVector(const SbVec3f& vector)
 bool isFiniteVector(const Base::Vector3d& vector)
 {
     return std::isfinite(vector.x) && std::isfinite(vector.y) && std::isfinite(vector.z);
+}
+
+/// Redraws sketch in the editor once the current change is done. The record of its parked
+/// projections (ops#131) is written after the geometry it marks has been drawn, so the colours
+/// wait for it (ops#166). (Its removal comes with the projection's own redraw.)
+void redrawParked(const App::DocumentObject* sketch)
+{
+    if (!sketch || !sketch->isAttachedToDocument()) {
+        return;
+    }
+    std::string doc = sketch->getDocument()->getName();
+    std::string name = sketch->getNameInDocument();
+    QTimer::singleShot(0, [doc, name]() {
+        auto appDoc = App::GetApplication().getDocument(doc.c_str());
+        auto obj = appDoc ? appDoc->getObject(name.c_str()) : nullptr;
+        auto vp = obj ? freecad_cast<ViewProviderSketch*>(
+                      Gui::Application::Instance->getViewProvider(obj))
+                      : nullptr;
+        if (vp && vp->isInEditMode()) {
+            vp->draw(false, true);
+        }
+    });
+}
+
+bool isParkedRecord(const App::Property& prop)
+{
+    return prop.getName() && std::strcmp(prop.getName(), Sketcher::ParkedRecordProperty) == 0
+        && freecad_cast<Sketcher::SketchObject*>(prop.getContainer());
 }
 }  // namespace
 
@@ -3870,6 +3902,10 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
     if (prop != &getSketchObject()->Constraints) {
         signalElementsChanged();
     }
+
+    if (isInEditMode() && isParkedRecord(*prop)) {
+        redrawParked(getSketchObject());
+    }
 }
 
 void ViewProviderSketch::slotSolverUpdate()
@@ -4310,6 +4346,7 @@ bool ViewProviderSketch::setEdit(int ModNum)
     connectSolverUpdate = getSketchObject()
             ->signalSolverUpdate.connect(boost::bind(&ViewProviderSketch::slotSolverUpdate, this));
     //NOLINTEND
+
 
     // There are geometry extensions introduced by the solver and geometry extensions introduced by
     // the viewprovider.
