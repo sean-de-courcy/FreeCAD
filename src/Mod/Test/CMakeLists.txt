@@ -34,6 +34,7 @@ SET(Test_SRCS
     TestSelectionVisual.py
     TestCornerAxisCrossVisual.py
     TestViewProviderLink.py
+    TestVariables.py
 )
 
 SET(TestData_SRCS
