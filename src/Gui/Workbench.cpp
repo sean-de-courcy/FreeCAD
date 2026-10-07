@@ -932,6 +932,8 @@ DockWindowItems* StdWorkbench::setupDockWindows() const
     root->addDockWidget("Std_TaskView", Qt::RightDockWidgetArea, Gui::DockWindowOption::VisibleTabbed);
     root->addDockWidget("Std_ReportView", Qt::BottomDockWidgetArea, Gui::DockWindowOption::HiddenTabbed);
     root->addDockWidget("Std_PythonView", Qt::BottomDockWidgetArea, Gui::DockWindowOption::HiddenTabbed);
+    // FreeCAD-CH (ops#152): the Variables panel, hidden until opened from View > Panels
+    root->addDockWidget("Std_VariablesView", Qt::RightDockWidgetArea, Gui::DockWindowOption::Hidden);
 
     // Dagview through parameter.
     ParameterGrp::handle group = App::GetApplication()

@@ -18,6 +18,7 @@ SET(Test_SRCS
     GuiRecompute.py
     TestApp.py
     TestGui.py
+    TestVariablesPanelGui.py
     UnicodeTests.py
     UnitTests.py
     Workbench.py

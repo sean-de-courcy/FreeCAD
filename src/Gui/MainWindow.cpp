@@ -114,6 +114,7 @@
 #include "ToolBoxManager.h"
 #include "Utilities.h"
 #include "Tree.h"
+#include "VariablesView.h"  // FreeCAD-CH (ops#152)
 #include "WaitCursor.h"
 #include "WorkbenchManager.h"
 #include "Workbench.h"
@@ -700,12 +701,24 @@ void MainWindow::initDockWindows(bool show)
     updateDAGView(show);
 }
 
+// FreeCAD-CH (ops#152): the Variables panel (a function here, so MainWindow.h stays as it is)
+static void setupVariablesView(QWidget* parent, const std::string& hiddenDockWindows)
+{
+    if (hiddenDockWindows.find("Std_VariablesView") == std::string::npos) {
+        auto variablesView = new DockWnd::VariablesView(nullptr, parent);
+        variablesView->setObjectName(QStringLiteral("Variables"));
+        variablesView->setMinimumWidth(210);
+        DockWindowManager::instance()->registerDockWindow("Std_VariablesView", variablesView);
+    }
+}
+
 void MainWindow::setupDockWindows()
 {
     // Report view must be created before PythonConsole!
     setupReportView();
     setupPythonConsole();
     setupSelectionView();
+    setupVariablesView(this, d->hiddenDockWindows);  // FreeCAD-CH (ops#152)
     setupTaskView();
 
     initDockWindows(false);
