@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -209,11 +210,12 @@ bool runEdit(
 }
 
 /// Whether @a text, typed for an alias or a String or Bool variable, is meant as an expression:
-/// it starts with '=', uses `#name`, or names only things that exist. Any other text is stored as
-/// it is, so `steel` edited to `bronze` stays a text, not a reference to nothing.
+/// it starts with '=', or it parses and either uses `#name` or names only things that exist, more
+/// than a bare name or path. Any other text is stored as it is: `steel` edited to `bronze` stays a
+/// text, not a reference to nothing, and so do `Part #3` and a single word like `Label` (ops#188).
 bool isExpressionText(const App::DocumentObject* owner, const std::string& text)
 {
-    if (text.starts_with('=') || text.find('#') != std::string::npos) {
+    if (text.starts_with('=')) {
         return true;
     }
     std::shared_ptr<App::Expression> expr;
@@ -222,6 +224,12 @@ bool isExpressionText(const App::DocumentObject* owner, const std::string& text)
     }
     catch (const Base::Exception&) {
         return false;
+    }
+    if (text.find('#') != std::string::npos) {
+        return true;
+    }
+    if (freecad_cast<App::VariableExpression*>(expr.get())) {
+        return false;  // A bare name or path: `=Label` or `#Width` makes it a reference.
     }
     std::map<App::ObjectIdentifier, bool> ids;
     expr->getIdentifiers(ids);
@@ -572,7 +580,13 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
                         error = tr("%1 takes a whole number.").arg(QString::fromStdString(name));
                         return false;
                     }
-                    value << static_cast<long long>(number);
+                    // PropertyInteger holds a long; a cast from outside its range is undefined.
+                    if (number < static_cast<double>(std::numeric_limits<long>::min())
+                        || number >= static_cast<double>(std::numeric_limits<long>::max()) + 1.0) {
+                        error = tr("%1 is out of range.").arg(QString::fromStdString(name));
+                        return false;
+                    }
+                    value << static_cast<long>(number);
                 }
                 else {
                     value << quantity.getValue();

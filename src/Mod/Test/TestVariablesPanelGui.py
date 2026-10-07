@@ -422,6 +422,8 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual(doc.findObjects("App::VarSet"), [])
         self.assertEqual(doc.UndoCount, 0)
         self.assertEqual(self.rows(), {})
+        # Taken out by Undo, so Redo would bring the empty VarSet back (design note 3.6).
+        self.assertEqual(doc.RedoNames, ["Add variable"])
 
     def test_live_update(self):
         """G7. Python changes show at once: addProperty adds a row, setExpression updates the
@@ -581,7 +583,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual(self.varSet.Count, 3)
         self.assertEqual(self.text("VarSet", "Count", VALUE), "3")
         undoCount = doc.UndoCount
-        for bad in ("2.5", "3 mm"):
+        for bad in ("2.5", "3 mm", "1e30"):
             self.commit("VarSet", "Count", EXPRESSION, bad)
             self.assertEqual(self.varSet.Count, 3, bad)
             self.assertEqual(doc.UndoCount, undoCount, bad)
@@ -644,3 +646,51 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertEqual(self.model().rowCount(), 0, "the hidden panel rebuilt")
         self.showPanel()
         self.assertEqual(set(self.rows()), {("VarSet", "Width")})
+
+    # ops#188
+
+    def test_text_values_hash_and_words(self):
+        """Text with '#' that doesn't parse, a single word naming a property of the owner, and a
+        number or quantity are a String's or an alias's text; '=' makes a reference. A Bool's text
+        is trimmed."""
+        doc = self.standardDocument()
+        self.sheet.set("B1", "steel")
+        self.sheet.setAlias("B1", "Material")
+        self.varSet.addProperty("App::PropertyString", "Finish")
+        self.varSet.Finish = "matte"
+        self.varSet.addProperty("App::PropertyBool", "Hollow")
+        doc.recompute()
+
+        for text in ("Part #3", "Label", "Height", "12", "3 mm"):
+            self.commit("VarSet", "Finish", EXPRESSION, text)
+            self.assertEqual(self.varSet.Finish, text)
+            self.assertIsNone(expressionText(self.varSet, "Finish"), text)
+        self.commit("Sheet", "Material", EXPRESSION, "Part #3")
+        doc.recompute()
+        self.assertEqual(self.sheet.get("B1"), "Part #3")
+
+        # Set on the model: in the editor, Return would accept the completer's "Label".
+        self.assertTrue(self.model().setData(self.cell("VarSet", "Finish", EXPRESSION), "=Label"))
+        self.assertEqual(expressionText(self.varSet, "Finish"), "Label")
+
+        self.commit("VarSet", "Hollow", EXPRESSION, " True")
+        self.assertTrue(self.varSet.Hollow)
+
+    def test_collapsed_per_document(self):
+        """A header collapsed in one document stays collapsed there, and a header for an object
+        of the same name in another document is not collapsed."""
+        doc = self.standardDocument()
+        header = [h for h in self.headers() if self.model().data(h) == "VarSet"][0]
+        self.tree.setExpanded(header, False)
+        other = self.newDocument("TestVariablesPanelOther")
+        varSet = other.addObject("App::VarSet", "VarSet")
+        varSet.addProperty("App::PropertyLength", "Pitch")
+        Gui.setActiveDocument(other.Name)
+        pump(0.3)
+        self.assertEqual(set(self.rows()), {("VarSet", "Pitch")})
+        self.assertTrue(self.tree.isExpanded(self.headers()[0]))
+        Gui.setActiveDocument(doc.Name)
+        pump(0.3)
+        self.rows()
+        header = [h for h in self.headers() if self.model().data(h) == "VarSet"][0]
+        self.assertFalse(self.tree.isExpanded(header))
