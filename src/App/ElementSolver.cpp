@@ -174,6 +174,51 @@ std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
     return tags;
 }
 
+std::string NameAncestry::makerTag(std::string_view name)
+{
+    auto sections = splitSections(name);
+    if (sections.empty()) {
+        return {};
+    }
+    const auto& tag = decodeSection(sections.front()).iterationTag;
+    return tag == Data::EMPTY_VALUE ? std::string() : tag;
+}
+
+bool NameAncestry::hasLineageTag(std::string_view name, std::string_view tag)
+{
+    if (tag.empty() || tag == Data::EMPTY_VALUE) {
+        return false;
+    }
+    // A linked name is part of how the element was made, all of it: every section's tag and
+    // what each section links. Of the name itself only the first section counts (sourceTags()).
+    std::function<bool(std::string_view)> linked = [&](std::string_view part) {
+        for (const auto& section : splitSections(part)) {
+            const auto& decoded = decodeSection(section);
+            if (decoded.iterationTag == tag) {
+                return true;
+            }
+            for (const auto& embedded : decoded.linkedNames) {
+                if (!embedded.empty() && embedded != Data::EMPTY_VALUE && linked(embedded)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    auto sections = splitSections(name);
+    if (sections.empty()) {
+        return false;
+    }
+    const auto& first = decodeSection(sections.front());
+    if (first.iterationTag == tag) {
+        return true;
+    }
+    const auto& names = first.linkedNames;
+    return std::any_of(names.begin(), names.end(), [&](const auto& embedded) {
+        return !embedded.empty() && embedded != Data::EMPTY_VALUE && linked(embedded);
+    });
+}
+
 const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
 {
     if (_done[key]) {
@@ -2385,6 +2430,8 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::set<int> fromOverlap;
         std::set<int> fromNames;
         std::set<int> inAncestry;
+        // Tier 1's candidates that T1 dropped, made by another maker (ops#167): for the evidence.
+        std::vector<int> otherMaker;
         // The IDX source's elements, and whether they replaced the other candidates (tier 2
         // agreed with one of them at least).
         std::set<int> fromIndex;
@@ -2485,18 +2532,39 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 state.outcome.candidateDistances.push_back(distance);
             }
         };
-    // Whether one of \a element's names shares an innermost source with \a oldName (policy D).
-    auto sharesSource = [](const SolveInput::Element& element, const std::string& oldName) {
+    // What G2's pick \a element lacks, or nullptr: one of its names must share an innermost
+    // source with \a oldName (policy D) and, under sameMaker, have its maker in its lineage
+    // (G2', ops#167), since two holes' edges on the face both cut share that face's sketch as a
+    // source, but not their maker.
+    auto otherOrigin = [&input](const SolveInput::Element& element,
+                                const std::string& oldName) -> const char* {
         const auto old = NameAncestry::sourceTags(oldName);
-        if (old.empty()) {
-            return false;
-        }
-        return std::any_of(element.names.begin(), element.names.end(), [&](const auto& name) {
+        const auto& names = element.names;
+        const bool shared = std::any_of(names.begin(), names.end(), [&](const auto& name) {
             const auto tags = NameAncestry::sourceTags(name);
             return std::any_of(tags.begin(), tags.end(), [&](const auto& tag) {
                 return std::binary_search(old.begin(), old.end(), tag);
             });
         });
+        if (!shared) {
+            return "source";
+        }
+        const std::string maker = input.sameMaker ? NameAncestry::makerTag(oldName) : std::string();
+        if (!maker.empty() && std::none_of(names.begin(), names.end(), [&](const auto& name) {
+                return NameAncestry::hasLineageTag(name, maker);
+            })) {
+            return "maker";
+        }
+        return nullptr;
+    };
+    // Why structure didn't decide, when T1 dropped tier 1's candidates (ops#167).
+    auto otherMakerText = [](const GroupState& state) {
+        const auto n = state.otherMaker.size();
+        if (n == 0) {
+            return std::string();
+        }
+        return n == 1 ? std::string("; tier 1's 1 survivor has another maker")
+                      : "; tier 1's " + std::to_string(n) + " survivors have another maker";
     };
 
     MatchGraph graph;
@@ -2596,6 +2664,29 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         return NameAncestry::isPieceOf(n, oldName);
                     })) {
                     all.insert(static_cast<int>(k));
+                }
+            }
+        }
+        // T1 (ops#167): a candidate must come from the old element's maker. The overlap counts
+        // shared ancestry of any kind, so another hole's edge on the face both holes cut shares
+        // that face with the old edge as fully as a piece of the old edge would. A candidate in
+        // the old name's ancestry, or with the maker in its lineage (pieces, a redraw in the
+        // maker's own sketch, a later feature's modification), stays.
+        if (input.sameMaker) {
+            const std::string maker = NameAncestry::makerTag(oldName);
+            if (!maker.empty()) {
+                for (auto it = all.begin(); it != all.end();) {
+                    const auto& names = pool.elements[*it].names;
+                    if (state.inAncestry.count(*it)
+                        || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                               return NameAncestry::hasLineageTag(n, maker);
+                           })) {
+                        ++it;
+                    }
+                    else {
+                        state.otherMaker.push_back(*it);
+                        it = all.erase(it);
+                    }
                 }
             }
         }
@@ -2808,24 +2899,25 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     // (ops#127, N3 4.4): the pick must share an innermost source with the old
                     // name, as a line redrawn in its sketch does; an element of another source
                     // (a neighbour of a deleted feature, a new sketch object) is no guess, and
-                    // the reference breaks with the candidates by distance.
+                    // the reference breaks with the candidates by distance. G2' (ops#167): the
+                    // pick must also come from the old element's maker.
                     Nearest wide;
                     if (guessing && input.guessNoStructure) {
                         wide = wideNearestOf(agree);
                     }
                     std::string otherSource;
-                    if (wide.index >= 0 && !input.guessAnySource
-                        && !sharesSource(pool.elements[agree[wide.index]], oldName)) {
-                        otherSource = pool.elements[agree[wide.index]].index;
-                        wide = Nearest();
+                    if (wide.index >= 0 && !input.guessAnySource) {
+                        const auto& picked = pool.elements[agree[wide.index]];
+                        if (const char* lacks = otherOrigin(picked, oldName)) {
+                            otherSource = "; the wide reach's " + picked.index + " has another "
+                                + lacks;
+                            wide = Nearest();
+                        }
                     }
                     if (wide.index < 0) {
                         state.decided = true;
                         state.outcome.evidence = "no structural candidate, tier 3 found none: "
-                            + describeNearest(nearest)
-                            + (otherSource.empty()
-                                   ? std::string()
-                                   : "; the wide reach's " + otherSource + " has another source");
+                            + describeNearest(nearest) + otherSource + otherMakerText(state);
                         listByDistance(state, agree, "geometric");
                         continue;
                     }
@@ -2853,7 +2945,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
 
         if (state.candidates.empty()) {
             state.decided = true;
-            state.outcome.evidence = "no candidate";
+            state.outcome.evidence = "no candidate" + otherMakerText(state);
             continue;
         }
 
