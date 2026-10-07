@@ -3032,6 +3032,261 @@ bool SketchObject::canRetargetExternalGeometry() const
     return externalGeoRef.size() == ExternalGeometry.getValues().size();
 }
 
+std::vector<long> SketchObject::externalGeometryIds(int entry) const
+{
+    if (entry < 0 || entry >= static_cast<int>(externalGeoRef.size())) {
+        return {};
+    }
+    // externalGeoRefMap lists a key's Ids in the order of ExternalGeo, which is the order the
+    // rebuild gives them to the projections
+    auto it = externalGeoRefMap.find(externalGeoRef[entry]);
+    if (it == externalGeoRefMap.end()) {
+        return {};
+    }
+    return it->second;
+}
+
+int SketchObject::externalType(int entry) const
+{
+    // ExternalTypes is parallel to the links by index but isn't pruned when a link goes (it can
+    // be longer): the type an entry gets is the one at its index, as the rebuild reads it
+    const auto& types = ExternalTypes.getValues();
+    if (entry < 0 || entry >= static_cast<int>(types.size())) {
+        return static_cast<int>(ExtType::Projection);
+    }
+    return static_cast<int>(types[entry]);
+}
+
+std::optional<std::string> SketchObject::externalGeometryRefOf(long id) const
+{
+    auto it = externalGeoMap.find(id);
+    if (it == externalGeoMap.end() || it->second < 0 || it->second >= ExternalGeo.getSize()) {
+        return std::nullopt;
+    }
+    return ExternalGeometryFacade::getFacade(ExternalGeo[it->second])->getRef();
+}
+
+void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
+{
+    auto objs = ExternalGeometry.getValues();
+    auto subs = ExternalGeometry.getSubValues();
+    auto shadows = ExternalGeometry.getShadowSubs();
+    if (!canRetargetExternalGeometry() || subs.size() != objs.size()
+        || shadows.size() != objs.size()) {
+        throw Base::RuntimeError("parkExternalGeometry: the projections are out of step with "
+                                 "the links");
+    }
+    std::set<int> parked;
+    for (int entry : entries) {
+        if (entry < 0 || entry >= static_cast<int>(objs.size())) {
+            throw Base::IndexError("parkExternalGeometry: no such entry");
+        }
+        parked.insert(entry);
+    }
+    if (parked.empty()) {
+        return;
+    }
+
+    // The geometries lose their reference and stay where they are: the rebuild skips a geometry
+    // without one, the solver keeps it fixed, and its Id, GeoId and constraints don't change
+    auto geos = ExternalGeo.getValues();
+    for (int entry : parked) {
+        for (long id : externalGeometryIds(entry)) {
+            auto it = externalGeoMap.find(id);
+            if (it == externalGeoMap.end()) {
+                continue;
+            }
+            auto& geo = geos[it->second];
+            geo = geo->clone();
+            auto egf = ExternalGeometryFacade::getFacade(geo);
+            egf->setRef(std::string());
+            egf->setFlag(ExternalGeometryExtension::Missing, false);
+        }
+    }
+
+    auto types = ExternalTypes.getValues();
+    for (auto it = parked.rbegin(); it != parked.rend(); ++it) {
+        objs.erase(objs.begin() + *it);
+        subs.erase(subs.begin() + *it);
+        shadows.erase(shadows.begin() + *it);
+        if (*it < static_cast<int>(types.size())) {
+            types.erase(types.begin() + *it);
+        }
+    }
+
+    ExternalGeo.setValues(std::move(geos));
+    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
+    ExternalTypes.setValues(types);
+}
+
+int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
+                                         const std::string& sub,
+                                         App::PropertyLinkBase::ShadowSub&& shadow,
+                                         int type,
+                                         const std::vector<long>& ids)
+{
+    auto objs = ExternalGeometry.getValues();
+    auto subs = ExternalGeometry.getSubValues();
+    auto shadows = ExternalGeometry.getShadowSubs();
+    if (!obj || !canRetargetExternalGeometry() || subs.size() != objs.size()
+        || shadows.size() != objs.size()) {
+        throw Base::RuntimeError("unparkExternalGeometry: the projections are out of step with "
+                                 "the links");
+    }
+
+    // The entry's type goes at its index: drop the types left behind by links deleted earlier
+    auto types = ExternalTypes.getValues();
+    types.resize(objs.size(), static_cast<long>(ExtType::Projection));
+    types.push_back(type);
+
+    objs.push_back(obj);
+    subs.push_back(sub);
+    shadows.push_back(std::move(shadow));
+    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
+    ExternalTypes.setValues(types);
+    if (externalGeoRef.size() != ExternalGeometry.getValues().size()) {
+        throw Base::RuntimeError("unparkExternalGeometry: the link was not added");
+    }
+    const std::string key = externalGeoRef.back();
+
+    // Give the free geometries the entry's key, then set the key's Ids in the recorded order: the
+    // rebuild gives projection n to the n-th Id, and an Id it doesn't find becomes new geometry
+    auto geos = ExternalGeo.getValues();
+    std::vector<long> refs;
+    std::vector<bool> kept;
+    refs.reserve(ids.size());
+    kept.reserve(ids.size());
+    int replaced = 0;
+    for (long id : ids) {
+        auto it = externalGeoMap.find(id);
+        if (it != externalGeoMap.end()
+            && ExternalGeometryFacade::getFacade(geos[it->second])->getRef().empty()) {
+            auto& geo = geos[it->second];
+            geo = geo->clone();
+            ExternalGeometryFacade::getFacade(geo)->setRef(key);
+            refs.push_back(id);
+            kept.push_back(true);
+        }
+        else {
+            refs.push_back(++geoLastId);
+            kept.push_back(false);
+            ++replaced;
+        }
+    }
+
+    // externalGeoRefMap lists a key's Ids in ExternalGeo's order whenever it is rebuilt from
+    // ExternalGeo (onExternalGeoChanged: every rebuild's write, undo, reopen), so a new Id must sit
+    // at its place in the projection order, not be appended after the kept ones: a placeholder
+    // with the new Id goes right after the entry's previous geometry (or before its next kept one),
+    // and the rebuild replaces it with the projection. When none is kept, the rebuild appends all
+    // of them in order, which is that order already. A frozen entry gets none: the rebuild skips
+    // the whole entry while one of its geometries is frozen, so a placeholder would stay a copy of
+    // its neighbour; the deleted projection stays gone, as the freeze says.
+    bool frozen = false;
+    bool defining = true;  // the entry's state, as the rebuild infers it for a new geometry
+    for (std::size_t n = 0; n < refs.size(); ++n) {
+        if (kept[n]) {
+            auto egf = ExternalGeometryFacade::getFacade(geos[externalGeoMap[refs[n]]]);
+            frozen = frozen || egf->testFlag(ExternalGeometryExtension::Frozen);
+            defining = defining && egf->testFlag(ExternalGeometryExtension::Defining);
+        }
+    }
+    std::vector<int> inserted;  // the ExternalGeo indexes the placeholders took, in turn
+    if (replaced > 0 && replaced < static_cast<int>(ids.size()) && !frozen) {
+        auto indexOf = [&geos](long id) {
+            for (std::size_t i = 0; i < geos.size(); ++i) {
+                if (GeometryFacade::getId(geos[i]) == id) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        int previous = -1;  // the index of the entry's previous geometry
+        for (std::size_t n = 0; n < refs.size(); ++n) {
+            if (kept[n]) {
+                previous = indexOf(refs[n]);
+                continue;
+            }
+            int model = previous;  // a kept geometry of the entry, which the placeholder copies
+            if (model < 0) {
+                auto next = std::find(kept.begin() + n, kept.end(), true);
+                model = indexOf(refs[next - kept.begin()]);
+            }
+            if (model < 0) {
+                continue;  // not expected: a kept Id is in ExternalGeo
+            }
+            const int at = previous >= 0 ? previous + 1 : model;
+            auto placeholder = geos[model]->copy();
+            GeometryFacade::setId(placeholder, refs[n]);
+            // The rebuild keeps the placeholder's flags on the projection: give it the entry's
+            auto egf = ExternalGeometryFacade::getFacade(placeholder);
+            egf->setRef(key);
+            egf->setFlag(ExternalGeometryExtension::Defining, defining);
+            egf->setFlag(ExternalGeometryExtension::Frozen, false);
+            egf->setFlag(ExternalGeometryExtension::Sync, false);
+            egf->setFlag(ExternalGeometryExtension::Missing, false);
+            egf->setFlag(ExternalGeometryExtension::Detached, false);
+            geos.insert(geos.begin() + at, placeholder);
+            inserted.push_back(at);
+            previous = at;
+        }
+    }
+
+    if (inserted.empty()) {
+        ExternalGeo.setValues(std::move(geos));
+    }
+    else {
+        // The reverse of delExternalPrivate: each external GeoId at or after an inserted index
+        // moves one on, so every constraint stays on its geometry
+        std::vector<Constraint*> constraints;
+        for (const auto& cstr : Constraints.getValues()) {
+            auto shifted = cstr->clone();
+            for (int at : inserted) {
+                const int geoId = -at - 1;
+                for (int i = 0; shifted->hasElement(i); ++i) {
+                    const int given = shifted->getGeoId(i);
+                    if (given <= geoId && given != GeoEnum::GeoUndef) {
+                        shifted->setGeoId(i, given - 1);
+                    }
+                }
+            }
+            constraints.push_back(shifted);
+        }
+        Base::StateLocker lock(managedoperation, true);
+        ExternalGeo.setValues(std::move(geos));
+        solverNeedsUpdate = true;
+        Constraints.setValues(std::move(constraints));
+        acceptGeometry();
+    }
+    externalGeoRefMap[key] = std::move(refs);
+    return replaced;
+}
+
+int SketchObject::markExternalGeometryMissing(const std::vector<long>& ids, const std::string& ref)
+{
+    if (ref.empty()) {
+        return 0;
+    }
+    auto geos = ExternalGeo.getValues();
+    int marked = 0;
+    for (long id : ids) {
+        auto it = externalGeoMap.find(id);
+        if (it == externalGeoMap.end()
+            || !ExternalGeometryFacade::getFacade(geos[it->second])->getRef().empty()) {
+            continue;
+        }
+        auto& geo = geos[it->second];
+        geo = geo->clone();
+        ExternalGeometryFacade::getFacade(geo)->setRef(ref);
+        ++marked;
+    }
+    if (marked) {
+        ExternalGeo.setValues(std::move(geos));
+        touch();
+    }
+    return marked;
+}
+
 void SketchObject::updateGeometryRefs()
 {
     const auto &objs = ExternalGeometry.getValues();

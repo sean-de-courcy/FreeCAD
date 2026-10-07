@@ -154,7 +154,8 @@ names it.
 | `fix/128-stale-subelement` | fix | ops#128 | - | `integration` `e7caa6e13c` | `c0892b56a8` (fork PR 125), 2026-10-06 | upstream's `SketchObject::checkSubName` (or `IndexedName::set`) rejects a name whose type isn't the whole text before its index |
 | `fix/154-alias-recompute` | fix | ops#154 | - | `integration` `c0892b56a8` | `a419d6b97e` (fork PR 127), 2026-10-06 | upstream's fine-grained recompute follows a Spreadsheet alias edge (`Document::recompute` matching the property an edge's name resolves to, and alias edges kept by name); upstream main `93f831f895` has the bug |
 | `fix/155-panel-field-refresh` | fix | ops#155 | - | `fix/154-alias-recompute` `d047f6c90e` (stacked on fork PR 127) | `3bebd8f1a4` (fork PR 128), 2026-10-06 | upstream's `ExpressionSpinBox` (or `ExpressionBinding`) refreshes a bound field when its property changes; upstream main `93f831f895` has the bug |
-| `feat/127-guess-policy` | feat | ops#127, ops#133, ops#107 | - | `integration` `2eb8b6ec7a` | (fork PR 122) | never (fork feature) |
+| `feat/127-guess-policy` | feat | ops#127, ops#133, ops#107 | - | `integration` `2eb8b6ec7a` | `872ffe8fc1` (fork PR 122), 2026-10-06 | never (fork feature) |
+| `feat/131-park-projections` | feat | ops#131 | - | `feat/127-guess-policy` `5dde1ed1e0` (stacked on fork PR 122) | (fork PR 126) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
