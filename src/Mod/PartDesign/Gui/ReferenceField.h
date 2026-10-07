@@ -150,12 +150,12 @@ public:
     /// while the field has the focus (Add All Edges).
     void addMenuAction(QAction* action);
 
-    /// For the panel's writer: sets the property to  obj and  subs, the entries this change
+    /// For the panel's writer: sets the property to \a obj and \a subs, the entries this change
     /// keeps with their mapped names, element records (guess, rejection) and fingerprints, which
     /// a plain setValue() drops (a missing element's candidates go with its mapped name). Called
     /// between the writer's transaction and its recompute.
     void assign(App::DocumentObject* obj, const std::vector<std::string>& subs);
-    /// Writes  subs (stored style) as one step of the field's undo (Add All Edges).
+    /// Writes \a subs (stored style) as one step of the field's undo (Add All Edges).
     void replaceEntries(const std::vector<std::string>& subs);
 
     /// Removes the selected entries.
