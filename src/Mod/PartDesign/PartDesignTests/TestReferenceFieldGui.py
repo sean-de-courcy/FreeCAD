@@ -58,6 +58,11 @@ from PartDesignTests.TestDressUpDeleteKeyGui import focus, pump, taskButton, wai
 
 STATE_ROLE = QtCore.Qt.UserRole + 1
 FILLET_CUT = (1 - math.pi / 4) * 10  # r = 1, L = 10
+# The highlight's colours (rounded): an entry, the current entry, and the highlighter's colour for
+# a whole object, which no entry should show.
+MAGENTA = (1.0, 0.0, 1.0)
+CURRENT = (0.0, 0.75, 1.0)
+PURPLE = (0.6, 0.0, 1.0)
 TOP_FRONT = edge("line", direction=X, through=(0, 0, 10))
 BOTTOM_BACK = edge("line", direction=X, through=(0, 10, 0))
 VERTICAL = edge("line", direction=Z, through=(10, 0, 0))
@@ -649,3 +654,249 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.runCommand("Std_Undo")
         self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
         self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
+
+    # -- PR 140 review round ------------------------------------------------------------------------
+
+    def edgeColours(self, obj):
+        """The colours the view provider draws obj's edges in: its line material, one colour per
+        edge while a highlight is on."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setType(coin.SoMaterial.getClassTypeId())
+        search.setInterest(coin.SoSearchAction.ALL)
+        search.apply(obj.ViewObject.RootNode)
+        count = len(obj.Shape.Edges)
+        for path in search.getPaths():
+            material = path.getTail()
+            if material.diffuseColor.getNum() == count:
+                return [tuple(round(v, 2) for v in c.getValue()) for c in material.diffuseColor.getValues()]
+        return []
+
+    def testHighlightColoursOnlyTheEntries(self):
+        """Review 1: a pick colours that edge only, in the entries' colour; the current entry is
+        the only one in the current colour. No edge takes the highlighter's whole-object colour
+        (purple), which it gives every edge when handed an empty list."""
+        box, fillet = self.newFillet()
+        [field] = fields()
+        self.assertTrue(waitFor(lambda: armed(field)))
+        [first] = TOP_FRONT.one(box.Shape)
+        self.pick(box, first)
+        colours = self.edgeColours(box)
+        self.assertEqual(len(colours), 12, "no per-edge colours on the base")
+        self.assertNotIn(PURPLE, colours)
+        self.assertEqual(colours.count(MAGENTA), 1)
+        self.assertEqual(colours[int(first[4:]) - 1], MAGENTA)
+
+        clickRow(field, 0)
+        colours = self.edgeColours(box)
+        self.assertNotIn(PURPLE, colours)
+        self.assertNotIn(MAGENTA, colours)
+        self.assertEqual(colours.count(CURRENT), 1)
+
+    def testGuessStaysGuessedAfterAnotherPick(self):
+        """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
+        another edge is picked, when that one is deleted again, and through the field's undo."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        self.arm(field, byFocus=True)
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        self.pick(pad, other)
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed", "exact"]), states(field))
+        self.assertIn(("Base", 0), {(e["property"], e["index"]) for e in App.getReferenceReport(fillet)})
+
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed"]), states(field))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed", "exact"]), states(field))
+
+    def testFieldUndoStepsBackOverAUse(self):
+        """Review 3: the Boss fillet, a second edge picked, then the broken entry repaired with
+        Use: Ctrl+Z takes back the Use only (the entry broken again, the pick kept), not the
+        pick with it."""
+        pad, fillet = self.boss()
+        [field] = self.edit(fillet)
+        self.arm(field, byFocus=False)
+        [topBack] = edge("line", direction=X, through=(0, 10, 10)).one(pad.Shape)
+        self.pick(pad, topBack)
+        self.assertEqual(states(field), ["broken", "exact"])
+        menu = openMenu(field, 0)
+        use = menuActions(menu)["Use"].menu()
+        [a for a in use.actions() if not a.isSeparator()][0].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: states(field) == ["exact", "exact"]), states(field))
+
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: states(field) == ["broken", "exact"]), states(field))
+        self.assertEqual(len(fillet.Base[1]), 2)
+        self.assertEqual(fillet.Base[1][1], topBack)
+
+    def testDocumentUndoEndsTheFieldUndo(self):
+        """Review 3: two picks, then the document's undo: Base is back to the one edge, and the
+        field's Ctrl+Z has nothing left to write back."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        [second] = BOTTOM_BACK.one(box.Shape)
+        [third] = VERTICAL.one(box.Shape)
+        fillet = self.addFillet(box, [first])
+        [field] = self.edit(fillet)
+        self.arm(field, byFocus=False)
+        self.pick(box, second)
+        self.pick(box, third)
+        Gui.runCommand("Std_Undo")
+        self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [first])
+        self.assertEqual(texts(field), [first])
+
+    def testAddAllEdgesShowsThemAndUndoes(self):
+        """B5, review 3: Add All Edges (Ctrl+Shift+A in the field) lists all twelve edges; the
+        field's Ctrl+Z takes them back to the one edge."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        fillet = self.addFillet(box, [first])
+        [field] = self.edit(fillet)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_A, QtCore.Qt.ControlModifier | QtCore.Qt.ShiftModifier)
+        self.assertTrue(waitFor(lambda: len(texts(field)) == 12), texts(field))
+        self.assertEqual(len(fillet.Base[1]), 12)
+        self.assertEqual(texts(field)[0], first)
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
+        self.assertEqual(texts(field), [first])
+
+    def referencesTree(self):
+        return Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+
+    def listedRows(self):
+        tree = self.referencesTree()
+        if tree is None or not tree.isVisible():
+            return None
+        return [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+
+    def testDisabledFieldLeavesItsRowsToThePanel(self):
+        """Review 5: the redrawn fillet's guessed row is in its field, no References panel; with
+        Use All Edges on the field can't act on it, so the panel lists it; off again, it goes."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertIsNone(self.listedRows())
+        useAll = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUseAllEdges")
+        useAll.setChecked(True)
+        self.assertTrue(waitFor(lambda: self.listedRows() == ["Base[0]"]), self.listedRows())
+        useAll.setChecked(False)
+        self.assertTrue(waitFor(lambda: self.listedRows() is None), self.listedRows())
+
+    def testHiddenPanelComesBackOnRefresh(self):
+        """Review 6: the redrawn draft with its neutral plane's guess accepted: only Base is
+        left, in its field, so no References panel. The document's undo takes the acceptance
+        back: the panel comes back with the neutral plane."""
+        pad, draft = self.redrawnDraft()
+        self.doc.openTransaction("Accept")
+        App.acceptReference(draft, "NeutralPlane", 0)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        rows = {(e["property"], e["index"]) for e in App.getReferenceReport(draft)}
+        self.assertEqual(rows, {("Base", 0)})
+        [field] = self.edit(draft)
+        self.assertIsNone(self.listedRows())
+        Gui.runCommand("Std_Undo")
+        self.doc.recompute()
+        self.assertTrue(waitFor(lambda: self.listedRows() == ["NeutralPlane[0]"]), self.listedRows())
+
+    # -- ops#162 B1, B3; the other dress-up panels -------------------------------------------------
+
+    def testNewDraftArmsItsFaces(self):
+        """B1: a new draft (nothing selected) opens with its faces field armed; a face pick
+        writes Base."""
+        box = self.box()
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_Draft")
+        self.assertTrue(waitFor(lambda: len(fields()) >= 1), "the draft's reference field")
+        settle()
+        draft = self.doc.getObject("Draft")
+        field = fields()[0]
+        self.assertTrue(waitFor(lambda: armed(field)), "the new draft's faces field isn't armed")
+        [side] = face(normal=(0, -1, 0)).one(box.Shape)
+        self.pick(box, side)
+        self.assertEqual(draft.Base[1], [side])
+
+    def testDraftAngleEndsThePlanePick(self):
+        """B3: the plane pick on, an angle edit ends it: its gate goes (a vertex can be selected
+        again) and NeutralPlane takes no pick."""
+        box = self.box()
+        [side] = face(normal=(0, -1, 0)).one(box.Shape)
+        [bottom] = face(normal=(0, 0, -1)).one(box.Shape)
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        draft = self.body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (box, [side])
+        draft.NeutralPlane = (box, [bottom])
+        draft.Angle = 2
+        self.doc.recompute()
+        self.edit(draft)
+        plane = Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonPlane")
+        plane.click()
+        pump()
+        angle = Gui.getMainWindow().findChild(QtWidgets.QWidget, "draftAngle")
+        angle.setProperty("rawValue", 3.0)
+        pump(0.3)
+        self.assertAlmostEqual(draft.Angle.Value, 3.0)
+        Gui.Selection.addSelection(self.doc.Name, box.Name, "Vertex1")
+        pump(0.1)
+        self.assertEqual(
+            [(s.ObjectName, list(s.SubElementNames)) for s in Gui.Selection.getSelectionEx(self.doc.Name)],
+            [(box.Name, ["Vertex1"])],
+            "the plane's gate stayed",
+        )
+        Gui.Selection.clearSelection()
+        self.pick(box, top)
+        self.assertEqual(draft.NeutralPlane[1], [bottom])
+
+    def emptyDressUp(self, typeName, name):
+        box = self.box()
+        feature = self.body.newObject(typeName, name)
+        feature.Base = (box, [])
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).setEdit(feature.Name)
+        self.assertTrue(waitFor(lambda: len(fields()) == 1), "the dialog's reference field")
+        settle()
+        [field] = fields()
+        self.assertTrue(waitFor(lambda: armed(field)), f"the new {name}'s field isn't armed")
+        return box, feature, field
+
+    def testChamferField(self):
+        """A new chamfer (size 1) arms its field; an edge pick writes Base and takes a prism of
+        1 x 1 / 2 x 10 off the box."""
+        box, chamfer, field = self.emptyDressUp("PartDesign::Chamfer", "Chamfer")
+        chamfer.Size = 1
+        [first] = TOP_FRONT.one(box.Shape)
+        self.pick(box, first)
+        self.assertEqual(chamfer.Base[1], [first])
+        self.assertEqual(texts(field), [first])
+        self.assertVolume(chamfer, 1000 - 5)
+
+    def testThicknessField(self):
+        """A new thickness (1, inward) arms its field; a pick of the top face writes Base and
+        hollows the box: 1000 - 8 x 8 x 9."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        thickness.Value = 1
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [top])
+        self.assertEqual(texts(field), [top])
+        self.assertVolume(thickness, 1000 - 8 * 8 * 9)
+
+    def testDefeaturingField(self):
+        """A new defeaturing arms its field; a face pick writes Base."""
+        box, defeaturing, field = self.emptyDressUp("PartDesign::Defeaturing", "Defeaturing")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(defeaturing.Base[1], [top])
+        self.assertEqual(texts(field), [top])
