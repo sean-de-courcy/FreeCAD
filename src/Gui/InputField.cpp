@@ -273,9 +273,12 @@ void InputField::newInput(const QString& text)
         if (isBound()) {
             // FreeCAD-CH (ops#152): the shown text of the current expression (`#Width`, set by
             // bind() and updateText()) keeps it. Parsed back, a label or a `.Width` reference would
-            // come back in another form and rewrite the expression with nobody editing.
+            // come back in another form and rewrite the expression with nobody editing. Compared
+            // before fixup() too: it removes the locale's group separator, which may be '.'
+            // (ops#185).
             std::shared_ptr<Expression> current = getExpression();
-            if (!current || input != expressionDisplayText(current.get())) {
+            QString shown = current ? expressionDisplayText(current.get()) : QString();
+            if (!current || (text != shown && input != shown)) {
                 std::shared_ptr<Expression> e(
                     ExpressionParser::parse(getPath().getDocumentObject(), input.toUtf8())
                 );

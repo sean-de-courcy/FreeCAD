@@ -327,11 +327,23 @@ QPoint DlgExpressionInput::expressionPosition() const
     return ui->expression->pos();
 }
 
-bool DlgExpressionInput::checkCyclicDependencyVarSet(const QString& text)
+// FreeCAD-CH (ops#152): the expression @a text stands for. The shown text of the stored expression
+// keeps it, so OK with the text unchanged doesn't rewrite a label or a `.Width` reference into the
+// form it parses back to. Compared before parsing, so the shown text is never parsed (ops#185).
+static std::shared_ptr<Expression> expressionFor(const App::ObjectIdentifier& path, const QString& text)
 {
-    std::shared_ptr<Expression> expr(
+    if (std::shared_ptr<Expression> stored = path.getDocumentObject()->getExpression(path).expression;
+        stored && text == Gui::expressionDisplayText(stored.get())) {
+        return std::shared_ptr<Expression>(stored->copy());
+    }
+    return std::shared_ptr<Expression>(
         ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData())
     );
+}
+
+bool DlgExpressionInput::checkCyclicDependencyVarSet(const QString& text)
+{
+    std::shared_ptr<Expression> expr = expressionFor(path, text);
 
     if (expr) {
         DocumentObject* obj = path.getDocumentObject();
@@ -356,16 +368,7 @@ bool DlgExpressionInput::checkCyclicDependencyVarSet(const QString& text)
 void DlgExpressionInput::checkExpression(const QString& text)
 {
     // now handle expression
-    std::shared_ptr<Expression> expr(
-        ExpressionParser::parse(path.getDocumentObject(), text.toUtf8().constData())
-    );
-
-    // FreeCAD-CH (ops#152): the shown text of the stored expression keeps it, so OK with the text
-    // unchanged doesn't rewrite a label or a `.Width` reference into the form it parses back to.
-    if (std::shared_ptr<Expression> stored = path.getDocumentObject()->getExpression(path).expression;
-        stored && text == expressionDisplayText(stored.get())) {
-        expr = stored->copy();
-    }
+    std::shared_ptr<Expression> expr = expressionFor(path, text);  // FreeCAD-CH (ops#152)
 
     if (expr) {
         std::string error = path.getDocumentObject()->ExpressionEngine.validateExpression(path, expr);

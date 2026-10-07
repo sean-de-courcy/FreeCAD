@@ -183,7 +183,8 @@ names it.
 | `fix/173-multi-circle-tier1` | fix | ops#173, ops#174 | - | `integration` (`fix/168-own-twin-lift` `f911f50fc3`) | `e31de021cc` (fork PR 149), 2026-10-07 | never (fork feature) |
 | `feat/152-panel` | feat | ops#152 | - | `fix/152-uses-undo` `07b3b5894e` (stacked on fork PR 148) | `7b0de5eea3` (fork PR 155), 2026-10-07 | never (fork feature); refit when upstream changes `DockWindowManager`, `MainWindow::setupDockWindows`, `StdWorkbench::setupDockWindows` or `DlgAddProperty` |
 | `feat/152-display-gui` | feat | ops#152 | - | `integration` `dbd0b40f6f` | `d4965681c6` (fork PR 153), 2026-10-07 | never (fork feature); refit when upstream changes the display sites (`PropertyItem.cpp`, `SheetModel.cpp`, `SheetTableView.cpp`, `InputField.cpp`, `ViewProviderSketch.cpp`; section 8.3) |
-| `feat/150-w5-opacity` | feat | ops#150, ops#186 | - | `integration` `d68294375b` | (fork PR 156) | never (fork feature) |
+| `feat/150-w5-opacity` | feat | ops#150, ops#186 | - | `integration` `d68294375b` | `50485c0283` (fork PR 156), 2026-10-07 | never (fork feature) |
+| `fix/185-variables-followups` | fix | ops#185, ops#188 | - | `integration` `d4965681c6` | (fork PR 158) | never (fork feature); goes with `feat/152-display-gui` and `feat/152-panel` |
 
 ## Fork-only commits in carried topics
 

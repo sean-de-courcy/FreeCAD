@@ -267,6 +267,27 @@ class TestVariablesGui(unittest.TestCase):
         self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2")
         self.assertEqual(self.doc.UndoCount, undoCount)
 
+    def test_input_field_group_separator(self):
+        """An InputField whose locale's group separator is '.' (German): showing
+        `#Width * 2.5` changes nothing, though fixup() makes it `#Width * 25` (ops#185)."""
+        self.varSet.Label = "Variables"
+        self.box.setExpression("Length", "<<Variables>>.Width * 2.5")
+        self.doc.recompute()
+        undoCount = self.doc.UndoCount
+        field = Gui.UiLoader().createWidget("Gui::InputField")
+        self.widgets.append(field)
+        field.setLocale(QtCore.QLocale(QtCore.QLocale.German, QtCore.QLocale.Germany))
+        self.assertEqual(field.locale().groupSeparator(), ".")
+        binding = Gui.ExpressionBinding(field)
+        binding.bind(self.box, "Length")
+        field.show()
+        pump(0.1)
+        self.assertEqual(field.text(), "#Width * 2.5")
+        field.setProperty("unit", "mm")  # updateText() shows the text again
+        pump(0.1)
+        self.assertEqual(expressionText(self.box, "Length"), "<<Variables>>.Width * 2.5")
+        self.assertEqual(self.doc.UndoCount, undoCount)
+
     def test_property_view_repaints(self):
         """8.4: changes that make a name unique or ambiguous repaint the property view's Data tab:
         an alias set, a VarSet deleted, and its deletion undone (fork PR 153 review)."""
@@ -286,13 +307,30 @@ class TestVariablesGui(unittest.TestCase):
             pump(0.3)
             return counter.count
 
-        self.doc.openTransaction("Delete Other")
-        self.assertGreater(repainted(lambda: self.doc.removeObject("Other")), 0, "delete")
+        # Each change is compared with one of the same kind that changes no names (ops#185, fork
+        # PR 158 review): a delete, its undo and a change to a sheet repaint by themselves.
+        spare = self.doc.addObject("App::FeaturePython", "Spare")
+        self.doc.recompute()
+        pump(0.3)
+        counts = {}
+        self.doc.openTransaction("Delete Spare")
+        counts["delete, no names"] = repainted(lambda: self.doc.removeObject(spare.Name))
         self.doc.commitTransaction()
-        self.assertGreater(repainted(self.doc.undo), 0, "undo of the delete")
+        counts["undo, no names"] = repainted(self.doc.undo)
+        self.doc.openTransaction("Delete Other")
+        counts["delete"] = repainted(lambda: self.doc.removeObject("Other"))
+        self.doc.commitTransaction()
+        counts["undo"] = repainted(self.doc.undo)
         self.assertIsNotNone(self.doc.getObject("Other"))
-        self.assertGreater(repainted(lambda: sheet.setAlias("A1", "Depth")), 0, "alias")
+        counts["sheet, no names"] = repainted(lambda: sheet.setColumnWidth("A", 120))
+        counts["alias"] = repainted(lambda: sheet.setAlias("A1", "Depth"))
         editor.viewport().removeEventFilter(counter)
+        for change, control in (
+            ("delete", "delete, no names"),
+            ("undo", "undo, no names"),
+            ("alias", "sheet, no names"),
+        ):
+            self.assertGreater(counts[change], counts[control], "%s: %s" % (change, counts))
 
     def test_live_ambiguity_change(self):
         """G15. A sheet alias `Width` makes the name ambiguous: the Length row falls back to the
