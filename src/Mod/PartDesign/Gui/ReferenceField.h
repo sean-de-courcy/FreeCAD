@@ -44,6 +44,7 @@
 
 class QAction;
 class QComboBox;
+class QKeyEvent;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -104,6 +105,13 @@ public:
         /// while armed; the gate is Options::accept and noDependents. Written through an
         /// ObjectsWriter.
         Objects,
+        /// An ordered list of sections (PropertyLinkSubList: a loft's or a pipe's Sections), each
+        /// an object whole or one element of it, one per object. A pick of an object not listed
+        /// appends it; the same object and element again takes it out; another element of a
+        /// listed object replaces that section's (a sketch and one of its points). The order is
+        /// changed by drag, the entry menu's Move up / Move down, or Alt+Up / Alt+Down, each one
+        /// write. The gate is Options::accept and noDependents. Written through a SectionsWriter.
+        Sections,
     };
     /// Turns a pick into what is written: the object and its subs (a copy of another body's
     /// element, a datum's coordinate system). False: nothing is written.
@@ -139,12 +147,22 @@ public:
         /// The References panel leaves out the property's rows while the field is enabled; a
         /// hidden field doesn't (they would be shown nowhere).
         bool covers = true;
+        /// SingleElement: the gate is accept and noDependents alone, not ReferenceSelection's
+        /// flags (a loft's profile: a sketch whole, a sketch point, a face).
+        bool acceptOnly = false;
+        /// Sections: whether the feature takes the sections in this order; \a why says what it
+        /// refuses (a pipe takes a point only as the last section).
+        std::function<bool(const std::vector<App::PropertyLinkSubList::SubSet>&, std::string& why)>
+            checkSections;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
         std::function<void(App::DocumentObject* obj, const std::vector<std::string>& subs)>;
     /// Writes a list of objects (Kind::Objects).
     using ObjectsWriter = std::function<void(const std::vector<App::DocumentObject*>& objs)>;
+    /// Writes a list of sections (Kind::Sections), in order.
+    using SectionsWriter =
+        std::function<void(const std::vector<App::PropertyLinkSubList::SubSet>& sections)>;
 
     ReferenceField(App::DocumentObject* owner,
                    const char* property,
@@ -156,6 +174,12 @@ public:
                    const char* property,
                    Options options,
                    ObjectsWriter write,
+                   QWidget* parent = nullptr);
+    /// A field of Kind::Sections.
+    ReferenceField(App::DocumentObject* owner,
+                   const char* property,
+                   Options options,
+                   SectionsWriter write,
                    QWidget* parent = nullptr);
     ~ReferenceField() override;
 
@@ -212,11 +236,16 @@ public:
     /// a plain setValue() drops (a missing element's candidates go with its mapped name). Called
     /// between the writer's transaction and its recompute.
     void assign(App::DocumentObject* obj, const std::vector<std::string>& subs);
+    /// The same for a SectionsWriter: sets the property to \a sections, the kept sections with
+    /// their records.
+    void assign(const std::vector<App::PropertyLinkSubList::SubSet>& sections);
     /// Writes \a subs (stored style) as one step of the field's undo (Add All Edges).
     void replaceEntries(const std::vector<std::string>& subs);
 
     /// Removes the selected entries.
     void removeSelected();
+    /// Kind::Sections: moves the current section up (\a step -1) or down (+1), one write.
+    void moveCurrent(int step);
     /// The field's own undo and redo of its changes.
     bool undo();
     bool redo();
@@ -271,6 +300,24 @@ private:
     {
         return options.kind == Kind::Objects;
     }
+    bool isSections() const
+    {
+        return options.kind == Kind::Sections;
+    }
+    /// Kind::Sections: the sections as the property stores them (mapped names kept).
+    std::vector<App::PropertyLinkSubList::SubSet> storedSections() const;
+    /// Kind::Sections: writes \a sections (stored style) if the feature takes their order; the
+    /// sections kept from the current value keep their records.
+    void writeSections(const std::vector<App::PropertyLinkSubList::SubSet>& sections,
+                       bool undoable = true);
+    /// Kind::Sections: a pick appends a section, takes it out or changes its element.
+    void pickSection(const Gui::SelectionChanges& msg);
+    /// Kind::Sections: the entries dragged into another order are written in it.
+    void sectionsDragged();
+    /// Sets the property's records, fingerprints, `from`s and report to the pending value's.
+    void assignPendingRecords(App::PropertyLinkBase* prop);
+    /// Alt+Up or Alt+Down on a list of sections.
+    bool isSectionMove(const QKeyEvent* ke) const;
     /// Kind::Objects: the objects the property lists.
     std::vector<App::DocumentObject*> linkedObjects() const;
     /// The object a list's entries are written on: the one the property links, the target
@@ -291,7 +338,7 @@ private:
         std::vector<std::string> froms;
         /// The reference solver's report on the subs (a broken one's candidates), by index.
         std::vector<App::ReferenceReport::Entry> report;
-        /// Kind::Objects: the objects listed.
+        /// Kind::Objects: the objects listed. Kind::Sections: the object of each sub.
         std::vector<App::DocumentObjectT> objects;
     };
     Snapshot snapshot() const;
@@ -325,7 +372,10 @@ private:
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());
-    void zoomTo(const std::string& element);
+    /// Kind::Sections: each section coloured on its own object, a whole one all its edges.
+    void highlightSections();
+    /// Zooms to \a element of the field's object, or of \a obj when given.
+    void zoomTo(const std::string& element, App::DocumentObject* obj = nullptr);
 
     /// The reference row of the entry \a item (its slot index), or null.
     const App::ReferenceRow* rowOf(const QListWidgetItem* item) const;
@@ -340,6 +390,7 @@ private:
     Options options;
     Writer writer;
     ObjectsWriter objectsWriter;
+    SectionsWriter sectionsWriter;
     QPointer<ReferenceFieldGroup> group;
 
     QLabel* label = nullptr;
@@ -364,7 +415,8 @@ private:
     bool valuePending = false;
     /// The target shown while armed, and the one its entries are coloured on.
     TargetDisplay display;
-    App::DocumentObjectT highlightedTarget;
+    /// The objects whose elements are coloured (a list of sections colours several).
+    std::vector<App::DocumentObjectT> highlightedTargets;
     QString message;
 };
 

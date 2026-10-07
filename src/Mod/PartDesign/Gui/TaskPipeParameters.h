@@ -63,9 +63,7 @@ public:
         refSpineEdgeRemove,
         refAuxSpine,
         refAuxSpineEdgeAdd,
-        refAuxSpineEdgeRemove,
-        refSectionAdd,
-        refSectionRemove
+        refAuxSpineEdgeRemove
     };
 
 public:
@@ -120,9 +118,8 @@ private:
     void exitSelectionMode();
     void setVisibilityOfSpineAndProfile();
 
-    bool spineShow = false;
-    bool profileShow = false;
-    bool auxSpineShow = false;
+    /// The spine, the profile and the auxiliary spine shown for the edit (B13).
+    EditVisibility shown;
 
 private:
     QWidget* proxy;
@@ -178,27 +175,26 @@ public:
     explicit TaskPipeScaling(ViewProviderPipe* PipeView, bool newObj = false, QWidget* parent = nullptr);
     ~TaskPipeScaling() override;
 
-    void onReferenceSelectionTaken() override;
+    /// The sections (ops#150 W7).
+    std::vector<ReferenceField*> referenceFields() const override;
 
 private Q_SLOTS:
     void onScalingChanged(int);
     void updateUI(int idx);
-    void onDeleteSection();
-    void indexesMoved();
-
-protected:
-    void removeFromListWidget(QListWidget* w, QString name);
-    bool referenceSelected(const Gui::SelectionChanges& msg) const;
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
-    void clearButtons();
-    void exitSelectionMode();
+    void createSectionsField();
+    /// A section that is a point: the pipe takes one only last.
+    static bool isPointSection(const App::PropertyLinkSubList::SubSet& section);
 
 private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskPipeScaling> ui;
     StateHandlerTaskPipe* stateHandler;
+    ReferenceField* sectionsField = nullptr;
+    /// The sections shown for the edit, also those picked during it (B13).
+    EditVisibility shown;
     friend class TaskDlgPipeParameters;
 };
 

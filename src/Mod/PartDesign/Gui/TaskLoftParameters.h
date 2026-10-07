@@ -24,12 +24,12 @@
 
 #pragma once
 
+#include "ReferenceActions.h"
 #include "TaskSketchBasedParameters.h"
 #include "ViewProviderLoft.h"
 
 
 class Ui_TaskLoftParameters;
-class QListWidget;
 
 namespace App
 {
@@ -57,40 +57,31 @@ public:
     );
     ~TaskLoftParameters() override;
 
+    /// The profile and the sections (ops#150 W7).
+    std::vector<ReferenceField*> referenceFields() const override;
+    /// The profile and the sections shown for the edit as they were before.
+    void restoreVisibility();
+
 private Q_SLOTS:
-    void onProfileButton(bool);
-    void onRefButtonAdd(bool);
-    void onRefButtonRemove(bool);
     void onClosed(bool);
     void onRuled(bool);
-    void onDeleteSection();
-    void indexesMoved();
 
 protected:
-    enum selectionModes
-    {
-        none,
-        refAdd,
-        refRemove,
-        refProfile
-    };
-
     void changeEvent(QEvent* e) override;
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void updateUI();
-    bool referenceSelected(const Gui::SelectionChanges& msg) const;
-    void removeFromListWidget(QListWidget* w, QString name);
-    void clearButtons(const selectionModes notThis = none);
-    void exitSelectionMode();
-    void setSelectionMode(selectionModes mode, bool checked);
+    void createFields();
 
 private:
     QWidget* proxy;
     std::unique_ptr<Ui_TaskLoftParameters> ui;
 
-    selectionModes selectionMode = none;
+    ReferenceField* profileField = nullptr;
+    ReferenceField* sectionsField = nullptr;
+    /// What the edit shows: the profile and the sections, also those picked during it (B13).
+    EditVisibility shown;
 };
 
 /// simulation dialog for the TaskView
