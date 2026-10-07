@@ -5295,6 +5295,35 @@ TEST(SolveOwner, keptSourcesStayStructural)
     EXPECT_EQ(outcomes[0].candidates.front(), "Edge5");
 }
 
+TEST(SolveOwner, anotherMakerEvictsNoSameMakerSurvivor)
+{
+    // ops#174: T1 runs before tier 1's band. The old circle (maker 41) is cut from a face three
+    // features deep; Edge8, another maker's (71), shares that whole face (overlap 0.9), Edge5,
+    // the maker's own, only the face's sketch lines and the hole's cylinder (0.6). With the band
+    // first, Edge8 evicted Edge5 and T1 then dropped Edge8: no candidate. Now Edge5 is tier 1's.
+    std::string face = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)});
+    for (int tag : {6, 7, 8}) {
+        face = generated({face}, tag, "XTR", 'F');
+    }
+    const auto cylinder = generated({sketchEdge(1, 40)}, 41, "XTR", 'F');
+    const auto old = generated({face, cylinder}, 41, "CUT", 'E');
+    SolveInput input;
+    input.pool["Edge"] = {
+        element("Edge5",
+                {generated({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4), cylinder},
+                           41,
+                           "CUT",
+                           'E')}),
+        element("Edge8",
+                {generated({face, generated({sketchEdge(1, 40)}, 71, "XTR", 'F')}, 71, "CUT", 'E')}),
+    };
+    input.entries = {missing(old, "Edge")};
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << outcome.evidence;
+    EXPECT_EQ(outcome.element, "Edge5");
+    EXPECT_EQ(outcome.tier, 1);
+}
+
 TEST(SolveOwner, guessThePieceAtTheSavedCentre)
 {
     // G3: an edge 0..20 along X split under One. Off centre (pieces 0..6 and 8..20) the saved

@@ -2806,8 +2806,25 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto& excluded = input.entries[member].excluded;
             rejected.insert(excluded.begin(), excluded.end());
         }
+        // T1 (ops#167): a candidate must come from the old element's maker. The overlap counts
+        // shared ancestry of any kind, so another hole's edge on the face both holes cut shares
+        // that face with the old edge as fully as a piece of the old edge would. A candidate in
+        // the old name's ancestry, or with the maker in its lineage (pieces, a redraw in the
+        // maker's own sketch, a later feature's modification), stays. Another maker's elements
+        // are left out before tier 1's band and top agreement narrow the survivors, so that none
+        // of them evicts a same-maker survivor (ops#174); their own survivors are the evidence.
+        const std::string maker = input.sameMaker ? NameAncestry::makerTag(oldName) : std::string();
+        auto fromMaker = [&](int k) {
+            const auto& names = pool.elements[k].names;
+            return maker.empty() || state.inAncestry.count(k)
+                || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return NameAncestry::hasLineageTag(n, maker);
+                   });
+        };
         std::vector<std::string> flatNames;
         std::vector<int> flatElements;
+        std::vector<std::string> otherNames;
+        std::vector<int> otherElements;
         std::vector<char> allowed(pool.elements.size(), 0);
         for (std::size_t k = 0; k < pool.elements.size(); ++k) {
             const auto& element = pool.elements[k];
@@ -2825,15 +2842,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (contains) {
                 state.inAncestry.insert(static_cast<int>(k));
             }
+            const bool same = fromMaker(static_cast<int>(k));
             for (const auto& name : element.names) {
-                flatNames.push_back(name);
-                flatElements.push_back(static_cast<int>(k));
+                (same ? flatNames : otherNames).push_back(name);
+                (same ? flatElements : otherElements).push_back(static_cast<int>(k));
             }
         }
 
+        std::set<int> otherMaker;
         if (!oldName.empty() && input.source != Tier1Source::Names) {
             for (int i : ancestry.structuralSurvivors(oldName, flatNames, input.gap)) {
                 state.fromOverlap.insert(flatElements[i]);
+            }
+            if (!otherNames.empty()) {
+                for (int i : ancestry.structuralSurvivors(oldName, otherNames, input.gap)) {
+                    otherMaker.insert(otherElements[i]);
+                }
             }
         }
         if (input.source != Tier1Source::Overlap) {
@@ -2887,29 +2911,17 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 }
             }
         }
-        // T1 (ops#167): a candidate must come from the old element's maker. The overlap counts
-        // shared ancestry of any kind, so another hole's edge on the face both holes cut shares
-        // that face with the old edge as fully as a piece of the old edge would. A candidate in
-        // the old name's ancestry, or with the maker in its lineage (pieces, a redraw in the
-        // maker's own sketch, a later feature's modification), stays.
-        if (input.sameMaker) {
-            const std::string maker = NameAncestry::makerTag(oldName);
-            if (!maker.empty()) {
-                for (auto it = all.begin(); it != all.end();) {
-                    const auto& names = pool.elements[*it].names;
-                    if (state.inAncestry.count(*it)
-                        || std::any_of(names.begin(), names.end(), [&](const auto& n) {
-                               return NameAncestry::hasLineageTag(n, maker);
-                           })) {
-                        ++it;
-                    }
-                    else {
-                        state.otherMaker.push_back(*it);
-                        it = all.erase(it);
-                    }
-                }
+        // T1 for the name matches (the overlap's survivors are filtered above).
+        for (auto it = all.begin(); it != all.end();) {
+            if (fromMaker(*it)) {
+                ++it;
+            }
+            else {
+                otherMaker.insert(*it);
+                it = all.erase(it);
             }
         }
+        state.otherMaker.assign(otherMaker.begin(), otherMaker.end());
         // T1' (ops#173): a candidate must keep the old element's sources. Another hole cut by
         // the same pocket from another circle of its sketch shares the maker and the cut face,
         // as fully as a redraw of the hole's own circle does; it is no structural evidence that
