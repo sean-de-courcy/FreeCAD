@@ -2794,14 +2794,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         )
         field = findField("fieldReferenceAxis")
         self.assertTrue(field.isVisible())
-        self.assertIn(states(field)[0], ("guessed", "broken"))
-        if states(field)[0] == "guessed":
-            menu = openMenu(field, 0)
-            menuActions(menu)["Accept guess"].trigger()
-            menu.close()
-            pump(0.3)
-            self.assertTrue(waitFor(lambda: states(field) == ["exact"]), states(field))
-            self.assertVolume(feature, 16 * math.pi)
+        # The line drawn again in place, the other way round: found again by geometry, a guess
+        self.assertEqual(states(field), ["guessed"])
+        menu = openMenu(field, 0)
+        menuActions(menu)["Accept guess"].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertTrue(waitFor(lambda: states(field) == ["exact"]), states(field))
+        self.assertVolume(feature, 16 * math.pi)
 
     def upToWalls(self, groove):
         """T23 / T36: both sides up to a face, each side's field writes its own property; a
@@ -2848,14 +2848,18 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testGrooveUpToFaces(self):
         self.upToWalls(groove=True)
 
+    def visibilities(self, *objs):
+        return tuple(obj.ViewObject.isVisible() for obj in objs)
+
     def testRevolutionFieldsAndVisibility(self):
         """T24: the start reference armed, an angle change keeps it armed (B17); the axis row
-        armed after it, then disarmed (Esc): the revolution shows again (B16); with the row armed
-        the References panel's pick disarms it (B15)."""
-        feature = self.revolution()
+        armed after it, then disarmed (Esc): the base solid (the core) and the revolution are as
+        the edit showed them (B16: the second start of a pick took the shown base for the edited
+        feature, which stayed hidden). B15 is testReferencesPanelDisarmsTheAxisRow."""
+        feature = self.revolution(core=True)
+        core = self.doc.getObject("Cylinder")
         self.edit(feature, count=0)
-        # The edit shows the feature before (none here: the revolution itself is hidden)
-        shown = (feature.ViewObject.isVisible(), self.ringSketch.ViewObject.isVisible())
+        shown = self.visibilities(feature, core, self.ringSketch)
         start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
         self.choose(start, 2)
         startField = findField("fieldStartReference")
@@ -2876,9 +2880,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not armed(field)), "Esc left the row armed")
         self.assertTrue(Gui.Control.activeDialog())
         self.assertEqual(
-            (feature.ViewObject.isVisible(), self.ringSketch.ViewObject.isVisible()),
+            self.visibilities(feature, core, self.ringSketch),
             shown,
-            "the revolution and its sketch aren't as the edit showed them",
+            "the revolution, its base and its sketch aren't as the edit showed them",
         )
         self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
 
@@ -2898,17 +2902,29 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertAlmostEqual(helix.Shape.Volume / (32 * math.pi), 1, delta=1e-3)
         return sketch, helix
 
+    def helixPreview(self):
+        """The additive helix's preview on (with it, the stock axis pick hid the profile), as the
+        test found it after."""
+        prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        old = prefs.GetBool("AdditiveHelixPreview", False)
+        prefs.SetBool("AdditiveHelixPreview", True)
+        self.addCleanup(prefs.SetBool, "AdditiveHelixPreview", old)
+
     def testHelixAxisRow(self):
-        """T25, B18, B15: the helix's axis row armed shows the profile; the x = -1 line picked:
-        48 pi; OK closes the dialog."""
+        """T25, B18: with the preview on, the helix's axis row armed leaves the profile sketch
+        shown (the stock pick hid it while the preview is on, so its lines couldn't be picked);
+        the x = -1 line picked: 48 pi, the row disarmed; OK closes the dialog (B15's throw)."""
+        self.helixPreview()
         sketch, helix = self.coil()
         self.edit(helix, count=0)
+        self.assertTrue(sketch.ViewObject.isVisible(), "the edit doesn't show the sketch")
         field = findField("fieldReferenceAxis")
         self.selectReference("axis")
         self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
         pump(0.3)
         self.assertTrue(sketch.ViewObject.isVisible(), "the profile isn't shown")
         self.pick(self.lines[-1], "")
+        self.assertTrue(waitFor(lambda: not armed(field)), "the row stays armed")
         self.assertLink(helix.ReferenceAxis, self.lines[-1], [])
         self.doc.recompute()
         self.assertAlmostEqual(helix.Shape.Volume / (48 * math.pi), 1, delta=1e-3)
@@ -2930,3 +2946,151 @@ class TestReferenceFieldGui(unittest.TestCase):
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         self.assertLink(helix.ReferenceAxis, sketch, ["V_Axis"])
+
+    # -- PR 159 review round 1 ----------------------------------------------------------------------
+
+    def testRevolutionStartReferenceWholeSketch(self):
+        """Review (1): a whole sketch is a start reference again (its plane; only an up-to-face
+        refuses it). The ring turned 90 degrees about Z from a sketch whose plane holds Z at 60
+        degrees: 4 pi (Pappus), and the solid's centroid lies 45 degrees from that plane, where
+        from the ring's own plane it lies at 45 degrees from X (15 degrees from that plane)."""
+        feature = self.revolution()
+        feature.Angle = 90
+        self.doc.recompute()
+        self.assertAlmostEqual(feature.Shape.Volume, 4 * math.pi, places=3)
+        plane = App.Rotation(App.Vector(0, 0, 1), 60).multiply(App.Rotation(App.Vector(1, 0, 0), 90))
+        reference = models.sketch(
+            self.doc,
+            "StartPlane",
+            models.rectangle(1, 0, 2, 1),
+            self.body,
+            placement=App.Placement(App.Vector(), plane),
+        )
+        self.doc.recompute()
+
+        def fromPlane():
+            # The centroid's angle from the plane's trace (the line at 60 degrees), in 0..90
+            centre = feature.Shape.Solids[0].CenterOfMass
+            azimuth = math.degrees(math.atan2(centre.y, centre.x))
+            return abs((azimuth - 60 + 90) % 180 - 90)
+
+        self.assertNotAlmostEqual(fromPlane(), 45, places=1)
+        self.edit(feature, count=0)
+        start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
+        self.choose(start, 2)
+        startField = findField("fieldStartReference")
+        self.assertTrue(waitFor(lambda: startField.isVisible() and armed(startField)))
+        self.pick(reference, "")
+        self.assertLink(feature.StartReference, reference, [])
+        self.assertVolume(feature, 4 * math.pi)
+        self.assertAlmostEqual(fromPlane(), 45, places=3)
+
+    def testPadDirectionDatumLine(self):
+        """Review (2): a datum line picked as the pad's direction is linked whole as [""] (it was
+        [], which gives no direction). The line leans 45 degrees towards X: the square 2..4
+        padded 3 along the normal is sheared, its top at x 5..7; the volume is the prism's."""
+        box, pad = self.padOnBox(toFace=False)
+        line = self.body.newObject("PartDesign::Line", "Leaning")
+        line.MapMode = "Deactivated"
+        line.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0, 1, 0), 45))
+        self.doc.recompute()
+        self.assertAlmostEqual(pad.AddSubShape.BoundBox.XMax, 4, places=4)
+        self.edit(pad, count=1)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "directionCB")
+        combo.setCurrentIndex(1)
+        combo.activated.emit(1)
+        pump(0.2)
+        field = findField("fieldReferenceAxis")
+        self.assertTrue(waitFor(lambda: armed(field)), "the direction field isn't armed")
+        self.pick(line, "")
+        self.assertEqual(pad.ReferenceAxis[0].Name, "Leaning")
+        self.assertEqual(pad.ReferenceAxis[1], [""])
+        self.assertVolume(pad, 1012)
+        self.assertAlmostEqual(pad.AddSubShape.BoundBox.XMax, 7, places=4)
+
+    def testAxisRowDeleteKeepsTheAxis(self):
+        """Review (5): Delete in the axis row (armed by "Select reference...", showing the axis
+        there is) doesn't clear the axis: refused with a message."""
+        feature = self.revolution()
+        self.edit(feature, count=0)
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
+        self.assertTrue(focus(entries(field)))
+        entries(field).setCurrentRow(0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+        self.assertVolume(feature, 16 * math.pi)
+        self.assertIn("empty", field.findChild(QtWidgets.QLabel, "status").text())
+
+    def testAxisComboFollowsFieldUndo(self):
+        """Review (6): the x = -1 line picked in the row, then the row's own undo (Ctrl+Z, the row
+        disarmed): the axis is the V axis again and the box shows it, the row hidden."""
+        feature = self.revolution()
+        self.edit(feature, count=0)
+        combo = self.axisCombo()
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)))
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertTrue(focus(entries(field)))
+        field.setProperty("armed", False)
+        pump(0.1)
+        self.assertFalse(armed(field))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: feature.ReferenceAxis[1] == ["V_Axis"]), feature.ReferenceAxis)
+        self.assertTrue(
+            waitFor(lambda: combo.currentText() == "Vertical sketch axis"), combo.currentText()
+        )
+        self.assertFalse(field.isVisible(), "the row stays under the box")
+
+    def testHelixProfileHiddenWhenDialogCloses(self):
+        """Review (7): the profile hidden, the axis row armed shows it; the dialog closed
+        (Control.closeDialog) while the row is armed: the profile is hidden again."""
+        sketch, helix = self.coil()
+        self.edit(helix, count=0)
+        sketch.ViewObject.Visibility = False
+        pump(0.1)
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)))
+        pump(0.3)
+        self.assertTrue(sketch.ViewObject.isVisible())
+        Gui.Control.closeDialog()
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertFalse(sketch.ViewObject.isVisible(), "the profile stays shown")
+
+    def testReferencesPanelDisarmsTheAxisRow(self):
+        """B15 (review 4): the axis row armed, the References panel takes the selection (its
+        selectionTaken, which its picks and highlights send first): the row disarms, the box shows
+        the axis there is, and OK closes."""
+        feature = self.revolution()
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        axisSketch = models.sketch(
+            self.doc, "AxisSketch", models.polyline([(0, -1), (0, 5)]), self.body, placement=xz
+        )
+        self.doc.recompute()
+        feature.ReferenceAxis = (axisSketch, ["Edge1"])
+        self.doc.recompute()
+        axisSketch.deleteAllGeometry()
+        axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
+        self.doc.recompute()
+        self.edit(feature, count=1)
+        field = findField("fieldReferenceAxis")
+        self.arm(field, byFocus=True)
+        [panel] = [
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget)
+            if w.metaObject().className() == "PartDesignGui::TaskReferences"
+        ]
+        self.assertTrue(QtCore.QMetaObject.invokeMethod(panel, "selectionTaken"))
+        pump(0.2)
+        self.assertFalse(armed(field), "the row stays armed")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(feature.ReferenceAxis[0].Name, "AxisSketch")
