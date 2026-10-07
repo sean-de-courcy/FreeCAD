@@ -51,11 +51,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <numbers>
 
 #include <fmt/format.h>
 
+#include <App/ElementNamingUtils.h>
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -76,6 +78,7 @@
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
 #include <Mod/Part/App/Geometry.h>
+#include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/GeoList.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
@@ -2702,7 +2705,7 @@ Base::BoundBox3d ViewProviderSketch::_getBoundingBox(
 
     // Apply the accumulated transformation
     if (bbox.IsValid()) {
-        bbox.Transformed(m);
+        bbox = bbox.Transformed(m);
     }
 
     return bbox;
@@ -3850,6 +3853,10 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
     if (std::string(prop->getName()) != "ShapeMaterial") {
         // We don't want material to override the colors of sketches.
         ViewProvider2DObject::updateData(prop);
+    }
+
+    if (prop == &getSketchObject()->ExternalGeo || prop == &getSketchObject()->ExternalGeometry) {
+        signalChangeIcon();
     }
 
     if (prop == &getSketchObject()->InternalShape) {
@@ -5018,9 +5025,61 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
     return PartGui::ViewProviderPart::onDelete(subList);
 }
 
+bool ViewProviderSketch::hasMissingExternalGeometry() const
+{
+    const auto& externalGeometry = getSketchObject()->ExternalGeo.getValues();
+    return std::ranges::any_of(externalGeometry, [](const Part::Geometry* geometry) {
+        return ExternalGeometryFacade::getFacade(geometry)->testFlag(
+            ExternalGeometryExtension::Missing);
+    }) || !brokenExternalLinks().isEmpty();
+}
+
+// FreeCAD-CH (ops#144): a sketch whose external reference is gone fails before its external
+// geometry is rebuilt (ops#72; in solver documents the recompute check), so no geometry is
+// flagged Missing. The link keeps the missing element's name instead ("?Edge2").
+QStringList ViewProviderSketch::brokenExternalLinks() const
+{
+    QStringList broken;
+    const auto& link = getSketchObject()->ExternalGeometry;
+    const auto& objects = link.getValues();
+    const auto subs = link.getSubValues(false);
+    for (std::size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
+        if (!objects[i] || !Data::hasMissingElement(subs[i].c_str())) {
+            continue;
+        }
+        std::string element = subs[i];
+        element.erase(0, element.find_last_of('.') + 1);
+        element.erase(0, std::strlen(Data::MISSING_PREFIX));
+        broken << QStringLiteral("%1.%2").arg(
+            QString::fromUtf8(objects[i]->Label.getValue()),
+            QString::fromStdString(element)
+        );
+    }
+    return broken;
+}
+
+QString ViewProviderSketch::getToolTip() const
+{
+    if (!hasMissingExternalGeometry()) {
+        return {};
+    }
+    QString tip = tr("Missing external geometry");
+    const QStringList broken = brokenExternalLinks();
+    if (!broken.isEmpty()) {
+        tip += QStringLiteral(": ") + broken.join(QStringLiteral(", "));
+    }
+    return tip;
+}
+
 QIcon ViewProviderSketch::mergeColorfulOverlayIcons(const QIcon& orig) const
 {
     QIcon mergedicon = orig;
+
+    if (hasMissingExternalGeometry()) {
+        static QPixmap warning(Gui::BitmapFactory().pixmapFromSvg("Warning", QSize(10, 10)));
+        mergedicon = Gui::BitmapFactoryInst::mergePixmap(
+            mergedicon, warning, Gui::BitmapFactoryInst::TopRight);
+    }
 
     if (!getSketchObject()->FullyConstrained.getValue()) {
         static QPixmap px(Gui::BitmapFactory().pixmapFromSvg("Sketcher_NotFullyConstrained", QSize(10, 10)));

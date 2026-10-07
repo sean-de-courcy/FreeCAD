@@ -31,6 +31,7 @@
 #include <Inventor/sensors/SoNodeSensor.h>
 #include <QCoreApplication>
 #include <QMetaObject>
+#include <QStringList>
 #include <fastsignals/signal.h>
 #include <memory>
 
@@ -724,6 +725,7 @@ public:
 
     /// Control the overlays appearing on the Tree and reflecting different sketcher states
     QIcon mergeColorfulOverlayIcons(const QIcon& orig) const override;
+    QString getToolTip() const override;
 
     /** @name Signals for controlling information in Task dialogs */
     //@{
@@ -834,6 +836,10 @@ protected:
     ) const override;
 
 private:
+    bool hasMissingExternalGeometry() const;
+    /// The external links whose element is gone, as "Label.Edge2" (FreeCAD-CH, ops#144)
+    QStringList brokenExternalLinks() const;
+
     /// function to handle OCCT BSpline weight calculation singularities and representation
     void scaleBSplinePoleCirclesAndUpdateSolverAndSketchObjectGeometry(
         GeoListFacade& geolist,

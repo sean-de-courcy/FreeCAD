@@ -42,6 +42,8 @@ if(BUILD_GUI)
           SketcherTests/TestExternalFacePreselection.py
           SketcherTests/TestAutoScaleNamesGui.py
           SketcherTests/TestSketchMissingExternalGui.py
+          SketcherTests/TestSketchBrokenExternalTreeGui.py
+          SketcherTests/TestSketchEditCameraGui.py
     )
 endif(BUILD_GUI)
 
