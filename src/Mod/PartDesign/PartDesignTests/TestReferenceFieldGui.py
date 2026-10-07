@@ -1714,3 +1714,224 @@ class TestReferenceFieldGui(unittest.TestCase):
             self.assertEqual(pad.ViewObject.Visibility, padShown)
         finally:
             preview.SetBool("ShowProfilePreview", had)
+
+    # -- PR 144's review (ops#150 W3, round 1) ---------------------------------------------------
+
+    def statusText(self, field):
+        return field.findChild(QtWidgets.QLabel, "status").text()
+
+    def solidFaceProfile(self, typeName, expected):
+        """The box (10 x 10 x 10), and a Pad or Pocket of its top face, 2 long: 1200 or 800 mm^3.
+        Returns the feature and the top face's name."""
+        box = self.box()
+        [top] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(box.Shape.Faces)
+            if abs(f.CenterOfMass.z - 10) < 1e-6
+        ]
+        feature = self.body.newObject(typeName, typeName.split("::")[1])
+        feature.Profile = (box, [top])
+        feature.Length = 2
+        self.assertVolume(feature, expected)
+        return feature, top
+
+    def testPadKeepsTheSolidsLastFace(self):
+        """Review 1: a pad of the solid's top face; a pick of that face again would take out the
+        last element and leave the solid whole, which is no profile: refused, with a message."""
+        pad, top = self.solidFaceProfile("PartDesign::Pad", 1200)
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pick(self.boxFeature, top)
+        self.assertLink(pad.Profile, self.boxFeature, [top])
+        self.assertTrue(self.statusText(field), "no message for the refused pick")
+        self.assertVolume(pad, 1200)
+
+    def testPocketKeepsTheSolidsLastFace(self):
+        """Review 1: the same for a pocket, through Delete on its entry."""
+        pocket, top = self.solidFaceProfile("PartDesign::Pocket", 800)
+        [field] = self.edit(pocket)
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        pump(0.3)
+        self.assertLink(pocket.Profile, self.boxFeature, [top])
+        self.assertTrue(self.statusText(field), "no message for the refused Delete")
+        self.assertVolume(pocket, 800)
+
+    def testProfileRefusesASketchOnTheFeature(self):
+        """Review 2: a sketch attached to the pad's own top face depends on the pad: the profile
+        field refuses it (a cycle), as the start and up-to fields do."""
+        pad, sketch, regions = self.regionsPad()
+        [top] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(pad.Shape.Faces)
+            if abs(f.CenterOfMass.z - 5) < 1e-6 and f.Area > 150
+        ]
+        onPad = pad.getParent().newObject("Sketcher::SketchObject", "OnPad")
+        onPad.AttachmentSupport = [(pad, top)]
+        onPad.MapMode = "FlatFace"
+        onPad.addGeometry(models.rectangle(1, 1, 3, 3), False)
+        self.doc.recompute()
+        self.assertTrue(onPad.isValid(), onPad.getStatusString())
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pick(onPad, "")
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+    def testRepickRefusesAnotherObject(self):
+        """Review 3: during an entry's Re-pick, a pick of another sketch, or of the sketch whole,
+        would replace the profile and drop every entry: refused; a region replaces the entry."""
+        pad, sketch, regions = self.regionsPad()
+        other = models.sketch(self.doc, "Other", models.rectangle(50, 0, 52, 2), pad.getParent())
+        self.doc.recompute()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        self.pickRegion(sketch, regions["disk"])
+        both = [regions["B"], regions["disk"]]
+        self.assertEqual(pad.Profile[1], both)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Re-pick"].trigger()
+        menu.close()
+        pump()
+        self.pick(other, "")
+        self.assertEqual(pad.Profile, (sketch, both))
+        self.assertTrue(self.statusText(field), "no message for the refused pick")
+        self.pick(sketch, "")
+        self.assertEqual(pad.Profile, (sketch, both))
+        self.pickRegion(sketch, regions["A"])
+        self.assertTrue(
+            waitFor(lambda: pad.Profile[1] == [regions["A"], regions["disk"]]), pad.Profile
+        )
+
+    def testOlderPadGetsItsAllowMultiFaceBack(self):
+        """Review 4: a pad without AllowMultiFace gets it with region B; without regions again
+        (the field's undo, Delete of the last region, Use whole sketch) it goes back to False,
+        so that the whole sketch takes its old way after OK; Cancel restores it too."""
+        pad, sketch, regions = self.regionsPad(allowMultiFace=False)
+        self.doc.openTransaction("Edit Pad")
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=True)
+        self.pickRegion(sketch, regions["B"])
+        self.assertTrue(pad.AllowMultiFace)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: pad.Profile[1] == []), pad.Profile)
+        self.assertFalse(pad.AllowMultiFace)
+
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        self.assertTrue(pad.AllowMultiFace)
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: pad.Profile[1] == []), pad.Profile)
+        self.assertFalse(pad.AllowMultiFace)
+
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        self.pickRegion(sketch, regions["disk"])
+        self.assertTrue(pad.AllowMultiFace)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Use whole sketch"].trigger()
+        menu.close()
+        pump(0.3)
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertFalse(pad.AllowMultiFace)
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+        self.pickRegion(sketch, regions["B"])
+        self.assertTrue(pad.AllowMultiFace)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel")
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertFalse(pad.AllowMultiFace)
+
+    def shadingRestoredWhenTheEditEnds(self, close, editEnds):
+        """Review 5: the field armed (the sketch shown and stronger, the pad hidden), then the
+        dialog closed other than by OK or Cancel: all as before. The pad as before the edit when
+        the edit ends (resetEdit), as in the dialog when it goes on (closeDialog)."""
+        pad, sketch, regions = self.regionsPad()
+        sketch.ViewObject.Visibility = False
+        saved = sketch.ViewObject.ShapeAppearance[0].Transparency
+        padBefore = pad.ViewObject.Visibility
+        [field] = self.edit(pad)
+        padShown = padBefore if editEnds else pad.ViewObject.Visibility
+        self.arm(field, byFocus=False)
+        self.assertTrue(sketch.ViewObject.Visibility)
+        self.assertFalse(pad.ViewObject.Visibility)
+        close()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        pump(0.3)
+        self.assertFalse(sketch.ViewObject.Visibility)
+        self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
+        self.assertEqual(pad.ViewObject.Visibility, padShown)
+
+    def testShadingRestoredOnResetEdit(self):
+        self.shadingRestoredWhenTheEditEnds(
+            lambda: Gui.getDocument(self.doc.Name).resetEdit(), editEnds=True
+        )
+
+    def testShadingRestoredOnCloseDialog(self):
+        self.shadingRestoredWhenTheEditEnds(Gui.Control.closeDialog, editEnds=False)
+
+    def testZoomToARegion(self):
+        """Review 6: the entry menu's Zoom to on a region moves the view to it (it looked the
+        region up in the sketch's Shape, which has none: nothing happened)."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, regions["B"])
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.viewTop()
+        view.fitAll()
+        pump(0.2)
+        before = view.getCameraNode().position.getValue().getValue()
+        menu = openMenu(field, 0)
+        menuActions(menu)["Zoom to"].trigger()
+        menu.close()
+        pump(0.3)
+        after = view.getCameraNode().position.getValue().getValue()
+        # B is 30..40 x 0..10: the view centres on it
+        self.assertNotAlmostEqual(before[0], after[0], places=3)
+        self.assertAlmostEqual(after[0], 35, delta=0.5)
+        self.assertAlmostEqual(after[1], 5, delta=0.5)
+
+    def testGuessedRegionKeepsItsWarning(self):
+        """Review test gap: region B's rectangle drawn again in place (new geometry) is found by
+        geometry, a guess with a warning; the entry stays guessed, its warning kept, when region
+        A is picked and when A is taken out again."""
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        pad, sketch, regions = self.regionsPad()
+        pad.Profile = (sketch, [regions["B"], regions["disk"]])
+        self.assertVolume(pad, 500 + 20 * math.pi)
+        last = sketch.GeometryCount
+        sketch.delGeometries(list(range(last - 4, last)))
+        sketch.addGeometry(models.polygon([(40, 10), (40, 0), (30, 0), (30, 10)]), False)
+        self.assertVolume(pad, 500 + 20 * math.pi)
+        self.assertIn("Warning", pad.State)
+
+        def warned():
+            return {
+                e["index"]
+                for e in App.getReferenceReport(pad)
+                if e["property"] == "Profile" and e["warning"]
+            }
+
+        self.assertEqual(warned(), {0})
+        [field] = self.edit(pad)
+        self.assertEqual(states(field), ["guessed", "exact"])
+        self.arm(field, byFocus=True)
+        self.pickRegion(sketch, regions["A"])
+        self.assertTrue(
+            waitFor(lambda: states(field) == ["guessed", "exact", "exact"]), states(field)
+        )
+        self.assertEqual(warned(), {0})
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 2)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed", "exact"]), states(field))
+        self.assertEqual(warned(), {0})
+        self.assertVolume(pad, 500 + 20 * math.pi)

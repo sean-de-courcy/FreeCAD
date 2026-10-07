@@ -563,9 +563,10 @@ class TestReferencePickerGui(unittest.TestCase):
         subs = [entries(field).item(i).data(QtCore.Qt.UserRole + 2) for i in range(2)]
         self.assertIn("?InternalFace1", subs)
         #   the field shows the Profile: the References panel doesn't (ops#150 3.5)
+        #   (its only rows are the field's, so it is left out: PR 144's review, the check was
+        #   skipped whenever the panel was hidden)
         tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
-        if tree is not None and tree.isVisible():
-            self.assertNotIn("Profile[0]", [r[0] for r in Panel(self).rows()])
+        self.assertTrue(tree is None or not tree.isVisible(), "the References panel is shown")
 
         for row, region in enumerate(REGIONS):
             menu = openMenu(field, row)
