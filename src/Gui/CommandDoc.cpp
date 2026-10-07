@@ -1569,14 +1569,31 @@ DEF_STD_CMD_A(StdCmdDelete)
 namespace
 {
 // Std_Delete hands an object in edit its own selected sub-elements, for the Sketcher to delete
-// geometry. A PartDesign feature in edit deletes nothing that way (its onDelete does nothing in
-// edit, ops#143): its sub-elements take the general path, which keeps it and says so, and the
-// rest of the selection is still deleted (ops#160). Looked up by name: Gui doesn't link
-// PartDesignGui.
+// geometry. Part shapes, PartDesign features included, delete nothing that way: their onDelete is
+// about deleting the object itself (a PartDesign feature's does nothing in edit, ops#143). Their
+// sub-elements take the general path, which keeps the object and says so, and the rest of the
+// selection is still deleted (ops#160, ops#164). Looked up by name: Gui links neither PartGui nor
+// SketcherGui, whose sketch is a Part shape too.
 bool handsSubElementsToEdited(const ViewProviderDocumentObject* vpedit)
 {
-    const Base::Type partDesignFeature = Base::Type::fromName("PartDesignGui::ViewProvider");
-    return partDesignFeature.isBad() || !vpedit->isDerivedFrom(partDesignFeature);
+    const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+    if (!sketch.isBad() && vpedit->isDerivedFrom(sketch)) {
+        return true;
+    }
+    const Base::Type partShape = Base::Type::fromName("PartGui::ViewProviderPartExt");
+    return partShape.isBad() || !vpedit->isDerivedFrom(partShape);
+}
+
+void warnNotDeleted(const QStringList& editedLabels, const QStringList& keptLabels)
+{
+    if (keptLabels.isEmpty()) {
+        return;
+    }
+    const QString message
+        = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
+              .arg(editedLabels.join(QStringLiteral(", ")), keptLabels.join(QStringLiteral(", ")));
+    getMainWindow()->showStatus(MainWindow::Wrn, message);
+    Base::Console().warning("%s\n", message.toUtf8().constData());
 }
 }  // namespace
 
@@ -1639,31 +1656,65 @@ void StdCmdDelete::activated(int iMsg)
 
         Gui::getMainWindow()->setUpdatesEnabled(false);
 
-        bool deletedSelectionOfEditDocument = false;
+        // Read before the in-edit path: the Sketcher's onDelete clears the selection
+        auto sels = Selection().getSelectionEx();
         std::vector<Gui::Document*> editDocs = Application::Instance->editDocuments();
+        struct HandedToEdited
+        {
+            ViewProviderDocumentObject* vp;
+            App::DocumentObject* obj;
+            std::vector<std::string> subNames;
+        };
+        std::vector<HandedToEdited> handed;
         for (auto& editDoc : editDocs) {
-            auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getInEdit());
+            // getEditViewProvider(), not getInEdit(): that is null while another view of the
+            // document is active (ops#164)
+            auto vpedit = freecad_cast<ViewProviderDocumentObject*>(editDoc->getEditViewProvider());
 
             // In practice, no ViewProviderDocumentObject accepts deletion in edit - 2025-06-17
             if (vpedit && !vpedit->acceptDeletionsInEdit() && handsSubElementsToEdited(vpedit)) {
                 for (auto& sel : Selection().getSelectionEx(editDoc->getDocument()->getName())) {
                     if (sel.getObject() == vpedit->getObject()) {
                         if (!sel.getSubNames().empty()) {
-                            deletedSelectionOfEditDocument = true;
-                            manageDocCommand(editDoc->getDocument());
-                            vpedit->onDelete(sel.getSubNames());
-                            docs.insert(editDoc->getDocument());
+                            handed.push_back({vpedit, sel.getObject(), sel.getSubNames()});
                         }
                         break;
                     }
                 }
             }
         }
+        for (auto& [vpedit, edited, subNames] : handed) {
+            manageDocCommand(edited->getDocument());
+            vpedit->onDelete(subNames);
+            docs.insert(edited->getDocument());
+        }
+        // The hand-off is exclusive: the rest of the selection stays, e.g. a Pad clicked in the
+        // tree while a sketch is in edit (the Sketcher keeps tree clicks). It was skipped
+        // silently; now Std_Delete says so (ops#164)
+        if (!handed.empty()) {
+            QStringList editedLabels;
+            for (const auto& entry : handed) {
+                editedLabels << QString::fromUtf8(entry.obj->Label.getValue());
+            }
+            auto isHanded = [&handed](const App::DocumentObject* obj) {
+                return std::ranges::any_of(handed, [obj](const HandedToEdited& entry) {
+                    return entry.obj == obj;
+                });
+            };
+            QStringList keptLabels;
+            for (const auto& sel : sels) {
+                const App::DocumentObject* obj = sel.getObject();
+                if (obj && !isHanded(obj)) {
+                    keptLabels << QString::fromUtf8(obj->Label.getValue());
+                }
+            }
+            warnNotDeleted(editedLabels, keptLabels);
+            sels.clear();
+        }
 
-        if (!deletedSelectionOfEditDocument) {
+        if (!sels.empty()) {
             std::set<QString> affectedLabels;
             bool more = false;
-            auto sels = Selection().getSelectionEx();
 
             // Never delete an object in edit, or a group holding it (its Body, its Part): its
             // task dialog would be left on deleted objects. A dress-up panel's highlight selects
@@ -1673,10 +1724,13 @@ void StdCmdDelete::activated(int iMsg)
             std::set<const App::DocumentObject*> editProtected;
             QStringList editedLabels;
             for (auto& editDoc : editDocs) {
+                // getInEdit() fills its out-parameters even when it returns null, i.e. while
+                // another view of the document is active (ops#164)
                 ViewProviderDocumentObject* parentVp = nullptr;
                 std::string subname;
+                editDoc->getInEdit(&parentVp, &subname);
                 auto vpedit = freecad_cast<ViewProviderDocumentObject*>(
-                    editDoc->getInEdit(&parentVp, &subname)
+                    editDoc->getEditViewProvider()
                 );
                 if (!vpedit || vpedit->acceptDeletionsInEdit()) {
                     continue;
@@ -1713,17 +1767,14 @@ void StdCmdDelete::activated(int iMsg)
                 keptLabels << QString::fromUtf8(obj->Label.getValue());
                 return true;
             });
-            if (!keptLabels.isEmpty()) {
-                const QString message
-                    = qApp->translate("Std_Delete", "Not deleted while %1 is being edited: %2")
-                          .arg(
-                              editedLabels.join(QStringLiteral(", ")),
-                              keptLabels.join(QStringLiteral(", "))
-                          );
-                getMainWindow()->showStatus(MainWindow::Wrn, message);
-                Base::Console().warning("%s\n", message.toUtf8().constData());
-            }
+            warnNotDeleted(editedLabels, keptLabels);
 
+            // A parent deleted too doesn't count as a dependency: it is looked up in sels, not in
+            // the live selection, which still holds the objects kept above (ops#164)
+            std::set<const App::DocumentObject*> deleting;
+            for (const auto& sel : sels) {
+                deleting.insert(sel.getObject());
+            }
             bool autoDeletion = true;
             bool forceDeletion = false;
             for (auto& sel : sels) {
@@ -1736,7 +1787,7 @@ void StdCmdDelete::activated(int iMsg)
                     continue;
                 }
                 for (auto parent : obj->getInList()) {
-                    if (!Selection().isSelected(parent)) {
+                    if (deleting.count(parent) == 0) {
                         ViewProvider* vp = Application::Instance->getViewProvider(parent);
                         if (vp && !vp->canDelete(obj)) {
                             autoDeletion = false;
