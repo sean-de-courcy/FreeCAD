@@ -1054,13 +1054,6 @@ def shiftedOntoItself(region, dx, dy):
     return (dy == 0 and abs(dx) == x1 - x0) or (dx == 0 and abs(dy) == y1 - y0)
 
 
-def raisedByAPocketDepth(spec, height):
-    """Whether the block's new height moves its top by a pocket's depth: the pocket's rim then
-    lies where its floor was, or its floor where its rim was, and the reference solver breaks a
-    reference to either as ambiguous (ops#105; PocketRimRaisedByItsDepth in moves.py)."""
-    return any(f.kind == "pocket" and abs(height - spec.H) == f.size for f in spec.features)
-
-
 def drawRedraw(rng, spec):
     """A redraw (N3 6.2) of a line or circle, preferably one whose element a reference holds."""
     options = []
@@ -1122,8 +1115,6 @@ def drawEdit(rng, spec):
     if kind == "block":
         key = rng.choice(("W", "D", "H"))
         value = uniform(rng, *LIMITS[key])
-        if key == "H" and raisedByAPocketDepth(spec, value):
-            return None
         return BlockSize(key, value) if value != getattr(spec, key) else None
     if kind == "feature":
         sized = [f for f in spec.features if f.kind != "marker" and f.kind != "external"]

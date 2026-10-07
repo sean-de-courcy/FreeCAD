@@ -105,7 +105,7 @@ std::string piece(
     return incoming + "|" + section({}, {}, tag, opCode, index, elementType, {"MOD"}, connected);
 }
 
-// Instance  number of pattern  tag, with the number as text: one number per step of a
+// Instance \a number of pattern \a tag, with the number as text: one number per step of a
 // multi-step pattern (`2:2`, ops#6).
 std::string stepInstance(
     const std::string& incoming,
@@ -4327,6 +4327,157 @@ TEST(Moved, patternSiblingAtTheOldPlaceBreaks)
               "broken  -1 [Edge2 Edge1 ] moved 6.000 mm; Edge2 sits where it was");
 }
 
+namespace
+{
+
+// ops#168's seed 267: a boss (tag 7) padded from sketch line g2 (sketch 5) on a block; a
+// chamfer names its top right edge, Edge33, the line's `XTR;PRJ` copy at z = 15. The block is
+// raised by the boss's height, 2.5: Edge33 is at z = 17.5, and the boss's bottom edge Edge22,
+// the sketch line verbatim, sits where Edge33 was. \a atOldPlace names Edge22.
+SolveInput liftedBoss(const std::string& atOldPlace)
+{
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    SolveInput input;
+    input.diagonal = 40;
+    input.pool["Edge"] = {
+        element("Edge22", {atOldPlace}),
+        element("Edge33", {top}),
+        element("Edge40", {sketchEdge(4)}),
+    };
+    auto entry = exact("Edge33", "Edge");
+    entry.exactName = top;
+    entry.fingerprint = lineX(10, 18, 3.25, 15);
+    input.entries = {entry};
+    measure(input,
+            {{"Edge22", lineX(10, 18, 3.25, 15)},
+             {"Edge33", lineX(10, 18, 3.25, 17.5)},
+             {"Edge40", lineX(10, 18, 9.25, 15)}},
+            nullptr);
+    return input;
+}
+
+}  // namespace
+
+TEST(Moved, liftedOntoItsOwnTwinKeepsItsName)
+{
+    // The element at the old place is the hit's own other copy of line g2: the name stands.
+    auto outcome = Data::solveOwner(liftedBoss(sketchEdge(2)))[0];
+    EXPECT_EQ(describe(outcome),
+              "exact Edge33 0 [] moved 2.500 mm; its own twin Edge22 sits where it was");
+    EXPECT_TRUE(outcome.candidates.empty());
+}
+
+TEST(Moved, anotherLineOfTheSketchAtTheOldPlaceBreaks)
+{
+    // Line g3 of the same sketch there (a profile shifted by its width): the rule as before.
+    auto outcome = Data::solveOwner(liftedBoss(sketchEdge(3)))[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
+TEST(Moved, ownTwinAndAnotherAtTheOldPlaceBreaks)
+{
+    // Every element there must be an own twin: with another line there too, it breaks.
+    auto input = liftedBoss(sketchEdge(2));
+    input.pool["Edge"].push_back(element("Edge50", {sketchEdge(3, 6)}));
+    auto fingerprints = std::map<std::string, ElementFingerprint> {
+        {"Edge22", lineX(10, 18, 3.25, 15)},
+        {"Edge33", lineX(10, 18, 3.25, 17.5)},
+        {"Edge40", lineX(10, 18, 9.25, 15)},
+        {"Edge50", lineX(10, 18, 3.25, 15)},
+    };
+    measure(input, fingerprints, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge22 Edge50 Edge33 ] moved 2.500 mm; Edge22, Edge50 sit where it was");
+}
+
+TEST(Moved, ownTwinOfAnotherInstanceBreaks)
+{
+    // The same source in another pattern instance is a pattern sibling, not an own twin.
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    auto input = liftedBoss(stepInstance(sketchEdge(2), 8, "2", 'E'));
+    input.pool["Edge"][1] = element("Edge33", {stepInstance(top, 8, "1", 'E')});
+    input.entries[0].exactName = stepInstance(top, 8, "1", 'E');
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+    //   in the same instance, it is the own twin
+    input.pool["Edge"][0] = element("Edge22", {stepInstance(sketchEdge(2), 8, "1", 'E')});
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "exact Edge33 0 [] moved 2.500 mm; its own twin Edge22 sits where it was");
+}
+
+TEST(Moved, laterFeaturesEdgeOfAMirroredCopyIsNoTwin)
+{
+    // The PR 143 review's finding 1 (MirroredBossesTradePlaces): a pocket (tag 9) slices the
+    // top off a boss and its Mirrored copy (tag 8, instance 2), and its edges carry the copy only
+    // inside the linked face. The copy's edge at the boss's old place is no own twin of the
+    // boss's, so the reference breaks, as two copies trading places do.
+    const auto side = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'F', {"GEN"});
+    const auto floor = section({}, {sketchEdge(4, 6)}, 9, "XTR", 0, 'F', {"PRJ"});
+    auto sliced = [&](const std::string& face) {
+        return generated({floor, face}, 9, "CUT", 'E');
+    };
+    auto input = liftedBoss(sliced(stepInstance(side, 8, "2", 'F')));
+    input.pool["Edge"][1] = element("Edge33", {sliced(side)});
+    input.entries[0].exactName = sliced(side);
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+    //   two instances of a pattern, the same
+    input.pool["Edge"][1] = element("Edge33", {sliced(stepInstance(side, 8, "3", 'F'))});
+    input.entries[0].exactName = sliced(stepInstance(side, 8, "3", 'F'));
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+    //   the hit's own copy in the same instance is its twin
+    const auto bottom = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'F', {"PRJ"});
+    input.pool["Edge"][0] = element("Edge22", {sliced(stepInstance(bottom, 8, "3", 'F'))});
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "exact Edge33 0 [] moved 2.500 mm; its own twin Edge22 sits where it was");
+}
+
+TEST(Moved, twoPiecesOfOneEdgeAreNoTwins)
+{
+    // The PR 143 review's finding 2 (EdgePiecesTradePlaces): a notch (tag 9) splits the boss's
+    // top edge into two equal pieces, told apart by their neighbours; a move puts one where the
+    // other was. They share every source, but two pieces of one edge are no twins: it breaks.
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto held = piece(top, 9, "CUT", 0, 'E', {"Face3"});
+    auto input = liftedBoss(piece(top, 9, "CUT", 0, 'E', {"Face5"}));
+    input.pool["Edge"][1] = element("Edge33", {held});
+    input.entries[0].exactName = held;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
+TEST(Moved, twoPiecesOfOneEdgeInACopyAreNoTwins)
+{
+    // The PR 143 verification's finding A: the split made before a pattern instance (8, instance
+    // 2) copies both pieces, `X|<split>|<TRF;2>`. Compared without the copy chain they share,
+    // they are two pieces of one edge, no twins: it breaks.
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    const auto held = stepInstance(piece(top, 9, "CUT", 0, 'E', {"Face3"}), 8, "2", 'E');
+    auto input = liftedBoss(stepInstance(piece(top, 9, "CUT", 0, 'E', {"Face5"}), 8, "2", 'E'));
+    input.pool["Edge"][1] = element("Edge33", {held});
+    input.entries[0].exactName = held;
+    EXPECT_EQ(describe(Data::solveOwner(input)[0]),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
+TEST(Moved, onlyTheHeldNameOfTheHitMakesATwin)
+{
+    // The PR 143 review's finding 3: the hit also has a name made from line g3, the element at
+    // the old place's source. The reference holds the g2 name, so that one decides: no twin.
+    auto input = liftedBoss(sketchEdge(3));
+    const auto top = section({}, {sketchEdge(2)}, 7, "XTR", 0, 'E', {"PRJ"});
+    input.pool["Edge"][1] =
+        element("Edge33", {top, section({}, {sketchEdge(3, 6)}, 7, "XTR", 0, 'E', {"PRJ"})});
+    input.pool["Edge"][0] = element("Edge22", {sketchEdge(3, 6)});
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(describe(outcome),
+              "broken  -1 [Edge22 Edge33 ] moved 2.500 mm; Edge22 sits where it was");
+}
+
 TEST(Moved, independentOfInputOrder)
 {
     // Two traded bosses, a third moved alone, a missing reference and a plate edge, shuffled.
@@ -4851,6 +5002,40 @@ TEST(NameAncestry, sourceTags)
         = section({}, {sketchVertex({"g1v2", "g2v1"}, 5)}, 7, "XTR", 0, 'E', {"GEN"});
     EXPECT_EQ(NameAncestry::sourceTags(blockCorner), profile);
     EXPECT_TRUE(NameAncestry::sourceTags("").empty());
+}
+
+TEST(NameAncestry, sourceSections)
+{
+    // The innermost source sections (ops#168): tag, type and reference IDs. Profile is tag 5,
+    // the pad 7, a second sketch 6.
+    auto padEdge = [](int geoId, int sketchTag) {
+        return section({}, {sketchEdge(geoId, sketchTag)}, 7, "XTR", 0, 'E', {"PRJ"});
+    };
+    const std::vector<std::string> line2 {"5;E;g2,"};
+    //   the pad's top edge (PRJ) and its bottom edge (the sketch line verbatim): one source
+    EXPECT_EQ(NameAncestry::sourceSections(padEdge(2, 5)), line2);
+    EXPECT_EQ(NameAncestry::sourceSections(sketchEdge(2)), line2);
+    //   another line of the sketch, the line redrawn (a new ID), another sketch: other sources
+    EXPECT_NE(NameAncestry::sourceSections(padEdge(3, 5)), line2);
+    EXPECT_NE(NameAncestry::sourceSections(padEdge(9, 5)), line2);
+    EXPECT_NE(NameAncestry::sourceSections(padEdge(2, 6)), line2);
+    //   a vertical edge from a sketch vertex: the vertex's IDs
+    const auto vertical = section({}, {sketchVertex({"g1v1", "g4v2"})}, 7, "XTR", 0, 'E', {"GEN"});
+    EXPECT_EQ(NameAncestry::sourceSections(vertical), (std::vector<std::string> {"5;V;g1v1,g4v2,"}));
+    //   a face of two sketches' edges has both; a split piece and its neighbours add none
+    EXPECT_EQ(
+        NameAncestry::sourceSections(lowFace({sketchEdge(2, 5), sketchEdge(1, 6)}, 8)),
+        (std::vector<std::string> {"5;E;g2,", "6;E;g1,"})
+    );
+    EXPECT_EQ(NameAncestry::sourceSections(piece(padEdge(2, 5), 9, "FUS", 1, 'E', {padEdge(1, 6)})),
+              line2);
+    //   a source without a reference ID or a tag is unknown: no sources at all
+    EXPECT_TRUE(NameAncestry::sourceSections(section({}, {}, 7, "XTR", 0, 'E', {})).empty());
+    EXPECT_TRUE(
+        NameAncestry::sourceSections(lowFace({sketchEdge(2), section({}, {}, 7, "XTR", 0, 'E', {})}))
+            .empty()
+    );
+    EXPECT_TRUE(NameAncestry::sourceSections("").empty());
 }
 
 namespace

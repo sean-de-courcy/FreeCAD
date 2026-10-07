@@ -107,9 +107,10 @@ cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesBack.test_edge_b_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesOneFillet.test_edges_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_a_V1
 cli  PartDesignTests.TestNamingScenarios.BossesTradePlacesReopened.test_edge_b_V1
+cli  PartDesignTests.TestNamingScenarios.EdgePiecesTradePlaces.test_piece_V1
 cli  PartDesignTests.TestNamingScenarios.ExternalBossTradePlaces.test_external_a_V1
 cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubled.test_instance3_edge_V1
-cli  PartDesignTests.TestNamingScenarios.PocketRimRaisedByItsDepth.test_rim_edge_V1
+cli  PartDesignTests.TestNamingScenarios.LinearPitchDoubledSliced.test_instance3_edge_V1
 cli  PartDesignTests.TestNamingScenarios.RectangleShiftedByWidth.test_right_top_edge_V1
 
 reason: V1's Draft fails first; since a failure in a Body passes its input through (ops#126), the fillet after it runs, and its edge, which the Draft made, is gone: it breaks red (notes/reorder-rollback-design.md 4.7). Before, the fillet was skipped and kept its old shape, which scored correct by accident. Permanent, as V1's other verdicts

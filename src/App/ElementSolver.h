@@ -137,6 +137,14 @@ public:
      */
     static std::vector<std::string> sourceTags(std::string_view name);
 
+    /** The innermost source sections of \a name (ops#168), as sourceTags() finds them, each as
+     * its tag, element type and reference IDs: e.g. a pad's top edge (`XTR`, `PRJ`) and its
+     * bottom edge (the sketch line verbatim) both give the sketch's line `g2`. Two elements with
+     * the same sources are copies of one source geometry (own twins). Sorted and unique; empty
+     * for an empty name, or if a source has no tag or no reference ID (unknown).
+     */
+    static std::vector<std::string> sourceSections(std::string_view name);
+
     /** The maker of \a name (ops#167): the iteration tag of its first section, the feature or
      * sketch that made the element. Later sections are what later features did to it. Empty for
      * an empty name or a first section without a tag.
@@ -617,7 +625,13 @@ struct AppExport SolveOutcome
  *   element, geometry the others. It breaks under One and Expand, with those elements first
  *   (role `place`) and the named one last (`name`); under Equivalent the hit stands if each of
  *   them gives the consumer the hit's result. Those elements leave the other entries' pools, as
- *   tier-0 elements do. An element that moved with nothing at its old place keeps its reference.
+ *   tier-0 elements do. An element that moved with nothing at its old place keeps its reference,
+ *   and so does one whose old place only its own twins hold (ops#168): elements with the same
+ *   source sections (NameAncestry::sourceSections(), for the name the entry holds and a name of
+ *   the other), made in the same copies (pattern instances and boundaries, anywhere in the
+ *   lineage), not told apart only by the duplicate counter, and not two pieces of one split
+ *   element (NameAncestry::isPieceOf() of their common sections), e.g. a pad's bottom edge where
+ *   its top edge was after a lift by the pad's own length. The exact outcome's evidence says so.
  * - Collapse (PR 7): the entries with the same scope and `from` are a group. When `from` names
  *   an element of the target exactly and every member is exact on that element or missing and
  *   merged back into it (a structural piece of `from`, or saved geometry lying on the element
