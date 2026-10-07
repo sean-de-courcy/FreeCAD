@@ -23,12 +23,14 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <set>
 #include <sstream>
 #include <vector>
 
 #include <QAction>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -194,10 +196,56 @@ bool runEdit(
         error = QString::fromUtf8(e.what());
         return false;
     }
+    catch (...) {
+        if (own) {
+            doc->abortTransaction();
+        }
+        throw;
+    }
     if (own) {
         doc->commitTransaction();
     }
     return true;
+}
+
+/// Whether @a text, typed for an alias or a String or Bool variable, is meant as an expression:
+/// it starts with '=', uses `#name`, or names only things that exist. Any other text is stored as
+/// it is, so `steel` edited to `bronze` stays a text, not a reference to nothing.
+bool isExpressionText(const App::DocumentObject* owner, const std::string& text)
+{
+    if (text.starts_with('=') || text.find('#') != std::string::npos) {
+        return true;
+    }
+    std::shared_ptr<App::Expression> expr;
+    try {
+        expr = App::Expression::parse(owner, text);
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    std::map<App::ObjectIdentifier, bool> ids;
+    expr->getIdentifiers(ids);
+    if (ids.empty()) {
+        return false;
+    }
+    for (const auto& [id, hidden] : ids) {
+        if (!id.getProperty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The value of @a text for a Bool variable: 1 for true, 0 for false, -1 if it is neither.
+int boolValue(const QString& text)
+{
+    if (text.compare(QLatin1String("True"), Qt::CaseInsensitive) == 0 || text == QLatin1String("1")) {
+        return 1;
+    }
+    if (text.compare(QLatin1String("False"), Qt::CaseInsensitive) == 0 || text == QLatin1String("0")) {
+        return 0;
+    }
+    return -1;
 }
 
 /// The panel's tree: says whether an editor is open (state() is protected).
@@ -457,20 +505,40 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         return false;
     }
 
-    // A text that is a plain quantity sets the value; anything else is an expression.
-    bool isValue = alias || isNumeric(prop);
-    if (isValue) {
+    // A text that is a plain quantity sets a number's value. For an alias, a String or a Bool, a
+    // text that isn't meant as an expression (isExpressionText) is the value. Anything else is an
+    // expression.
+    enum class As
+    {
+        Value,
+        Text,
+        Expression
+    };
+    As as = As::Expression;
+    bool isString = freecad_cast<App::PropertyString*>(prop) != nullptr;
+    bool isBool = freecad_cast<App::PropertyBool*>(prop) != nullptr;
+    if (alias || isNumeric(prop)) {
         try {
             Base::Quantity::parse(typed);
+            as = As::Value;
         }
         catch (const Base::Exception&) {
-            isValue = false;
         }
+    }
+    else if (isBool && boolValue(text) >= 0) {
+        as = As::Value;
+    }
+    if (as == As::Expression && (alias || isString || isBool) && !isExpressionText(obj, typed)) {
+        if (isBool) {
+            error = tr("%1 is True or False, or an expression.").arg(QString::fromStdString(name));
+            return false;
+        }
+        as = As::Text;
     }
 
     std::vector<std::string> commands;
     std::string target = pyObject(obj);
-    if (isValue) {
+    if (as != As::Expression) {
         if (alias) {
             commands.push_back(
                 target + ".set('" + index.data(AddressRole).toString().toStdString() + "', "
@@ -481,8 +549,13 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
             if (obj->getExpression(App::ObjectIdentifier(*prop)).expression) {
                 commands.push_back(target + ".setExpression(" + pyString(name) + ", None)");
             }
-            if (freecad_cast<App::PropertyQuantity*>(prop)) {
+            if (isString || freecad_cast<App::PropertyQuantity*>(prop)) {
                 commands.push_back(target + "." + name + " = " + pyString(typed));
+            }
+            else if (isBool) {
+                commands.push_back(
+                    target + "." + name + " = " + (boolValue(text) ? "True" : "False")
+                );
             }
             else {
                 // A Float or an Integer: the quantity must have no unit.
@@ -494,7 +567,12 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
                 std::ostringstream value;
                 value.precision(17);
                 if (freecad_cast<App::PropertyInteger*>(prop)) {
-                    value << static_cast<long>(std::lround(quantity.getValue()));
+                    double number = quantity.getValue();
+                    if (number != std::floor(number)) {
+                        error = tr("%1 takes a whole number.").arg(QString::fromStdString(name));
+                        return false;
+                    }
+                    value << static_cast<long long>(number);
                 }
                 else {
                     value << quantity.getValue();
@@ -505,9 +583,10 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
     }
     else {
         // Parsed with the variable's owner: the command gets the stored text, never `#name`.
+        // A leading '=' only says "expression", as in a sheet cell.
         std::shared_ptr<App::Expression> expr;
         try {
-            expr = App::Expression::parse(obj, typed);
+            expr = App::Expression::parse(obj, typed.starts_with('=') ? typed.substr(1) : typed);
         }
         catch (const Base::Exception& e) {
             error = QString::fromUtf8(e.what());
@@ -549,6 +628,7 @@ QWidget* VariablesDelegate::createEditor(
     const QModelIndex& index
 ) const
 {
+    committedByKey = false;
     if (index.column() != VariablesModel::ExpressionColumn) {
         return QStyledItemDelegate::createEditor(parent, option, index);
     }
@@ -558,6 +638,19 @@ QWidget* VariablesDelegate::createEditor(
         editor->setDocumentObject(obj);
     }
     return editor;
+}
+
+bool VariablesDelegate::eventFilter(QObject* object, QEvent* event)
+{
+    // Read by the view when a commit fails: only Return or Enter reopens the editor.
+    if (event->type() == QEvent::KeyPress) {
+        int key = static_cast<QKeyEvent*>(event)->key();
+        committedByKey = key == Qt::Key_Return || key == Qt::Key_Enter;
+    }
+    else if (event->type() == QEvent::FocusOut) {
+        committedByKey = false;
+    }
+    return QStyledItemDelegate::eventFilter(object, event);
 }
 
 void VariablesDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const
@@ -600,8 +693,6 @@ void VariablesDelegate::setModelData(
 VariablesView::VariablesView(Gui::Document* doc, QWidget* parent)
     : DockWindow(doc, parent)
 {
-    setWindowTitle(tr("Variables"));
-
     auto layout = new QVBoxLayout(this);
     layout->setSpacing(2);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -738,20 +829,25 @@ bool VariablesView::isRelevant(const App::DocumentObject* obj) const
 
 void VariablesView::onChangedObject(const App::DocumentObject& obj, const App::Property&)
 {
-    if (isRelevant(&obj)) {
+    // Hidden, any change only marks the panel dirty: isRelevant is too costly for every change.
+    if (!isVisible() || isRelevant(&obj)) {
         scheduleRebuild();
     }
 }
 
 void VariablesView::onObject(const App::DocumentObject& obj)
 {
-    if (isRelevant(&obj)) {
+    if (!isVisible() || isRelevant(&obj)) {
         scheduleRebuild();
     }
 }
 
 void VariablesView::onProperty(const App::Property& prop)
 {
+    if (!isVisible()) {
+        scheduleRebuild();
+        return;
+    }
     auto obj = freecad_cast<App::DocumentObject*>(prop.getContainer());
     if (obj && isRelevant(obj)) {
         scheduleRebuild();
@@ -763,7 +859,6 @@ void VariablesView::onActiveDocument(const Gui::Document& doc)
     std::string name = doc.getDocument()->getName();
     if (name != documentName) {
         documentName = name;
-        collapsed.clear();
         showMessage(QString(), false);
         scheduleRebuild();
     }
@@ -771,29 +866,40 @@ void VariablesView::onActiveDocument(const Gui::Document& doc)
 
 void VariablesView::onDeleteDocument(const Gui::Document& doc)
 {
-    if (doc.getDocument()->getName() == documentName) {
+    std::string name = doc.getDocument()->getName();
+    std::erase_if(collapsed, [&name](const std::string& key) {
+        return key.starts_with(name + "/");
+    });
+    if (name == documentName) {
         documentName.clear();
         // The rows name objects of the closing document: drop them now, not on the timer.
         model->rebuild(nullptr);
+        hint->setVisible(true);
         updateActions();
     }
 }
 
 void VariablesView::scheduleRebuild()
 {
+    if (!isVisible()) {
+        dirty = true;
+        return;
+    }
     timer->start();
 }
 
 void VariablesView::showEvent(QShowEvent* ev)
 {
     DockWindow::showEvent(ev);
-    rebuild();
+    if (dirty) {
+        rebuild();
+    }
 }
 
 void VariablesView::rebuild()
 {
-    if (!isVisible() && !documentName.empty() && model->rowCount() > 0) {
-        // Rebuilt when shown again.
+    if (!isVisible()) {
+        dirty = true;  // Rebuilt when shown.
         return;
     }
     if (static_cast<VariablesTree*>(tree)->isEditing()) {
@@ -801,6 +907,7 @@ void VariablesView::rebuild()
         scheduleRebuild();
         return;
     }
+    dirty = false;
 
     // Keep the collapsed headers and the current row across the rebuild.
     QString currentHolder;
@@ -813,14 +920,17 @@ void VariablesView::rebuild()
         currentVariable = current.data(VariablesModel::VariableRole).toString();
         currentColumn = current.column();
     }
+    auto headerKey = [](const QModelIndex& header) {
+        return header.data(VariablesModel::DocumentRole).toString().toStdString() + "/"
+            + header.data(VariablesModel::HolderRole).toString().toStdString();
+    };
     for (int row = 0; row < model->rowCount(); ++row) {
         QModelIndex header = model->index(row, 0);
-        std::string holder = header.data(VariablesModel::HolderRole).toString().toStdString();
         if (tree->isExpanded(header)) {
-            collapsed.erase(holder);
+            collapsed.erase(headerKey(header));
         }
         else {
-            collapsed.insert(holder);
+            collapsed.insert(headerKey(header));
         }
     }
 
@@ -830,7 +940,7 @@ void VariablesView::rebuild()
         QModelIndex header = model->index(row, 0);
         tree->setFirstColumnSpanned(row, QModelIndex(), true);
         QString holder = header.data(VariablesModel::HolderRole).toString();
-        tree->setExpanded(header, !collapsed.contains(holder.toStdString()));
+        tree->setExpanded(header, !collapsed.contains(headerKey(header)));
         if (holder != currentHolder) {
             continue;
         }
@@ -869,6 +979,10 @@ void VariablesView::showMessage(const QString& text, bool isError)
 void VariablesView::onCommitFailed(const QModelIndex& index, const QString& text)
 {
     showMessage(model->lastError(), true);
+    if (!delegate->committedByKey) {
+        // Committed by leaving the editor: reopening it would take the focus back.
+        return;
+    }
     // Keep editing what was typed: nothing was changed.
     QPersistentModelIndex retry(index);
     delegate->retryIndex = retry;
@@ -924,30 +1038,21 @@ void VariablesView::addVariable()
         }
     }
 
-    int created = 0;
+    bool created = false;
+    int createdID = 0;  // the "Add variable" undo step, when the panel made one
     if (!target) {
-        // A temporary name: the dialog's "Add property" takes this transaction over, so the
-        // VarSet and its first variable are one undo step, and cancelling removes both.
+        // Its own committed step: the dialog aborts and reopens its "Add property" transaction
+        // as the name or the type is typed, which must not take the VarSet with it.
         bool own = doc->getBookedTransactionID() == 0;
-        if (own) {
-            created = doc->openTransaction(
-                App::TransactionName {.name = "Add variable", .temporary = true}
-            );
-        }
-        try {
-            Gui::Command::runCommand(
-                Gui::Command::Doc,
-                (std::string("App.getDocument('") + doc->getName()
-                 + "').addObject('App::VarSet', 'Variables')")
-                    .c_str()
-            );
-        }
-        catch (const Base::Exception& e) {
-            if (own) {
-                doc->abortTransaction();
-            }
-            showMessage(QString::fromUtf8(e.what()), true);
+        QString error;
+        std::string command = std::string("App.getDocument('") + doc->getName()
+            + "').addObject('App::VarSet', 'Variables')";
+        if (!runEdit(doc, "Add variable", {command}, error)) {
+            showMessage(error, true);
             return;
+        }
+        if (own) {
+            createdID = doc->getTransactionID(true, 0);
         }
         // The new object is the document's last; its name may be "Variables001" if another
         // object is named "Variables".
@@ -956,27 +1061,37 @@ void VariablesView::addVariable()
         if (!target || !target->isDerivedFrom<App::VarSet>()) {
             return;
         }
+        created = true;
     }
 
     auto dialog = new Dialog::DlgAddProperty(getMainWindow(), target);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowModality(Qt::ApplicationModal);
-    if (created != 0) {
+    if (created) {
         std::string docName = doc->getName();
         std::string varSetName = target->getNameInDocument();
-        connect(dialog, &QDialog::finished, this, [docName, varSetName, created](int) {
-            // Cancelled before any variable was added: take the empty VarSet back out.
+        connect(dialog, &QDialog::finished, this, [docName, varSetName, createdID](int) {
+            // Closed before any variable was added: take the empty VarSet back out, by undoing
+            // its step while it is the last one, else in a step of its own.
             App::Document* doc = App::GetApplication().getDocument(docName.c_str());
-            if (!doc || doc->getBookedTransactionID() != created) {
+            App::DocumentObject* varSet = doc ? doc->getObject(varSetName.c_str()) : nullptr;
+            if (!varSet || !varSet->getDynamicPropertyNames().empty()) {
                 return;
             }
-            App::DocumentObject* varSet = doc->getObject(varSetName.c_str());
-            if (varSet && varSet->getDynamicPropertyNames().empty()) {
-                doc->abortTransaction();
+            Gui::Document* guiDoc = Application::Instance->getDocument(doc);
+            if (guiDoc && createdID != 0 && doc->getBookedTransactionID() == 0
+                && doc->getTransactionID(true, 0) == createdID) {
+                guiDoc->undo(1);
+                return;
             }
-            else {
-                doc->commitTransaction();
-            }
+            QString error;
+            runEdit(
+                doc,
+                "Delete " + varSetName,
+                {std::string("App.getDocument('") + docName + "').removeObject('" + varSetName
+                 + "')"},
+                error
+            );
         });
     }
     dialog->show();
@@ -1009,53 +1124,62 @@ void VariablesView::deleteVariable()
     if (!obj || VariablesModel::kind(current) == VariablesModel::HeaderKind) {
         return;
     }
+    // Everything is read from the row before the message box: the panel may rebuild while it is
+    // open, which frees the row.
+    std::string docName = obj->getDocument()->getName();
+    std::string holderName = obj->getNameInDocument();
     std::string name = current.data(VariablesModel::VariableRole).toString().toStdString();
     QString qName = QString::fromStdString(name);
-    std::string command;
+    std::vector<std::string> commands;
+    int count = 0;
+    QString uses;
     if (VariablesModel::kind(current) == VariablesModel::AliasKind) {
         // Removes the alias, not the cell: its uses are rewritten to the cell address.
-        command = pyObject(obj) + ".setAlias('"
-            + current.data(VariablesModel::AddressRole).toString().toStdString() + "', None)";
+        commands.push_back(
+            pyObject(obj) + ".setAlias('"
+            + current.data(VariablesModel::AddressRole).toString().toStdString() + "', None)"
+        );
     }
-    std::vector<std::string> commands;
-    if (VariablesModel::kind(current) != VariablesModel::AliasKind) {
-        int count = 0;
-        QString uses = usesText(current, &count);
-        if (count > 0) {
-            QMessageBox box(
-                QMessageBox::Warning,
-                tr("Delete variable"),
-                tr("%n expression(s) use #%1. They will fail at the next recompute.\n\n%2\n\n"
-                   "Delete #%1?",
-                   nullptr,
-                   count)
-                    .arg(qName, uses),
-                QMessageBox::Ok | QMessageBox::Cancel,
-                this
-            );
-            box.setObjectName(QStringLiteral("deleteVariableUses"));
-            box.setDefaultButton(QMessageBox::Cancel);
-            if (box.exec() != QMessageBox::Ok) {
-                return;
-            }
-        }
+    else {
+        uses = usesText(current, &count);
         commands.push_back(pyObject(obj) + ".removeProperty(" + pyString(name) + ")");
-        // Its users fail at the next recompute (D4): touch them, as nothing else would.
+        // Its users, the VarSet itself included, fail at the next recompute (D4): touch them, as
+        // nothing else would.
         std::set<const App::DocumentObject*> users;
         if (App::Property* prop = VariablesModel::property(current)) {
             for (const auto& use : App::VariableLookup::uses(prop)) {
-                if (use.user && use.user->isAttachedToDocument() && use.user != obj
+                if (use.user && use.user->isAttachedToDocument()
                     && users.insert(use.user).second) {
                     commands.push_back(pyObject(use.user) + ".touch()");
                 }
             }
         }
     }
-    else {
-        commands.push_back(command);
+    if (count > 0) {
+        QMessageBox box(
+            QMessageBox::Warning,
+            tr("Delete variable"),
+            tr("%n expression(s) use #%1. They will fail at the next recompute.\n\n%2\n\n"
+               "Delete #%1?",
+               nullptr,
+               count)
+                .arg(qName, uses),
+            QMessageBox::Ok | QMessageBox::Cancel,
+            this
+        );
+        box.setObjectName(QStringLiteral("deleteVariableUses"));
+        box.setDefaultButton(QMessageBox::Cancel);
+        if (box.exec() != QMessageBox::Ok) {
+            return;
+        }
+    }
+    // Looked up again: the document may have changed while the box was open.
+    App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+    if (!doc || !doc->getObject(holderName.c_str())) {
+        return;
     }
     QString error;
-    if (!runEdit(obj->getDocument(), "Delete " + name, commands, error)) {
+    if (!runEdit(doc, "Delete " + name, commands, error)) {
         showMessage(error, true);
         return;
     }

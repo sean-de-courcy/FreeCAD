@@ -157,13 +157,16 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertIsNotNone(action, "no action " + name)
         return action
 
-    def answerNextBox(self, objectName, button, texts):
-        """Answers the next message box named objectName with button, keeping its text."""
+    def answerNextBox(self, objectName, button, texts, before=None):
+        """Answers the next message box named objectName with button, keeping its text; calls
+        before() first, while the box is open."""
 
         def answer():
             for widget in QtWidgets.QApplication.topLevelWidgets():
                 if isinstance(widget, QtWidgets.QMessageBox) and widget.objectName() == objectName:
                     texts.append(widget.text())
+                    if before:
+                        before()
                     widget.button(button).click()
                     return
             QtCore.QTimer.singleShot(50, answer)
@@ -320,6 +323,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         doc = self.standardDocument()
         self.sheet.set("B1", "=VarSet.Width")
         doc.recompute()
+        undoCount = doc.UndoCount
         self.tree.setCurrentIndex(self.cell("VarSet", "Width", NAME))
         texts = []
         self.answerNextBox("deleteVariableUses", QtWidgets.QMessageBox.Ok, texts)
@@ -329,6 +333,8 @@ class TestVariablesPanelGui(unittest.TestCase):
         listed = [line for line in texts[0].split("\n") if line in ("Box.Length", "Sheet.B1")]
         self.assertEqual(sorted(listed), ["Box.Length", "Sheet.B1"])
         self.assertNotIn("Width", self.varSet.PropertiesList)
+        self.assertEqual(doc.UndoCount, undoCount + 1)
+        self.assertEqual(doc.UndoNames[0], "Delete Width")
         doc.recompute()
         self.assertIn("Invalid", self.box.State)
 
@@ -338,11 +344,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertNotIn("Invalid", self.box.State)
         self.assertAlmostEqual(self.box.Length.Value, 40)
 
-    def test_add(self):
-        """G6. In an empty document, Add creates the "Variables" VarSet and the dialog adds
-        Height = 12 mm (Length, the default type), all as one undo step."""
-        doc = self.newDocument()
-        self.showPanel()
+    def openAddDialog(self):
         self.action("addVariable").trigger()
         dialog = waitFor(
             lambda: [
@@ -352,26 +354,74 @@ class TestVariablesPanelGui(unittest.TestCase):
             ]
         )
         self.assertTrue(dialog, "no Add Property dialog")
-        dialog = dialog[0]
-        typeBox = dialog.findChild(QtWidgets.QComboBox, "comboBoxType")
-        self.assertTrue(typeBox.currentText().endswith("PropertyLength"))
-        dialog.findChild(QtWidgets.QLineEdit, "lineEditName").setText("Height")
-        pump(0.2)
+        return dialog[0]
+
+    def setAddValue(self, dialog, value):
         editor = waitFor(lambda: dialog.findChild(QtWidgets.QWidget, "editor"))
         self.assertIsNotNone(editor, "no value editor")
-        editor.setProperty("rawValue", 12.0)
+        editor.setProperty("rawValue", value)
         pump(0.2)
-        dialog.accept()
-        dialog.reject()
-        pump(0.3)
 
+    def assertAdded(self, doc):
+        """The "Variables" VarSet holds Height = 12 mm, made in two undo steps."""
         varSet = doc.getObject("Variables")
         self.assertIsNotNone(varSet)
         self.assertEqual(varSet.TypeId, "App::VarSet")
         self.assertEqual(varSet.Label, "Variables")
         self.assertAlmostEqual(varSet.Height.Value, 12)
-        self.assertEqual(doc.UndoCount, 1)
+        self.assertEqual(doc.UndoCount, 2)
+        self.assertEqual(doc.UndoNames, ["Add property", "Add variable"])
         self.assertIn(("Variables", "Height"), self.rows())
+
+    def test_add(self):
+        """G6. In an empty document, Add creates the "Variables" VarSet in its own undo step, and
+        the dialog adds Height = 12 mm (Length, the default type) in a second one."""
+        doc = self.newDocument()
+        self.showPanel()
+        dialog = self.openAddDialog()
+        typeBox = dialog.findChild(QtWidgets.QComboBox, "comboBoxType")
+        self.assertTrue(typeBox.currentText().endswith("PropertyLength"))
+        dialog.findChild(QtWidgets.QLineEdit, "lineEditName").setText("Height")
+        pump(0.2)
+        self.setAddValue(dialog, 12.0)
+        dialog.accept()
+        dialog.reject()
+        pump(0.3)
+        self.assertAdded(doc)
+
+    def test_add_typed(self):
+        """G6, as typed: the dialog rebuilds its property on every key and type change, aborting
+        its own transaction each time; the new VarSet survives it, and OK adds Height."""
+        doc = self.newDocument()
+        self.showPanel()
+        dialog = self.openAddDialog()
+        typeBox = dialog.findChild(QtWidgets.QComboBox, "comboBoxType")
+        lengthType = typeBox.currentText()
+        QTest.keyClicks(dialog.findChild(QtWidgets.QLineEdit, "lineEditName"), "Height")
+        pump(0.2)
+        self.assertIsNotNone(doc.getObject("Variables"), "typing the name removed the VarSet")
+        typeBox.setCurrentText("App::PropertyAngle")
+        pump(0.1)
+        typeBox.setCurrentText(lengthType)
+        pump(0.2)
+        self.setAddValue(dialog, 12.0)
+        dialog.accept()
+        dialog.reject()
+        pump(0.3)
+        self.assertAdded(doc)
+
+    def test_add_cancel(self):
+        """Add, type a name, Cancel: the empty VarSet is taken out again, and no undo step is left."""
+        doc = self.newDocument()
+        self.showPanel()
+        dialog = self.openAddDialog()
+        QTest.keyClicks(dialog.findChild(QtWidgets.QLineEdit, "lineEditName"), "He")
+        pump(0.2)
+        dialog.reject()
+        pump(0.3)
+        self.assertEqual(doc.findObjects("App::VarSet"), [])
+        self.assertEqual(doc.UndoCount, 0)
+        self.assertEqual(self.rows(), {})
 
     def test_live_update(self):
         """G7. Python changes show at once: addProperty adds a row, setExpression updates the
@@ -436,3 +486,161 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.commit("VarSet", "Depth", EXPRESSION, "#Width * 2")
         self.assertEqual(expressionText(self.varSet, "Depth"), stored)
         self.assertEqual(doc.UndoCount, undoCount)
+
+    # Review round 1 of fork PR 155
+
+    def test_delete_rebuild_during_box(self):
+        """The panel rebuilds while Delete's message box is open (a change elsewhere): OK still
+        deletes Width, as one undo step, and touches its users."""
+        doc = self.standardDocument()
+        undoCount = doc.UndoCount
+        self.tree.setCurrentIndex(self.cell("VarSet", "Width", NAME))
+
+        def changeElsewhere():
+            self.varSet.Height = 11
+            pump(0.3)  # the rebuild timer fires inside the box
+
+        texts = []
+        self.answerNextBox("deleteVariableUses", QtWidgets.QMessageBox.Ok, texts, changeElsewhere)
+        self.action("deleteVariable").trigger()
+        pump(0.3)
+        self.assertEqual(len(texts), 1)
+        self.assertNotIn("Width", self.varSet.PropertiesList)
+        self.assertEqual(doc.UndoCount, undoCount + 1)
+        self.assertEqual(doc.UndoNames[0], "Delete Width")
+        doc.recompute()
+        self.assertIn("Invalid", self.box.State)
+
+    def test_delete_own_use(self):
+        """`Depth = .Width * 2` in the VarSet itself: Delete lists VarSet.Depth, and the VarSet
+        fails at the next recompute."""
+        doc = self.standardDocument()
+        self.box.clearExpression("Length")
+        self.varSet.addProperty("App::PropertyLength", "Depth")
+        self.varSet.setExpression("Depth", ".Width * 2")
+        doc.recompute()
+        self.assertNotIn("Invalid", self.varSet.State)
+        self.tree.setCurrentIndex(self.cell("VarSet", "Width", NAME))
+        texts = []
+        self.answerNextBox("deleteVariableUses", QtWidgets.QMessageBox.Ok, texts)
+        self.action("deleteVariable").trigger()
+        pump(0.3)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("VarSet.Depth", texts[0].split("\n"))
+        self.assertNotIn("Width", self.varSet.PropertiesList)
+        doc.recompute()
+        self.assertIn("Invalid", self.varSet.State)
+
+    def test_text_values(self):
+        """A text that isn't meant as an expression is the value: an alias holding `steel` edited
+        to `bronze`, and a String variable; a Bool takes True or False and refuses other text."""
+        doc = self.standardDocument()
+        self.sheet.set("B1", "steel")
+        self.sheet.setAlias("B1", "Material")
+        self.varSet.addProperty("App::PropertyString", "Finish")
+        self.varSet.Finish = "matte"
+        self.varSet.addProperty("App::PropertyBool", "Hollow")
+        self.varSet.Hollow = True
+        doc.recompute()
+
+        self.commit("Sheet", "Material", EXPRESSION, "bronze")
+        # A text cell: stock shows its contents with a leading quote.
+        self.assertEqual(self.sheet.getContents("B1"), "'bronze")
+        doc.recompute()
+        self.assertEqual(self.sheet.get("B1"), "bronze")
+        self.commit("VarSet", "Finish", EXPRESSION, "gloss")
+        self.assertEqual(self.varSet.Finish, "gloss")
+        self.assertIsNone(expressionText(self.varSet, "Finish"))
+        self.commit("VarSet", "Hollow", EXPRESSION, "False")
+        self.assertFalse(self.varSet.Hollow)
+        self.assertIsNone(expressionText(self.varSet, "Hollow"))
+
+        undoCount = doc.UndoCount
+        self.commit("VarSet", "Hollow", EXPRESSION, "maybe")
+        self.assertFalse(self.varSet.Hollow)
+        self.assertEqual(doc.UndoCount, undoCount)
+        self.assertTrue(self.message.isVisible())
+        QTest.keyClick(self.tree.indexWidget(self.tree.currentIndex()), QtCore.Qt.Key_Escape)
+        pump(0.2)
+
+        # Text that names what exists, or starts with '=', is still an expression.
+        self.commit("Sheet", "Material", EXPRESSION, "=VarSet.Width * 2")
+        self.assertEqual(self.sheet.getContents("B1"), "=VarSet.Width * 2")
+
+    def test_numbers(self):
+        """A Float takes 2.5; an Integer takes 3 and refuses 2.5 and 3 mm, changing nothing."""
+        doc = self.standardDocument()
+        self.varSet.addProperty("App::PropertyFloat", "Ratio")
+        self.varSet.addProperty("App::PropertyInteger", "Count")
+        self.varSet.Count = 1
+        doc.recompute()
+
+        self.commit("VarSet", "Ratio", EXPRESSION, "2.5")
+        self.assertAlmostEqual(self.varSet.Ratio, 2.5)
+        self.commit("VarSet", "Count", EXPRESSION, "3")
+        self.assertEqual(self.varSet.Count, 3)
+        self.assertEqual(self.text("VarSet", "Count", VALUE), "3")
+        undoCount = doc.UndoCount
+        for bad in ("2.5", "3 mm"):
+            self.commit("VarSet", "Count", EXPRESSION, bad)
+            self.assertEqual(self.varSet.Count, 3, bad)
+            self.assertEqual(doc.UndoCount, undoCount, bad)
+            self.assertTrue(self.message.isVisible(), bad)
+            QTest.keyClick(self.tree.indexWidget(self.tree.currentIndex()), QtCore.Qt.Key_Escape)
+            pump(0.2)
+
+    def test_edit_in_booked_transaction(self):
+        """An edit while another transaction is booked joins it: no step of its own."""
+        doc = self.standardDocument()
+        undoCount = doc.UndoCount
+        doc.openTransaction("Outer")
+        self.commit("VarSet", "Width", EXPRESSION, "30 mm")
+        doc.commitTransaction()
+        self.assertAlmostEqual(self.varSet.Width.Value, 30)
+        self.assertEqual(doc.UndoCount, undoCount + 1)
+        self.assertEqual(doc.UndoNames[0], "Outer")
+
+    def test_failed_commit_on_leaving(self):
+        """A failed commit made by leaving the editor (another row made current) shows the message
+        but doesn't reopen the editor; Return does reopen it (G3)."""
+        doc = self.standardDocument()
+        index = self.cell("VarSet", "Width", EXPRESSION)
+        self.tree.setCurrentIndex(index)
+        self.tree.edit(index)
+        editor = waitFor(lambda: self.tree.indexWidget(index))
+        self.assertIsNotNone(editor)
+        editor.setText("#Nope")
+        self.tree.setCurrentIndex(self.cell("VarSet", "Height", NAME))
+        pump(0.3)
+        self.assertTrue(self.message.isVisible())
+        self.assertIn("Nope", self.message.text())
+        self.assertIsNone(self.tree.indexWidget(self.cell("VarSet", "Width", EXPRESSION)))
+        self.assertEqual(self.tree.currentIndex().data(VariableRole), "Height")
+        self.assertEqual(expressionText(self.varSet, "Width"), None)
+
+    def test_close_document(self):
+        """Closing the document the panel shows empties it and shows the hint."""
+        doc = self.standardDocument()
+        self.assertTrue(self.rows())
+        hint = self.panel.findChild(QtWidgets.QLabel, "hint")
+        self.assertFalse(hint.isVisible())
+        self.docs.remove(doc)
+        App.closeDocument(doc.Name)
+        pump(0.3)
+        self.assertEqual(self.model().rowCount(), 0)
+        self.assertTrue(hint.isVisible())
+
+    def test_hidden_panel_waits(self):
+        """While hidden, the panel doesn't rebuild on changes; shown, it has them."""
+        doc = self.newDocument()
+        self.showPanel()
+        self.assertEqual(self.rows(), {})
+        dockOf(self.panel).hide()
+        pump(0.2)
+        varSet = doc.addObject("App::VarSet", "VarSet")
+        varSet.addProperty("App::PropertyLength", "Width")
+        doc.recompute()
+        pump(0.3)
+        self.assertEqual(self.model().rowCount(), 0, "the hidden panel rebuilt")
+        self.showPanel()
+        self.assertEqual(set(self.rows()), {("VarSet", "Width")})

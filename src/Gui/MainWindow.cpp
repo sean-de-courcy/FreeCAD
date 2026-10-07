@@ -707,6 +707,7 @@ static void setupVariablesView(QWidget* parent, const std::string& hiddenDockWin
     if (hiddenDockWindows.find("Std_VariablesView") == std::string::npos) {
         auto variablesView = new DockWnd::VariablesView(nullptr, parent);
         variablesView->setObjectName(QStringLiteral("Variables"));
+        variablesView->setWindowTitle(QDockWidget::tr("Variables"));
         variablesView->setMinimumWidth(210);
         DockWindowManager::instance()->registerDockWindow("Std_VariablesView", variablesView);
     }

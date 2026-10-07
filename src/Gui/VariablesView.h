@@ -144,6 +144,9 @@ public:
         const QModelIndex& index
     ) const override;
 
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override;
+
 Q_SIGNALS:
     /// A commit changed nothing: @a text is what was typed, to edit again.
     void commitFailed(const QModelIndex& index, const QString& text) const;
@@ -152,6 +155,8 @@ Q_SIGNALS:
 private:
     mutable QPersistentModelIndex retryIndex;
     mutable QString retryText;
+    /// Whether the editor was committed with Return or Enter (not by losing the focus or Tab).
+    mutable bool committedByKey = false;
 
     friend class VariablesView;
 };
@@ -206,7 +211,10 @@ private:
     QAction* deleteAction;
     QAction* usesAction;
     std::string documentName;
+    /// The collapsed headers, as "document/object".
     std::set<std::string> collapsed;
+    /// A change came while the panel was hidden: rebuilt when shown.
+    bool dirty = true;
 
     std::vector<fastsignals::scoped_connection> connections;
 };
