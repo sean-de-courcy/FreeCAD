@@ -396,6 +396,48 @@ TEST_F(RenameProperty, undo)
     EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
 }
 
+// Tests whether adding a property as the first change under a global (application) transaction,
+// as a Gui command's openCommand makes, is undone with it (ops#163)
+TEST_F(RenameProperty, addUnderGlobalTransactionUndoes)
+{
+    // Arrange
+    int undos = doc->getAvailableUndos();
+
+    // Act
+    int tid = App::GetApplication().openGlobalTransaction({.name = "Add property"});
+    auto* added = freecad_cast<App::PropertyInteger*>(
+        varSet->addDynamicProperty("App::PropertyInteger", "Added")
+    );
+    ASSERT_NE(added, nullptr);
+    added->setValue(5);
+    App::GetApplication().commitTransaction(tid);
+
+    // Assert
+    ASSERT_EQ(doc->getAvailableUndos(), undos + 1);
+    EXPECT_TRUE(doc->undo());
+    EXPECT_EQ(varSet->getDynamicPropertyByName("Added"), nullptr);
+}
+
+// Tests whether a rename as the first change under a global transaction is undone with it (ops#163)
+TEST_F(RenameProperty, renameUnderGlobalTransactionUndoes)
+{
+    // Arrange
+    int undos = doc->getAvailableUndos();
+
+    // Act
+    int tid = App::GetApplication().openGlobalTransaction({.name = "Rename property"});
+    bool isRenamed = varSet->renameDynamicProperty(prop, "NewName");
+    App::GetApplication().commitTransaction(tid);
+
+    // Assert
+    EXPECT_TRUE(isRenamed);
+    ASSERT_EQ(doc->getAvailableUndos(), undos + 1);
+    EXPECT_TRUE(doc->undo());
+    EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+    EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), prop);
+    EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
+}
+
 
 // Tests whether we can rename a property, undo, and redo it
 TEST_F(RenameProperty, redo)
