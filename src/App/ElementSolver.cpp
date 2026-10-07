@@ -144,34 +144,99 @@ std::vector<std::string_view> NameAncestry::splitSections(std::string_view name)
     return sections;
 }
 
+namespace
+{
+
+// Walks the lineage of  name, how its element was made, calling  visit(section, source) on
+// each section until it returns true (then true). The lineage: the name's first section and,
+// recursively, every section of every name a visited section links. The sections after the
+// name's first are what later features did to it (MOD, a fusion's FUS), and connected elements
+// name neighbours that tell pieces apart; neither is followed.
+// A source is an innermost section of the first sections' chain: following the first section's
+// linked names, and their first sections' linked names, down to a section made from no name. With
+//  sourcesOnly, only that chain is walked (the later sections of a linked name aren't).
+bool walkLineage(
+    std::string_view name,
+    bool sourcesOnly,
+    const std::function<bool(const DecodedMappedSection&, bool)>& visit
+)
+{
+    std::function<bool(std::string_view, bool, bool)> walk =
+        [&](std::string_view part, bool top, bool firstChain) {
+            auto sections = NameAncestry::splitSections(part);
+            for (std::size_t i = 0; i < sections.size(); ++i) {
+                const bool chain = firstChain && i == 0;
+                if (i > 0 && (top || sourcesOnly)) {
+                    break;
+                }
+                const auto& decoded = decodeSection(sections[i]);
+                bool embeds = false;
+                for (const auto& embedded : decoded.linkedNames) {
+                    embeds = embeds || (!embedded.empty() && embedded != Data::EMPTY_VALUE);
+                }
+                if (visit(decoded, chain && !embeds)) {
+                    return true;
+                }
+                for (const auto& embedded : decoded.linkedNames) {
+                    if (!embedded.empty() && embedded != Data::EMPTY_VALUE
+                        && walk(embedded, false, chain)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+    return walk(name, true, true);
+}
+
+bool hasTag(const DecodedMappedSection& section)
+{
+    return !section.iterationTag.empty() && section.iterationTag != Data::EMPTY_VALUE;
+}
+
+}  // namespace
+
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
 {
     std::vector<std::string> tags;
-    // A name's first section says where its element came from: the names it was made from
-    // (linked names), down to a section made from none. The sections after it are what later
-    // features did to it (MOD, a fusion's FUS), and connected elements name neighbours that tell
-    // pieces apart; neither is a source.
-    std::function<void(std::string_view)> collect = [&](std::string_view part) {
-        auto sections = splitSections(part);
-        if (sections.empty()) {
-            return;
+    walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
+        if (source && hasTag(section)) {
+            tags.push_back(section.iterationTag);
         }
-        const auto& decoded = decodeSection(sections.front());
-        bool embeds = false;
-        for (const auto& embedded : decoded.linkedNames) {
-            if (!embedded.empty() && embedded != Data::EMPTY_VALUE) {
-                embeds = true;
-                collect(embedded);
-            }
-        }
-        if (!embeds && !decoded.iterationTag.empty() && decoded.iterationTag != Data::EMPTY_VALUE) {
-            tags.push_back(decoded.iterationTag);
-        }
-    };
-    collect(name);
+        return false;
+    });
     std::sort(tags.begin(), tags.end());
     tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
     return tags;
+}
+
+std::vector<std::string> NameAncestry::sourceSections(std::string_view name)
+{
+    std::vector<std::string> sources;
+    const bool unknown = walkLineage(name, true, [&](const DecodedMappedSection& section, bool source) {
+        if (!source) {
+            return false;
+        }
+        const auto& ids = section.referenceIDs;
+        const bool hasId = std::any_of(ids.begin(), ids.end(), [](const std::string& id) {
+            return !id.empty() && id != Data::EMPTY_VALUE;
+        });
+        if (!hasTag(section) || !hasId) {
+            return true;  // a source without a tag or ID: the sources are unknown
+        }
+        std::string key = section.iterationTag + ";" + section.elementType + ";";
+        for (const auto& id : ids) {
+            key += id + ",";
+        }
+        sources.push_back(std::move(key));
+        return false;
+    });
+    if (unknown) {
+        return {};
+    }
+    std::sort(sources.begin(), sources.end());
+    sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+    return sources;
 }
 
 std::string NameAncestry::makerTag(std::string_view name)
@@ -189,33 +254,8 @@ bool NameAncestry::hasLineageTag(std::string_view name, std::string_view tag)
     if (tag.empty() || tag == Data::EMPTY_VALUE) {
         return false;
     }
-    // A linked name is part of how the element was made, all of it: every section's tag and
-    // what each section links. Of the name itself only the first section counts (sourceTags()).
-    std::function<bool(std::string_view)> linked = [&](std::string_view part) {
-        for (const auto& section : splitSections(part)) {
-            const auto& decoded = decodeSection(section);
-            if (decoded.iterationTag == tag) {
-                return true;
-            }
-            for (const auto& embedded : decoded.linkedNames) {
-                if (!embedded.empty() && embedded != Data::EMPTY_VALUE && linked(embedded)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-    auto sections = splitSections(name);
-    if (sections.empty()) {
-        return false;
-    }
-    const auto& first = decodeSection(sections.front());
-    if (first.iterationTag == tag) {
-        return true;
-    }
-    const auto& names = first.linkedNames;
-    return std::any_of(names.begin(), names.end(), [&](const auto& embedded) {
-        return !embedded.empty() && embedded != Data::EMPTY_VALUE && linked(embedded);
+    return walkLineage(name, false, [&](const DecodedMappedSection& section, bool) {
+        return section.iterationTag == tag;
     });
 }
 
@@ -1961,16 +2001,52 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 // as if unmoved, and reserves nothing.
                 continue;
             }
+            auto distanceOf = [&](const ElementFingerprint& fp) {
+                return saved.center && fp.center ? Base::Distance(*saved.center, *fp.center) : nan;
+            };
+            const double moved = distanceOf(now);
+            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
+            auto movedBy = [&]() {
+                return std::isnan(moved) || moved <= eps
+                    ? std::string("changed")
+                    : "moved " + formatDistance(moved) + " mm";
+            };
+            std::string there;
+            for (int k : place) {
+                there += (there.empty() ? "" : ", ") + pool.elements[k].index;
+            }
+            const char* sit = place.size() > 1 ? " sit" : " sits";
+            // Own twins (ops#168): the elements there are copies of the hit's own source
+            // geometry, e.g. a pad's bottom edge where its top edge was after a lift by the pad's
+            // length. The element moved with its feature; nothing else took its place.
+            const auto& hitNames = pool.elements[hitPosition].names;
+            auto ownTwin = [&](int k) {
+                for (const auto& name : pool.elements[k].names) {
+                    const auto sources = NameAncestry::sourceSections(name);
+                    if (sources.empty()) {
+                        continue;
+                    }
+                    for (const auto& hitName : hitNames) {
+                        if (NameAncestry::sourceSections(hitName) == sources
+                            && patternInstances(name) == patternInstances(hitName)
+                            && !isCounterSibling(name, hitName)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            if (std::all_of(place.begin(), place.end(), ownTwin)) {
+                outcomes[i].evidence = movedBy() + "; its own twin" + (place.size() > 1 ? "s " : " ")
+                    + there + sit + " where it was";
+                continue;
+            }
             decidedEntry[i] = 1;
             for (int k : place) {
                 reserved[entry.type].insert(pool.elements[k].index);
             }
-            auto distanceOf = [&](const ElementFingerprint& fp) {
-                return saved.center && fp.center ? Base::Distance(*saved.center, *fp.center) : nan;
-            };
             auto& outcome = outcomes[i];
             outcome = SolveOutcome();
-            std::string there;
             auto list = [&](int k, const char* role) {
                 const auto& element = pool.elements[k];
                 outcome.candidates.push_back(element.index);
@@ -1980,15 +2056,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             };
             for (int k : place) {
                 list(k, "place");
-                there += (there.empty() ? "" : ", ") + pool.elements[k].index;
             }
             list(hitPosition, "name");
-            const double moved = distanceOf(now);
-            const double eps = input.continuationDistance * std::max(1.0, input.diagonal);
-            outcome.evidence = (std::isnan(moved) || moved <= eps
-                                    ? std::string("changed")
-                                    : "moved " + formatDistance(moved) + " mm")
-                + "; " + there + (place.size() > 1 ? " sit" : " sits") + " where it was";
+            outcome.evidence = movedBy() + "; " + there + sit + " where it was";
         }
         // The elements at an old place are as ambiguous as the moved one: no other entry of the
         // owner takes them.

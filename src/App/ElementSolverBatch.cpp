@@ -1315,6 +1315,13 @@ bool solveElementReferences(DocumentObject* feature,
             const auto& outcome = outcomes[i];
             const std::string& oldName = entry.oldName.empty() ? entry.exactName : entry.oldName;
             if (outcome.status == Data::SolveStatus::Exact) {
+                if (!outcome.evidence.empty()) {
+                    // Kept by its name although something sits at its old place (its own
+                    // twin, ops#168).
+                    FC_LOG(referenceName(entry.prop) << "[" << entry.index << "]: "
+                                                     << outcome.element << " kept ("
+                                                     << outcome.evidence << ")");
+                }
                 continue;
             }
             if (outcome.status == Data::SolveStatus::Removed) {
