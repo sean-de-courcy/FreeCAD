@@ -2554,3 +2554,125 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(
             mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "YZ_Plane").Name
         )
+
+    def choosePlane(self, text):
+        """The visible plane box's entry of that text chosen, as a user does."""
+        [combo] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "comboPlane") if c.isVisible()
+        ]
+        [index] = [i for i in range(combo.count()) if combo.itemText(i) == text]
+        self.choose(combo, index)
+        self.assertEqual(combo.currentIndex(), index)
+
+    def testMirroredUpdateViewOffPlaneChosenThenOk(self):
+        """PR 156 review (1): "Update view" off, the XZ plane chosen in the box: OK writes it
+        (the pending-pick cancel showed the old plane again, so apply() wrote YZ back)."""
+        first, second = self.bumps()
+        mirrored = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(mirrored)
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(False)
+        pump(0.1)
+        self.choosePlane("Base XZ-plane")
+        self.assertEqual(
+            mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "YZ_Plane").Name
+        )
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(
+            mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "XZ_Plane").Name
+        )
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+
+    def testMultiTransformMirroredPlaneChosenThenOk(self):
+        """PR 156 review (1), the sub-task: the MultiTransform's "Update view" off, the
+        sub-task's XZ plane chosen, its OK: the sub-feature keeps XZ."""
+        multi, mirrored, field = self.multiTransform("PartDesign::Mirrored")
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(False)
+        pump(0.1)
+        self.choosePlane("Base XZ-plane")
+        ok = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonOK")
+        ok.click()
+        pump(0.3)
+        self.assertEqual(
+            mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "XZ_Plane").Name
+        )
+
+    def testPreviewOpacitySliderEnds(self):
+        """PR 156 review (7): the slider at 100 % makes the pocket's preview opaque and its tool
+        0.25 (the theme's 0.05 scaled by 5: transparency 0.75); at 0 both vanish (1)."""
+        self.defaultOpacity()
+        self.box()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body, z=10)
+        pocket = models.pocket(self.body, square, 3)
+        self.doc.recompute()
+        self.edit(pocket, count=1)
+
+        def shown():
+            """The preview's transparency, then the tool's (the profile's has no faces: 1)."""
+            main, *others = self.previewTransparencies(pocket)
+            return main, min(others)
+
+        self.opacitySlider().setValue(100)
+        pump(0.05)
+        main, tool = shown()
+        self.assertAlmostEqual(main, 0.0, places=5)
+        self.assertAlmostEqual(tool, 0.75, places=5)
+        self.opacitySlider().setValue(0)
+        pump(0.05)
+        self.assertEqual([round(t, 5) for t in self.previewTransparencies(pocket)], [1.0] * 3)
+
+    def testPreviewOpacityDressUpError(self):
+        """PR 156 review (7): a fillet in its error state keeps the error opacity (0.05,
+        transparency 0.95) when the slider moves."""
+        self.defaultOpacity()
+        box = self.box()
+        fillet = self.addFillet(box, TOP_FRONT.one(box.Shape))
+        self.edit(fillet, count=1)
+        # Through the panel: its recompute shows the error state
+        radius = Gui.getMainWindow().findChild(QtWidgets.QAbstractSpinBox, "filletRadius")
+        radius.setProperty("rawValue", 20.0)
+        self.assertTrue(waitFor(lambda: not fillet.isValid()), "the fillet didn't fail")
+        pump(0.05)
+        self.assertAlmostEqual(self.previewTransparencies(fillet)[0], 0.95, places=5)
+        self.opacitySlider().setValue(60)
+        pump(0.05)
+        self.assertAlmostEqual(self.previewTransparencies(fillet)[0], 0.95, places=5)
+
+    def testPreviewOpacityBoolean(self):
+        """PR 156 review (7): a Boolean's tool and base shapes scale as a pocket's tool does:
+        0.05 at the theme's 20 % (transparency 0.95), 0.15 at 60 % (0.85); its preview shape
+        takes 60 % (0.4)."""
+        self.defaultOpacity()
+        self.box()
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        tool = self.doc.addObject("PartDesign::AdditiveBox", "ToolBox")
+        for prop in ("Length", "Width", "Height"):
+            setattr(tool, prop, 10)
+        tool.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation())
+        other.addObject(tool)
+        self.doc.recompute()
+        boolean = self.doc.addObject("PartDesign::Boolean", "Boolean")
+        self.body.addObject(boolean)
+        boolean.setObjects([other])
+        boolean.Type = "Fuse"
+        self.doc.recompute()
+        self.assertAlmostEqual(boolean.Shape.Volume, 1500, places=6)
+        Gui.getDocument(self.doc.Name).setEdit(boolean.Name)
+        self.assertTrue(waitFor(lambda: self.opacitySlider() is not None), "no opacity slider")
+        settle()
+
+        def others():
+            """The transparencies of the tool and base shapes (and the base class's tool)."""
+            shapes = [t for t in self.previewTransparencies(boolean)[1:] if t < 0.999]
+            self.assertGreaterEqual(len(shapes), 2, "no tool shapes in the preview")
+            return shapes
+
+        for transparency in others():
+            self.assertAlmostEqual(transparency, 0.95, places=5)
+        self.opacitySlider().setValue(60)
+        pump(0.05)
+        self.assertAlmostEqual(self.previewTransparencies(boolean)[0], 0.4, places=5)
+        for transparency in others():
+            self.assertAlmostEqual(transparency, 0.85, places=5)
