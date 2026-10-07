@@ -50,6 +50,14 @@ Designed models, each built by the test:
   square, 3 deep; a fillet on the box's top front edge. The Preview box's slider sets the preview
   shape's opacity, read back as its Coin node's transparency (1 - opacity); a pocket's tool shape
   scales with it (the theme's 0.05 at the theme's 0.2, so 0.15 at 0.6).
+- Ring (W6): a sketch in the XZ plane, the rectangle x 1..3, z 0..2 (area 4, centroid 2 from Z);
+  datum lines along Z through x = 0 and x = -1; two datum planes through Z, normal X ("walls").
+  By Pappus a revolution of 360 degrees about Z is 16 pi, about the x = -1 line 24 pi; up to a
+  wall on each side, 90 degrees each, 8 pi. A groove of the same from a cylinder r 5, 2 high
+  (50 pi) leaves 34 pi about Z, 26 pi about x = -1 (the annulus r 2..4 about it lies inside the
+  cylinder), 42 pi up to the walls.
+- Coil (W6): the Ring's rectangle, a helix of pitch 5 and height 10 (two turns): 32 pi about Z,
+  48 pi about the x = -1 line (the sweep is approximated: relative tolerance 1e-3).
 
 Keys go through the window (QTest's QWindow overload), so the shortcut map sees them as it sees a
 user's. Each arming test also has a twin that arms through the field's `armed` property, so that a
@@ -2676,3 +2684,249 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertAlmostEqual(self.previewTransparencies(boolean)[0], 0.4, places=5)
         for transparency in others():
             self.assertAlmostEqual(transparency, 0.85, places=5)
+
+    # -- W6: Revolution, Groove and Helix ---------------------------------------------------------
+
+    def ring(self, groove=False, core=False):
+        """The Ring model: the profile, the datum lines at x = 0 and x = -1, the walls; with a
+        groove, its cylinder first (r 5); with a core, a cylinder r 1 first (2 pi: an additive
+        revolution up to a face needs a base solid: ops#191)."""
+        self.body = models.body(self.doc)
+        if groove or core:
+            cylinder = self.doc.addObject("PartDesign::AdditiveCylinder", "Cylinder")
+            self.body.addObject(cylinder)
+            cylinder.Radius = 5 if groove else 1
+            cylinder.Height = 2
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        self.ringSketch = models.sketch(
+            self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=xz
+        )
+        self.lines = {}
+        for name, x in (("LineAt0", 0), ("LineAtMinus1", -1)):
+            line = self.body.newObject("PartDesign::Line", name)
+            line.MapMode = "Deactivated"
+            line.Placement = App.Placement(App.Vector(x, 0, 0), App.Rotation())
+            self.lines[x] = line
+        self.walls = []
+        for name in ("Wall1", "Wall2"):
+            wall = self.body.newObject("PartDesign::Plane", name)
+            wall.MapMode = "Deactivated"
+            wall.Placement = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(0, 1, 0), 90))
+            self.walls.append(wall)
+        self.doc.recompute()
+        return self.ringSketch
+
+    def revolution(self, groove=False, core=False):
+        sketch = self.ring(groove, core)
+        typeName = "PartDesign::Groove" if groove else "PartDesign::Revolution"
+        feature = self.body.newObject(typeName, "Groove" if groove else "Revolution")
+        feature.Profile = sketch
+        feature.ReferenceAxis = (sketch, ["V_Axis"])
+        feature.Angle = 360
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        expected = 34 * math.pi if groove else (18 if core else 16) * math.pi
+        self.assertAlmostEqual(feature.Shape.Volume, expected, places=3)
+        return feature
+
+    def axisCombo(self):
+        return Gui.getMainWindow().findChild(QtWidgets.QComboBox, "axis")
+
+    def pickedAxis(self, groove):
+        """T21 / T36: "Select reference..." shows the axis row, armed; the x = -1 line picked is
+        its entry (exact) and the axis; the V axis chosen again hides the row."""
+        feature = self.revolution(groove)
+        self.edit(feature, count=0)
+        combo = self.axisCombo()
+        self.assertFalse(any("?" in combo.itemText(i) for i in range(combo.count())))
+        field = findField("fieldReferenceAxis")
+        self.assertIsNotNone(field, "the axis has no row")
+        self.assertFalse(field.isVisible(), "the row shows while the axis is a choice")
+
+        combo_, index = self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: field.isVisible() and armed(field)), "the row isn't armed")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertTrue(waitFor(lambda: texts(field) == [self.lines[-1].Label]), texts(field))
+        self.assertEqual(states(field), ["exact"])
+        self.assertEqual(combo.currentIndex(), index)
+        self.assertVolume(feature, 26 * math.pi if groove else 24 * math.pi)
+
+        [vAxis] = [i for i in range(combo.count()) if combo.itemText(i) == "Vertical sketch axis"]
+        self.choose(combo, vAxis)
+        self.assertTrue(waitFor(lambda: not field.isVisible()), "the row stays after a choice")
+        self.assertFalse(armed(field))
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+        self.assertVolume(feature, 34 * math.pi if groove else 16 * math.pi)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+
+    def testRevolutionPickedAxis(self):
+        self.pickedAxis(groove=False)
+
+    def testGroovePickedAxis(self):
+        self.pickedAxis(groove=True)
+
+    def testRevolutionAxisGuessed(self):
+        """T22, B19: the axis an edge of a sketch that is drawn again: the row shows it guessed,
+        no "?" entry in the combo; Accept guess makes it exact."""
+        feature = self.revolution()
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        axisSketch = models.sketch(
+            self.doc, "AxisSketch", models.polyline([(0, -1), (0, 5)]), self.body, placement=xz
+        )
+        self.doc.recompute()
+        feature.ReferenceAxis = (axisSketch, ["Edge1"])
+        self.doc.recompute()
+        self.assertAlmostEqual(feature.Shape.Volume, 16 * math.pi, places=3)
+        axisSketch.deleteAllGeometry()
+        axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
+        self.doc.recompute()
+
+        self.edit(feature, count=1)
+        combo = self.axisCombo()
+        self.assertFalse(
+            any("?" in combo.itemText(i) for i in range(combo.count())),
+            [combo.itemText(i) for i in range(combo.count())],
+        )
+        field = findField("fieldReferenceAxis")
+        self.assertTrue(field.isVisible())
+        self.assertIn(states(field)[0], ("guessed", "broken"))
+        if states(field)[0] == "guessed":
+            menu = openMenu(field, 0)
+            menuActions(menu)["Accept guess"].trigger()
+            menu.close()
+            pump(0.3)
+            self.assertTrue(waitFor(lambda: states(field) == ["exact"]), states(field))
+            self.assertVolume(feature, 16 * math.pi)
+
+    def upToWalls(self, groove):
+        """T23 / T36: both sides up to a face, each side's field writes its own property; a
+        whole sketch is refused with a reason (B20). Each wall is the YZ plane, met a quarter
+        turn each way: 2 x 4 pi of the ring (Pappus: 2 pi x 2 x 4 / 4 each), added to the core
+        (2 pi) or taken from the cylinder (50 pi)."""
+        feature = self.revolution(groove, core=not groove)
+        self.edit(feature, count=0)
+        sides = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "sidesMode")
+        self.choose(sides, 1)
+        first = findField("fieldUpToFace")
+        second = findField("fieldUpToFace2")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertFalse(first.isVisible() or second.isVisible())
+
+        mode = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode")
+        self.choose(mode, 3)
+        self.assertTrue(waitFor(lambda: first.isVisible() and armed(first)), "side 1 isn't armed")
+        self.pick(self.ringSketch, "")
+        self.assertIsNone(feature.UpToFace)
+        self.assertIn("sketch", statusText().lower())
+        self.assertTrue(armed(first))
+        self.pick(self.walls[0], "")
+        self.assertLink(feature.UpToFace, self.walls[0], [])
+
+        mode2 = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode2")
+        self.choose(mode2, 3)
+        self.assertTrue(waitFor(lambda: second.isVisible() and armed(second)), "side 2 isn't armed")
+        self.assertFalse(armed(first))
+        self.pick(self.walls[1], "")
+        self.assertLink(feature.UpToFace2, self.walls[1], [])
+        self.assertLink(feature.UpToFace, self.walls[0], [])
+        self.assertVolume(feature, 42 * math.pi if groove else 10 * math.pi)
+
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(feature.UpToFace, self.walls[0], [])
+        self.assertLink(feature.UpToFace2, self.walls[1], [])
+
+    def testRevolutionUpToFaces(self):
+        self.upToWalls(groove=False)
+
+    def testGrooveUpToFaces(self):
+        self.upToWalls(groove=True)
+
+    def testRevolutionFieldsAndVisibility(self):
+        """T24: the start reference armed, an angle change keeps it armed (B17); the axis row
+        armed after it, then disarmed (Esc): the revolution shows again (B16); with the row armed
+        the References panel's pick disarms it (B15)."""
+        feature = self.revolution()
+        self.edit(feature, count=0)
+        # The edit shows the feature before (none here: the revolution itself is hidden)
+        shown = (feature.ViewObject.isVisible(), self.ringSketch.ViewObject.isVisible())
+        start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
+        self.choose(start, 2)
+        startField = findField("fieldStartReference")
+        self.assertTrue(waitFor(lambda: startField.isVisible() and armed(startField)))
+        angle = Gui.getMainWindow().findChild(QtWidgets.QWidget, "revolveAngle")
+        angle.setProperty("rawValue", 270)
+        pump(0.2)
+        self.assertAlmostEqual(feature.Angle, 270, places=6)
+        self.assertTrue(armed(startField), "an angle change disarmed the field")
+
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
+        self.assertFalse(armed(startField))
+        self.assertTrue(self.ringSketch.ViewObject.isVisible(), "the profile isn't shown")
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not armed(field)), "Esc left the row armed")
+        self.assertTrue(Gui.Control.activeDialog())
+        self.assertEqual(
+            (feature.ViewObject.isVisible(), self.ringSketch.ViewObject.isVisible()),
+            shown,
+            "the revolution and its sketch aren't as the edit showed them",
+        )
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+
+    def coil(self):
+        """The Coil model: the Ring's profile, a helix of pitch 5 and height 10 (2 turns) about
+        the V axis: 2 pi x 2 x 4 x 2 = 32 pi. Marked edited, as a helix made in its dialog is:
+        an unedited one gets the dialog's proposed pitch and height when it opens."""
+        sketch = self.ring()
+        helix = self.body.newObject("PartDesign::AdditiveHelix", "Helix")
+        helix.Profile = sketch
+        helix.ReferenceAxis = (sketch, ["V_Axis"])
+        helix.Pitch = 5
+        helix.Height = 10
+        helix.HasBeenEdited = True
+        self.doc.recompute()
+        self.assertTrue(helix.isValid(), helix.getStatusString())
+        self.assertAlmostEqual(helix.Shape.Volume / (32 * math.pi), 1, delta=1e-3)
+        return sketch, helix
+
+    def testHelixAxisRow(self):
+        """T25, B18, B15: the helix's axis row armed shows the profile; the x = -1 line picked:
+        48 pi; OK closes the dialog."""
+        sketch, helix = self.coil()
+        self.edit(helix, count=0)
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
+        pump(0.3)
+        self.assertTrue(sketch.ViewObject.isVisible(), "the profile isn't shown")
+        self.pick(self.lines[-1], "")
+        self.assertLink(helix.ReferenceAxis, self.lines[-1], [])
+        self.doc.recompute()
+        self.assertAlmostEqual(helix.Shape.Volume / (48 * math.pi), 1, delta=1e-3)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(helix.ReferenceAxis, self.lines[-1], [])
+
+    def testHelixReferencePickTakenByThePanel(self):
+        """B15: the axis row armed, the References panel takes the selection (its gate goes):
+        the row disarms and OK still closes."""
+        sketch, helix = self.coil()
+        self.edit(helix, count=0)
+        field = findField("fieldReferenceAxis")
+        self.selectReference("axis")
+        self.assertTrue(waitFor(lambda: armed(field)))
+        Gui.Selection.removeSelectionGate()
+        pump(0.2)
+        self.assertFalse(armed(field), "the row stays armed without its gate")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(helix.ReferenceAxis, sketch, ["V_Axis"])
