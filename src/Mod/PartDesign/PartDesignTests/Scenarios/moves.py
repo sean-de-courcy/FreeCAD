@@ -472,3 +472,165 @@ class BossRaisedByItsHeight(Scenario):
     def edit(self, doc):
         doc.Pad.Length = 12.5
         self.edited = True
+
+
+
+class LinearPitchDoubledSliced(LinearPitchDoubled):
+    """LinearPitchDoubled with a pocket (1 deep, made after the pattern) slicing the top off every
+    instance, and the fillet (0.5) on instance 3's cut top circle at z = 9. The pocket's edges
+    carry their instance only inside a linked name; instance 2's circle at instance 3's old place
+    is a copy of the same sketch circle in another instance, no own twin (the PR 143 review,
+    ops#168), so the reference is ambiguous, as LinearPitchDoubled's is."""
+
+    def topEdge(self, x):
+        return edge("circle", center=(x, 5, 9), radius=2)
+
+    def build(self, doc):
+        body = m.body(doc)
+        plate = m.sketch(doc, "PlateSketch", m.rectangle(0, 0, 60, 10), body)
+        m.pad(body, plate, 5, "Plate")
+        bossSketch = m.sketch(doc, "BossSketch", [m.circle(5, 5, 2)], body, z=5)
+        boss = m.pad(body, bossSketch, 5, "Boss")
+        pattern = doc.addObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [boss]
+        pattern.Direction = (m.originFeature(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 10
+        pattern.Occurrences = 3
+        body.addObject(pattern)
+        sliceSketch = m.sketch(doc, "SliceSketch", m.rectangle(-1, -1, 61, 11), body, z=10)
+        slicer = m.pocket(body, sliceSketch, 1, "Slice")
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (slicer, self.names(slicer, self.instance3Edge()))
+        fillet.Radius = 0.5
+        self.ref("instance3_edge", fillet, "Base", self.instance3Edge, Filleted(0.5))
+
+
+class MirroredBossesTradePlaces(Scenario):
+    """A plate (-15..15 x 0..30, 5 high) with a round boss (radius 3, 5 high) at (-5, 15) and its
+    Mirrored copy at (5, 15) (the YZ plane); a pocket (1 deep, made after the mirror) slices the
+    top off both, and a fillet sits on each cut top circle (z = 9), 0.5 on the original's and
+    0.75 on the copy's. The boss's circle moves to (5, 15): the boss and its copy trade places.
+    Each fillet's circle moved and the other's sits where it was; the two are copies of one
+    sketch circle, but in different copies (the mirror's instance), so neither is an own twin:
+    the solver breaks both (the PR 143 review, ops#168). V2 and V2multi swap the fillets."""
+
+    area = "moves"
+    MULTI = True
+    REFS = ("original_edge", "copy_edge")
+    radii = {"original_edge": 0.5, "copy_edge": 0.75}
+    edited = False
+
+    def topAt(self, x):
+        return edge("circle", center=(x, 15, 9), radius=3)
+
+    def expected(self, x):
+        if self.edited:
+            return Broken(self.topAt(x), self.topAt(-x))
+        return self.topAt(x)
+
+    def originalEdge(self):
+        return self.expected(-5)
+
+    def copyEdge(self):
+        return self.expected(5)
+
+    def build(self, doc):
+        body = m.body(doc)
+        plate = m.sketch(doc, "Plate", m.rectangle(-15, 0, 15, 30), body)
+        m.pad(body, plate, 5, name="PlatePad")
+        bossSketch = m.sketch(doc, "BossSketch", [m.circle(-5, 15, 3)], body, z=5)
+        boss = m.pad(body, bossSketch, 5, name="Boss")
+        mirrored = doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss]
+        mirrored.MirrorPlane = (m.originFeature(body, "YZ_Plane"), [""])
+        body.addObject(mirrored)
+        sliceSketch = m.sketch(doc, "SliceSketch", m.rectangle(-16, -1, 16, 31), body, z=10)
+        slicer = m.pocket(body, sliceSketch, 1, "Slice")
+        doc.recompute()
+        for ref, predicate in (("original_edge", self.originalEdge), ("copy_edge", self.copyEdge)):
+            fillet = body.newObject("PartDesign::Fillet", "Fillet_" + ref)
+            fillet.Base = (slicer, self.names(slicer, predicate()))
+            fillet.Radius = self.radii[ref]
+            self.ref(ref, fillet, "Base", predicate, Filleted(self.radii[ref]))
+            doc.recompute()
+
+    def edit(self, doc):
+        moveCircles(doc.BossSketch, {0: (5, 15)})
+        self.edited = True
+
+
+class PadReversedAndShifted(Scenario):
+    """A pad (0..10 x 0..10, 5 high) with a chamfer (0.5) on its top right edge (x = 10, z = 5),
+    the sketch line's `XTR;PRJ` copy. The pad is reversed and its sketch raised by the pad's
+    length: the solid is the same, the copy now lies at z = 0 and the sketch line itself where it
+    was. The line is the copy's own twin, so the reference keeps its name and the chamfer moves
+    to the bottom edge, silently (ops#168, the PR 143 review's finding 2). Nothing in the names
+    or the saved geometry tells this from a lift by the pad's own length (BossRaisedByItsHeight):
+    pinned as an accepted risk of the own-twin rule, an open question for the user."""
+
+    area = "moves"
+    MULTI = True
+    REFS = ("top_edge",)
+    edited = False
+
+    def rightEdgeAt(self, z):
+        return edge("line", direction=Y, through=(10, 0, z), contains=(10, 5, z))
+
+    def topEdge(self):
+        return self.rightEdgeAt(0 if self.edited else 5)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 10, 10), body)
+        pad = m.pad(body, profile, 5)
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, self.names(pad, self.topEdge()))
+        chamfer.Size = 0.5
+        self.ref("top_edge", chamfer, "Base", self.topEdge, Chamfered(0.5))
+
+    def edit(self, doc):
+        doc.Pad.Reversed = True
+        doc.Profile.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        self.edited = True
+
+
+class EdgePiecesTradePlaces(Scenario):
+    """A pad (0..10 x 0..10, 5 high) with a notch (y 4.5..5.5, through all) in its right side: the
+    top right edge is two pieces of 4.5, y 0..4.5 and 5.5..10, and a chamfer (0.5) holds the
+    second. The pad's rectangle moves to y 5.5..15.5 and the notch to y 10..11: the first piece
+    now lies where the second was, which moved to y 11..15.5. Two pieces of one edge share every
+    source but are no own twins (ops#168, the PR 143 review's finding 2): the solver breaks the
+    reference with both."""
+
+    area = "moves"
+    MULTI = True
+    REFS = ("piece",)
+    edited = False
+
+    def topRightAt(self, y0, y1):
+        return edge("line", direction=Y, through=(10, 0, 5), contains=(10, (y0 + y1) / 2, 5))
+
+    def piece(self):
+        if self.edited:
+            return Broken(self.topRightAt(5.5, 10), self.topRightAt(11, 15.5))
+        return self.topRightAt(5.5, 10)
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 10, 10), body)
+        m.pad(body, profile, 5)
+        notch = m.sketch(doc, "NotchSketch", m.rectangle(9, 4.5, 11, 5.5), body, z=5)
+        pocket = m.pocketThroughAll(body, notch, "Notch")
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pocket, self.names(pocket, self.piece()))
+        chamfer.Size = 0.5
+        self.ref("piece", chamfer, "Base", self.piece, Chamfered(0.5))
+
+    def edit(self, doc):
+        m.moveRectangle(doc.Profile, 0, 5.5, 10, 15.5)
+        m.moveRectangle(doc.NotchSketch, 9, 10, 11, 11)
+        self.edited = True
