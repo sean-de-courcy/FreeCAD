@@ -27,6 +27,7 @@
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
 #include <Base/PyObjectBase.h>
+#include <App/VariableLookup.h>
 
 #include "Sheet.h"
 
@@ -61,6 +62,27 @@ PyMOD_INIT_FUNC(Spreadsheet)
 
     Spreadsheet::Sheet::init();
     Spreadsheet::SheetPython::init();
+
+    // FreeCAD-CH (ops#152): a sheet's aliases are variables for `#name`. The alias map is read,
+    // not the cell properties, so an alias resolves before the sheet's first execute.
+    App::VariableLookup::registerProvider(
+        Spreadsheet::Sheet::getClassTypeId(),
+        [](const App::DocumentObject* obj, const std::string& name) {
+            return !static_cast<const Spreadsheet::Sheet*>(obj)->getAddressFromAlias(name).empty();
+        },
+        [](const App::DocumentObject* obj) {
+            auto sheet = const_cast<Spreadsheet::Sheet*>(static_cast<const Spreadsheet::Sheet*>(obj));
+            std::vector<std::string> names;
+            for (const auto& address : sheet->getCells()->getUsedCells()) {
+                std::string alias;
+                const auto cell = sheet->getCell(address);
+                if (cell && cell->getAlias(alias)) {
+                    names.push_back(alias);
+                }
+            }
+            return names;
+        }
+    );
 
     PyObject* mod = Spreadsheet::initModule();
     Base::Console().log("Loading Spreadsheet module... done\n");

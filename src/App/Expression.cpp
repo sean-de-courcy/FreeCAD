@@ -43,12 +43,14 @@
 #include <string>
 #include <fmt/format.h>
 
+#include <QChar>
 #include <QObject>
 
 #include <App/Application.h>
 #include <App/DocumentObject.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyUnits.h>
+#include <App/VariableLookup.h>
 #include <Base/Interpreter.h>
 #include <Base/MatrixPy.h>
 #include <Base/PlacementPy.h>
@@ -3777,8 +3779,161 @@ std::vector<std::tuple<int, int, std::string> > tokenize(const std::string &str)
   *
   */
 
+// FreeCAD-CH (ops#152): `#name` is input sugar for the full path of the one variable named
+// `name` in the owner's document (a VarSet property or a Spreadsheet alias, see
+// VariableLookup.h). It is rewritten here, in front of the generated lexer, so the parser and
+// the stored text never see it. A `#` after an identifier or a `<<...>>` string is left alone
+// (`Doc#Obj.Prop`, `<<Doc>>#Obj.Prop`), and so is anything inside `<<...>>`.
+namespace
+{
+
+// The code point at s[i] and its length in bytes (UTF-8; a bad byte counts as one).
+std::pair<char32_t, std::size_t> codePointAt(const std::string& s, std::size_t i)
+{
+    auto c = static_cast<unsigned char>(s[i]);
+    std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+    if (i + len > s.size()) {
+        return {c, 1};
+    }
+    char32_t cp = len == 1 ? c : c & (0x3F >> (len - 1));
+    for (std::size_t k = 1; k < len; ++k) {
+        auto cc = static_cast<unsigned char>(s[i + k]);
+        if ((cc >> 6) != 0x2) {
+            return {c, 1};
+        }
+        cp = (cp << 6) | (cc & 0x3F);
+    }
+    return {cp, len};
+}
+
+// The identifier rule of Expression.l: ({L}{M}*|_)({L}{M}*|{N}|_|@)*
+bool isIdentifierStart(char32_t cp)
+{
+    return cp == '_' || QChar::isLetter(cp);
+}
+
+bool isIdentifierPart(char32_t cp)
+{
+    return cp == '_' || cp == '@' || QChar::isLetter(cp) || QChar::isMark(cp) || QChar::isNumber(cp);
+}
+
+// The end of the `<<...>>` string starting at s[i], or npos if the lexer wouldn't take it as one
+// (Expression.l: \<\<(\\(.|\n)|[^\\>\n])*\>\>).
+std::size_t stringEnd(const std::string& s, std::size_t i)
+{
+    for (std::size_t j = i + 2; j < s.size(); ++j) {
+        if (s[j] == '\\') {
+            ++j;
+        }
+        else if (s[j] == '\n') {
+            return std::string::npos;
+        }
+        else if (s[j] == '>') {
+            return j + 1 < s.size() && s[j + 1] == '>' ? j + 2 : std::string::npos;
+        }
+    }
+    return std::string::npos;
+}
+
+std::string resolveVariable(const App::DocumentObject* owner, const std::string& name, const char* buffer)
+{
+    auto refs = App::VariableLookup::find(owner->getDocument(), name);
+    if (refs.empty()) {
+        throw ParserError(
+            fmt::format("no variable named {} in this document (in expression '{}')", name, buffer)
+        );
+    }
+    if (refs.size() > 1) {
+        std::string paths;
+        for (const auto& ref : refs) {
+            paths += (paths.empty() ? "" : ", ") + ref.path();
+        }
+        throw ParserError(fmt::format(
+            "#{} is ambiguous: {}; write the full path (in expression '{}')",
+            name,
+            paths,
+            buffer
+        ));
+    }
+    return refs.front().path();
+}
+
+std::string rewriteVariableRefs(const App::DocumentObject* owner, const char* buffer)
+{
+    std::string s(buffer);
+    if (s.find('#') == std::string::npos || !owner || !owner->getDocument()) {
+        return s;
+    }
+    enum class Prev { Other, Word, String } prev = Prev::Other;
+    std::string out;
+    out.reserve(s.size() + 16);
+    std::size_t i = 0;
+    while (i < s.size()) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            out += c;
+            ++i;
+            continue;
+        }
+        if (c == '<' && i + 1 < s.size() && s[i + 1] == '<') {
+            std::size_t end = stringEnd(s, i);
+            if (end != std::string::npos) {
+                out.append(s, i, end - i);
+                prev = Prev::String;
+                i = end;
+                continue;
+            }
+            out += "<<";
+            prev = Prev::Other;
+            i += 2;
+            continue;
+        }
+        if (c == '#' && prev == Prev::Other && i + 1 < s.size()
+            && isIdentifierStart(codePointAt(s, i + 1).first)) {
+            std::size_t j = i + 1;
+            while (j < s.size()) {
+                auto [cp, len] = codePointAt(s, j);
+                if (!isIdentifierPart(cp)) {
+                    break;
+                }
+                j += len;
+            }
+            out += resolveVariable(owner, s.substr(i + 1, j - i - 1), buffer);
+            prev = Prev::Word;
+            i = j;
+            continue;
+        }
+        auto [cp, len] = codePointAt(s, i);
+        if (isIdentifierPart(cp)) {
+            std::size_t j = i + len;
+            while (j < s.size()) {
+                auto [cp2, len2] = codePointAt(s, j);
+                if (!isIdentifierPart(cp2)) {
+                    break;
+                }
+                j += len2;
+            }
+            out.append(s, i, j - i);
+            prev = Prev::Word;
+            i = j;
+            continue;
+        }
+        out.append(s, i, len);
+        prev = Prev::Other;
+        i += len;
+    }
+    return out;
+}
+
+}  // namespace
+
 ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, const char* buffer)
 {
+    // FreeCAD-CH (ops#152): `#name` to its full path; the rewritten text is what gets parsed.
+    const std::string rewritten = rewriteVariableRefs(owner, buffer);
+    const char* original = buffer;
+    buffer = rewritten.c_str();
+
     // parse from buffer
     ExpressionParser::YY_BUFFER_STATE my_string_buffer = ExpressionParser::ExpressionParser_scan_string (buffer);
     ExpressionParser::StringBufferCleaner cleaner(my_string_buffer);
@@ -3789,11 +3944,11 @@ ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, con
     int result = ExpressionParser::ExpressionParser_yyparse ();
 
     if (result != 0) {
-        throw ParserError(fmt::format("Failed to parse expression '{}'", buffer));
+        throw ParserError(fmt::format("Failed to parse expression '{}'", original));
     }
 
     if (!ScanResult) {
-        throw ParserError(fmt::format("Unknown error in expression '{}'", buffer));
+        throw ParserError(fmt::format("Unknown error in expression '{}'", original));
     }
 
     if (!valueExpression) {
