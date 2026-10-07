@@ -34,8 +34,7 @@
 
 
 class QAction;
-class QListWidget;
-class QListWidgetItem;
+class QWidget;
 
 namespace Part
 {
@@ -44,6 +43,8 @@ class Feature;
 
 namespace PartDesignGui
 {
+
+class ReferenceField;
 
 class TaskDressUpParameters: public TaskFeatureParameters, public Gui::SelectionObserver
 {
@@ -68,67 +69,55 @@ public:
         return transactionID;
     }
 
-    void setSelectionGate();
-
-    bool event(QEvent* event) override;
-
     /// The list shows Base again (ops#127).
     void onReferencesRepaired() override;
     void onReferenceSelectionTaken() override;
-
-protected Q_SLOTS:
-    void onButtonRefSel(const bool checked);
-    void doubleClicked(QListWidgetItem* item);
-    void setSelection(QListWidgetItem* current);
-    void itemClickedTimeout();
-    virtual void onRefDeleted() = 0;
-    void createDeleteAction(QListWidget* parentList);
-    void createAddAllEdgesAction(QListWidget* parentList);
+    /// The Base field (ops#150).
+    std::vector<ReferenceField*> referenceFields() const override;
 
 protected:
-    bool eventFilter(QObject* watched, QEvent* event) override;
-    void referenceSelected(const Gui::SelectionChanges& msg, QListWidget* widget);
-    bool wasDoubleClicked = false;
-    void keyPressEvent(QKeyEvent* ke) override;
+    /// The Base list, in place of \a placeholder in the panel's layout (ops#150): the base's
+    /// edges and/or faces, written through updateFeature().
+    void createBaseField(QWidget* placeholder);
+    /// "Add All Edges" in the Base field's menu (Ctrl+Shift+A).
+    void createAddAllEdgesAction();
+    /// Base was changed in its field.
+    virtual void onBaseChanged()
+    {}
     void hideOnError();
-    void addAllEdges(QListWidget* listWidget);
-    void deleteRef(QListWidget* listWidget);
+    void addAllEdges();
     void updateFeature(PartDesign::DressUp* pcDressUp, const std::vector<std::string>& refs);
+    /// Ends the field's picking: a value edit, or another pick mode of the panel.
+    void disarmBaseField();
 
 protected:
+    /// The panel's own pick modes besides the Base field (Draft's neutral plane and pull
+    /// direction).
     enum selectionModes
     {
         none,
-        refSel,
         plane,
         line
     };
     void setSelectionMode(selectionModes mode);
-    virtual void setButtons(const selectionModes mode) = 0;
-    static void removeItemFromListWidget(QListWidget* widget, const char* itemstr);
+    virtual void setButtons(const selectionModes mode)
+    {
+        Q_UNUSED(mode)
+    }
 
     ViewProviderDressUp* getDressUpView() const;
 
-private:
-    void tryAddSelection(const std::string& doc, const std::string& obj, const std::string& sub);
-    void setDressUpVisibility(bool visible);
-
 protected:
     QWidget* proxy;
-    QAction* deleteAction;
+    ReferenceField* baseField = nullptr;
     QAction* addAllEdgesAction;
 
     bool allowFaces, allowEdges;
     selectionModes selectionMode;
     int transactionID;
 
-    static QString stopSelectionLabel();
-    static QString startSelectionLabel();
-
 private:
     Gui::WeakPtrT<ViewProviderDressUp> DressUpView;
-
-    Gui::ViewProvider* previouslyShownViewProvider {nullptr};
 };
 
 /// simulation dialog for the TaskView

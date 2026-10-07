@@ -61,6 +61,7 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
     ui->setupUi(proxy);
 
     this->groupLayout()->addWidget(proxy);
+    createBaseField(ui->baseFieldPlaceholder);
 
     PartDesign::Draft* pcDraft = DressUpView->getObject<PartDesign::Draft>();
     double a = pcDraft->Angle.getValue();
@@ -69,18 +70,16 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
     ui->draftAngle->setMaximum(pcDraft->Angle.getMaximum());
     ui->draftAngle->setValue(a);
     ui->draftAngle->selectAll();
-    QMetaObject::invokeMethod(ui->draftAngle, "setFocus", Qt::QueuedConnection);
+    // A new draft's faces field takes the focus when the dialog opens (Q2)
+    if (!pcDraft->Base.getSubValues().empty()) {
+        QMetaObject::invokeMethod(ui->draftAngle, "setFocus", Qt::QueuedConnection);
+    }
 
     // Bind input fields to properties
     ui->draftAngle->bind(pcDraft->Angle);
 
     bool r = pcDraft->Reversed.getValue();
     ui->checkReverse->setChecked(r);
-
-    std::vector<std::string> strings = pcDraft->Base.getSubValues();
-    for (const auto& string : strings) {
-        ui->listWidgetReferences->addItem(QString::fromStdString(string));
-    }
 
     QMetaObject::connectSlotsByName(this);
 
@@ -89,39 +88,21 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
             this, &TaskDraftParameters::onAngleChanged);
     connect(ui->checkReverse, &QCheckBox::toggled,
             this, &TaskDraftParameters::onReversedChanged);
-    connect(ui->buttonRefSel, &QToolButton::toggled,
-            this, &TaskDraftParameters::onButtonRefSel);
     connect(ui->buttonPlane, &QToolButton::toggled,
             this, &TaskDraftParameters::onButtonPlane);
     connect(ui->buttonLine, &QToolButton::toggled,
             this, &TaskDraftParameters::onButtonLine);
-
-    // Create context menu
-    createDeleteAction(ui->listWidgetReferences);
-    connect(deleteAction, &QAction::triggered, this, &TaskDraftParameters::onRefDeleted);
-
-    connect(ui->listWidgetReferences, &QListWidget::currentItemChanged,
-            this, &TaskDraftParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemClicked,
-            this, &TaskDraftParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemDoubleClicked,
-            this, &TaskDraftParameters::doubleClicked);
     // clang-format on
 
     App::DocumentObject* ref = pcDraft->NeutralPlane.getValue();
-    strings = pcDraft->NeutralPlane.getSubValues();
+    std::vector<std::string> strings = pcDraft->NeutralPlane.getSubValues();
     ui->linePlane->setText(getRefStr(ref, strings));
 
     ref = pcDraft->PullDirection.getValue();
     strings = pcDraft->PullDirection.getSubValues();
     ui->lineLine->setText(getRefStr(ref, strings));
 
-    if (strings.size() == 0) {
-        setSelectionMode(refSel);
-    }
-    else {
-        hideOnError();
-    }
+    hideOnError();
 
     setupGizmos(DressUpView);
 }
@@ -132,10 +113,7 @@ void TaskDraftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
     // adds/deletes the selection accordingly
 
     if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == refSel) {
-            referenceSelected(msg, ui->listWidgetReferences);
-        }
-        else if (selectionMode == plane) {
+        if (selectionMode == plane) {
             auto pcDraft = getObject<PartDesign::Draft>();
             std::vector<std::string> planes;
             App::DocumentObject* selObj {};
@@ -183,8 +161,8 @@ void TaskDraftParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 
 void TaskDraftParameters::setButtons(const selectionModes mode)
 {
-    ui->buttonRefSel->setText(mode == refSel ? stopSelectionLabel() : startSelectionLabel());
-    ui->buttonRefSel->setChecked(mode == refSel);
+    QSignalBlocker blockLine(ui->buttonLine);
+    QSignalBlocker blockPlane(ui->buttonPlane);
     ui->buttonLine->setChecked(mode == line);
     ui->buttonPlane->setChecked(mode == plane);
 }
@@ -192,6 +170,7 @@ void TaskDraftParameters::setButtons(const selectionModes mode)
 void TaskDraftParameters::onButtonPlane(bool checked)
 {
     if (checked) {
+        disarmBaseField();
         setButtons(plane);
         getViewObject()->showPreviousFeature(true);
         selectionMode = plane;
@@ -206,6 +185,7 @@ void TaskDraftParameters::onButtonPlane(bool checked)
 void TaskDraftParameters::onButtonLine(bool checked)
 {
     if (checked) {
+        disarmBaseField();
         setButtons(line);
         getViewObject()->showPreviousFeature(true);
         selectionMode = line;
@@ -214,11 +194,6 @@ void TaskDraftParameters::onButtonLine(bool checked)
             new ReferenceSelection(this->getBase(), AllowSelection::EDGE | AllowSelection::PLANAR)
         );
     }
-}
-
-void TaskDraftParameters::onRefDeleted()
-{
-    TaskDressUpParameters::deleteRef(ui->listWidgetReferences);
 }
 
 void TaskDraftParameters::getPlane(App::DocumentObject*& obj, std::vector<std::string>& sub) const
@@ -255,7 +230,8 @@ void TaskDraftParameters::getLine(App::DocumentObject*& obj, std::vector<std::st
 void TaskDraftParameters::onAngleChanged(double angle)
 {
     if (auto draft = getObject<PartDesign::Draft>()) {
-        setButtons(none);
+        // a value edit ends the picking, gate and display included (B3)
+        setSelectionMode(none);
         setupTransaction();
         draft->Angle.setValue(angle);
         draft->recomputeFeature();
@@ -272,7 +248,7 @@ double TaskDraftParameters::getAngle() const
 void TaskDraftParameters::onReversedChanged(const bool reversed)
 {
     if (auto draft = getObject<PartDesign::Draft>()) {
-        setButtons(none);
+        setSelectionMode(none);
         setupTransaction();
         draft->Reversed.setValue(reversed);
         draft->recomputeFeature();
@@ -292,7 +268,6 @@ TaskDraftParameters::~TaskDraftParameters()
 {
     try {
         Gui::Selection().clearSelection();
-        Gui::Selection().rmvSelectionGate();
     }
     catch (const Py::Exception&) {
         Base::PyException e;  // extract the Python error text
@@ -311,7 +286,7 @@ void TaskDraftParameters::changeEvent(QEvent* e)
 void TaskDraftParameters::apply()
 {
     // Alert user if he created an empty feature
-    if (ui->listWidgetReferences->count() == 0) {
+    if (getReferences().empty()) {
         Base::Console().warning(tr("Empty draft created!\n").toStdString().c_str());
     }
 

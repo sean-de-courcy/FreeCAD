@@ -62,12 +62,10 @@ private Q_SLOTS:
     void onSize2Changed(double);
     void onAngleChanged(double);
     void onFlipDirection(bool);
-    void onRefDeleted() override;
-    void onAddAllEdges();
+    void onBaseChanged() override;
     void onCheckBoxUseAllEdgesToggled(bool checked);
 
 protected:
-    void setButtons(const selectionModes mode) override;
     void changeEvent(QEvent* e) override;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 

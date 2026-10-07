@@ -418,7 +418,9 @@ TaskDlgBooleanParameters::~TaskDlgBooleanParameters() = default;
 
 
 void TaskDlgBooleanParameters::open()
-{}
+{
+    TaskDlgFeatureParameters::open();
+}
 
 void TaskDlgBooleanParameters::clicked(int)
 {}

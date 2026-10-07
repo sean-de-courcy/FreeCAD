@@ -41,10 +41,8 @@ public:
     void apply() override;
 
 private Q_SLOTS:
-    void onRefDeleted() override;
 
 protected:
-    void setButtons(const selectionModes mode) override;
     void changeEvent(QEvent* e) override;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 

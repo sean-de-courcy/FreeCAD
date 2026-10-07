@@ -28,6 +28,9 @@
 #include "ViewProviderPipe.h"
 #include "TaskDressUpParameters.h"
 
+class QListWidget;
+class QListWidgetItem;
+
 
 namespace App
 {

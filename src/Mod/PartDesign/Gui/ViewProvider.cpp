@@ -27,6 +27,7 @@
 #include <QMenu>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoPickStyle.h>
+#include <Inventor/events/SoKeyboardEvent.h>
 #include <BRep_Builder.hxx>
 
 #include <Base/Exception.h>
@@ -47,6 +48,7 @@
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
 
+#include "ReferenceField.h"
 #include "TaskFeatureParameters.h"
 #include "StyleParameters.h"
 
@@ -109,6 +111,21 @@ void ViewProvider::setupContextMenu(QMenu* menu, QObject* receiver, const char* 
     act->setData(QVariant((int)ViewProvider::Color));
     // Call the extensions
     Gui::ViewProvider::setupContextMenu(menu, receiver, member);
+}
+
+bool ViewProvider::keyPressed(bool pressed, int key)
+{
+    // Esc there is posted to the task view and resets the edit; with a field armed, the first Esc
+    // only ends the picking (Q1)
+    if (key == SoKeyboardEvent::ESCAPE) {
+        if (ReferenceField* field = ReferenceField::armedField()) {
+            if (!pressed) {
+                field->setArmed(false);
+            }
+            return true;
+        }
+    }
+    return PartGui::ViewProviderPart::keyPressed(pressed, key);
 }
 
 bool ViewProvider::setEdit(int ModNum)

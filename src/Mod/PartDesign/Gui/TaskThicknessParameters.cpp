@@ -61,6 +61,7 @@ void TaskThicknessParameters::addContainerWidget()
     proxy = new QWidget(this);
     ui->setupUi(proxy);
     this->groupLayout()->addWidget(proxy);
+    createBaseField(ui->baseFieldPlaceholder);
 }
 
 void TaskThicknessParameters::initControls()
@@ -71,7 +72,10 @@ void TaskThicknessParameters::initControls()
     ui->Value->setMinimum(0.0);
     ui->Value->setValue(a);
     ui->Value->selectAll();
-    QMetaObject::invokeMethod(ui->Value, "setFocus", Qt::QueuedConnection);
+    // A new thickness's faces field takes the focus when the dialog opens (Q2)
+    if (!thickness->Base.getSubValues().empty()) {
+        QMetaObject::invokeMethod(ui->Value, "setFocus", Qt::QueuedConnection);
+    }
 
     // Bind input fields to properties
     ui->Value->bind(thickness->Value);
@@ -82,11 +86,6 @@ void TaskThicknessParameters::initControls()
     bool i = thickness->Intersection.getValue();
     ui->checkIntersection->setChecked(i);
 
-    std::vector<std::string> strings = thickness->Base.getSubValues();
-    for (const auto& string : strings) {
-        ui->listWidgetReferences->addItem(QString::fromStdString(string));
-    }
-
     setupConnections();
 
     int mode = static_cast<int>(thickness->Mode.getValue());
@@ -95,12 +94,7 @@ void TaskThicknessParameters::initControls()
     int join = static_cast<int>(thickness->Join.getValue());
     ui->joinComboBox->setCurrentIndex(join);
 
-    if (strings.empty()) {
-        setSelectionMode(refSel);
-    }
-    else {
-        hideOnError();
-    }
+    hideOnError();
 }
 
 void TaskThicknessParameters::setupConnections()
@@ -114,54 +108,26 @@ void TaskThicknessParameters::setupConnections()
             this, &TaskThicknessParameters::onReversedChanged);
     connect(ui->checkIntersection, &QCheckBox::toggled,
             this, &TaskThicknessParameters::onIntersectionChanged);
-    connect(ui->buttonRefSel, &QToolButton::toggled,
-            this, &TaskThicknessParameters::onButtonRefSel);
     connect(ui->modeComboBox, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TaskThicknessParameters::onModeChanged);
     connect(ui->joinComboBox, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &TaskThicknessParameters::onJoinTypeChanged);
-
-    // Create context menu
-    createDeleteAction(ui->listWidgetReferences);
-    connect(deleteAction, &QAction::triggered, this, &TaskThicknessParameters::onRefDeleted);
-
-    connect(ui->listWidgetReferences, &QListWidget::currentItemChanged,
-            this, &TaskThicknessParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemClicked,
-            this, &TaskThicknessParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemDoubleClicked,
-            this, &TaskThicknessParameters::doubleClicked);
     // clang-format on
 }
 
 void TaskThicknessParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
 {
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == refSel) {
-            referenceSelected(msg, ui->listWidgetReferences);
-        }
-    }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
+    if (msg.Type == Gui::SelectionChanges::ClrSelection) {
         // TODO: the gizmo position should be only recalculated when the feature associated
         // with the gizmo is removed from the list
         setGizmoPositions();
     }
 }
 
-void TaskThicknessParameters::setButtons(const selectionModes mode)
-{
-    ui->buttonRefSel->setChecked(mode == refSel);
-    ui->buttonRefSel->setText(mode == refSel ? stopSelectionLabel() : startSelectionLabel());
-}
-
-void TaskThicknessParameters::onRefDeleted()
-{
-    TaskDressUpParameters::deleteRef(ui->listWidgetReferences);
-}
-
 PartDesign::Thickness* TaskThicknessParameters::onBeforeChange()
 {
-    setButtons(none);
+    // a value edit ends the picking, gate and display included (B3)
+    setSelectionMode(none);
     setupTransaction();
     return getObject<PartDesign::Thickness>();
 }
@@ -246,7 +212,6 @@ TaskThicknessParameters::~TaskThicknessParameters()
 {
     try {
         Gui::Selection().clearSelection();
-        Gui::Selection().rmvSelectionGate();
     }
     catch (const Py::Exception&) {
         Base::PyException e;  // extract the Python error text
@@ -265,7 +230,7 @@ void TaskThicknessParameters::changeEvent(QEvent* e)
 void TaskThicknessParameters::apply()
 {
     // Alert user if he created an empty feature
-    if (ui->listWidgetReferences->count() == 0) {
+    if (getReferences().empty()) {
         Base::Console().warning(tr("Empty thickness created!\n").toStdString().c_str());
     }
 }

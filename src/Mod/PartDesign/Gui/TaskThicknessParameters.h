@@ -68,10 +68,8 @@ private Q_SLOTS:
     void onJoinTypeChanged(int join);
     void onReversedChanged(bool on);
     void onIntersectionChanged(bool on);
-    void onRefDeleted() override;
 
 protected:
-    void setButtons(const selectionModes mode) override;
     void changeEvent(QEvent* e) override;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
 

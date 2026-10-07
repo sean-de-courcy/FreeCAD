@@ -63,7 +63,6 @@ private Q_SLOTS:
     void onReversedChanged(bool reversed);
     void onButtonPlane(bool checked);
     void onButtonLine(bool checked);
-    void onRefDeleted() override;
 
 protected:
     void setButtons(selectionModes mode) override;

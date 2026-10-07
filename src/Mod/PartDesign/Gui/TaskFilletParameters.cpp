@@ -41,6 +41,7 @@
 #include <Mod/Part/App/GizmoHelper.h>
 
 #include "ui_TaskFilletParameters.h"
+#include "ReferenceField.h"
 #include "TaskFilletParameters.h"
 
 
@@ -59,10 +60,10 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     this->groupLayout()->addWidget(proxy);
 
     PartDesign::Fillet* pcFillet = DressUpView->getObject<PartDesign::Fillet>();
+    createBaseField(ui->baseFieldPlaceholder);
     bool useAllEdges = pcFillet->UseAllEdges.getValue();
     ui->checkBoxUseAllEdges->setChecked(useAllEdges);
-    ui->buttonRefSel->setEnabled(!useAllEdges);
-    ui->listWidgetReferences->setEnabled(!useAllEdges);
+    baseField->setEnabled(!useAllEdges);
     double r = pcFillet->Radius.getValue();
 
     ui->filletRadius->setUnit(Base::Unit::Length);
@@ -70,10 +71,9 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     ui->filletRadius->setMinimum(0);
     ui->filletRadius->selectNumber();
     ui->filletRadius->bind(pcFillet->Radius);
-    QMetaObject::invokeMethod(ui->filletRadius, "setFocus", Qt::QueuedConnection);
-    std::vector<std::string> strings = pcFillet->Base.getSubValues();
-    for (const auto& string : strings) {
-        ui->listWidgetReferences->addItem(QString::fromStdString(string));
+    // A new fillet's edges field takes the focus when the dialog opens (Q2)
+    if (!pcFillet->Base.getSubValues().empty()) {
+        QMetaObject::invokeMethod(ui->filletRadius, "setFocus", Qt::QueuedConnection);
     }
 
     QMetaObject::connectSlotsByName(this);
@@ -81,32 +81,12 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     // clang-format off
     connect(ui->filletRadius, qOverload<double>(&Gui::QuantitySpinBox::valueChanged),
         this, &TaskFilletParameters::onLengthChanged);
-    connect(ui->buttonRefSel, &QToolButton::toggled,
-        this, &TaskFilletParameters::onButtonRefSel);
     connect(ui->checkBoxUseAllEdges, &QToolButton::toggled,
         this, &TaskFilletParameters::onCheckBoxUseAllEdgesToggled);
-
-    // Create context menu
-    createDeleteAction(ui->listWidgetReferences);
-    connect(deleteAction, &QAction::triggered, this, &TaskFilletParameters::onRefDeleted);
-
-    createAddAllEdgesAction(ui->listWidgetReferences);
-    connect(addAllEdgesAction, &QAction::triggered, this, &TaskFilletParameters::onAddAllEdges);
-
-    connect(ui->listWidgetReferences, &QListWidget::currentItemChanged,
-        this, &TaskFilletParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemClicked,
-        this, &TaskFilletParameters::setSelection);
-    connect(ui->listWidgetReferences, &QListWidget::itemDoubleClicked,
-        this, &TaskFilletParameters::doubleClicked);
     // clang-format on
 
-    if (strings.empty()) {
-        setSelectionMode(refSel);
-    }
-    else {
-        hideOnError();
-    }
+    createAddAllEdgesAction();
+    hideOnError();
 
     setupGizmos(DressUpView);
 }
@@ -116,12 +96,7 @@ void TaskFilletParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
     // executed when the user selected something in the CAD object
     // adds/deletes the selection accordingly
 
-    if (msg.Type == Gui::SelectionChanges::AddSelection) {
-        if (selectionMode == refSel) {
-            referenceSelected(msg, ui->listWidgetReferences);
-        }
-    }
-    else if (msg.Type == Gui::SelectionChanges::ClrSelection) {
+    if (msg.Type == Gui::SelectionChanges::ClrSelection) {
         // TODO: the gizmo position should be only recalculated when the feature associated
         // with the gizmo is removed from the list
         setGizmoPositions();
@@ -135,28 +110,15 @@ void TaskFilletParameters::onCheckBoxUseAllEdgesToggled(bool checked)
             setSelectionMode(none);
         }
 
-        ui->buttonRefSel->setEnabled(!checked);
-        ui->listWidgetReferences->setEnabled(!checked);
+        baseField->setEnabled(!checked);
         fillet->UseAllEdges.setValue(checked);
         fillet->recomputeFeature();
     }
 }
 
-void TaskFilletParameters::setButtons(const selectionModes mode)
+void TaskFilletParameters::onBaseChanged()
 {
-    ui->buttonRefSel->setChecked(mode == refSel);
-    ui->buttonRefSel->setText(mode == refSel ? stopSelectionLabel() : startSelectionLabel());
-}
-
-void TaskFilletParameters::onRefDeleted()
-{
-    TaskDressUpParameters::deleteRef(ui->listWidgetReferences);
     setGizmoPositions();
-}
-
-void TaskFilletParameters::onAddAllEdges()
-{
-    TaskDressUpParameters::addAllEdges(ui->listWidgetReferences);
 }
 
 void TaskFilletParameters::onLengthChanged(double len)
@@ -180,7 +142,6 @@ TaskFilletParameters::~TaskFilletParameters()
 {
     try {
         Gui::Selection().clearSelection();
-        Gui::Selection().rmvSelectionGate();
     }
     catch (const Py::Exception&) {
         Base::PyException e;  // extract the Python error text
@@ -201,7 +162,7 @@ void TaskFilletParameters::apply()
     ui->filletRadius->apply();
 
     // Alert user if he created an empty feature
-    if (ui->listWidgetReferences->count() == 0) {
+    if (getReferences().empty()) {
         std::string text = tr("Empty fillet created!").toStdString();
         Base::Console().warning("%s\n", text.c_str());
     }

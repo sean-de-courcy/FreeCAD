@@ -47,6 +47,15 @@ from PartDesignTests.TestPad import (
     makeRegionPad,
     redrawBosses,
 )
+from PartDesignTests.TestReferenceFieldGui import (
+    armed,
+    entries,
+    fields,
+    menuActions,
+    openMenu,
+    states,
+    texts,
+)
 
 
 def pump(seconds=0.3):
@@ -353,19 +362,24 @@ class TestReferencePickerGui(unittest.TestCase):
     # -- the feature's own dialog ---------------------------------------------------------------
 
     def testFeatureDialogShowsTheReferences(self):
-        """The fillet's own dialog has the References panel at the top. Accepted there, OK on the
-        dialog keeps it: the fillet's list shows Base again, and nothing writes the old value
-        back."""
+        """The fillet's own dialog: its only row is Base[0], which the edges field shows
+        (guessed), so the References panel is left out (ops#150, 3.5). Accepted in the field's
+        menu, OK keeps it, and nothing writes the old value back."""
         pad, fillet, original, corner = self.redrawnFillet()
         Gui.ActiveDocument.setEdit(fillet)
         pump()
-        panel = Panel(self)
-        self.assertEqual([r[0] for r in panel.rows()], ["Base[0]"])
-        references = Gui.getMainWindow().findChildren(QtWidgets.QListWidget, "listWidgetReferences")
-        self.assertTrue(references)
+        tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+        self.assertTrue(tree is None or not tree.isVisible(), "the References panel is shown")
+        [field] = fields()
+        self.assertEqual(states(field), ["guessed"])
 
-        panel.click(panel.accept)
-        self.assertEqual([references[0].item(i).text() for i in range(references[0].count())], [corner])
+        menu = openMenu(field, 0)
+        self.assertIsNotNone(menu, "no context menu")
+        menuActions(menu)["Accept guess"].trigger()
+        menu.close()
+        pump()
+        self.assertEqual(texts(field), [corner])
+        self.assertEqual(states(field), ["exact"])
         self.close(QtWidgets.QDialogButtonBox.Ok)
 
         self.assertTrue(fillet.isValid())
@@ -373,50 +387,66 @@ class TestReferencePickerGui(unittest.TestCase):
         self.assertEqual(fillet.Base[1], [corner])
         self.assertEqual(App.getReferenceReport(fillet), [])
 
-    def testRowClickEndsTheFilletsSelection(self):
-        """Review B2: the fillet's own dialog with Select on. A click on a row highlights the edge
-        it holds; the dialog's selection mode ends first and the dialog doesn't take the edge as
-        its own pick (it would have taken it out of Base)."""
-        pad, fillet, original, corner = self.redrawnFillet(alsoAt=(0, 0, 0))
-        base = sorted(fillet.Base[1])
-        Gui.ActiveDocument.setEdit(fillet)
+    def redrawnDraft(self):
+        """The redrawn pad and a draft on its front face, the bottom face its neutral plane: after
+        the redraw both references are found again by geometry. Returns (pad, draft)."""
+        body, pad = self.redrawnPad()
+        draft = body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (pad, face(normal=(0, -1, 0)).one(pad.Shape))
+        draft.NeutralPlane = (pad, face(normal=(0, 0, -1)).one(pad.Shape))
+        draft.Angle = 2
+        self.doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.redraw()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertIn("Warning", draft.State)
+        return pad, draft
+
+    def testRowClickEndsTheFieldsPicking(self):
+        """Review B2, with the faces field (ops#150): the draft's own dialog, the faces field
+        armed. A click on the panel's row highlights the element it holds; the field disarms first
+        and doesn't take the element as its own pick (it would have taken it out of Base)."""
+        pad, draft = self.redrawnDraft()
+        base = list(draft.Base[1])
+        Gui.ActiveDocument.setEdit(draft)
         pump()
         panel = Panel(self)
-        self.assertTrue(panel.rows())
-        select = Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonRefSel")
-        select.click()
+        self.assertEqual([r[0] for r in panel.rows()], ["NeutralPlane[0]"])
+        [field] = fields()
+        field.setProperty("armed", True)
         pump()
-        self.assertTrue(select.isChecked())
+        self.assertTrue(armed(field))
 
-        for row in range(panel.tree.topLevelItemCount()):
-            panel.tree.setCurrentItem(None)
-            pump()
-            panel.tree.setCurrentItem(panel.tree.topLevelItem(row))
-            pump()
-            self.assertEqual(sorted(fillet.Base[1]), base)
-            self.assertTrue(Gui.Selection.getSelectionEx(self.doc.Name))
+        panel.tree.setCurrentItem(None)
+        pump()
+        panel.tree.setCurrentItem(panel.tree.topLevelItem(0))
+        pump()
+        self.assertFalse(armed(field))
+        self.assertEqual(draft.Base[1], base)
+        self.assertTrue(Gui.Selection.getSelectionEx(self.doc.Name))
 
-        self.assertFalse(select.isChecked())
         self.close(QtWidgets.QDialogButtonBox.Ok)
-        self.assertEqual(sorted(fillet.Base[1]), base)
-        self.assertIn("Warning", fillet.State)
+        self.assertEqual(draft.Base[1], base)
 
     def testCancelUndoesTheRepairAndAListEdit(self):
         """ops#130 (review M5): the fillet's own dialog opened with no transaction booked, as
-        Std_Edit opens it. Accept in the panel, then an edge added to the fillet's list, then
+        Std_Edit opens it. Accept in the edges field's menu, then an edge added to the field, then
         Cancel: both are undone and the warning is back. (The list edit used to open a
-        transaction of its own, which committed the panel's.)"""
+        transaction of its own, which committed the accept.)"""
         pad, fillet, original, corner = self.redrawnFillet()
         self.assertFalse(self.doc.HasPendingTransaction)
         Gui.ActiveDocument.setEdit(fillet)
         pump()
-        panel = Panel(self)
-        panel.click(panel.accept)
-        self.assertNotIn("Warning", fillet.State)
-        select = Gui.getMainWindow().findChild(QtWidgets.QAbstractButton, "buttonRefSel")
-        select.click()
+        [field] = fields()
+        menu = openMenu(field, 0)
+        self.assertIsNotNone(menu, "no context menu")
+        menuActions(menu)["Accept guess"].trigger()
+        menu.close()
         pump()
-        self.assertTrue(select.isChecked())
+        self.assertNotIn("Warning", fillet.State)
+        field.setProperty("armed", True)
+        pump()
+        self.assertTrue(armed(field))
         [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
         Gui.Selection.addSelection(self.doc.Name, "Pad", other)
         pump()

@@ -15,34 +15,10 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
-    <widget class="QToolButton" name="buttonRefSel">
-     <property name="toolTip">
-      <string>Toggles selection mode</string>
-     </property>
-     <property name="text">
-      <string>Select</string>
-     </property>
-     <property name="checkable">
-      <bool>true</bool>
-     </property>
-    </widget>
-   </item>
-   <item>
-    <widget class="QListWidget" name="listWidgetReferences">
-     <property name="toolTip">
-      <string>Select an item in the 3D view to highlight it</string>
-     </property>
-     <property name="selectionMode">
-      <enum>QAbstractItemView::ExtendedSelection</enum>
-     </property>
-    </widget>
+    <widget class="QWidget" name="baseFieldPlaceholder"/>
    </item>
   </layout>
  </widget>
- <tabstops>
-  <tabstop>buttonRefSel</tabstop>
-  <tabstop>listWidgetReferences</tabstop>
- </tabstops>
  <resources/>
  <connections/>
 </ui>
