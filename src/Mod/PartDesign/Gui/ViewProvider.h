@@ -87,6 +87,15 @@ public:
     /// Toggles visibility of the preview
     void showPreviousFeature(bool);
 
+    /// The preview overlay's opacity, 0..1: the Preview box's slider (ops#150 W5), saved in the
+    /// preview parameters in percent; the theme's PreviewShapeOpacity until it is set.
+    static double previewOpacity();
+    /// A subtractive feature's tool shape: the theme's PreviewToolOpacity, scaled as
+    /// previewOpacity() scales the theme's PreviewShapeOpacity.
+    static double previewToolOpacity();
+    /// Gives the preview shapes previewOpacity() (the tool shapes previewToolOpacity()).
+    virtual void updatePreviewOpacity();
+
     PyObject* getPyObject() override;
 
     QIcon mergeColorfulOverlayIcons(const QIcon& orig) const override;

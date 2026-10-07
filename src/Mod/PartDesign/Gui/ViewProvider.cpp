@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+
 #include <QMessageBox>
 #include <QAction>
 #include <QMenu>
@@ -227,22 +229,59 @@ void ViewProvider::unsetEdit(int ModNum)
     }
 }
 
+// FreeCAD-CH (ops#150 W5): the preview overlay's opacity, set by the Preview box's slider
+double ViewProvider::previewOpacity()
+{
+    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
+    const long percent = App::GetApplication()
+                             .GetParameterGroupByPath(
+                                 "User parameter:BaseApp/Preferences/Mod/PartDesign/Preview"
+                             )
+                             ->GetInt("Opacity", -1);
+    if (percent < 0) {
+        return styleParameterManager->resolve(StyleParameters::PreviewShapeOpacity).value;
+    }
+    return static_cast<double>(std::min(percent, 100L)) / 100.0;
+}
+
+double ViewProvider::previewToolOpacity()
+{
+    auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
+    const double tool = styleParameterManager->resolve(StyleParameters::PreviewToolOpacity).value;
+    const double shape = styleParameterManager->resolve(StyleParameters::PreviewShapeOpacity).value;
+    if (shape <= 0.0) {
+        return tool;
+    }
+    return std::min(1.0, tool * previewOpacity() / shape);
+}
+
+void ViewProvider::updatePreviewOpacity()
+{
+    if (pcPreviewShape) {
+        pcPreviewShape->transparency = 1.0F - static_cast<float>(previewOpacity());
+    }
+    if (pcToolPreview) {
+        pcToolPreview->transparency = 1.0F - static_cast<float>(previewToolOpacity());
+    }
+}
+
 void ViewProvider::attachPreview()
 {
     ViewProviderPreviewExtension::attachPreview();
 
     auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
 
-    const double opacity = styleParameterManager->resolve(StyleParameters::PreviewToolOpacity).value;
     const double lineWidth = styleParameterManager->resolve(StyleParameters::PreviewLineWidth).value;
 
     pcPreviewShape->lineWidth = static_cast<float>(lineWidth);
 
     pcToolPreview = new PartGui::SoPreviewShape;
-    pcToolPreview->transparency = 1.0F - static_cast<float>(opacity);
     pcToolPreview->color.connectFrom(&pcPreviewShape->color);
 
     pcPreviewRoot->addChild(pcToolPreview);
+
+    // FreeCAD-CH (ops#150 W5): both opacities follow the slider (the tool's was the theme's)
+    updatePreviewOpacity();
 }
 
 void ViewProvider::updatePreview()

@@ -467,12 +467,27 @@ void ViewProviderBoolean::attachPreview()
     pcPreviewRoot->addChild(this->pcBasePreviewToggle);
 }
 
+// FreeCAD-CH (ops#150 W5): the opacity slider reaches the tool and base shapes too
+void ViewProviderBoolean::updatePreviewOpacity()
+{
+    ViewProvider::updatePreviewOpacity();
+
+    // The tool and base shapes of the last updatePreview()
+    const auto transparency = static_cast<float>(1.0 - previewToolOpacity());
+    for (SoGroup* group : {pcToolsPreview.get(), static_cast<SoGroup*>(pcBasePreviewToggle.get())}) {
+        for (int i = 0; i < group->getNumChildren(); ++i) {
+            SoNode* child = group->getChild(i);
+            if (child->isOfType(PartGui::SoPreviewShape::getClassTypeId())) {
+                static_cast<PartGui::SoPreviewShape*>(child)->transparency = transparency;
+            }
+        }
+    }
+}
+
 void ViewProviderBoolean::updatePreview()
 {
-    const auto* styleParameterManager = Base::provideService<Gui::StyleParameters::ParameterManager>();
-
-    const double toolOpacity = styleParameterManager->resolve(StyleParameters::PreviewToolOpacity).value;
-    const double toolTransparency = 1.0 - toolOpacity;
+    // FreeCAD-CH (ops#150 W5): scaled by the opacity slider (was the theme's alone)
+    const double toolTransparency = 1.0 - previewToolOpacity();
 
     auto boolean = getObject<PartDesign::Boolean>();
 

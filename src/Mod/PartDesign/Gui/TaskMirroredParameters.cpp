@@ -30,6 +30,7 @@
 #include <App/DocumentObject.h>
 #include <App/Origin.h>
 #include <Base/Console.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Selection/Selection.h>
@@ -115,9 +116,12 @@ void TaskMirroredParameters::updateUI()
     if (blockUpdate) {
         return;
     }
-    blockUpdate = true;
-
     auto pcMirrored = getObject<PartDesign::Mirrored>();
+    if (!pcMirrored) {
+        return;
+    }
+    // FreeCAD-CH (ops#186): a locker, so a throw doesn't leave the panel blocked
+    Base::StateLocker lock(blockUpdate, true);
 
     if (planeLinks.setCurrentLink(pcMirrored->MirrorPlane) == -1) {
         // failed to set current, because the link isn't in the list yet
@@ -127,8 +131,6 @@ void TaskMirroredParameters::updateUI()
         );
         planeLinks.setCurrentLink(pcMirrored->MirrorPlane);
     }
-
-    blockUpdate = false;
 }
 
 void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg)
@@ -159,6 +161,13 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
 void TaskMirroredParameters::cancelReferencePick()
 {
     exitSelectionMode();
+    // Only the empty entry ("Select reference...") shows the link again: with "Update view"
+    // off, a plane chosen in the box is still to be written by apply() (ops#186)
+    if (planeLinks.getCurrentLink().getValue()) {
+        return;
+    }
+    // updateUI() returns while blockUpdate is set, which "Update view" off sets too
+    Base::StateLocker unblock(blockUpdate, false);
     updateUI();
 }
 

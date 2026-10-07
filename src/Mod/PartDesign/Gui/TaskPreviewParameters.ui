@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>364</width>
-    <height>62</height>
+    <height>90</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -27,6 +27,39 @@
       <string>Show preview overlay</string>
      </property>
     </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="opacityLayout">
+     <item>
+      <widget class="QLabel" name="opacityLabel">
+       <property name="text">
+        <string>Overlay opacity</string>
+       </property>
+       <property name="buddy">
+        <cstring>opacitySlider</cstring>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QSlider" name="opacitySlider">
+       <property name="toolTip">
+        <string>How opaque the preview overlay is (saved for all features)</string>
+       </property>
+       <property name="maximum">
+        <number>100</number>
+       </property>
+       <property name="singleStep">
+        <number>5</number>
+       </property>
+       <property name="pageStep">
+        <number>10</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Orientation::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </item>
   </layout>
  </widget>

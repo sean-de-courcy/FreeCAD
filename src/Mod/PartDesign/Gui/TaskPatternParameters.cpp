@@ -326,13 +326,6 @@ void TaskPatternParameters::onReferencesRepaired()
     updateUI();
 }
 
-void TaskPatternParameters::onReferenceSelectionTaken()
-{
-    if (selectionMode != SelectionMode::None) {
-        exitReferenceSelectionMode();
-    }
-}
-
 void TaskPatternParameters::cancelReferencePick()
 {
     if (selectionMode != SelectionMode::None) {

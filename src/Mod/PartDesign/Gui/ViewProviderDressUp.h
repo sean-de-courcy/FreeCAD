@@ -55,6 +55,8 @@ public:
     /// Set preview parameters to indicate error state
     void setErrorState(bool error);
 
+    void updatePreviewOpacity() override;
+
     /**
      * Returns the feature Name associated with the view provider.
      * Should be reimplemented in the successor.

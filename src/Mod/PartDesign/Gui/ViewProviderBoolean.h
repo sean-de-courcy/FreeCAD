@@ -63,6 +63,7 @@ public:
     std::vector<App::DocumentObject*> claimChildren3D() const override;
     void onChanged(const App::Property* prop) override;
     void update(const App::Property* prop) override;
+    void updatePreviewOpacity() override;
 
 protected:
     void updateData(const App::Property* prop) override;

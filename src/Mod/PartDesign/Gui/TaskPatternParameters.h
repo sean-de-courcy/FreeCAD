@@ -54,7 +54,6 @@ public:
 
     void apply() override;
     void onReferencesRepaired() override;
-    void onReferenceSelectionTaken() override;
     void cancelReferencePick() override;
 
 protected:

@@ -97,10 +97,11 @@ public:
     /// link property read it again, so that OK doesn't write the old value back.
     virtual void onReferencesRepaired()
     {}
-    /// The References panel is about to change the selection: the selection mode ends.
+    /// The References panel is about to change the selection: a pending pick ends, its combo
+    /// back on the link (ops#186).
     virtual void onReferenceSelectionTaken()
     {
-        exitSelectionMode();
+        cancelReferencePick();
     }
 
     /// A "Select reference..." pick ends unfinished: the pick mode ends and the combo shows the

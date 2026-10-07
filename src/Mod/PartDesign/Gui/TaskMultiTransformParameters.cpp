@@ -154,10 +154,15 @@ void TaskMultiTransformParameters::slotDeletedObject(const Gui::ViewProviderDocu
     TaskTransformedParameters::slotDeletedObject(Obj);
 }
 
-void TaskMultiTransformParameters::endPickModes()
+void TaskMultiTransformParameters::cancelReferencePick()
 {
-    if (subTask) {
+    // A sub-task whose sub-feature was deleted has nothing to show, but its pick mode still
+    // ends (ops#186)
+    if (subTask && subFeature) {
         subTask->cancelReferencePick();
+    }
+    else if (subTask) {
+        subTask->exitSelectionMode();
     }
     exitSelectionMode();
 }
@@ -166,7 +171,9 @@ void TaskMultiTransformParameters::closeSubTask()
 {
     if (subTask) {
         ui->buttonOK->hide();
-        exitSelectionMode();
+        // A pending pick of the sub-task ends first, or its apply() writes the empty entry
+        // (ops#186)
+        cancelReferencePick();
         // The subfeature can already be deleted (e.g. cancel) so we have to check before
         // calling apply
         if (subFeature) {
