@@ -25,6 +25,7 @@ Task 2 PR 3), on designed models in documents with ReferenceSolver on. The resol
 themselves are judged by the naming scenarios in their V2s configuration
 (TestNamingScenarios)."""
 
+import itertools
 import os
 import re
 import shutil
@@ -1552,7 +1553,9 @@ class TestNamingSolver(unittest.TestCase):
         self.assertIn("Warning", owner.State)
         [entry] = App.getReferenceReport(owner)
         self.assertEqual((entry["status"], entry["tier"]), ("resolved", 3), entry)
-        self.assertIn(f"{kind} reference resolved by geometry: {expected}", owner.getStatusString())
+        self.assertIn(
+            f"{kind} reference resolved by geometry: {expected} for ", owner.getStatusString()
+        )
         return entry
 
     def testHorizontalHoleKeepsTheEntryCircle(self):
@@ -1584,11 +1587,11 @@ class TestNamingSolver(unittest.TestCase):
         self.redrawProfile(profile, (0, 0, 30, 20))
         doc.recompute()
 
-        [entry] = entryCircle.one(pocket.Shape)
+        [entryEdge] = entryCircle.one(pocket.Shape)
         [exitCircle] = edge("circle", center=(15, 20, 5), radius=2).one(pocket.Shape)
-        self.assertNotEqual(pocket.Shape.getElementMappedName(entry), oldName)
-        self.assertEqual(fillet.Base[1], [entry])
-        row = self.assertWarnedInPlace(fillet, "Edge", entry)
+        self.assertNotEqual(pocket.Shape.getElementMappedName(entryEdge), oldName)
+        self.assertEqual(fillet.Base[1], [entryEdge])
+        row = self.assertWarnedInPlace(fillet, "Edge", entryEdge)
         self.assertIn(exitCircle, [a["index"] for a in row["alternatives"]])
 
     def testPatternedHoleUnderARedrawnProfileWarns(self):
@@ -1653,8 +1656,10 @@ class TestNamingSolver(unittest.TestCase):
         """ops#183: a sketch attached to the refined top face of two pads. Pad B's whole profile
         redrawn leaves the face's name (the refined face is named from pad A's): exact. Pad A's
         redrawn renames it, and no element has the old name's structure: tier 3 takes the face in
-        place, with a warning (also with T1' off)."""
-        for redrawn in ("ProfileB", "Profile"):
+        place, with a warning, also with NamingSolver/Tier1SameSource off."""
+        for sameSource, redrawn in itertools.product((True, False), ("ProfileB", "Profile")):
+            if not sameSource:
+                self.guessSwitch("Tier1SameSource", False)
             doc = self.newDocument()
             padB = self.refinedBlocks(doc)
             top = face("plane", normal=Z, through=(0, 0, 10))
@@ -1703,8 +1708,9 @@ class TestNamingSolver(unittest.TestCase):
         as defining external geometry, the hole's top circle (radius 2); a fillet (0.3) on the
         collar's inner top circle, made from the external circle. The hole moved 1 mm: the
         external circle follows it and keeps its geometry ID, so the circle keeps its name:
-        exact. The external circle deleted and added again: a new geometry ID renames the
-        circle, and no element has its structure: tier 3 takes it in place, with a warning."""
+        exact. The external circle deleted and added again before one recompute: a new geometry
+        ID renames the circle, and no element has its structure: tier 3 takes it in place, with
+        a warning."""
         for edit in ("move", "re-add"):
             doc = self.newDocument()
             body = models.body(doc)
@@ -1724,6 +1730,7 @@ class TestNamingSolver(unittest.TestCase):
             fillet.Radius = 0.3
             doc.recompute()
             self.assertTrue(fillet.isValid(), fillet.getStatusString())
+            oldName = collar.Shape.getElementMappedName(inner.one(collar.Shape)[0])
 
             if edit == "move":
                 geometry = holeSketch.Geometry
@@ -1731,14 +1738,16 @@ class TestNamingSolver(unittest.TestCase):
                 holeSketch.Geometry = geometry
                 inner = edge("circle", center=(9, 10, 13), radius=2)
             else:
+                #   no recompute in between: without the external circle the collar would cover
+                #   the hole, failing the fillet before the rename
                 sketch.delExternal(0)
-                doc.recompute()
-                [holeTop] = edge("circle", center=(8, 10, 10), radius=2).one(hole.Shape)
                 sketch.addExternal(hole.Name, holeTop, True)
             doc.recompute()
 
             [circle] = inner.one(collar.Shape)
             self.assertEqual(fillet.Base[1], [circle])
+            renamed = collar.Shape.getElementMappedName(circle) != oldName
+            self.assertEqual(renamed, edit == "re-add")
             if edit == "move":
                 self.assertTrue(fillet.isValid(), fillet.getStatusString())
                 self.assertNotIn("Warning", fillet.State)
