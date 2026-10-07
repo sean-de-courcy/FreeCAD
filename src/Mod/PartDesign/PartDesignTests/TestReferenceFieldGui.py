@@ -2910,7 +2910,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def helixPreview(self):
         """The additive helix's preview on, restored after the test. With it on, the stock axis
-        pick hid the profile (startReferenceSelection), so its lines couldn't be picked."""
+        pick hid the helix itself (startReferenceSelection is given the feature, not its profile)
+        and left a hidden profile hidden, so its lines couldn't be picked."""
         prefs = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
         old = prefs.GetBool("AdditiveHelixPreview", False)
         prefs.SetBool("AdditiveHelixPreview", True)
@@ -2918,7 +2919,7 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testHelixAxisRow(self):
         """T25, B18: with the preview on and the profile sketch hidden, the helix's axis row armed
-        shows it (the stock pick hid it); the x = -1 line picked: 48 pi, the row disarmed and the
+        shows it (the stock pick left it hidden); the x = -1 line picked: 48 pi, the row disarmed and the
         sketch hidden again; OK closes the dialog (B15's throw)."""
         self.helixPreview()
         sketch, helix = self.coil()
@@ -3078,8 +3079,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testReferencesPanelDisarmsTheAxisRow(self):
         """B15 (review 4): the axis row armed, the References panel takes the selection (its
-        selectionTaken, which its picks and highlights send first): the row disarms, the box shows
-        the axis there is, and OK closes."""
+        selectionTaken, which its picks and highlights send first): the row disarms; the guessed
+        axis, no choice of the box, stays in the row under "Select reference..."; OK closes."""
         feature = self.revolution()
         self.doc.HistoryAlgorithm = "V2"
         self.doc.ReferenceSolver = True
@@ -3291,23 +3292,36 @@ class TestReferenceFieldGui(unittest.TestCase):
         return list(vp.LineColorArray)
 
     def testLoftHighlightLeavesLineColours(self):
-        """B14: the sections coloured while the field is armed, in the Coin nodes only: a
-        section's own per-edge colours (LineColorArray) are the same after, and the edit wrote
-        nothing to them."""
+        """B14, PR 163 review 11: armed, the field colours the whole section S1 in the Coin nodes,
+        all four edges in the entries' colour; disarmed, and after the dialog closed while armed,
+        S1 is drawn in its own per-edge colours again. LineColorArray is never written."""
         loft = self.tower(("S1", "S2"))
         colours = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0)]
         self.s1.ViewObject.LineColorArray = colours
         before = self.sketchColours(self.s1)
+        pump(0.1)
+        self.assertEqual(self.edgeColours(self.s1), colours)
         self.edit(loft, count=2)
         field = self.sectionsField()
-        self.arm(field, byFocus=True)
-        pump(0.2)
+
+        def lit():
+            drawn = self.edgeColours(self.s1)
+            return len(drawn) == 4 and len(set(drawn)) == 1 and drawn[0] in (MAGENTA, CURRENT)
+
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lit), self.edgeColours(self.s1))
         self.assertEqual(self.sketchColours(self.s1), before)
         field.setProperty("armed", False)
         pump(0.2)
+        self.assertEqual(self.edgeColours(self.s1), colours, "disarmed: not S1's own colours")
         self.assertEqual(self.sketchColours(self.s1), before)
-        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
-        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lit), self.edgeColours(self.s1))
+        Gui.Control.closeDialog()
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertEqual(self.edgeColours(self.s1), colours, "closed: not S1's own colours")
         self.assertEqual(self.sketchColours(self.s1), before)
 
     def testLoftCancelRestoresVisibility(self):
@@ -3456,3 +3470,105 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testPipeCancelRestoresVisibility(self):
         self.pipeVisibility(ok=False)
+
+    # -- PR 163 review round 1 ----------------------------------------------------------------
+
+    def testLoftSectionsDragOfTwo(self):
+        """H1: two entries dropped together. Qt's drop moves them one row at a time, each move
+        signalled, before any event runs: S1 and S2 of [S3, S1, S2] dropped on top give
+        [S1, S2, S3] in one write (the slice at z = 10 is S1's 20 x 20 = 400), and one Ctrl+Z puts
+        back [S3, S1, S2]."""
+        loft = self.tower()
+        s3 = self.squareSketch("S3", 5, 30)
+        loft.Sections = [(s3, [""]), (self.s1, [""]), (self.s2, [""])]
+        self.doc.recompute()
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.assertEqual(texts(field), ["1. S3", "2. S1", "3. S2"])
+        refs = entries(field)
+        refs.item(1).setSelected(True)
+        refs.item(2).setSelected(True)
+        model = refs.model()
+        # As QListWidget::dropEvent moves rows 1 and 2 to the top: row 1 to 0, then row 2 to 1
+        self.assertTrue(model.moveRow(QtCore.QModelIndex(), 1, QtCore.QModelIndex(), 0))
+        self.assertTrue(model.moveRow(QtCore.QModelIndex(), 2, QtCore.QModelIndex(), 1))
+        self.assertTrue(
+            waitFor(lambda: self.sectionNames(loft) == ["S1", "S2", "S3"]), loft.Sections
+        )
+        pump(0.2)
+        self.assertEqual(self.sectionNames(loft), ["S1", "S2", "S3"])
+        self.assertTrue(waitFor(lambda: texts(field) == ["1. S1", "2. S2", "3. S3"]), texts(field))
+        self.assertThroughSection(loft, 10, 400)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(
+            waitFor(lambda: self.sectionNames(loft) == ["S3", "S1", "S2"]), loft.Sections
+        )
+
+    def newFeatureCancelled(self, command, name):
+        """H2: the command on a shown sketch makes the feature and hides the sketch; Cancel
+        removes the feature and the sketch is shown again, as before the command."""
+        self.body = models.body(self.doc)
+        profile = self.squareSketch("Profile", 5, 0)
+        self.doc.recompute()
+        self.assertTrue(profile.ViewObject.Visibility)
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        Gui.runCommand(command)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no dialog")
+        settle()
+        self.assertIsNotNone(self.doc.getObject(name))
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertIsNone(self.doc.getObject(name), "Cancel left the feature")
+        self.assertTrue(profile.ViewObject.Visibility, "Cancel left the profile hidden")
+
+    def testNewLoftCancelShowsTheProfile(self):
+        self.newFeatureCancelled("PartDesign_AdditiveLoft", "AdditiveLoft")
+
+    def testNewPipeCancelShowsTheProfile(self):
+        self.newFeatureCancelled("PartDesign_AdditivePipe", "AdditivePipe")
+
+    def testLoftCancelRestoresVisibilityItself(self):
+        """Review 11: testLoftCancelRestoresVisibility with no transaction for Cancel to abort
+        (setEdit alone), so only the dialog puts the visibility back: the profile and the
+        sections hidden before the edit, the picked one included, are hidden after."""
+        loft = self.tower(("S1",))
+        for sketch in (self.towerProfile, self.s1, self.s2):
+            sketch.ViewObject.Visibility = False
+        self.edit(loft, count=2)
+        self.assertTrue(self.s1.ViewObject.Visibility)
+        self.assertTrue(self.towerProfile.ViewObject.Visibility)
+        field = self.sectionsField()
+        self.arm(field, byFocus=False)
+        self.pick(self.s2, "")
+        self.assertTrue(self.s2.ViewObject.Visibility, "a picked section isn't shown")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        flushDeletes()
+        pump(0.2)
+        self.assertFalse(self.towerProfile.ViewObject.Visibility, "Cancel left the profile shown")
+        self.assertFalse(self.s1.ViewObject.Visibility, "Cancel left the section shown")
+        self.assertFalse(self.s2.ViewObject.Visibility, "Cancel left the picked section shown")
+
+    def testLoftRefusesAWholeSolid(self):
+        """Review 9: a solid picked whole (in the tree) is no section: refused with the reason;
+        one of its faces is taken."""
+        loft = self.tower(("S1",))
+        block = self.doc.addObject("Part::Box", "Block")
+        block.Placement = App.Placement(App.Vector(-5, -5, 40), App.Rotation())
+        self.doc.recompute()
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        self.arm(field, byFocus=False)
+        self.pick(block, "")
+        self.assertEqual(self.sectionNames(loft), ["S1"])
+        self.assertIn("whole solid", statusText().lower())
+        self.pick(block, "Face6")  # its top, at z = 50
+        self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])
