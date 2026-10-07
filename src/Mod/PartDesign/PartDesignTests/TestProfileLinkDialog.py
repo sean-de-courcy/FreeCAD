@@ -70,6 +70,10 @@ class LinkDialog:
         for editor in mainWindow.findChildren(QtWidgets.QTreeView):
             if editor.metaObject().className() != "Gui::PropertyEditor::PropertyEditor":
                 continue
+            # the Data tab's: the View tab can have a "Base" group too (it does after a dress-up
+            # panel selected a reference row, ops#143)
+            if editor.objectName() != "propertyEditorData":
+                continue
             index = self._findRow(editor.model(), QtCore.QModelIndex(), prop)
             if index is not None:
                 cell = (editor, index.sibling(index.row(), 1))

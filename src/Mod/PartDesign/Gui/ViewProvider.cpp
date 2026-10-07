@@ -321,6 +321,13 @@ QIcon ViewProvider::mergeColorfulOverlayIcons(const QIcon& orig) const
 
 bool ViewProvider::onDelete(const std::vector<std::string>&)
 {
+    // Std_Delete hands an edited object its own selected sub-elements (the Sketcher deletes
+    // geometry that way). A feature in edit isn't deleted, nor taken out of its Body, under its
+    // open dialog (ops#143).
+    if (isEditing()) {
+        return false;
+    }
+
     PartDesign::Feature* feature = getObject<PartDesign::Feature>();
 
     App::DocumentObject* previousfeat = feature->BaseFeature.getValue();

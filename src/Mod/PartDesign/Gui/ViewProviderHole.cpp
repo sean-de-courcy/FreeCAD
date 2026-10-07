@@ -92,6 +92,9 @@ ViewProviderHole::~ViewProviderHole() = default;
 
 bool ViewProviderHole::onDelete(const std::vector<std::string>& arg)
 {
+    if (isEditing()) {  // see ViewProvider::onDelete (ops#143)
+        return false;
+    }
     clearThreadTextures();
     return PartDesignGui::ViewProvider::onDelete(arg);
 }

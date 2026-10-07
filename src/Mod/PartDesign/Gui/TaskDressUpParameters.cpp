@@ -338,6 +338,9 @@ void TaskDressUpParameters::createDeleteAction(QListWidget* parentList)
 
     deleteAction = new QAction(tr("Remove"), this);
     deleteAction->setShortcut(Gui::QtTools::deleteKeySequence());
+    // only in the list: elsewhere in the window the key is Std_Delete's, not an ambiguous match
+    // between the two (ops#143)
+    deleteAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
 
     // display shortcut behind the context menu entry
     deleteAction->setShortcutVisibleInContextMenu(true);

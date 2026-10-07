@@ -156,7 +156,8 @@ names it.
 | `fix/155-panel-field-refresh` | fix | ops#155 | - | `fix/154-alias-recompute` `d047f6c90e` (stacked on fork PR 127) | `3bebd8f1a4` (fork PR 128), 2026-10-06 | upstream's `ExpressionSpinBox` (or `ExpressionBinding`) refreshes a bound field when its property changes; upstream main `93f831f895` has the bug |
 | `feat/127-guess-policy` | feat | ops#127, ops#133, ops#107 | - | `integration` `2eb8b6ec7a` | `872ffe8fc1` (fork PR 122), 2026-10-06 | never (fork feature) |
 | `feat/131-park-projections` | feat | ops#131 | - | `feat/127-guess-policy` `5dde1ed1e0` (stacked on fork PR 122) | `e1823b66e8` (fork PR 126), 2026-10-06 | never (fork feature) |
-| `feat/131-parked-marking` | feat | ops#131 | - | `feat/131-park-projections` `464c20fa17` (stacked on fork PR 126) | (fork PR 133) | never (fork feature) |
+| `feat/131-parked-marking` | feat | ops#131 | - | `feat/131-park-projections` `464c20fa17` (stacked on fork PR 126) | `8361a07aaf` (fork PR 133), 2026-10-06 | never (fork feature) |
+| `fix/143-dressup-delete-key` | fix | ops#143 | - | `integration` `872ffe8fc1` | (fork PR 129) | upstream's Std_Delete keeps the object in edit and the groups holding it |
 
 ## Fork-only commits in carried topics
 
