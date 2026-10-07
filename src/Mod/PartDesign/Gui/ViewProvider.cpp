@@ -294,7 +294,11 @@ void ViewProvider::updatePreview()
             return;
         }
 
-        Part::TopoShape toolShape = addSubFeature->AddSubShape.getShape();
+        // FreeCAD-CH (ops#148): no tool while the feature fails (its AddSubShape is stale)
+        Part::TopoShape toolShape;
+        if (!addSubFeature->isError()) {
+            toolShape = addSubFeature->AddSubShape.getShape();
+        }
 
         updatePreviewShape(toolShape, pcToolPreview);
     }
