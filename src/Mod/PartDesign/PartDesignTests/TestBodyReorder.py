@@ -1691,6 +1691,123 @@ class BodyReorderBase:
         self.parkedExpressionReadingAnotherDocument(self.mergeInto)
 
 
+    # -- re-target records and new objects, copies and merges (ops#165) --------------------------
+
+    def savedRetargetIds(self):
+        """The `rtid` attributes of the document as saved: the re-target records' object IDs."""
+        self.tempDir = self.tempDir or tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "recordIds.FCStd")
+        self.doc.saveCopy(path)
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("Document.xml").decode("utf-8")
+        return [int(i) for i in re.findall(r'\brtid="(-?\d+)"', xml)]
+
+    def recordOnPad2(self):
+        """RO6's record: the hole moved above Pad2, the face its sketch sits on, so the support is
+        on the block with a re-target record naming Pad2 and its ID."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.assertIs(sketch.AttachmentSupport[0][0], block)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.assertEqual(self.savedRetargetIds(), [pad2.ID])
+        return block, pad2, sketch, hole
+
+    def assertRecordEndedOnNewcomer(self, sketch, hole, newcomer):
+        """Moved below the newcomer that took Pad2's name, the sketch's support is not put on it:
+        the record ends with its object, the support stays a missing reference on the block."""
+        self.body.reorderObject([hole], newcomer, True)
+        self.assertNotEqual(sketch.AttachmentSupport[0][0], newcomer)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+
+    def testRecordNameTakenByNewObject(self):
+        """RO6's record, then Pad2 deleted and a boss made afterwards gets the name Pad2 (its top
+        face where Pad2's was): moved below it, the support doesn't go onto it."""
+        block, pad2, sketch, hole = self.recordOnPad2()
+        self.deleteFeature(pad2)
+        newcomer = self.boss("Pad2", 1, 1)
+        self.assertEqual(newcomer.Name, "Pad2")
+        self.recompute()
+        self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
+
+    def testRecordNameTakenByNewObjectAfterReopen(self):
+        """As above, with the record saved and read back before Pad2 is deleted."""
+        block, pad2, sketch, hole = self.recordOnPad2()
+        self.tempDir = self.tempDir or tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, f"BodyReorder{type(self).__name__}Record.FCStd")
+        self.doc.saveAs(path)
+        names = [o.Name for o in (self.body, block, pad2, sketch, hole)]
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body, block, pad2, sketch, hole = (self.doc.getObject(name) for name in names)
+        self.assertEqual(self.savedRetargetIds(), [pad2.ID])
+        self.deleteFeature(pad2)
+        newcomer = self.boss("Pad2", 1, 1)
+        self.assertEqual(newcomer.Name, "Pad2")
+        self.recompute()
+        self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
+
+    def recordCopied(self, copy):
+        """RO6's record, then copy(other) puts the Body with its dependencies into a document whose
+        objects take the names Pad2 and Body: the copy's record names the copy of Pad2 with its ID,
+        and moved back, the support is on that copy's top face."""
+        self.recordOnPad2()
+        other = self.otherDocument("Pad2", "Body")
+        before = copy(other)
+        self.doc = other
+        self.body, block, pad2, sketch, hole = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "Block"),
+            ("PartDesign::Pad", "Pad2"),
+            ("Sketcher::SketchObject", "OnPad2Sketch"),
+            ("PartDesign::Pocket", "OnPad2"),
+        )
+        self.assertNotEqual(pad2.Name, "Pad2")
+        self.assertEqual(self.savedRetargets(), [pad2.Name])
+        self.assertEqual(self.savedRetargetIds(), [pad2.ID])
+        self.recompute()
+
+        self.body.reorderObject([hole], pad2, True)
+        self.assertChain(block, pad2, hole)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
+
+    def testRecordPastedIntoAnotherDocument(self):
+        self.recordCopied(lambda other: self.pasteInto(other, [self.body]))
+
+    def testRecordMergedFromAProject(self):
+        self.recordCopied(self.mergeInto)
+
+    def testStaleRecordWithNewcomerPasted(self):
+        """RO6's record, Pad2 deleted and a newcomer named Pad2, then the Body pasted into another
+        document: the copy's record doesn't name the newcomer's copy, so moved below it, the
+        support doesn't go onto it."""
+        block, pad2, sketch, hole = self.recordOnPad2()
+        self.deleteFeature(pad2)
+        self.assertEqual(self.boss("Pad2", 1, 1).Name, "Pad2")
+        self.recompute()
+        other = self.otherDocument()
+        before = self.pasteInto(other, [self.body])
+        self.doc = other
+        self.body, sketch, hole, newcomer = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("Sketcher::SketchObject", "OnPad2Sketch"),
+            ("PartDesign::Pocket", "OnPad2"),
+            ("PartDesign::Pad", "Pad2"),
+        )
+        self.recompute()
+        self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
+
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
     solver = False
 

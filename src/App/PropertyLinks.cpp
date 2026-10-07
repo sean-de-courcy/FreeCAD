@@ -43,6 +43,7 @@
 #include "ElementSolverBatch.h"
 #include "ReferenceReport.h"
 #include "DocumentObject.h"
+#include "MergeDocuments.h"
 #include "DocumentObjectPy.h"
 #include "DocumentObserver.h"
 #include "ObjectIdentifier.h"
@@ -3047,6 +3048,7 @@ void PropertyLinkBase::_getLinksTo(std::vector<App::ObjectIdentifier>& identifie
 #define ATTR_FINGERPRINT "fp"
 #define ATTR_FROM "from"
 #define ATTR_RETARGET_TARGET "rt"
+#define ATTR_RETARGET_TARGET_ID "rtid"
 #define ATTR_RETARGET_ORIGINAL "rto"
 #define ATTR_RETARGET_FINGERPRINT "rtfp"
 #define ATTR_RETARGET_GUESS "rtguess"
@@ -3065,8 +3067,12 @@ static void writeRetargetRecord(Base::Writer& writer,
     }
     const auto& record = records[i].retarget;
     writer.Stream() << "\" " ATTR_RETARGET_TARGET "=\""
-                    << Base::Persistence::encodeAttribute(record.target)
-                    << "\" " ATTR_RETARGET_ORIGINAL "=\""
+                    << Base::Persistence::encodeAttribute(record.target);
+    if (record.targetId != 0) {
+        // Its own attribute, which builds before ops#165 ignore
+        writer.Stream() << "\" " ATTR_RETARGET_TARGET_ID "=\"" << record.targetId;
+    }
+    writer.Stream() << "\" " ATTR_RETARGET_ORIGINAL "=\""
                     << Base::Persistence::encodeAttribute(record.origText());
     if (!record.origFp.empty()) {
         writer.Stream() << "\" " ATTR_RETARGET_FINGERPRINT "=\""
@@ -3090,9 +3096,44 @@ static void writeRetargetRecord(Base::Writer& writer,
     }
 }
 
-// The record saved on the current element (see writeRetargetRecord()), empty if none. An
-// imported object's name is mapped as the reader maps it.
-static RetargetRecord readRetargetRecord(Base::XMLReader& reader)
+// An imported record's object (ops#165): Document::importObjects gives the objects new IDs and,
+// where a name is taken, new names. The object saved under the record's name (with the owner's
+// `@<document>` from a copy, as the reader maps it) and with its ID came in as the object named
+// now; one that didn't come in is still the original in a copy within the document, and
+// otherwise is in another document, whatever has its name and ID here.
+static void importRetargetTarget(Base::XMLReader& reader,
+                                 RetargetRecord& record,
+                                 const Property& prop)
+{
+    auto owner = freecad_cast<DocumentObject*>(prop.getContainer());
+    auto doc = owner ? owner->getDocument() : nullptr;
+    std::optional<ImportedSource> source;
+    if (doc) {
+        source = importedSource(owner);
+    }
+    if (!source || record.empty()) {
+        return;  // not imported: the names and IDs are the file's
+    }
+    auto at = source->name.find('@');
+    const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
+    if (record.targetId >= 0) {
+        const std::string name = record.target + suffix;
+        auto obj = doc->getObject(reader.getName(name.c_str()));
+        auto saved = importedSource(obj);
+        if (saved && saved->name == name && record.isTarget(saved->id)) {
+            record.target = obj->getNameInDocument();
+            record.targetId = obj->getID();
+            return;
+        }
+    }
+    if (suffix != std::string("@") + doc->getName()) {
+        record.targetId = -1;
+    }
+}
+
+// The record saved on the current element (see writeRetargetRecord()), empty if none, of the
+// reference in prop. An imported record names the object's copy (importRetargetTarget()).
+static RetargetRecord readRetargetRecord(Base::XMLReader& reader, const Property& prop)
 {
     if (!reader.hasAttribute(ATTR_RETARGET_TARGET)) {
         return {};
@@ -3100,10 +3141,14 @@ static RetargetRecord readRetargetRecord(Base::XMLReader& reader)
     auto attribute = [&](const char* name) {
         return std::string(reader.hasAttribute(name) ? reader.getAttribute<const char*>(name) : "");
     };
-    std::string target = reader.getName(reader.getAttribute<const char*>(ATTR_RETARGET_TARGET));
-    auto record = RetargetRecord::fromAttributes(target,
+    auto record = RetargetRecord::fromAttributes(attribute(ATTR_RETARGET_TARGET),
                                                  attribute(ATTR_RETARGET_ORIGINAL),
                                                  attribute(ATTR_RETARGET_FINGERPRINT));
+    if (reader.hasAttribute(ATTR_RETARGET_TARGET_ID)) {
+        long id = reader.getAttribute<long>(ATTR_RETARGET_TARGET_ID);
+        record.targetId = id < 0 ? -1 : id;
+    }
+    importRetargetTarget(reader, record, prop);
     if (reader.hasAttribute(ATTR_RETARGET_GUESS)) {
         std::string orig = attribute(ATTR_RETARGET_GUESS_ORIG);
         if (auto* remap = Data::NameRemap::active()) {
@@ -3272,7 +3317,7 @@ void PropertyLinkSub::Restore(Base::XMLReader& reader)
         if (reader.hasAttribute(ATTR_FINGERPRINT)) {
             fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
         }
-        records[i].retarget = readRetargetRecord(reader);
+        records[i].retarget = readRetargetRecord(reader, *this);
         readRetargetCheck(reader, i, checks);
         if (reader.hasAttribute(ATTR_FROM)) {
             froms[i] = reader.getAttribute<const char*>(ATTR_FROM);
@@ -4412,7 +4457,7 @@ void PropertyLinkSubList::Restore(Base::XMLReader& reader)
                                           : "");
             records.emplace_back();
             records.back().guess = readGuessRecord(reader);
-            records.back().retarget = readRetargetRecord(reader);
+            records.back().retarget = readRetargetRecord(reader, *this);
             auto& shadow = shadows.back();
             shadow.oldName = importSubName(reader, reader.getAttribute<const char*>("sub"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {
@@ -6365,7 +6410,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
         }
         readRetargetCheck(reader, 0, checks);
         records.emplace_back();
-        records.back().retarget = readRetargetRecord(reader);
+        records.back().retarget = readRetargetRecord(reader, *this);
         subs.emplace_back();
         auto& subname = subs.back();
         shadows.emplace_back();
@@ -6399,7 +6444,7 @@ void PropertyXLink::Restore(Base::XMLReader& reader)
                 fingerprints[i] = reader.getAttribute<const char*>(ATTR_FINGERPRINT);
             }
             records[i].guess = readGuessRecord(reader);
-            records[i].retarget = readRetargetRecord(reader);
+            records[i].retarget = readRetargetRecord(reader, *this);
             readRetargetCheck(reader, i, checks);
             shadows[i].oldName = importSubName(reader, reader.getAttribute<const char*>("value"), restoreLabel);
             if (reader.hasAttribute(ATTR_SHADOWED) && !IGNORE_SHADOW) {

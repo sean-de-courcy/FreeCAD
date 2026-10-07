@@ -397,7 +397,8 @@ struct Unit
             return false;
         }
         for (const auto& s : subs) {
-            if (s.record.empty() || s.record.target != subs.front().record.target) {
+            if (s.record.empty() || s.record.target != subs.front().record.target
+                || s.record.targetId != subs.front().record.targetId) {
                 return false;
             }
         }
@@ -618,6 +619,15 @@ SubEntry originalOf(const App::RetargetRecord& record)
     return entry;
 }
 
+/// The object a re-target record names: the one of that name, if it is the same object (ops#165:
+/// a new object can take a deleted one's name); null when it was deleted, or is in another
+/// document
+App::DocumentObject* recordTarget(const App::Document* doc, const App::RetargetRecord& record)
+{
+    auto obj = doc ? doc->getObject(record.target.c_str()) : nullptr;
+    return obj && record.isTarget(obj->getID()) ? obj : nullptr;
+}
+
 /// The re-target record for an entry the rule moves off obj (N1 3.2: its saved original)
 App::RetargetRecord recordFor(const SubEntry& entry, App::DocumentObject* obj)
 {
@@ -626,6 +636,7 @@ App::RetargetRecord recordFor(const SubEntry& entry, App::DocumentObject* obj)
     }
     App::RetargetRecord record;
     record.target = obj->getNameInDocument();
+    record.targetId = obj->getID();
     record.guess = entry.guess;
     if (!entry.guess.empty()
         && (!entry.guess.origName.empty() || !entry.guess.origIndex.empty())) {
@@ -953,7 +964,7 @@ private:
             }
             // 1. The restore: the record's object is no longer after the feature that uses it
             if (unit.allRecorded()) {
-                auto target = doc->getObject(unit.subs.front().record.target.c_str());
+                auto target = recordTarget(doc, unit.subs.front().record);
                 if (!target) {
                     // Its object is gone: nothing to restore to
                     for (auto& s : unit.subs) {
@@ -1042,13 +1053,13 @@ private:
                 }
                 // A record's object exists here: decide() ends a record whose object is gone
                 auto doc = unit.obj->getDocument();
-                auto source = s.record.empty() ? unit.obj : doc->getObject(s.record.target.c_str());
+                auto source = s.record.empty() ? unit.obj : recordTarget(doc, s.record);
                 if (source) {
                     item.setTarget(source);
                 }
                 else {
                     item.target = s.record.target;
-                    item.targetId = 0;
+                    item.targetId = s.record.targetId;
                 }
                 item.sub = entry.sub;
                 item.shadowNew = entry.shadow.newName;

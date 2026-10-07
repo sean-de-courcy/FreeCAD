@@ -377,6 +377,9 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
         auto owner = slot.prop ? freecad_cast<DocumentObject*>(slot.prop->getContainer()) : nullptr;
         auto doc = owner ? owner->getDocument() : nullptr;
         auto was = doc ? doc->getObject(record.target.c_str()) : nullptr;
+        if (was && !record.isTarget(was->getID())) {
+            was = nullptr;  // another object took its name (ops#165)
+        }
         ss << "; it was on '" << (was ? was->Label.getValue() : record.target.c_str())
            << "', which a reorder put after the feature that uses it";
     }

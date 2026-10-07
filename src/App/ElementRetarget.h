@@ -22,6 +22,10 @@ struct RetargetRecord
 {
     /// The name of the object the reference was on (in the owner's document)
     std::string target;
+    /// Its ID (DocumentObject::getID(), ops#165): another object that takes the name of a deleted
+    /// one isn't it. 0 in records written before, -1 when the object is in another document (an
+    /// import left it behind)
+    long targetId = 0;
     /// The original element's mapped name in shadow form (empty if it had none) and its index
     /// name (`Face6`)
     std::string origName;
@@ -36,6 +40,12 @@ struct RetargetRecord
     bool empty() const
     {
         return target.empty();
+    }
+
+    /// Whether an object of the record's name with the ID id is its object
+    bool isTarget(long id) const
+    {
+        return targetId == 0 || targetId == id;
     }
 
     /// `rto`: "<origName>,<origIndex>" (a mapped name may hold commas; an index name doesn't)
