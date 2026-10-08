@@ -209,7 +209,8 @@ names it.
 | `fix/208-hidden-ancestors` | fix | ops#208 | - | `feat/149-next-problem` `f2e204cb53` (stacked on fork PR 174) | `d99b067e11` (fork PR 180), 2026-10-08 | never (fork fix) |
 | `fix/202-banner-followups` | fix | ops#202 | - | `fix/151-error-text` `a5c3ecd5d1` (stacked on fork PR 173) | `e0a7d17b4f` (fork PR 182), 2026-10-08 | never (fork fix) |
 | `fix/206-lcs-dependents` | fix | ops#206, ops#207 | - | `integration` `4c741b93b4` | `621669a6ab` (fork PR 181), 2026-10-08 | when upstream recomputes a coordinate system's bare-linked dependants on its move and places its elements in paths through it |
-| `fix/209-multirow-problems` | fix | ops#209 | - | `fix/208-hidden-ancestors` `9269739a90` (stacked on fork PR 180) | (fork PR 183) | never (fork fix) |
+| `fix/209-multirow-problems` | fix | ops#209 | - | `fix/208-hidden-ancestors` `9269739a90` (stacked on fork PR 180) | `5f617f718e` (fork PR 183), 2026-10-08 | never (fork fix) |
+| `fix/211-inplace-formula-followups` | fix | ops#211 | none (fork code, ops#145) | `integration` `392692de73` | (fork PR 186) | never (fork code) |
 
 ## Fork-only commits in carried topics
 

@@ -498,7 +498,12 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
             sketch->setExpression(expressionPath, expressionBefore);
         }
         if (sketch->Constraints.getValues()[ConstrNbr]->getValue() != datumBefore) {
-            sketch->setDatum(ConstrNbr, datumBefore);
+            if (int err = sketch->setDatum(ConstrNbr, datumBefore); err != 0) {
+                Base::Console().warning(
+                    "Could not put the dimension's value back (error %d)\n",
+                    err
+                );
+            }
         }
     }
 
@@ -581,17 +586,13 @@ void EditDatumDialog::applyValue()
     Constr = sketch->Constraints.getValues()[ConstrNbr];
 
     // A formula from the formula editor ('=') is in the field, and in the sketch's expression
-    // engine already
-    const bool fromEditor = valueEdit->hasExpression();
+    // engine already: hasExpression() reads the engine at the field's path
     std::shared_ptr<App::Expression> expr;
-    if (fromEditor) {
+    if (valueEdit->hasExpression()) {
         expr = sketch->getExpression(sketch->Constraints.createPath(ConstrNbr)).expression;
-        if (!expr) {
-            valueEdit->apply();
-            return;
-        }
     }
-    else {
+    const bool fromEditor = expr != nullptr;
+    if (!fromEditor) {
         QString text = valueEdit->text().trimmed();
         try {
             expr = App::ExpressionParser::parse(sketch, text.toUtf8().constData());
