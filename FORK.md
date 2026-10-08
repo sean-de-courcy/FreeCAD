@@ -201,7 +201,8 @@ names it.
 | `fix/150-w2-w3-tests` | fix | ops#150 | - | `feat/150-w9-hole-fields` `b66289dc18` (stacked on fork PR 169) | `5da114a060` (fork PR 172), 2026-10-07 | never (fork feature) |
 | `fix/198-lcs-plane-placement` | fix | ops#198 | - | `fix/150-w2-w3-tests` `77cae0dfe6` (stacked on fork PR 172) | `84aefc7dba` (fork PR 175), 2026-10-07 | when upstream places a coordinate system's plane in it (`makePlnFromPlane`, `getLCS`) |
 | `fix/200-datum-placement` | fix | ops#200 | - | `fix/198-lcs-plane-placement` `e9c7eebc28` (stacked on fork PR 175) | `71897501bf` (fork PR 177), 2026-10-07 | when upstream places a coordinate system's datum elements in it (Attacher, ShapeBinder) |
-| `feat/194-keymap-a` | feat | ops#194 | - | `integration` `9dd9ca6159` (fork PR 160's head `531d325e43`) | (fork PR 170) | never (fork feature); refit when upstream changes `ShortcutManager`, `CommandManager::addCommand`, `Command::initAction` or the mapped commands' names |
+| `feat/194-keymap-a` | feat | ops#194 | - | `integration` `9dd9ca6159` (fork PR 160's head `531d325e43`) | `d9f9627dd4` (fork PR 170), 2026-10-07 | never (fork feature); refit when upstream changes `ShortcutManager`, `CommandManager::addCommand`, `Command::initAction` or the mapped commands' names |
+| `fix/199-sketcher-autoconstraints` | fix | ops#199, ops#172, ops#175 | upstream issues 21334, 30707 | `integration` `5e76a4a186` | (fork PR 176) | a new base's `filterRedundantAutoConstraints` keeps the auto constraints that add no redundancy, and `EditDatumDialog::accepted` re-reads the constraint |
 
 ## Fork-only commits in carried topics
 

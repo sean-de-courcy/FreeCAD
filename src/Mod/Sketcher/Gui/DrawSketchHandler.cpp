@@ -26,6 +26,7 @@
 #include <cmath>
 #include <iterator>
 #include <ranges>
+#include <set>
 #include <tuple>
 #include <utility>
 
@@ -1529,46 +1530,76 @@ bool DrawSketchHandler::filterRedundantAutoConstraints(
     // but WITHOUT adding them to the sketchobject..
     sketchobject->diagnoseAdditionalConstraints(constraints);
 
-    if (sketchobject->getLastHasRedundancies()) {
+    if (!sketchobject->getLastHasRedundancies() && !sketchobject->getLastHasConflicts()) {
+        return true;
+    }
+
+    // The solver's tags are 1-based positions in the sketch's constraints followed by the
+    // autoconstraints.
+    const int sketchConstraintCount = sketchobject->Constraints.getSize();
+    const int autoConstraintCount = static_cast<int>(autoConstraints.size());
+    auto autoIndex = [&](int tag) {
+        int index = tag - 1 - sketchConstraintCount;
+        return index < autoConstraintCount ? index : -1;
+    };
+
+    auto notifyRemoval = [&]() {
         Base::Console().message(
             sketchobject->getFullLabel(),
             QT_TRANSLATE_NOOP("Notifications", "Autoconstraints cause redundancy. Removing them") "\n"
         );
+    };
 
-        auto lastsketchconstraintindex = sketchobject->Constraints.getSize() - 1;
-
-        auto redundants = sketchobject->getLastRedundant();  // redundants is always sorted
-
-        for (int index = redundants.size() - 1; index >= 0; index--) {
-            int redundantconstraintindex = redundants[index] - 1;
-            if (redundantconstraintindex > lastsketchconstraintindex) {
-                int removeindex = redundantconstraintindex - lastsketchconstraintindex - 1;
-                autoConstraints.erase(std::next(autoConstraints.begin(), removeindex));
-            }
-            else {
-                return false;
-            }
-        }
-
-        // NOTE: If we removed all redundants in the list, then at this moment there are no
-        // redundants anymore
-    }
-
-    // This can happen if OVP generated constraints and autoconstraints are conflicting
+    // Conflicts can happen if OVP generated constraints and autoconstraints are conflicting
     // For instance : https://github.com/FreeCAD/FreeCAD/issues/17722
-    if (sketchobject->getLastHasConflicts()) {
-        auto lastsketchconstraintindex = sketchobject->Constraints.getSize() - 1;
+    std::set<int> named;
+    std::ranges::copy(sketchobject->getLastRedundant(), std::inserter(named, named.end()));
+    std::ranges::copy(sketchobject->getLastConflicting(), std::inserter(named, named.end()));
 
-        auto conflicting = sketchobject->getLastConflicting();
+    if (std::ranges::all_of(named, [&](int tag) { return autoIndex(tag) >= 0; })) {
+        // The solver names autoconstraints only: remove them. Then there are no redundants or
+        // conflicts anymore.
+        if (sketchobject->getLastHasRedundancies()) {
+            notifyRemoval();
+        }
+        for (int tag : named | std::views::reverse) {
+            autoConstraints.erase(std::next(autoConstraints.begin(), autoIndex(tag)));
+        }
+        return true;
+    }
 
-        for (int index = conflicting.size() - 1; index >= 0; index--) {
-            int conflictingIndex = conflicting[index] - 1;
-            if (conflictingIndex > lastsketchconstraintindex) {
-                int removeindex = conflictingIndex - lastsketchconstraintindex - 1;
-                autoConstraints.erase(std::next(autoConstraints.begin(), removeindex));
-            }
+    // The solver names a constraint already in the sketch (ops#199): the sketch was already
+    // redundant or conflicting, or the solver blames an existing constraint for an
+    // autoconstraint's redundancy (it names the one with fewer equations, e.g. a Horizontal
+    // rather than a new Coincident). Compare with the sketch's own diagnosis, and keep the
+    // autoconstraints, one at a time, that name nothing new.
+    sketchobject->diagnoseAdditionalConstraints({});
+    std::set<int> before;
+    std::ranges::copy(sketchobject->getLastRedundant(), std::inserter(before, before.end()));
+    std::ranges::copy(sketchobject->getLastConflicting(), std::inserter(before, before.end()));
+    auto namesNothingNew = [&]() {
+        auto isOld = [&](int tag) { return before.contains(tag); };
+        return std::ranges::all_of(sketchobject->getLastRedundant(), isOld)
+            && std::ranges::all_of(sketchobject->getLastConflicting(), isOld);
+    };
+
+    std::vector<std::unique_ptr<Sketcher::Constraint>> kept;
+    std::vector<Sketcher::Constraint*> trial;
+    for (auto& constraint : autoConstraints) {
+        trial.push_back(constraint.get());
+        sketchobject->diagnoseAdditionalConstraints(trial);
+        if (namesNothingNew()) {
+            kept.push_back(std::move(constraint));
+        }
+        else {
+            trial.pop_back();
         }
     }
+
+    if (kept.size() < autoConstraints.size()) {
+        notifyRemoval();
+    }
+    autoConstraints = std::move(kept);
 
     return true;
 }

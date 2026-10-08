@@ -831,3 +831,107 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assertTrue(
             self.origin_marker_is_hollow(), "Expected the Dimension tool to stay active after Esc"
         )
+
+    # D20: the dialog's OK after a Reference toggle (ops#172) -----------------------------------
+
+    def test_d20_dialog_reference_toggled_then_diameter(self):
+        """D20 (ops#172): in the dialog for a new Radius of 5, Reference on and off again,
+        Diameter chosen and 14 typed: OK gives one driving Diameter of 14, the circle's radius
+        is 7, in one undo step. Each Reference toggle replaces the constraint objects
+        (setDriving); OK used to change the type through the old, deleted object, so the
+        sketch kept a Radius and set it to 14."""
+        self.set_param(SKETCHER_PARAMS, "Bool", "DimensionValueInPlace", False)
+        self.sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 5), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        self.doc.recompute()
+        self.start_edit()
+
+        seen = {"dialog": False}
+
+        def fill():
+            dialog = QtGui.QApplication.activeModalWidget()
+            spinbox = dialog.findChild(QtGui.QAbstractSpinBox, "labelEdit") if dialog else None
+            if spinbox is None:
+                QtCore.QTimer.singleShot(50, fill)
+                return
+            seen["dialog"] = True
+            reference = dialog.findChild(QtGui.QCheckBox, "cbDriving")
+            reference.setChecked(True)
+            seen["reference"] = not self.sketch.Constraints[-1].Driving
+            reference.setChecked(False)
+            dialog.findChild(QtGui.QRadioButton, "rbDiameter").setChecked(True)
+            line_edit = spinbox.findChild(QtGui.QLineEdit)
+            line_edit.selectAll()
+            line_edit.insert("14 mm")
+            dialog.accept()
+
+        QtCore.QTimer.singleShot(50, fill)
+        self.run_with_selection(["Edge1"], "Sketcher_ConstrainRadius")
+        self.assertTrue(self.wait_until(lambda: seen["dialog"], 3000), "Expected the dialog")
+        self.assertTrue(seen["reference"], "Expected the toggle to make the Radius a reference")
+
+        self.assertEqual(self.constraints_of("Radius"), [])
+        diameters = self.constraints_of("Diameter")
+        self.assertEqual(len(diameters), 1)
+        self.assertTrue(diameters[0].Driving)
+        self.assertAlmostEqual(diameters[0].Value, 14.0, places=9)
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 7.0, places=7)
+        self.assert_one_undo_step()
+
+    # D21-D23: the review of fork PR 139, the gaps (ops#175) ------------------------------------
+
+    def click_outside(self, popup, edit):
+        """A click outside the field, as a user's: the open popup gets the mouse press."""
+        QTest.mouseClick(
+            popup, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(-20, -20)
+        )
+
+    def test_d21_click_outside_applies(self):
+        """D21: 25 typed, then a click outside the field: the Distance is 25 and the free end
+        at (25, 0), in one undo step."""
+        state = self.place_distance([{"text": "25", "act": self.click_outside}])
+        self.wait_answered(state, 1)
+
+        self.assertFalse(state["seen"][0]["open_after"], "Expected the click to close the field")
+        self.assertAlmostEqual(self.constraints_of("Distance")[0].Value, 25.0, places=9)
+        self.assert_point(self.line_end(), 25, 0)
+        self.assert_one_undo_step()
+
+    def test_d22_click_outside_keeps_the_measured_value_on_invalid_input(self):
+        """D22: 0 (no distance) typed, then a click outside: the field closes and the Distance
+        keeps its measured 10, in one undo step."""
+        state = self.place_distance([{"text": "0", "act": self.click_outside}])
+        self.wait_answered(state, 1)
+
+        self.assertFalse(state["seen"][0]["open_after"], "Expected the click to close the field")
+        distances = self.constraints_of("Distance")
+        self.assertEqual(len(distances), 1)
+        self.assertAlmostEqual(distances[0].Value, 10.0, places=9)
+        self.assert_point(self.line_end(), 10, 0)
+        self.assert_one_undo_step()
+
+    def test_d23_lock_shift_tab_goes_back(self):
+        """D23: the lock's fields: 3, Tab; 4, Shift+Tab back to the first field, which shows
+        the applied 3; 5, Tab; the second field shows the applied 4; Enter. DistanceX = 5 and
+        DistanceY = 4, the point at (5, 4), in one undo step."""
+        state = self.place_lock(
+            [
+                {"text": "3", "key": QtCore.Qt.Key_Tab},
+                {
+                    "text": "4",
+                    "key": QtCore.Qt.Key_Backtab,
+                    "modifier": QtCore.Qt.ShiftModifier,
+                },
+                {"text": "5", "key": QtCore.Qt.Key_Tab},
+                {"key": QtCore.Qt.Key_Return},
+            ]
+        )
+        self.wait_answered(state, 4)
+
+        self.assertTrue(state["seen"][2]["text_before"].startswith("3"), state["seen"][2])
+        self.assertTrue(state["seen"][3]["text_before"].startswith("4"), state["seen"][3])
+        self.assertAlmostEqual(self.constraints_of("DistanceX")[0].Value, 5.0, places=9)
+        self.assertAlmostEqual(self.constraints_of("DistanceY")[0].Value, 4.0, places=9)
+        self.assert_point(self.point(), 5, 4)
+        self.assert_one_undo_step()

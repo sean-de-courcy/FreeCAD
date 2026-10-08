@@ -10,6 +10,7 @@ from SketcherTests.TestSketchBrokenExternalTreeGui import TestSketchBrokenExtern
 from SketcherTests.TestSketchEditCameraGui import TestSketchEditCameraGui
 from SketcherTests.TestDimensionInPlaceGui import TestDimensionInPlaceGui
 from SketcherTests.TestSketchCameraOnEditGui import TestSketchCameraOnEditGui
+from SketcherTests.TestAutoConstraintsGui import TestAutoConstraintsGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -25,5 +26,6 @@ from SketcherTests.TestSketchCameraOnEditGui import TestSketchCameraOnEditGui
     and TestSketchEditCameraGui
     and TestDimensionInPlaceGui
     and TestSketchCameraOnEditGui
+    and TestAutoConstraintsGui
     else False
 )
