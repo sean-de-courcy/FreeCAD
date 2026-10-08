@@ -38,6 +38,8 @@ Keys go to the main window's QWindow, through the shortcut map as a user's key d
 its key code only, so the Shift+digit check doesn't prove a real keyboard's `!` maps to Shift+1."""
 
 import contextlib
+import os
+import tempfile
 import time
 import unittest
 
@@ -337,6 +339,66 @@ def putBack(path, name, value):
         App.ParamGet(path).SetString(name, value)
 
 
+# GetContents()' types and the methods that set / remove each
+SETTERS = {
+    "String": ("SetString", "RemString"),
+    "Integer": ("SetInt", "RemInt"),
+    "Float": ("SetFloat", "RemFloat"),
+    "Boolean": ("SetBool", "RemBool"),
+    "Unsigned Long": ("SetUnsigned", "RemUnsigned"),
+}
+
+
+def snapshot(path):
+    """({(type, name): value}, {subgroup: snapshot}) of a parameter group, recursively."""
+    group = App.ParamGet(path)
+    values = {(t, n): v for t, n, v in group.GetContents() or []}
+    return values, {g: snapshot(f"{path}/{g}") for g in group.GetGroups()}
+
+
+def restore(path, state):
+    """Puts a group back as snapshot() saw it, a value at a time, so that its observers apply
+    each one (ShortcutManager sets the command's key, priority or timeout); a value added since
+    is removed. A group Clear() emptied but an observer holds comes back attached when written."""
+    values, groups = state
+    group = App.ParamGet(path)
+    for t, n, v in group.GetContents() or []:
+        if (t, n) not in values:
+            getattr(group, SETTERS[t][1])(n)
+    for (t, n), v in values.items():
+        getattr(group, SETTERS[t][0])(n, v)
+    for name, sub in groups.items():
+        restore(f"{path}/{name}", sub)
+
+
+def clearStoredKeys():
+    """The commands' defaults only: removes the stored keys and priorities (each removal
+    re-applies the default), and sets a changed chord timeout back to 300 ms."""
+    shortcuts = App.ParamGet(SHORTCUTS)
+    for name in shortcuts.GetStrings():
+        shortcuts.RemString(name)
+    priorities = App.ParamGet(SHORTCUTS + "/Priorities")
+    for name in priorities.GetInts():
+        priorities.RemInt(name)
+    settings = App.ParamGet(SHORTCUTS + "/Settings")
+    if "ShortcutTimeout" in settings.GetInts() and settings.GetInt("ShortcutTimeout") != 300:
+        settings.SetInt("ShortcutTimeout", 300)
+
+
+def isTemporaryHome():
+    """Whether FreeCAD's user settings are a temporary folder's (a test run's, as CI's), not a
+    user's profile."""
+    home = os.environ.get("FREECAD_USER_HOME")
+    if not home:
+        return False
+    home = os.path.normcase(os.path.realpath(home))
+    temp = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
+    try:
+        return os.path.commonpath([home, temp]) == temp
+    except ValueError:  # another drive
+        return False
+
+
 def enabledShortcuts():
     """{key: [action names]} of every enabled action under the main window with a shortcut."""
     keys = {}
@@ -360,16 +422,18 @@ class TestForkKeymapGui(unittest.TestCase):
 
         Gui.activateWorkbench("PartDesignWorkbench")
         pump()
-        # the tests change these; the user's values come back at the end
-        cls.saved = [
-            (KEYMAP, "Keymap", saved(KEYMAP, "Keymap")),
-            (SHORTCUTS, "Std_ViewFitAll", saved(SHORTCUTS, "Std_ViewFitAll")),
-        ]
+        # The tests change these and expect the defaults: the user's keys, priorities and keymap
+        # come back at the end
+        cls.saved = [(KEYMAP, "Keymap", saved(KEYMAP, "Keymap"))]
+        cls.shortcuts = snapshot(SHORTCUTS)
+        clearStoredKeys()
+        pump(0.1)
 
     @classmethod
     def tearDownClass(cls):
         for path, name, value in cls.saved:
             putBack(path, name, value)
+        restore(SHORTCUTS, cls.shortcuts)
         pump(0.1)
 
     def setUp(self):
@@ -531,7 +595,14 @@ class TestForkKeymapGui(unittest.TestCase):
     def testResetAllKeepsTheKeymap(self):
         """Preferences > General > Keyboard > Reset All (the keyboard page's button) clears the
         Shortcut group and its subgroups: the keymap, kept elsewhere, stays FreeCAD's, in the
-        preference and in the session."""
+        preference and in the session. The real button clears every stored key and priority, so
+        only in a temporary settings folder, and the group is put back right after: a stored key
+        set here comes back on its command."""
+        if not isTemporaryHome():
+            self.skipTest("Reset All clears the stored keys: FREECAD_USER_HOME isn't temporary")
+        App.ParamGet(SHORTCUTS).SetString("Std_ViewFitAll", "Ctrl+Alt+F")
+        pump(0.1)
+        before = snapshot(SHORTCUTS)
         setKeymap("FreeCAD")
         self.assertTrue(same(shortcut("Std_ViewFront"), "1"))
         page = Gui.UiLoader().createWidget("Gui::Dialog::DlgCustomKeyboardImp")
@@ -541,11 +612,15 @@ class TestForkKeymapGui(unittest.TestCase):
             self.assertIsNotNone(button)
             button.click()
             pump(0.2)
+            self.assertEqual(App.ParamGet(KEYMAP).GetString("Keymap"), "FreeCAD")
+            self.assertTrue(same(shortcut("Std_ViewFront"), "1"), shortcut("Std_ViewFront"))
+            self.assertTrue(same(shortcut("Std_ViewFitAll"), "V, F"), "Reset All ran")
         finally:
             page.deleteLater()
+            restore(SHORTCUTS, before)
             pump(0.1)
-        self.assertEqual(App.ParamGet(KEYMAP).GetString("Keymap"), "FreeCAD")
-        self.assertTrue(same(shortcut("Std_ViewFront"), "1"), shortcut("Std_ViewFront"))
+        self.assertEqual(snapshot(SHORTCUTS), before)
+        self.assertTrue(same(shortcut("Std_ViewFitAll"), "Ctrl+Alt+F"), shortcut("Std_ViewFitAll"))
 
     def testGroupButtonsFollowASwitch(self):
         """A group button (a toolbar drop-down) carries no key, or its default tool's once the

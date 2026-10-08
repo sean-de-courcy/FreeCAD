@@ -364,6 +364,11 @@ class TestSelectionFilterGui(unittest.TestCase):
         settings = App.ParamGet("User parameter:BaseApp/Preferences/General")
         before = settings.GetString("Keymap") if "Keymap" in settings.GetStrings() else None
         settings.RemString("Keymap")
+        # the defaults: a key the user stored for it comes back afterwards
+        shortcuts = App.ParamGet("User parameter:BaseApp/Preferences/Shortcut")
+        stored = "Std_ClarifySelection" in shortcuts.GetStrings()
+        storedKey = shortcuts.GetString("Std_ClarifySelection") if stored else None
+        shortcuts.RemString("Std_ClarifySelection")
         pump(0.1)
         try:
             self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "")
@@ -375,4 +380,6 @@ class TestSelectionFilterGui(unittest.TestCase):
                 settings.RemString("Keymap")
             else:
                 settings.SetString("Keymap", before)
+            if stored:
+                shortcuts.SetString("Std_ClarifySelection", storedKey)
             pump(0.1)
