@@ -81,11 +81,10 @@ TEST_F(SketchObjectTest, testDelExternalReducesCount)
 
 // A sketch with a line, a projected box edge, and three constraints: a horizontal on the line,
 // a coincidence of the line with the edge, and a constraint whose fourth element is the edge (no
-// constraint type builds one today, a group constraint would). Then the sketch's geometry goes,
-// so the constraint list is flagged invalid (its indices go past the geometry); `geometry`
-// gets a copy to put back.
-static void setupExternalWithInvalidConstraints(Sketcher::SketchObject* sketch,
-                                               std::vector<Part::Geometry*>& geometry)
+// constraint type builds one today, a group constraint would). Then the constraint list is flagged
+// invalid for its geometry (invalidGeometry: the geometry's kinds aren't the ones it was accepted
+// for, as during a restore), not for its indices.
+static void setupExternalWithInvalidConstraints(Sketcher::SketchObject* sketch)
 {
     auto* doc = sketch->getDocument();
     auto box {doc->addObject("Part::Box")};
@@ -118,11 +117,8 @@ static void setupExternalWithInvalidConstraints(Sketcher::SketchObject* sketch,
     doc->recompute();
     ASSERT_EQ(sketch->Constraints.getSize(), 3);
     ASSERT_EQ(sketch->Constraints.getValues()[2]->getElementsSize(), 4U);
-    for (auto* geo : sketch->Geometry.getValues()) {
-        geometry.push_back(geo->clone());
-    }
-    sketch->Geometry.setValues(std::vector<Part::Geometry*> {});
-    ASSERT_TRUE(sketch->Constraints.getValues().empty());  // flagged invalid
+    sketch->Constraints.checkGeometry(std::vector<Part::Geometry*> {});
+    ASSERT_TRUE(sketch->Constraints.hasInvalidGeometry());
 }
 
 // delAllExternal with the constraint list flagged invalid keeps the constraints that aren't on
@@ -132,15 +128,13 @@ static void setupExternalWithInvalidConstraints(Sketcher::SketchObject* sketch,
 TEST_F(SketchObjectTest, testDelAllExternalWithInvalidConstraintListKeepsConstraints)
 {
     // Arrange
-    std::vector<Part::Geometry*> geometry;
-    setupExternalWithInvalidConstraints(getObject(), geometry);
+    setupExternalWithInvalidConstraints(getObject());
 
     // Act
     int res = getObject()->delAllExternal();
 
-    // Assert
-    EXPECT_TRUE(getObject()->Constraints.getValues().empty());  // still flagged invalid
-    getObject()->Geometry.setValues(std::move(geometry));
+    // Assert (the flag itself: delAllExternal puts ExternalGeo back as it was, so the list's own
+    // check of the geometry's kinds clears it)
     EXPECT_EQ(res, 0);
     EXPECT_EQ(getObject()->ExternalGeometry.getSize(), 0);
     EXPECT_EQ(getObject()->ExternalTypes.getSize(), 0);
@@ -153,15 +147,13 @@ TEST_F(SketchObjectTest, testDelAllExternalWithInvalidConstraintListKeepsConstra
 TEST_F(SketchObjectTest, testDelExternalWithInvalidConstraintListKeepsConstraints)
 {
     // Arrange
-    std::vector<Part::Geometry*> geometry;
-    setupExternalWithInvalidConstraints(getObject(), geometry);
+    setupExternalWithInvalidConstraints(getObject());
 
     // Act
     int res = getObject()->delExternal(0);
 
     // Assert
-    EXPECT_TRUE(getObject()->Constraints.getValues().empty());  // still flagged invalid
-    getObject()->Geometry.setValues(std::move(geometry));
+    EXPECT_TRUE(getObject()->Constraints.hasInvalidGeometry());
     EXPECT_EQ(res, 0);
     EXPECT_EQ(getObject()->ExternalGeometry.getSize(), 0);
     ASSERT_EQ(getObject()->Constraints.getValuesForce().size(), 1);

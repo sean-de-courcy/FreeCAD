@@ -27,6 +27,7 @@ App = FreeCAD
 V = App.Vector
 TOL = 1e-6
 PROJECTION, INTERSECTION = 0, 1
+PENDING = -1  # the entry an open leaves when it couldn't tell every link's type
 
 
 class TestSketchExternalTypes(unittest.TestCase):
@@ -166,14 +167,14 @@ class TestSketchExternalTypes(unittest.TestCase):
     def testStaleTypesWithMissingElements(self):
         """Both sources lose their edge, so no type can be built. The ring's saved geometry, two
         distinct points of an edge, can only be an intersection; the rail's, one line, can't be
-        told. The rail keeps the type at its index, and the type list keeps its stale entry so a
-        later open can still repair it."""
+        told. The rail keeps the type at its index, and the type list ends in the pending mark so
+        a later open can still repair it."""
         self.rail.Shape = Part.Vertex(V(0, 20, 0))
         self.ring.Shape = Part.Vertex(V(0, 0, 10))
         self.doc.recompute()
         self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION]
         sketch = self.saveAndReopen("MissingElements")
-        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PENDING])
         self.assertEqual(self.externalPoints(sketch), [-10, 10])
 
     def testUndoRedoOfDelete(self):
@@ -228,9 +229,9 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.makeRailUndecided()
         self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION, INTERSECTION]
         sketch = self.saveAndReopen("PendingRepair")
-        types = list(sketch.ExternalTypes)
-        self.assertEqual(types[:3], [PROJECTION, INTERSECTION, INTERSECTION])
-        self.assertGreater(len(types), 3)  # the stale entry is kept
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION, PENDING]
+        )
         ball = self.doc.getObject("Ball")
         ball.Shape = Part.makeSphere(10, V(0, 0, 20))
         self.doc.recompute()
@@ -331,7 +332,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.makeRailUndecided()
         self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
         sketch = self.saveAndReopen("ElementBack")
-        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PENDING])
         self.assertRailRepairedWhenItsEdgeIsBack(
             sketch, self.doc.FileName, [PROJECTION, INTERSECTION]
         )
@@ -346,8 +347,66 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc.recompute()
         sketch.addExternal(rail2.Name, "Edge1", False, False)
         self.assertEqual(
-            list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PROJECTION, INTERSECTION]
+            list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PROJECTION, PENDING]
         )
         self.assertRailRepairedWhenItsEdgeIsBack(
             sketch, self.doc.FileName, [PROJECTION, INTERSECTION, PROJECTION]
         )
+
+    def testUndecidedTypeRepairedWhenTheElementComesBack(self):
+        """The ball loses its face, and the stale list gives it a projection by index: on open its
+        type can't be told (no type builds, a circle doesn't say which), so it keeps the
+        projection, and the list ends in the pending mark. The face comes back in the same
+        session: the recompute matches the ball with its saved circle (radius 8), so it gets its
+        intersection back, not the projection's circle of radius 10, and the mark goes."""
+        ball = self.addBall()
+        ball.Shape = Part.Vertex(V(0, 0, 6))
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("ElementBackInSession")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        self.doc.getObject("Ball").Shape = Part.makeSphere(10, V(0, 0, 6))
+        self.doc.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(self.circleRadii(sketch), [8])
+        self.assertRingPoints(sketch)
+
+    def testLaterOpenRepairsOnlyTheUndecidedLinks(self):
+        """An open decides the ring and the ball from their saved geometry and leaves the rail
+        (no edge) undecided. The ball then moves 3 up without a recompute: its saved circle (radius
+        8) is now closer to its projection (radius 10) than to its intersection (radius about
+        4.4). The next open repairs only the rail: the ball keeps its intersection."""
+        ball = self.addBall()
+        self.makeRailUndecided()
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION, INTERSECTION]
+        sketch = self.saveAndReopen("LaterOpen")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION, PENDING]
+        )
+        self.doc.getObject("Ball").Shape = Part.makeSphere(10, V(0, 0, 9))
+        path = self.doc.FileName
+        self.doc.save()
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION, PENDING]
+        )
+
+    def testKindsOnlyMatchOfARotatedSource(self):
+        """As testKindsOnlyMatchTakesTheClosestType, with the ball also turned a quarter about the
+        sketch normal, which moves where its circles' parameters start: the repair still takes the
+        intersection."""
+        ball = self.addBall()
+        self.sketch.delExternal(0)
+        shape = Part.makeSphere(10, V(0, 0, 6.5))
+        shape.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        ball.Shape = shape
+        self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("Rotated")
+        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
+        self.doc.recompute()
+        radius = (100 - 6.5**2) ** 0.5
+        self.assertEqual(self.circleRadii(sketch), [round(radius, 6)])

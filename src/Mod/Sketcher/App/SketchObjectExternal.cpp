@@ -2489,34 +2489,66 @@ std::optional<long> typeFromSavedGeometry(const std::string& sub,
     return static_cast<long>(ExtType::Intersection);
 }
 
-// How far a built geometry lies from a saved one of the same kind: for points their distance,
-// for curves the largest distance between points at the same fraction of their parameter ranges,
-// in either direction (ops#140)
+// How far a built geometry lies from a saved one of the same kind (ops#140): for points their
+// distance; for full circles and ellipses the distance of the centres plus the radii's
+// differences, which doesn't depend on where their parameter starts; for other curves the largest
+// distance of a point sampled on one from the other, both ways.
 double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
 {
     if (auto* point = freecad_cast<const Part::GeomPoint*>(geo)) {
         return Base::Distance(point->getPoint(),
                               static_cast<const Part::GeomPoint*>(saved)->getPoint());
     }
+    if (auto* circle = freecad_cast<const Part::GeomCircle*>(geo)) {
+        auto* other = static_cast<const Part::GeomCircle*>(saved);
+        return Base::Distance(circle->getCenter(), other->getCenter())
+            + std::abs(circle->getRadius() - other->getRadius());
+    }
+    if (auto* ellipse = freecad_cast<const Part::GeomEllipse*>(geo)) {
+        auto* other = static_cast<const Part::GeomEllipse*>(saved);
+        return Base::Distance(ellipse->getCenter(), other->getCenter())
+            + std::abs(ellipse->getMajorRadius() - other->getMajorRadius())
+            + std::abs(ellipse->getMinorRadius() - other->getMinorRadius());
+    }
     auto* curve = freecad_cast<const Part::GeomCurve*>(geo);
     auto* savedCurve = freecad_cast<const Part::GeomCurve*>(saved);
     if (!curve || !savedCurve) {
         return std::numeric_limits<double>::infinity();
     }
-    auto at = [](const Part::GeomCurve* c, double fraction) {
-        const double first = c->getFirstParameter();
-        return c->pointAtParameter(first + fraction * (c->getLastParameter() - first));
+    // the largest distance of a point of `from` from the curve `to`
+    auto oneWay = [](const Part::GeomCurve* from, const Part::GeomCurve* to) {
+        constexpr int samples = 8;
+        const double first = from->getFirstParameter();
+        const double last = from->getLastParameter();
+        double distance = 0.0;
+        for (int k = 0; k <= samples; ++k) {
+            const auto p = from->pointAtParameter(first + (last - first) * k / samples);
+            double u = 0.0;
+            if (!to->closestParameter(p, u)) {
+                return std::numeric_limits<double>::infinity();
+            }
+            distance = std::max(distance, Base::Distance(p, to->pointAtParameter(u)));
+        }
+        return distance;
     };
-    constexpr int samples = 8;
-    double forward = 0.0;
-    double backward = 0.0;
-    for (int k = 0; k <= samples; ++k) {
-        const double fraction = static_cast<double>(k) / samples;
-        const auto p = at(curve, fraction);
-        forward = std::max(forward, Base::Distance(p, at(savedCurve, fraction)));
-        backward = std::max(backward, Base::Distance(p, at(savedCurve, 1.0 - fraction)));
+    return std::max(oneWay(curve, savedCurve), oneWay(savedCurve, curve));
+}
+
+// The entry that marks a type list whose repair on open couldn't tell every link's type: the next
+// open repairs only the links that are still undecided (ops#140). No type has this value.
+constexpr long pendingTypeRepairMark = -1;
+
+// "0", "0 and 1", "0, 1 and 2": the types, for a warning
+std::string typeList(const std::vector<long>& types)
+{
+    std::string text;
+    for (std::size_t k = 0; k < types.size(); ++k) {
+        if (k > 0) {
+            text += k + 1 == types.size() ? " and " : ", ";
+        }
+        text += std::to_string(types[k]);
     }
-    return std::min(forward, backward);
+    return text;
 }
 }  // namespace
 
@@ -2564,12 +2596,23 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     const std::size_t linkCount = Objects.size();
     // A type list longer than the links was saved before ops#140, when deleting a link left its
     // type behind: the types after it belong to other links. On open (typesOnly) each link takes
-    // the type that gives back its saved geometries (below). Only then: later the saved geometry
-    // is the one before an edit of the source, which a correct type no longer gives.
-    const bool repairTypes = typesOnly && Types.size() > linkCount;
-    if (typesOnly && !repairTypes) {
+    // the type that gives back its saved geometries (below). Only then, and later only for a link
+    // the open couldn't decide whose geometry is still the saved one (flagged Missing): otherwise
+    // the saved geometry is the one before an edit of the source, which a correct type no longer
+    // gives. An open of a list that ends in the mark an earlier open left repairs only the links
+    // that are still undecided (missing or without saved geometry), not the ones decided then.
+    const bool openRepair = typesOnly && Types.size() > linkCount;
+    if (typesOnly && !openRepair) {
         return;
     }
+    const bool laterOpen = openRepair
+        && std::find(Types.begin() + static_cast<std::ptrdiff_t>(linkCount), Types.end(),
+                     pendingTypeRepairMark)
+            != Types.end();
+    if (openRepair) {
+        undecidedTypeKeys.clear();
+    }
+    bool typesRepaired = false;  // a full rebuild decided an undecided link's type
     // links whose sub-element is set again below, because their element is back (ops#72)
     std::set<std::size_t> relinked;
 
@@ -2650,11 +2693,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     BRepBuilderAPI_MakeFace mkFace(sketchPlane);
     TopoDS_Shape aProjFace = mkFace.Shape();
 
-    // the types after the links: kept while a link's type can't be told, so that a later open can
-    // still find it (ops#140)
-    std::vector<long> staleTypes;
+    // the entries after the links are no link's type
     if (Types.size() > linkCount) {
-        staleTypes.assign(Types.begin() + linkCount, Types.end());
         Types.resize(linkCount);
     }
     bool undecided = false;
@@ -2872,14 +2912,23 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             }
         };
 
-        if (repairTypes) {
-            std::vector<const Part::Geometry*> saved;
+        std::vector<const Part::Geometry*> saved;
+        bool savedMissing = false;
+        if (openRepair || !undecidedTypeKeys.empty()) {
             for (long id : externalGeoRefMap[key]) {
                 auto it = externalGeoMap.find(id);
                 if (it != externalGeoMap.end()) {
                     saved.push_back(ExternalGeo[it->second]);
+                    savedMissing = savedMissing
+                        || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                               ->testFlag(ExternalGeometryExtension::Missing);
                 }
             }
+        }
+        const bool repairThis = openRepair
+            ? (!laterOpen || saved.empty() || savedMissing)
+            : (undecidedTypeKeys.count(key) != 0 && savedMissing);
+        if (repairThis) {
             auto setType = [&](long type) {
                 projection = type == (int)ExtType::Projection || type == (int)ExtType::Both;
                 intersection = type == (int)ExtType::Intersection || type == (int)ExtType::Both;
@@ -2939,41 +2988,62 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     }
                 }
             }
+            bool decided = true;
             if (!exact.empty()) {
                 // the type at the link's index when it is among them, else the first
                 Types[i] = std::find(exact.begin(), exact.end(), indexType) != exact.end()
                     ? indexType
                     : exact.front();
                 if (exact.size() > 1) {
-                    FC_WARN("External link " << key << " in " << getFullName()
-                            << ": several types give its saved geometry; it takes type "
+                    FC_WARN("External link " << key << " in " << getFullName() << ": types "
+                            << typeList(exact) << " all give its saved geometry; it takes type "
                             << Types[i]);
                 }
             }
             else if (!kinds.empty()) {
                 // the closest to the saved geometry (arcs fitted to a tolerance, approximated
                 // B-splines or another OCCT version can miss it); the index type on a tie
-                auto closest = kinds.front();
+                double best = std::numeric_limits<double>::infinity();
                 for (const auto& kind : kinds) {
-                    if (kind.second < closest.second - Precision::Confusion()
-                        || (kind.first == indexType
-                            && kind.second <= closest.second + Precision::Confusion())) {
-                        closest = kind;
+                    best = std::min(best, kind.second);
+                }
+                std::vector<long> closest;
+                for (const auto& kind : kinds) {
+                    if (kind.second <= best + Precision::Confusion()) {
+                        closest.push_back(kind.first);
                     }
                 }
-                Types[i] = closest.first;
-                FC_WARN("External link " << key << " in " << getFullName()
-                        << ": no type gives its saved geometry exactly, only the same kinds; it"
-                        << " takes the closest, type " << Types[i]);
+                Types[i] = std::find(closest.begin(), closest.end(), indexType) != closest.end()
+                    ? indexType
+                    : closest.front();
+                if (closest.size() > 1) {
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": no type gives its saved geometry exactly; types "
+                            << typeList(closest) << " are equally close to it; it takes type "
+                            << Types[i]);
+                }
+                else {
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": no type gives its saved geometry exactly, only the same kinds;"
+                            << " it takes the closest, type " << Types[i]);
+                }
             }
             else if (auto type = typeFromSavedGeometry(SubElement, saved)) {
                 Types[i] = *type;
             }
             else {
+                decided = false;
                 undecided = true;
-                FC_WARN("External link " << key << " in " << getFullName()
-                        << ": its type can't be told from a type list saved before ops#140; it"
-                        << " keeps type " << indexType);
+                if (typesOnly) {
+                    undecidedTypeKeys.insert(key);
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": its type can't be told from a type list saved before ops#140;"
+                            << " it keeps type " << indexType);
+                }
+            }
+            if (decided && !typesOnly) {
+                undecidedTypeKeys.erase(key);
+                typesRepaired = true;
             }
             setType(Types[i]);
             geos.clear();
@@ -3024,7 +3094,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         Types.resize(linkCount);
         externalTypeRepairPending = undecided;
         if (undecided) {
-            Types.insert(Types.end(), staleTypes.begin(), staleTypes.end());
+            Types.push_back(pendingTypeRepairMark);
         }
         ExternalTypes.setValues(Types);
         return;
@@ -3152,9 +3222,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             newSubElements.push_back(SubElements[index]);
             newTypes.push_back(Types[index]);
         }
+        if (typesRepaired) {
+            // the mark goes with the last undecided link
+            externalTypeRepairPending = externalTypeRepairPending && !undecidedTypeKeys.empty();
+        }
         if (linksChanged) {
             // a relinked entry has a new sub, so it gets no shadow and is resolved again
             setExternalLinksAndTypes(newObjects, newSubElements, newTypes);
+        }
+        else if (typesRepaired) {
+            auto pending = pendingTypeRepair();
+            newTypes.insert(newTypes.end(), pending.begin(), pending.end());
+            ExternalTypes.setValues(newTypes);
         }
     }
 

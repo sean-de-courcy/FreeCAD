@@ -1295,6 +1295,9 @@ private:
     // otherwise (a new sketch's list holds one entry and no links).
     std::vector<long> pendingTypeRepair() const;
     bool externalTypeRepairPending = false;
+    // the keys of the links whose type the open couldn't tell: a full rebuild matches them with
+    // their saved geometry once their element is back (ops#140)
+    std::set<std::string> undecidedTypeKeys;
     // set while a deletion keeps a constraint list flagged invalid: the rebuild it causes doesn't
     // accept the geometry then (ops#140)
     bool keepConstraintsInvalid = false;
