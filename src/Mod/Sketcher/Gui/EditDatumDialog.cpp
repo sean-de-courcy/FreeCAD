@@ -707,12 +707,21 @@ void EditDatumDialog::accepted()
     // through setDriving, which replaces the constraint objects: read it afresh (ops#172).
     Constr = sketch->Constraints.getValues()[ConstrNbr];
 
-    // Check if we need to swap Radius <-> Diameter
+    // Check if we need to swap Radius <-> Diameter. A copy with the new type goes through the
+    // property, so that the change is recorded for undo before setDatum and also when setDatum
+    // isn't called (a reference); changed in place, undo kept it (ops#205).
+    Sketcher::ConstraintType newType = Constr->Type;
     if (Constr->Type == Sketcher::Radius && ui_ins_datum->rbDiameter->isChecked()) {
-        Constr->Type = Sketcher::Diameter;
+        newType = Sketcher::Diameter;
     }
     else if (Constr->Type == Sketcher::Diameter && ui_ins_datum->rbRadius->isChecked()) {
-        Constr->Type = Sketcher::Radius;
+        newType = Sketcher::Radius;
+    }
+    if (newType != Constr->Type) {
+        std::unique_ptr<Sketcher::Constraint> changed(Constr->clone());
+        changed->Type = newType;
+        sketch->Constraints.set1Value(ConstrNbr, changed.get());
+        Constr = sketch->Constraints.getValues()[ConstrNbr];
     }
 
     Base::Quantity newQuant = ui_ins_datum->labelEdit->value();
