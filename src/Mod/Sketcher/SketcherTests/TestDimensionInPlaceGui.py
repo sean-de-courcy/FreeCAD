@@ -902,28 +902,39 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.doc.recompute()
         self.start_edit()
 
-        seen = {"dialog": False}
+        seen = {"dialog": False, "tries": 0, "error": None}
 
         def fill():
+            # ops#204: bounded (5 s), and the dialog is closed whatever happens here: it is
+            # modal, so an exception left open would hang the run until its time limit
+            seen["tries"] += 1
             dialog = QtGui.QApplication.activeModalWidget()
             spinbox = dialog.findChild(QtGui.QAbstractSpinBox, "labelEdit") if dialog else None
             if spinbox is None:
-                QtCore.QTimer.singleShot(50, fill)
+                if seen["tries"] < 100:
+                    QtCore.QTimer.singleShot(50, fill)
                 return
             seen["dialog"] = True
-            reference = dialog.findChild(QtGui.QCheckBox, "cbDriving")
-            reference.setChecked(True)
-            seen["reference"] = not self.sketch.Constraints[-1].Driving
-            reference.setChecked(False)
-            dialog.findChild(QtGui.QRadioButton, "rbDiameter").setChecked(True)
-            line_edit = spinbox.findChild(QtGui.QLineEdit)
-            line_edit.selectAll()
-            line_edit.insert("14 mm")
-            dialog.accept()
+            try:
+                reference = dialog.findChild(QtGui.QCheckBox, "cbDriving")
+                reference.setChecked(True)
+                seen["reference"] = not self.sketch.Constraints[-1].Driving
+                reference.setChecked(False)
+                dialog.findChild(QtGui.QRadioButton, "rbDiameter").setChecked(True)
+                line_edit = spinbox.findChild(QtGui.QLineEdit)
+                line_edit.selectAll()
+                line_edit.insert("14 mm")
+                dialog.accept()
+            except Exception as error:
+                seen["error"] = repr(error)
+            finally:
+                if dialog.isVisible():
+                    dialog.reject()
 
         QtCore.QTimer.singleShot(50, fill)
         self.run_with_selection(["Edge1"], "Sketcher_ConstrainRadius")
         self.assertTrue(self.wait_until(lambda: seen["dialog"], 3000), "Expected the dialog")
+        self.assertIsNone(seen["error"], "Filling the dialog failed")
         self.assertTrue(seen["reference"], "Expected the toggle to make the Radius a reference")
 
         self.assertEqual(self.constraints_of("Radius"), [])

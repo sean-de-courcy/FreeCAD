@@ -351,7 +351,7 @@ protected:
         Sketcher::PointPos pointPos,
         std::vector<std::unique_ptr<Sketcher::Constraint>>& autoConstraints
     );
-    bool filterRedundantAutoConstraints(
+    void filterRedundantAutoConstraints(
         std::vector<std::unique_ptr<Sketcher::Constraint>>& autoConstraints
     );
     void addGeneratedAutoConstraints(
