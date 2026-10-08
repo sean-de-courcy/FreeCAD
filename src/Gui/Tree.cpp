@@ -1382,6 +1382,54 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
 )
 {
     std::vector<ProblemItem> problems;
+
+    // The first row of an object, in tree order, with no hidden row above it. Rows exist only
+    // under populated parents (a Pad's children are made when it is first expanded), so when
+    // none is shown the shown, unpopulated parents are populated and the rows looked at again
+    // (ops#209).
+    auto firstShownRow = [docItem](App::DocumentObject* top) -> DocumentObjectItem* {
+        auto shownRow = [&]() -> DocumentObjectItem* {
+            DocumentObjectItem* best = nullptr;
+            std::vector<int> bestPath;
+            auto data = docItem->ObjectMap.find(top);
+            if (data == docItem->ObjectMap.end()) {
+                return nullptr;
+            }
+            for (auto row : data->second->items) {
+                if (row->isHidden() || hiddenAbove(row)) {
+                    continue;
+                }
+                auto path = treePath(row);
+                if (!best || path < bestPath) {
+                    best = row;
+                    bestPath = std::move(path);
+                }
+            }
+            return best;
+        };
+        if (auto row = shownRow()) {
+            return row;
+        }
+        bool populated = false;
+        for (auto parent : top->getInList()) {
+            auto data = docItem->ObjectMap.find(parent);
+            if (data == docItem->ObjectMap.end()) {
+                continue;
+            }
+            for (auto parentRow : std::vector<DocumentObjectItem*>(
+                     data->second->items.begin(),
+                     data->second->items.end()
+                 )) {
+                if (!parentRow->populated && !parentRow->isHidden() && !hiddenAbove(parentRow)) {
+                    parentRow->populated = true;
+                    docItem->populateItem(parentRow, true);
+                    populated = true;
+                }
+            }
+        }
+        return populated ? shownRow() : nullptr;
+    };
+
     for (auto obj : docItem->document()->getDocument()->getObjects()) {
         bool error = obj->isError();
         if (!(error ? errors : warnings && obj->isWarning())) {
@@ -1416,19 +1464,8 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
         // first of those in tree order stands for it (ops#209).
         if (!docItem->showHidden() && hiddenAbove(item)) {
             item = nullptr;
-            auto data = subname.empty() ? docItem->ObjectMap.find(top) : docItem->ObjectMap.end();
-            if (data != docItem->ObjectMap.end()) {
-                std::vector<int> best;
-                for (auto row : data->second->items) {
-                    if (row->isHidden() || hiddenAbove(row)) {
-                        continue;
-                    }
-                    auto path = treePath(row);
-                    if (!item || path < best) {
-                        item = row;
-                        best = std::move(path);
-                    }
-                }
+            if (subname.empty()) {
+                item = firstShownRow(top);
             }
             if (!item) {
                 continue;
@@ -1561,6 +1598,9 @@ bool TreeWidget::selectNextProblem(bool forward)
     );
     Gui::Selection().selStackPush();
     tree->scrollToItem(next->item);
+    // Selecting the object marks all its rows: the next search starts from this one, not from a
+    // row under a hidden parent (ops#209 review)
+    tree->setCurrentItem(next->item, 0, QItemSelectionModel::NoUpdate);
 
     App::DocumentObject* obj = next->item->object()->getObject();
     QString info = QApplication::translate(
