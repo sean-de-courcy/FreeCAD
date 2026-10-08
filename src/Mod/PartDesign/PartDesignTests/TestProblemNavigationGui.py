@@ -293,8 +293,70 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertIn("Body002", rows)
         self.assertTrue({"BadPad", "BadSketch"}.isdisjoint(rows))
         self.assertEqual(self.step(), ["Fillet"])
+        self.assertEqual(self.step(False), ["Fillet"])
         self.assertEqual(self.search(":e"), [])
         self.assertTrue({"BadPad", "BadSketch"}.isdisjoint(visibleRows()))
+
+    def sharedSketchModel(self):
+        """A failing sketch used as the profile of two Pads: it has a row under each, and none
+        of its own under the Body, once both Pads are expanded (the tree makes a Pad's children
+        when it is first expanded). The Pads fail with it."""
+        body = self.doc.addObject("PartDesign::Body", "Body002")
+        sketch = models.sketch(self.doc, "BadSketch", models.rectangle(0, 0, 10, 10), body)
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 20))
+        first = models.pad(body, sketch, 10, "BadPad")
+        second = models.pad(body, sketch, 5, "BadPad2")
+        self.doc.recompute()
+        pump()
+        for obj in (sketch, first, second):
+            self.assertIn("Invalid", obj.State)
+        for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+            try:
+                if tree.metaObject().className() == "Gui::TreeWidget":
+                    tree.expandAll()
+            except RuntimeError:
+                continue
+        pump()
+        return first, second
+
+    def checkSharedSketch(self, hidden, shown):
+        """The Pad `hidden` is hidden from the tree: the sketch still has a row under `shown`,
+        so Next problem and the tokens reach it, once."""
+        self.assertEqual(self.step(), [shown.Name])
+        self.assertEqual(self.step(), ["BadSketch"])
+        self.assertEqual(self.step(), [shown.Name], "wraps")
+        self.assertEqual(self.step(False), ["BadSketch"])
+        self.assertEqual(self.search(":e"), sorted([shown.Name, "BadSketch"]))
+        rows = visibleRows()
+        self.assertTrue({shown.Name, "BadSketch"} <= rows)
+        self.assertNotIn(hidden.Name, rows)
+
+    def testSharedSketchIsFoundUnderTheShownFirstPad(self):
+        """A sketch under two Pads, the second hidden from the tree: the sketch's row under the
+        first is shown, so the sketch counts (ops#209). Which of its two rows the tree finds
+        first depends on allocation order, so the mirror image is the next test."""
+        first, second = self.sharedSketchModel()
+        second.ViewObject.ShowInTree = False
+        pump()
+        self.checkSharedSketch(second, first)
+
+    def testSharedSketchIsFoundUnderTheShownSecondPad(self):
+        first, second = self.sharedSketchModel()
+        first.ViewObject.ShowInTree = False
+        pump()
+        self.checkSharedSketch(first, second)
+
+    def testSharedSketchUnderTwoHiddenPadsIsSkipped(self):
+        """Both rows have a hidden row above: no problem is left."""
+        first, second = self.sharedSketchModel()
+        first.ViewObject.ShowInTree = False
+        second.ViewObject.ShowInTree = False
+        pump()
+        self.assertEqual(self.step(), [])
+        self.assertEqual(self.search(":e"), [])
+        rows = visibleRows()
+        self.assertTrue({"BadPad", "BadPad2", "BadSketch"}.isdisjoint(rows))
 
     def testPreviousFindsAProblemMadeAMomentAgo(self):
         """Run right after the recompute, before the tree's pending update: the new object's row
