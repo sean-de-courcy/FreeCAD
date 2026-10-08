@@ -4351,7 +4351,9 @@ std::vector<PickData> picksAt(
             .element = elementName,
             .docName = obj->getDocument()->getName(),
             .objName = obj->getNameInDocument(),
-            .subName = hasSubObject ? subName : elementName
+            .subName = hasSubObject ? subName : elementName,
+            .preselect = {},
+            .select = {}
         };
 
         selections.push_back(pickData);
@@ -4382,7 +4384,9 @@ std::vector<PickData> picksAt(
                     .element = relElement,
                     .docName = obj->getDocument()->getName(),
                     .objName = obj->getNameInDocument(),
-                    .subName = subObjPath + relSubName
+                    .subName = subObjPath + relSubName,
+                    .preselect = {},
+                    .select = {}
                 }
             );
         }
