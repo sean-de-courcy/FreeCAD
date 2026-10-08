@@ -630,6 +630,10 @@ void EditDatumDialog::typeChanged(bool checked)
 
 void EditDatumDialog::accepted()
 {
+    // Toggling Reference while the dialog was open (also by typing a value: datumChanged) went
+    // through setDriving, which replaces the constraint objects: read it afresh (ops#172).
+    Constr = sketch->Constraints.getValues()[ConstrNbr];
+
     // Check if we need to swap Radius <-> Diameter
     if (Constr->Type == Sketcher::Radius && ui_ins_datum->rbDiameter->isChecked()) {
         Constr->Type = Sketcher::Diameter;

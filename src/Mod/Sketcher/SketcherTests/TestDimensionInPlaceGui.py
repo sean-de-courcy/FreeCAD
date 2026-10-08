@@ -831,3 +831,50 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assertTrue(
             self.origin_marker_is_hollow(), "Expected the Dimension tool to stay active after Esc"
         )
+
+    # D20: the dialog's OK after a Reference toggle (ops#172) -----------------------------------
+
+    def test_d20_dialog_reference_toggled_then_diameter(self):
+        """D20 (ops#172): in the dialog for a new Radius of 5, Reference on and off again,
+        Diameter chosen and 14 typed: OK gives one driving Diameter of 14, the circle's radius
+        is 7, in one undo step. Each Reference toggle replaces the constraint objects
+        (setDriving); OK used to change the type through the old, deleted object, so the
+        sketch kept a Radius and set it to 14."""
+        self.set_param(SKETCHER_PARAMS, "Bool", "DimensionValueInPlace", False)
+        self.sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 5), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        self.doc.recompute()
+        self.start_edit()
+
+        seen = {"dialog": False}
+
+        def fill():
+            dialog = QtGui.QApplication.activeModalWidget()
+            spinbox = dialog.findChild(QtGui.QAbstractSpinBox, "labelEdit") if dialog else None
+            if spinbox is None:
+                QtCore.QTimer.singleShot(50, fill)
+                return
+            seen["dialog"] = True
+            reference = dialog.findChild(QtGui.QCheckBox, "cbDriving")
+            reference.setChecked(True)
+            seen["reference"] = not self.sketch.Constraints[-1].Driving
+            reference.setChecked(False)
+            dialog.findChild(QtGui.QRadioButton, "rbDiameter").setChecked(True)
+            line_edit = spinbox.findChild(QtGui.QLineEdit)
+            line_edit.selectAll()
+            line_edit.insert("14 mm")
+            dialog.accept()
+
+        QtCore.QTimer.singleShot(50, fill)
+        self.run_with_selection(["Edge1"], "Sketcher_ConstrainRadius")
+        self.assertTrue(self.wait_until(lambda: seen["dialog"], 3000), "Expected the dialog")
+        self.assertTrue(seen["reference"], "Expected the toggle to make the Radius a reference")
+
+        self.assertEqual(self.constraints_of("Radius"), [])
+        diameters = self.constraints_of("Diameter")
+        self.assertEqual(len(diameters), 1)
+        self.assertTrue(diameters[0].Driving)
+        self.assertAlmostEqual(diameters[0].Value, 14.0, places=9)
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 7.0, places=7)
+        self.assert_one_undo_step()
