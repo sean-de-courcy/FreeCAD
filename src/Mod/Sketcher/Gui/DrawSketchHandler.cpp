@@ -1660,7 +1660,13 @@ void DrawSketchHandler::filterRedundantAutoConstraints(
     for (int index : order) {
         trial.push_back(autoConstraints[index].get());
         const int trialDoF = sketchobject->diagnoseAdditionalConstraints(trial);
-        if (trialDoF < dof && std::ranges::all_of(sketchobject->getLastRedundant(), isOld)
+        // ops#223: a one-equation autoconstraint that lowers the DoF by one is independent,
+        // whichever member of an old redundant group the solver names now (adding a row can
+        // move the name within the group); a conflict still drops it (in an over-constrained
+        // sketch a conflict lowers the DoF too)
+        const bool independent = isOneEquation(*autoConstraints[index]) && trialDoF == dof - 1;
+        if (trialDoF < dof
+            && (independent || std::ranges::all_of(sketchobject->getLastRedundant(), isOld))
             && std::ranges::all_of(sketchobject->getLastConflicting(), isOld)) {
             keep[index] = true;
             dof = trialDoF;

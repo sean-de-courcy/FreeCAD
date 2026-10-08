@@ -913,6 +913,10 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
             if spinbox is None:
                 if seen["tries"] < 100:
                     QtCore.QTimer.singleShot(50, fill)
+                elif dialog:
+                    # ops#223: another modal (an error box) would stay open: close it
+                    seen["error"] = f"a modal without the value field: {dialog.objectName()}"
+                    dialog.reject()
                 return
             seen["dialog"] = True
             try:

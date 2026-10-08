@@ -247,3 +247,42 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         self.assertEqual(len(self.sketch.Constraints), 4, f"Got {self.describe()}")
         self.sketch.solve()
         self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)
+
+    def test_a5_single_autoconstraint_in_an_already_redundant_sketch(self):
+        """A5 (ops#223, the one-diagnosis skip of ops#204): line 0 with two Horizontal
+        constraints, then a vertical line 1 from (15, 3) to (15, 9), away from line 0: one
+        automatic Vertical. The solver names only the old Horizontal and the DoF falls, so it
+        is kept without trying it alone; the sketch keeps its own redundancy."""
+        self.add_horizontal_line(2)
+        old_redundant = list(self.sketch.RedundantConstraints)
+        self.start_edit()
+        self.draw_line((15, 3), (15, 9))
+
+        self.assertTrue(self.has_constraint("Vertical", 1), f"Got {self.describe()}")
+        self.assertEqual(len(self.sketch.Constraints), 3, f"Got {self.describe()}")
+        self.sketch.solve()
+        self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)
+
+    def test_a6_independent_point_on_object_kept_when_the_solver_renames_an_old_redundancy(self):
+        """A6 (ops#223): line 0 with three Horizontal constraints (the sketch names one of them
+        redundant), then line 1 from (3, 2), on line 0 (not its midpoint, which would give a Symmetric), to
+        (7, 9): an automatic PointOnObject
+        of line 1's start on line 0. It fixes the start's height, an equation of its own, but
+        with it the solver names another of line 0's Horizontals. A one-equation constraint
+        that lowers the DoF by one is kept whatever old constraint the solver names. Drawn
+        this way the drawing tool's diagnosis names the same Horizontal as before (a full
+        solve with the constraint appended names another), so the one-diagnosis skip keeps it:
+        this guards the outcome, not yet the renamed case."""
+        self.add_horizontal_line(3)
+        self.assertEqual(len(self.sketch.RedundantConstraints), 1)
+        self.start_edit()
+        self.draw_line((3, 2), (7, 9))
+
+        self.assertTrue(
+            self.has_constraint("PointOnObject", 1, 1, 0),
+            f"Expected line 1's start on line 0, got {self.describe()}",
+        )
+        self.assertEqual(len(self.sketch.Constraints), 4, f"Got {self.describe()}")
+        self.sketch.solve()
+        self.assertEqual(len(self.sketch.RedundantConstraints), 1, f"Got {self.describe()}")
+        self.assertEqual(list(self.sketch.ConflictingConstraints), [])
