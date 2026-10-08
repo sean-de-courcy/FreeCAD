@@ -179,8 +179,8 @@ def sendRepeats(kinds):
     system delivers them (QTest has no auto-repeat flag): to a popup, else the focus widget."""
     window = Gui.getMainWindow().windowHandle()
     for kind in kinds:
-        type = QtCore.QEvent.KeyPress if kind == "press" else QtCore.QEvent.KeyRelease
-        event = QtGui.QKeyEvent(type, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier, "", True)
+        eventType = QtCore.QEvent.KeyPress if kind == "press" else QtCore.QEvent.KeyRelease
+        event = QtGui.QKeyEvent(eventType, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier, "", True)
         QtWidgets.QApplication.sendEvent(window, event)
         pump(0.05)
 
@@ -663,9 +663,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEscHeldAfterAPopupKeepsTheFieldArmed(["press"] * 3)
 
     def testEscHeldAfterClosingAPopupX11KeepsTheFieldArmed(self):
-        """ops#220: as above with X11's repeats, a release and a press each: no repeated release
+        """ops#220: as above with X11's repeats, each a release then a press: no repeated release
         disarms the field or closes the dialog."""
-        self.assertEscHeldAfterAPopupKeepsTheFieldArmed(["press", "release"] * 3)
+        self.assertEscHeldAfterAPopupKeepsTheFieldArmed(["release", "press"] * 3)
 
     def testEscHeldInTheViewActsOnce(self):
         """ops#220: Esc pressed and held in the 3D view with a field armed: the repeats (X11's
@@ -706,6 +706,38 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.popupEscIntoTheView(view, [])
         self.assertTrue(armed(field), "the release of the popup's Esc disarmed the field")
         self.assertTrue(Gui.Control.activeDialog(), "the release of the popup's Esc closed the dialog")
+        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+
+    def testEscPressedInTheViewThenInAnotherViewLeavesNoRecord(self):
+        """ops#222: Esc pressed in the 3D view in edit whose release goes elsewhere (the focus
+        moved to a task panel widget); the next Esc is pressed in another 3D view of the
+        document, not in edit, and released in the view in edit: that release doesn't count
+        there, as the press it follows went to the other view."""
+        box, fillet = self.newFillet()
+        [field] = fields()
+        [view] = views3D()
+        self.arm(field, byFocus=False)
+        self.assertTrue(focus(view))
+        window = Gui.getMainWindow().windowHandle()
+        QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(focus(radius), "the radius doesn't take the focus")
+        QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
+        pump(0.3)
+
+        Gui.runCommand("Std_ViewCreate")
+        self.assertTrue(waitFor(lambda: len(views3D()) == 2), "Std_ViewCreate made no view")
+        [other] = [v for v in views3D() if v is not view]
+        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the new view ended the edit")
+        # the radius's focus disarmed the field; armed again before the other view's Esc
+        self.arm(field, byFocus=False)
+        self.assertTrue(focus(other))
+        QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
+        self.assertTrue(focus(view))
+        QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
+        pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "the release of the other view's Esc closed the dialog")
+        self.assertTrue(armed(field), "the release of the other view's Esc disarmed the field")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
     # -- T6: Delete -----------------------------------------------------------------------------
