@@ -373,6 +373,30 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(self.circleRadii(sketch), [8])
         self.assertRingPoints(sketch)
 
+    def testUndecidedTypeKeptThroughARepairedReference(self):
+        """As above, but the ball's sphere comes back as Face2 of a compound (Face1 a small square
+        above the plane), and App.repairReference re-points the link to it: the link's key
+        changes before the recompute. The link is still undecided under its new key, so the
+        recompute matches it with its saved circle: intersection, radius 8."""
+        ball = self.addBall()
+        ball.Shape = Part.Vertex(V(0, 0, 6))
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("RepairedReference")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        square = Part.makePlane(1, 1, V(30, 30, 5))
+        self.doc.getObject("Ball").Shape = Part.makeCompound(
+            [square, Part.makeSphere(10, V(0, 0, 6)).Faces[0]]
+        )
+        App.repairReference(sketch, "ExternalGeometry", 2, "Face2", True)
+        self.assertEqual(sketch.ExternalGeometry[2][1], ("Face2",))
+        self.doc.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(self.circleRadii(sketch), [8])
+        self.assertRingPoints(sketch)
+
     def testLaterOpenRepairsOnlyTheUndecidedLinks(self):
         """An open decides the ring and the ball from their saved geometry and leaves the rail
         (no edge) undecided. The ball then moves 3 up without a recompute: its saved circle (radius

@@ -2520,6 +2520,8 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
         constexpr int samples = 8;
         const double first = from->getFirstParameter();
         const double last = from->getLastParameter();
+        const double toFirst = to->getFirstParameter();
+        const double toLast = to->getLastParameter();
         double distance = 0.0;
         for (int k = 0; k <= samples; ++k) {
             const auto p = from->pointAtParameter(first + (last - first) * k / samples);
@@ -2527,7 +2529,12 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
             if (!to->closestParameter(p, u)) {
                 return std::numeric_limits<double>::infinity();
             }
-            distance = std::max(distance, Base::Distance(p, to->pointAtParameter(u)));
+            // closestParameter() gives an orthogonal foot when there is one, which on an arc
+            // over half a turn can be the far side; an end can be nearer
+            const double near = std::min({Base::Distance(p, to->pointAtParameter(u)),
+                                          Base::Distance(p, to->pointAtParameter(toFirst)),
+                                          Base::Distance(p, to->pointAtParameter(toLast))});
+            distance = std::max(distance, near);
         }
         return distance;
     };
@@ -3698,6 +3705,14 @@ void SketchObject::updateGeometryRefs()
             refMap[originalRefs[i]] = key;
         }
     }
+    // a renamed link still undecided since the open stays undecided under its new key (ops#140)
+    std::set<std::string> renamedUndecided;
+    for (const auto& v : refMap) {
+        if (undecidedTypeKeys.erase(v.first) != 0) {
+            renamedUndecided.insert(v.second);
+        }
+    }
+    undecidedTypeKeys.insert(renamedUndecided.begin(), renamedUndecided.end());
     bool touched = false;
     auto geos = ExternalGeo.getValues();
     if (!refMap.empty()) {
