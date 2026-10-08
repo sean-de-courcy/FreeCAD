@@ -243,7 +243,8 @@ names it.
 | `fix/191-revolution-upto-face-first-solid` | fix | ops#191 | - | `integration` `307ab9804d` | `5b08371dd1` (fork PR 217), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
 | `fix/233-makecopy-external-constraints` | fix | ops#233 | - | `integration` `800c03ab49` | `5169738cd5` (fork PR 215), 2026-10-08 | never (fork fix) |
 | `fix/140-sketcher-external-types` | fix | ops#140 | - | `integration` `800c03ab49` | `363bb33ea0` (fork PR 214), 2026-10-08 | when upstream keeps `ExternalTypes` parallel to `ExternalGeometry` and `breakLink` keeps shadows |
-| `fix/237-pr214-followups` | fix | ops#237 | - | `fix/140-sketcher-external-types` `1218ee0079` | (fork PR 218) | with `fix/140-sketcher-external-types` |
+| `fix/237-pr214-followups` | fix | ops#237 | - | `fix/140-sketcher-external-types` `1218ee0079` | `1d0e0a37c1` (fork PR 218), 2026-10-08 | with `fix/140-sketcher-external-types` |
+| `fix/231-property-editor-transactions` | fix | ops#231 | - | `integration` `800c03ab49` | (fork PR 213) | when upstream's `PropertyEditor` Add/Delete/Move Property and `DlgAddProperty` join a booked transaction and close only their own; `DocumentObject::renameDynamicProperty` completes a rename a handler threw after |
 
 ## Fork-only commits in carried topics
 

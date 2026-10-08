@@ -44,6 +44,7 @@
 #include "Macro.h"
 #include "ui_DlgAddProperty.h"
 #include "ViewProviderVarSet.h"
+#include "propertyeditor/PropertyEditor.h"
 #include "propertyeditor/PropertyItem.h"
 
 FC_LOG_LEVEL_INIT("DlgAddProperty", true, true)
@@ -920,9 +921,12 @@ void DlgAddProperty::valueChanged()
  */
 void DlgAddProperty::openTransaction()
 {
-    transactionID = App::GetApplication().setActiveTransaction(
-        App::TransactionName {.name = "Add property", .temporary = false}
-    );
+    // FreeCAD-CH (ops#231): in the container's document, and a transaction it has booked already
+    // (a task dialog's) takes the property: booking our own committed that one, past the task's
+    // Cancel. Joined, transactionID stays 0 and closeTransaction() closes nothing; a property that
+    // isn't kept is removed before that in every case.
+    // Our own booking (left by a property that failed to be created) isn't one to join.
+    transactionID = PropertyEditor::openPropertyTransaction(container, "Add property", transactionID);
 }
 
 void DlgAddProperty::critical(const QString& title, const QString& text)
