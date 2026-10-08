@@ -451,52 +451,84 @@ TEST_F(RenameProperty, renameUnderGlobalTransactionUndoes)
     EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), nullptr);
 }
 
-// Tests whether a rename that a signalRenameDynamicProperty handler throws from, after the
-// property has its new name, is still complete: the property keeps the new name with its
-// expression, and aborting the transaction takes back both (ops#231)
-TEST_F(RenameProperty, handlerThrowsAfterRename)
+// A VarSet's Variable = Variable2 + 1, a handler of signalRenameDynamicProperty that throws for
+// Variable (once, or every time), and the expression of a property by name (ops#231)
+class RenameHandlerThrows: public RenameProperty
 {
-    // Arrange: Variable = Variable2 + 1, and a handler that throws
-    auto* prop2 = freecad_cast<App::PropertyInteger*>(
-        varSet->addDynamicProperty("App::PropertyInteger", "Variable2", "Variables")
-    );
-    prop2->setValue(value);
-    varSet->setExpression(
-        App::ObjectIdentifier(*prop),
-        std::shared_ptr<App::Expression>(App::Expression::parse(varSet, "Variable2 + 1"))
-    );
-    varSet->ExpressionEngine.execute();
-    fastsignals::scoped_connection conn = App::GetApplication().signalRenameDynamicProperty.connect(
-        [this](const App::Property& renamed, const char*) {
-            if (&renamed == prop) {
-                throw Base::RuntimeError("handler failed");
+protected:
+    void arrange(bool always)
+    {
+        prop2 = freecad_cast<App::PropertyInteger*>(
+            varSet->addDynamicProperty("App::PropertyInteger", "Variable2", "Variables")
+        );
+        prop2->setValue(value);
+        varSet->setExpression(
+            App::ObjectIdentifier(*prop),
+            std::shared_ptr<App::Expression>(App::Expression::parse(varSet, "Variable2 + 1"))
+        );
+        varSet->ExpressionEngine.execute();
+        throws = always ? -1 : 1;
+        conn = App::GetApplication().signalRenameDynamicProperty.connect(
+            [this](const App::Property& renamed, const char*) {
+                if (&renamed == prop && throws != 0) {
+                    if (throws > 0) {
+                        --throws;
+                    }
+                    throw Base::RuntimeError("handler failed");
+                }
             }
-        }
-    );
-    auto expressionOf = [this](const char* name) -> std::string {
+        );
+    }
+
+    std::string expressionOf(const char* name) const
+    {
         auto expressions = varSet->ExpressionEngine.getExpressions();
         auto it = expressions.find(App::ObjectIdentifier(varSet, std::string(name)));
         return it == expressions.end() ? std::string() : it->second->toString();
-    };
+    }
 
-    // Act
+    App::PropertyInteger* prop2 = nullptr;
+    int throws = 0;
+    fastsignals::scoped_connection conn;
+};
+
+// Tests whether a rename that a handler throws from once is taken back, as a refused rename:
+// the old name with its expression, and nothing to abort
+TEST_F(RenameHandlerThrows, takenBack)
+{
+    arrange(false);
+
     doc->openTransaction("Rename Property");
     EXPECT_THROW(varSet->renameDynamicProperty(prop, "NewName"), Base::RuntimeError);
-    conn.disconnect();
 
-    // Assert: renamed, with the expression under the new name
-    EXPECT_STREQ(varSet->getPropertyName(prop), "NewName");
-    EXPECT_EQ(expressionOf("NewName"), "Variable2 + 1");
-    EXPECT_EQ(expressionOf("Variable"), "");
-
-    // Act: abort the transaction
+    EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+    EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    EXPECT_EQ(expressionOf("NewName"), "");
     doc->abortTransaction();
+    EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), prop);
+    EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    prop2->setValue(value + 1);
+    varSet->ExpressionEngine.execute();
+    EXPECT_EQ(prop->getValue(), value + 2);
+}
 
-    // Assert: the old name, with its expression
+// Tests whether a rename whose handler throws every time, also when the rename is taken back, is
+// still taken back: the name changes before the handlers run
+TEST_F(RenameHandlerThrows, takenBackWhenHandlerAlwaysThrows)
+{
+    arrange(true);
+
+    doc->openTransaction("Rename Property");
+    EXPECT_THROW(varSet->renameDynamicProperty(prop, "NewName"), Base::RuntimeError);
+    throws = 0;
+    EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+    EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    EXPECT_EQ(expressionOf("NewName"), "");
+
+    doc->abortTransaction();
     EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), prop);
     EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
     EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
-    EXPECT_EQ(expressionOf("NewName"), "");
     prop2->setValue(value + 1);
     varSet->ExpressionEngine.execute();
     EXPECT_EQ(prop->getValue(), value + 2);

@@ -932,15 +932,27 @@ bool DocumentObject::renameDynamicProperty(Property* prop, const char* name)
         renamed = TransactionalObject::renameDynamicProperty(prop, name);
     }
     catch (...) {
-        if (oldName == prop->getName()) {
-            restoreExpressions();
-        }
-        else {
+        if (oldName != prop->getName()) {
             // FreeCAD-CH (ops#231): a handler of signalRenameDynamicProperty threw after the
-            // rename. The property keeps its new name, so it gets its expressions and the
-            // transaction the rename: undo and abort found nothing to rename back.
-            finishRename();
+            // rename, which left the new name with no expressions and no record of the rename.
+            // The rename is taken back, as a refused one (the handlers see the old name again; the
+            // name changes before they run). Should the name stay new, the rename is completed
+            // instead. The first exception is kept.
+            try {
+                TransactionalObject::renameDynamicProperty(prop, oldName.c_str());
+            }
+            catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+            if (oldName != prop->getName()) {
+                try {
+                    finishRename();
+                }
+                catch (...) {  // NOLINT(bugprone-empty-catch)
+                }
+                throw;
+            }
         }
+        restoreExpressions();
         throw;
     }
     if (!renamed) {

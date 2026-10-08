@@ -148,13 +148,14 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.throughMenu(name, "Rename Property", nameDialog, answer, before)
         self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
 
-    def throughMenu(self, name, action, findDialog=None, answer=None, before=None):
-        """Picks action in the Data tab's context menu on the VarSet's row name, as a user does,
-        and answers the dialog findDialog() returns with answer(dialog); before() runs once the
-        row is selected."""
+    def throughMenu(self, name, action, findDialog=None, answer=None, before=None, objects=None):
+        """Picks action in the Data tab's context menu on row name, as a user does, with objects
+        (default: the VarSet) selected, and answers the dialog findDialog() returns with
+        answer(dialog); before() runs once the row is selected."""
         self.seen = []
         Gui.Selection.clearSelection()
-        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        for obj in objects or [self.obj]:
+            Gui.Selection.addSelection(obj.Document.Name, obj.Name)
         pump(1.0)
         editor = self.dataEditor()
         index = findRow(editor.model(), QtCore.QModelIndex(), name)
@@ -344,8 +345,9 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.doc.undo()
         self.assertEqual(self.obj.getPropertyByName("Width"), 5)
 
-    def moveThroughMenu(self, name, target):
-        """Moves the VarSet's property name to the object target with Move Property."""
+    def moveThroughMenu(self, name, target, objects=None):
+        """Moves the property name of objects (default: the VarSet) to the object target with Move
+        Property."""
 
         def objectDialog():
             widget = QtWidgets.QApplication.activeModalWidget()
@@ -366,7 +368,7 @@ class TestPropertyEditorGui(unittest.TestCase):
             items[0].setSelected(True)
             dialog.accept()
 
-        self.throughMenu(name, "Move Property", objectDialog, answer)
+        self.throughMenu(name, "Move Property", objectDialog, answer, objects=objects)
         self.assertEqual(self.seen, ["QMenu", "QDialog"])
 
     def testMoveJoinsBookedTransaction(self):
@@ -414,10 +416,28 @@ class TestPropertyEditorGui(unittest.TestCase):
     def testAddJoinsBookedTransaction(self):
         undos = self.doc.UndoCount
         tid = self.openTask()
+        props = self.obj.PropertiesList
         self.addThroughMenu("Height")
         self.assertIn("Height", self.obj.PropertiesList)
         self.assertTaskAborts(tid, undos)
-        self.assertNotIn("Height", self.obj.PropertiesList)
+        # also no property of a partial name typed (H, He, ...)
+        self.assertEqual(self.obj.PropertiesList, props)
+
+    def testFailedMoveLeavesNothingBooked(self):
+        """Review of fork PR 213 (L1): two VarSets with Width, both selected, Move Property to a
+        third: the second Width is refused at the target. The move's own transaction is aborted
+        (the first Width comes back), and nothing stays booked."""
+        other = self.doc.addObject("App::VarSet", "Second")
+        other.addProperty("App::PropertyInteger", "Width", "Variables")
+        other.Width = 4
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        self.moveThroughMenu("Width", target, objects=[self.obj, other])
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertEqual(other.getPropertyByName("Width"), 4)
+        self.assertNotIn("Width", target.PropertiesList)
+        self.assertEqual(self.doc.UndoCount, undos)
 
     def testAddWithoutBookingIsOwnStep(self):
         undos = self.doc.UndoCount
@@ -446,6 +466,43 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(self.obj.Width, 5)
         self.assertEqual(self.doc.UndoCount, undos)
 
+    def testEscapeInBookingKeepsIt(self):
+        """Review of fork PR 213 (S9): a task's transaction with a change in it; a value typed and
+        Esc: the value is back, and the task's transaction is still booked and aborts."""
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        widget = self.openValueEditor("Width")
+        self.typeThenEscape(widget, "9")
+        self.assertEqual(self.obj.Width, 5)
+        self.assertTaskAborts(tid, undos)
+
+    def testValueEditLeavesActiveDocumentsBooking(self):
+        """Review of fork PR 213 (L3'): "Edit" books in the active document. With a booking there
+        and nothing written yet, an edit of an object in another document doesn't replace it."""
+        other = App.newDocument("TestPropertyEditorGuiOther")
+        try:
+            other.UndoMode = 1
+            varSet = other.addObject("App::VarSet", "Other")
+            varSet.addProperty("App::PropertyInteger", "Width", "Variables")
+            varSet.Width = 2
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+            App.setActiveDocument(self.doc.Name)
+            self.doc.openTransaction("Task")
+            tid = self.doc.getBookedTransactionID()
+            widget = self.openValueEditor("Width", objects=[varSet])
+            self.assertEqual(App.ActiveDocument.Name, self.doc.Name)
+            QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+            QtTest.QTest.keyClicks(widget, "7")
+            QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+            pump(0.3)
+            self.assertEqual(varSet.Width, 7)
+            self.assertEqual(self.doc.getBookedTransactionID(), tid)
+            self.doc.abortTransaction()
+        finally:
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
+
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 
@@ -455,7 +512,7 @@ class TestPropertyEditorGui(unittest.TestCase):
         one-name path is a leaf row unless leaf is False (a Placement's own row)."""
         Gui.Selection.clearSelection()
         for obj in objects or [self.obj]:
-            Gui.Selection.addSelection(self.doc.Name, obj.Name)
+            Gui.Selection.addSelection(obj.Document.Name, obj.Name)
         pump(1.0)
         editor = self.dataEditor()
         model = editor.model()

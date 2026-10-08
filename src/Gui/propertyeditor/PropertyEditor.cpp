@@ -58,6 +58,18 @@
 
 FC_LOG_LEVEL_INIT("PropertyView", true, true)
 
+namespace
+{
+// FreeCAD-CH (ops#231): the property editors' "Edit" bookings, which openPropertyTransaction()
+// doesn't join (a dialog of its own, e.g. Add Property from the Variables panel, can't know them).
+// An ID is closed with its transaction or forgotten: IDs aren't reused.
+std::unordered_set<int>& editorBookings()
+{
+    static std::unordered_set<int> ids;
+    return ids;
+}
+}  // namespace
+
 using namespace Gui::PropertyEditor;
 
 PropertyEditor::PropertyEditor(QWidget* parent)
@@ -394,8 +406,13 @@ void PropertyEditor::openEditor(const QModelIndex& index)
     }
     // FreeCAD-CH (ops#231): a booked transaction (a task dialog's, before its first change) takes
     // the edit too: booking "Edit" replaced it, and the dialog's Cancel no longer reverted. The
-    // editor's own booking from a previous edit isn't one to keep.
-    int booked = obj->getDocument()->getBookedTransactionID();
+    // editor's own booking from a previous edit isn't one to keep. The booking checked is the one
+    // in the document "Edit" books in, the active one, as closeTransaction() and revertEdit() use.
+    App::Document* editDoc = App::GetApplication().getActiveDocument();
+    if (!editDoc) {
+        return;
+    }
+    int booked = editDoc->getBookedTransactionID();
     if (booked != 0 && booked != transactionID) {
         FC_LOG("booked transaction");
         return;
@@ -418,7 +435,8 @@ void PropertyEditor::openEditor(const QModelIndex& index)
     if (items.size() > 1) {
         str << "...";
     }
-    transactionID = Command::openActiveDocumentCommand(str.str());
+    transactionID = editDoc->openTransaction(str.str());
+    editorBookings().insert(transactionID);
     FC_LOG("editor transaction " << App::GetApplication().getTransactionName(transactionID));
 }
 
@@ -481,6 +499,7 @@ void PropertyEditor::closeTransaction()
         if (autoupdate) {
             recomputeDocument(doc);
         }
+        editorBookings().erase(transactionID);
         doc->commitTransaction();
         transactionID = 0;
     }
@@ -494,6 +513,7 @@ void PropertyEditor::revertEdit()
 {
     App::Document* doc = App::GetApplication().getActiveDocument();
     if (doc && transactionID != 0 && doc->getBookedTransactionID() == transactionID) {
+        editorBookings().erase(transactionID);
         doc->abortTransaction();
         transactionID = 0;
         return;
@@ -891,7 +911,7 @@ int Gui::PropertyEditor::openPropertyTransaction(
         return 0;
     }
     int booked = doc->getBookedTransactionID();
-    if (booked != 0 && booked != ownBooking) {
+    if (booked != 0 && booked != ownBooking && !editorBookings().contains(booked)) {
         return 0;
     }
     return doc->openTransaction(name);
@@ -932,23 +952,41 @@ static void moveProperties(
     // each one opened here is committed, not only the last document's. A document's second
     // property joins the transaction opened for its first.
     std::vector<int> tids;
-    for (auto& prop : props) {
-        auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
-        if (!obj) {
-            FC_ERR(
-                "Cannot move property " << prop->getName()
-                                        << " because its container is not a DocumentObject"
-            );
-            continue;
+    auto closeAll = [&tids](bool commit) {
+        for (int tid : tids) {
+            closePropertyTransaction(tid, commit);
         }
-        if (int tid = openPropertyTransaction(obj, "Move Property", ownBooking)) {
-            tids.push_back(tid);
+    };
+    // A failed move (e.g. two selected objects' properties of one name: the second is in use at
+    // the target) aborts the transactions opened here, so none stays booked; in a joined one the
+    // moves made stay, for its owner to commit or abort.
+    try {
+        for (auto& prop : props) {
+            auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
+            if (!obj) {
+                FC_ERR(
+                    "Cannot move property " << prop->getName()
+                                            << " because its container is not a DocumentObject"
+                );
+                continue;
+            }
+            if (int tid = openPropertyTransaction(obj, "Move Property", ownBooking)) {
+                tids.push_back(tid);
+            }
+            obj->moveDynamicProperty(prop, subObjects[0].getObject());
         }
-        obj->moveDynamicProperty(prop, subObjects[0].getObject());
     }
-    for (int tid : tids) {
-        closePropertyTransaction(tid);
+    catch (Base::Exception& e) {
+        closeAll(false);
+        e.reportException();
+        return;
     }
+    catch (...) {
+        closeAll(false);
+        FC_ERR("Unknown exception while moving properties");
+        return;
+    }
+    closeAll(true);
 }
 
 enum MenuAction
@@ -1118,6 +1156,11 @@ void PropertyEditor::removeProperties(const std::unordered_set<App::Property*>& 
         catch (Base::Exception& e) {
             closePropertyTransaction(tid, false);
             e.reportException();
+            continue;
+        }
+        catch (...) {
+            closePropertyTransaction(tid, false);
+            FC_ERR("Unknown exception while removing property " << prop->getName());
             continue;
         }
         closePropertyTransaction(tid);
