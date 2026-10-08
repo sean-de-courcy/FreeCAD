@@ -185,6 +185,8 @@ private:
     std::unique_ptr<Ui_TaskRevolutionParameters> ui;
     QWidget* proxy;
     bool isGroove;
+    /// updateUI is running (its own guard: blockUpdate is also "Update view" off, ops#193)
+    bool updatingUI = false;
     double defaultGizmoMultFactor;
 
     /// The start reference (ops#150 W6)

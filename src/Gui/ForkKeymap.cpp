@@ -106,6 +106,15 @@ const Entry table[] = {
     {"Std_TreeRecordSelection", ""},
     {"Std_TreeDrag", ""},
     {"Std_DockOverlayMouseTransparent", ""},
+    // The 3D view's arrows orbit (B2, View3DInventorViewer::processSoEvent). A window shortcut
+    // fires before the viewer sees the key, so the commands on Shift+arrows and Ctrl+arrows give
+    // their chords up (Ctrl+Shift+arrows are free); both stay in the menus
+    {"Std_ViewRotateLeft", ""},
+    {"Std_ViewRotateRight", ""},
+    {"Std_DockOverlayToggleLeft", ""},
+    {"Std_DockOverlayToggleRight", ""},
+    {"Std_DockOverlayToggleTop", ""},
+    {"Std_DockOverlayToggleBottom", ""},
     // The Part selection filters: off their chords (C, E, X and F are Onshape keys)
     {"Part_VertexSelection", "Shift+Alt+V"},
     {"Part_EdgeSelection", "Shift+Alt+E"},

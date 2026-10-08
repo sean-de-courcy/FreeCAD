@@ -219,7 +219,13 @@ names it.
 | `fix/205-datum-type-change` | fix | ops#205 | - | `integration` `45ca797def` | `b8c02a82e5` (fork PR 190), 2026-10-08 | a new base's `EditDatumDialog::accepted` changes the Radius/Diameter type through the property |
 | `fix/162-reference-test-gaps` | fix | ops#162 | none (fork code, ops#150) | `integration` `45ca797def` | `35bfb296f7` (fork PR 191), 2026-10-08 | never (fork code) |
 | `fix/216-unseen-key-release` | fix | ops#216 | - | `integration` `e8ad709d94` | `918b8fbf22` (fork PR 192), 2026-10-08 | never (fork fix) |
-| `fix/215-reference-test-flakes` | fix | ops#215 | none (fork code, ops#150) | `integration` `e8ad709d94` | (fork PR 194) | never (fork code) |
+| `fix/215-reference-test-flakes` | fix | ops#215 | none (fork code, ops#150) | `integration` `e8ad709d94` | `a2e660570b` (fork PR 194), 2026-10-08 | never (fork code) |
+| `fix/213-next-problem-start` | fix | ops#213 | - | `integration` `45ca797def` | `f66704e59b` (fork PR 188), 2026-10-08 | never (fork fix) |
+| `fix/218-edit-end-shown-feature` | fix | ops#218 | - | `fix/182-187-189-pattern-minors` `588f42cef2` (stacked on fork PR 184) | `715d1d5e96` (fork PR 193), 2026-10-08 | never (fork fix) |
+| `fix/217-select-other-polish` | fix | ops#217 | - | `fix/216-unseen-key-release` `5d86d00f6e` + `integration` `dd587e77db` (stacked on fork PR 192) | `498ff50527` (fork PR 197), 2026-10-08 | never (fork code) |
+| `feat/194-keymap-b2` | feat | ops#194 | - | `integration` `dd587e77db` | `101952b663` (fork PR 195), 2026-10-08 | never (fork feature); refit when upstream changes `View3DInventorViewer::processSoEvent` or the arrow handling in `SoQTQuarterAdaptor` |
+| `fix/214-originals-pick-history` | fix | ops#214 | - | `integration` `a2e660570b` | `0ad9fc0b74` (fork PR 196), 2026-10-08 | never (fork feature: the Originals field is the fork's) |
+| `fix/193-revolution-update-view-off` | fix | ops#193 | - | `integration` `f66704e59b` | (fork PR 199) | when upstream's `updateUI` no longer returns on `blockUpdate` (the early return is upstream's, in `base`) |
 
 ## Fork-only commits in carried topics
 

@@ -135,6 +135,7 @@
 #include "MainWindow.h"
 #include "Multisample.h"
 #include "NaviCube.h"
+#include "ForkKeymap.h"
 #include "Navigation/NavigationStyle.h"
 #include "Navigation/GestureNavigationStyle.h"
 #include "Navigation/SiemensNXNavigationStyle.h"
@@ -3551,6 +3552,96 @@ void View3DInventorViewer::selectAll()
     }
 }
 
+namespace
+{
+
+/** FreeCAD-CH (ops#194 B2): Onshape's orbit arrows, under the fork's keymap. The arrows turn the
+ * view about the focal point, by the screen's up axis (Left, Right) or right axis (Up, Down): 15
+ * degrees, 5 with Ctrl, 90 with Shift. The step is the direction the model turns, as for a mouse
+ * drag. Ctrl+Shift and Alt are left to the pan below (SoQTQuarterAdaptor::processSoEvent). The
+ * steps are fixed, not the navigation cube's. Qt reports the arrows of a Mac keyboard with
+ * Qt::KeypadModifier; Quarter reads only Shift, Ctrl and Alt, so the flag is ignored here too
+ * (and Ctrl is Cmd on a Mac, which Qt reports as ControlModifier).
+ *
+ * A box or polygon selection keeps the keys (its mouse model takes them in the navigation style).
+ *
+ * \return whether the event is the orbit's (a release too, so the navigation style sees neither)
+ */
+bool orbitByArrowKey(Gui::View3DInventorViewer* viewer, const SoKeyboardEvent* event)
+{
+    if (!Gui::ForkKeymap::isOnshape() || event->wasAltDown()
+        || (event->wasCtrlDown() && event->wasShiftDown()) || viewer->isSelecting()) {
+        return false;
+    }
+    SbVec3f axis;
+    float turn = 1.0F;  // a turn of the camera about its own axis; the model turns the other way
+    switch (event->getKey()) {
+        case SoKeyboardEvent::LEFT_ARROW:
+            axis = SbVec3f(0.0F, 1.0F, 0.0F);
+            break;
+        case SoKeyboardEvent::RIGHT_ARROW:
+            axis = SbVec3f(0.0F, 1.0F, 0.0F);
+            turn = -1.0F;
+            break;
+        case SoKeyboardEvent::UP_ARROW:
+            axis = SbVec3f(1.0F, 0.0F, 0.0F);
+            break;
+        case SoKeyboardEvent::DOWN_ARROW:
+            axis = SbVec3f(1.0F, 0.0F, 0.0F);
+            turn = -1.0F;
+            break;
+        default:
+            return false;
+    }
+    if (event->getState() != SoButtonEvent::DOWN) {
+        return true;
+    }
+
+    SoCamera* camera = viewer->getSoRenderManager()->getCamera();
+    Gui::NavigationStyle* navigation = viewer->navigationStyle();
+    if (!camera || !navigation) {
+        return false;
+    }
+    constexpr float degrees = std::numbers::pi_v<float> / 180.0F;
+    float step = 15.0F;
+    if (event->wasCtrlDown()) {
+        step = 5.0F;
+    }
+    else if (event->wasShiftDown()) {
+        step = 90.0F;
+    }
+    const float angle = step * degrees;
+
+    // A running animation (a standard view, a sketch's edit entry, a spin) would set the camera
+    // again at its next frame: stop it and turn from where it is, as a mouse drag does
+    if (navigation->isAnimating()) {
+        navigation->stopAnimating();
+    }
+
+    const SbRotation current = camera->orientation.getValue();
+    SbVec3f direction;
+    current.multVec(SbVec3f(0.0F, 0.0F, -1.0F), direction);
+    const SbVec3f focalPoint = camera->position.getValue()
+        + direction * camera->focalDistance.getValue();
+
+    // Coin composes left to right: the turn about the camera's own axis comes first
+    const SbRotation next = SbRotation(axis, turn * angle) * current;
+    camera->enableNotify(false);
+    if (navigation->setCameraOrientationValue(
+            camera,
+            next,
+            Gui::NavigationStyle::OrientationChangeSource::Interactive
+        )) {
+        next.multVec(SbVec3f(0.0F, 0.0F, -1.0F), direction);
+        camera->position = focalPoint - direction * camera->focalDistance.getValue();
+    }
+    camera->enableNotify(true);
+    camera->touch();
+    return true;
+}
+
+}  // namespace
+
 bool View3DInventorViewer::processSoEvent(const SoEvent* ev)
 {
     ZoneScoped;
@@ -3571,6 +3662,10 @@ bool View3DInventorViewer::processSoEvent(const SoEvent* ev)
     if (ev->getTypeId().isDerivedFrom(SoKeyboardEvent::getClassTypeId())) {
         // filter out 'Q' and 'ESC' keys
         const auto ke = static_cast<const SoKeyboardEvent*>(ev);  // NOLINT
+
+        if (orbitByArrowKey(this, ke)) {
+            return true;
+        }
 
         switch (ke->getKey()) {
             case SoKeyboardEvent::ESCAPE:
