@@ -130,6 +130,100 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(self.doc.UndoCount, undos)
         self.assertNotIn("Rename property", self.doc.UndoNames)
 
+    # ops#178: Rename opened its transaction with a fresh ID, which committed one the document had
+    # booked (a task dialog's), and committed with an ID of 0 when it had none of its own.
+
+    def renameThroughMenu(self, name, newName, before=None):
+        """Renames the VarSet's property name to newName through the Data tab's context menu and
+        the name dialog, as a user does; before() runs once the row is selected."""
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        pump(1.0)
+        editor = self.dataEditor()
+        index = findRow(editor.model(), QtCore.QModelIndex(), name)
+        self.assertIsNotNone(index, "no %s row in the property view" % name)
+        editor.setCurrentIndex(index)
+        editor.selectionModel().select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows,
+        )
+        if before:
+            before()
+
+        def pickRename(menu):
+            actions = [a for a in menu.actions() if a.text() == "Rename Property"]
+            self.assertTrue(actions, "no Rename Property in the menu")
+            menu.setActiveAction(actions[0])
+            for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
+                event = QtGui.QKeyEvent(kind, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
+                QtWidgets.QApplication.sendEvent(menu, event)
+
+        def nameDialog():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            return widget if isinstance(widget, QtWidgets.QInputDialog) else None
+
+        def answer(dialog):
+            dialog.setTextValue(newName)
+            dialog.accept()
+
+        self.answerSoon(QtWidgets.QApplication.activePopupWidget, pickRename)
+        self.answerSoon(nameDialog, answer)
+        viewport = editor.viewport()
+        pos = editor.visualRect(index).center()
+        event = QtGui.QContextMenuEvent(
+            QtGui.QContextMenuEvent.Mouse, pos, viewport.mapToGlobal(pos)
+        )
+        QtWidgets.QApplication.sendEvent(viewport, event)
+        pump()
+        self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
+
+    def testRenameKeepsBookedTransactionOpen(self):
+        """A transaction open in the document, as a task dialog keeps one, with a change to another
+        property in it: the rename joins it, and aborting it takes back the change and the rename.
+        (A value change and a rename of the same property in one transaction don't roll back:
+        ops#229.)"""
+        self.obj.addProperty("App::PropertyInteger", "Depth", "Variables")
+        self.obj.Depth = 3
+        undos = self.doc.UndoCount
+        self.doc.openTransaction("Task")
+        self.obj.Depth = 9
+        tid = self.doc.getBookedTransactionID()
+        self.renameThroughMenu("Width", "Wide")
+        self.assertEqual(self.obj.getPropertyByName("Wide"), 5)
+        self.assertEqual(self.doc.getBookedTransactionID(), tid)
+        self.assertEqual(self.doc.UndoNames[0], "Task")
+
+        self.doc.abortTransaction()
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Wide", self.obj.PropertiesList)
+        self.assertEqual(self.obj.Depth, 3)
+        self.assertEqual(self.doc.UndoCount, undos)
+
+    def testRenameLeavesOtherDocumentsBooking(self):
+        """The rename has no transaction of its own (it joined the document's): it closes none,
+        not the active document's booking in another document either."""
+        other = App.newDocument("TestPropertyEditorGuiOther")
+        try:
+            other.UndoMode = 1
+            self.doc.openTransaction("Task")
+            self.obj.Label2 = "task"
+
+            def activateOther():
+                Gui.ActiveDocument = Gui.getDocument(other.Name)
+                App.setActiveDocument(other.Name)
+                other.openTransaction("Other")
+                other.addObject("App::VarSet", "Other")
+                activateOther.tid = other.getBookedTransactionID()
+
+            self.renameThroughMenu("Width", "Wide", activateOther)
+            self.assertEqual(App.ActiveDocument.Name, other.Name)
+            self.assertEqual(self.obj.getPropertyByName("Wide"), 5)
+            self.assertEqual(other.getBookedTransactionID(), activateOther.tid)
+            other.commitTransaction()
+            self.assertEqual(other.UndoNames, ["Other"])
+        finally:
+            App.closeDocument(other.Name)
+
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 
