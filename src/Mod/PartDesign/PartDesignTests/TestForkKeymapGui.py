@@ -606,6 +606,9 @@ class TestForkKeymapGui(unittest.TestCase):
         away. In sketch edit, so the sketch toolbars' actions exist; a command with no action yet
         has no shortcut to check (its action takes the same default when it's made)."""
         self.editSketch()
+        # a group's button carries its default tool's key once a tool was picked from it
+        # (GroupCommand::setup(); earlier tests pick, and a workbench switch sets the buttons up)
+        tools = {name: toolKey for name, (_, _, toolKey) in groupCommands().items()}
         wrong = []
         checked = 0
         for name, key in ONSHAPE.items():
@@ -614,7 +617,7 @@ class TestForkKeymapGui(unittest.TestCase):
                 continue
             checked += 1
             actual = shortcut(name)
-            if not same(actual, key):
+            if not same(actual, key) and not (name in tools and same(actual, tools[name])):
                 wrong.append(f"{name}: {actual!r}, expected {key!r}")
         self.assertEqual(wrong, [])
         self.assertGreater(
