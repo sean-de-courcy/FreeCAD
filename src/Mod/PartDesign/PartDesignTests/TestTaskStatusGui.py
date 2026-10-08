@@ -43,6 +43,7 @@ Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
 import FreeCAD as App
@@ -289,3 +290,98 @@ class TestTaskStatusGui(unittest.TestCase):
             shown = shown or banner.isVisible()
         self.assertNotIn("Invalid", pad.State)
         self.assertFalse(shown, "the label flashed")
+
+    # -- PR 173 follow-ups (ops#202) -------------------------------------------------------------
+
+    def testShowDelayRestartsOnEachFailingRefresh(self):
+        """The label shows 300 ms after the *last* failing refresh: a feature failing, failing
+        again 200 ms later, and fixed 400 ms after the first failure (200 after the second)
+        never shows it. (Timed from the first failure, the label showed at 300 ms and hid again
+        at 400.) The recomputes are made through the document, to keep the times tight; a runner
+        too slow for them (the fix more than 290 ms after the second failure) skips the test."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        start = time.monotonic()
+        log = []
+
+        def watch(until):
+            while time.monotonic() - start < until:
+                pump(0.01)
+                if banner.isVisible():
+                    log.append(round(time.monotonic() - start, 3))
+
+        pad.Type = "UpToLast"
+        self.doc.recompute()  # t = 0: fails
+        self.assertIn("Invalid", pad.State)
+        watch(0.2)
+        second = time.monotonic()
+        pad.touch()
+        self.doc.recompute()  # t = 0.2: fails again
+        self.assertIn("Invalid", pad.State)
+        watch(0.4)
+        pad.Type = "Length"
+        self.doc.recompute()  # t = 0.4: fixed
+        gap = time.monotonic() - second
+        self.assertNotIn("Invalid", pad.State)
+        if gap >= 0.29:
+            self.skipTest(f"the runner is too slow: the fix came {gap:.3f} s after the failure")
+        watch(1.0)
+        self.assertEqual(log, [], f"the label flashed (fixed {gap:.3f} s after the second failure)")
+        self.assertEqual(banner.text(), "")
+
+    def testShowsOnlyAfterTheDelayOfTheLastFailure(self):
+        """A failure that stays shows the label 300 ms after the *last* failing refresh, not
+        after the first: failing at t = 0 and again at 0.2 s, it is still hidden at 0.4 s (the
+        first deadline, 0.3 s, has passed) and shown by 0.8 s. A runner too slow to look at 0.4
+        s, 0.3 s after the second failure, skips the test."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        start = time.monotonic()
+
+        def until(seconds):
+            while time.monotonic() - start < seconds:
+                pump(0.01)
+
+        pad.Type = "UpToLast"
+        self.doc.recompute()  # t = 0: fails
+        self.assertIn("Invalid", pad.State)
+        until(0.2)
+        second = time.monotonic()
+        pad.touch()
+        self.doc.recompute()  # t = 0.2: fails again
+        self.assertIn("Invalid", pad.State)
+        until(0.4)
+        hidden = not banner.isVisible()
+        looked = time.monotonic() - second
+        if looked >= 0.29:
+            self.skipTest(f"the runner is too slow: looked {looked:.3f} s after the failure")
+        self.assertTrue(hidden, f"the label showed {looked:.3f} s after the second failure")
+        self.assertTrue(waitFor(banner.isVisible), "the error isn't shown")
+
+    def testLabelFollowsUndoAndRedo(self):
+        """The edited feature failing in a transaction of its own: after undo (and a recompute)
+        the label is gone, after redo (and a recompute) it is back. Undo and redo alone change
+        no status bit, only the recompute does, so this checks the label against the document,
+        not the undo and redo signals (which Python can't isolate)."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        self.doc.openTransaction("Fail")
+        pad.Type = "UpToLast"
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", pad.State)
+        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays after undo")
+        self.assertEqual(banner.text(), "")
+
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
