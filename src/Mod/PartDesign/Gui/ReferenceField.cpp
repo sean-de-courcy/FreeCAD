@@ -65,8 +65,10 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/Gui/ReferenceHighlighter.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
+#include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
@@ -940,21 +942,75 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     if (usable(origin)) {
         return origin;
     }
-    // A sketch: the feature it is the profile of. A pad and a pocket on one sketch: the one that is
-    // in the element's history, else the first.
-    std::vector<App::DocumentObject*> profiled;
-    for (App::DocumentObject* user : origin->getInList()) {
-        auto based = freecad_cast<PartDesign::ProfileBased*>(user);
-        if (based && based->Profile.getValue() == origin && usable(based)) {
-            profiled.push_back(based);
+    // A sketch: the feature it is the profile of, also through binders: the side faces of a pad
+    // on a ShapeBinder or SubShapeBinder come from the binder's source (a sketch, a face, an inner
+    // binder). A binder counts by what it binds (its Support), not by its other links.
+    auto binds = [](App::DocumentObject* user, App::DocumentObject* obj) {
+        std::vector<App::DocumentObject*> bound;
+        if (auto binder = freecad_cast<PartDesign::ShapeBinder*>(user)) {
+            bound = binder->Support.getValues();
+        }
+        else if (auto binder = freecad_cast<PartDesign::SubShapeBinder*>(user)) {
+            bound = binder->Support.getValues();
+        }
+        return std::ranges::find(bound, obj) != bound.end();
+    };
+    std::vector<App::DocumentObject*> profiles {origin};
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        for (App::DocumentObject* user : profiles[i]->getInList()) {
+            if (binds(user, profiles[i]) && std::ranges::find(profiles, user) == profiles.end()) {
+                profiles.push_back(user);
+            }
         }
     }
+    // The origin's own users first, then those reached through a binder
+    std::vector<App::DocumentObject*> profiled;
+    std::size_t direct = 0;
+    for (App::DocumentObject* profile : profiles) {
+        for (App::DocumentObject* user : profile->getInList()) {
+            auto based = freecad_cast<PartDesign::ProfileBased*>(user);
+            if (based && based->Profile.getValue() == profile && usable(based)
+                && std::ranges::find(profiled, based) == profiled.end()) {
+                profiled.push_back(based);
+            }
+        }
+        if (profile == origin) {
+            direct = profiled.size();
+        }
+    }
+    // A pad and a pocket on one profile: the one that is in the element's history
     for (auto item = history.rbegin(); item != history.rend(); ++item) {
         if (std::ranges::find(profiled, item->obj) != profiled.end()) {
             return item->obj;
         }
     }
-    return profiled.empty() ? nullptr : profiled.front();
+    // Not in the history: no guess unless it's a safe one (fork PR 196 review). Several, some
+    // through a binder: nothing tells them apart. An origin that has solid faces of its own (the
+    // body's base, a box cut into it, another body's feature) made the element itself: a pad on
+    // a binder of its face left that face as it was. So did an object between the origin and the
+    // shape that isn't a feature of the body (another body's pad of the sketch a binder binds, an
+    // extrusion of it as the base). Otherwise (PR 187: a pad and a pocket on one sketch) the
+    // first.
+    if (profiled.empty() || (profiled.size() > 1 && profiled.size() > direct)) {
+        return nullptr;
+    }
+    auto feature = freecad_cast<PartDesign::Feature*>(owner());
+    PartDesign::Body* body = feature ? feature->getFeatureBody() : nullptr;
+    if (!body || body->BaseFeature.getValue() == origin) {
+        return nullptr;
+    }
+    for (const Data::HistoryItem& item : history) {
+        if (item.obj != origin
+            && (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj))) {
+            return nullptr;
+        }
+    }
+    const bool flat = origin->isDerivedFrom<Part::Part2DObject>()
+        || freecad_cast<PartDesign::ShapeBinder*>(origin)
+        || freecad_cast<PartDesign::SubShapeBinder*>(origin)
+        || !Part::Feature::getTopoShape(origin, Part::ShapeOption::ResolveLink)
+                .hasSubShape(TopAbs_SOLID);
+    return flat ? profiled.front() : nullptr;
 }
 
 void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)

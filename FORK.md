@@ -223,7 +223,8 @@ names it.
 | `fix/213-next-problem-start` | fix | ops#213 | - | `integration` `45ca797def` | `f66704e59b` (fork PR 188), 2026-10-08 | never (fork fix) |
 | `fix/218-edit-end-shown-feature` | fix | ops#218 | - | `fix/182-187-189-pattern-minors` `588f42cef2` (stacked on fork PR 184) | `715d1d5e96` (fork PR 193), 2026-10-08 | never (fork fix) |
 | `fix/217-select-other-polish` | fix | ops#217 | - | `fix/216-unseen-key-release` `5d86d00f6e` + `integration` `dd587e77db` (stacked on fork PR 192) | `498ff50527` (fork PR 197), 2026-10-08 | never (fork code) |
-| `feat/194-keymap-b2` | feat | ops#194 | - | `integration` `dd587e77db` | (fork PR 195) | never (fork feature); refit when upstream changes `View3DInventorViewer::processSoEvent` or the arrow handling in `SoQTQuarterAdaptor` |
+| `feat/194-keymap-b2` | feat | ops#194 | - | `integration` `dd587e77db` | `101952b663` (fork PR 195), 2026-10-08 | never (fork feature); refit when upstream changes `View3DInventorViewer::processSoEvent` or the arrow handling in `SoQTQuarterAdaptor` |
+| `fix/214-originals-pick-history` | fix | ops#214 | - | `integration` `a2e660570b` | (fork PR 196) | never (fork feature: the Originals field is the fork's) |
 
 ## Fork-only commits in carried topics
 
