@@ -656,6 +656,25 @@ class TestUpToPlanePlacement(unittest.TestCase):
         self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
         self.assertVolume(40)
 
+    def testUpToAPlaneWithACoordinateSystemAttached(self):
+        """A plane of no coordinate system (a Part datum plane at z = 7) with a coordinate system
+        attached to it, 10 above: the pad stops at the plane (40), not moved by the attached
+        coordinate system (PR 175 review, Medium 1)."""
+        plane = self.Doc.addObject("Part::DatumPlane", "DatumPlane")
+        self.Body.addObject(plane)
+        plane.MapMode = "Deactivated"
+        plane.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 7), FreeCAD.Rotation())
+        lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "Attached")
+        self.Body.addObject(lcs)
+        lcs.AttachmentSupport = [(plane, "")]
+        lcs.MapMode = "ObjectXY"
+        lcs.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+        self.Doc.recompute()
+        self.assertIn(lcs, plane.InList)
+        self.Pad.Type = "UpToFace"
+        self.Pad.UpToFace = (plane, [""])
+        self.assertVolume(40)
+
 
 class TestUpToPlanePlacementInAPlacedBody(TestUpToPlanePlacement):
     """The same in a body moved and turned: the same volumes."""
