@@ -221,3 +221,29 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         self.assertFalse(self.has_constraint("Horizontal", 1), f"Got {self.describe()}")
         self.sketch.solve()
         self.assertEqual(list(self.sketch.RedundantConstraints), [])
+
+    def test_a4_redundant_autoconstraint_dropped_in_an_already_redundant_sketch(self):
+        """A4 (ops#204): line 0 with two Horizontal constraints (redundant before the tool
+        runs), then line 1 drawn over it from (0, 2) to (10, 2): two automatic Coincidents and
+        an automatic Horizontal. The solver names an old Horizontal, so the tool tries the
+        automatic constraints one at a time, the one-equation Horizontal last: both Coincidents
+        are kept, the Horizontal brings a new redundancy and is dropped, and the sketch keeps
+        its own (old) redundancy, nothing more."""
+        self.add_horizontal_line(2)
+        old_redundant = list(self.sketch.RedundantConstraints)
+        self.assertEqual(len(old_redundant), 1)
+        self.start_edit()
+        self.draw_line((0, 2), (10, 2))
+
+        self.assertTrue(
+            self.has_constraint("Coincident", 1, 1, 0, 1),
+            f"Expected line 1's start on line 0's start, got {self.describe()}",
+        )
+        self.assertTrue(
+            self.has_constraint("Coincident", 1, 2, 0, 2),
+            f"Expected line 1's end on line 0's end, got {self.describe()}",
+        )
+        self.assertFalse(self.has_constraint("Horizontal", 1), f"Got {self.describe()}")
+        self.assertEqual(len(self.sketch.Constraints), 4, f"Got {self.describe()}")
+        self.sketch.solve()
+        self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)

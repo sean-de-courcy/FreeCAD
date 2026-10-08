@@ -456,12 +456,8 @@ void DrawSketchHandlerDragAutoConstraint::create(const std::vector<GeoElementId>
         }
     }
 
-    const bool valid = filterRedundantAutoConstraints(autoConstraints);
+    filterRedundantAutoConstraints(autoConstraints);
     obj->solve(false);
-
-    if (!valid) {
-        return;
-    }
 
     addGeneratedAutoConstraints(autoConstraints);
 }

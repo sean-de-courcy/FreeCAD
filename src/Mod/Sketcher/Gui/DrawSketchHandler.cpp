@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <numeric>
 #include <ranges>
 #include <set>
 #include <tuple>
@@ -1553,12 +1554,12 @@ bool DrawSketchHandler::generateOneAutoConstraintFromSuggestion(
     return true;
 }
 
-bool DrawSketchHandler::filterRedundantAutoConstraints(
+void DrawSketchHandler::filterRedundantAutoConstraints(
     std::vector<std::unique_ptr<Sketcher::Constraint>>& autoConstraints
 )
 {
     if (autoConstraints.empty()) {
-        return true;
+        return;
     }
 
     auto sketchobject = getSketchObject();
@@ -1567,10 +1568,10 @@ bool DrawSketchHandler::filterRedundantAutoConstraints(
 
     // Allows a diagnose with the new autoconstraints as if they were part of the sketchobject,
     // but WITHOUT adding them to the sketchobject..
-    sketchobject->diagnoseAdditionalConstraints(constraints);
+    const int allDoF = sketchobject->diagnoseAdditionalConstraints(constraints);
 
     if (!sketchobject->getLastHasRedundancies() && !sketchobject->getLastHasConflicts()) {
-        return true;
+        return;
     }
 
     // The solver's tags are 1-based positions in the sketch's constraints followed by the
@@ -1604,34 +1605,76 @@ bool DrawSketchHandler::filterRedundantAutoConstraints(
         for (int tag : named | std::views::reverse) {
             autoConstraints.erase(std::next(autoConstraints.begin(), autoIndex(tag)));
         }
-        return true;
+        return;
     }
 
     // The solver names a constraint already in the sketch (ops#199): the sketch was already
     // redundant or conflicting, or the solver blames an existing constraint for an
     // autoconstraint's redundancy (it names the one with fewer equations, e.g. a Horizontal
     // rather than a new Coincident). Compare with the sketch's own diagnosis, and keep the
-    // autoconstraints, one at a time, that name nothing new.
-    sketchobject->diagnoseAdditionalConstraints({});
+    // autoconstraints, one at a time, that name nothing new and lower the DoF (ops#204: GCS's
+    // DoF is the parameters less the Jacobian's rank, so a wholly redundant or conflicting
+    // constraint leaves it; in an over-constrained sketch a conflict lowers it, but then the
+    // solver names the conflict).
+    int dof = sketchobject->diagnoseAdditionalConstraints({});
     std::set<int> before;
     std::ranges::copy(sketchobject->getLastRedundant(), std::inserter(before, before.end()));
     std::ranges::copy(sketchobject->getLastConflicting(), std::inserter(before, before.end()));
-    auto namesNothingNew = [&]() {
-        auto isOld = [&](int tag) { return before.contains(tag); };
-        return std::ranges::all_of(sketchobject->getLastRedundant(), isOld)
-            && std::ranges::all_of(sketchobject->getLastConflicting(), isOld);
+    auto isOld = [&](int tag) { return before.contains(tag); };
+
+    // ops#204: one-equation types are tried last, so that when the solver blames a group, the
+    // autoconstraint with more equations is the one kept.
+    auto isOneEquation = [](const Sketcher::Constraint& constraint) {
+        switch (constraint.Type) {
+            case Sketcher::Horizontal:
+            case Sketcher::Vertical:
+            case Sketcher::PointOnObject:
+                return true;
+            default:
+                return false;
+        }
     };
 
-    std::vector<std::unique_ptr<Sketcher::Constraint>> kept;
+    // ops#204: when the whole set names nothing new, one diagnosis can tell that every
+    // autoconstraint lowers the DoF in two cases: there is one, or they all have one equation
+    // and the DoF fell by their number. Then keep them all without trying each.
+    const int fall = dof - allDoF;
+    if (std::ranges::all_of(named, isOld)
+        && (autoConstraintCount == 1
+                ? fall > 0
+                : fall == autoConstraintCount
+                    && std::ranges::all_of(autoConstraints, [&](const auto& constraint) {
+                           return isOneEquation(*constraint);
+                       }))) {
+        return;
+    }
+
+    std::vector<int> order(autoConstraints.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::ranges::stable_partition(order, [&](int index) {
+        return !isOneEquation(*autoConstraints[index]);
+    });
+
+    std::vector<bool> keep(autoConstraints.size(), false);
     std::vector<Sketcher::Constraint*> trial;
-    for (auto& constraint : autoConstraints) {
-        trial.push_back(constraint.get());
-        sketchobject->diagnoseAdditionalConstraints(trial);
-        if (namesNothingNew()) {
-            kept.push_back(std::move(constraint));
+    for (int index : order) {
+        trial.push_back(autoConstraints[index].get());
+        const int trialDoF = sketchobject->diagnoseAdditionalConstraints(trial);
+        if (trialDoF < dof && std::ranges::all_of(sketchobject->getLastRedundant(), isOld)
+            && std::ranges::all_of(sketchobject->getLastConflicting(), isOld)) {
+            keep[index] = true;
+            dof = trialDoF;
         }
         else {
             trial.pop_back();
+        }
+    }
+
+    // the kept ones in their original order
+    std::vector<std::unique_ptr<Sketcher::Constraint>> kept;
+    for (std::size_t index = 0; index < autoConstraints.size(); ++index) {
+        if (keep[index]) {
+            kept.push_back(std::move(autoConstraints[index]));
         }
     }
 
@@ -1639,8 +1682,6 @@ bool DrawSketchHandler::filterRedundantAutoConstraints(
         notifyRemoval();
     }
     autoConstraints = std::move(kept);
-
-    return true;
 }
 
 void DrawSketchHandler::addGeneratedAutoConstraints(
