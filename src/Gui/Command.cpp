@@ -54,6 +54,7 @@
 #include "Dialogs/DlgUndoRedo.h"
 #include "PreferencePages/DlgSettingsWorkbenchesImp.h"
 #include "Document.h"
+#include "ForkKeymap.h"
 #include "frameobject.h"
 #include "Macro.h"
 #include "MainWindow.h"
@@ -295,6 +296,7 @@ void Command::initAction()
         // printConflictingAccelerators();
 #endif
         setShortcut(ShortcutManager::instance()->getShortcut(getName(), getAccel()));
+        ForkKeymap::actionCreated(this);  // FreeCAD-CH (ops#194)
         testActive();
     }
 }
@@ -1607,7 +1609,7 @@ const char* PythonCommand::getPixmap() const
 
 const char* PythonCommand::getAccel() const
 {
-    return getResource("Accel");
+    return ForkKeymap::accel(getName(), getResource("Accel"));  // FreeCAD-CH (ops#194)
 }
 
 bool PythonCommand::isCheckable() const
@@ -2056,6 +2058,7 @@ void CommandManager::addCommand(Command* pCom)
     }
     ++_revision;
     cmd = pCom;
+    ForkKeymap::applyTo(pCom);  // FreeCAD-CH: the fork's default keys (ops#194)
     signalChanged();
 }
 

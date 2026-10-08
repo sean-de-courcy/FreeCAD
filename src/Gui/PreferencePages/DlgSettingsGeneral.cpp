@@ -45,6 +45,7 @@
 #include <Gui/Dialogs/DlgPreferencesImp.h>
 #include <Gui/Dialogs/DlgPreferencePackManagementImp.h>
 #include <Gui/Dialogs/DlgRevertToBackupConfigImp.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/OverlayManager.h>
 #include <Gui/ParamHandler.h>
@@ -254,6 +255,11 @@ void DlgSettingsGeneral::saveSettings()
     }
     ui->FineGrainedRecompute->onSave();
     ui->ComboBoxWheelEventFilter->onSave();
+    // FreeCAD-CH (ops#194): the keymap; ShortcutManager applies a change at once
+    ForkKeymap::preferenceGroup()->SetASCII(
+        "Keymap",
+        ui->Keymap->currentIndex() == 1 ? "FreeCAD" : "Onshape"
+    );
 
     setRecentFileSize();
     bool force = setLanguage();
@@ -309,6 +315,8 @@ void DlgSettingsGeneral::loadSettings()
     setProperty("ActivateOverlay", ui->ActivateOverlay->isChecked());
     ui->FineGrainedRecompute->onRestore();
     ui->ComboBoxWheelEventFilter->onRestore();
+    auto keymap = ForkKeymap::preferenceGroup()->GetASCII("Keymap", "Onshape");
+    ui->Keymap->setCurrentIndex(keymap == "FreeCAD" ? 1 : 0);
 
     // search for the language files
     ParameterGrp::handle hGrp = WindowParameter::getDefaultParameter()->GetGroup("General");

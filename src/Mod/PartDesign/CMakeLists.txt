@@ -90,6 +90,7 @@ if(BUILD_GUI)
         PartDesignTests/TestDressUpDeleteKeyGui.py
         PartDesignTests/TestReferenceFieldGui.py
         PartDesignTests/TestTreeItemsGui.py
+        PartDesignTests/TestForkKeymapGui.py
     )
 endif(BUILD_GUI)
 

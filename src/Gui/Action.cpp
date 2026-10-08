@@ -47,6 +47,7 @@
 #include "PreferencePages/DlgSettingsWorkbenchesImp.h"
 #include "Document.h"
 #include "EditorView.h"
+#include "ForkKeymap.h"
 #include "Macro.h"
 #include "ModuleIO.h"
 #include "MainWindow.h"
@@ -736,8 +737,12 @@ void WorkbenchGroup::refreshWorkbenchList()
         action->setIcon(px);
         action->setToolTip(tip);
         action->setStatusTip(tr("Selects the '%1' workbench").arg(name));
-        if (index < 9) {
+        // FreeCAD-CH (ops#194): W is box zoom in the fork's keymap
+        if (index < 9 && !ForkKeymap::isOnshape()) {
             action->setShortcut(QKeySequence(QStringLiteral("W,%1").arg(index + 1)));
+        }
+        else {
+            action->setShortcut(QKeySequence());
         }
         if (wbName.toStdString() == activeWbName) {
             action->setChecked(true);

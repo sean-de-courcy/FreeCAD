@@ -33,6 +33,7 @@
 #include <TopoDS_Face.hxx>
 
 
+#include <App/DocumentObserver.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Origin.h>
@@ -43,9 +44,11 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionObject.h>
+#include <Gui/ViewProviderDocumentObject.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -1214,6 +1217,41 @@ void prepareProfileBased(
     }
 }
 
+// FreeCAD-CH (ops#194): from a sketch in edit, Pad and Revolution close the sketch and take it as
+// their profile, as Onshape's extrude and revolve keys (Shift+E, Shift+W) do. The sketch's task
+// dialog would disable them, so they are ForEdit and check the dialog themselves.
+static Sketcher::SketchObject* sketchInEdit()
+{
+    Gui::Document* guiDoc = Gui::Application::Instance->activeDocument();
+    auto vp = guiDoc ? dynamic_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getInEdit()) : nullptr;
+    return vp ? dynamic_cast<Sketcher::SketchObject*>(vp->getObject()) : nullptr;
+}
+
+// What Command::testActive() checks for a command that isn't ForEdit, but a sketch in edit passes
+// under the fork's keymap (FreeCAD's keeps upstream's: disabled in the sketch)
+static bool allowedOrSketchInEdit(App::Document* doc)
+{
+    return (Gui::ForkKeymap::isOnshape() && sketchInEdit())
+        || (Gui::Control().isAllowedAlterDocument(doc) && Gui::Control().isAllowedAlterView(doc)
+            && Gui::Control().isAllowedAlterSelection(doc));
+}
+
+static void leaveSketchForProfile()
+{
+    Sketcher::SketchObject* sketch = sketchInEdit();
+    if (!sketch) {
+        return;
+    }
+    Gui::Document* guiDoc = Gui::Application::Instance->activeDocument();
+    App::DocumentObjectT sketchT(sketch);
+    Gui::Application::Instance->commandManager().runCommandByName("Sketcher_LeaveSketch");
+    if (guiDoc->getInEdit() || !sketchT.getObject()) {
+        return;  // the sketch stayed open: leave its selection alone
+    }
+    Gui::Selection().clearSelection();
+    Gui::Selection().addSelection(sketchT.getDocumentName().c_str(), sketchT.getObjectName().c_str());
+}
+
 void finishProfileBased(const Gui::Command* cmd, const Part::Feature* sketch, App::DocumentObject* Feat)
 {
     if (sketch && sketch->isDerivedFrom<Part::Part2DObject>()) {
@@ -1270,18 +1308,20 @@ CmdPartDesignPad::CmdPartDesignPad()
     sWhatsThis = "PartDesign_Pad";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Pad";
+    eType |= ForEdit;  // FreeCAD-CH (ops#194): from a sketch in edit; isActive() checks the dialog
 }
 
 void CmdPartDesignPad::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    leaveSketchForProfile();
     prepareProfileBased(this, "Pad", 10.0);
 }
 
 bool CmdPartDesignPad::isActive()
 {
-    return hasActiveDocument();
+    return hasActiveDocument() && allowedOrSketchInEdit(getDocument());
 }
 
 //===========================================================================
@@ -1375,12 +1415,14 @@ CmdPartDesignRevolution::CmdPartDesignRevolution()
     sWhatsThis = "PartDesign_Revolution";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Revolution";
+    eType |= ForEdit;  // FreeCAD-CH (ops#194): as PartDesign_Pad
 }
 
 void CmdPartDesignRevolution::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
+    leaveSketchForProfile();
     PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
 
     if (!pcActiveBody) {
@@ -1417,7 +1459,7 @@ void CmdPartDesignRevolution::activated(int iMsg)
 
 bool CmdPartDesignRevolution::isActive()
 {
-    return hasActiveDocument();
+    return hasActiveDocument() && allowedOrSketchInEdit(getDocument());
 }
 
 //===========================================================================

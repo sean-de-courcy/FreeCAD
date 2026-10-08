@@ -30,6 +30,7 @@
 #include <Gui/Action.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/View3DInventor.h>
@@ -88,16 +89,24 @@ Gui::Action* PartCmdSelectFilter::createAction()
 
     QAction* cmd0 = pcAction->addAction(QString());
     cmd0->setIcon(Gui::BitmapFactory().iconFromTheme("vertex-selection"));
-    cmd0->setShortcut(QKeySequence(QStringLiteral("X,S")));
+    cmd0->setShortcut(
+        QKeySequence(QString::fromLatin1(Gui::ForkKeymap::accel("Part_VertexSelection", "X,S")))
+    );
     QAction* cmd1 = pcAction->addAction(QString());
     cmd1->setIcon(Gui::BitmapFactory().iconFromTheme("edge-selection"));
-    cmd1->setShortcut(QKeySequence(QStringLiteral("E,S")));
+    cmd1->setShortcut(
+        QKeySequence(QString::fromLatin1(Gui::ForkKeymap::accel("Part_EdgeSelection", "E,S")))
+    );
     QAction* cmd2 = pcAction->addAction(QString());
     cmd2->setIcon(Gui::BitmapFactory().iconFromTheme("face-selection"));
-    cmd2->setShortcut(QKeySequence(QStringLiteral("F,S")));
+    cmd2->setShortcut(
+        QKeySequence(QString::fromLatin1(Gui::ForkKeymap::accel("Part_FaceSelection", "F,S")))
+    );
     QAction* cmd3 = pcAction->addAction(QString());
     cmd3->setIcon(Gui::BitmapFactory().iconFromTheme("clear-selection"));
-    cmd3->setShortcut(QKeySequence(QStringLiteral("C,S")));
+    cmd3->setShortcut(
+        QKeySequence(QString::fromLatin1(Gui::ForkKeymap::accel("Part_RemoveSelectionGate", "C,S")))
+    );
 
     _pcAction = pcAction;
     languageChange();
