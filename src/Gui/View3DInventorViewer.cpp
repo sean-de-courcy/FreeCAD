@@ -822,6 +822,18 @@ public:
             }
         }
 
+        // FreeCAD-CH (ops#220): auto-repeated Esc never becomes a Coin event. Held past the
+        // repeat delay after Esc closed a popup, its repeated presses reached the view and made
+        // the release count there (disarming an armed field); on X11 each repeated release acted
+        // (first disarming, then closing the dialog). Other keys keep repeating (a held arrow
+        // keeps panning or orbiting).
+        if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
+            auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
+            if (ke->key() == Qt::Key_Escape && ke->isAutoRepeat()) {
+                return true;
+            }
+        }
+
         if (Base::Sequencer().isRunning() && Base::Sequencer().isBlocking()) {
             return false;
         }
