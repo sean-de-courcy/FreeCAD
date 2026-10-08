@@ -1144,9 +1144,16 @@ void ViewProviderSketch::getSelectOtherPicks(
                                                                                           : nullptr;
     };
 
+    // the hover's point first, as the hover keeps it among points within reach
+    int hoveredPointIndex = Result::InvalidPoint;
+    if (viewProviderParameters.hasLastPreselectionResult
+        && viewProviderParameters.lastPreselectionResult.Kind == Result::HitKind::Point) {
+        hoveredPointIndex = viewProviderParameters.lastPreselectionResult.PointIndex;
+    }
+
     std::set<std::string> seen;
     SoPickedPointList points = getPickedPointsOnRay(pos, viewer);
-    for (Result result : editCoinManager->detectAllPreselections(points, pos)) {
+    for (Result result : editCoinManager->detectAllPreselections(points, pos, hoveredPointIndex)) {
         if (!result.hasPickedPoint()) {
             continue;
         }

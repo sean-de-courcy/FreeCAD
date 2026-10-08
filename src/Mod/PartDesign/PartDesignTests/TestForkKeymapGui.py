@@ -1835,7 +1835,8 @@ OrthographicCamera {{
     def testSelectOtherDoesNothingOverATaskPanelOverlay(self):
         """With the cursor over a task panel docked as an overlay over the 3D view (its content,
         where the panel keeps the mouse), backtick opens no list: a click there wouldn't reach
-        the view either (PR 197 review finding 2)."""
+        the view either (PR 197 review finding 2). The box lies under the panel there: with the
+        panel hidden, the same spot opens a list (PR 198 review finding 3)."""
         self.filletScene()
         view = Gui.getDocument(self.doc.Name).ActiveView
         viewport = view.graphicsView().viewport()
@@ -1856,6 +1857,15 @@ OrthographicCamera {{
                 break
         if spot is None:
             self.skipTest("no task panel overlay over the view here")
+        # the box's front face under the spot: move the camera so that (5, 0, 5) shows there
+        local = viewport.mapFromGlobal(spot)
+        _, height = view.getSize()
+        scale = viewport.devicePixelRatioF()
+        pixel = (int(local.x() * scale), int(height - 1 - local.y() * scale))
+        there = view.getPoint(*pixel)
+        self.frontCamera(cx=5 + 5 - there.x, cz=5 - self.topBand() + 5 - there.z)
+        if not view.getObjectsInfo(pixel, 1):
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
         QtGui.QCursor.setPos(spot)
         pump(0.1)
         if QtGui.QCursor.pos() != spot:
@@ -1865,6 +1875,30 @@ OrthographicCamera {{
             self.assertTrue(waitFor(lambda: fired), "the command didn't run")
         pump(0.3)
         self.assertIsNone(self.selectOtherList(), "a list opened under the task panel")
+        # the overlays over the spot hidden (the Tasks panel's, and any other docked there): the
+        # view is under the cursor, and the list opens
+        hidden = []
+        try:
+            for _ in range(4):
+                under = QtWidgets.QApplication.widgetAt(spot)
+                if under is viewport or (under is not None and viewport.isAncestorOf(under)):
+                    break
+                chain, overlay = [], under
+                while overlay is not None:
+                    chain.append(overlay.metaObject().className())
+                    if chain[-1] == "Gui::OverlayTabWidget":
+                        break
+                    overlay = overlay.parentWidget()
+                self.assertIsNotNone(overlay, f"no overlay over the view here: {chain}")
+                overlay.hide()
+                hidden.append(overlay)
+                pump(0.2)
+            self.assertCursorOverTheView()
+            self.openSelectOther()
+        finally:
+            for overlay in hidden:
+                overlay.show()
+            pump(0.2)
 
     def testSelectOtherDoesNothingUnderAWindowOverTheView(self):
         """With the cursor over a window in front of the 3D view (a floating panel), backtick
@@ -1892,20 +1926,27 @@ OrthographicCamera {{
 
     # --- Select other in sketch edit (PR E)
 
-    def sketchInEdit(self, lines=(), points=()):
+    def sketchInEdit(self, lines=(), points=(), inBody=False, offset=(0, 0)):
         """A sketch in the XY plane with the given lines ((x1, y1), (x2, y2)) and points, in edit,
         seen from the top by an orthographic camera 40 mm high, with (10, 5) in the top band of
         the view. Its edges are Edge1, Edge2, ... in the order given; the points' vertices follow
-        the lines' ends. The sketch is not in the body: off screen, a sketch in a body picks
-        nothing in edit, not even through its own hover (SketcherGui.getActiveSketchPreselection),
-        seen 2026-10-08 and not understood."""
-        sketch = self.doc.addObject("Sketcher::SketchObject", "SketchE")
+        the lines' ends. With `inBody` the sketch is the body's, the body moved by `offset` (x,
+        y), and the edit entered through the body (a subname), as the tree does; the camera
+        follows the offset."""
+        if inBody:
+            self.body.Placement.Base = App.Vector(offset[0], offset[1], 0)
+            sketch = self.body.newObject("Sketcher::SketchObject", "SketchE")
+        else:
+            sketch = self.doc.addObject("Sketcher::SketchObject", "SketchE")
         for (ax, ay), (bx, by) in lines:
             sketch.addGeometry(Part.LineSegment(App.Vector(ax, ay, 0), App.Vector(bx, by, 0)))
         for x, y in points:
             sketch.addGeometry(Part.Point(App.Vector(x, y, 0)))
         self.doc.recompute()
-        Gui.ActiveDocument.setEdit(sketch.Name)
+        if inBody:
+            Gui.ActiveDocument.setEdit(self.body.Name, 0, sketch.Name + ".")
+        else:
+            Gui.ActiveDocument.setEdit(sketch.Name)
         self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
         view = Gui.getDocument(self.doc.Name).ActiveView
         view.setCameraType("Orthographic")
@@ -1914,7 +1955,7 @@ OrthographicCamera {{
             f"""#Inventor V2.1 ascii
 OrthographicCamera {{
   viewportMapping ADJUST_CAMERA
-  position 10 {5 - self.topBand()} 100
+  position {10 + offset[0]} {5 + offset[1] - self.topBand()} 100
   orientation 0 0 1  0
   nearDistance 10
   farDistance 300
@@ -1949,8 +1990,33 @@ OrthographicCamera {{
         """Two overlapping lines in sketch edit: the list holds both, the first preselected;
         backtick preselects the other and selects nothing, Enter selects it and the sketch stays
         in edit."""
-        self.sketchInEdit(lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))])
-        self.cursorOverSketch(App.Vector(10, 5, 0))
+        self.overlappingLines()
+
+    def testSelectOtherInABodysSketchListsBothOverlappingLines(self):
+        """The same in a sketch of the body, its edit entered through the body (PR 198 review
+        finding 2: the sketch's own hover lookup found no view for a sketch in a body)."""
+        self.overlappingLines(inBody=True)
+
+    def testSelectOtherInAMovedBodysSketchListsBothOverlappingLines(self):
+        """The same with the body moved away from the origin."""
+        self.overlappingLines(inBody=True, offset=(30, -20))
+
+    def overlappingLines(self, inBody=False, offset=(0, 0)):
+        import SketcherGui
+
+        self.sketchInEdit(
+            lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))], inBody=inBody, offset=offset
+        )
+        at = App.Vector(10 + offset[0], 5 + offset[1], 0)
+        # the sketch's own hover picks a line there
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        info = SketcherGui.getActiveSketchPreselection(view.getPointOnViewport(at)) or {}
+        self.assertIn(
+            (info.get("SubElementNames") or [None])[0],
+            ("Edge1", "Edge2"),
+            "the sketch's hover picks no line",
+        )
+        self.cursorOverSketch(at)
         popup = self.openSelectOther()
         names = self.entries(popup)
         self.assertEqual(sorted(names), ["Edge1", "Edge2"], names)
@@ -2082,11 +2148,61 @@ OrthographicCamera {{
         finally:
             self.escapeTool()
 
+    def testSelectOtherInAnotherDocumentsViewIsThe3DViewsList(self):
+        """With a sketch in edit, backtick in another document's 3D view lists what that view
+        picks (a box), as without the sketch; it used to list nothing there, the sketch's picker
+        claiming the view (PR 198 review finding 1; another view of the sketch's own document was
+        safe: Document::getInEdit is empty while that view is active). The other view has the
+        sketch's camera, so the sketch's lines would lie under the cursor there too. Back in the
+        sketch's view, the same spot gives the sketch's list."""
+        self.sketchInEdit(lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))])
+        camera = Gui.getDocument(self.doc.Name).ActiveView.getCamera()
+        other = App.newDocument("ForkKeymapOther")
+        try:
+            box = other.addObject("Part::Box", "Box")
+            box.Length, box.Width, box.Height = 20, 10, 2
+            box.Placement.Base = App.Vector(0, 0, -5)
+            other.recompute()
+            pump(0.3)
+            self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit ended")
+            view = Gui.getDocument(other.Name).ActiveView
+            view.setCameraType("Orthographic")
+            pump(0.2)
+            view.setCamera(camera)
+            pump(0.3)
+            viewport = view.graphicsView().viewport()
+            x, y = view.getPointOnViewport(App.Vector(10, 5, -3))
+            _, height = view.getSize()
+            scale = viewport.devicePixelRatioF()
+            target = viewport.mapToGlobal(
+                QtCore.QPoint(int(round(x / scale)), int(round((height - y - 1) / scale)))
+            )
+            QtGui.QCursor.setPos(target)
+            pump(0.1)
+            if QtGui.QCursor.pos() != target:
+                self.skipTest("the platform doesn't move the cursor")
+            under = QtWidgets.QApplication.widgetAt(target)
+            self.assertTrue(under is viewport or viewport.isAncestorOf(under), "not over the view")
+            if not view.getObjectsInfo((x, y), 1):
+                self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+            popup = self.openSelectOther()
+            labels = [action.text() for action in popup.actions()]
+            self.assertTrue(labels and all("Box" in label for label in labels), labels)
+            self.listKey(QtCore.Qt.Key_Escape)
+            self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        finally:
+            App.closeDocument(other.Name)
+            pump(0.3)
+        Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+        self.cursorOverSketch(App.Vector(10, 5, 0))
+        popup = self.openSelectOther()
+        self.assertEqual(sorted(self.entries(popup)), ["Edge1", "Edge2"])
+
     def testCommitToggleOnceInAnArmedFilletField(self):
         """In a Fillet's armed field a commit toggles the element once, and cycling the list
         toggles nothing. (A face: off screen the 3D view picks no edges.)"""
         fillet, field = self.filletScene()
-        self.cursorOverSketch(App.Vector(5, 0, 5))
+        self.cursorOver(App.Vector(5, 0, 5))
         self.assertCursorOverTheView()
         self.openSelectOther()
         self.listKey(QtCore.Qt.Key_QuoteLeft)  # the second entry
@@ -2175,9 +2291,10 @@ OrthographicCamera {{
         self.assertDirection(self.turned(90, self.LEFT), "keypad shift+left")
 
     def testAnArrowStopsAViewAnimation(self):
-        """An arrow during a view animation (a standard view, the sketch's edit entry) stops it
-        and turns the camera from where it is, as a mouse drag does; the animation used to set
-        the orientation again at its next frame, and the step was lost. The animation is slowed
+        """An arrow during a view animation (a standard view; a sketch's edit entry with
+        OrientViewOnEdit on) stops it and turns the camera from where it is, as a mouse drag
+        does; the animation used to run on, turning the camera by the rest of its way from where
+        the arrow had put it, so the view didn't end where the arrow put it. The animation is slowed
         to 10 s, so that the arrow lands in it."""
         view = self.orbitView()
         viewSettings = App.ParamGet("User parameter:BaseApp/Preferences/View")
@@ -2203,6 +2320,43 @@ OrthographicCamera {{
             moved = math.degrees(after.getAngle(self.cameraDirection()))
             self.assertLess(moved, 0.1, "the animation went on after the arrow")
         finally:
+            view.stopAnimating()
+            view.setAnimationEnabled(animated)
+            if hadDuration:
+                viewSettings.SetInt("AnimationDuration", oldDuration)
+            else:
+                viewSettings.RemInt("AnimationDuration")
+
+    def testARefusedArrowLeavesAViewAnimationRunning(self):
+        """With rotation off (the navigation style's setRotationEnabled), an arrow doesn't turn
+        the view, and a running view animation goes on to its end: the arrow used to stop it
+        before the turn was refused, which froze the view half way (PR 195 verification)."""
+        view = self.orbitView()
+        navigation = view.getViewer().getNavigationStyle()
+        viewSettings = App.ParamGet("User parameter:BaseApp/Preferences/View")
+        hadDuration = "AnimationDuration" in viewSettings.GetInts()
+        oldDuration = viewSettings.GetInt("AnimationDuration", 500)
+        animated = view.isAnimationEnabled()
+        viewSettings.SetInt("AnimationDuration", 3000)
+        view.setAnimationEnabled(True)
+        front, top = App.Vector(0, 1, 0), App.Vector(0, 0, -1)
+        navigation.setRotationEnabled(False)
+        try:
+            view.viewTop()
+            self.assertTrue(
+                waitFor(lambda: math.degrees(self.cameraDirection().getAngle(front)) > 1),
+                "the view animation didn't start",
+            )
+            self.assertGreater(
+                math.degrees(self.cameraDirection().getAngle(top)), 30, "the animation ran ahead"
+            )
+            self.press(QtCore.Qt.Key_Left)
+            self.assertTrue(
+                waitFor(lambda: math.degrees(self.cameraDirection().getAngle(top)) < 0.5, 6),
+                "the animation stopped short of the top view",
+            )
+        finally:
+            navigation.setRotationEnabled(True)
             view.stopAnimating()
             view.setAnimationEnabled(animated)
             if hadDuration:
@@ -2288,7 +2442,8 @@ OrthographicCamera {{
         sketch saw a key): the arrows orbit there too, the sketch stays in edit, and its other
         keys still reach its tools."""
         self.editSketch()
-        # the edit entry turns the view to the sketch with an animation: read the camera after it
+        # with OrientViewOnEdit on (off by default) the edit entry turns the view to the sketch
+        # with an animation: read the camera after it
         self.assertDirection(App.Vector(0, 0, -1), "the sketch's view")
         pump(0.3)
         before = self.cameraDirection()

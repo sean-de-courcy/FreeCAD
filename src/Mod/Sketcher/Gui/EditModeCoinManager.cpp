@@ -1615,7 +1615,8 @@ EditModeCoinManager::PreselectionResult EditModeCoinManager::detectPreselection(
 
 std::vector<EditModeCoinManager::PreselectionResult> EditModeCoinManager::detectAllPreselections(
     const SoPickedPointList& points,
-    const SbVec2s& cursorPos
+    const SbVec2s& cursorPos,
+    int hoveredPointIndex
 )
 {
     // (priority, squared screen distance, hit); the ray's hits count as distance 0
@@ -1720,7 +1721,7 @@ std::vector<EditModeCoinManager::PreselectionResult> EditModeCoinManager::detect
             all.push_back(result);
         }
     };
-    PreselectionResult winner = detectPreselection(points, cursorPos);
+    PreselectionResult winner = detectPreselection(points, cursorPos, hoveredPointIndex);
     if (winner.hasWinner() && winner.Kind == PreselectionResult::HitKind::Constraint) {
         // a merged icon: its first constraint leads
         winner.ConstrIndices = {*winner.ConstrIndices.begin()};

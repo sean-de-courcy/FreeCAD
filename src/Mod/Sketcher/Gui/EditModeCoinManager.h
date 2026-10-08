@@ -287,11 +287,12 @@ public:
      * detectPreselection() picks, then the rest by the same priorities (points, constraint icons,
      * datum labels, edges, axes), each kind nearest first. One entry per constraint (a merged icon
      * gives one per constraint in it); an element the ray and the screen test both find comes
-     * once.
+     * once. @a hoveredPointIndex as for detectPreselection(): the point the hover shows.
      */
     std::vector<PreselectionResult> detectAllPreselections(
         const SoPickedPointList& points,
-        const SbVec2s& cursorPos
+        const SbVec2s& cursorPos,
+        int hoveredPointIndex = PreselectionResult::InvalidPoint
     );
     /// The client is responsible for unref-ing the SoGroup to release the memory.
     SoGroup* getSelectedConstraints();

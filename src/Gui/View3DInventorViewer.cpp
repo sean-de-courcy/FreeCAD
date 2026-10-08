@@ -3612,20 +3612,31 @@ bool orbitByArrowKey(Gui::View3DInventorViewer* viewer, const SoKeyboardEvent* e
     }
     const float angle = step * degrees;
 
-    // A running animation (a standard view, a sketch's edit entry, a spin) would set the camera
-    // again at its next frame: stop it and turn from where it is, as a mouse drag does
+    const SbRotation current = camera->orientation.getValue();
+    // Coin composes left to right: the turn about the camera's own axis comes first
+    const SbRotation next = SbRotation(axis, turn * angle) * current;
+    // A turn the view refuses (rotation off, orientation locked) leaves a running animation alone
+    if (!navigation->canChangeCameraOrientation(
+            current,
+            next,
+            Gui::NavigationStyle::OrientationChangeSource::Interactive
+        )) {
+        return true;
+    }
+
+    // A running animation (a standard view, a sketch's edit entry with OrientViewOnEdit on, a
+    // spin) turns the camera on from where it is by the rest of its way at its next frames, so
+    // the view wouldn't end where the arrow puts it: stop it and turn from where it is, as a
+    // mouse drag does. Stopping leaves the camera where it is, so `current` still holds
     if (navigation->isAnimating()) {
         navigation->stopAnimating();
     }
 
-    const SbRotation current = camera->orientation.getValue();
     SbVec3f direction;
     current.multVec(SbVec3f(0.0F, 0.0F, -1.0F), direction);
     const SbVec3f focalPoint = camera->position.getValue()
         + direction * camera->focalDistance.getValue();
 
-    // Coin composes left to right: the turn about the camera's own axis comes first
-    const SbRotation next = SbRotation(axis, turn * angle) * current;
     camera->enableNotify(false);
     if (navigation->setCameraOrientationValue(
             camera,
