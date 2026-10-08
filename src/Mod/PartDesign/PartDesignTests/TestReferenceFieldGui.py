@@ -652,8 +652,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         [view] = views3D()
         self.escInTheViewFirst(field, view)
         self.popupEscIntoTheView(view, repeats)
-        self.assertTrue(armed(field), "the held Esc's repeats disarmed the field")
         self.assertTrue(Gui.Control.activeDialog(), "the held Esc's repeats closed the dialog")
+        self.assertTrue(armed(field), "the held Esc's repeats disarmed the field")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
     def testEscHeldAfterClosingAPopupKeepsTheFieldArmed(self):
@@ -680,9 +680,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
         sendRepeats(["release", "press"] * 3)
         QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
         pump(0.5)
         self.assertTrue(Gui.Control.activeDialog(), "a held Esc in the 3D view closed the dialog")
+        self.assertFalse(armed(field), "Esc in the 3D view didn't disarm")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
     def testEscPressedInTheViewReleasedElsewhereLeavesNoRecord(self):
