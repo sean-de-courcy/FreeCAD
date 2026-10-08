@@ -234,6 +234,30 @@ public:
 
     std::vector<std::pair<Base::LogStyle, std::string>> messages;
 };
+
+// Sets a log tag's level while it lives
+class LogLevelScope
+{
+public:
+    LogLevelScope(const char* tag, int level)
+        : level(Base::Console().getLogLevel(tag))
+        , oldLevel(*this->level)
+    {
+        *this->level = level;
+    }
+    ~LogLevelScope()
+    {
+        *level = oldLevel;
+    }
+    LogLevelScope(const LogLevelScope&) = delete;
+    LogLevelScope(LogLevelScope&&) = delete;
+    LogLevelScope& operator=(const LogLevelScope&) = delete;
+    LogLevelScope& operator=(LogLevelScope&&) = delete;
+
+private:
+    int* level;
+    int oldLevel;
+};
 }  // namespace
 
 TEST_F(TopoShapeExpansionTest, mapSubElementOtherHasherOnlyLogs)
@@ -251,14 +275,11 @@ TEST_F(TopoShapeExpansionTest, mapSubElementOtherHasherOnlyLogs)
     TopoShape topoShape(plain.getShape(), 1L, hasher1);
     topoShape.mapSubElement(TopoShape(edge1, 2L, hasher1));
     ASSERT_GT(topoShape.getElementMapSize(), 0);
-    int* level = Base::Console().getLogLevel("TopoShape");
-    const int oldLevel = *level;
-    *level = FC_LOGLEVEL_LOG;
-    // Act
+    // Act: at the log level, restored however the test ends
     {
+        LogLevelScope logLevel("TopoShape", FC_LOGLEVEL_LOG);
         ConsoleCollector collector;
         topoShape.mapSubElement(TopoShape(edge2, 3L, hasher2));
-        *level = oldLevel;
         // Assert: the mismatch was seen, and reported at the log level only
         EXPECT_GE(collector.count("hasher mismatch", Base::LogStyle::Log), 1);
         EXPECT_EQ(collector.count("hasher mismatch", Base::LogStyle::Error), 0);

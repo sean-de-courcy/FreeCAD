@@ -32,9 +32,17 @@ Designed models, each built by the test:
   type has no solid to reach and fails; "Dimension" computes again.
 - Pocket: a 2 x 2 square on the Plate's top, pocketed "Up to face" with no face picked; it fails.
 - Conflicting sketch: one 10 mm line constrained to both 5 and 7 mm; the sketch fails.
+- Redrawn fillet: a 20 x 10 rectangle padded 10 with a fillet of radius 1 on its vertical edge at
+  (20, 0); the rectangle drawn again the other way round. The fillet finds its edge by geometry
+  only and computes with a warning (the reference solver on, V2).
+- Linked box: a 10 mm Part box in a second document, linked from the first and edited in place
+  there; a length of 0 fails it.
 
 Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md)."""
 
+import os
+import shutil
+import tempfile
 import unittest
 
 import FreeCAD as App
@@ -43,6 +51,7 @@ import Sketcher
 from PySide import QtCore, QtGui, QtWidgets
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.Scenarios.harness import Z, edge
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 
 
@@ -60,6 +69,7 @@ def plainText(label):
 class TestTaskStatusGui(unittest.TestCase):
     def setUp(self):
         self.doc = models.newDocument("TaskStatus")
+        self.otherDocs = []
         Gui.Selection.clearSelection()
 
     def tearDown(self):
@@ -77,6 +87,8 @@ class TestTaskStatusGui(unittest.TestCase):
             pump()
         Gui.Selection.clearSelection()
         App.closeDocument(self.doc.Name)
+        for doc in self.otherDocs:
+            App.closeDocument(doc.Name)
         pump()
 
     def edit(self, feature):
@@ -186,3 +198,94 @@ class TestTaskStatusGui(unittest.TestCase):
         self.edit(sketch)
         pump()
         self.assertEqual(statusBanners(), [])
+
+    # -- PR 173 review round 1 -------------------------------------------------------------------
+
+    def testShownWhileAnotherViewIsActive(self):
+        """The edit's own 3D view needn't be the active one (a spreadsheet driving the length, a
+        second view): the error is still shown."""
+        pad = self.plate()
+        self.edit(pad)
+        Gui.runCommand("Std_ViewCreate", 0)
+        pump()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.assertIsNone(guiDoc.getInEdit(), "the edit's view is still the active one")
+        pad.Type = "UpToLast"
+        self.doc.recompute()
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+    def testWarningIsShown(self):
+        """The redrawn fillet computes with a warning: the label shows it, as the tree does."""
+        self.doc.HistoryAlgorithm = "V2"
+        self.doc.ReferenceSolver = True
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 20, 10), self.body)
+        pad = models.pad(self.body, profile, 10)
+        self.doc.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, edge("line", direction=Z, through=(20, 0, 0)).one(pad.Shape))
+        fillet.Radius = 1
+        self.doc.recompute()
+        profile.deleteAllGeometry()
+        profile.addGeometry(models.polygon([(20, 10), (20, 0), (0, 0), (0, 10)]), False)
+        self.doc.recompute()
+        self.assertIn("Warning", fillet.State)
+        self.assertNotIn("Invalid", fillet.State)
+        self.edit(fillet)
+        banner = self.banner()
+        self.assertTrue(waitFor(banner.isVisible), "the feature's warning isn't shown")
+        text = plainText(banner)
+        self.assertTrue(text.startswith("Warning:"), text)
+        self.assertIn(fillet.getStatusString()[len("Warning: ") :].strip(), text)
+
+    def testInPlaceEditOfAnotherDocument(self):
+        """A box of a second document, edited in place through a link in the first: its error
+        comes from its own document's recompute, with its own text."""
+        other = App.newDocument("TaskStatusOther")
+        self.otherDocs.append(other)
+        box = other.addObject("Part::Box", "Box")
+        other.recompute()
+        # A link to another document needs both documents saved
+        folder = tempfile.mkdtemp(prefix="TaskStatus")
+        self.addCleanup(shutil.rmtree, folder, True)
+        other.saveAs(os.path.join(folder, "Other.FCStd"))
+        self.doc.saveAs(os.path.join(folder, "Main.FCStd"))
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        link = self.doc.addObject("App::Link", "Link")
+        link.LinkedObject = box
+        self.doc.recompute()
+        pump()
+        Gui.getDocument(self.doc.Name).setEdit(link, 0)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "the dialog didn't open")
+        pump()
+        banner = self.banner()
+        self.assertFalse(banner.isVisible())
+
+        box.Length = 0
+        other.recompute()
+        self.assertIn("Invalid", box.State)
+        self.checkShowsError(box)
+
+        box.Length = 10
+        other.recompute()
+        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays")
+
+    def testQuickFailAndFixDoesNotFlash(self):
+        """A failing value replaced within the show delay ("0.5" passes through "0") never shows
+        the label."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode")
+        combo.setCurrentIndex(combo.findText("To last"))
+        QtWidgets.QApplication.processEvents()
+        self.assertIn("Invalid", pad.State)
+        shown = banner.isVisible()
+        combo.setCurrentIndex(combo.findText("Dimension"))
+        for _ in range(40):
+            pump(0.02)
+            shown = shown or banner.isVisible()
+        self.assertNotIn("Invalid", pad.State)
+        self.assertFalse(shown, "the label flashed")

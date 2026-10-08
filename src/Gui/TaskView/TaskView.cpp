@@ -65,7 +65,12 @@ namespace
  * Shows the text the tree's tooltip shows: the recompute error, or the warning of a recompute
  * that succeeded on a guessed reference. It is refreshed after each recompute, undo and redo,
  * and hidden while the object is fine. The label changes only when the text does, and it takes
- * no focus, so typing in the panel isn't disturbed.
+ * no focus, so typing in the panel isn't disturbed. It shows only after a short delay, and hides
+ * at once, so a value typed through a failing one ("0.5" passes through "0") doesn't flash it.
+ *
+ * The edited object comes from the document's edit view provider, which stays set while another
+ * view is active (getInEdit() is null then). An object edited in place through a link belongs to
+ * another document: its recomputes are followed in that document too.
  */
 class EditStatusBanner: public QLabel
 {
@@ -82,32 +87,35 @@ public:
         setContentsMargins(6, 4, 6, 4);
         setVisible(false);
 
-        auto schedule = [this](const App::Document& changed) {
-            if (&changed == this->doc) {
-                scheduleUpdate();
+        showTimer.setSingleShot(true);
+        showTimer.setInterval(showDelayMs);
+        QObject::connect(&showTimer, &QTimer::timeout, this, [this] {
+            if (!text().isEmpty()) {
+                setVisible(true);
             }
-        };
-        auto scheduleVp = [this](const Gui::ViewProviderDocumentObject& vp) {
-            if (vp.getDocument() && vp.getDocument()->getDocument() == this->doc) {
-                scheduleUpdate();
-            }
+        });
+
+        bindDocument(doc, docConnections);
+        // Any edit start or end, undo or redo: cheap, and an in-place edit's object belongs to
+        // another document than the dialog's
+        auto schedule = [this](const auto&) {
+            scheduleUpdate();
         };
         // clang-format off
-        docConnections.emplace_back(doc->signalRecomputed.connect(
-            [this](const App::Document&, const std::vector<App::DocumentObject*>&) {
-                scheduleUpdate();
-            }));
-        docConnections.emplace_back(doc->signalRecomputedObject.connect(
-            [this](const App::DocumentObject&) { scheduleUpdate(); }));
         connections.emplace_back(App::GetApplication().signalUndoDocument.connect(schedule));
         connections.emplace_back(App::GetApplication().signalRedoDocument.connect(schedule));
-        connections.emplace_back(Gui::Application::Instance->signalInEdit.connect(scheduleVp));
-        connections.emplace_back(Gui::Application::Instance->signalResetEdit.connect(scheduleVp));
+        connections.emplace_back(Gui::Application::Instance->signalInEdit.connect(schedule));
+        connections.emplace_back(Gui::Application::Instance->signalResetEdit.connect(schedule));
         connections.emplace_back(App::GetApplication().signalDeleteDocument.connect(
             [this](const App::Document& deleted) {
+                if (&deleted == objectDoc) {
+                    objectDoc = nullptr;
+                    objectConnections.clear();
+                }
                 if (&deleted == this->doc) {
                     this->doc = nullptr;
                     docConnections.clear();
+                    showTimer.stop();
                     setVisible(false);
                 }
             }));
@@ -115,7 +123,21 @@ public:
         scheduleUpdate();
     }
 
+    static constexpr int showDelayMs = 300;
+
 private:
+    void bindDocument(App::Document* target, std::vector<fastsignals::scoped_connection>& to)
+    {
+        // clang-format off
+        to.emplace_back(target->signalRecomputed.connect(
+            [this](const App::Document&, const std::vector<App::DocumentObject*>&) {
+                scheduleUpdate();
+            }));
+        to.emplace_back(target->signalRecomputedObject.connect(
+            [this](const App::DocumentObject&) { scheduleUpdate(); }));
+        // clang-format on
+    }
+
     // Coalesces the signals of one recompute into one update, after the status bits are final
     void scheduleUpdate()
     {
@@ -132,9 +154,27 @@ private:
     const App::DocumentObject* editedObject() const
     {
         auto* guiDoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
-        auto* vp = guiDoc ? dynamic_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getInEdit())
-                          : nullptr;
+        auto* vp = guiDoc
+            ? dynamic_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getEditViewProvider())
+            : nullptr;
         return vp ? vp->getObject() : nullptr;
+    }
+
+    // Follows the recomputes of the edited object's document when it isn't the dialog's
+    void followObjectDocument(const App::DocumentObject* obj)
+    {
+        App::Document* target = obj ? obj->getDocument() : nullptr;
+        if (target == doc) {
+            target = nullptr;
+        }
+        if (target == objectDoc) {
+            return;
+        }
+        objectConnections.clear();
+        objectDoc = target;
+        if (target) {
+            bindDocument(target, objectConnections);
+        }
     }
 
     void refresh()
@@ -142,12 +182,18 @@ private:
         QString html;
         QString style;
         const App::DocumentObject* obj = editedObject();
-        if (obj && obj->isAttachedToDocument()) {
+        if (obj && !obj->isAttachedToDocument()) {
+            obj = nullptr;
+        }
+        followObjectDocument(obj);
+        if (obj) {
+            // Translated as the tree translates the status text
+            const std::string typeName {obj->getTypeId().getName()};
             if (obj->isError()) {
-                const char* text = doc->getErrorDescription(obj);
+                const char* text = obj->getDocument()->getErrorDescription(obj);
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Error:"),
-                    text && *text ? QString::fromUtf8(text)
+                    text && *text ? QCoreApplication::translate(typeName.c_str(), text)
                                   : QCoreApplication::translate(
                                         "Gui::TaskView::TaskView",
                                         "The feature failed to recompute."
@@ -162,7 +208,7 @@ private:
                 const char* text = obj->getWarningDescription();
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Warning:"),
-                    QString::fromUtf8(text ? text : "")
+                    text ? QCoreApplication::translate(typeName.c_str(), text) : QString()
                 );
                 style = QStringLiteral(
                     "QLabel#TaskEditStatus { background-color: rgba(230, 160, 0, 45);"
@@ -173,12 +219,18 @@ private:
         if (html != text()) {
             setText(html);
         }
-        if (style != styleSheet()) {
+        if (!html.isEmpty() && style != styleSheet()) {
             setStyleSheet(style);
         }
         // isHidden(), not isVisible(): the panel of another document's dialog may be hidden
-        if (html.isEmpty() != isHidden()) {
-            setVisible(!html.isEmpty());
+        if (html.isEmpty()) {
+            showTimer.stop();
+            if (!isHidden()) {
+                setVisible(false);
+            }
+        }
+        else if (isHidden() && !showTimer.isActive()) {
+            showTimer.start();
         }
     }
 
@@ -191,8 +243,11 @@ private:
     }
 
     App::Document* doc;
+    App::Document* objectDoc = nullptr;
     bool pending = false;
+    QTimer showTimer;
     std::vector<fastsignals::scoped_connection> docConnections;
+    std::vector<fastsignals::scoped_connection> objectConnections;
     std::vector<fastsignals::scoped_connection> connections;
 };
 }  // namespace

@@ -1101,8 +1101,10 @@ void TopoShape::mapSubElement(
     auto checkHasher = [this](const TopoShape& other) {
         if (Hasher) {
             if (other.Hasher != Hasher) {
-                // A shape of another document's string table (hasher). The user can't act on
-                // it, so it goes only to the log (ops#151, upstream issue 24567).
+                // The input has another string table (hasher) than this shape, e.g. another
+                // document's, or none. The user can't act on it, so it goes only to the log
+                // (ops#151, upstream issue 24567). Retagging the input to this hasher instead of
+                // switching would keep this shape's names valid: ops#201.
                 if (!getElementMapSize(false)) {
                     FC_LOG("hasher mismatch: the shape takes the string table of its input");
                 }

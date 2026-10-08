@@ -754,8 +754,9 @@ protected:
         if (!filterRedundantAutoConstraints(AutoConstraints)) {
             // This exception stops the procedure here, which means that:
             // 1) Geometry (and constraints of the geometry in case of a multicurve shape)
-            // are created 2) No autoconstrains are actually added 3) No widget mandated
-            // constraints are added
+            // are created 2) The widget mandated constraints (the dimensions entered while
+            // drawing) are already added too: finish() adds them in beforeCreateAutoConstraints()
+            // 3) No autoconstraints are added
             // The text says what the user can do (ops#151, upstream issues 21334, 30707). The
             // usual cause is a sketch that is already redundant: the solver then names an
             // existing constraint, not an autoconstraint.
@@ -763,10 +764,10 @@ protected:
                 Base::RuntimeError,
                 QT_TRANSLATE_NOOP(
                     "Notifications",
-                    "The new geometry was added without its automatic constraints and without "
-                    "the dimensions entered while drawing: with them, a constraint already in "
-                    "the sketch would be redundant. If the solver messages list redundant "
-                    "constraints, remove those first. Then add the missing constraints by hand."
+                    "The new geometry was added without its automatic constraints: with them, a "
+                    "constraint already in the sketch would be redundant. If the solver messages "
+                    "list redundant constraints, remove those first. Then add the missing "
+                    "constraints by hand."
                 ) "\n"
             );
         }
