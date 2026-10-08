@@ -3276,6 +3276,47 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testGrooveUpToFaces(self):
         self.upToWalls(groove=True)
 
+    def testRevolutionUpdateViewOffUpToFace(self):
+        """ops#193: with "Update view" off, Type "Up to face" shows the face field, armed, in
+        place of the angle, and a pick of a wall is its entry; Type "Angle" hides and disarms it
+        again. Only the recompute waits: the shape is the full ring until OK."""
+        feature = self.revolution(core=True)
+        self.edit(feature, count=0)
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(False)
+        settle()
+        field = findField("fieldUpToFace")
+        # Hidden or not by the panel (run alone, the first panel sits in the hidden overlay)
+        shown = lambda widget: not widget.isHidden()
+        angle = Gui.getMainWindow().findChild(QtWidgets.QWidget, "revolveAngle")
+        self.assertFalse(shown(field))
+        self.assertTrue(shown(angle))
+
+        mode = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode")
+        self.choose(mode, 3)
+        self.assertEqual(feature.Type, "UpToFace")
+        self.assertTrue(waitFor(lambda: shown(field) and armed(field)), "not shown, armed")
+        self.assertFalse(shown(angle))
+        self.pick(self.walls[0], "")
+        self.assertLink(feature.UpToFace, self.walls[0], [])
+        self.assertTrue(waitFor(lambda: texts(field) == [self.walls[0].Label]), texts(field))
+        self.assertAlmostEqual(feature.Shape.Volume, 18 * math.pi, places=3)
+
+        self.choose(mode, 0)
+        self.assertEqual(feature.Type, "Angle")
+        self.assertTrue(waitFor(lambda: not shown(field)), "the field stays")
+        self.assertFalse(armed(field))
+        self.assertTrue(shown(angle))
+
+        self.choose(mode, 3)
+        self.assertTrue(waitFor(lambda: shown(field)), "the field isn't shown again")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(feature.Type, "UpToFace")
+        self.assertLink(feature.UpToFace, self.walls[0], [])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertLess(feature.Shape.Volume, 18 * math.pi - 1)
+
     def visibilities(self, *objs):
         return tuple(obj.ViewObject.isVisible() for obj in objs)
 
