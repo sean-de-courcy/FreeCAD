@@ -464,10 +464,13 @@ void TaskRevolutionParameters::connectSignals()
 
 void TaskRevolutionParameters::updateUI(Side side)
 {
-    if (isUpdateBlocked()) {
+    // The mode's widgets follow the Type whatever "Update view" says (blockUpdate); only the
+    // recompute waits (ops#193)
+    if (updatingUI) {
         return;
     }
 
+    Base::StateLocker updating(updatingUI, true);
     Base::StateLocker lock(getUpdateBlockRef(), true);
     fillAxisCombo();
     updateWholeUI(side);

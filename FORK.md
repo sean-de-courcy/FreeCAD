@@ -224,7 +224,8 @@ names it.
 | `fix/218-edit-end-shown-feature` | fix | ops#218 | - | `fix/182-187-189-pattern-minors` `588f42cef2` (stacked on fork PR 184) | `715d1d5e96` (fork PR 193), 2026-10-08 | never (fork fix) |
 | `fix/217-select-other-polish` | fix | ops#217 | - | `fix/216-unseen-key-release` `5d86d00f6e` + `integration` `dd587e77db` (stacked on fork PR 192) | `498ff50527` (fork PR 197), 2026-10-08 | never (fork code) |
 | `feat/194-keymap-b2` | feat | ops#194 | - | `integration` `dd587e77db` | `101952b663` (fork PR 195), 2026-10-08 | never (fork feature); refit when upstream changes `View3DInventorViewer::processSoEvent` or the arrow handling in `SoQTQuarterAdaptor` |
-| `fix/214-originals-pick-history` | fix | ops#214 | - | `integration` `a2e660570b` | (fork PR 196) | never (fork feature: the Originals field is the fork's) |
+| `fix/214-originals-pick-history` | fix | ops#214 | - | `integration` `a2e660570b` | `0ad9fc0b74` (fork PR 196), 2026-10-08 | never (fork feature: the Originals field is the fork's) |
+| `fix/193-revolution-update-view-off` | fix | ops#193 | - | `integration` `f66704e59b` | (fork PR 199) | when upstream's `updateUI` no longer returns on `blockUpdate` (the early return is upstream's, in `base`) |
 
 ## Fork-only commits in carried topics
 
