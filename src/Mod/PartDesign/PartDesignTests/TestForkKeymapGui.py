@@ -1926,6 +1926,7 @@ OrthographicCamera {{
         """ops#220: the view drops auto-repeated Esc only; a held arrow's repeated presses (and
         X11's repeated releases between them) keep orbiting: Left and two repeats, 45 degrees."""
         self.orbitView()
+        self.assertTrue(focus(self.view3d()), "the 3D view doesn't take the focus")
         window = Gui.getMainWindow().windowHandle()
         QtTest.QTest.keyPress(window, QtCore.Qt.Key_Left)
         for type in (QtCore.QEvent.KeyRelease, QtCore.QEvent.KeyPress) * 2:
