@@ -361,12 +361,18 @@ class TestSelectionFilterGui(unittest.TestCase):
         """Std_ClarifySelection ("select other" under the cursor) is on backtick in FreeCAD's
         keymap. The fork's keymap (Onshape's, ops#194) gives it no key: backtick goes to Select
         other (ops#194 PR C), and the context menu and long-press stay."""
-        settings = App.ParamGet("User parameter:BaseApp/Preferences/Shortcut/Settings")
-        self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "")
+        settings = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        before = settings.GetString("Keymap") if "Keymap" in settings.GetStrings() else None
+        settings.RemString("Keymap")
+        pump(0.1)
         try:
+            self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "")
             settings.SetString("Keymap", "FreeCAD")
             pump(0.1)
             self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "`")
         finally:
-            settings.RemString("Keymap")
+            if before is None:
+                settings.RemString("Keymap")
+            else:
+                settings.SetString("Keymap", before)
             pump(0.1)

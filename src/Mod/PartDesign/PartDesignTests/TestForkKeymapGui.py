@@ -23,11 +23,11 @@
 """The fork's default keymap, Onshape's shortcuts (FreeCAD-CH, ops#194 PR A).
 
 The keymap is a table of default keys applied when a command registers, so a key the user set
-keeps its value and Reset goes to the table's key. The preference
-`Shortcut/Settings/Keymap` = `FreeCAD` gives upstream's keys back. On a tie between two enabled
-commands, a command for the edit in progress wins (Shift+F in a sketch is the sketch fillet, not
-PartDesign's). Shift+E / Shift+W in a sketch close the sketch and pad / revolve it, as Onshape's
-extrude and revolve do. See notes/onshape-shortcuts.md.
+keeps its value and Reset goes to the table's key. The preference `General/Keymap` = `FreeCAD`
+gives upstream's keys back. On a tie between two enabled commands, a command for the edit in
+progress wins (Shift+F in a sketch is the sketch fillet, not PartDesign's). Shift+E / Shift+W in
+a sketch close the sketch and pad / revolve it, as Onshape's extrude and revolve do. See
+notes/onshape-shortcuts.md.
 
 Designed model: a Body with a 10 x 10 rectangle sketch on XY at x 5..15, y 0..10 (so a revolution
 about the sketch's V axis is valid). The oracles: the command a key runs (its action's triggered
@@ -41,6 +41,8 @@ import contextlib
 import time
 import unittest
 
+import shiboken6
+
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
@@ -48,7 +50,7 @@ import Part
 from PySide import QtCore, QtGui, QtWidgets
 from PySide6 import QtTest
 
-SETTINGS = "User parameter:BaseApp/Preferences/Shortcut/Settings"
+KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap
 SHORTCUTS = "User parameter:BaseApp/Preferences/Shortcut"
 
 # The keys the fork's keymap sets (notes/onshape-shortcuts.md section 2, PLAN.md decision 27);
@@ -209,6 +211,9 @@ UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
 # Sub-actions that aren't commands: the draw styles, and the workbenches' W, 1..9
 DRAW_STYLES = {"Std_DrawStyleAsIs": "V,1", "Std_DrawStyleShaded": "V,6"}
 
+# Draft's chords starting with an Onshape key, cleared (Python commands); upstream's keys
+DRAFT_CHORDS = {"Draft_Line": "L, I", "Draft_SelectPlane": "W, P", "Draft_Facebinder": "F, F"}
+
 
 def pump(seconds=0.3):
     app = QtWidgets.QApplication.instance()
@@ -269,19 +274,67 @@ def focus(widget):
     return False
 
 
-def isGroup(name):
-    """Whether name is a group command (a toolbar drop-down): its action carries the key of its
-    current default tool (GroupCommand::setup()), so the two run the same command."""
+def command(name):
     try:
-        command = Gui.Command.get(name)
+        return Gui.Command.get(name)
     except Exception:
-        return False
-    return command is not None and len(command.getAction()) > 1
+        return None
+
+
+def sameObject(a, b):
+    return shiboken6.getCppPointer(a)[0] == shiboken6.getCppPointer(b)[0]
+
+
+def groupCommands():
+    """{group: (its key, its default tool, the tool's key)} of the group commands with an action
+    (toolbar drop-downs). A group's button carries its default tool's key (GroupCommand::setup()),
+    so the two run the same command. A C++ group's tools are the commands' own actions; a Python
+    group's are actions of its own naming the command."""
+    groups = {}
+    for obj in Gui.getMainWindow().findChildren(QtCore.QObject):
+        if obj.metaObject().className() != "Gui::ActionGroup":
+            continue
+        main = [c for c in obj.children() if isinstance(c, QtGui.QAction)]
+        group = command(main[0].objectName()) if len(main) == 1 else None
+        index = obj.property("defaultAction")
+        if group is None or index is None:
+            continue
+        actions = group.getAction()
+        if not 0 <= index < len(actions):
+            continue
+        tool = actions[index]
+        if tool.property("CommandName"):
+            toolName = bytes(tool.property("CommandName")).decode()
+        else:
+            # not a group command where the tool isn't a command's own action (the draw styles)
+            toolName = tool.objectName()
+            own = command(toolName).getAction() if command(toolName) else []
+            if not own or not sameObject(own[0], tool):
+                continue
+        groups[main[0].objectName()] = (
+            main[0].shortcut().toString(),
+            toolName,
+            Gui.Command.get(toolName).getShortcut(),
+        )
+    return groups
 
 
 def setKeymap(name):
-    App.ParamGet(SETTINGS).SetString("Keymap", name)
+    App.ParamGet(KEYMAP).SetString("Keymap", name)
     pump(0.1)
+
+
+def saved(path, name):
+    """The stored string, None where there is none (to put back as it was)."""
+    group = App.ParamGet(path)
+    return group.GetString(name) if name in group.GetStrings() else None
+
+
+def putBack(path, name, value):
+    if value is None:
+        App.ParamGet(path).RemString(name)
+    else:
+        App.ParamGet(path).SetString(name, value)
 
 
 def enabledShortcuts():
@@ -307,9 +360,20 @@ class TestForkKeymapGui(unittest.TestCase):
 
         Gui.activateWorkbench("PartDesignWorkbench")
         pump()
+        # the tests change these; the user's values come back at the end
+        cls.saved = [
+            (KEYMAP, "Keymap", saved(KEYMAP, "Keymap")),
+            (SHORTCUTS, "Std_ViewFitAll", saved(SHORTCUTS, "Std_ViewFitAll")),
+        ]
+
+    @classmethod
+    def tearDownClass(cls):
+        for path, name, value in cls.saved:
+            putBack(path, name, value)
+        pump(0.1)
 
     def setUp(self):
-        App.ParamGet(SETTINGS).RemString("Keymap")
+        App.ParamGet(KEYMAP).RemString("Keymap")
         self.doc = App.newDocument("ForkKeymapGui")
         self.body = self.doc.addObject("PartDesign::Body", "Body")
         self.sketch = self.body.newObject("Sketcher::SketchObject", "Sketch")
@@ -327,7 +391,7 @@ class TestForkKeymapGui(unittest.TestCase):
         pump()
 
     def tearDown(self):
-        App.ParamGet(SETTINGS).RemString("Keymap")
+        App.ParamGet(KEYMAP).RemString("Keymap")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -464,6 +528,92 @@ class TestForkKeymapGui(unittest.TestCase):
         pump(0.1)
         self.assertTrue(same(shortcut("Std_ViewFitAll"), "F"))
 
+    def testResetAllKeepsTheKeymap(self):
+        """Preferences > General > Keyboard > Reset All (the keyboard page's button) clears the
+        Shortcut group and its subgroups: the keymap, kept elsewhere, stays FreeCAD's, in the
+        preference and in the session."""
+        setKeymap("FreeCAD")
+        self.assertTrue(same(shortcut("Std_ViewFront"), "1"))
+        page = Gui.UiLoader().createWidget("Gui::Dialog::DlgCustomKeyboardImp")
+        self.assertIsNotNone(page)
+        try:
+            button = page.findChild(QtWidgets.QPushButton, "buttonResetAll")
+            self.assertIsNotNone(button)
+            button.click()
+            pump(0.2)
+        finally:
+            page.deleteLater()
+            pump(0.1)
+        self.assertEqual(App.ParamGet(KEYMAP).GetString("Keymap"), "FreeCAD")
+        self.assertTrue(same(shortcut("Std_ViewFront"), "1"), shortcut("Std_ViewFront"))
+
+    def testGroupButtonsFollowASwitch(self):
+        """A group button (a toolbar drop-down) carries no key, or its default tool's once the
+        user picked from the drop-down (GroupCommand::setup()). After a switch either way it
+        carries the tool's new key, never the old keymap's: Std_ViewFront picked under FreeCAD's
+        keymap gives the view group 1, and Onshape's then Shift+1. In sketch edit, so the sketch's
+        groups have actions. Then nothing clashes, groups included."""
+        self.editSketch()
+        groups = groupCommands()
+        for name in ("Std_ViewGroup", "Sketcher_CompHorVer", "Sketcher_CompCreateRectangles"):
+            self.assertIn(name, groups)
+        setKeymap("FreeCAD")
+        viewGroup = Gui.Command.get("Std_ViewGroup")
+        front = [a for a in viewGroup.getAction() if a.objectName() == "Std_ViewFront"]
+        self.assertEqual(len(front), 1)
+        front[0].trigger()
+        pump(0.2)
+        self.assertTrue(same(viewGroup.getShortcut(), "1"), viewGroup.getShortcut())
+        for keymap in ("Onshape", "FreeCAD", "Onshape"):
+            setKeymap(keymap)
+            wrong = [
+                f"{name}: {key!r}, its tool {tool}: {toolKey!r}"
+                for name, (key, tool, toolKey) in groupCommands().items()
+                if key and not same(key, toolKey)
+            ]
+            self.assertEqual(wrong, [], keymap)
+        self.assertTrue(same(viewGroup.getShortcut(), "Shift+1"), viewGroup.getShortcut())
+        pump(0.5)
+        self.assertNoClashes("sketch edit, after a switch and back")
+
+    def testFreeCADKeymapIsStockInSketchEdit(self):
+        """Under FreeCAD's keymap, Pad and Revolution are disabled in sketch edit, as upstream,
+        and the fork's widget doesn't hold their actions; back under Onshape's they work there."""
+
+        def held(action):
+            holder = Gui.getMainWindow().findChild(QtWidgets.QWidget, "_fc_ch_keymap_actions_")
+            return holder is not None and any(sameObject(a, action) for a in holder.actions())
+
+        pad = Gui.Command.get("PartDesign_Pad").getAction()[0]
+        setKeymap("FreeCAD")
+        self.editSketch()
+        pump(0.5)
+        self.assertFalse(pad.isEnabled())
+        self.assertFalse(held(pad))
+        setKeymap("Onshape")
+        self.assertTrue(waitFor(pad.isEnabled))
+        self.assertTrue(held(pad))
+
+    def testOtherWorkbenchesChordsAreCleared(self):
+        """Draft's chords starting with an Onshape key have no key under the fork's keymap (they
+        would make that key wait once Draft is loaded), and upstream's under FreeCAD's. Python
+        commands; in the Draft workbench, so their actions exist."""
+        if "DraftWorkbench" not in Gui.listWorkbenches():
+            self.skipTest("no Draft")
+        try:
+            Gui.activateWorkbench("DraftWorkbench")
+            pump()
+            wrong = [f"{n}: {shortcut(n)!r}" for n in DRAFT_CHORDS if shortcut(n) != ""]
+            self.assertEqual(wrong, [], "Onshape")
+            setKeymap("FreeCAD")
+            wrong = [
+                f"{n}: {shortcut(n)!r}" for n, k in DRAFT_CHORDS.items() if not same(shortcut(n), k)
+            ]
+            self.assertEqual(wrong, [], "FreeCAD")
+        finally:
+            Gui.activateWorkbench("PartDesignWorkbench")
+            pump()
+
     # --- keys pressed
 
     def testShiftDigitSetsTheView(self):
@@ -559,8 +709,9 @@ class TestForkKeymapGui(unittest.TestCase):
             elapsed = time.monotonic() - start
         self.escapeTool()
         self.escapeTool()
-        # the chord wait is 300 ms; events are pumped in 10-50 ms steps
-        self.assertLess(elapsed, 0.2)
+        # the chord wait is 300 ms, the tool's start-up comes on top; events are pumped in 10-50
+        # ms steps
+        self.assertLess(elapsed, 0.28)
 
     def editAndPress(self, key, typeName):
         self.editSketch()
@@ -594,15 +745,16 @@ class TestForkKeymapGui(unittest.TestCase):
     # --- conflicts
 
     def assertNoClashes(self, context, allowed=UPSTREAM_CLASHES):
-        """No two enabled actions share a key, except a group with its default tool, where the tie
-        rule picks one (a Sketcher command against a general one, in sketch edit), or where
-        `allowed` lists the pair; and no enabled chord starts with an enabled single key (that key
-        would wait 300 ms)."""
+        """No two enabled actions share a key, except a group with its default tool (the same
+        command), where the tie rule picks one (a Sketcher command against a general one, in
+        sketch edit), or where `allowed` lists the pair; and no enabled chord starts with an
+        enabled single key (that key would wait 300 ms)."""
         keys = enabledShortcuts()
+        tools = {name: tool for name, (key, tool, toolKey) in groupCommands().items()}
         inEdit = Gui.ActiveDocument.getInEdit() is not None
         clashes = []
         for key, names in keys.items():
-            names = {n for n in names if not isGroup(n)}
+            names = {n for n in names if tools.get(n) not in names}
             if len(names) < 2:
                 continue
             sketcher = [n for n in names if n.startswith("Sketcher_")]
