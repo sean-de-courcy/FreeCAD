@@ -117,7 +117,8 @@ def settle():
     view off screen; the task view is put in front again, until the panel's buttons show (under
     load the panel can show later than the fixed wait, ops#215)."""
     pump(0.3)
-    waitFor(panelShown)
+    if not waitFor(panelShown):
+        raise AssertionError("no task panel OK/Cancel")
     pump(0.05)
 
 
@@ -1648,7 +1649,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         QtTest.QTest.mouseClick(
             view.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center()
         )
-        waitFor(lambda: not view.isVisible())
+        if not waitFor(lambda: not view.isVisible()):
+            combo.hidePopup()  # not left open for the next test
+            self.fail("the popup didn't close")
         pump(0.2)
 
     def testDirectionFieldDisarmsThroughThePopup(self):
