@@ -35,8 +35,9 @@ Designed model, built by the test (the reference solver on, V2):
   by geometry only and computes with a warning; the pocket fails.
 - Body001: a 10 x 10 rectangle at x = 40 padded "To last" as its first feature ("Pad001"): there
   is no solid to reach, so it fails.
-Tree order: Body (Profile, Pad, Fillet, Square, Pocket), then Body001 (Profile001, Pad001). The
-problems in order: Fillet (warning), Pocket (error), Pad001 (error).
+Tree order: Body (Pad, with Profile under it, Fillet, Pocket, with Square under it), then Body001
+(Pad001, with Profile001 under it). The problems in order: Fillet (warning), Pocket (error), Pad001
+(error).
 
 Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md)."""
 
@@ -53,36 +54,41 @@ from PartDesignTests.TestExpressionFieldsGui import pump
 HIGHLIGHT = (255, 255, 0, 100)
 
 
-def visibleTree():
-    for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
-        if tree.metaObject().className() == "Gui::TreeWidget" and tree.isVisible():
-            return tree
+def searchBox():
+    """A tree panel's search box. Under the test runner a panel's widgets can come back as stale
+    PySide wrappers (already deleted), so the first box that answers is taken; the search works
+    on the active document from any panel."""
+    for edit in Gui.getMainWindow().findChildren(QtWidgets.QLineEdit):
+        try:
+            panel = edit.parentWidget()
+            if panel is not None and panel.metaObject().className() == "Gui::TreePanel":
+                return edit
+        except RuntimeError:
+            continue
     return None
 
 
-def searchBox(tree):
-    """The search box of the tree's panel."""
-    for edit in tree.parentWidget().findChildren(QtWidgets.QLineEdit):
-        if edit.placeholderText() == "Search":
-            return edit
-    return None
-
-
-def highlighted(tree):
-    """The labels of the tree's items with the search highlight, read at once (PySide drops a
-    child item's wrapper when its parent's goes)."""
-    labels = []
+def highlighted():
+    """The labels of the items with the search highlight, in every model tree that answers,
+    read at once (PySide drops a child item's wrapper when its parent's goes)."""
+    labels = set()
 
     def walk(item):
         brush = item.background(0)
         if brush.style() != QtCore.Qt.NoBrush and brush.color().getRgb() == HIGHLIGHT:
-            labels.append(item.text(0))
+            labels.add(item.text(0))
         for i in range(item.childCount()):
             walk(item.child(i))
 
-    for i in range(tree.topLevelItemCount()):
-        walk(tree.topLevelItem(i))
-    return labels
+    for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+        try:
+            if tree.metaObject().className() != "Gui::TreeWidget":
+                continue
+            for i in range(tree.topLevelItemCount()):
+                walk(tree.topLevelItem(i))
+        except RuntimeError:
+            continue
+    return sorted(labels)
 
 
 def selectedNames():
@@ -99,11 +105,9 @@ class TestProblemNavigationGui(unittest.TestCase):
 
     def tearDown(self):
         Gui.Selection.clearSelection()
-        tree = visibleTree()
-        if tree is not None:
-            edit = searchBox(tree)
-            if edit is not None:
-                edit.clear()
+        edit = searchBox()
+        if edit is not None:
+            edit.clear()
         App.closeDocument(self.doc.Name)
         pump()
 
@@ -174,11 +178,16 @@ class TestProblemNavigationGui(unittest.TestCase):
         pump()
         self.assertEqual(selectedNames(), ["Pad"])
         self.assertEqual(self.step(), ["Fillet"])
+        # A sketch nested under its feature comes after that feature in the tree
         Gui.Selection.clearSelection()
-        Gui.Selection.addSelection(self.doc.Name, "Body", "Square.")
+        Gui.Selection.addSelection(self.doc.Name, "Body", "Pocket.Square.")
         pump()
-        self.assertEqual(self.step(), ["Pocket"])
-        self.assertEqual(self.step(False), ["Fillet"])
+        self.assertEqual(selectedNames(), ["Square"])
+        self.assertEqual(self.step(), ["Pad001"])
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "Body", "Pocket.Square.")
+        pump()
+        self.assertEqual(self.step(False), ["Pocket"])
 
     def testTouchedDoesNotCount(self):
         """A model without errors or warnings, only an object that needs a recompute: Next
@@ -198,13 +207,11 @@ class TestProblemNavigationGui(unittest.TestCase):
     # -- search tokens ---------------------------------------------------------------------------
 
     def search(self, text, enter=False):
-        tree = visibleTree()
-        self.assertIsNotNone(tree, "no visible tree")
-        edit = searchBox(tree)
-        self.assertIsNotNone(edit, "no search box")
+        edit = searchBox()
+        self.assertIsNotNone(edit, "no tree search box")
+        # The highlights are read at once: the box's wrapper may not outlive an event loop
         edit.setText(text)
-        pump()
-        labels = highlighted(tree)
+        labels = highlighted()
         if enter:
             edit.returnPressed.emit()
             pump()
@@ -212,8 +219,8 @@ class TestProblemNavigationGui(unittest.TestCase):
 
     def testErrorsToken(self):
         self.model()
-        self.assertEqual(sorted(self.search(":errors")), ["Pad001", "Pocket"])
-        self.assertEqual(sorted(self.search(":errors", enter=True)), ["Pad001", "Pocket"])
+        self.assertEqual(self.search(":errors"), ["Pad001", "Pocket"])
+        self.assertEqual(self.search(":errors", enter=True), ["Pad001", "Pocket"])
         self.assertEqual(sorted(selectedNames()), ["Pad001", "Pocket"])
 
     def testWarningsToken(self):
@@ -224,8 +231,8 @@ class TestProblemNavigationGui(unittest.TestCase):
 
     def testProblemsTokenAndPrefixes(self):
         self.model()
-        self.assertEqual(sorted(self.search(":problems")), ["Fillet", "Pad001", "Pocket"])
-        self.assertEqual(sorted(self.search(":e")), ["Pad001", "Pocket"])
+        self.assertEqual(self.search(":problems"), ["Fillet", "Pad001", "Pocket"])
+        self.assertEqual(self.search(":e"), ["Pad001", "Pocket"])
         self.assertEqual(self.search(":warn"), ["Fillet"])
         # Not a token: an ordinary search, which finds nothing and highlights nothing
         self.assertEqual(self.search(":zzz"), [])
