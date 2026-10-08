@@ -484,14 +484,15 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIsNot(copy, self.spine)
         return copy
 
-    def assertIndependentCopy(self, copy, constraints, lines, edges):
-        """The copy links nothing outside, keeps the original's constraints, lines and shape, and
-        solves."""
+    def assertIndependentCopy(self, copy, constraints, lines, edges, dof=3):
+        """The copy links nothing outside, keeps the original's constraints (all of them in
+        force: the guided spine's 8 degrees of freedom less 5), lines and shape, and solves."""
         self.assertEqual(copy.ExternalGeometry, [])
         self.assertEqual(copy.ExternalTypes, [])
         self.assertEqual(len(copy.ExternalGeo), 3)  # the axes and the detached projection
         self.assertEqual(self.constraints(copy), constraints)
         self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertEqual(copy.DoF, dof)
         self.assertEqual([(g.StartPoint, g.EndPoint) for g in copy.Geometry], lines)
         self.assertEqual(self.edges(copy.Shape), edges)
 
@@ -501,6 +502,8 @@ class TestPanelFixesGui(unittest.TestCase):
         reference, so its recompute doesn't link the guide outside the body again), and solves to
         the same lines. The old code deleted the original's external constraint (once per
         property), and the copy linked the guide again."""
+        import Sketcher
+
         pipe = self.guidedSpine()
         constraints = self.constraints(self.spine)
         self.assertEqual(
@@ -514,9 +517,17 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
         self.assertEqual([(g.StartPoint, g.EndPoint) for g in self.spine.Geometry], lines)
         self.assertEqual(len(self.spine.ExternalGeometry), 1)
+        self.assertEqual(self.spine.DoF, 3)
         self.assertIndependentCopy(copy, constraints, lines, edges)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+        # a constraint added to the copy keeps the pasted ones (an invalid list read as empty,
+        # and the add dropped them all)
+        copy.addConstraint(Sketcher.Constraint("Vertical", 1))
+        self.doc.recompute()
+        self.assertEqual(self.constraints(copy)[:3], constraints)
+        self.assertEqual(len(copy.Constraints), 4)
+        self.assertEqual(copy.DoF, 2)
 
     def testPipeCopyKeepsADefiningExternalEdge(self):
         """ops#233 round: the guide is projected as defining geometry, so it is an edge of the

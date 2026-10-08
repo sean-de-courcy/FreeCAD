@@ -415,6 +415,14 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
                 sketchCopy->ExternalGeo.setValues(std::move(external));
             }
             sketchCopy->ExternalTypes.setValues({});
+            // Constraints were pasted before ExternalGeo (declaration order), against the axes
+            // alone: a constraint on a projection was marked invalid, and an invalid list reads
+            // as empty (no constraints solved, none shown, the next addConstraint drops them all)
+            sketchCopy->Constraints.checkConstraintIndices(
+                sketchCopy->getHighestCurveIndex(),
+                -sketchCopy->getExternalGeometryCount()
+            );
+            sketchCopy->Constraints.acceptGeometry(sketchCopy->getCompleteGeometry());
         }
     }
     else {
