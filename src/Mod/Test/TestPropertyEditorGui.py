@@ -136,6 +136,23 @@ class TestPropertyEditorGui(unittest.TestCase):
     def renameThroughMenu(self, name, newName, before=None):
         """Renames the VarSet's property name to newName through the Data tab's context menu and
         the name dialog, as a user does; before() runs once the row is selected."""
+
+        def nameDialog():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            return widget if isinstance(widget, QtWidgets.QInputDialog) else None
+
+        def answer(dialog):
+            dialog.setTextValue(newName)
+            dialog.accept()
+
+        self.throughMenu(name, "Rename Property", nameDialog, answer, before)
+        self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
+
+    def throughMenu(self, name, action, findDialog=None, answer=None, before=None):
+        """Picks action in the Data tab's context menu on the VarSet's row name, as a user does,
+        and answers the dialog findDialog() returns with answer(dialog); before() runs once the
+        row is selected."""
+        self.seen = []
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
         pump(1.0)
@@ -150,24 +167,17 @@ class TestPropertyEditorGui(unittest.TestCase):
         if before:
             before()
 
-        def pickRename(menu):
-            actions = [a for a in menu.actions() if a.text() == "Rename Property"]
-            self.assertTrue(actions, "no Rename Property in the menu")
+        def pick(menu):
+            actions = [a for a in menu.actions() if a.text() == action]
+            self.assertTrue(actions, "no %s in the menu" % action)
             menu.setActiveAction(actions[0])
             for kind in (QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease):
                 event = QtGui.QKeyEvent(kind, QtCore.Qt.Key_Return, QtCore.Qt.NoModifier)
                 QtWidgets.QApplication.sendEvent(menu, event)
 
-        def nameDialog():
-            widget = QtWidgets.QApplication.activeModalWidget()
-            return widget if isinstance(widget, QtWidgets.QInputDialog) else None
-
-        def answer(dialog):
-            dialog.setTextValue(newName)
-            dialog.accept()
-
-        self.answerSoon(QtWidgets.QApplication.activePopupWidget, pickRename)
-        self.answerSoon(nameDialog, answer)
+        self.answerSoon(QtWidgets.QApplication.activePopupWidget, pick)
+        if findDialog:
+            self.answerSoon(findDialog, answer)
         viewport = editor.viewport()
         pos = editor.visualRect(index).center()
         event = QtGui.QContextMenuEvent(
@@ -175,7 +185,6 @@ class TestPropertyEditorGui(unittest.TestCase):
         )
         QtWidgets.QApplication.sendEvent(viewport, event)
         pump()
-        self.assertEqual(self.seen, ["QMenu", "QInputDialog"])
 
     def testRenameKeepsBookedTransactionOpen(self):
         """A transaction open in the document, as a task dialog keeps one, with a change to another
@@ -242,7 +251,7 @@ class TestPropertyEditorGui(unittest.TestCase):
     def testRefusedRenameKeepsExpression(self):
         """Width = Depth * 2 (an expression), inside a booked transaction: a rename to a name in use
         is refused and Width keeps its expression; the same name through the menu changes
-        nothing."""
+        nothing and reports no error (a refused rename through the menu reports one)."""
         self.obj.addProperty("App::PropertyInteger", "Depth", "Variables")
         self.obj.Depth = 4
         self.obj.setExpression("Width", "Depth * 2")
@@ -254,12 +263,188 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(dict(self.obj.ExpressionEngine).get("Width"), "Depth * 2")
 
         undos = self.doc.UndoCount
+        errors = self.reportedErrors()
+        self.renameThroughMenu("Width", "Depth")
+        self.assertEqual(self.reportedErrors(), errors + 1, "the refused rename reported no error")
         self.renameThroughMenu("Width", "Width")
+        self.assertEqual(self.reportedErrors(), errors + 1, "the same name reported an error")
         self.assertEqual(dict(self.obj.ExpressionEngine).get("Width"), "Depth * 2")
         self.assertEqual(self.doc.UndoCount, undos)
         self.doc.abortTransaction()
+        self.assertEqual(dict(self.obj.ExpressionEngine).get("Width"), "Depth * 2")
         self.doc.recompute()
         self.assertEqual(self.obj.Width, 8)
+
+    def reportedErrors(self):
+        """How many "already exists" errors the Report view shows."""
+        pump(0.2)
+        report = next(
+            (
+                w
+                for w in Gui.getMainWindow().findChildren(QtWidgets.QTextEdit)
+                if w.metaObject().className() == "Gui::DockWnd::ReportOutput"
+            ),
+            None,
+        )
+        self.assertIsNotNone(report, "no Report view")
+        return report.toPlainText().count("already exists")
+
+    # ops#231: Delete, Move and Add Property opened their transactions as Rename did before ops#178
+    # (committing a task dialog's booking), and a value editor's "Edit" booking replaced one with
+    # nothing written yet.
+
+    def openTask(self):
+        """A task dialog's transaction: booked, with a change to Depth (3 -> 9) in it."""
+        self.obj.addProperty("App::PropertyInteger", "Depth", "Variables")
+        self.obj.Depth = 3
+        self.doc.openTransaction("Task")
+        self.obj.Depth = 9
+        return self.doc.getBookedTransactionID()
+
+    def assertTaskAborts(self, tid, undos):
+        """The task's transaction is still the booked one, and aborting it takes back Depth."""
+        self.assertEqual(self.doc.getBookedTransactionID(), tid)
+        self.assertEqual(self.doc.UndoNames[0], "Task")
+        self.doc.abortTransaction()
+        self.assertEqual(self.obj.Depth, 3)
+        self.assertEqual(self.doc.UndoCount, undos)
+
+    def deleteRow(self, name):
+        """Deletes the VarSet's property name with the Delete key in the Data tab."""
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.obj.Name)
+        pump(1.0)
+        editor = self.dataEditor()
+        index = findRow(editor.model(), QtCore.QModelIndex(), name)
+        self.assertIsNotNone(index, "no %s row in the property view" % name)
+        editor.setCurrentIndex(index)
+        editor.selectionModel().select(
+            index,
+            QtCore.QItemSelectionModel.ClearAndSelect | QtCore.QItemSelectionModel.Rows,
+        )
+        editor.setFocus()
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key_Delete)
+        pump()
+
+    def testDeleteJoinsBookedTransaction(self):
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        self.deleteRow("Width")
+        self.assertNotIn("Width", self.obj.PropertiesList)
+        self.assertTaskAborts(tid, undos)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+
+    def testDeleteWithoutBookingIsOwnStep(self):
+        undos = self.doc.UndoCount
+        self.deleteRow("Width")
+        self.assertNotIn("Width", self.obj.PropertiesList)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Remove property")
+        self.doc.undo()
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+
+    def moveThroughMenu(self, name, target):
+        """Moves the VarSet's property name to the object target with Move Property."""
+
+        def objectDialog():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if widget is None or widget.findChild(QtWidgets.QTreeWidget, "typeTree") is None:
+                return None
+            return widget
+
+        def answer(dialog):
+            tree = dialog.findChild(QtWidgets.QTreeWidget, "treeWidget")
+            for _ in range(40):
+                items = tree.findItems(target.Label, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive)
+                if items:
+                    break
+                for row in range(tree.topLevelItemCount()):
+                    tree.topLevelItem(row).setExpanded(True)
+                pump(0.05)
+            self.assertTrue(items, "no %s in the object dialog" % target.Label)
+            items[0].setSelected(True)
+            dialog.accept()
+
+        self.throughMenu(name, "Move Property", objectDialog, answer)
+        self.assertEqual(self.seen, ["QMenu", "QDialog"])
+
+    def testMoveJoinsBookedTransaction(self):
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        self.moveThroughMenu("Width", target)
+        self.assertNotIn("Width", self.obj.PropertiesList)
+        self.assertEqual(target.getPropertyByName("Width"), 5)
+        self.assertTaskAborts(tid, undos)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Width", target.PropertiesList)
+
+    def testMoveWithoutBookingIsOwnStep(self):
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        self.moveThroughMenu("Width", target)
+        self.assertEqual(target.getPropertyByName("Width"), 5)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Move Property")
+        self.doc.undo()
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Width", target.PropertiesList)
+
+    def addThroughMenu(self, name):
+        """Adds the property name (the dialog's default type) to the VarSet with Add Property,
+        then closes the dialog."""
+
+        def addDialog():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if widget is None or widget.findChild(QtWidgets.QLineEdit, "lineEditName") is None:
+                return None
+            return widget
+
+        def answer(dialog):
+            QtTest.QTest.keyClicks(dialog.findChild(QtWidgets.QLineEdit, "lineEditName"), name)
+            pump(0.2)
+            dialog.accept()
+            dialog.reject()
+
+        self.throughMenu("Width", "Add Property", addDialog, answer)
+        self.assertEqual(self.seen, ["QMenu", "QDialog"])
+
+    def testAddJoinsBookedTransaction(self):
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        self.addThroughMenu("Height")
+        self.assertIn("Height", self.obj.PropertiesList)
+        self.assertTaskAborts(tid, undos)
+        self.assertNotIn("Height", self.obj.PropertiesList)
+
+    def testAddWithoutBookingIsOwnStep(self):
+        undos = self.doc.UndoCount
+        self.addThroughMenu("Height")
+        self.assertIn("Height", self.obj.PropertiesList)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Add property")
+        self.doc.undo()
+        self.assertNotIn("Height", self.obj.PropertiesList)
+
+    def testValueEditJoinsBookingWithoutChanges(self):
+        """L5: a task's transaction booked, nothing written in it yet: a value edit joins it, and
+        aborting it takes the edit back."""
+        undos = self.doc.UndoCount
+        self.doc.openTransaction("Task")
+        tid = self.doc.getBookedTransactionID()
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "9")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(self.obj.Width, 9)
+        self.assertEqual(self.doc.getBookedTransactionID(), tid)
+        self.doc.abortTransaction()
+        self.assertEqual(self.obj.Width, 5)
+        self.assertEqual(self.doc.UndoCount, undos)
 
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
@@ -299,7 +484,7 @@ class TestPropertyEditorGui(unittest.TestCase):
 
     def openOuter(self):
         """A transaction someone else opened and already wrote in: the editor books none of its
-        own (a transaction only booked, with nothing written yet, it replaces)."""
+        own (nor for one only booked, with nothing written yet, since ops#231)."""
         self.doc.openTransaction("Outer")
         self.obj.Label2 = self.obj.Label2 + "."
 

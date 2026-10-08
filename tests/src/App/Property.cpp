@@ -451,6 +451,56 @@ TEST_F(RenameProperty, renameUnderGlobalTransactionUndoes)
     EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), nullptr);
 }
 
+// Tests whether a rename that a signalRenameDynamicProperty handler throws from, after the
+// property has its new name, is still complete: the property keeps the new name with its
+// expression, and aborting the transaction takes back both (ops#231)
+TEST_F(RenameProperty, handlerThrowsAfterRename)
+{
+    // Arrange: Variable = Variable2 + 1, and a handler that throws
+    auto* prop2 = freecad_cast<App::PropertyInteger*>(
+        varSet->addDynamicProperty("App::PropertyInteger", "Variable2", "Variables")
+    );
+    prop2->setValue(value);
+    varSet->setExpression(
+        App::ObjectIdentifier(*prop),
+        std::shared_ptr<App::Expression>(App::Expression::parse(varSet, "Variable2 + 1"))
+    );
+    varSet->ExpressionEngine.execute();
+    fastsignals::scoped_connection conn = App::GetApplication().signalRenameDynamicProperty.connect(
+        [this](const App::Property& renamed, const char*) {
+            if (&renamed == prop) {
+                throw Base::RuntimeError("handler failed");
+            }
+        }
+    );
+    auto expressionOf = [this](const char* name) -> std::string {
+        auto expressions = varSet->ExpressionEngine.getExpressions();
+        auto it = expressions.find(App::ObjectIdentifier(varSet, std::string(name)));
+        return it == expressions.end() ? std::string() : it->second->toString();
+    };
+
+    // Act
+    doc->openTransaction("Rename Property");
+    EXPECT_THROW(varSet->renameDynamicProperty(prop, "NewName"), Base::RuntimeError);
+    conn.disconnect();
+
+    // Assert: renamed, with the expression under the new name
+    EXPECT_STREQ(varSet->getPropertyName(prop), "NewName");
+    EXPECT_EQ(expressionOf("NewName"), "Variable2 + 1");
+    EXPECT_EQ(expressionOf("Variable"), "");
+
+    // Act: abort the transaction
+    doc->abortTransaction();
+
+    // Assert: the old name, with its expression
+    EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), prop);
+    EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
+    EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    EXPECT_EQ(expressionOf("NewName"), "");
+    prop2->setValue(value + 1);
+    varSet->ExpressionEngine.execute();
+    EXPECT_EQ(prop->getValue(), value + 2);
+}
 
 // Tests whether we can rename a property, undo, and redo it
 TEST_F(RenameProperty, redo)

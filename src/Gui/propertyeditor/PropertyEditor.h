@@ -35,6 +35,7 @@
 namespace App
 {
 class Property;
+class PropertyContainer;
 class Document;
 }  // namespace App
 
@@ -48,6 +49,21 @@ namespace PropertyEditor
 
 class PropertyItemDelegate;
 class PropertyModel;
+
+/// FreeCAD-CH (ops#178, ops#231): opens the transaction @a name for a change to @a container's
+/// properties (Add, Remove, Move or Rename Property) in its document, unless the document has
+/// booked one already (a task dialog's): that one takes the change, since opening another would
+/// commit it, past the dialog's Cancel. @a ownBooking (the property editor's "Edit" booking) isn't
+/// one to join. Returns the ID for closePropertyTransaction(), or 0 when the change joins a booking.
+GuiExport int openPropertyTransaction(
+    App::PropertyContainer* container,
+    const char* name,
+    int ownBooking = 0
+);
+/// Commits, or with @a commit false aborts, the transaction @a tid from openPropertyTransaction().
+/// Nothing for 0: an ID of 0 would close the active document's booking, someone else's.
+GuiExport void closePropertyTransaction(int tid, bool commit = true);
+
 /*!
  Put this into the .qss file after Gui--PropertyEditor--PropertyEditor
 

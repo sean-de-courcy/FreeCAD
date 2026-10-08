@@ -917,6 +917,16 @@ bool DocumentObject::renameDynamicProperty(Property* prop, const char* name)
             ExpressionEngine.setValue(idsWithExprsToRemove[i], expressionsToMove[i]);
         }
     };
+    // Records the rename and gives the property its expressions under the new name
+    auto finishRename = [&]() {
+        if (_pDoc) {
+            _pDoc->renamePropertyOfObject(this, prop, oldName.c_str());
+        }
+        App::ObjectIdentifier idNewProp(prop->getContainer(), std::string(name));
+        for (auto& exprToMove : expressionsToMove) {
+            ExpressionEngine.setValue(idNewProp, exprToMove);
+        }
+    };
     bool renamed = false;
     try {
         renamed = TransactionalObject::renameDynamicProperty(prop, name);
@@ -925,23 +935,20 @@ bool DocumentObject::renameDynamicProperty(Property* prop, const char* name)
         if (oldName == prop->getName()) {
             restoreExpressions();
         }
+        else {
+            // FreeCAD-CH (ops#231): a handler of signalRenameDynamicProperty threw after the
+            // rename. The property keeps its new name, so it gets its expressions and the
+            // transaction the rename: undo and abort found nothing to rename back.
+            finishRename();
+        }
         throw;
     }
     if (!renamed) {
         restoreExpressions();
         return false;
     }
-    if (renamed && _pDoc) {
-        _pDoc->renamePropertyOfObject(this, prop, oldName.c_str());
-    }
-
-
-    App::ObjectIdentifier idNewProp(prop->getContainer(), std::string(name));
-    for (auto& exprToMove : expressionsToMove) {
-        ExpressionEngine.setValue(idNewProp, exprToMove);
-    }
-
-    return renamed;
+    finishRename();
+    return true;
 }
 
 void DocumentObject::moveExpressionTargetingProp(Property* prop,
