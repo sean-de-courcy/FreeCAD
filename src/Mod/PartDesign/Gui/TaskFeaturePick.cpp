@@ -48,6 +48,7 @@
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/FeaturePrimitive.h>
+#include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "ui_TaskFeaturePick.h"
@@ -393,12 +394,35 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
             }
 
             cprop->Paste(*prop);
+        }
 
-            // we are a independent copy, therefore no external geometry was copied. WE therefore
-            // can delete all constraints
-            if (auto* sketchObj = freecad_cast<Sketcher::SketchObject*>(obj)) {
-                sketchObj->delConstraintsToExternal();
+        // An independent copy links nothing outside (its links weren't copied). Its projections
+        // stay, detached as a parked link's are (SketchObject::parkExternalGeometry): no
+        // reference, not Missing. So the constraints on them, its degrees of freedom and its
+        // Shape (defining external edges included) stay the original's, and its recompute keeps
+        // them fixed: a reference left on a projection would be linked again by
+        // rebuildExternalGeometry's re-check of missing elements. The copy only: the original is
+        // never touched (ops#233: delConstraintsToExternal() ran on obj, once per property).
+        if (auto* sketchCopy = freecad_cast<Sketcher::SketchObject*>(copy)) {
+            std::vector<Part::Geometry*> external = sketchCopy->ExternalGeo.getValues();
+            if (external.size() > 2) {
+                for (auto it = external.begin() + 2; it != external.end(); ++it) {
+                    *it = (*it)->clone();
+                    auto facade = Sketcher::ExternalGeometryFacade::getFacade(*it);
+                    facade->setRef(std::string());
+                    facade->setFlag(Sketcher::ExternalGeometryExtension::Missing, false);
+                }
+                sketchCopy->ExternalGeo.setValues(std::move(external));
             }
+            sketchCopy->ExternalTypes.setValues({});
+            // Constraints were pasted before ExternalGeo (declaration order), against the axes
+            // alone: a constraint on a projection was marked invalid, and an invalid list reads
+            // as empty (no constraints solved, none shown, the next addConstraint drops them all)
+            sketchCopy->Constraints.checkConstraintIndices(
+                sketchCopy->getHighestCurveIndex(),
+                -sketchCopy->getExternalGeometryCount()
+            );
+            sketchCopy->Constraints.acceptGeometry(sketchCopy->getCompleteGeometry());
         }
     }
     else {

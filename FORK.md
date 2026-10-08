@@ -240,7 +240,8 @@ names it.
 | `fix/178-181-rename-move-transactions` | fix | ops#178, ops#181 | - | `integration` `fb2a4a9229` | `800c03ab49` (fork PR 210), 2026-10-08 | Rename part: when upstream's `PropertyEditor` Rename joins a booked transaction and guards its commit; `openPendingTransaction`: never (fork code, fork PR 148) |
 | `fix/229-rename-value-rollback` | fix | ops#229 | - | `fix/178-181-rename-move-transactions` `5d982c82f5` (fork PR 210) | `79b75b8f45` (fork PR 212), 2026-10-08 | when upstream's `TransactionObject` keeps a rename and a value change of one property apart (one entry per property ID) |
 | `fix/225-pipe-copy-followups` | fix | ops#225 | - | `integration` `144785fdd0` | `307ab9804d` (fork PR 211), 2026-10-08 | never (fork fix) |
-| `fix/191-revolution-upto-face-first-solid` | fix | ops#191 | - | `integration` `307ab9804d` | (fork PR 217) | when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
+| `fix/191-revolution-upto-face-first-solid` | fix | ops#191 | - | `integration` `307ab9804d` | `5b08371dd1` (fork PR 217), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
+| `fix/233-makecopy-external-constraints` | fix | ops#233 | - | `integration` `800c03ab49` | (fork PR 215) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
