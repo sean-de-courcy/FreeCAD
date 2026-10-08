@@ -236,7 +236,7 @@ public:
 };
 }  // namespace
 
-TEST_F(TopoShapeExpansionTest, makeElementCompoundOtherHasherOnlyLogs)
+TEST_F(TopoShapeExpansionTest, mapSubElementOtherHasherOnlyLogs)
 {
     // Arrange: the second input belongs to another document's string table (hasher). The user
     // can't act on that, so it goes to the log only, not to the Report view as an error or
@@ -245,15 +245,19 @@ TEST_F(TopoShapeExpansionTest, makeElementCompoundOtherHasherOnlyLogs)
     auto edge2 = BRepBuilderAPI_MakeEdge(gp_Pnt(1.0, 0.0, 0.0), gp_Pnt(2.0, 0.0, 0.0)).Edge();
     App::StringHasherRef hasher1(new App::StringHasher);
     App::StringHasherRef hasher2(new App::StringHasher);
-    TopoShape topoShape {1L, hasher1};
-    std::vector<TopoShape> shapes {TopoShape(edge1, 2L, hasher1), TopoShape(edge2, 3L, hasher2)};
+    TopoShape plain {1L};
+    plain.makeElementCompound({TopoShape(edge1, 2L), TopoShape(edge2, 3L)});
+    // The compound's shape alone, named from its inputs one by one below
+    TopoShape topoShape(plain.getShape(), 1L, hasher1);
+    topoShape.mapSubElement(TopoShape(edge1, 2L, hasher1));
+    ASSERT_GT(topoShape.getElementMapSize(), 0);
     int* level = Base::Console().getLogLevel("TopoShape");
     const int oldLevel = *level;
     *level = FC_LOGLEVEL_LOG;
     // Act
     {
         ConsoleCollector collector;
-        topoShape.makeElementCompound(shapes);
+        topoShape.mapSubElement(TopoShape(edge2, 3L, hasher2));
         *level = oldLevel;
         // Assert: the mismatch was seen, and reported at the log level only
         EXPECT_GE(collector.count("hasher mismatch", Base::LogStyle::Log), 1);

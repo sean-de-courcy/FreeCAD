@@ -24,13 +24,14 @@
 
 While a feature is edited, its task panel shows the error the tree's tooltip shows, refreshed
 after each recompute and hidden while the feature is fine. The panel is Gui::TaskView's, so this
-holds for every dialog; the tests use PartDesign's.
+holds for every dialog but the sketch editor, whose solver messages already say why a sketch
+fails (PLAN decision 30); the tests use PartDesign's.
 
 Designed models, each built by the test:
 - Plate: a 10 x 10 rectangle padded 10 as the Body's first feature (1000 mm^3). Its "To last"
   type has no solid to reach and fails; "Dimension" computes again.
-- Pocket alone: a 2 x 2 square pocketed 3 as the Body's first feature. It has nothing to cut and
-  fails.
+- Pocket: a 2 x 2 square on the Plate's top, pocketed "Up to face" with no face picked; it fails.
+- Conflicting sketch: one 10 mm line constrained to both 5 and 7 mm; the sketch fails.
 
 Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md)."""
 
@@ -38,6 +39,7 @@ import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import Sketcher
 from PySide import QtCore, QtGui, QtWidgets
 
 from PartDesignTests.Scenarios import models
@@ -152,10 +154,11 @@ class TestTaskStatusGui(unittest.TestCase):
         self.setMode("Dimension")
         self.assertTrue(waitFor(lambda: not self.banner().isVisible()), "the error stays")
 
-    def testPocketWithNothingToCut(self):
-        self.body = models.body(self.doc)
-        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body)
+    def testPocketUpToNoFace(self):
+        self.plate()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body, z=10)
         pocket = models.pocket(self.body, square, 3)
+        pocket.Type = "UpToFace"
         self.doc.recompute()
         self.assertIn("Invalid", pocket.State)
         self.edit(pocket)
@@ -165,7 +168,21 @@ class TestTaskStatusGui(unittest.TestCase):
         pad = self.plate()
         self.edit(pad)
         self.assertEqual(len(statusBanners()), 1)
-        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        cancel = QtWidgets.QDialogButtonBox.Cancel
+        self.assertTrue(waitFor(lambda: taskButton(cancel) is not None), "no Cancel button")
+        taskButton(cancel).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog didn't close")
+        pump()
+        self.assertEqual(statusBanners(), [])
+
+    def testSketchEditorShowsNothing(self):
+        """The sketch editor has no status label, even for a sketch in error."""
+        self.body = models.body(self.doc)
+        sketch = models.sketch(self.doc, "Conflict", models.polyline([(0, 0), (10, 0)]), self.body)
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 5.0))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 7.0))
+        self.doc.recompute()
+        self.assertIn("Invalid", sketch.State)
+        self.edit(sketch)
         pump()
         self.assertEqual(statusBanners(), [])

@@ -753,8 +753,9 @@ bool TaskView::showDialog(TaskDialog* dlg, App::Document* doc)
     dlg->modifyStandardButtons(outInfo.ActiveCtrl->buttonBox);
 
     outInfo.taskPanel = new TaskPanel(this);
-    // The edited object's error or warning, above the dialog (ops#151)
-    if (doc) {
+    // The edited object's error or warning, above the dialog (ops#151). Not in the sketch editor:
+    // its solver messages already say why a sketch fails (PLAN decision 30)
+    if (doc && !dlg->inherits("SketcherGui::TaskDlgEditSketch")) {
         outInfo.taskPanel->mainLayout->insertWidget(1, new EditStatusBanner(doc, outInfo.taskPanel));
     }
     if (dlg->buttonPosition() == TaskDialog::North) {
