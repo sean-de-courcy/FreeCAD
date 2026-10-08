@@ -29,8 +29,10 @@
 #include <optional>
 #include <ranges>
 #include <utility>
+#include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
@@ -565,7 +567,7 @@ TopoShape Revolved::tryToRevolveToFace(
     // the axis, so the whole sweep lies within |location - center| + diagonal / 2 of the axis
     // location along it, and the box starts more than half a diagonal beyond that.
     // The box is also what BRepFeat trims an unbounded up-to face to (BRepFeat::FaceUntil: a
-    // square of 10 times the base's largest bounding box coordinate around the face's origin).
+    // square sized from 10 times the base's largest bounding box coordinate).
     // A small box near the axis made that square miss part of the sweep: a loud failure, or a
     // nearly full ring instead of a quarter (ops#239). So the box is centred radially on the
     // axis, and its side is twice the distance from the global origin to anything involved:
@@ -578,16 +580,24 @@ TopoShape Revolved::tryToRevolveToFace(
         gp_Pnt center(profile.GetCenter().x, profile.GetCenter().y, profile.GetCenter().z);
         const gp_Pnt& location = axis.Location();
         double clearance = location.Distance(center) + profile.CalcDiagonalLength() + 1.0;
+        // The up-to face's reach is a margin: a datum plane's origin far from the profile made no
+        // difference in probes (ops#239). An infinite face's bounding box (about 1e100) would
+        // make the cube lose the clearance to rounding, so only a finite box counts, and an
+        // elementary surface adds its location.
         double faceReach = 0.0;
-        gp_Pln upToPlane;
-        if (upToFace.findPlane(upToPlane)) {
-            faceReach = upToPlane.Location().Distance(gp::Origin());
-        }
-        else {
+        if (!upToFace.isNull() && upToFace.getShape().ShapeType() == TopAbs_FACE) {
+            Handle(Geom_ElementarySurface) surface = Handle(Geom_ElementarySurface)::DownCast(
+                BRep_Tool::Surface(TopoDS::Face(upToFace.getShape()))
+            );
+            if (!surface.IsNull()) {
+                faceReach = surface->Location().Distance(gp::Origin());
+            }
             Base::BoundBox3d faceBox = upToFace.getBoundBox();
-            if (faceBox.IsValid()) {
-                faceReach = faceBox.GetCenter().Length()
-                    + faceBox.CalcDiagonalLength() / 2.0;
+            if (faceBox.IsValid() && !Precision::IsInfinite(faceBox.CalcDiagonalLength())) {
+                faceReach = std::max(
+                    faceReach,
+                    faceBox.GetCenter().Length() + faceBox.CalcDiagonalLength() / 2.0
+                );
             }
         }
         double side = 2.0 * (location.Distance(gp::Origin()) + clearance + faceReach) + 2.0;
@@ -595,10 +605,8 @@ TopoShape Revolved::tryToRevolveToFace(
         gp_Pnt corner = frame.Location().Translated(
             (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-side / 2.0)
         );
-        featureBase = TopoShape(
-            BRepPrimAPI_MakeBox(gp_Ax2(corner, axis.Direction(), frame.XDirection()), side, side, side)
-                .Shape()
-        );
+        gp_Ax2 boxFrame(corner, axis.Direction(), frame.XDirection());
+        featureBase = TopoShape(BRepPrimAPI_MakeBox(boxFrame, side, side, side).Shape());
     }
 
     auto makeRevolution = [&](Part::RevolMode mode, Standard_Boolean modify) {

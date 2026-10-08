@@ -143,15 +143,15 @@ class TestRevolve(unittest.TestCase):
         wallHeight=0,
     ):
         """A Revolution or Groove up to a wall, as the body's first solid or after a core cylinder
-        (ops#191, ops#239). The profile is the rectangle x in [1, 3] * scale + offset, z in
-        [0, 2] * scale on XZ (area 4 * scale^2, centroid 2 * scale from the axis), revolved about
-        the vertical line x = offset, y = 0:
-        the sketch's V axis when offset is 0, else a datum line. The wall is the plane x = offset,
-        a quarter turn away on either side: a datum plane with its origin at z = wallHeight, or (wall="binder" or "part") the
-        bounded face y in [0.5, 4], z in [-1, 3] of a Part::Plane outside the body, through a
-        ShapeBinder or linked directly. The bounded face lies on the y > 0 side only: a face that
-        the sweep crosses on both sides gives the region between the two crossings instead (the
-        based path does that too)."""
+        (ops#191, ops#239). The profile is the rectangle x in [1, 3] * scale + offset,
+        z in [0, 2] * scale on XZ (area 4 * scale^2, centroid 2 * scale from the axis), revolved
+        about the vertical line x = offset, y = 0: the sketch's V axis when offset is 0, else a
+        datum line. The wall is the plane x = offset, a quarter turn away on either side: a datum
+        plane with its origin at z = wallHeight, or (wall="binder" or "part") the bounded face
+        y in [0.5, 4], z in [-1, 3] of a Part::Plane outside the body, through a ShapeBinder or
+        linked directly. The bounded face lies on the y > 0 side only: a face that the sweep
+        crosses on both sides gives the region between the two crossings instead (the based path
+        does that too)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         if core:
             cylinder = body.newObject("PartDesign::AdditiveCylinder", "Core")
@@ -214,8 +214,8 @@ class TestRevolve(unittest.TestCase):
 
     def assertQuarter(self, shape, positiveY, offset=0, scale=1):
         """One quarter of the ring: x from offset to offset + 3 * scale and z in [0, 2] * scale on
-        the given side of the profile plane y = 0. The axis runs along +Z, so a positive turn carries +X to +Y;
-        Reversed turns the other way."""
+        the given side of the profile plane y = 0. The axis runs along +Z, so a positive turn
+        carries +X to +Y; Reversed turns the other way."""
         bounds = shape.BoundBox
         self.assertAlmostEqual(bounds.XMin, offset, places=6)
         self.assertAlmostEqual(bounds.XMax, offset + 3 * scale, places=6)
@@ -331,9 +331,11 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, 0, places=6)
 
     def testRevolutionUpToFaceFirstSolidFarWallOrigin(self):
-        """The wall's origin 500 above the profile: the trimmed square sits around it."""
+        """The wall's origin 100000 above the profile does not matter. (Probed with and without
+        the wall origin in the box's size, ops#239: OCCT's trim of the wall doesn't sit around
+        the wall's origin, so the term is only a margin.)"""
         revolution = self.revolveUpToWall(
-            "One side", core=False, reversed=True, scale=10, wallHeight=500
+            "One side", core=False, reversed=True, scale=10, wallHeight=100000
         )
         self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4000, places=4)
         self.assertQuarter(revolution.Shape, positiveY=False, scale=10)
@@ -381,6 +383,53 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(bounds.YMax, 30, places=6)
         self.assertAlmostEqual(bounds.ZMin, 0, places=6)
         self.assertAlmostEqual(bounds.ZMax, 30, places=6)
+
+    def testRevolutionUpToInfiniteCylinderFirstSolid(self):
+        """The up-to face is a whole cylinder surface (unbounded along its axis): radius 100, its
+        axis parallel to Z through (100, 0), so it passes through the revolution axis. The profile
+        x in [1, 3], z in [0, 2] on XZ about Z: the point at radius r meets it after the angle
+        acos(r / 200), and the volume is 2 * the integral of r * acos(r / 200) from 1 to 3. Its
+        bounding box (about 1e100) must not size the box BRepFeat gets without a base."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 100
+        cylinder.Center = FreeCAD.Vector(100, 0, 0)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(cylinder)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+
+        k = 200
+
+        def antiderivative(r):
+            # integral of r * acos(r / k) dr
+            return (
+                r**2 / 2 * math.acos(r / k)
+                + k**2 / 4 * math.asin(r / k)
+                - r / 4 * math.sqrt(k**2 - r**2)
+            )
+
+        expected = 2 * (antiderivative(3) - antiderivative(1))
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.YMin, 0, places=6)
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
