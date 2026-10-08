@@ -472,6 +472,13 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
         }
     });
 
+    // The formula editor's OK writes the expression into the sketch at once, before the field
+    // is answered, and the next recompute moves the value with it. Esc then keeps what the
+    // constraint had (ops#203 review M1).
+    const auto expressionPath = sketch->Constraints.createPath(ConstrNbr);
+    const auto expressionBefore = sketch->getExpression(expressionPath).expression;
+    const double datumBefore = Constr->getValue();
+
     popup.show();
     box->setFocus();
     box->selectNumber();
@@ -484,6 +491,15 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
         popup.show();
         box->setFocus();
         result = popup.exec();
+    }
+
+    if (result == InPlaceKept) {
+        if (expressionBefore || sketch->getExpression(expressionPath).expression) {
+            sketch->setExpression(expressionPath, expressionBefore);
+        }
+        if (sketch->Constraints.getValues()[ConstrNbr]->getValue() != datumBefore) {
+            sketch->setDatum(ConstrNbr, datumBefore);
+        }
     }
 
     inPlacePopup = nullptr;
@@ -564,24 +580,32 @@ void EditDatumDialog::applyValue()
     // old ones), also when it fails and the field stays open for another try: read it afresh.
     Constr = sketch->Constraints.getValues()[ConstrNbr];
 
-    if (valueEdit->hasExpression()) {
-        // A formula from the formula editor ('=').
-        valueEdit->apply();
-        return;
-    }
-
-    QString text = valueEdit->text().trimmed();
+    // A formula from the formula editor ('=') is in the field, and in the sketch's expression
+    // engine already
+    const bool fromEditor = valueEdit->hasExpression();
     std::shared_ptr<App::Expression> expr;
-    try {
-        expr = App::ExpressionParser::parse(sketch, text.toUtf8().constData());
+    if (fromEditor) {
+        expr = sketch->getExpression(sketch->Constraints.createPath(ConstrNbr)).expression;
+        if (!expr) {
+            valueEdit->apply();
+            return;
+        }
     }
-    catch (const Base::Exception&) {
-        // Not an expression as it stands, e.g. a value in the user's locale: the field reads it.
+    else {
+        QString text = valueEdit->text().trimmed();
+        try {
+            expr = App::ExpressionParser::parse(sketch, text.toUtf8().constData());
+        }
+        catch (const Base::Exception&) {
+            // Not an expression as it stands, e.g. a value in the user's locale: the field reads
+            // it.
+        }
     }
 
-    if (refersToProperty(expr.get())) {
-        // A spreadsheet alias or another property: link to it. Its value goes through setDatum
-        // first, which refuses values the constraint can't take.
+    if (fromEditor || refersToProperty(expr.get())) {
+        // A spreadsheet alias or another property, or a formula: link to it. Its value goes
+        // through setDatum first, which refuses values the constraint can't take (ops#203
+        // review M2).
         App::ExpressionPtr result = expr->eval();
         auto* number = freecad_cast<App::NumberExpression*>(result.get());
         if (!number) {
@@ -601,15 +625,21 @@ void EditDatumDialog::applyValue()
             unitString
         );
 
-        std::string exprString = Base::Tools::escapedUnicodeFromUtf8(expr->toString().c_str());
-        exprString = Base::Tools::escapeQuotesFromString(exprString);
         try {
-            Gui::cmdAppObjectArgs(
-                sketch,
-                "setExpression('%s', u'%s')",
-                sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
-                exprString
-            );
+            if (fromEditor) {
+                valueEdit->apply();
+            }
+            else {
+                std::string exprString
+                    = Base::Tools::escapedUnicodeFromUtf8(expr->toString().c_str());
+                exprString = Base::Tools::escapeQuotesFromString(exprString);
+                Gui::cmdAppObjectArgs(
+                    sketch,
+                    "setExpression('%s', u'%s')",
+                    sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
+                    exprString
+                );
+            }
         }
         catch (const Base::Exception&) {
             // No link (e.g. a cyclic one): put the value back, so that Esc keeps the old one.
