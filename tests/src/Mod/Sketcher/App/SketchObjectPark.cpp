@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -663,11 +664,14 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
 
     const std::string name = doc->getName();
     const std::string sketchName = sketch->getNameInDocument();
-    auto path = std::filesystem::temp_directory_path() / (name + "Pending.FCStd");
+    // under the same name, which TearDown closes
+    auto path = std::filesystem::temp_directory_path() / (name + ".FCStd");
     doc->saveAs(Base::FileInfo::pathToString(path).c_str());
     App::GetApplication().closeDocument(name.c_str());
     doc = App::GetApplication().openDocument(Base::FileInfo::pathToString(path).c_str());
+    std::filesystem::remove(path);
     ASSERT_NE(doc, nullptr);
+    ASSERT_EQ(std::string(doc->getName()), name);
     sketch = static_cast<Sketcher::SketchObject*>(doc->getObject(sketchName.c_str()));
     ASSERT_NE(sketch, nullptr);
     box = doc->getObject("Box");
@@ -680,6 +684,22 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
     sketch->ExternalGeometry.setValues(objs, subs);
     EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, 0, -1}));
     doc->recompute();
-    EXPECT_EQ(sketch->externalGeometryIds(2).size(), 1U);
-    std::filesystem::remove(path);
+    ASSERT_EQ(sketch->externalGeometryIds(2).size(), 1U);
+    // it is the other edge's projection: the last external geometry, between its ends
+    auto shape = Part::Feature::getTopoShape(box, Part::ShapeOption::NoFlag);
+    auto other = TopoDS::Edge(shape.getSubShape(otherEdge.c_str()));
+    auto p1 = BRep_Tool::Pnt(TopExp::FirstVertex(other));
+    auto p2 = BRep_Tool::Pnt(TopExp::LastVertex(other));
+    auto* line =
+        dynamic_cast<const Part::GeomLineSegment*>(sketch->ExternalGeo.getValues().back());
+    ASSERT_NE(line, nullptr);
+    std::vector<Base::Vector3d> ends {line->getStartPoint(), line->getEndPoint()};
+    std::vector<Base::Vector3d> expected {Base::Vector3d(p1.X(), p1.Y(), 0),
+                                          Base::Vector3d(p2.X(), p2.Y(), 0)};
+    auto byX = [](const Base::Vector3d& a, const Base::Vector3d& b) { return a.x < b.x; };
+    std::sort(ends.begin(), ends.end(), byX);
+    std::sort(expected.begin(), expected.end(), byX);
+    for (std::size_t k = 0; k < 2; ++k) {
+        EXPECT_TRUE(ends[k].IsEqual(expected[k], tolerance));
+    }
 }

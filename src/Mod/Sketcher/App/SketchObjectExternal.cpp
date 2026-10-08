@@ -2492,8 +2492,9 @@ std::optional<long> typeFromSavedGeometry(const std::string& sub,
 
 // How far a built geometry lies from a saved one of the same kind (ops#140): for points their
 // distance; for full circles and ellipses the distance of the centres plus the radii's
-// differences, which doesn't depend on where their parameter starts; for other curves the largest
-// distance of a point sampled on one from the other, both ways.
+// differences (and for ellipses how far the turn of the major axis moves the curve), which
+// doesn't depend on where their parameter starts; for other curves the largest distance of a
+// point sampled on one from the other, both ways, each to the nearer of the foot and the ends.
 double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
 {
     if (auto* point = freecad_cast<const Part::GeomPoint*>(geo)) {
@@ -2507,14 +2508,18 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
     }
     if (auto* ellipse = freecad_cast<const Part::GeomEllipse*>(geo)) {
         auto* other = static_cast<const Part::GeomEllipse*>(saved);
-        // and how far the end of the major axis turns: the axis has no sense, so at most a
-        // quarter turn (ops#237)
+        // and how far turning the major axis moves the curve, about (a - b) sin(angle): nothing
+        // for a near-circular ellipse, whose axis direction is noise (ops#237). The axis has no
+        // sense, so the angle is at most a quarter turn.
         double angle = ellipse->getMajorAxisDir().GetAngle(other->getMajorAxisDir());
         angle = std::min(angle, std::numbers::pi - angle);
+        const double eccentricity =
+            std::max(ellipse->getMajorRadius() - ellipse->getMinorRadius(),
+                     other->getMajorRadius() - other->getMinorRadius());
         return Base::Distance(ellipse->getCenter(), other->getCenter())
             + std::abs(ellipse->getMajorRadius() - other->getMajorRadius())
             + std::abs(ellipse->getMinorRadius() - other->getMinorRadius())
-            + std::max(ellipse->getMajorRadius(), other->getMajorRadius()) * angle;
+            + eccentricity * std::sin(angle);
     }
     auto* curve = freecad_cast<const Part::GeomCurve*>(geo);
     auto* savedCurve = freecad_cast<const Part::GeomCurve*>(saved);

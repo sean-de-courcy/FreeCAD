@@ -1432,15 +1432,21 @@ void SketchObject::onExternalGeometryChanged()
         }
         else if (!externalLinksWithTypes && !(doc && doc->isPerformingTransaction())
                  && externalGeoRef.size() > oldRefs.size() && externalTypeRepairPending
-                 && types.size() > oldRefs.size()
-                 && std::equal(oldRefs.begin(), oldRefs.end(), externalGeoRef.begin())) {
-            // links appended outside the sketch while entries wait for the repair: the new links
-            // are projections, before those entries, which would otherwise be read as the new
-            // links' types (the mark builds nothing) (ops#237)
-            types.insert(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
-                         externalGeoRef.size() - oldRefs.size(),
-                         static_cast<long>(ExtType::Projection));
-            ExternalTypes.setValues(types);
+                 && types.size() > oldRefs.size()) {
+            if (std::equal(oldRefs.begin(), oldRefs.end(), externalGeoRef.begin())) {
+                // links appended outside the sketch while entries wait for the repair: the new
+                // links are projections, before those entries, which would otherwise be read as
+                // the new links' types (the mark builds nothing) (ops#237)
+                types.insert(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
+                             externalGeoRef.size() - oldRefs.size(),
+                             static_cast<long>(ExtType::Projection));
+                ExternalTypes.setValues(types);
+            }
+            else {
+                FC_WARN("External links of " << getFullName() << " changed beyond an append "
+                        << "while their types wait for a repair; their types are left as they "
+                        << "are, and links past the old ones can read a pending entry");
+            }
         }
         signalElementsChanged();
     }
@@ -1596,25 +1602,36 @@ void SketchObject::onSketchRestore()
             // a type list saved before ops#140 gets each link's own type back, from the saved
             // geometries, before anything reads it by index
             if (ExternalTypes.getSize() > ExternalGeometry.getSize()) {
-                // its own try: a failure leaves the list as saved, and the rest of the restore
-                // (orientations, geometry state, solve) still runs (ops#237). The repair follows
-                // from the file alone, so it leaves the sketch untouched (it runs again on the next
-                // open until a save).
+                // its own try, so the rest of the restore (orientations, geometry state, solve)
+                // still runs (ops#237). A failure puts the list back as saved and keeps its extra
+                // entries pending, so they survive edits and a save, and the next open repairs
+                // again; until then each link reads the type at its index.
+                const auto savedTypes = ExternalTypes.getValues();
+                auto failed = [&](const std::string& why) {
+                    FC_ERR("Failed to repair the external link types of "
+                           << getFullName() << " (" << why << "); until the file is opened "
+                           << "again, each link reads the type at its index, which can be "
+                           << "another link's");
+                    undecidedTypeKeys.clear();
+                    if (ExternalTypes.getValues() != savedTypes) {
+                        ExternalTypes.setValues(savedTypes);
+                    }
+                    externalTypeRepairPending = true;
+                };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);
-                    ExternalTypes.purgeTouched();
                 }
                 catch (const Base::Exception& e) {
-                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
-                           << e.what());
+                    failed(e.what());
                 }
                 catch (const Standard_Failure& e) {
-                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
-                           << e.GetMessageString());
+                    failed(e.GetMessageString());
                 }
                 catch (const std::exception& e) {
-                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
-                           << e.what());
+                    failed(e.what());
+                }
+                catch (...) {
+                    failed("unknown exception");
                 }
             }
         }
