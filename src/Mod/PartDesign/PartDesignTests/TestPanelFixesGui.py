@@ -527,6 +527,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(pipe.Spine[0]))
         self.assertEqual(pipe.Spine[1], subs)
         self.doc.recompute()
+        # the copy's edges, in order, are the spine's: 10 then 20 long
+        lengths = [pipe.Spine[0].getSubObject(sub).Length for sub in pipe.Spine[1]]
+        self.assertEqual([round(length, 6) for length in lengths], [10, 20])
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
         self.assertIn("Warning", pipe.State)
@@ -534,8 +537,10 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def testPipeCopyThatFailsIsNamed(self):
         """ops#234: the spine outside the body has conflicting constraints (its first line 10 and
-        20 long), so its copy doesn't recompute either. OK names the copy and why in the Report
-        view. The copy's result was ignored."""
+        20 long), so its copy doesn't recompute either. OK stops with a message naming the copy
+        and why, and aborts: the copy is gone, the spine is the original, the body as before. The
+        copy's result was ignored (round 1 of PR 219: it named it only in the Report view, and OK
+        went on)."""
         import Sketcher
 
         pipe = self.rod(spineInBody=False)
@@ -543,16 +548,28 @@ class TestPanelFixesGui(unittest.TestCase):
         self.spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 20))
         self.doc.recompute()
         self.assertFalse(self.spine.isValid())
-        reportStart = len(reportText() or "")
+        before = self.body.Group
+        self.assertOkStops(
+            pipe,
+            "Pipe: the copy 'CopySpine' of 'Spine' doesn't recompute: Sketch with conflicting",
+        )
+        self.assertIs(pipe.Spine[0], self.spine)
+        self.assertEqual(self.body.Group, before)
+
+    def assertOkStops(self, pipe, text):
+        """OK answered Make independent copy shows a message box with text and leaves the panel
+        open; the transaction is aborted (no copy left)."""
         self.edit(pipe)
         self.answerModals()
-        self.close(ok=True)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2, 5.0), self.modals)
         self.answering = False
-        self.assertEqual(self.modals, ["DlgReference"])
-        self.assertIn(
-            "Pipe: the copy 'CopySpine' of 'Spine' doesn't recompute: Sketch with conflicting",
-            (reportText() or "")[reportStart:],
-        )
+        pump(0.2)
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: "), self.modals)
+        self.assertIn(text, self.modals[1])
+        self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
 
     def testPipeCopyAbortedWithThePipe(self):
         """ops#234 (PR 211 review): the profile is open (three sides of the square), so the pipe
@@ -604,6 +621,88 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(copy))
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testPipeCopyOfAnotherShapeStops(self):
+        """ops#234 round (PR 219 review F1): the spine is an edge of a box in another body that
+        is fused with a base box. The independent copy takes no BaseFeature, so its shape is the
+        box alone, where that index is another edge (or none): written by index, the spine moved
+        silently. OK now stops and names the reference. Model: a base box 20 x 20 x 10 and a box
+        10 x 10 x 20, both at the origin; the spine is the fused shape's vertical edge at
+        x = 20, y = 0 (z 0..10), which the box alone hasn't; the profile is a 2 x 2 square around
+        its foot."""
+        other = models.body(self.doc)
+        base = other.newObject("PartDesign::AdditiveBox", "Base")
+        base.Length = 20
+        base.Width = 20
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Height = 20
+        self.body = models.body(self.doc)
+        self.profile = models.sketch(
+            self.doc, "Profile", models.rectangle(19, -1, 21, 1), self.body
+        )
+        self.doc.recompute()
+        self.assertTrue(box.isValid(), box.getStatusString())
+        # the base's vertical edge at x = 20, y = 0, by geometry
+        [sub] = [
+            f"Edge{i}"
+            for i, e in enumerate(box.Shape.Edges, 1)
+            if (e.CenterOfMass - V(20, 0, 5)).Length < 1e-6
+        ]
+        alone = Part.makeBox(10, 10, 20)
+        index = int(sub[4:])
+        if index <= len(alone.Edges):
+            self.assertGreater((alone.Edges[index - 1].CenterOfMass - V(20, 0, 5)).Length, 1)
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (box, [sub])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertOkStops(pipe, f"Pipe: Spine '{sub}' of 'Box' is another element on its copy")
+        self.assertIs(pipe.Spine[0], box)
+        self.assertEqual(pipe.Spine[1], [sub])
+
+    def testPipeCopyKeepsAnOutsideSectionsGuess(self):
+        """ops#234 round (PR 219 review, test gap): the section is the top face of a pad in
+        another body, found again by geometry (the pad's rectangle drawn again the other way
+        round), so the pipe warns. OK copies it (a ShapeBinder of the pad's shape): the copied
+        entry is written by its index name and keeps its guess, so the warning and the report
+        entry stay. 2 x 2 at z = 0 to 4 x 4 at z = 10, ruled: a frustum, V = 280 / 3."""
+        other = models.body(self.doc)
+        base = models.sketch(self.doc, "Base", models.rectangle(-2, -2, 2, 2), other)
+        pad = models.pad(other, base, 10)
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body)
+        spine = models.sketch(self.doc, "Spine", [line(0, 0, 0, 10)], self.body, placement=XZ)
+        self.doc.recompute()
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        top = face("plane", normal=Z, through=(0, 0, 10)).one(pad.Shape)
+        pipe.Sections = [(pad, top)]
+        pipe.Transformation = "Multisection"
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        base.deleteAllGeometry()
+        base.addGeometry(models.polygon([(2, 2), (2, -2), (-2, -2), (-2, 2)]), False)
+        self.doc.recompute()
+        self.assertIn("Warning", pipe.State)
+        guessed = [(r["property"], r["index"]) for r in App.getReferenceReport(pipe)]
+        self.assertEqual(guessed, [("Sections", 0)])
+        sub = pipe.Sections[0][1][0]
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        [(copy, subs)] = pipe.Sections
+        self.assertIsNot(copy, pad)
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertEqual(subs, (sub,))
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertIn("Warning", pipe.State)
+        self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], guessed)
+        self.assertAlmostEqual(pipe.AddSubShape.Volume, 280 / 3, places=3)
 
     def testPipeWidgetsWriteAfterLoad(self):
         """ops#225: the widgets loaded under signal blockers (ops#180) still write once the panel
