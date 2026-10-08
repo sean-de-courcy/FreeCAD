@@ -424,6 +424,22 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
             );
             sketchCopy->Constraints.acceptGeometry(sketchCopy->getCompleteGeometry());
         }
+
+        // The pasted Shape names its elements after the original (its element map), and the
+        // copy's first recompute names them after the copy: a link a caller sets before that maps
+        // names the copy then loses ("?Face1"), and the reference comes back resolved by
+        // geometry, with a Warning. So the copy gets its own Shape here, before any caller links
+        // it (ops#230; the Pipe panel did it for its spines and sections since ops#225). A sketch
+        // copy has no attachment and links nothing outside (above); a primitive gets its
+        // BaseFeature only when its caller adds it to a body.
+        if (!copy->recomputeFeature()) {
+            Base::Console().warning(
+                "The copy '%s' of '%s' doesn't recompute: %s\n",
+                copy->Label.getValue(),
+                obj->Label.getValue(),
+                copy->getStatusString()
+            );
+        }
     }
     else {
 
