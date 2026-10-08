@@ -1235,6 +1235,25 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertEqual(shown & {part.Name, inner.Name}, {part.Name, inner.Name})
         self.assertEqual(shown & {a.Name, b.Name, self.body.Name}, set())
 
+    def testShiftIKeepsTheFolderOfAnObjectSelectedWithoutAPath(self):
+        """The same for a plain folder (App::DocumentObjectGroup): an App::Part resolves to a path
+        even without the loop that keeps the groups, a folder doesn't, and hiding the folder would
+        hide the object in it."""
+        a, b = self.boxes()
+        folder = self.doc.addObject("App::DocumentObjectGroup", "Folder")
+        inner = self.doc.addObject("Part::Box", "Inner")
+        folder.addObject(inner)
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).getObject(folder.Name).Visibility = True
+        Gui.getDocument(self.doc.Name).getObject(inner.Name).Visibility = True
+        pump()
+        self.assertTrue(self.visibility()[folder.Name], "the folder starts hidden")
+        Gui.Selection.addSelection(self.doc.Name, inner.Name)
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        shown = {n for n, v in self.visibility().items() if v}
+        self.assertEqual(shown & {folder.Name, inner.Name}, {folder.Name, inner.Name})
+        self.assertEqual(shown & {a.Name, b.Name, self.body.Name}, set())
+
     def testShiftIKeepsTheSelectedFeaturesBody(self):
         """Isolating a feature of a body (selected through the body, as a click in the 3D view
         does) keeps the body, whose hiding would hide the feature, and hides the boxes and the
