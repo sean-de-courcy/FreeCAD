@@ -247,7 +247,8 @@ names it.
 | `fix/231-property-editor-transactions` | fix | ops#231 | - | `integration` `800c03ab49` | `db8ad21ceb` (fork PR 213), 2026-10-08 | when upstream's `PropertyEditor` Add/Delete/Move Property and `DlgAddProperty` join a booked transaction and close only their own; `DocumentObject::renameDynamicProperty` completes a rename a handler threw after |
 | `fix/235-transaction-rename-order` | fix | ops#235 | - | `integration` `79b75b8f45` (stacked on fork PR 213) | `ecb2ada10a` (fork PR 216), 2026-10-08 | when upstream's `TransactionObject::applyChn` applies entries in a defined order with per-entry error handling |
 | `fix/239-revolution-first-solid-followups` | fix | ops#239 | - | `integration` `5169738cd5` | `6089fc009f` (fork PR 220), 2026-10-08 | with the ops#191 row: when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
-| `fix/242-revolution-small-base-trim` | fix | ops#242 | - | `fix/239-revolution-first-solid-followups` `f52c8a07bb` (fork PR 220) | (fork PR 221) | when upstream's `Revolved::tryToRevolveToFace` gives BRepFeat a base large enough for its up-to face trim |
+| `fix/242-revolution-small-base-trim` | fix | ops#242 | - | `fix/239-revolution-first-solid-followups` `f52c8a07bb` (fork PR 220) | `278b805640` (fork PR 221), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` gives BRepFeat a base large enough for its up-to face trim |
+| `fix/234-pipe-copy-step-followups` | fix | ops#234 | - | `fix/225-pipe-copy-followups` `97d11994a2` | (fork PR 219) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

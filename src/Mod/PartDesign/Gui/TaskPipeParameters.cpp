@@ -28,9 +28,19 @@
 #include <QMetaObject>
 
 
+#include <algorithm>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
+
+#include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
+#include <TopoDS.hxx>
+#include <fmt/format.h>
 
 #include <QPointer>
 #include <QTimer>
@@ -51,6 +61,7 @@
 #include <Gui/ViewProvider.h>
 #include <Gui/Widgets.h>
 #include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeaturePipe.h>
 
@@ -446,6 +457,225 @@ void TaskPipeParameters::setVisibilityOfSpineAndProfile()
     shown.restore();
 }
 
+namespace
+{
+
+// The shape of an element, or null when it can't be read
+TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
+{
+    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+        | Part::ShapeOption::Transform;
+    try {
+        return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+// The properties that tell one element from another: its type, its length, area or point, and
+// its centre of mass. Both are taken in the frame of the object's container (its own Placement
+// applied, its parents' not), which a copy in the body shares with an original beside the body
+// (a dependent copy has its own placement).
+bool sameElement(App::DocumentObject* original, App::DocumentObject* copy, const std::string& sub)
+{
+    if (sub.empty() || original == copy) {
+        return true;
+    }
+    TopoDS_Shape before = elementShape(original, sub);
+    TopoDS_Shape after = elementShape(copy, sub);
+    if (before.IsNull()) {
+        // ops#234 round 2: the reference is already broken on the original; on a copy that has
+        // the element it would name another one, silently
+        return after.IsNull();
+    }
+    if (after.IsNull() || after.ShapeType() != before.ShapeType()) {
+        return false;
+    }
+    auto measure = [](const TopoDS_Shape& shape, double& size, gp_Pnt& center) {
+        GProp_GProps props;
+        switch (shape.ShapeType()) {
+            case TopAbs_VERTEX:
+                size = 0;
+                center = BRep_Tool::Pnt(TopoDS::Vertex(shape));
+                return;
+            case TopAbs_EDGE:
+            case TopAbs_WIRE:
+                BRepGProp::LinearProperties(shape, props);
+                break;
+            default:
+                BRepGProp::SurfaceProperties(shape, props);
+                break;
+        }
+        size = props.Mass();
+        center = props.CentreOfMass();
+    };
+    double sizeBefore = 0;
+    double sizeAfter = 0;
+    gp_Pnt centerBefore;
+    gp_Pnt centerAfter;
+    try {
+        measure(before, sizeBefore, centerBefore);
+        measure(after, sizeAfter, centerAfter);
+    }
+    catch (const Standard_Failure&) {
+        return false;  // not shown to be the same
+    }
+    const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
+    return std::abs(sizeAfter - sizeBefore) <= tolerance
+        && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
+}
+
+// FreeCAD-CH (ops#170, ops#180): each spine on its own (both can be outside the body), neither
+// when missing (makeCopy(nullptr) put a null into the body after the commit), one copy of an
+// object used twice (the spine as the auxiliary spine too), and the original kept where makeCopy
+// makes none (an App::Link). Throws when a copy fails or doesn't keep a reference (ops#234).
+void copyOutsideObjects(
+    PartDesign::Pipe* pipe,
+    const std::function<bool(App::DocumentObject*)>& outside,
+    bool independent,
+    std::vector<App::DocumentObject*>& copies
+)
+{
+    App::DocumentObject* spine = pipe->Spine.getValue();
+    App::DocumentObject* auxSpine = pipe->AuxiliarySpine.getValue();
+    std::map<App::DocumentObject*, App::DocumentObject*> copyOf;
+    auto copied = [&](App::DocumentObject* obj) {
+        auto [it, added] = copyOf.try_emplace(obj, nullptr);
+        if (added) {
+            it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent);
+            if (it->second) {
+                copies.push_back(it->second);
+                // ops#225: its own shape before a link maps names in it: the shape pasted from
+                // the original names its elements after the original, and the pipe's references
+                // were then found again by geometry, with a warning.
+                // ops#234: a copy that fails (or that an ops#127 reorder continuation blocks)
+                // ends OK, named, with its reason
+                if (!it->second->recomputeFeature()) {
+                    throw Base::RuntimeError(fmt::format(
+                        "{}: a copy of '{}' doesn't recompute: {}",
+                        pipe->Label.getValue(),
+                        obj->Label.getValue(),
+                        it->second->getStatusString()
+                    ));
+                }
+            }
+            else {
+                // ops#225: say so, since the pipe still reaches outside its body
+                Base::Console().warning(
+                    "%s: '%s' can't be copied into the body; it stays a reference to "
+                    "outside it\n",
+                    pipe->Label.getValue(),
+                    obj->Label.getValue()
+                );
+            }
+        }
+        return it->second ? it->second : obj;
+    };
+    // ops#234: every copy is made (and recomputed) before any of the three properties is written
+    for (auto obj : {spine, auxSpine}) {
+        if (outside(obj)) {
+            copied(obj);
+        }
+    }
+    std::vector<App::DocumentObject*> objs = pipe->Sections.getValues();
+    for (auto obj : objs) {
+        if (outside(obj)) {
+            copied(obj);
+        }
+    }
+
+    // ops#234 round: the references are written as index names, so each must name on the copy
+    // the element it names on the original. A copy can have another shape (a primitive without
+    // the BaseFeature it was fused with, a sketch edited and not recomputed), and the index would
+    // then name another element, silently.
+    auto checkKept = [&](const char* property,
+                         App::DocumentObject* obj,
+                         const std::vector<std::string>& subs) {
+        for (const std::string& sub : subs) {
+            if (!sameElement(obj, copied(obj), sub)) {
+                throw Base::RuntimeError(fmt::format(
+                    "{}: {} '{}' of '{}' would name another element on a copy, whose shape "
+                    "differs (or the element can't be read). Recompute '{}' and pick the "
+                    "reference again, or make a cross-reference instead.",
+                    pipe->Label.getValue(),
+                    property,
+                    sub,
+                    obj->Label.getValue(),
+                    obj->Label.getValue()
+                ));
+            }
+        }
+    };
+
+    // ops#234: a guess stays a guess on the copy, which has the same element under the same
+    // index name: its record is carried over (the re-target record was about the original, so it
+    // ends), else the copy's exact match hid the guess and its warning
+    auto carried = [](std::vector<App::ElementRecords> records) {
+        for (auto& record : records) {
+            record.retarget = App::RetargetRecord();
+        }
+        return records;
+    };
+
+    // a property is written only when its object was copied: setValue with the original would
+    // drop its shadows and guess record (ops#127)
+    struct SpineWrite
+    {
+        App::PropertyLinkSub* prop;
+        App::DocumentObject* obj;
+        std::vector<std::string> subs;
+    };
+    std::vector<SpineWrite> spineWrites;
+    for (auto [prop, obj] : {std::pair {&pipe->Spine, spine}, {&pipe->AuxiliarySpine, auxSpine}}) {
+        if (outside(obj) && copied(obj) != obj) {
+            spineWrites.push_back({prop, obj, prop->getSubValues(false)});
+            checkKept(prop->getName(), obj, spineWrites.back().subs);
+        }
+    }
+
+    // ops#225: the sections entry by entry, written only when one was copied; the others keep
+    // their shadows, so their guess records stay (setSubListValues dropped them all)
+    std::vector<std::string> subs = pipe->Sections.getSubValues();
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows = pipe->Sections.getShadowSubs();
+    shadows.resize(subs.size());
+    std::vector<App::ElementRecords> records = pipe->Sections.getElementRecords();
+    records.resize(subs.size());
+    bool changed = false;
+    for (std::size_t i = 0; i < objs.size(); ++i) {
+        if (outside(objs[i]) && copied(objs[i]) != objs[i]) {
+            // the index name, as for the spines (ops#234)
+            if (!shadows[i].oldName.empty()) {
+                subs[i] = shadows[i].oldName;
+            }
+            checkKept("Sections", objs[i], {subs[i]});
+            objs[i] = copied(objs[i]);
+            shadows[i] = App::PropertyLinkBase::ShadowSub();
+            records[i].retarget = App::RetargetRecord();
+            changed = true;
+        }
+    }
+
+    // every check passed: the writes. A spine keeps its guess records and the names a guess was
+    // expanded from (a continued guess merges back through them; setValue clears them)
+    for (auto& write : spineWrites) {
+        auto spineRecords = carried(write.prop->getElementRecords());
+        auto froms = write.prop->getExpandedFroms();
+        write.prop->setValue(copied(write.obj), write.subs);
+        write.prop->setElementRecords(std::move(spineRecords));
+        write.prop->setExpandedFroms(std::move(froms));
+    }
+    if (changed) {
+        pipe->Sections.setValues(std::move(objs), std::move(subs), std::move(shadows));
+        // the copied entries' guesses (ops#234); the kept entries' records are unchanged
+        pipe->Sections.setElementRecords(std::move(records));
+    }
+}
+
+}  // namespace
+
 bool TaskPipeParameters::accept()
 {
     // see what to do with external references
@@ -480,6 +710,9 @@ bool TaskPipeParameters::accept()
         }
     }
 
+    // FreeCAD-CH (ops#234 round): the choice is asked first, then the copy step runs
+    bool copyOutside = false;
+    bool independent = false;
     if (extReference) {
         QDialog dia(Gui::getMainWindow());
         Ui_DlgReference dlg;
@@ -489,66 +722,40 @@ bool TaskPipeParameters::accept()
         if (result == QDialog::DialogCode::Rejected) {
             return false;
         }
+        copyOutside = !dlg.radioXRef->isChecked();
+        independent = dlg.radioIndependent->isChecked();
+    }
 
-        if (!dlg.radioXRef->isChecked()) {
-            // FreeCAD-CH (ops#170, ops#180): each spine on its own (both can be outside the body),
-            // neither when missing (makeCopy(nullptr) put a null into the body after the commit),
-            // one copy of an object used twice (the spine as the auxiliary spine too), and the
-            // original kept where makeCopy makes none (an App::Link)
-            const bool independent = dlg.radioIndependent->isChecked();
-            std::map<App::DocumentObject*, App::DocumentObject*> copyOf;
-            auto copied = [&](App::DocumentObject* obj) {
-                auto [it, added] = copyOf.try_emplace(obj, nullptr);
-                if (added) {
-                    it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent);
-                    if (it->second) {
-                        // ops#225: its own shape before a link maps names in it: the shape
-                        // pasted from the original names its elements after the original, and
-                        // the pipe's references were then found again by geometry, with a warning
-                        it->second->recomputeFeature();
-                        copies.push_back(it->second);
-                    }
-                    else {
-                        // ops#225: say so, since the pipe still reaches outside its body
-                        Base::Console().warning(
-                            "%s: '%s' can't be copied into the body; it stays a reference to "
-                            "outside it\n",
-                            pipe->Label.getValue(),
-                            obj->Label.getValue()
-                        );
-                    }
-                }
-                return it->second ? it->second : obj;
-            };
-            // a property is written only when its object was copied: setValue with the original
-            // would drop its shadows and guess record (ops#127)
-            if (outside(spine) && copied(spine) != spine) {
-                pipe->Spine.setValue(copied(spine), pipe->Spine.getSubValues());
-            }
-            if (outside(auxSpine) && copied(auxSpine) != auxSpine) {
-                pipe->AuxiliarySpine.setValue(
-                    copied(auxSpine),
-                    pipe->AuxiliarySpine.getSubValues()
-                );
-            }
-
-            // ops#225: the sections entry by entry, written only when one was copied; the others
-            // keep their shadows, so their guess records stay (setSubListValues dropped them all)
-            std::vector<App::DocumentObject*> objs = pipe->Sections.getValues();
-            std::vector<std::string> subs = pipe->Sections.getSubValues();
-            std::vector<App::PropertyLinkBase::ShadowSub> shadows = pipe->Sections.getShadowSubs();
-            shadows.resize(subs.size());
-            bool changed = false;
-            for (std::size_t i = 0; i < objs.size(); ++i) {
-                if (outside(objs[i]) && copied(objs[i]) != objs[i]) {
-                    objs[i] = copied(objs[i]);
-                    shadows[i] = App::PropertyLinkBase::ShadowSub();
-                    changed = true;
+    // FreeCAD-CH (ops#234 round 2): a copy that fails, or a reference a copy can't keep, stops
+    // the copy step before it writes anything. Its copies are removed inside the edit's still-open
+    // transaction (created and removed in it, they leave nothing), and the edit stays open: the
+    // user can fix the reference and press OK again, or Cancel, which restores the state from
+    // before the edit. Aborting the transaction here undid the whole edit under the open panel.
+    if (copyOutside) {
+        auto stop = [&](const char* what) {
+            App::Document* doc = pipe->getDocument();
+            for (auto it = copies.rbegin(); it != copies.rend(); ++it) {
+                if ((*it)->isAttachedToDocument()) {
+                    doc->removeObject((*it)->getNameInDocument());
                 }
             }
-            if (changed) {
-                pipe->Sections.setValues(std::move(objs), std::move(subs), std::move(shadows));
-            }
+            copies.clear();
+            QMessageBox::warning(
+                this,
+                tr("Input Error"),
+                QApplication::translate("Exception", what) + QStringLiteral("\n\n")
+                    + tr("No copy was kept, and the edit is still open.")
+            );
+            return false;
+        };
+        try {
+            copyOutsideObjects(pipe, outside, independent, copies);
+        }
+        catch (const Base::Exception& e) {
+            return stop(e.what());
+        }
+        catch (const Standard_Failure& e) {
+            return stop(e.GetMessageString());
         }
     }
 
@@ -574,6 +781,12 @@ bool TaskPipeParameters::accept()
     catch (const Base::Exception& e) {
         pipe->getDocument()->abortTransaction();
         QMessageBox::warning(this, tr("Input Error"), QApplication::translate("Exception", e.what()));
+        return false;
+    }
+    catch (const Standard_Failure& e) {
+        // ops#234 round 2: as above, not out of accept() with the copies in the open transaction
+        pipe->getDocument()->abortTransaction();
+        QMessageBox::warning(this, tr("Input Error"), QString::fromUtf8(e.GetMessageString()));
         return false;
     }
 
