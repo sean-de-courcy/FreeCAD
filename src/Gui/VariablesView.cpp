@@ -652,6 +652,14 @@ bool VariablesModel::setExpression(const QModelIndex& index, const QString& text
         }
         catch (const Base::Exception& e) {
             error = QString::fromUtf8(e.what());
+            // A text with '#' and a letter (`#FF0000`, `#todo`) came here through
+            // hasVariableRef: say how to keep it as text (ops#192).
+            if ((alias || isString) && !typed.starts_with('=')) {
+                QString example = text.contains(u'>') || text.contains(u'\\')
+                    ? QStringLiteral("=<<...>>")
+                    : QStringLiteral("=<<%1>>").arg(text);
+                error += QLatin1Char('\n') + tr("For text, write %1.").arg(example);
+            }
             return false;
         }
         std::string stored = expr->toString();

@@ -343,7 +343,7 @@ static std::shared_ptr<Expression> expressionFor(const App::ObjectIdentifier& pa
 
 bool DlgExpressionInput::checkCyclicDependencyVarSet(const QString& text)
 {
-    std::shared_ptr<Expression> expr = expressionFor(path, text);
+    std::shared_ptr<Expression> expr = expressionFor(path, text);  // FreeCAD-CH (ops#152)
 
     if (expr) {
         DocumentObject* obj = path.getDocumentObject();
