@@ -2061,10 +2061,21 @@ class TestReferenceFieldGui(unittest.TestCase):
         """T1: an edit of a linear pattern with no originals arms its Originals field (no Add and
         Remove buttons); a pick of a bump in the tree adds it, and the pattern computes during
         the edit (ops#182: the edit's roll-back point took it for a MultiTransform's step and
-        held it until the edit ended)."""
+        held it until the edit ended). A bump made after the pattern stays held during the edit,
+        and the pattern doesn't (ops#212)."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [])
+        after = self.doc.addObject("PartDesign::AdditiveBox", "After")
+        self.body.addObject(after)
+        for prop in ("Length", "Width", "Height"):
+            setattr(after, prop, 1)
+        after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
+        self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
+        self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
+        self.assertFalse(self.body.holds(pattern), "the pattern in edit is held")
         self.assertEqual(field.objectName(), "fieldOriginals")
         self.assertTrue(waitFor(lambda: armed(field)), "the empty Originals field isn't armed")
         for name in ("buttonAddFeature", "buttonRemoveFeature"):
@@ -2076,6 +2087,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
         self.assertVolume(pattern, 1003)
+        self.assertTrue(self.body.holds(after), "the pick released the feature after the pattern")
+        self.assertFalse(self.body.holds(pattern))
 
     def testPatternOriginalsPicksToggle(self):
         """T2: with the field armed, a pick of a face of the second bump adds it, a pick of the
@@ -2513,6 +2526,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         multi.Transformations = [sub]
         self.doc.recompute()
         self.assertAlmostEqual(multi.Shape.Volume, 1004, places=6)
+        # The body's shown feature is its first visible solid: the sub-feature, added last
+        # (ops#187's test deletes it; ops#212)
+        solids = [o for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")]
+        shown = [o for o in solids if o.Visibility]
+        self.assertEqual(shown, [sub], "the sub-feature isn't the body's shown feature")
         [field] = self.edit(multi)
         transforms = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listTransformFeatures")
         transforms.setCurrentRow(0)

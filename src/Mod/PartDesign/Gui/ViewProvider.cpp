@@ -168,7 +168,9 @@ bool ViewProvider::setEdit(int ModNum)
 
         // This is handling for an erroneous case where features are for some reason placed outside
         // the body container. That should never happen, but in some cases we find models with a
-        // problem like that.
+        // problem like that. Without a Body, no feature is shown again at the end (an earlier
+        // edit's would be: ops#212).
+        previouslyShownFeature = nullptr;
         if (ViewProviderBody* bodyViewProvider = getBodyViewProvider()) {
             previouslyShownFeature = bodyViewProvider->getShownFeature();
         }
