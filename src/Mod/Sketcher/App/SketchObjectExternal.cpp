@@ -130,22 +130,35 @@ void setExternalLinks(App::PropertyLinkSubList& links,
     links.setValues(std::move(objs), std::move(subs), std::move(shadows));
 }
 
-// Sets the links and their types. ExternalTypes is parallel to the links by index (ops#140): a
-// path that removes or adds links passes the types of the links it keeps, in their order; an
-// entry without one is a projection. The types go first, since setting the links can rebuild.
-void setExternalLinks(App::PropertyLinkSubList& links,
-                      App::PropertyIntegerList& typeList,
-                      std::vector<App::DocumentObject*> objs,
-                      std::vector<std::string> subs,
-                      std::vector<long> types)
-{
-    types.resize(objs.size(), static_cast<long>(ExtType::Projection));
-    if (typeList.getValues() != types) {
-        typeList.setValues(types);
-    }
-    setExternalLinks(links, std::move(objs), std::move(subs));
-}
 }  // namespace
+
+// ExternalTypes is parallel to the links by index (ops#140): a path that removes or adds links
+// passes the types of the links it keeps, in their order; an entry without one is a projection.
+// The types go first, since setting the links can rebuild. Entries waiting for a repair on open
+// stay after the links' types.
+void SketchObject::setExternalLinksAndTypes(std::vector<App::DocumentObject*> objs,
+                                            std::vector<std::string> subs,
+                                            std::vector<long> types)
+{
+    auto pending = pendingTypeRepair();
+    types.resize(objs.size(), static_cast<long>(ExtType::Projection));
+    types.insert(types.end(), pending.begin(), pending.end());
+    Base::StateLocker lock(externalLinksWithTypes, true);
+    if (ExternalTypes.getValues() != types) {
+        ExternalTypes.setValues(types);
+    }
+    setExternalLinks(ExternalGeometry, std::move(objs), std::move(subs));
+}
+
+std::vector<long> SketchObject::pendingTypeRepair() const
+{
+    const auto& types = ExternalTypes.getValues();
+    const auto count = ExternalGeometry.getValues().size();
+    if (!externalTypeRepairPending || types.size() <= count) {
+        return {};
+    }
+    return {types.begin() + static_cast<std::ptrdiff_t>(count), types.end()};
+}
 
 void SketchObject::initExternalGeo() {
     std::vector<Part::Geometry *> geos;
@@ -545,7 +558,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             si++;
         }
 
-        setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
+        setExternalLinksAndTypes(Objects, SubElements, Types);
 
         try {
             rebuildExternalGeometry();
@@ -553,8 +566,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         catch (const Base::Exception& e) {
             Base::Console().error("%s\n", e.what());
             // revert to original values
-            setExternalLinks(
-                ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
+            setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
             return -1;
         }
 
@@ -898,9 +910,11 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         Types.push_back(static_cast<int>(intersection ? ExtType::Intersection : ExtType::Projection));
 
         // set the Link list.
-        setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
+        setExternalLinksAndTypes(Objects, SubElements, Types);
     }
     else {
+        auto pending = pendingTypeRepair();
+        Types.insert(Types.end(), pending.begin(), pending.end());
         ExternalTypes.setValues(Types);
     }
 
@@ -911,8 +925,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        setExternalLinks(
-            ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
+        setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
         return -1;
     }
 
@@ -962,6 +975,7 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
     // a restore) stays flagged: accepting the current geometry below would bless the constraints
     // against geometry they weren't made for (ops#140).
     const bool invalidConstraints = Constraints.hasInvalidGeometry();
+    Base::StateLocker keepInvalid(keepConstraintsInvalid, invalidConstraints);
 
     std::set<std::string> refs;
     // Must sort in reverse order so as to delete geo from back to front to
@@ -1039,7 +1053,7 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
             }
         }
         if (touched) {
-            setExternalLinks(ExternalGeometry, ExternalTypes, newObjs, newSubs, newTypes);
+            setExternalLinksAndTypes(newObjs, newSubs, newTypes);
         }
     }
 
@@ -1080,6 +1094,10 @@ int SketchObject::delAllExternal()
     const std::vector<std::string> originalSubElements = SubElements;
     const std::vector<long> originalTypes = ExternalTypes.getValues();
 
+    // a constraint list flagged invalid stays flagged, as in delExternalPrivate (ops#140)
+    const bool invalidConstraints = Constraints.hasInvalidGeometry();
+    Base::StateLocker keepInvalid(keepConstraintsInvalid, invalidConstraints);
+
     Objects.clear();
     SubElements.clear();
 
@@ -1103,15 +1121,14 @@ int SketchObject::delAllExternal()
         }
     }
 
-    setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, {});
+    setExternalLinksAndTypes(Objects, SubElements, {});
     try {
         rebuildExternalGeometry();
     }
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        setExternalLinks(
-            ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
+        setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
         for (Constraint* it : newConstraints) {
             delete it;
         }
@@ -1122,7 +1139,13 @@ int SketchObject::delAllExternal()
     ExternalGeo.setValues(std::move(geos));
     solverNeedsUpdate = true;
     Constraints.setValues(std::move(newConstraints));
-    acceptGeometry();  // This may need to be refactored into OnChanged for ExternalGeometry
+    if (invalidConstraints) {
+        rebuildVertexIndex();
+        signalElementsChanged();
+    }
+    else {
+        acceptGeometry();  // This may need to be refactored into OnChanged for ExternalGeometry
+    }
     return 0;
 }
 // clang-format off
@@ -1213,7 +1236,7 @@ int SketchObject::attachExternal(
     SubElements.push_back(std::string(SubName));
     Types.push_back(attachedType.value_or(static_cast<long>(ExtType::Projection)));
 
-    setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
+    setExternalLinksAndTypes(Objects, SubElements, Types);
     if(externalGeoRef.size()!=Objects.size())
         return -1;
 
@@ -1499,7 +1522,7 @@ void SketchObject::validateExternalLinks()
             types.push_back(externalType(static_cast<int>(i)));
         }
         if (touched) {
-            setExternalLinks(ExternalGeometry, ExternalTypes, objs, subs, types);
+            setExternalLinksAndTypes(objs, subs, types);
         }
 
         rebuildExternalGeometry();
@@ -2465,6 +2488,36 @@ std::optional<long> typeFromSavedGeometry(const std::string& sub,
     }
     return static_cast<long>(ExtType::Intersection);
 }
+
+// How far a built geometry lies from a saved one of the same kind: for points their distance,
+// for curves the largest distance between points at the same fraction of their parameter ranges,
+// in either direction (ops#140)
+double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
+{
+    if (auto* point = freecad_cast<const Part::GeomPoint*>(geo)) {
+        return Base::Distance(point->getPoint(),
+                              static_cast<const Part::GeomPoint*>(saved)->getPoint());
+    }
+    auto* curve = freecad_cast<const Part::GeomCurve*>(geo);
+    auto* savedCurve = freecad_cast<const Part::GeomCurve*>(saved);
+    if (!curve || !savedCurve) {
+        return std::numeric_limits<double>::infinity();
+    }
+    auto at = [](const Part::GeomCurve* c, double fraction) {
+        const double first = c->getFirstParameter();
+        return c->pointAtParameter(first + fraction * (c->getLastParameter() - first));
+    };
+    constexpr int samples = 8;
+    double forward = 0.0;
+    double backward = 0.0;
+    for (int k = 0; k <= samples; ++k) {
+        const double fraction = static_cast<double>(k) / samples;
+        const auto p = at(curve, fraction);
+        forward = std::max(forward, Base::Distance(p, at(savedCurve, fraction)));
+        backward = std::max(backward, Base::Distance(p, at(savedCurve, 1.0 - fraction)));
+    }
+    return std::min(forward, backward);
+}
 }  // namespace
 
 void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd, bool typesOnly)
@@ -2510,9 +2563,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     auto keys = externalGeoRef;
     const std::size_t linkCount = Objects.size();
     // A type list longer than the links was saved before ops#140, when deleting a link left its
-    // type behind: the types after it belong to other links. Each link then takes the type that
-    // gives back its saved geometries (below).
-    const bool repairTypes = Types.size() > linkCount;
+    // type behind: the types after it belong to other links. On open (typesOnly) each link takes
+    // the type that gives back its saved geometries (below). Only then: later the saved geometry
+    // is the one before an edit of the source, which a correct type no longer gives.
+    const bool repairTypes = typesOnly && Types.size() > linkCount;
     if (typesOnly && !repairTypes) {
         return;
     }
@@ -2599,8 +2653,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     // the types after the links: kept while a link's type can't be told, so that a later open can
     // still find it (ops#140)
     std::vector<long> staleTypes;
-    if (repairTypes) {
+    if (Types.size() > linkCount) {
         staleTypes.assign(Types.begin() + linkCount, Types.end());
+        Types.resize(linkCount);
     }
     bool undecided = false;
     Types.resize(Objects.size(), static_cast<long>(ExtType::Projection));
@@ -2835,54 +2890,60 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 Kinds,  // the same number of geometries of the same kinds: the Ids map one to one
                 Exact   // and each is the saved one, within tolerance
             };
-            auto matchSaved = [&](long type) {
+            // the match, and for the same kinds how far the built geometry is from the saved one
+            auto matchSaved = [&](long type) -> std::pair<Match, double> {
                 setType(type);
                 geos.clear();
                 try {
                     build();
+                    if (!std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
+                                    [](const auto& geo, const Part::Geometry* old) {
+                                        return geo->getTypeId() == old->getTypeId();
+                                    })) {
+                        return {Match::None, 0.0};
+                    }
+                    bool same = std::equal(geos.begin(), geos.end(), saved.begin(),
+                                           [](const auto& geo, const Part::Geometry* old) {
+                                               return geo->isSame(*old,
+                                                                  Precision::Confusion(),
+                                                                  Precision::Angular());
+                                           });
+                    if (same) {
+                        return {Match::Exact, 0.0};
+                    }
+                    double distance = 0.0;
+                    for (std::size_t k = 0; k < geos.size(); ++k) {
+                        distance = std::max(distance, distanceFromSaved(geos[k].get(), saved[k]));
+                    }
+                    return {Match::Kinds, distance};
                 }
                 catch (...) {
-                    return Match::None;
+                    return {Match::None, 0.0};
                 }
-                if (!std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
-                                [](const auto& geo, const Part::Geometry* old) {
-                                    return geo->getTypeId() == old->getTypeId();
-                                })) {
-                    return Match::None;
-                }
-                bool same = std::equal(geos.begin(), geos.end(), saved.begin(),
-                                       [](const auto& geo, const Part::Geometry* old) {
-                                           return geo->isSame(*old,
-                                                              Precision::Confusion(),
-                                                              Precision::Angular());
-                                       });
-                return same ? Match::Exact : Match::Kinds;
             };
             const long indexType = Types[i];
             std::vector<long> exact;
-            std::vector<long> kinds;
+            std::vector<std::pair<long, double>> kinds;
             if (!saved.empty() && hasSource) {
                 for (auto type : {ExtType::Projection, ExtType::Intersection, ExtType::Both}) {
-                    switch (matchSaved(static_cast<long>(type))) {
+                    auto [match, distance] = matchSaved(static_cast<long>(type));
+                    switch (match) {
                         case Match::Exact:
                             exact.push_back(static_cast<long>(type));
                             break;
                         case Match::Kinds:
-                            kinds.push_back(static_cast<long>(type));
+                            kinds.emplace_back(static_cast<long>(type), distance);
                             break;
                         case Match::None:
                             break;
                     }
                 }
             }
-            // the type at the link's index when it is among them, else the first
-            auto pick = [indexType](const std::vector<long>& types) {
-                return std::find(types.begin(), types.end(), indexType) != types.end()
-                    ? indexType
-                    : types.front();
-            };
             if (!exact.empty()) {
-                Types[i] = pick(exact);
+                // the type at the link's index when it is among them, else the first
+                Types[i] = std::find(exact.begin(), exact.end(), indexType) != exact.end()
+                    ? indexType
+                    : exact.front();
                 if (exact.size() > 1) {
                     FC_WARN("External link " << key << " in " << getFullName()
                             << ": several types give its saved geometry; it takes type "
@@ -2890,10 +2951,20 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
             }
             else if (!kinds.empty()) {
-                Types[i] = pick(kinds);
+                // the closest to the saved geometry (arcs fitted to a tolerance, approximated
+                // B-splines or another OCCT version can miss it); the index type on a tie
+                auto closest = kinds.front();
+                for (const auto& kind : kinds) {
+                    if (kind.second < closest.second - Precision::Confusion()
+                        || (kind.first == indexType
+                            && kind.second <= closest.second + Precision::Confusion())) {
+                        closest = kind;
+                    }
+                }
+                Types[i] = closest.first;
                 FC_WARN("External link " << key << " in " << getFullName()
                         << ": no type gives its saved geometry exactly, only the same kinds; it"
-                        << " takes type " << Types[i]);
+                        << " takes the closest, type " << Types[i]);
             }
             else if (auto type = typeFromSavedGeometry(SubElement, saved)) {
                 Types[i] = *type;
@@ -2951,6 +3022,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     if (typesOnly) {
         Types.resize(linkCount);
+        externalTypeRepairPending = undecided;
         if (undecided) {
             Types.insert(Types.end(), staleTypes.begin(), staleTypes.end());
         }
@@ -3082,19 +3154,14 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         }
         if (linksChanged) {
             // a relinked entry has a new sub, so it gets no shadow and is resolved again
-            setExternalLinks(
-                ExternalGeometry, ExternalTypes, newObjects, newSubElements, newTypes);
-        }
-        else if (repairTypes) {
-            if (undecided) {
-                newTypes.insert(newTypes.end(), staleTypes.begin(), staleTypes.end());
-            }
-            ExternalTypes.setValues(newTypes);
+            setExternalLinksAndTypes(newObjects, newSubElements, newTypes);
         }
     }
 
     solverNeedsUpdate=true;
-    Constraints.acceptGeometry(getCompleteGeometry());
+    if (!keepConstraintsInvalid) {
+        Constraints.acceptGeometry(getCompleteGeometry());
+    }
 
     if (hasError && this->isRecomputing()) {
         throw Base::RuntimeError(
@@ -3232,7 +3299,7 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
         auto types = ExternalTypes.getValues();
         types.resize(ExternalGeometry.getSize(), static_cast<long>(ExtType::Projection));
         ExternalGeo.setValues(geos);
-        setExternalLinks(ExternalGeometry, ExternalTypes, objs, subs, types);
+        setExternalLinksAndTypes(objs, subs, types);
         rebuildExternalGeometry();
     }
 }
@@ -3343,6 +3410,7 @@ void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
     }
 
     ExternalGeo.setValues(std::move(geos));
+    Base::StateLocker lock(externalLinksWithTypes, true);
     ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
     ExternalTypes.setValues(types);
 }
@@ -3362,16 +3430,21 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
                                  "the links");
     }
 
-    // The entry's type goes at its index: drop the types left behind by links deleted earlier
+    // The entry's type goes at its index, before the entries waiting for a repair on open
+    auto pending = pendingTypeRepair();
     auto types = ExternalTypes.getValues();
     types.resize(objs.size(), static_cast<long>(ExtType::Projection));
     types.push_back(type);
+    types.insert(types.end(), pending.begin(), pending.end());
 
     objs.push_back(obj);
     subs.push_back(sub);
     shadows.push_back(std::move(shadow));
-    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
-    ExternalTypes.setValues(types);
+    {
+        Base::StateLocker lock(externalLinksWithTypes, true);
+        ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
+        ExternalTypes.setValues(types);
+    }
     if (externalGeoRef.size() != ExternalGeometry.getValues().size()) {
         throw Base::RuntimeError("unparkExternalGeometry: the link was not added");
     }

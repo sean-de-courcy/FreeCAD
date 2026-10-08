@@ -14,8 +14,10 @@ Its projection would be one line, (-10, 0)-(10, 0). A sketch line has its ends c
 the two points: two constraints, neither on the rail."""
 
 import os
+import re
 import tempfile
 import unittest
+import zipfile
 
 import FreeCAD
 import Part
@@ -191,3 +193,161 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(self.sketch.ExternalGeometry, [(self.ring, ("Edge1",))])
         self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
         self.assertRingPoints()
+
+    def addBall(self, z=6):
+        """A sphere of radius 10 about (0, 0, z), linked as an intersection: a circle of radius
+        sqrt(100 - z^2). Its projection is a circle of radius 10."""
+        ball = self.doc.addObject("Part::Feature", "Ball")
+        ball.Shape = Part.makeSphere(10, V(0, 0, z))
+        self.doc.recompute()
+        self.sketch.addExternal(ball.Name, "Face1", False, True)
+        self.doc.recompute()
+        return ball
+
+    def circleRadii(self, sketch=None):
+        sketch = sketch or self.sketch
+        return [
+            round(g.Radius, 6) for g in list(sketch.ExternalGeo)[2:] if isinstance(g, Part.Circle)
+        ]
+
+    def makeRailUndecided(self):
+        """The rail moves 5 above the sketch plane (its projection doesn't change, it no longer
+        crosses the plane), then loses its edge: no type can be built for it, and its saved line
+        can't tell the type."""
+        self.rail.Shape = Part.makeLine(V(-20, 20, 5), V(20, 20, 5))
+        self.doc.recompute()
+        self.rail.Shape = Part.Vertex(V(0, 20, 5))
+        self.doc.recompute()
+
+    def testIntersectionTypeSurvivesARecomputeWhileARepairIsPending(self):
+        """A stale list with a link whose type can't be told keeps its stale entry after the
+        open. The repair runs only on the open: moved off the sketch plane, the ball gives no
+        intersection, and a recompute must not turn it into a projection (a circle of radius 10,
+        the same kind as the saved circle). Moved back, it gives its circle of radius 8 again."""
+        self.addBall()
+        self.makeRailUndecided()
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION, INTERSECTION]
+        sketch = self.saveAndReopen("PendingRepair")
+        types = list(sketch.ExternalTypes)
+        self.assertEqual(types[:3], [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertGreater(len(types), 3)  # the stale entry is kept
+        ball = self.doc.getObject("Ball")
+        ball.Shape = Part.makeSphere(10, V(0, 0, 20))
+        self.doc.recompute()
+        self.assertNotIn(10, self.circleRadii(sketch))
+        self.assertNotIn(PROJECTION, list(sketch.ExternalTypes)[1:3])
+        ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        self.doc.recompute()
+        self.assertNotIn(PROJECTION, list(sketch.ExternalTypes)[1:3])
+        self.assertEqual(self.circleRadii(sketch), [8])
+
+    def testShortTypeListWhenTheFirstSourceIsDeleted(self):
+        """A file saved by a version whose paths appended links without a type: three links, two
+        types. Deleting the rail's object drops its link outside the sketch; the ring keeps its
+        intersection and the third link (a projection) its projection."""
+        rail2 = self.addEdge("Rail2", Part.makeLine(V(-20, -20, 0), V(20, -20, 0)))
+        self.doc.recompute()
+        self.sketch.addExternal(rail2.Name, "Edge1", False, False)
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.removeObject(self.rail.Name)
+        self.assertEqual(len(self.sketch.ExternalGeometry), 2)
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION, PROJECTION])
+        self.doc.recompute()
+        self.assertRingPoints()
+
+    def testKindsOnlyMatchTakesTheClosestType(self):
+        """The ball moves half a unit up after its sketch was last rebuilt: its intersection is a
+        circle of radius about 7.6, its projection one of radius 10, the saved one has radius 8.
+        Neither gives the saved geometry exactly; behind a stale projection type, the repair on
+        open takes the closer one, the intersection."""
+        ball = self.addBall()
+        self.sketch.delExternal(0)
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
+        ball.Shape = Part.makeSphere(10, V(0, 0, 6.5))
+        self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("KindsOnly")
+        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
+        self.doc.recompute()
+        radius = (100 - 6.5**2) ** 0.5
+        self.assertEqual(self.circleRadii(sketch), [round(radius, 6)])
+        self.assertRingPoints(sketch)
+
+    @staticmethod
+    def freezeInFile(path, obj):
+        """Sets the Frozen flag of the external geometries of `obj` in a saved file (Python's
+        copies of external points don't carry their extension, so it can't be set on them)."""
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    data, count = re.subn(
+                        rb'(Ref="' + obj.encode() + rb'\.[^"]*" Flags=")(\d+)"',
+                        lambda m: m.group(1) + str(int(m.group(2)) | 2).encode() + b'"',
+                        data,
+                    )
+                    assert count > 0
+                archive.writestr(info, data)
+
+    def testFrozenLinkTypeRepairedOnOpen(self):
+        """The ring's points are frozen, and the stale list gives the ring a projection by index.
+        The repair builds frozen links too: the ring gets its intersection back. Its points stay
+        frozen: moving the ring doesn't move them."""
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION]
+        path = os.path.join(tempfile.mkdtemp(), "Frozen.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.freezeInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.doc.getObject("Ring").Shape = Part.makeCircle(12, V(0, 0, 0), V(0, 1, 0))
+        sketch.touch()
+        self.doc.recompute()
+        self.assertRingPoints(sketch)
+
+    def assertRailRepairedWhenItsEdgeIsBack(self, sketch, path, types):
+        """Gives the rail its edge back, saves and opens again: the rail gets its projection,
+        the stale entry goes."""
+        self.doc.getObject("Rail").Shape = Part.makeLine(V(-20, 20, 5), V(20, 20, 5))
+        self.doc.save()
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(list(sketch.ExternalTypes), types)
+        sketch.touch()
+        self.doc.recompute()
+        lines = [g for g in list(sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertTrue(any(abs(g.StartPoint.y - 20) < TOL for g in lines))
+        self.assertRingPoints(sketch)
+        return sketch
+
+    def testLaterOpenWithTheElementBackRepairsTheType(self):
+        """The rail's type can't be told while its edge is missing: it keeps the stale
+        intersection at its index, and the list its stale entry. Opened again with the edge
+        back, the rail gets its projection."""
+        self.makeRailUndecided()
+        self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("ElementBack")
+        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, INTERSECTION])
+        self.assertRailRepairedWhenItsEdgeIsBack(
+            sketch, self.doc.FileName, [PROJECTION, INTERSECTION]
+        )
+
+    def testStaleEntryKeptThroughALinkEdit(self):
+        """As above, with a link added between the two opens: the stale entry stays after the
+        new link's type, so the later open still repairs the rail."""
+        self.makeRailUndecided()
+        self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("LinkEdit")
+        rail2 = self.addEdge("Rail2", Part.makeLine(V(-20, -20, 0), V(20, -20, 0)))
+        self.doc.recompute()
+        sketch.addExternal(rail2.Name, "Edge1", False, False)
+        self.assertEqual(
+            list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION, PROJECTION, INTERSECTION]
+        )
+        self.assertRailRepairedWhenItsEdgeIsBack(
+            sketch, self.doc.FileName, [PROJECTION, INTERSECTION, PROJECTION]
+        )

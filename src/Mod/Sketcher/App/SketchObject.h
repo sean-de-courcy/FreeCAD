@@ -347,7 +347,7 @@ public:
     // It uses std::optional because this function is actually used to both recompute external
     // geometries but also to add new external geometries. Ideally this should be refactored.
     // With typesOnly it only repairs a type list saved before ops#140 (longer than the links)
-    // and leaves the geometry as it is.
+    // and leaves the geometry as it is: on open only, since it compares with the saved geometry.
     void rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd = std::nullopt,
                                  bool typesOnly = false);
     /// returns the number of external Geometry entities
@@ -1282,6 +1282,22 @@ private:
     // Some external geometry may generate more than one projection
     std::map<std::string, std::vector<long>> externalGeoRefMap;
     bool updateGeoRef = false;
+    // set while the sketch sets its links together with their types: onChanged leaves the types
+    // alone then (ops#140)
+    bool externalLinksWithTypes = false;
+
+    // Sets the links and their types (ExternalTypes is parallel to the links by index, ops#140).
+    void setExternalLinksAndTypes(std::vector<App::DocumentObject*> objs,
+                                  std::vector<std::string> subs,
+                                  std::vector<long> types);
+    // The entries after the links' types: a list saved before ops#140 whose repair on open
+    // couldn't tell every link's type keeps them, so that a later open still repairs it. Empty
+    // otherwise (a new sketch's list holds one entry and no links).
+    std::vector<long> pendingTypeRepair() const;
+    bool externalTypeRepairPending = false;
+    // set while a deletion keeps a constraint list flagged invalid: the rebuild it causes doesn't
+    // accept the geometry then (ops#140)
+    bool keepConstraintsInvalid = false;
 
     // backup of ExternalGeometry in case of element reference change
     std::vector<std::string> externalGeoRef;

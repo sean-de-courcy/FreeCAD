@@ -1373,6 +1373,9 @@ void SketchObject::onExternalGeoChanged()
         }
         refs.clear();
     }
+    auto pending = pendingTypeRepair();
+    types.insert(types.end(), pending.begin(), pending.end());
+    Base::StateLocker lock(externalLinksWithTypes, true);
     if (ExternalTypes.getValues() != types) {
         ExternalTypes.setValues(types);
     }
@@ -1393,16 +1396,20 @@ void SketchObject::onExternalGeometryChanged()
         // fully restored
         updateGeometryRefs();
 
-        // The sketch's own paths set the types before the links. A path outside it that drops
-        // links (PropertyLinkSubList::breakLink, when a linked object is deleted) leaves their
-        // types behind: drop them too, keeping the remaining links' types in order (ops#140).
-        // The sketch's own paths size the types to the new links first, so a list that already
-        // fits them is left alone. A list shorter than the old links was saved by paths that
-        // appended links without types (projections); a longer one is a list saved before
-        // ops#140, left to the repair on open.
+        // The sketch's own paths set the types with the links (externalLinksWithTypes). A path
+        // outside it that drops links (PropertyLinkSubList::breakLink, when a linked object is
+        // deleted) leaves their types behind: drop them too, keeping the remaining links' types
+        // in order (ops#140). A list shorter than the old links was saved by paths that appended
+        // links without types (projections); entries after the old links wait for the repair
+        // on open and stay after them.
         auto types = ExternalTypes.getValues();
-        if (!(doc && doc->isPerformingTransaction()) && types.size() != externalGeoRef.size()
-            && types.size() <= oldRefs.size() && externalGeoRef.size() < oldRefs.size()) {
+        if (!externalLinksWithTypes && !(doc && doc->isPerformingTransaction())
+            && externalGeoRef.size() < oldRefs.size()) {
+            std::vector<long> pending;
+            if (externalTypeRepairPending && types.size() > oldRefs.size()) {
+                pending.assign(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
+                               types.end());
+            }
             types.resize(oldRefs.size(), static_cast<long>(ExtType::Projection));
             std::vector<long> kept;
             std::size_t next = 0;
@@ -1413,7 +1420,10 @@ void SketchObject::onExternalGeometryChanged()
                 }
             }
             if (next == externalGeoRef.size()) {
-                ExternalTypes.setValues(kept);
+                kept.insert(kept.end(), pending.begin(), pending.end());
+                if (kept != ExternalTypes.getValues()) {
+                    ExternalTypes.setValues(kept);
+                }
             }
             else {
                 FC_WARN("External links of " << getFullName()
