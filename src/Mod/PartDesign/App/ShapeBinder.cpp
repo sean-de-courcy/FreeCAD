@@ -99,6 +99,21 @@ short int ShapeBinder::mustExecute() const
     return Part::Feature::mustExecute();
 }
 
+namespace
+{
+// A datum element in the body's coordinates: an element of a coordinate system is placed in it
+// (ops#200); an origin's too, at identity unless set from Python (ops#206)
+Base::Placement datumPlacement(const App::GeoFeature* obj)
+{
+    Base::Placement placement = obj->Placement.getValue();
+    auto element = dynamic_cast<const App::DatumElement*>(obj);
+    if (auto lcs = element ? element->getLCS() : nullptr) {
+        placement = lcs->Placement.getValue() * placement;
+    }
+    return placement;
+}
+}  // namespace
+
 Part::TopoShape ShapeBinder::updatedShape() const
 {
     Part::TopoShape shape = makeTopoShape(false);
@@ -119,8 +134,9 @@ Part::TopoShape ShapeBinder::updatedShape() const
 
         if (TraceSupport.getValue()) {
             // compute the transform, and apply it to the shape.
-            Base::Placement sourceCS =  // full placement of container of obj
-                obj->globalPlacement() * obj->Placement.getValue().inverse();
+            // full placement of container of obj; a datum element's is its coordinate system's
+            // container, as its global placement goes through the coordinate system (ops#210)
+            Base::Placement sourceCS = obj->globalPlacement() * datumPlacement(obj).inverse();
             Base::Placement targetCS =  // full placement of container of this shapebinder
                 this->globalPlacement() * this->Placement.getValue().inverse();
             Base::Placement transform = targetCS.inverse() * sourceCS;
@@ -218,21 +234,6 @@ void ShapeBinder::getFilteredReferences(
         }
     }
 }
-
-namespace
-{
-// A datum element in the body's coordinates: an element of a coordinate system is placed in it
-// (ops#200); an origin's too, at identity unless set from Python (ops#206)
-Base::Placement datumPlacement(const App::GeoFeature* obj)
-{
-    Base::Placement placement = obj->Placement.getValue();
-    auto element = dynamic_cast<const App::DatumElement*>(obj);
-    if (auto lcs = element ? element->getLCS() : nullptr) {
-        placement = lcs->Placement.getValue() * placement;
-    }
-    return placement;
-}
-}  // namespace
 
 Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs)
 {
