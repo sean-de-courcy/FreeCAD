@@ -358,5 +358,15 @@ class TestSelectionFilterGui(unittest.TestCase):
         self.assertFalse(self.selectable(self.sketch, "Vertex1"))
 
     def testClarifySelectionKey(self):
-        """Std_ClarifySelection ("select other" under the cursor) is on one key, as in Onshape."""
-        self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "`")
+        """Std_ClarifySelection ("select other" under the cursor) is on backtick in FreeCAD's
+        keymap. The fork's keymap (Onshape's, ops#194) gives it no key: backtick goes to Select
+        other (ops#194 PR C), and the context menu and long-press stay."""
+        settings = App.ParamGet("User parameter:BaseApp/Preferences/Shortcut/Settings")
+        self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "")
+        try:
+            settings.SetString("Keymap", "FreeCAD")
+            pump(0.1)
+            self.assertEqual(Gui.Command.get("Std_ClarifySelection").getShortcut(), "`")
+        finally:
+            settings.RemString("Keymap")
+            pump(0.1)

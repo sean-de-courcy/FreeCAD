@@ -51,6 +51,7 @@ from PartDesignTests.TestStalePreviewGui import TestStalePreviewGui
 from PartDesignTests.TestDressUpDeleteKeyGui import TestDressUpDeleteKeyGui
 from PartDesignTests.TestReferenceFieldGui import TestReferenceFieldGui
 from PartDesignTests.TestTreeItemsGui import TestTreeItemsGui
+from PartDesignTests.TestForkKeymapGui import TestForkKeymapGui
 
 
 # timer runs this class in order to access modal dialog
