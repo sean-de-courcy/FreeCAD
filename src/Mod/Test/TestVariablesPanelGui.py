@@ -713,6 +713,42 @@ class TestVariablesPanelGui(unittest.TestCase):
             self.assertEqual(self.varSet.Finish, text)
             self.assertIsNone(expressionText(self.varSet, "Finish"), text)
 
+    def test_text_values_hash_hint(self):
+        """A text value with '#' and a letter that fails as an expression (`#FF0000`) says how to
+        write it as text, for a String and an alias; `=<<#FF0000>>` then stores it. An expression
+        typed with '=', and a number variable's, get no hint (ops#192)."""
+        doc = self.standardDocument()
+        self.sheet.set("B1", "steel")
+        self.sheet.setAlias("B1", "Material")
+        self.varSet.addProperty("App::PropertyString", "Finish")
+        self.varSet.Finish = "matte"
+        doc.recompute()
+
+        def failsWith(source, name, text):
+            undoCount = doc.UndoCount
+            self.commit(source, name, EXPRESSION, text)
+            self.assertEqual(doc.UndoCount, undoCount, text)
+            self.assertTrue(self.message.isVisible(), text)
+            message = self.message.text()
+            QTest.keyClick(self.tree.indexWidget(self.tree.currentIndex()), QtCore.Qt.Key_Escape)
+            pump(0.2)
+            return message
+
+        for source, name in (("VarSet", "Finish"), ("Sheet", "Material")):
+            message = failsWith(source, name, "#FF0000")
+            self.assertIn("no variable named FF0000", message)
+            self.assertIn("=<<#FF0000>>", message)
+            self.assertIn("=<<...>>", failsWith(source, name, "#a >> b"))
+            self.assertNotIn("=<<", failsWith(source, name, "=#FF0000"))
+        self.assertNotIn("=<<", failsWith("VarSet", "Height", "#FF0000"))
+
+        self.commit("VarSet", "Finish", EXPRESSION, "=<<#FF0000>>")
+        doc.recompute()
+        self.assertEqual(self.varSet.Finish, "#FF0000")
+        self.commit("Sheet", "Material", EXPRESSION, "=<<#FF0000>>")
+        doc.recompute()
+        self.assertEqual(self.sheet.get("B1"), "#FF0000")
+
     def test_collapsed_per_document(self):
         """A header collapsed in one document stays collapsed there, and a header for an object
         of the same name in another document is not collapsed."""

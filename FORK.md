@@ -233,7 +233,8 @@ names it.
 | `fix/222-esc-record-followups` | fix | ops#222 | - | `fix/220-esc-autorepeat` `55d57d873e` + `integration` `d5e044c6a4` (stacked on fork PR 201) | `b3ae78d04e` (fork PR 205), 2026-10-08 | never (fork fix) |
 | `fix/180-pipe-panel-followups` | fix | ops#180 | - | `integration` `d5e044c6a4` | `ea0d025ff5` (fork PR 204), 2026-10-08 | never (fork fix) |
 | `fix/223-autoconstraint-review-followups` | fix | ops#223 | - | `integration` `819fdb26db` | `fb2a4a9229` (fork PR 206), 2026-10-08 | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
-| `fix/219-originals-pick-geometry` | fix | ops#219 | none (fork code, ops#150) | `integration` `d5e044c6a4` | (fork PR 202) | never (fork code) |
+| `fix/219-originals-pick-geometry` | fix | ops#219 | none (fork code, ops#150) | `integration` `d5e044c6a4` | `144785fdd0` (fork PR 202), 2026-10-08 | never (fork code) |
+| `fix/192-variables-text-hint` | fix | ops#192 | - | `integration` `fb2a4a9229` | (fork PR 207) | never (fork feature: the Variables panel) |
 
 ## Fork-only commits in carried topics
 
