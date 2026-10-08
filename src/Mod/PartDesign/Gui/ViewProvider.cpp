@@ -216,15 +216,18 @@ void ViewProvider::unsetEdit(int ModNum)
 
     // ensure that after edit we still show the same feature, if it is still there
     // If it was deleted during the edit (ops#187), the Body's Tip is shown, so the Body isn't left
-    // empty when nothing else is shown (ops#212). On Cancel the edit may still show the edited
-    // feature's base, which counts as nothing shown too (ops#218).
+    // empty when nothing else is shown (ops#212). The edit may still show the edited feature's
+    // base (Cancel) or the edited feature itself (Show final result): neither is a shown feature
+    // the user chose, so the Tip is shown then too (ops#218).
     App::DocumentObject* feature = previouslyShownFeature.get<App::DocumentObject>();
     if (!feature && hadShownFeature) {
         ViewProviderBody* bodyViewProvider = getBodyViewProvider();
         if (bodyViewProvider) {
             PartDesign::Feature* shownFeature = bodyViewProvider->getShownFeature();
             auto edited = freecad_cast<PartDesign::Feature*>(getObject());
-            if (!shownFeature || (edited && shownFeature == edited->getBaseObject(true))) {
+            if (!shownFeature
+                || (edited
+                    && (shownFeature == edited || shownFeature == edited->getBaseObject(true)))) {
                 feature = PartDesign::Body::findBodyOf(getObject())->Tip.getValue();
             }
         }

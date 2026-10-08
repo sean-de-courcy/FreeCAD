@@ -131,6 +131,18 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertAlmostEqual(self.body.Shape.Volume, 20 * 10 * 10 + 10 * 6 * 5, places=6)
         return pad
 
+    def addPadOnTop(self, name, sketchName, rect, z, length):
+        """A small pad on the solid's top at height z, its sketch hidden; it becomes the Tip."""
+        sketch = rectangleSketch(self.body, sketchName, *rect, z=z)
+        pad = self.body.newObject("PartDesign::Pad", name)
+        pad.Profile = sketch
+        pad.Length = length
+        self.doc.recompute()
+        sketch.ViewObject.Visibility = False
+        pump()
+        self.assertTrue(pad.isValid())
+        return pad
+
     def styleOf(self, label):
         tree = modelTree()
         self.assertIsNotNone(tree, "no model tree")
@@ -392,14 +404,7 @@ class TestTreeItemsGui(unittest.TestCase):
         Pad002 deleted, Cancel: the Tip, Pad001, is shown, not Pad (ops#218 A: the base the edit
         showed counted as the Body's shown feature, so the model looked rolled back)."""
         pad2 = self.addSecondPad()
-        sketch3 = rectangleSketch(self.body, "Sketch002", 8, 4, 12, 6, z=15)
-        pad3 = self.body.newObject("PartDesign::Pad", "Pad002")
-        pad3.Profile = sketch3
-        pad3.Length = 2
-        self.doc.recompute()
-        sketch3.ViewObject.Visibility = False
-        pump()
-        self.assertTrue(pad3.isValid())
+        pad3 = self.addPadOnTop("Pad002", "Sketch002", (8, 4, 12, 6), 15, 2)
         self.assertShown(pad3)
         Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
@@ -432,7 +437,92 @@ class TestTreeItemsGui(unittest.TestCase):
         pump()
         taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
-        guiDoc.resetEdit()
+        self.assertTrue(waitFor(lambda: guiDoc.getInEdit() is None), "the edit didn't end")
         pump()
         self.assertShown(self.pad)
         self.assertFalse(pad2.Visibility, "the Color edit's end showed an earlier edit's feature")
+
+        # a Default edit remembers again: Cancel shows what was shown when it began
+        guiDoc.setEdit(self.pad.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+        pump()
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump()
+        self.assertShown(self.pad)
+        self.assertFalse(pad2.Visibility)
+
+    def deleteTheShownFeatureWithShowFinal(self, ok):
+        """Pad .. Pad003 with Pad003 shown and "Show final result" on: the edit of Pad001 shows
+        Pad001 itself; Pad003 deleted, OK or Cancel: the Tip, Pad002, is shown (ops#218 A, PR 193
+        review: the edited feature counted as the Body's shown feature)."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+        had = group.GetBool("ShowFinal", False)
+        group.SetBool("ShowFinal", True)
+        try:
+            pad2 = self.addSecondPad()
+            pad3 = self.addPadOnTop("Pad002", "Sketch002", (8, 4, 12, 6), 15, 2)
+            pad4 = self.addPadOnTop("Pad003", "Sketch003", (9, 4.5, 11, 5.5), 17, 1)
+            self.assertShown(pad4)
+            Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+            pump()
+            self.delete(pad4)
+            self.assertNotIn("Pad003", [o.Name for o in self.doc.Objects])
+            button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
+            taskButton(button).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the panel stays")
+            pump()
+            self.assertEqual(self.body.Tip, pad3)
+            self.assertShown(pad3)
+            self.assertFalse(pad2.Visibility, "the edited feature is shown instead of the Tip")
+            self.assertFalse(self.pad.Visibility)
+        finally:
+            group.SetBool("ShowFinal", had)
+
+    def testCancelAfterDeletingTheShownFeatureWithShowFinal(self):
+        self.deleteTheShownFeatureWithShowFinal(ok=False)
+
+    def testOkAfterDeletingTheShownFeatureWithShowFinal(self):
+        self.deleteTheShownFeatureWithShowFinal(ok=True)
+
+    def testCancelOfALaterEditKeepsTheShownBase(self):
+        """Pad, Pad001, Pad002 with Pad shown (the user's choice); Pad001 in edit, nothing
+        deleted, Cancel: Pad stays shown, not the Tip (ops#218 A only applies to a deleted
+        shown feature)."""
+        pad2 = self.addSecondPad()
+        pad3 = self.addPadOnTop("Pad002", "Sketch002", (8, 4, 12, 6), 15, 2)
+        pad3.ViewObject.Visibility = False
+        self.pad.ViewObject.Visibility = True
+        pump()
+        self.assertShown(self.pad)
+        Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+        pump()
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump()
+        self.assertShown(self.pad)
+        self.assertFalse(pad2.Visibility)
+        self.assertFalse(pad3.Visibility, "the Tip is shown instead of the user's Pad")
+
+    def testCancelOfANewPadShowsThePad(self):
+        """A new Pad001 made by the command from a sketch on the Pad, then Cancel: Pad001 is
+        gone and the Pad is shown, as before (ops#218: a cancelled new feature is deleted during
+        its edit's end)."""
+        sketch = rectangleSketch(self.body, "Sketch001", 5, 2, 15, 8, z=10)
+        self.sketch.ViewObject.Visibility = False
+        self.doc.recompute()
+        pump()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sketch.Name)
+        Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+        pump()
+        self.assertIsNotNone(self.doc.getObject("Pad001"))
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump()
+        self.assertIsNone(self.doc.getObject("Pad001"))
+        self.assertEqual(self.body.Tip, self.pad)
+        self.assertShown(self.pad)
