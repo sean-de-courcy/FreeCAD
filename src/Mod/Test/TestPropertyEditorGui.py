@@ -200,8 +200,8 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(self.doc.UndoCount, undos)
 
     def testRenameLeavesOtherDocumentsBooking(self):
-        """The rename has no transaction of its own (it joined the document's): it closes none,
-        not the active document's booking in another document either."""
+        """The property's document has a booking, so the rename joins it and its tid is 0: it
+        closes no transaction, not the active document's booking in another document either."""
         other = App.newDocument("TestPropertyEditorGuiOther")
         try:
             other.UndoMode = 1
@@ -222,7 +222,44 @@ class TestPropertyEditorGui(unittest.TestCase):
             other.commitTransaction()
             self.assertEqual(other.UndoNames, ["Other"])
         finally:
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+            App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
+
+    def testRenameWithoutBookingIsOwnStep(self):
+        """With nothing booked, the rename is its own undo step "Rename property", and undo takes
+        it back."""
+        undos = self.doc.UndoCount
+        self.renameThroughMenu("Width", "Wide")
+        self.assertEqual(self.obj.getPropertyByName("Wide"), 5)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Rename property")
+        self.doc.undo()
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Wide", self.obj.PropertiesList)
+
+    def testRefusedRenameKeepsExpression(self):
+        """Width = Depth * 2 (an expression), inside a booked transaction: a rename to a name in use
+        is refused and Width keeps its expression; the same name through the menu changes
+        nothing."""
+        self.obj.addProperty("App::PropertyInteger", "Depth", "Variables")
+        self.obj.Depth = 4
+        self.obj.setExpression("Width", "Depth * 2")
+        self.doc.recompute()
+        self.doc.openTransaction("Task")
+        self.obj.Label2 = "task"
+        with self.assertRaises(Exception):
+            self.obj.renameProperty("Width", "Depth")
+        self.assertEqual(dict(self.obj.ExpressionEngine).get("Width"), "Depth * 2")
+
+        undos = self.doc.UndoCount
+        self.renameThroughMenu("Width", "Width")
+        self.assertEqual(dict(self.obj.ExpressionEngine).get("Width"), "Depth * 2")
+        self.assertEqual(self.doc.UndoCount, undos)
+        self.doc.abortTransaction()
+        self.doc.recompute()
+        self.assertEqual(self.obj.Width, 8)
 
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.

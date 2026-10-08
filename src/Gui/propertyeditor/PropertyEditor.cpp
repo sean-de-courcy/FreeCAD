@@ -1465,7 +1465,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 QLineEdit::Normal,
                 QString::fromUtf8(oldName)
             );
-            if (res.isEmpty()) {
+            if (res.isEmpty() || res == QString::fromUtf8(oldName)) {  // FreeCAD-CH (ops#178)
                 break;
             }
             // FreeCAD-CH (ops#163): the transaction opens once there is a name. Booked before the
@@ -1473,10 +1473,12 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             // property"), and a change made while the dialog ran landed in it.
             // FreeCAD-CH (ops#178): a transaction the document has booked already (a task dialog's)
             // takes the rename; opening one would commit it, past its dialog's Cancel. Only our own
-            // is closed here: an ID of 0 would close the active document's booking.
+            // is closed here: an ID of 0 would close the active document's booking. The editor's
+            // own "Edit" booking (transactionID) isn't one to join: it is committed as before.
             int tid = 0;
             App::Document* doc = propertyDocument(prop->getContainer());
-            if (doc && doc->getBookedTransactionID() == 0) {
+            int booked = doc ? doc->getBookedTransactionID() : 0;
+            if (doc && (booked == 0 || booked == transactionID)) {
                 tid = doc->openTransaction("Rename property");
             }
 

@@ -541,7 +541,9 @@ class TestSaveAndRename(VariablesBase):
         """ops#181: changes made while a document is relabeled aren't recorded. A rename made then
         (by an observer of the relabel), under an application transaction, changes a deleted Box
         in another document that uses the variable: that document opens no transaction and keeps
-        its redo stack, and undoing the delete brings back the Box with the new name."""
+        its redo stack, and undoing the delete brings back the Box with the new name. (Known
+        limitation, upstream's rule: the rename's changes made during the relabel aren't recorded,
+        so they can't be undone.)"""
         varSet = self.addVarSet(Width=20)
         other = FreeCAD.newDocument("VarRenameRelabel")
         self.extraDocs.append(other)
@@ -570,6 +572,8 @@ class TestSaveAndRename(VariablesBase):
 
         observer = RenameOnRelabel()
         FreeCAD.addDocumentObserver(observer)
+        # The application transaction books the active document: `other`, where it would open.
+        self.assertEqual(FreeCAD.ActiveDocument.Name, other.Name)
         FreeCAD.setActiveTransaction("Relabel")
         try:
             self.doc.Label = "Relabeled"

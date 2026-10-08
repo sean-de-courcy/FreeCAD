@@ -910,7 +910,27 @@ bool DocumentObject::renameDynamicProperty(Property* prop, const char* name)
         ExpressionEngine.setValue(it, std::shared_ptr<Expression>());
     }
 
-    bool renamed = TransactionalObject::renameDynamicProperty(prop, name);
+    // FreeCAD-CH (ops#178): a refused rename (a name in use or invalid, a locked property, not a
+    // dynamic one) gives the property its expressions back; they were lost before.
+    auto restoreExpressions = [&]() {
+        for (std::size_t i = 0; i < idsWithExprsToRemove.size(); ++i) {
+            ExpressionEngine.setValue(idsWithExprsToRemove[i], expressionsToMove[i]);
+        }
+    };
+    bool renamed = false;
+    try {
+        renamed = TransactionalObject::renameDynamicProperty(prop, name);
+    }
+    catch (...) {
+        if (oldName == prop->getName()) {
+            restoreExpressions();
+        }
+        throw;
+    }
+    if (!renamed) {
+        restoreExpressions();
+        return false;
+    }
     if (renamed && _pDoc) {
         _pDoc->renamePropertyOfObject(this, prop, oldName.c_str());
     }
