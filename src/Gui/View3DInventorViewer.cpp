@@ -3621,8 +3621,8 @@ bool orbitByArrowKey(Gui::View3DInventorViewer* viewer, const SoKeyboardEvent* e
     const SbRotation current = camera->orientation.getValue();
     SbVec3f direction;
     current.multVec(SbVec3f(0.0F, 0.0F, -1.0F), direction);
-    const SbVec3f focalPoint
-        = camera->position.getValue() + direction * camera->focalDistance.getValue();
+    const SbVec3f focalPoint = camera->position.getValue()
+        + direction * camera->focalDistance.getValue();
 
     // Coin composes left to right: the turn about the camera's own axis comes first
     const SbRotation next = SbRotation(axis, turn * angle) * current;

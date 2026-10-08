@@ -1307,7 +1307,7 @@ class TestForkKeymapGui(unittest.TestCase):
         Gui.getDocument(self.doc.Name).getObject(folder.Name).Visibility = True
         Gui.getDocument(self.doc.Name).getObject(inner.Name).Visibility = True
         pump()
-        self.assertTrue(self.visibility()[folder.Name], "the folder starts hidden")
+        self.assertTrue(self.visibility()[folder.Name], "the folder should start shown")
         Gui.Selection.addSelection(self.doc.Name, inner.Name)
         self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
         shown = {n for n, v in self.visibility().items() if v}
@@ -1806,7 +1806,9 @@ OrthographicCamera {{
         """The designed view: an orthographic camera in front of (5, 0, 5) looking along +y, up
         +z, right +x. The point is the camera's focal point."""
         view = self.frontCamera()
-        self.assertTrue(waitFor(lambda: (self.cameraDirection() - App.Vector(0, 1, 0)).Length < 1e-3))
+        self.assertTrue(
+            waitFor(lambda: (self.cameraDirection() - App.Vector(0, 1, 0)).Length < 1e-3)
+        )
         return view
 
     def cameraDirection(self):
