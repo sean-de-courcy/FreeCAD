@@ -199,7 +199,8 @@ names it.
 | `feat/150-w9-hole-fields` | feat | ops#150 | - | `feat/150-w8-pipe-paths` `23a6d79be7` (stacked on fork PR 166) | `d162236575` (fork PR 169), 2026-10-07 | never (fork feature) |
 | `fix/149-tree-edit-highlight` | fix | ops#149 | upstream issues 20599, 30499 | `integration` `9dd9ca6159` | `5e76a4a186` (fork PR 171), 2026-10-07 | a new base styles the item in edit beyond its background |
 | `fix/150-w2-w3-tests` | fix | ops#150 | - | `feat/150-w9-hole-fields` `b66289dc18` (stacked on fork PR 169) | `5da114a060` (fork PR 172), 2026-10-07 | never (fork feature) |
-| `fix/198-lcs-plane-placement` | fix | ops#198 | - | `fix/150-w2-w3-tests` `77cae0dfe6` (stacked on fork PR 172) | (fork PR 175) | when upstream places a coordinate system's plane in it (`makePlnFromPlane`, `getLCS`) |
+| `fix/198-lcs-plane-placement` | fix | ops#198 | - | `fix/150-w2-w3-tests` `77cae0dfe6` (stacked on fork PR 172) | `84aefc7dba` (fork PR 175), 2026-10-07 | when upstream places a coordinate system's plane in it (`makePlnFromPlane`, `getLCS`) |
+| `fix/200-datum-placement` | fix | ops#200 | - | `fix/198-lcs-plane-placement` `e9c7eebc28` (stacked on fork PR 175) | (fork PR 177) | when upstream places a coordinate system's datum elements in it (Attacher, ShapeBinder) |
 
 ## Fork-only commits in carried topics
 

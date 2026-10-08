@@ -626,15 +626,15 @@ class TestUpToPlanePlacement(unittest.TestCase):
     def tearDown(self):
         FreeCAD.closeDocument(self.Doc.Name)
 
-    def xyPlane(self, coordinateSystem):
-        [plane] = [f for f in coordinateSystem.OriginFeatures if f.Role == "XY_Plane"]
+    def planeOf(self, coordinateSystem, role="XY_Plane"):
+        [plane] = [f for f in coordinateSystem.OriginFeatures if f.Role == role]
         return plane
 
     def coordinateSystemPlane(self):
         lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "LCS")
         self.Body.addObject(lcs)
         lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 7), FreeCAD.Rotation())
-        return self.xyPlane(lcs)
+        return self.planeOf(lcs)
 
     def assertVolume(self, volume):
         self.Doc.recompute()
@@ -643,7 +643,7 @@ class TestUpToPlanePlacement(unittest.TestCase):
 
     def testUpToOriginPlane(self):
         self.Pad.Type = "UpToFace"
-        self.Pad.UpToFace = (self.xyPlane(self.Body.Origin), [""])
+        self.Pad.UpToFace = (self.planeOf(self.Body.Origin), [""])
         self.assertVolume(12)
 
     def testUpToCoordinateSystemPlane(self):
@@ -654,6 +654,52 @@ class TestUpToPlanePlacement(unittest.TestCase):
     def testUpToCoordinateSystemPlaneAsShape(self):
         self.Pad.Type = "UpToShape"
         self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
+        self.assertVolume(40)
+
+    def testUpToCoordinateSystemPlaneAsShapeWithOffset(self):
+        """A plane alone as the shape is taken as a face, so the offset applies: 1 further, 44
+        (PR 175 review, Low 3)."""
+        self.Pad.Type = "UpToShape"
+        self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
+        self.Pad.Offset = 1
+        self.assertVolume(44)
+
+    def testUpToOriginXZPlaneAsShape(self):
+        """The square turned to face -Y at y = 3, up to the body's XZ origin plane as the shape:
+        3 long, 12. Alone it was taken without its placement, as the XY plane (PR 175 review,
+        Low 3)."""
+        self.Pad.Profile[0].Placement = FreeCAD.Placement(
+            FreeCAD.Vector(0, 3, 0), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        self.Pad.Type = "UpToShape"
+        self.Pad.UpToShape = [(self.planeOf(self.Body.Origin, "XZ_Plane"), [""])]
+        self.assertVolume(12)
+
+    def testUpToTurnedCoordinateSystemPlane(self):
+        """The coordinate system at z = 7 turned 90 degrees about X; its XZ plane lies flat at
+        z = 7 only as the coordinate system's placement times the plane's (the other order puts
+        it at z = 0): 40, as the face and as the shape (PR 175 review, Low 4)."""
+        lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "Turned")
+        self.Body.addObject(lcs)
+        lcs.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(0, 0, 7), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        plane = self.planeOf(lcs, "XZ_Plane")
+        self.Pad.Type = "UpToFace"
+        self.Pad.UpToFace = (plane, [""])
+        self.assertVolume(40)
+        self.Pad.Type = "UpToShape"
+        self.Pad.UpToShape = [(plane, [""])]
+        self.assertVolume(40)
+
+    def testUpToADatumPlaneAsShape(self):
+        """A PartDesign datum plane at z = 7 alone as the shape: 40. It was taken without its
+        placement, at z = 0 (PR 175 review, Medium 2)."""
+        plane = self.Body.newObject("PartDesign::Plane", "DatumPlane")
+        plane.MapMode = "Deactivated"
+        plane.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 7), FreeCAD.Rotation())
+        self.Pad.Type = "UpToShape"
+        self.Pad.UpToShape = [(plane, [""])]
         self.assertVolume(40)
 
     def testUpToAPlaneWithACoordinateSystemAttached(self):

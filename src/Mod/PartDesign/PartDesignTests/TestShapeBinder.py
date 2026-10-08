@@ -195,3 +195,71 @@ class TestSubShapeBinder(unittest.TestCase):
         self.assertAlmostEqual(binder.Shape.Area, 100)
         volume = 100 * math.pi * 2 * 20
         self.assertAlmostEqual(revolution.Shape.Volume, volume)
+
+
+class TestShapeBinderOfACoordinateSystem(unittest.TestCase):
+    """A ShapeBinder of an element of a coordinate system (as the command makes it: the element,
+    no subname) is placed in the coordinate system (FreeCAD-CH ops#200). The coordinate system
+    sits in the body at (3, 4, 5), turned 90 degrees about X: its XY plane faces -Y, its Y axis
+    runs along +Z, its origin is (3, 4, 5). It was at the body's origin."""
+
+    bodyPlacement = FreeCAD.Placement()
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestBinderOfLCS")
+        self.Body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Body.Placement = self.bodyPlacement
+        self.Lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.Body.addObject(self.Lcs)
+        self.Lcs.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(3, 4, 5), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        self.Doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def binder(self, role):
+        [element] = [f for f in self.Lcs.OriginFeatures if f.Role == role]
+        binder = self.Body.newObject("PartDesign::ShapeBinder", "Binder")
+        binder.Support = [(element, "")]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        return binder
+
+    def testPlane(self):
+        [face] = self.binder("XY_Plane").Shape.Faces
+        plane = face.Surface
+        self.assertLess(plane.Axis.cross(FreeCAD.Vector(0, -1, 0)).Length, 1e-9)
+        self.assertLess(abs((FreeCAD.Vector(3, 4, 5) - plane.Position).dot(plane.Axis)), 1e-9)
+
+    def testLine(self):
+        [edge] = self.binder("Y_Axis").Shape.Edges
+        line = edge.Curve
+        self.assertLess(line.Direction.cross(FreeCAD.Vector(0, 0, 1)).Length, 1e-9)
+        offset = line.Location.sub(FreeCAD.Vector(3, 4, 5))
+        self.assertLess(offset.cross(line.Direction).Length, 1e-9)
+
+    def testBodyAxis(self):
+        """The body's Z axis: a line along Z through the origin. An App::Line runs along its
+        placement's X; the binder's line ran along its Z."""
+        [axis] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "Z_Axis"]
+        binder = self.Body.newObject("PartDesign::ShapeBinder", "BodyAxis")
+        binder.Support = [(axis, "")]
+        self.Doc.recompute()
+        [edge] = binder.Shape.Edges
+        line = edge.Curve
+        self.assertLess(line.Direction.cross(FreeCAD.Vector(0, 0, 1)).Length, 1e-9)
+        self.assertLess(line.Location.cross(line.Direction).Length, 1e-9)
+
+    def testPoint(self):
+        [vertex] = self.binder("Origin").Shape.Vertexes
+        self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(3, 4, 5)), 1e-9)
+
+
+class TestShapeBinderOfACoordinateSystemInAPlacedBody(TestShapeBinderOfACoordinateSystem):
+    """The same in a body moved and turned: the binder's shape is in the body."""
+
+    bodyPlacement = FreeCAD.Placement(
+        FreeCAD.Vector(5, -4, 9), FreeCAD.Rotation(FreeCAD.Vector(1, 1, 0), 30)
+    )

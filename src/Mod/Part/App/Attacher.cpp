@@ -79,6 +79,16 @@ using namespace Attacher;
 
 namespace
 {
+// An element of a coordinate system linked bare, as (element, ""): its own placement is in the
+// coordinate system, so the coordinate system's comes first (ops#200). A link through the
+// coordinate system, (LCS, "XY_Plane"), has it already. An origin's sits at identity
+Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
+{
+    auto element = dynamic_cast<const App::DatumElement*>(obj);
+    auto lcs = element ? element->getLCS() : nullptr;
+    return lcs ? lcs->Placement.getValue() : Base::Placement();
+}
+
 struct PlanarFaceInfo
 {
     gp_Pln plane;
@@ -1104,6 +1114,10 @@ void AttachEngine::readLinks(
             }
         }
 
+        const Base::Placement container = coordinateSystemOf(objs[i]);
+        if (!container.isIdentity()) {
+            shape.move(Tools::fromPlacement(container));
+        }
         storage.emplace_back(shape);
         shapes[i] = &(storage.back());
 
@@ -1475,7 +1489,8 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
     // common stuff for all map modes
     App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-    Base::Placement Place = App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
+    Base::Placement Place = coordinateSystemOf(objs[0])
+        * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
     Base::Vector3d vec = Place.getPosition();
     gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
 
@@ -2252,7 +2267,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
             // special case for planes
             if (auto plane = dynamic_cast<App::Plane*>(objs[0])) {
-                return plane->Placement.getValue() * attachmentOffset;
+                return coordinateSystemOf(plane) * plane->Placement.getValue() * attachmentOffset;
             }
 
             auto shape = shapes.front();
@@ -2604,7 +2619,8 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
 
         // common stuff for all map modes
         App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-        Base::Placement Place = App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
+        Base::Placement Place = coordinateSystemOf(objs[0])
+            * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
         Base::Vector3d vec = Place.getPosition();
         gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
 

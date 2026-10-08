@@ -84,3 +84,104 @@ class TestDatumPlane(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestDatumPlane")
         # print ("omit closing document for debugging")
+
+
+class TestAttachedToACoordinateSystem(unittest.TestCase):
+    """Datums and a sketch attached to an element of a coordinate system, linked bare, as
+    (element, ""): placed in the coordinate system (FreeCAD-CH ops#200). The coordinate system
+    sits in the body at (3, 4, 5), turned 90 degrees about X: its XY plane faces -Y, its origin
+    is (3, 4, 5). The (coordinate system, "XY_Plane") link always gave that; the bare link gave
+    the element's own placement in the coordinate system, at the body's origin."""
+
+    bodyPlacement = FreeCAD.Placement()
+    lcsPlacement = FreeCAD.Placement(
+        FreeCAD.Vector(3, 4, 5), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+    )
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestAttachedToLCS")
+        self.Body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Body.Placement = self.bodyPlacement
+        self.Lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.Body.addObject(self.Lcs)
+        self.Lcs.Placement = self.lcsPlacement
+        self.Doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def element(self, role):
+        [feature] = [f for f in self.Lcs.OriginFeatures if f.Role == role]
+        return feature
+
+    def attach(self, typeName, support, mode):
+        feature = self.Body.newObject(typeName, "Attached")
+        feature.AttachmentSupport = support
+        feature.MapMode = mode
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    def assertPlacement(self, placement, expected):
+        self.assertTrue(placement.isSame(expected, 1e-9), "%s != %s" % (placement, expected))
+
+    def testPlaneFlatFace(self):
+        plane = self.attach("PartDesign::Plane", [(self.element("XY_Plane"), "")], "FlatFace")
+        self.assertPlacement(plane.Placement, self.lcsPlacement)
+
+    def testPlaneObjectXY(self):
+        plane = self.attach("PartDesign::Plane", [(self.element("XY_Plane"), "")], "ObjectXY")
+        self.assertPlacement(plane.Placement, self.lcsPlacement)
+
+    def testPlaneMidPoint(self):
+        plane = self.attach("PartDesign::Plane", [(self.element("XY_Plane"), "")], "MidPoint")
+        self.assertPlacement(plane.Placement, self.lcsPlacement)
+
+    def testSketchFlatFace(self):
+        """As the link through the coordinate system gives it."""
+        sketch = self.attach(
+            "Sketcher::SketchObject", [(self.element("XY_Plane"), "")], "FlatFace"
+        )
+        reference = self.attach(
+            "Sketcher::SketchObject", [(self.Lcs, self.element("XY_Plane").Name)], "FlatFace"
+        )
+        self.assertPlacement(reference.Placement, self.lcsPlacement)
+        self.assertPlacement(sketch.Placement, self.lcsPlacement)
+
+    def testPointOnTheOrigin(self):
+        point = self.attach("PartDesign::Point", [(self.element("Origin"), "")], "Vertex")
+        self.assertLess(point.Placement.Base.distanceToPoint(FreeCAD.Vector(3, 4, 5)), 1e-9)
+
+    def testMirroredOnAMovedElement(self):
+        """The coordinate system's XY plane moved 1 along its own Z (in the coordinate system):
+        in the body that is 1 along -Y, so the plane is y = 3. A 2 x 3 x 2 box at the body's
+        origin mirrored on it reaches y = 6. Adding the move without turning it gave y = 4, and
+        y = 8 (PR 175 review, Low 6: DatumElement::getBasePoint)."""
+        plane = self.element("XY_Plane")
+        plane.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 1), FreeCAD.Rotation())
+        box = self.Body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Height = 2
+        box.Width = 3
+        self.Doc.recompute()
+        # As TestMirrored makes it: added to the body once its originals are set
+        mirrored = self.Doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [box]
+        mirrored.MirrorPlane = (plane, [""])
+        self.Body.addObject(mirrored)
+        self.Doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.YMax, 6, places=6)
+
+    def testBodyOriginPlane(self):
+        """Unchanged: the body's own XY plane, at the body's origin."""
+        [xy] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        plane = self.attach("PartDesign::Plane", [(xy, "")], "FlatFace")
+        self.assertPlacement(plane.Placement, FreeCAD.Placement())
+
+
+class TestAttachedToACoordinateSystemInAPlacedBody(TestAttachedToACoordinateSystem):
+    """The same in a body moved and turned: the attached placements are in the body."""
+
+    bodyPlacement = FreeCAD.Placement(
+        FreeCAD.Vector(5, -4, 9), FreeCAD.Rotation(FreeCAD.Vector(1, 1, 0), 30)
+    )
