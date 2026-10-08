@@ -1188,10 +1188,8 @@ class TestForkKeymapGui(unittest.TestCase):
             if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
         )
 
-    def testSpaceInTheTreeWithNothingSelectedSelectsNothing(self):
-        """With nothing selected, Std_ClearSelection is off and Space goes on to the tree, whose
-        own handling selects the current item (so Space twice would clear, then select again):
-        under the fork's keymap the tree drops a plain Space."""
+    def spaceOnTheBodysItem(self):
+        """Presses Space in the tree with nothing selected and the body's item current."""
         tree = self.modelTree()
         tree.expandAll()
         pump(0.2)
@@ -1209,8 +1207,25 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertTrue(focus(tree), "the tree doesn't take the focus")
         QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Space)
         pump(0.5)
+        return tree
+
+    def testSpaceInTheTreeWithNothingSelectedSelectsNothing(self):
+        """With nothing selected, Std_ClearSelection is off and Space goes on to the tree, whose
+        own handling selects the current item (so Space twice would clear, then select again):
+        under the fork's keymap the tree drops a plain Space."""
+        tree = self.spaceOnTheBodysItem()
         self.assertEqual(Gui.Selection.getSelection(), [])
         self.assertEqual(tree.selectedItems(), [])
+
+    def testSpaceInTheTreeIsTheTreesOnceTheUserMovesClearSelection(self):
+        """The tree drops Space only while Space is Std_ClearSelection's: a user who moves the
+        command to another key gets the tree's own Space back (it selects the current item)."""
+        App.ParamGet(SHORTCUTS).SetString("Std_ClearSelection", "Ctrl+Alt+F12")
+        self.addCleanup(App.ParamGet(SHORTCUTS).RemString, "Std_ClearSelection")
+        pump(0.1)
+        self.assertTrue(same(shortcut("Std_ClearSelection"), "Ctrl+Alt+F12"))
+        self.spaceOnTheBodysItem()
+        self.assertEqual([o.Name for o in Gui.Selection.getSelection()], [self.body.Name])
 
     def boxes(self):
         """Two 10 mm boxes outside the body, at x 0 and x 30."""
