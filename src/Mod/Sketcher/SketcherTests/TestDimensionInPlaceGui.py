@@ -944,6 +944,47 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
                 return widget
         return None
 
+    def answer_formula_editor(self, formula, text="Sheet.width", button="accept"):
+        """Answers the formula editor when it opens: types `text` (None types nothing), then
+        presses `button` ("accept" for OK, "reject" for Cancel and Esc, "reset" for Reset).
+        `formula` records "opened" and "field_open". An editor that is on screen but never
+        becomes modal is rejected after a while, so a failure can't leave it blocking the run."""
+        formula["waited"] = formula.get("waited", 0)
+
+        def poll():
+            dialog = self.formula_editor()
+            if dialog is None or QtGui.QApplication.activeModalWidget() is not dialog:
+                formula["waited"] += 20
+                if formula["waited"] < 6000:
+                    QtCore.QTimer.singleShot(20, poll)
+                elif dialog is not None:
+                    dialog.reject()
+                return
+            formula["opened"] = True
+            formula["field_open"] = QtGui.QApplication.activePopupWidget() is not None
+            if text is not None:
+                dialog.findChild(QtGui.QPlainTextEdit, "expression").setPlainText(text)
+                self.pump(100)
+            if button == "accept":
+                dialog.accept()
+            elif button == "reject":
+                dialog.reject()
+            else:
+                box = dialog.findChild(QtGui.QDialogButtonBox, "buttonBox")
+                box.button(QtGui.QDialogButtonBox.Reset).click()
+
+        QtCore.QTimer.singleShot(20, poll)
+
+    def type_equals(self, formula, **options):
+        """A step's "act": = typed through the window, as a user's key, with the formula editor
+        answered as `options` say."""
+
+        def act(popup, edit):
+            self.answer_formula_editor(formula, **options)
+            QTest.keyClick(popup.windowHandle(), "=")
+
+        return act
+
     def test_d24_equals_opens_the_formula_editor(self):
         """D24 (ops#203): = typed in the field (through the window, as a user's key) opens the
         formula editor, and the field waits behind it; Sheet.width there and OK brings the
@@ -951,26 +992,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         (40, 0), in one undo step; the cell set to 55 mm moves it to (55, 0)."""
         sheet = self.add_sheet("40 mm")
         formula = {}
-
-        def answer_formula_editor():
-            dialog = self.formula_editor()
-            if dialog is None or QtGui.QApplication.activeModalWidget() is not dialog:
-                formula["waited"] = formula.get("waited", 0) + 20
-                if formula["waited"] < 6000:
-                    QtCore.QTimer.singleShot(20, answer_formula_editor)
-                return
-            formula["opened"] = True
-            formula["field_open"] = QtGui.QApplication.activePopupWidget() is not None
-            dialog.findChild(QtGui.QPlainTextEdit, "expression").setPlainText("Sheet.width")
-            self.pump(100)
-            dialog.accept()
-
-        def type_equals(popup, edit):
-            QtCore.QTimer.singleShot(20, answer_formula_editor)
-            QTest.keyClick(popup.windowHandle(), "=")
-
         state = self.place_distance(
-            [{"act": type_equals}, {"key": QtCore.Qt.Key_Return}],
+            [{"act": self.type_equals(formula)}, {"key": QtCore.Qt.Key_Return}],
             allowed_modal="DlgExpressionInput",
         )
         self.wait_answered(state, 2)
@@ -987,3 +1010,92 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         sheet.set("B1", "55 mm")
         self.doc.recompute()
         self.assert_point(self.line_end(), 55, 0)
+
+    def test_d25_escape_after_a_formula_keeps_the_measured_value(self):
+        """D25 (ops#203 review M1): = and Sheet.width, OK; the field comes back showing 40, and
+        Esc: nothing of the formula is kept. The new Distance stays at its measured 10, with no
+        expression, the free end at (10, 0), in one undo step."""
+        self.add_sheet("40 mm")
+        formula = {}
+        state = self.place_distance(
+            [{"act": self.type_equals(formula)}, {"key": QtCore.Qt.Key_Escape}],
+            allowed_modal="DlgExpressionInput",
+        )
+        self.wait_answered(state, 2)
+
+        self.assertTrue(formula.get("opened"), "Expected = to open the formula editor")
+        self.assertTrue(state["seen"][1]["text_before"].startswith("40"), state["seen"][1])
+        self.assertFalse(state["seen"][1]["open_after"], "Expected Esc to close the field")
+        distances = self.constraints_of("Distance")
+        self.assertEqual(len(distances), 1)
+        self.assertAlmostEqual(distances[0].Value, 10.0, places=9)
+        self.assertEqual(self.expressions(), {})
+        self.assert_point(self.line_end(), 10, 0)
+        self.assert_one_undo_step()
+
+    def test_d26_cancel_in_the_editor_keeps_the_typed_text(self):
+        """D26 (ops#203 review): 12 typed, = and Cancel in the formula editor: the field comes
+        back showing 12, and Enter applies 12, with no expression."""
+        self.add_sheet("40 mm")
+        formula = {}
+        state = self.place_distance(
+            [
+                {"text": "12", "act": self.type_equals(formula, button="reject")},
+                {"key": QtCore.Qt.Key_Return},
+            ],
+            allowed_modal="DlgExpressionInput",
+        )
+        self.wait_answered(state, 2)
+
+        self.assertTrue(formula.get("opened"), "Expected = to open the formula editor")
+        self.assertTrue(state["seen"][1]["text_before"].startswith("12"), state["seen"][1])
+        self.assertAlmostEqual(self.constraints_of("Distance")[0].Value, 12.0, places=9)
+        self.assertEqual(self.expressions(), {})
+        self.assert_point(self.line_end(), 12, 0)
+        self.assert_one_undo_step()
+
+    def test_d27_reset_in_the_editor_gives_a_plain_value(self):
+        """D27 (ops#203 review): Reset in the formula editor takes the formula away: the field
+        comes back with a plain number, which typing replaces (it is selected, not appended
+        to)."""
+        self.add_sheet("40 mm")
+        formula = {}
+        state = self.place_distance(
+            [
+                {"act": self.type_equals(formula, text=None, button="reset")},
+                {"text": "7", "key": QtCore.Qt.Key_Return},
+            ],
+            allowed_modal="DlgExpressionInput",
+        )
+        self.wait_answered(state, 2)
+
+        self.assertTrue(formula.get("opened"), "Expected = to open the formula editor")
+        self.assertAlmostEqual(self.constraints_of("Distance")[0].Value, 7.0, places=9)
+        self.assertEqual(self.expressions(), {})
+        self.assert_point(self.line_end(), 7, 0)
+
+    def test_d28_a_formula_giving_no_distance_is_refused(self):
+        """D28 (ops#203 review M2): the cell holds 0 mm: = and Sheet.width, OK, Enter: the
+        field stays open with the reason in its tooltip, and nothing is applied. Esc then keeps
+        the measured 10 and no expression."""
+        self.add_sheet("0 mm")
+        formula = {}
+        state = self.place_distance(
+            [
+                {"act": self.type_equals(formula)},
+                {"key": QtCore.Qt.Key_Return},
+                {"key": QtCore.Qt.Key_Escape},
+            ],
+            allowed_modal="DlgExpressionInput",
+        )
+        self.wait_answered(state, 3)
+
+        second = state["seen"][1]
+        self.assertTrue(second["open_after"], "Expected the field to stay open on a zero")
+        self.assertIn("zero", second["tooltip"].lower())
+        distances = self.constraints_of("Distance")
+        self.assertEqual(len(distances), 1)
+        self.assertAlmostEqual(distances[0].Value, 10.0, places=9)
+        self.assertEqual(self.expressions(), {})
+        self.assert_point(self.line_end(), 10, 0)
+        self.assert_one_undo_step()
