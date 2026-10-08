@@ -713,9 +713,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         moved to a task panel widget); the next Esc is pressed in another 3D view of the
         document, not in edit, and released in the view in edit: that release doesn't count
         there, as the press it follows went to the other view."""
+        # the second view first: Std_ViewCreate during the edit ends it
+        Gui.runCommand("Std_ViewCreate")
+        self.assertTrue(waitFor(lambda: len(views3D()) == 2), "Std_ViewCreate made no view")
         box, fillet = self.newFillet()
         [field] = fields()
-        [view] = views3D()
+        inEdit = Gui.getDocument(self.doc.Name).ActiveView.graphicsView()
+        [view] = [v for v in views3D() if v.isAncestorOf(inEdit)]
+        [other] = [v for v in views3D() if not v.isAncestorOf(inEdit)]
         self.arm(field, byFocus=False)
         self.assertTrue(focus(view))
         window = Gui.getMainWindow().windowHandle()
@@ -725,10 +730,6 @@ class TestReferenceFieldGui(unittest.TestCase):
         QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
         pump(0.3)
 
-        Gui.runCommand("Std_ViewCreate")
-        self.assertTrue(waitFor(lambda: len(views3D()) == 2), "Std_ViewCreate made no view")
-        [other] = [v for v in views3D() if v is not view]
-        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the new view ended the edit")
         # the radius's focus disarmed the field; armed again before the other view's Esc
         self.arm(field, byFocus=False)
         self.assertTrue(focus(other))
