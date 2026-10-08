@@ -67,6 +67,9 @@ public:
 
     static void setupResizableColumn(TreeWidget* tree = nullptr);
     static void scrollItemToTop();
+    /// Selects the active document's next (or previous) object in error or warning, in tree
+    /// order, wrapping at the end; false when there is none (ops#149)
+    static bool selectNextProblem(bool forward);
     void selectAllInstances(const ViewProviderDocumentObject& vpd);
     void selectLinkedObject(App::DocumentObject* linked);
     void selectAllLinks(App::DocumentObject* obj);
@@ -283,6 +286,12 @@ private:
     static TreeWidget* getTreeForSelection();
 
 private:
+    // The problems (objects in error or warning) of a document, in tree order (ops#149)
+    struct ProblemItem;
+    std::vector<ProblemItem> problemItems(DocumentItem* docItem, bool errors, bool warnings);
+    // A :errors, :warnings or :problems search: true when text is one (ops#149)
+    bool problemSearch(DocumentItem* docItem, const QString& text, bool select);
+
     QAction* createGroupAction;
     QAction* relabelObjectAction;
     QAction* finishEditingAction;
@@ -300,6 +309,8 @@ private:
     Command* skipRecomputeCommand;
     QTreeWidgetItem* contextItem;
     App::DocumentObject* searchObject;
+    /// The objects a :errors, :warnings or :problems search highlights (ops#149)
+    std::vector<App::DocumentObject*> searchProblems;
     Gui::Document* searchDoc;
     Gui::Document* searchContextDoc;
     DocumentObjectItem* editingItem;

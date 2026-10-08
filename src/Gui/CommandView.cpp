@@ -2976,6 +2976,64 @@ void StdTreeSelection::activated(int iMsg)
 }
 
 //===========================================================================
+// Std_TreeNextProblem, Std_TreePreviousProblem (ops#149)
+//===========================================================================
+
+DEF_STD_CMD_A(StdTreeNextProblem)
+
+StdTreeNextProblem::StdTreeNextProblem()
+    : Command("Std_TreeNextProblem")
+{
+    sGroup = "TreeView";
+    sMenuText = QT_TR_NOOP("&Next Problem");
+    sToolTipText = QT_TR_NOOP(
+        "Selects the next object with an error or a warning in the tree, from the selection"
+    );
+    sWhatsThis = "Std_TreeNextProblem";
+    sStatusTip = sToolTipText;
+    eType = AlterSelection;
+    sAccel = "F8";
+}
+
+void StdTreeNextProblem::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    TreeWidget::selectNextProblem(true);
+}
+
+bool StdTreeNextProblem::isActive()
+{
+    return Application::Instance->activeDocument() != nullptr;
+}
+
+DEF_STD_CMD_A(StdTreePreviousProblem)
+
+StdTreePreviousProblem::StdTreePreviousProblem()
+    : Command("Std_TreePreviousProblem")
+{
+    sGroup = "TreeView";
+    sMenuText = QT_TR_NOOP("&Previous Problem");
+    sToolTipText = QT_TR_NOOP(
+        "Selects the previous object with an error or a warning in the tree, from the selection"
+    );
+    sWhatsThis = "Std_TreePreviousProblem";
+    sStatusTip = sToolTipText;
+    eType = AlterSelection;
+    sAccel = "Shift+F8";
+}
+
+void StdTreePreviousProblem::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    TreeWidget::selectNextProblem(false);
+}
+
+bool StdTreePreviousProblem::isActive()
+{
+    return Application::Instance->activeDocument() != nullptr;
+}
+
+//===========================================================================
 // Std_TreeCollapse
 //===========================================================================
 
@@ -3518,6 +3576,8 @@ public:
 
         addCommand(new StdTreeDrag(), !cmds.empty());
         addCommand(new StdTreeSelection(), !cmds.empty());
+        addCommand(new StdTreeNextProblem(), !cmds.empty());
+        addCommand(new StdTreePreviousProblem(), !cmds.empty());
 
         addCommand();
 

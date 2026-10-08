@@ -678,8 +678,10 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
                   << "Std_ToggleSelectability" << "Std_TreeSelectAllInstances" << "Separator"
                   << "Std_RandomColor" << "Std_ToggleTransparency" << "Separator"
                   << "Std_Cut" << "Std_Copy" << "Std_Paste" << "Std_Delete"
-                  << "Std_SendToPythonConsole";
+                  << "Std_SendToPythonConsole" << "Separator";
         }
+        // The next object in error or warning (ops#149)
+        *item << "Std_TreeNextProblem";
     }
 
     if (sels.size() == 1) {

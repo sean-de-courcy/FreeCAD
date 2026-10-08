@@ -46,6 +46,7 @@
 #include <Gui/Utilities.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/Gui/ViewProvider.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
@@ -310,6 +311,12 @@ void ViewProvider::updatePreview()
 void ViewProvider::makeChildrenVisible()
 {
     for (const auto child : claimChildren()) {
+        // A deleted feature's sketch stays hidden, so only the previous feature shows, as when a
+        // feature without a sketch is deleted (ops#149, PLAN decision 29). Other children, e.g. a
+        // Boolean's tool bodies, are shown again.
+        if (child && child->isDerivedFrom<Part::Part2DObject>()) {
+            continue;
+        }
         if (auto vp = Gui::Application::Instance->getViewProvider(child)) {
             vp->show();
         }

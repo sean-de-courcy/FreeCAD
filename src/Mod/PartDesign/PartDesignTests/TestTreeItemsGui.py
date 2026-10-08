@@ -27,8 +27,9 @@
   font and background.
 - Deleting the visible last feature of a Body shows the feature before it (upstream issue 30499),
   also when the deleted feature has a nested sketch. This didn't fail on integration in any
-  variant tried (ops#149): the tests pin it. The left-behind sketch is shown too (upstream's
-  makeChildrenVisible), which a feature without a sketch doesn't have.
+  variant tried (ops#149): the tests pin it. The left-behind sketch stays hidden (PLAN decision
+  29; upstream's makeChildrenVisible showed it), so only the previous feature shows, as when a
+  feature without a sketch is deleted.
 
 Designed model, built by the test: a Body with a 20 x 10 rectangle padded 10, and a second
 rectangle (5..15 x 2..8) on the pad's top plane (z = 10) padded 5. The second sketch is the
@@ -269,7 +270,7 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertShown(self.pad)
         sketch = self.doc.getObject("Sketch001")
         self.assertIn(sketch, self.body.Group, "the left-behind sketch stays in the Body")
-        self.assertTrue(sketch.Visibility, "upstream shows the left-behind sketch")
+        self.assertFalse(sketch.Visibility, "the left-behind sketch is shown")
 
     def testDeletingLastFeatureWithoutSketchShowsPrevious(self):
         """The reference: a feature with no nested sketch."""
