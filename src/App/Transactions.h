@@ -176,8 +176,22 @@ private:
     void changeProperty(TransactionalObject* Obj,
                         std::function<void(TransactionObject* to)> changeFunc);
 
+    struct MoveEntry
+    {
+        TransactionObject* to;
+        int64_t key;
+    };
+    /// FreeCAD-CH (ops#235): the move entry of a property moved in this transaction, found by the
+    /// moved property (the target's), or null.
+    std::pair<TransactionObject*, int64_t> movedHere(const Property* prop);
+
 private:
     int transID;
+    /// FreeCAD-CH (ops#235): the properties moved in this transaction, at their target, with
+    /// their move entries. A later change, rename, removal or move of one is the move entry's:
+    /// recorded in the target's entries, it was applied in an order that depended on which object
+    /// came first, before or after the property moved back.
+    std::unordered_map<const Property*, MoveEntry> _MoveTargets;
     using Info = std::pair<const TransactionalObject*, TransactionObject*>;
     bmi::multi_index_container<
         Info,
@@ -228,6 +242,20 @@ public:
      * @param[in] forward If true, apply the transaction; otherwise, undo it.
      */
     virtual void applyChn(Document& doc, TransactionalObject* obj, bool forward);
+
+    /// FreeCAD-CH (ops#235): the passes of applyChn(), which Transaction::apply() runs for all
+    /// objects one after the other, since entries pass names and properties between objects:
+    /// properties added in the transaction removed; moved properties moved back (or removed, if
+    /// added in the transaction too); renames taken back; values restored and removed properties
+    /// re-created.
+    enum class ChnPass
+    {
+        Removals,
+        Moves,
+        Renames,
+        Values
+    };
+    void applyChnPass(TransactionalObject* obj, ChnPass pass);
 
     /**
      * @brief Set the property of the object that is affected by the transaction.
@@ -292,7 +320,17 @@ protected:
         Property* propertyTarget = nullptr;
         TransactionalObject* target = nullptr;
         PropertyContainer* source = nullptr;
+        // FreeCAD-CH (ops#235): a move of a property added in this transaction: undone by its
+        // removal from the target
+        bool added = false;
+        // FreeCAD-CH (ops#235): while applying, the property a move or a rename restored, for the
+        // value pass
+        Property* restored = nullptr;
     };
+
+    /// FreeCAD-CH (ops#235): the property the move entry @a key moved was removed from its
+    /// target: the entry becomes the removal of the source's property (nothing, if it was added).
+    void movedPropertyRemoved(int64_t key);
 
     /// FreeCAD-CH (ops#235): copies @a prop's dynamic data into @a data, with the name as a string
     /// (a property named by `pName` has an empty `name`); `property` is left null, not the live property

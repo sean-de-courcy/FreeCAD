@@ -687,6 +687,54 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(other.getPropertyByName("Width"), 4)
         self.assertNotIn("Width", target.PropertiesList)
 
+    def testMoveAfterValueEditUndoRedo(self):
+        """Review of fork PR 216: the M1 case committed: in a task's transaction, Width edited
+        5 -> 9 and moved to another VarSet; undo, redo and undo again."""
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        self.openTask()
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "9")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.moveThroughMenu("Width", target)
+        self.doc.commitTransaction()
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        for _ in range(2):
+            self.doc.undo()
+            self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+            self.assertEqual(self.obj.Depth, 3)
+            self.assertNotIn("Width", target.PropertiesList)
+            self.doc.redo()
+            self.assertNotIn("Width", self.obj.PropertiesList)
+            self.assertEqual(target.getPropertyByName("Width"), 9)
+            self.assertEqual(self.obj.Depth, 9)
+        self.doc.undo()
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Width", target.PropertiesList)
+
+    def testRenameThenMoveAborts(self):
+        """Review of fork PR 216 (M2): in a task's transaction, Width renamed to Wide so that it can
+        move to a VarSet that has a Width of its own, and moved; the task's Cancel brings Width back
+        to the VarSet with its value, and leaves the target's Width alone."""
+        target = self.doc.addObject("App::VarSet", "Target")
+        target.addProperty("App::PropertyInteger", "Width", "Variables")
+        target.Width = 3
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        self.renameThroughMenu("Width", "Wide")
+        self.assertEqual(self.obj.Wide, 5)
+        self.moveThroughMenu("Wide", target)
+        self.assertEqual(target.Wide, 5)
+        self.assertTaskAborts(tid, undos)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Wide", self.obj.PropertiesList)
+        self.assertNotIn("Wide", target.PropertiesList)
+        self.assertEqual(target.getPropertyByName("Width"), 3)
+        names = [p for p in self.obj.PropertiesList + target.PropertiesList if "Undo" in p]
+        self.assertEqual(names, [])
+
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 

@@ -56,9 +56,10 @@ TYPESYSTEM_SOURCE_ABSTRACT(App::PropertyExpressionContainer, App::PropertyXLinkC
 // FreeCAD-CH (ops#177, ops#179): every living container, undo/redo copies included, with the
 // serial number it got when it was made. The slots below visit a snapshot taken before they start,
 // and skip an entry that is gone or whose address now belongs to a newer container: visiting one
-// container can make undo copies (they hold the state from before this change, so they must not
-// be visited) or, under an application transaction, clear another document's redo stack (whose
-// copies are then freed).
+// container can make undo copies (they hold the state from before this change; since ops#235 they
+// are visited after the others, so that they have the names from after it like every other copy)
+// or, under an application transaction, clear another document's redo stack (whose copies are
+// then freed).
 static std::map<PropertyExpressionContainer*, std::uint64_t> _ExprContainers;
 static std::uint64_t _ExprContainerSerial;
 
@@ -66,7 +67,25 @@ template<class Function>
 static void forEachExpressionContainer(Function visit)
 {
     const auto containers = _ExprContainers;
+    const auto lastBefore = _ExprContainerSerial;
     for (const auto& [container, serial] : containers) {
+        auto it = _ExprContainers.find(container);
+        if (it != _ExprContainers.end() && it->second == serial) {
+            visit(container);
+        }
+    }
+    // FreeCAD-CH (ops#235): then the undo copies the visits made, once each: a copy holds the state
+    // from before this change, in the names from before it, and every other copy now has the names
+    // from after it. Left in the old names, a later rename in the same transaction rewrote a name
+    // the copy used for another property (Width -> Old, then Other -> Width made Other's
+    // reference Width's), and undoing it pasted the wrong references.
+    std::vector<std::pair<PropertyExpressionContainer*, std::uint64_t>> made;
+    for (const auto& [container, serial] : _ExprContainers) {
+        if (serial > lastBefore) {
+            made.emplace_back(container, serial);
+        }
+    }
+    for (const auto& [container, serial] : made) {
         auto it = _ExprContainers.find(container);
         if (it != _ExprContainers.end() && it->second == serial) {
             visit(container);
