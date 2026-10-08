@@ -22,12 +22,14 @@
  ***************************************************************************/
 
 #include <QCheckBox>
+#include <QCoreApplication>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMenu>
+#include <QTimer>
 #include <QTextStream>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -1236,6 +1238,36 @@ bool isForwards(const QKeyEvent* ev)
         || (ev->key() == Qt::Key_Down && isPlainArrow(ev));
 }
 
+/** Eats the next Esc key release, or none after a second. The list closes on Esc's press; the
+ * release then reaches the widget that has the focus, the 3D view, whose key handling acts on a
+ * release alone (a task panel's Cancel, a reference field's disarming).
+ */
+class EscReleaseEater: public QObject
+{
+public:
+    static void arm()
+    {
+        auto* eater = new EscReleaseEater(QCoreApplication::instance());
+        QCoreApplication::instance()->installEventFilter(eater);
+        QTimer::singleShot(1000, eater, [eater]() { eater->deleteLater(); });
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* ev) override
+    {
+        if (ev->type() == QEvent::KeyRelease
+            && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape) {
+            QCoreApplication::instance()->removeEventFilter(this);
+            deleteLater();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    using QObject::QObject;
+};
+
 }  // namespace
 
 SelectOtherMenu::SelectOtherMenu(QWidget* parent)
@@ -1272,6 +1304,16 @@ void SelectOtherMenu::open(const std::vector<PickData>& list, const QPoint& pos)
     if (!actions().isEmpty()) {
         setActiveAction(actions().first());
         preselect(actions().first());
+        // The 3D view clears a preselection once the list has taken the mouse (seen off screen,
+        // by an observer: set, set, then removed with the list still open): set it again after
+        // those events
+        for (int delay : {0, 150}) {
+            QTimer::singleShot(delay, this, [this]() {
+                if (isVisible()) {
+                    preselect(activeAction());
+                }
+            });
+        }
     }
 }
 
@@ -1299,6 +1341,9 @@ void SelectOtherMenu::keyPressEvent(QKeyEvent* ev)
         ev->accept();
     }
     else {
+        if (ev->key() == Qt::Key_Escape) {
+            EscReleaseEater::arm();
+        }
         QMenu::keyPressEvent(ev);
     }
 }

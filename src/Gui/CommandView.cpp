@@ -4501,8 +4501,7 @@ StdCmdSelectOther::StdCmdSelectOther()
     sGroup = "View";
     sMenuText = QT_TR_NOOP("Select Other");
     sToolTipText = QT_TR_NOOP(
-        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.
-"
+        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.\n"
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
         "highlights an element. Enter or a click selects the highlighted one, Esc closes the list."
     );

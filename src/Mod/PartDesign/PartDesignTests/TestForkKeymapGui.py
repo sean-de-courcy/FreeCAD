@@ -533,6 +533,12 @@ class TestForkKeymapGui(unittest.TestCase):
         pump()
 
     def tearDown(self):
+        # a list a failed test left open takes the keys of every later test; so does a filter
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None and popup.objectName() == "SelectOtherMenu":
+            popup.close()
+            pump(0.1)
+        Gui.runCommand("Part_SelectFilter", 3)
         App.ParamGet(KEYMAP).RemString("Keymap")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
@@ -1617,7 +1623,7 @@ OrthographicCamera {{
         """Esc closes the list: no selection, no preselection left, and its release doesn't
         reach the 3D view to disarm the field or cancel the Fillet panel."""
         fillet, field = self.filletScene()
-        self.cursorOver(App.Vector(5, 0, 10))
+        self.cursorOver(App.Vector(5, 0, 5))
         popup = self.openSelectOther()
         self.listKey(QtCore.Qt.Key_Escape)
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
@@ -1638,26 +1644,23 @@ OrthographicCamera {{
         self.assertIsNone(self.preselectedY())
 
     def testSelectOtherLeavesOutWhatTheFilterRefuses(self):
-        """With the edge filter on, the list over the box's front-top edge holds edges only; a
-        gate-refused face isn't listed. (Over a face centre it is empty and nothing opens.)"""
-        a, b = self.stack()
-        self.cursorOver(App.Vector(5, 0, 5))
+        """With the edge filter on, every face under the cursor is refused, so the list is empty
+        and nothing opens; without the filter the same position lists the four faces. (Off
+        screen the 3D view picks no edges, so a list of the edges that remain can't be
+        shown.)"""
+        self.stack()
         Gui.runCommand("Part_SelectFilter", 1)  # edges
         pump(0.1)
-        try:
-            with self.watching("Std_SelectOther") as fired:
-                self.press(QtCore.Qt.Key_QuoteLeft)
-                self.assertTrue(waitFor(lambda: fired), "the command didn't run")
-            pump(0.3)
-            self.assertIsNone(self.selectOtherList(), "a list opened over a face centre")
-            self.cursorOver(App.Vector(5, 0, 10))
-            popup = self.openSelectOther()
-            texts = [x.text() for x in popup.actions()]
-            self.assertTrue(texts and all(t.startswith("Edge") for t in texts), texts)
-            self.listKey(QtCore.Qt.Key_Escape)
-        finally:
-            Gui.runCommand("Part_SelectFilter", 3)  # none
-            pump(0.1)
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.4)
+        self.assertIsNone(self.selectOtherList(), "a list of refused faces opened")
+        Gui.runCommand("Part_SelectFilter", 3)  # none
+        pump(0.1)
+        popup = self.openSelectOther()
+        self.assertEqual(len(popup.actions()), 4)
+        self.listKey(QtCore.Qt.Key_Escape)
 
     def testBacktickTypesInAFieldAndOpensNothing(self):
         """With the focus in a line edit the backtick is typed, not a command."""
@@ -1704,25 +1707,19 @@ OrthographicCamera {{
         self.assertFalse(any(a.isEnabled() for a in action))
 
     def testCommitToggleOnceInAnArmedFilletField(self):
-        """In a Fillet's armed edge field a commit toggles the edge once, and cycling the list
-        toggles nothing."""
+        """In a Fillet's armed field a commit toggles the element once, and cycling the list
+        toggles nothing. (A face: off screen the 3D view picks no edges.)"""
         fillet, field = self.filletScene()
-        # the front-top edge (z = 10, y = 0), whose ray also meets the box's faces
-        self.cursorOver(App.Vector(5, 0, 10))
+        self.cursorOver(App.Vector(5, 0, 5))
         popup = self.openSelectOther()
-        found = False
-        for _ in range(len(popup.actions())):
-            if Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1].startswith("Edge"):
-                found = True
-                break
-            self.listKey(QtCore.Qt.Key_QuoteLeft)
-        self.assertTrue(found, "no edge in the list")
-        expected = Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1]
-        self.assertEqual(fillet.Base[1], [], "cycling toggled an edge")
+        self.listKey(QtCore.Qt.Key_QuoteLeft)  # the second entry
+        sub = Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1]
+        self.assertTrue(sub.startswith("Face"), sub)
+        self.assertEqual(fillet.Base[1], [], "cycling toggled an element")
         self.listKey(QtCore.Qt.Key_Return)
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None))
         pump(0.3)
-        self.assertEqual(fillet.Base[1], [expected])
+        self.assertEqual(fillet.Base[1], [sub])
 
 
 if __name__ == "__main__":
