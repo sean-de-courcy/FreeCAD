@@ -79,6 +79,51 @@ TEST_F(SketchObjectTest, testDelExternalReducesCount)
     EXPECT_EQ(getObject()->ExternalGeo.getSize(), numExt - 1);
 }
 
+// delAllExternal with the constraint list flagged invalid (here the sketch's geometry is gone)
+// keeps the constraints that aren't on external geometry: it read the list with getValues(),
+// empty while flagged, and wrote that back (ops#140)
+TEST_F(SketchObjectTest, testDelAllExternalWithInvalidConstraintListKeepsConstraints)
+{
+    // Arrange
+    auto* doc = getObject()->getDocument();
+    auto box {doc->addObject("Part::Box")};
+    doc->recompute();
+    getObject()->addExternal(box, "Edge6");
+    Part::GeomLineSegment lineSeg;
+    setupLineSegment(lineSeg);
+    int geoId = getObject()->addGeometry(&lineSeg);
+    Sketcher::Constraint horizontal;
+    horizontal.Type = Sketcher::ConstraintType::Horizontal;
+    horizontal.First = geoId;
+    getObject()->addConstraint(&horizontal);
+    Sketcher::Constraint coincident;  // on the projected edge
+    coincident.Type = Sketcher::ConstraintType::Coincident;
+    coincident.First = geoId;
+    coincident.FirstPos = Sketcher::PointPos::start;
+    coincident.Second = Sketcher::GeoEnum::RefExt;
+    coincident.SecondPos = Sketcher::PointPos::start;
+    getObject()->addConstraint(&coincident);
+    doc->recompute();
+    ASSERT_EQ(getObject()->Constraints.getSize(), 2);
+    std::vector<Part::Geometry*> geometry;
+    for (auto* geo : getObject()->Geometry.getValues()) {
+        geometry.push_back(geo->clone());
+    }
+    getObject()->Geometry.setValues(std::vector<Part::Geometry*> {});
+    ASSERT_TRUE(getObject()->Constraints.getValues().empty());  // flagged invalid
+
+    // Act
+    int res = getObject()->delAllExternal();
+    getObject()->Geometry.setValues(std::move(geometry));
+
+    // Assert
+    EXPECT_EQ(res, 0);
+    EXPECT_EQ(getObject()->ExternalGeometry.getSize(), 0);
+    EXPECT_EQ(getObject()->ExternalTypes.getSize(), 0);
+    ASSERT_EQ(getObject()->Constraints.getValuesForce().size(), 1);
+    EXPECT_EQ(getObject()->Constraints.getValuesForce()[0]->Type, Sketcher::ConstraintType::Horizontal);
+}
+
 // TODO: `delExternal` situation of constraints
 // TODO: `delExternal` situation of constraint containing more than 3 entities
 

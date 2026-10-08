@@ -126,3 +126,68 @@ class TestSketchExternalTypes(unittest.TestCase):
         sketch.touch()
         self.doc.recompute()
         self.assertRingPoints(sketch)
+
+    def saveAndReopen(self, name):
+        path = os.path.join(tempfile.mkdtemp(), name + ".FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.doc = App.openDocument(path)
+        return self.doc.getObject("Sketch")
+
+    def testStaleTypeOfTheSameKindsRepairedByGeometry(self):
+        """A sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8;
+        its projection is a circle as well, of radius 10. Linked as an intersection behind a stale
+        projection type, the counts and kinds can't tell the two apart: the saved circle's radius
+        does. The repaired type is intersection, and the circle keeps radius 8."""
+        ball = self.doc.addObject("Part::Feature", "Ball")
+        ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        self.doc.recompute()
+        self.sketch.delExternal(0)
+        self.sketch.addExternal(ball.Name, "Face1", False, True)
+        self.doc.recompute()
+        circles = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.Circle)]
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual(circles[0].Radius, 8, delta=TOL)
+        # the ring, then the ball; a stale list gives the ball the projection type by index
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
+        self.sketch.ExternalTypes = [INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("SameKinds")
+        self.assertEqual(list(sketch.ExternalTypes), [INTERSECTION, INTERSECTION])
+        sketch.touch()
+        self.doc.recompute()
+        circles = [g for g in list(sketch.ExternalGeo)[2:] if isinstance(g, Part.Circle)]
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual(circles[0].Radius, 8, delta=TOL)
+        self.assertRingPoints(sketch)
+
+    def testStaleTypesWithMissingElements(self):
+        """Both sources lose their edge, so no type can be built. The ring's saved geometry, two
+        distinct points of an edge, can only be an intersection; the rail's, one line, can't be
+        told. The rail keeps the type at its index, and the type list keeps its stale entry so a
+        later open can still repair it."""
+        self.rail.Shape = Part.Vertex(V(0, 20, 0))
+        self.ring.Shape = Part.Vertex(V(0, 0, 10))
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("MissingElements")
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(self.externalPoints(sketch), [-10, 10])
+
+    def testUndoRedoOfDelete(self):
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Delete the rail")
+        self.sketch.delExternal(0)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeometry), 2)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.assertRingPoints()
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(self.sketch.ExternalGeometry, [(self.ring, ("Edge1",))])
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
+        self.assertRingPoints()

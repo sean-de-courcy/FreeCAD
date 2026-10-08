@@ -958,6 +958,11 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
     Base::StateLocker lock(managedoperation, true);  // no need to check input data validity as this
                                                      // is an sketchobject managed operation.
 
+    // A constraint list flagged invalid (the geometry it was checked against is gone, e.g. during
+    // a restore) stays flagged: accepting the current geometry below would bless the constraints
+    // against geometry they weren't made for (ops#140).
+    const bool invalidConstraints = Constraints.hasInvalidGeometry();
+
     std::set<std::string> refs;
     // Must sort in reverse order so as to delete geo from back to front to
     // avoid index change
@@ -1042,7 +1047,13 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
 
     solverNeedsUpdate = true;
     Constraints.setValues(std::move(newConstraints));
-    acceptGeometry();  // This may need to be refactored into OnChanged for ExternalGeometry.
+    if (invalidConstraints) {
+        rebuildVertexIndex();
+        signalElementsChanged();
+    }
+    else {
+        acceptGeometry();  // This may need to be refactored into OnChanged for ExternalGeometry.
+    }
 }
 
 int SketchObject::delAllExternal()
@@ -1072,16 +1083,23 @@ int SketchObject::delAllExternal()
     Objects.clear();
     SubElements.clear();
 
-    const std::vector<Constraint*>& constraints = Constraints.getValues();
+    // getValuesForce(): getValues() is empty while the list is flagged invalid, and writing that
+    // back would delete every constraint (ops#140)
+    const std::vector<Constraint*>& constraints = Constraints.getValuesForce();
     std::vector<Constraint*> newConstraints(0);
 
     for (const auto& constr : constraints) {
-        if (constr->First > GeoEnum::RefExt
-            && (constr->Second > GeoEnum::RefExt || constr->Second == GeoEnum::GeoUndef)
-            && (constr->Third > GeoEnum::RefExt || constr->Third == GeoEnum::GeoUndef)) {
-            Constraint* copiedConstr = constr->clone();
-
-            newConstraints.push_back(copiedConstr);
+        // every element, not only First/Second/Third: a group constraint has more
+        bool onExternal = false;
+        for (std::size_t i = 0; i < constr->getElementsSize(); ++i) {
+            int geoId = constr->getElement(i).GeoId;
+            if (geoId <= GeoEnum::RefExt && geoId != GeoEnum::GeoUndef) {
+                onExternal = true;
+                break;
+            }
+        }
+        if (!onExternal) {
+            newConstraints.push_back(constr->clone());
         }
     }
 
@@ -2411,6 +2429,44 @@ std::string missingReferenceMessage(
 
 }  // anonymous namespace
 
+namespace
+{
+// The type a link had, from its saved geometries alone, where only one type gives them (ops#140):
+// saved geometries that are all points came from an intersection when the element is a face (its
+// projection gives curves) or an edge with two or more distinct points (an edge's projection is
+// one curve or one point; a line through the plane gives one point either way, and both types
+// give two points at the same place).
+std::optional<long> typeFromSavedGeometry(const std::string& sub,
+                                          const std::vector<const Part::Geometry*>& saved)
+{
+    if (saved.empty() || !std::all_of(saved.begin(), saved.end(), [](const Part::Geometry* geo) {
+            return geo->is<Part::GeomPoint>();
+        })) {
+        return std::nullopt;
+    }
+    // the element type is the last one named: a missing element reads "?Edge3", a mapped one
+    // ends in its old name
+    auto face = sub.rfind("Face");
+    auto edge = sub.rfind("Edge");
+    if (face != std::string::npos && (edge == std::string::npos || face > edge)) {
+        return static_cast<long>(ExtType::Intersection);
+    }
+    if (edge == std::string::npos || saved.size() < 2) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < saved.size(); ++i) {
+        for (std::size_t j = i + 1; j < saved.size(); ++j) {
+            auto a = static_cast<const Part::GeomPoint*>(saved[i])->getPoint();
+            auto b = static_cast<const Part::GeomPoint*>(saved[j])->getPoint();
+            if (Base::Distance(a, b) < Precision::Confusion()) {
+                return std::nullopt;
+            }
+        }
+    }
+    return static_cast<long>(ExtType::Intersection);
+}
+}  // namespace
+
 void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd, bool typesOnly)
 {
     Base::StateLocker lock(managedoperation, true); // no need to check input data validity as this is an sketchobject managed operation.
@@ -2540,6 +2596,13 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     BRepBuilderAPI_MakeFace mkFace(sketchPlane);
     TopoDS_Shape aProjFace = mkFace.Shape();
 
+    // the types after the links: kept while a link's type can't be told, so that a later open can
+    // still find it (ops#140)
+    std::vector<long> staleTypes;
+    if (repairTypes) {
+        staleTypes.assign(Types.begin() + linkCount, Types.end());
+    }
+    bool undecided = false;
     Types.resize(Objects.size(), static_cast<long>(ExtType::Projection));
 
     std::set<std::string> refSet;
@@ -2574,13 +2637,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
             }
         }
-        if(frozen && !sync) {
-            refSet.insert(std::move(key));
-            continue;
-        }
-        if (!Obj || !Obj->getNameInDocument()) {
-            continue;
-        }
+        // a frozen link, and one without its source, still get their type repaired below
+        const bool keepFrozen = frozen && !sync;
+        const bool hasSource = Obj && Obj->getNameInDocument();
 
         std::vector<std::unique_ptr<Part::Geometry> > geos;
 
@@ -2770,33 +2829,89 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 projection = type == (int)ExtType::Projection || type == (int)ExtType::Both;
                 intersection = type == (int)ExtType::Intersection || type == (int)ExtType::Both;
             };
-            // the same number of geometries of the same kinds, so the Ids map one to one
-            auto givesSaved = [&](long type) {
+            enum class Match
+            {
+                None,
+                Kinds,  // the same number of geometries of the same kinds: the Ids map one to one
+                Exact   // and each is the saved one, within tolerance
+            };
+            auto matchSaved = [&](long type) {
                 setType(type);
                 geos.clear();
                 try {
                     build();
                 }
                 catch (...) {
-                    return false;
+                    return Match::None;
                 }
-                return std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
-                                  [](const auto& geo, const Part::Geometry* old) {
-                                      return geo->getTypeId() == old->getTypeId();
-                                  });
+                if (!std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
+                                [](const auto& geo, const Part::Geometry* old) {
+                                    return geo->getTypeId() == old->getTypeId();
+                                })) {
+                    return Match::None;
+                }
+                bool same = std::equal(geos.begin(), geos.end(), saved.begin(),
+                                       [](const auto& geo, const Part::Geometry* old) {
+                                           return geo->isSame(*old,
+                                                              Precision::Confusion(),
+                                                              Precision::Angular());
+                                       });
+                return same ? Match::Exact : Match::Kinds;
             };
-            if (!saved.empty() && !givesSaved(Types[i])) {
+            const long indexType = Types[i];
+            std::vector<long> exact;
+            std::vector<long> kinds;
+            if (!saved.empty() && hasSource) {
                 for (auto type : {ExtType::Projection, ExtType::Intersection, ExtType::Both}) {
-                    if (static_cast<long>(type) != Types[i] && givesSaved(static_cast<long>(type))) {
-                        Types[i] = static_cast<long>(type);
-                        break;
+                    switch (matchSaved(static_cast<long>(type))) {
+                        case Match::Exact:
+                            exact.push_back(static_cast<long>(type));
+                            break;
+                        case Match::Kinds:
+                            kinds.push_back(static_cast<long>(type));
+                            break;
+                        case Match::None:
+                            break;
                     }
                 }
+            }
+            // the type at the link's index when it is among them, else the first
+            auto pick = [indexType](const std::vector<long>& types) {
+                return std::find(types.begin(), types.end(), indexType) != types.end()
+                    ? indexType
+                    : types.front();
+            };
+            if (!exact.empty()) {
+                Types[i] = pick(exact);
+                if (exact.size() > 1) {
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": several types give its saved geometry; it takes type "
+                            << Types[i]);
+                }
+            }
+            else if (!kinds.empty()) {
+                Types[i] = pick(kinds);
+                FC_WARN("External link " << key << " in " << getFullName()
+                        << ": no type gives its saved geometry exactly, only the same kinds; it"
+                        << " takes type " << Types[i]);
+            }
+            else if (auto type = typeFromSavedGeometry(SubElement, saved)) {
+                Types[i] = *type;
+            }
+            else {
+                undecided = true;
+                FC_WARN("External link " << key << " in " << getFullName()
+                        << ": its type can't be told from a type list saved before ops#140; it"
+                        << " keeps type " << indexType);
             }
             setType(Types[i]);
             geos.clear();
         }
-        if (typesOnly) {
+        if (keepFrozen) {
+            refSet.insert(key);
+            continue;
+        }
+        if (!hasSource || typesOnly) {
             continue;
         }
 
@@ -2836,6 +2951,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
     if (typesOnly) {
         Types.resize(linkCount);
+        if (undecided) {
+            Types.insert(Types.end(), staleTypes.begin(), staleTypes.end());
+        }
         ExternalTypes.setValues(Types);
         return;
     }
@@ -2968,6 +3086,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 ExternalGeometry, ExternalTypes, newObjects, newSubElements, newTypes);
         }
         else if (repairTypes) {
+            if (undecided) {
+                newTypes.insert(newTypes.end(), staleTypes.begin(), staleTypes.end());
+            }
             ExternalTypes.setValues(newTypes);
         }
     }

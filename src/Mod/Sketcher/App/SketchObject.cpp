@@ -1396,9 +1396,14 @@ void SketchObject::onExternalGeometryChanged()
         // The sketch's own paths set the types before the links. A path outside it that drops
         // links (PropertyLinkSubList::breakLink, when a linked object is deleted) leaves their
         // types behind: drop them too, keeping the remaining links' types in order (ops#140).
-        const auto& types = ExternalTypes.getValues();
-        if (!(doc && doc->isPerformingTransaction()) && types.size() == oldRefs.size()
-            && externalGeoRef.size() < oldRefs.size()) {
+        // The sketch's own paths size the types to the new links first, so a list that already
+        // fits them is left alone. A list shorter than the old links was saved by paths that
+        // appended links without types (projections); a longer one is a list saved before
+        // ops#140, left to the repair on open.
+        auto types = ExternalTypes.getValues();
+        if (!(doc && doc->isPerformingTransaction()) && types.size() != externalGeoRef.size()
+            && types.size() <= oldRefs.size() && externalGeoRef.size() < oldRefs.size()) {
+            types.resize(oldRefs.size(), static_cast<long>(ExtType::Projection));
             std::vector<long> kept;
             std::size_t next = 0;
             for (std::size_t i = 0; i < oldRefs.size() && next < externalGeoRef.size(); ++i) {
@@ -1409,6 +1414,10 @@ void SketchObject::onExternalGeometryChanged()
             }
             if (next == externalGeoRef.size()) {
                 ExternalTypes.setValues(kept);
+            }
+            else {
+                FC_WARN("External links of " << getFullName()
+                        << " changed beyond a removal; their types are left as they are");
             }
         }
         signalElementsChanged();
