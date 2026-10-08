@@ -25,6 +25,11 @@
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <Standard_Failure.hxx>
 
@@ -38,6 +43,7 @@
 #include <Base/Converter.h>
 #include <Base/Tools.h>
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Document.h>
@@ -74,9 +80,91 @@ namespace sp = std::placeholders;
 
 namespace
 {
-// A hole's position: a circle, an arc or a point of a sketch or of a solid in the hole's body, or
-// a sketch whole (Hole::execute makes a hole at each circle's centre and each point; what the
-// command takes from a preselection) (ops#150 W9)
+// The element a picked or stored name gives in the object's whole shape (null if none)
+TopoDS_Shape elementOf(const Part::TopoShape& whole, const std::string& sub)
+{
+    const char* element = Data::findElementName(sub.c_str());
+    const std::string name = Data::oldElementName(element ? element : sub.c_str());
+    try {
+        return whole.getSubShape(name.c_str(), /*silent =*/true);
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+bool hasCircle(const TopoDS_Shape& shape)
+{
+    for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+        if (BRepAdaptor_Curve(TopoDS::Edge(it.Current())).GetType() == GeomAbs_Circle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A vertex that no edge has: where Hole::findHoles makes a hole on a point
+bool hasFreeVertex(const TopoDS_Shape& shape)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape ancestors;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, ancestors);
+    for (int i = 1; i <= ancestors.Extent(); ++i) {
+        if (ancestors.FindFromIndex(i).IsEmpty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool onAnEdge(const TopoDS_Shape& whole, const TopoDS_Shape& vertex)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape ancestors;
+    TopExp::MapShapesAndAncestors(whole, TopAbs_VERTEX, TopAbs_EDGE, ancestors);
+    const int index = ancestors.FindIndex(vertex);
+    return index > 0 && !ancestors.FindFromIndex(index).IsEmpty();
+}
+
+bool bounds(const TopoDS_Shape& face, const TopoDS_Shape& edge)
+{
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(face, TopAbs_EDGE, edges);
+    return edges.Contains(edge);
+}
+
+// A face and one of its own edges in the list: Hole::findHoles takes the circle from both, and
+// the hole is cut twice
+bool mixesFaceAndEdge(const App::DocumentObjectT& holeT,
+                      App::DocumentObject* obj,
+                      const Part::TopoShape& whole,
+                      const TopoDS_Shape& picked)
+{
+    auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
+    if (!hole || hole->Profile.getValue() != obj) {
+        return false;  // another object starts the list on it
+    }
+    const bool pickedFace = picked.ShapeType() == TopAbs_FACE;
+    for (const std::string& sub : hole->Profile.getSubValues(false)) {
+        const TopoDS_Shape listed = elementOf(whole, sub);
+        if (listed.IsNull()) {
+            continue;
+        }
+        if (pickedFace && listed.ShapeType() == TopAbs_EDGE && bounds(picked, listed)) {
+            return true;
+        }
+        if (!pickedFace && listed.ShapeType() == TopAbs_FACE && bounds(listed, picked)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A hole's position, what Hole::execute makes a hole from and the command takes from a
+// preselection (ops#150 W9; PR 169 review M3): a circle, an arc or a point of a sketch or of a
+// solid in the hole's body; a cylindrical face, or a flat one with a circle among its edges; a
+// sketch whole, or a whole object without a solid that has circles or points (a binder of a
+// sketch)
 bool acceptPosition(const App::DocumentObjectT& holeT,
                     App::DocumentObject* obj,
                     const char* sub,
@@ -94,37 +182,78 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
         why = QT_TR_NOOP("Pick the positions in the hole's body.");
         return false;
     }
-    if (Base::Tools::isNullOrEmpty(sub)) {
-        if (obj->isDerivedFrom<Part::Part2DObject>()) {
-            return true;
-        }
-        why = QT_TR_NOOP("A solid whole has no positions: pick its circular edges or its "
-                         "vertices.");
-        return false;
-    }
-    const std::string type = ReferenceActions::subElementType(sub);
-    if (type == "Vertex") {
+    const bool sketch = obj->isDerivedFrom<Part::Part2DObject>();
+    if (Base::Tools::isNullOrEmpty(sub) && sketch) {
         return true;
     }
-    if (type == "Edge") {
-        try {
-            const Part::TopoShape shape = Part::Feature::getTopoShape(
-                obj,
-                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                    | Part::ShapeOption::Transform,
-                sub
-            );
-            if (!shape.isNull() && shape.getShape().ShapeType() == TopAbs_EDGE) {
-                BRepAdaptor_Curve curve(TopoDS::Edge(shape.getShape()));
-                if (curve.GetType() == GeomAbs_Circle) {
-                    return true;
-                }
+    Part::TopoShape whole;
+    try {
+        whole = Part::Feature::getTopoShape(
+            obj,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    if (whole.isNull()) {
+        why = notAPosition;
+        return false;
+    }
+    if (Base::Tools::isNullOrEmpty(sub)) {
+        if (whole.hasSubShape(TopAbs_SOLID)) {
+            why = QT_TR_NOOP("A solid whole has no positions: pick its circular edges, its faces "
+                             "with a circle, or its vertices.");
+            return false;
+        }
+        if (hasCircle(whole.getShape()) || hasFreeVertex(whole.getShape())) {
+            return true;
+        }
+        why = QT_TR_NOOP("This object has no circle, arc or point to make a hole at.");
+        return false;
+    }
+    const TopoDS_Shape element = elementOf(whole, sub);
+    if (element.IsNull()) {
+        why = notAPosition;
+        return false;
+    }
+    constexpr const char* twice =
+        QT_TR_NOOP("A face and one of its own edges would cut the hole twice: pick either.");
+    switch (element.ShapeType()) {
+        case TopAbs_VERTEX:
+            // The sketch whole leaves these out too (Hole::findHoles): a misclick on a circle's
+            // seam or a line's end would drill on the rim
+            if (sketch && onAnEdge(whole.getShape(), element)) {
+                why = QT_TR_NOOP("This point lies on a curve of the sketch and makes no hole of "
+                                 "its own: pick the circle or the arc, or a point of its own.");
+                return false;
             }
+            return true;
+        case TopAbs_EDGE:
+            if (BRepAdaptor_Curve(TopoDS::Edge(element)).GetType() != GeomAbs_Circle) {
+                break;
+            }
+            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
+                why = twice;
+                return false;
+            }
+            return true;
+        case TopAbs_FACE: {
+            const GeomAbs_SurfaceType surface = BRepAdaptor_Surface(TopoDS::Face(element)).GetType();
+            if (surface != GeomAbs_Cylinder && (surface != GeomAbs_Plane || !hasCircle(element))) {
+                why = QT_TR_NOOP("A face takes holes when it is cylindrical, or flat with a circle "
+                                 "among its edges.");
+                return false;
+            }
+            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
+                why = twice;
+                return false;
+            }
+            return true;
         }
-        catch (const Base::Exception&) {
-        }
-        catch (const Standard_Failure&) {
-        }
+        default:
+            break;
     }
     why = notAPosition;
     return false;
@@ -529,6 +658,8 @@ void TaskHoleParameters::baseProfileTypeChanged(int index)
 {
     if (auto hole = getObject<PartDesign::Hole>()) {
         hole->BaseProfileType.setValue(PartDesign::Hole::baseProfileOption_idxToBitmask(index));
+        // The positions' picks widen from the user's choice (PR 169 M2)
+        savedBaseProfileType = hole->BaseProfileType.getValue();
         recomputeFeature();
 
         setGizmoPositions();
@@ -1169,22 +1300,25 @@ void TaskHoleParameters::createFields()
     };
 
     // The positions (Q10 (a)): the sketch whole, or chosen circles, arcs and points of it, or
-    // circular edges and vertices of a solid of the body; a pick of another object starts the
-    // list on it
+    // circular edges, faces with circles and vertices of a solid of the body (acceptPosition); a
+    // pick of another object starts the list on it
     ReferenceField::Options positions;
     positions.kind = ReferenceField::Kind::Profile;
     positions.use = ReferenceField::ProfileUse::Positions;
     positions.target = baseSolid;
     positions.noDependents = true;
     positions.label = tr("Positions");
-    positions.kinds = tr("Circles, arcs and points, or a sketch whole");
+    positions.kinds = tr("Circles, arcs, points, faces with circles, or a sketch whole");
     positions.accept = [holeT](App::DocumentObject* obj, const char* sub, std::string& why) {
         return acceptPosition(holeT, obj, sub, why);
     };
+    if (auto hole = getObject<PartDesign::Hole>()) {
+        savedBaseProfileType = hole->BaseProfileType.getValue();
+    }
     auto positionsSelf = std::make_shared<QPointer<ReferenceField>>();
     auto writePositions = [this, positionsSelf](App::DocumentObject* obj,
                                                 const std::vector<std::string>& subs) {
-        widenBaseProfileType(subs);
+        fitBaseProfileType(obj, subs);
         if (*positionsSelf) {
             (*positionsSelf)->assign(obj, subs);
         }
@@ -1194,6 +1328,18 @@ void TaskHoleParameters::createFields()
     positionsField = new ReferenceField(getObject(), "Profile", positions, writePositions, proxy);
     *positionsSelf = positionsField;
     positionsField->takePlaceOf(ui->positionsFieldPlaceholder);
+    // The sketch shows too, hidden as the hole's creation leaves it: its circles and points are
+    // picked in the 3D view (PR 169 H1)
+    showProfileWhileArmed(positionsField);
+    connect(positionsField, &ReferenceField::picked, this, [this]() {
+        // The entry menu's actions (Use, Re-pick) write the subs past the writer (PR 169 M1)
+        auto hole = getObject<PartDesign::Hole>();
+        if (hole
+            && fitBaseProfileType(hole->Profile.getValue(), hole->Profile.getSubValues(false))) {
+            recomputeFeature();
+        }
+        setGizmoPositions();
+    });
 
     // The start reference, shown for Start "Reference" only: a face or a plane, as Pad's
     ReferenceField::Options start = faceFieldOptions(tr("Start reference"), baseSolid, false);
@@ -1209,6 +1355,7 @@ void TaskHoleParameters::createFields()
     startField = new ReferenceField(getObject(), "StartReference", start, writeStart, proxy);
     *startSelf = startField;
     startField->takePlaceOf(ui->startReferenceFieldPlaceholder);
+    connect(startField, &ReferenceField::picked, this, [this]() { setGizmoPositions(); });
 }
 
 std::vector<ReferenceField*> TaskHoleParameters::referenceFields() const
@@ -1216,29 +1363,61 @@ std::vector<ReferenceField*> TaskHoleParameters::referenceFields() const
     return {positionsField, startField};
 }
 
-void TaskHoleParameters::widenBaseProfileType(const std::vector<std::string>& subs)
+bool TaskHoleParameters::fitBaseProfileType(App::DocumentObject* obj,
+                                            const std::vector<std::string>& subs)
 {
     using Options = PartDesign::Hole::BaseProfileTypeOptions;
     auto hole = getObject<PartDesign::Hole>();
     if (!hole) {
-        return;
+        return false;
     }
-    const long type = hole->BaseProfileType.getValue();
-    bool point = false;
-    bool curve = false;
-    for (const std::string& sub : subs) {
-        const std::string element = ReferenceActions::subElementType(sub);
-        point = point || element == "Vertex";
-        curve = curve || element == "Edge";
+    // What the picked elements need: a point, a closed circle, an arc (the bits Hole::findHoles
+    // tests)
+    long needed = 0;
+    if (obj && !subs.empty()) {
+        Part::TopoShape whole;
+        try {
+            whole = Part::Feature::getTopoShape(
+                obj,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+        for (const std::string& sub : subs) {
+            const TopoDS_Shape element = whole.isNull() ? TopoDS_Shape() : elementOf(whole, sub);
+            if (element.IsNull()) {
+                continue;
+            }
+            if (element.ShapeType() == TopAbs_VERTEX) {
+                needed |= Options::OnPoints;
+                continue;
+            }
+            for (TopExp_Explorer it(element, TopAbs_EDGE); it.More(); it.Next()) {
+                BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
+                if (curve.GetType() == GeomAbs_Circle) {
+                    needed |= curve.IsClosed() ? Options::OnCircles : Options::OnArcs;
+                }
+            }
+        }
     }
-    const bool widen = (point && !(type & Options::OnPoints))
-        || (curve && !(type & (Options::OnCircles | Options::OnArcs)));
-    if (!widen) {
-        return;
+    // The type the panel opened with, or the combo's last choice, plus what the list needs: the
+    // field's undo or a Delete narrows it back (PR 169 M2). A curve under points only widens to
+    // circles and arcs, a value the combo lists
+    const long curves = Options::OnCircles | Options::OnArcs;
+    long wanted = savedBaseProfileType | needed;
+    if ((needed & curves) && !(savedBaseProfileType & curves)) {
+        wanted |= Options::OnCirclesArcs;
+    }
+    if (wanted == hole->BaseProfileType.getValue()) {
+        return false;
     }
     // A command, before the positions' own write: one undo step with the pick; the combo
     // follows through changedObject
-    FCMD_OBJ_CMD(hole, "BaseProfileType = " << (type | Options::OnPointsCirclesArcs));
+    FCMD_OBJ_CMD(hole, "BaseProfileType = " << wanted);
+    return true;
 }
 
 bool TaskHoleParameters::getThreaded() const

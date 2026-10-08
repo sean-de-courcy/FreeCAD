@@ -159,10 +159,10 @@ private:
     void updateStartUI();
     /// The positions and the start reference as fields (ops#150 W9)
     void createFields();
-    /// A pick of a point under circles and arcs, or of a circle or an arc under points, would
-    /// make no hole: the base profile type widens to points, circles and arcs, in the pick's
-    /// command (notes 11.6)
-    void widenBaseProfileType(const std::vector<std::string>& subs);
+    /// The base profile type the positions need: the saved type plus a point's, a circle's or
+    /// an arc's bit for each picked element (else the pick makes no hole), written in the pick's
+    /// command when it differs; true if written (notes 11.6, 10.9)
+    bool fitBaseProfileType(App::DocumentObject* obj, const std::vector<std::string>& subs);
 
 private:
     using Connection = fastsignals::scoped_connection;
@@ -177,6 +177,8 @@ private:
     Gui::LinearGizmo* startOffsetGizmo = nullptr;
     ReferenceField* positionsField = nullptr;
     ReferenceField* startField = nullptr;
+    /// BaseProfileType when the panel opened, or the combo's last choice (PR 169 M2)
+    long savedBaseProfileType = 0;
     void setupGizmos(ViewProviderHole* vp);
     void setGizmoPositions();
 };

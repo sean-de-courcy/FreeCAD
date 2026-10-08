@@ -113,8 +113,6 @@ public:
         /// write. The gate is Options::accept and noDependents. Written through a SectionsWriter.
         Sections,
     };
-    /// Turns a pick into what is written: the object and its subs (a copy of another body's
-    /// element, a datum's coordinate system). False: nothing is written.
     /// What a Kind::Profile field's object and elements are for.
     enum class ProfileUse
     {
@@ -122,9 +120,11 @@ public:
         Profile,
         /// A path to sweep along: edges, or a sketch or a wire whole.
         Path,
-        /// A hole's positions: circles, arcs and points, or a sketch whole.
+        /// A hole's positions: circles, arcs and points, faces with circles, or a sketch whole.
         Positions,
     };
+    /// Turns a pick into what is written: the object and its subs (a copy of another body's
+    /// element, a datum's coordinate system). False: nothing is written.
     using Resolver = std::function<
         bool(const Gui::SelectionChanges& msg, App::DocumentObject*& obj, std::vector<std::string>& subs)>;
     struct Options
