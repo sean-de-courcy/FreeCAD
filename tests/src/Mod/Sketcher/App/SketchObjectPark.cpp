@@ -8,6 +8,8 @@
 
 #include <filesystem>
 
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Tool.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -637,4 +639,47 @@ TEST_F(SketchObjectParkTest, markMissingFlagsTheParkedGeometry)
     // A geometry that has a reference isn't touched
     EXPECT_EQ(sketch->markExternalGeometryMissing(ids, "Other.Edge1"), 0);
     EXPECT_EQ(refOf(projection()), ref);
+}
+
+// A link appended to ExternalGeometry outside the sketch while an open's type repair is pending
+// (the list ends in the mark) is a projection, before the mark: read by index, the mark would be
+// its type, and it would build nothing (ops#237)
+TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
+{
+    auto* sketch = getObject();
+    // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
+    auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
+    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    doc->recompute();
+    ASSERT_GE(sketch->addExternal(box, edge.c_str(), false, false), 0);
+    ASSERT_GE(sketch->addExternal(ball, "Face1", false, true), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 1}));
+    // the ball loses its face: its saved circle can't tell its type
+    ball->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
+    doc->recompute();
+    // a list saved before ops#140: the ball reads a projection by index
+    sketch->ExternalTypes.setValues({0, 0, 1});
+
+    const std::string name = doc->getName();
+    const std::string sketchName = sketch->getNameInDocument();
+    auto path = std::filesystem::temp_directory_path() / (name + "Pending.FCStd");
+    doc->saveAs(Base::FileInfo::pathToString(path).c_str());
+    App::GetApplication().closeDocument(name.c_str());
+    doc = App::GetApplication().openDocument(Base::FileInfo::pathToString(path).c_str());
+    ASSERT_NE(doc, nullptr);
+    sketch = static_cast<Sketcher::SketchObject*>(doc->getObject(sketchName.c_str()));
+    ASSERT_NE(sketch, nullptr);
+    box = doc->getObject("Box");
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+
+    auto objs = sketch->ExternalGeometry.getValues();
+    auto subs = sketch->ExternalGeometry.getSubValues();
+    objs.push_back(box);
+    subs.push_back(otherEdge);
+    sketch->ExternalGeometry.setValues(objs, subs);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, 0, -1}));
+    doc->recompute();
+    EXPECT_EQ(sketch->externalGeometryIds(2).size(), 1U);
+    std::filesystem::remove(path);
 }

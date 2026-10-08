@@ -1430,6 +1430,18 @@ void SketchObject::onExternalGeometryChanged()
                         << " changed beyond a removal; their types are left as they are");
             }
         }
+        else if (!externalLinksWithTypes && !(doc && doc->isPerformingTransaction())
+                 && externalGeoRef.size() > oldRefs.size() && externalTypeRepairPending
+                 && types.size() > oldRefs.size()
+                 && std::equal(oldRefs.begin(), oldRefs.end(), externalGeoRef.begin())) {
+            // links appended outside the sketch while entries wait for the repair: the new links
+            // are projections, before those entries, which would otherwise be read as the new
+            // links' types (the mark builds nothing) (ops#237)
+            types.insert(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
+                         externalGeoRef.size() - oldRefs.size(),
+                         static_cast<long>(ExtType::Projection));
+            ExternalTypes.setValues(types);
+        }
         signalElementsChanged();
     }
 }

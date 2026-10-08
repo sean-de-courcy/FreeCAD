@@ -2507,9 +2507,14 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
     }
     if (auto* ellipse = freecad_cast<const Part::GeomEllipse*>(geo)) {
         auto* other = static_cast<const Part::GeomEllipse*>(saved);
+        // and how far the end of the major axis turns: the axis has no sense, so at most a
+        // quarter turn (ops#237)
+        double angle = ellipse->getMajorAxisDir().GetAngle(other->getMajorAxisDir());
+        angle = std::min(angle, std::numbers::pi - angle);
         return Base::Distance(ellipse->getCenter(), other->getCenter())
             + std::abs(ellipse->getMajorRadius() - other->getMajorRadius())
-            + std::abs(ellipse->getMinorRadius() - other->getMinorRadius());
+            + std::abs(ellipse->getMinorRadius() - other->getMinorRadius())
+            + std::max(ellipse->getMajorRadius(), other->getMajorRadius()) * angle;
     }
     auto* curve = freecad_cast<const Part::GeomCurve*>(geo);
     auto* savedCurve = freecad_cast<const Part::GeomCurve*>(saved);
