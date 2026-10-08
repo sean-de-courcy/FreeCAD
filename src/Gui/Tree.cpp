@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <optional>
 #include <unordered_set>
 
@@ -1140,6 +1141,21 @@ void TreeWidget::checkTopParent(App::DocumentObject*& obj, std::string& subname)
 
 void TreeWidget::resetItemSearch()
 {
+    for (auto obj : searchProblems) {
+        auto it = ObjectTable.find(obj);
+        if (it == ObjectTable.end()) {
+            continue;
+        }
+        for (auto& data : it->second) {
+            if (!data) {
+                continue;
+            }
+            for (auto item : data->items) {
+                static_cast<DocumentObjectItem*>(item)->restoreBackground();
+            }
+        }
+    }
+    searchProblems.clear();
     if (!searchObject) {
         return;
     }
@@ -1202,6 +1218,10 @@ void TreeWidget::itemSearch(const QString& text, bool select)
             resetItemSearch();
             return;
         }
+    }
+
+    if (problemSearch(docItem, text, select)) {
+        return;
     }
 
     auto doc = docItem->document()->getDocument();
@@ -1306,6 +1326,217 @@ void TreeWidget::itemSearch(const QString& text, bool select)
     catch (...) {
         FC_TRACE("item " << txt << " search exception in " << doc->getName());
     }
+}
+
+struct TreeWidget::ProblemItem
+{
+    DocumentObjectItem* item;
+    App::DocumentObject* top;
+    std::string subname;
+    std::vector<int> path;  // row indices from the tree's top: the tree order
+    bool error;
+};
+
+namespace
+{
+std::vector<int> treePath(const QTreeWidgetItem* item)
+{
+    std::vector<int> path;
+    for (; item; item = item->parent()) {
+        auto parent = item->parent();
+        path.push_back(
+            parent ? parent->indexOfChild(const_cast<QTreeWidgetItem*>(item))
+                   : item->treeWidget()->indexOfTopLevelItem(const_cast<QTreeWidgetItem*>(item))
+        );
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+}  // namespace
+
+void TreeWidget::flushStatusUpdate()
+{
+    // Items for objects recomputed a moment ago, as checkTopParent does (ops#149 review L5)
+    if (statusTimer->isActive()) {
+        bool locked = blockSelection(true);
+        _updateStatus(false);
+        blockSelection(locked);
+    }
+}
+
+std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
+    DocumentItem* docItem,
+    bool errors,
+    bool warnings
+)
+{
+    std::vector<ProblemItem> problems;
+    for (auto obj : docItem->document()->getDocument()->getObjects()) {
+        bool error = obj->isError();
+        if (!(error ? errors : warnings && obj->isWarning())) {
+            continue;
+        }
+        std::string subname;
+        auto top = docItem->getTopParent(obj, subname);
+        if (!top) {
+            continue;
+        }
+        // Skip a problem the user hid from the tree, or one under a hidden parent: finding its
+        // item would un-hide every row on the way (ops#149 review M1)
+        if (!docItem->showHidden()) {
+            auto chain = top->getSubObjectList(subname.c_str());
+            if (std::ranges::any_of(chain, [](App::DocumentObject* o) {
+                    auto vp = freecad_cast<ViewProviderDocumentObject*>(
+                        Application::Instance->getViewProvider(o)
+                    );
+                    return vp && !vp->showInTree();
+                })) {
+                continue;
+            }
+        }
+        // Populates collapsed parents, as a search does
+        auto item = docItem->findItemByObject(true, top, subname.c_str());
+        if (!item) {
+            continue;  // not shown in the tree
+        }
+        problems.push_back({item, top, subname, treePath(item), error});
+    }
+    std::ranges::sort(problems, {}, &ProblemItem::path);
+    return problems;
+}
+
+bool TreeWidget::problemSearch(DocumentItem* docItem, const QString& text, bool select)
+{
+    // ":e", ":err" ... ":errors" and the like: any start of a token after the colon
+    QString word = text.trimmed().toLower();
+    if (!word.startsWith(QLatin1Char(':')) || word.size() < 2) {
+        return false;
+    }
+    word = word.mid(1);
+    bool errors = false;
+    bool warnings = false;
+    if (QStringLiteral("errors").startsWith(word)) {
+        errors = true;
+    }
+    else if (QStringLiteral("warnings").startsWith(word)) {
+        warnings = true;
+    }
+    else if (QStringLiteral("problems").startsWith(word)) {
+        errors = warnings = true;
+    }
+    else {
+        return false;
+    }
+
+    flushStatusUpdate();
+    auto problems = problemItems(docItem, errors, warnings);
+    if (problems.empty()) {
+        getMainWindow()->showMessage(
+            errors && warnings ? tr("No errors or warnings")
+                : errors       ? tr("No errors")
+                               : tr("No warnings")
+        );
+        return true;
+    }
+    scrollToItem(problems.front().item);
+    if (select) {
+        // Enter selects them all
+        Gui::Selection().selStackPush();
+        Gui::Selection().clearSelection();
+        for (const auto& problem : problems) {
+            Gui::Selection().addSelection(
+                problem.top->getDocument()->getName(),
+                problem.top->getNameInDocument(),
+                problem.subname.c_str()
+            );
+        }
+        Gui::Selection().selStackPush();
+    }
+    else {
+        // Typing highlights them, as a search highlights its object
+        for (const auto& problem : problems) {
+            searchProblems.push_back(problem.item->object()->getObject());
+            problem.item->setBackground(0, QColor(255, 255, 0, 100));
+        }
+    }
+    return true;
+}
+
+bool TreeWidget::selectNextProblem(bool forward)
+{
+    auto tree = instance();
+    if (!tree) {
+        return false;
+    }
+    tree->flushStatusUpdate();
+
+    // From the current item when it is selected, else the first selected one (ops#149 review
+    // L2); with nothing selected, before the top (or after the end)
+    QTreeWidgetItem* start = nullptr;
+    auto selected = tree->selectedItems();
+    if (!selected.isEmpty()) {
+        start = tree->currentItem();
+        if (!start || !start->isSelected()) {
+            start = selected.front();
+        }
+    }
+
+    // The starting item's document, else the active one (L4)
+    DocumentItem* docItem = nullptr;
+    if (start && start->type() == ObjectType) {
+        docItem = static_cast<DocumentObjectItem*>(start)->getOwnerDocument();
+    }
+    else if (start && start->type() == DocumentType) {
+        docItem = static_cast<DocumentItem*>(start);
+    }
+    else if (auto guiDoc = Application::Instance->activeDocument()) {
+        docItem = tree->getDocumentItem(guiDoc);
+    }
+    if (!docItem) {
+        return false;
+    }
+    auto problems = tree->problemItems(docItem, true, true);
+    if (problems.empty()) {
+        getMainWindow()->showMessage(tr("No errors or warnings"));
+        return false;
+    }
+
+    const ProblemItem* next = nullptr;
+    if (!start) {
+        next = forward ? &problems.front() : &problems.back();
+    }
+    else {
+        auto current = treePath(start);
+        if (forward) {
+            auto it = std::ranges::upper_bound(problems, current, {}, &ProblemItem::path);
+            next = it != problems.end() ? &*it : &problems.front();
+        }
+        else {
+            auto it = std::ranges::lower_bound(problems, current, {}, &ProblemItem::path);
+            next = it != problems.begin() ? &*std::prev(it) : &problems.back();
+        }
+    }
+
+    Gui::Selection().selStackPush();
+    Gui::Selection().clearSelection();
+    Gui::Selection().addSelection(
+        next->top->getDocument()->getName(),
+        next->top->getNameInDocument(),
+        next->subname.c_str()
+    );
+    Gui::Selection().selStackPush();
+    tree->scrollToItem(next->item);
+
+    App::DocumentObject* obj = next->item->object()->getObject();
+    QString info = QApplication::translate(
+        std::string {obj->getTypeId().getName()}.c_str(),
+        obj->getStatusString()
+    );
+    getMainWindow()->showStatus(
+        next->error ? MainWindow::Err : MainWindow::Wrn,
+        tr("%1: %2").arg(QString::fromUtf8(obj->Label.getValue()), info)
+    );
+    return true;
 }
 
 Gui::Document* TreeWidget::selectedDocument()

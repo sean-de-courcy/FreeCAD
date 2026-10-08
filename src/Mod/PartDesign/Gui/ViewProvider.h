@@ -116,7 +116,8 @@ protected:
     void attachPreview() override;
     void updatePreview() override;
 
-    virtual void makeChildrenVisible();
+    /// Shows the claimed children, except those in keepHidden (ops#149)
+    virtual void makeChildrenVisible(const std::vector<App::DocumentObject*>& keepHidden);
     bool onDelete(const std::vector<std::string>&) override;
 
     /**

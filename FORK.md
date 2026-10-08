@@ -204,7 +204,8 @@ names it.
 | `feat/194-keymap-a` | feat | ops#194 | - | `integration` `9dd9ca6159` (fork PR 160's head `531d325e43`) | `d9f9627dd4` (fork PR 170), 2026-10-07 | never (fork feature); refit when upstream changes `ShortcutManager`, `CommandManager::addCommand`, `Command::initAction` or the mapped commands' names |
 | `fix/199-sketcher-autoconstraints` | fix | ops#199, ops#172, ops#175 | upstream issues 21334, 30707 | `integration` `5e76a4a186` | `4c741b93b4` (fork PR 176), 2026-10-07 | a new base's `filterRedundantAutoConstraints` keeps the auto constraints that add no redundancy, and `EditDatumDialog::accepted` re-reads the constraint |
 | `fix/203-inplace-formula` | fix | ops#203 | none (fork code, ops#145) | `fix/199-sketcher-autoconstraints` `87b6c11675` (stacked on fork PR 176) | `392692de73` (fork PR 179), 2026-10-08 | never (fork code): the in-place field's `=` runs the formula editor and opens the field again |
-| `fix/151-error-text` | fix | ops#151 | upstream issues 24567, 21334, 30707 | `integration` `9c31a0250c` | (fork PR 173) | never (fork feature); the message changes go when a new base rewords them |
+| `fix/151-error-text` | fix | ops#151 | upstream issues 24567, 21334, 30707 | `integration` `9c31a0250c` | `e66ef51e79` (fork PR 173), 2026-10-08 | never (fork feature); the message changes go when a new base rewords them |
+| `feat/149-next-problem` | feat | ops#149 | - | `fix/149-tree-edit-highlight` `db45d6e97c` (stacked on fork PR 171) | (fork PR 174) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
