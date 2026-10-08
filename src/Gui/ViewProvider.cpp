@@ -95,6 +95,60 @@ void coinRemoveAllChildren(SoGroup* group)
 
 }  // namespace Gui
 
+namespace
+{
+
+// FreeCAD-CH (ops#146, ops#216, ops#220): the viewer that saw the last Esc press; an Esc release
+// counts in a viewer only after a press there (ViewProvider::eventCallback).
+const View3DInventorViewer* escapePressedIn = nullptr;
+
+// ops#220: an Esc press that goes elsewhere (a popup, a dialog, a task panel field) clears the
+// record, so a press seen in the view whose release went elsewhere (the focus moved) doesn't
+// make the release of a later popup's Esc count in the view.
+class EscapePressWatcher: public QObject
+{
+public:
+    using QObject::QObject;
+
+    static void install()
+    {
+        static EscapePressWatcher* watcher = nullptr;
+        if (!watcher && qApp) {
+            watcher = new EscapePressWatcher(qApp);
+            qApp->installEventFilter(watcher);
+        }
+    }
+
+    bool eventFilter(QObject* obj, QEvent* event) override
+    {
+        if (event->type() == QEvent::KeyPress
+            && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape  // NOLINT
+            && !toAViewer()) {
+            escapePressedIn = nullptr;
+        }
+        return QObject::eventFilter(obj, event);
+    }
+
+private:
+    // Whether a key pressed now goes to a 3D viewer: no popup takes it and the focus is there.
+    // Decided by the focus, not the receiver, so the press's propagation to the view's parents
+    // (the main window holds every widget) doesn't count as a press elsewhere.
+    static bool toAViewer()
+    {
+        if (QApplication::activePopupWidget()) {
+            return false;
+        }
+        for (QWidget* w = QApplication::focusWidget(); w; w = w->parentWidget()) {
+            if (qobject_cast<View3DInventorViewer*>(w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+}  // namespace
+
 //**************************************************************************
 //**************************************************************************
 // ViewProvider
@@ -238,10 +292,12 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                     // view, which got the release and closed the panel too. Kept before the
                     // other paths, and every release clears it, so a press that one of them
                     // takes leaves nothing behind. A press here whose release goes elsewhere
-                    // (the focus moved) leaves it set until the next release here.
-                    static const View3DInventorViewer* escapePressedIn = nullptr;
+                    // (the focus moved) leaves it set until the next release here or the next
+                    // Esc press elsewhere (EscapePressWatcher, ops#220). Auto-repeated Esc
+                    // events never get here (ViewerEventFilter, ops#220).
                     bool pressedHere = true;
                     if (press) {
+                        EscapePressWatcher::install();
                         escapePressedIn = viewer;
                     }
                     else {

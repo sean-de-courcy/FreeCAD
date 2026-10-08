@@ -226,7 +226,8 @@ names it.
 | `feat/194-keymap-b2` | feat | ops#194 | - | `integration` `dd587e77db` | `101952b663` (fork PR 195), 2026-10-08 | never (fork feature); refit when upstream changes `View3DInventorViewer::processSoEvent` or the arrow handling in `SoQTQuarterAdaptor` |
 | `fix/214-originals-pick-history` | fix | ops#214 | - | `integration` `a2e660570b` | `0ad9fc0b74` (fork PR 196), 2026-10-08 | never (fork feature: the Originals field is the fork's) |
 | `fix/193-revolution-update-view-off` | fix | ops#193 | - | `integration` `f66704e59b` | `d5e044c6a4` (fork PR 199), 2026-10-08 | when upstream's `updateUI` no longer returns on `blockUpdate` (the early return is upstream's, in `base`) |
-| `fix/221-axis-combo-test-isolation` | fix | ops#221 | none (fork tests) | `integration` `d5e044c6a4` | (fork PR 200) | never (fork tests) |
+| `fix/221-axis-combo-test-isolation` | fix | ops#221 | none (fork tests) | `integration` `d5e044c6a4` | `6aac1f53ee` (fork PR 200), 2026-10-08 | never (fork tests) |
+| `fix/220-esc-autorepeat` | fix | ops#220 | - | `integration` `d5e044c6a4` | (fork PR 201) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
