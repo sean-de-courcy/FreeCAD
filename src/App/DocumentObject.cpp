@@ -1082,13 +1082,25 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // Phases 2, 3, and 4
-    arrangeMoveProperty(prop, newProp, targetObj);
+    // FreeCAD-CH (ops#238): a handler of the move that throws leaves the property on one object
+    // (it was left on both): the move is recorded already, so it is completed, then the exception
+    // is passed on
+    std::exception_ptr error;
+    try {
+        arrangeMoveProperty(prop, newProp, targetObj);
+    }
+    catch (...) {
+        error = std::current_exception();
+    }
 
     // Phase 5 remove the property from the source object
     if (!dynamicProps.removeDynamicProperty(propertyName)) {
         FC_THROWM(Base::RuntimeError,
                   "Failed to remove property " << propertyName << " from container "
                                                 << prop->getContainer()->getFullName());
+    }
+    if (error) {
+        std::rethrow_exception(error);
     }
 
     return newProp;
