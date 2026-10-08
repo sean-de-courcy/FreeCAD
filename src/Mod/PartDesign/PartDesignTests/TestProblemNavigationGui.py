@@ -297,7 +297,7 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertEqual(self.search(":e"), [])
         self.assertTrue({"BadPad", "BadSketch"}.isdisjoint(visibleRows()))
 
-    def sharedSketchModel(self):
+    def sharedSketchModel(self, expand=True):
         """A failing sketch used as the profile of two Pads: it has a row under each, and none
         of its own under the Body, once both Pads are expanded (the tree makes a Pad's children
         when it is first expanded). The Pads fail with it."""
@@ -311,13 +311,14 @@ class TestProblemNavigationGui(unittest.TestCase):
         pump()
         for obj in (sketch, first, second):
             self.assertIn("Invalid", obj.State)
-        for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
-            try:
-                if tree.metaObject().className() == "Gui::TreeWidget":
-                    tree.expandAll()
-            except RuntimeError:
-                continue
-        pump()
+        if expand:
+            for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+                try:
+                    if tree.metaObject().className() == "Gui::TreeWidget":
+                        tree.expandAll()
+                except RuntimeError:
+                    continue
+            pump()
         return first, second
 
     def checkSharedSketch(self, hidden, shown):
@@ -346,6 +347,36 @@ class TestProblemNavigationGui(unittest.TestCase):
         first.ViewObject.ShowInTree = False
         pump()
         self.checkSharedSketch(first, second)
+
+    def checkNextAfterSharedSketch(self, hidden, shown):
+        """A problem after the shared sketch is reached: selecting the sketch marks its row under
+        the hidden Pad too, and the next F8 must not start from that row (ops#209 review)."""
+        self.addBadSketch("Body003", "LaterSketch", "LaterPad", 60)
+        hidden.ViewObject.ShowInTree = False
+        pump()
+        self.assertEqual(self.step(), [shown.Name])
+        self.assertEqual(self.step(), ["BadSketch"])
+        self.assertEqual(self.step(), ["LaterPad"])
+        self.assertEqual(self.step(False), ["BadSketch"])
+        self.assertEqual(self.step(False), [shown.Name])
+
+    def testNextPastTheSharedSketchWithTheSecondPadHidden(self):
+        first, second = self.sharedSketchModel()
+        self.checkNextAfterSharedSketch(second, first)
+
+    def testNextPastTheSharedSketchWithTheFirstPadHidden(self):
+        first, second = self.sharedSketchModel()
+        self.checkNextAfterSharedSketch(first, second)
+
+    def testSharedSketchUnderAPadNeverExpanded(self):
+        """The first Pad hidden, the second never expanded: its sketch row isn't made yet, and
+        is made when the sketch is looked for (ops#209 review)."""
+        first, second = self.sharedSketchModel(expand=False)
+        first.ViewObject.ShowInTree = False
+        pump()
+        self.assertEqual(self.step(), [second.Name])
+        self.assertEqual(self.step(), ["BadSketch"])
+        self.assertEqual(self.search(":e"), sorted([second.Name, "BadSketch"]))
 
     def testSharedSketchUnderTwoHiddenPadsIsSkipped(self):
         """Both rows have a hidden row above: no problem is left."""
