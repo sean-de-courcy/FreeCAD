@@ -381,7 +381,9 @@ class TestProblemNavigationGui(unittest.TestCase):
     def checkNextAfterPickedSharedSketch(self, hidden, shown):
         """The shared sketch selected outside the tree (as a pick in the 3D view does): the tree's
         current item isn't one of its rows, and the search starts from a selected row that is
-        shown, not the one under the hidden Pad (ops#213)."""
+        shown, not the one under the hidden Pad (ops#213). The two tests below guard as a pair:
+        which selected row came first used to depend on heap order, so either one alone may pass
+        on the old code, but not both (PR 188 review L3)."""
         self.addBadSketch("Body003", "LaterSketch", "LaterPad", 60)
         hidden.ViewObject.ShowInTree = False
         pump()

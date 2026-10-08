@@ -1421,17 +1421,21 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
                 if (data == docItem->ObjectMap.end()) {
                     continue;
                 }
-                auto children = data->second->viewObject->claimChildren();
-                // Marked only once it holds a child: a referrer of one object (the next Pad on
-                // a Pad) can hold another (the sketch both use)
-                if (std::ranges::find(children, obj) == children.end()
-                    || !visited.insert(parent).second) {
+                // Held, not iterated: the populating below can add to ObjectMap (a claimed child
+                // from another document) and rehash it (PR 188 review M1)
+                auto holder = data->second;
+                // The children the rows are made from. Marked only once it holds a child: a
+                // referrer of one object (the next Pad on a Pad) can hold another (the sketch
+                // both use).
+                if (!holder->childSet.contains(obj) || !visited.insert(parent).second) {
                     continue;
                 }
+                // Up to the top: on the way only rows not populated yet are populated, so a
+                // shown, populated parent costs nothing more
                 self(self, parent);
                 for (auto parentRow : std::vector<DocumentObjectItem*>(
-                         data->second->items.begin(),
-                         data->second->items.end()
+                         holder->items.begin(),
+                         holder->items.end()
                      )) {
                     if (!parentRow->populated && !parentRow->isHidden()
                         && !hiddenAbove(parentRow)) {
@@ -1487,7 +1491,13 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
                 continue;
             }
         }
-        problems.push_back({item, top, subname, treePath(item), error});
+        problems.push_back({item, top, subname, {}, error});
+    }
+    // The paths once every row is made: populating a holder moves a root row under it, which
+    // shifts the root rows after it (PR 188 review L5). Rows are moved, not deleted, as only rows
+    // not populated yet are populated; selectNextProblem reads its start's path after this too.
+    for (auto& problem : problems) {
+        problem.path = treePath(problem.item);
     }
     std::ranges::sort(problems, {}, &ProblemItem::path);
     return problems;
