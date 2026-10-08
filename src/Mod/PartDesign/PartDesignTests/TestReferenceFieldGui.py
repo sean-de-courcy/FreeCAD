@@ -114,10 +114,18 @@ def flushDeletes():
 def settle():
     """After a dialog opens: its panel's queued focus (the value field, when the list is complete)
     lands, and so does the last dialog's late switch back to the Model tab, which hides the task
-    view off screen; the task view is put in front again."""
+    view off screen; the task view is put in front again, until the panel's buttons show (under
+    load the panel can show later than the fixed wait, ops#215)."""
     pump(0.3)
-    Gui.Control.showTaskView()
+    waitFor(panelShown)
     pump(0.05)
+
+
+def panelShown():
+    """The task view put in front; whether the open dialog's OK or Cancel shows in it."""
+    Gui.Control.showTaskView()
+    buttons = (QtWidgets.QDialogButtonBox.Ok, QtWidgets.QDialogButtonBox.Cancel)
+    return any(taskButton(which) is not None for which in buttons)
 
 
 def fields():
@@ -1043,6 +1051,28 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
+    def testDraftWithFacesOpensUnarmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
+        old panel armed on the pull direction's subs, not Base's)."""
+        box, draft = self.draft()
+        self.assertEqual(draft.PullDirection, None)
+        [faces, plane, line] = self.edit(draft, count=3)
+        pump(0.2)
+        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertFalse(armed(line))
+
+    def testDraftWithoutFacesOpensArmed(self):
+        """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field
+        armed."""
+        box, draft = self.draft()
+        [vertical] = edge("line", direction=Z, through=(0, 0, 0)).one(box.Shape)
+        draft.PullDirection = (box, [vertical])
+        draft.Base = (box, [])
+        self.doc.recompute()
+        [faces, plane, line] = self.edit(draft, count=3)
+        self.assertTrue(waitFor(lambda: armed(faces)), "a draft without faces opens unarmed")
+        self.assertEqual(draft.PullDirection[1], [vertical])
+
     def testDraftAngleEndsThePlanePick(self):
         """B3: the plane field armed, an angle edit disarms it: its gate goes (a vertex can be
         selected again) and NeutralPlane takes no pick."""
@@ -1098,6 +1128,35 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(thickness.Base[1], [top])
         self.assertEqual(texts(field), [top])
         self.assertVolume(thickness, 1000 - 8 * 8 * 9)
+
+    def testThicknessValueFocusDisarmsTheField(self):
+        """B3 (ops#162): the value takes the focus: the field disarms, and a pick of the top face
+        leaves Base alone (Thickness used to turn only the button off and keep the gate)."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        value = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Value")
+        self.assertIsNotNone(value)
+        self.assertTrue(focus(value), "the value doesn't take the focus")
+        self.assertTrue(waitFor(lambda: not armed(field)), "still armed with the value focused")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [])
+        self.assertEqual(texts(field), [])
+
+    def testThicknessValueEditDisarmsTheField(self):
+        """B3 (ops#162): a value edit, the focus left in the field, disarms it (the panel's own
+        disarm, not the focus model's), and a pick of the top face leaves Base alone."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        self.assertTrue(waitFor(lambda: armed(field)), "the new thickness's field isn't armed")
+        value = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Value")
+        self.assertIsNotNone(value)
+        self.assertFalse(value.hasFocus())
+        value.setProperty("rawValue", 2.0)
+        pump(0.2)
+        self.assertAlmostEqual(thickness.Value.Value, 2.0, places=6)
+        self.assertFalse(armed(field), "still armed after a value edit")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [])
 
     def testDefeaturingField(self):
         """A new defeaturing arms its field; a face pick writes Base."""
@@ -1236,6 +1295,44 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertTrue(armed(field))
         self.assertEqual(texts(field), [self.high.Label])
+
+    def testPadFaceRefusesAWholeSketch(self):
+        """B20 (ops#162): a sketch picked whole gives an up-to-face no face: refused with the
+        reason, UpToFace and the field stay as they were, and the field stays armed."""
+        box, pad = self.padOnBox(toFace=False)
+        self.edit(pad, count=1)
+        self.padModeBox().setCurrentIndex(3)
+        pump(0.2)
+        field = findField("fieldUpToFace")
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "the face field isn't armed"
+        )
+        self.pick(self.doc.getObject("Square"), "")
+        self.assertIsNone(pad.UpToFace)
+        self.assertEqual(texts(field), [])
+        self.assertIn("isn't a face", statusText())
+        self.assertTrue(armed(field))
+
+    def testPadFaceTakesACoordinateSystemPlane(self):
+        """B20 (ops#162): the XY plane of a coordinate system at z = 15 is linked through the
+        system (the plane's name as the sub), the field shows it and the pad goes up to it."""
+        box, pad = self.padOnBox(toFace=False)
+        lcs = self.doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.body.addObject(lcs)
+        lcs.Placement = App.Placement(App.Vector(0, 0, 15), App.Rotation())
+        self.doc.recompute()
+        [lcsPlane] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        self.edit(pad, count=1)
+        self.padModeBox().setCurrentIndex(3)
+        pump(0.2)
+        field = findField("fieldUpToFace")
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "the face field isn't armed"
+        )
+        self.pick(lcsPlane, "")
+        self.assertLink(pad.UpToFace, lcs, [lcsPlane.Name])
+        self.assertEqual(len(texts(field)), 1)
+        self.assertVolume(pad, 1020)
 
     def testPadOffsetDisarmsTheFace(self):
         """T3: the offset takes the focus: the face field disarms, a pick leaves UpToFace."""
@@ -1577,14 +1674,23 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.low, [])
 
     def choose(self, combo, index):
-        """An entry of a combo box chosen through its popup, as a user does."""
+        """An entry of a combo box chosen through its popup, as a user does. The popup is waited
+        for until the entry has its place, and then until it closes (under load a fixed wait
+        clicked a popup not yet laid out, ops#215)."""
         combo.showPopup()
-        pump(0.2)
         view = combo.view()
+
+        def placed():
+            rect = view.visualRect(view.model().index(index, 0))
+            return view.isVisible() and rect.isValid() and not rect.isEmpty()
+
+        self.assertTrue(waitFor(placed), "the popup's entry isn't placed")
+        pump(0.05)
         rect = view.visualRect(view.model().index(index, 0))
         QtTest.QTest.mouseClick(
             view.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center()
         )
+        waitFor(lambda: not view.isVisible())
         pump(0.2)
 
     def testDirectionFieldDisarmsThroughThePopup(self):
@@ -2142,12 +2248,23 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testPatternOriginalsArmOnOpen(self):
         """T1: an edit of a linear pattern with no originals arms its Originals field (no Add and
-        Remove buttons); a pick of a bump in the tree adds it. (A pattern that opens with none
-        doesn't recompute until the edit ends: the edit's roll-back point takes it for a
-        MultiTransform's step, ops#182; so no volume here.)"""
+        Remove buttons); a pick of a bump in the tree adds it, and the pattern computes during
+        the edit (ops#182: the edit's roll-back point took it for a MultiTransform's step and
+        held it until the edit ended). A bump made after the pattern stays held during the edit,
+        and the pattern doesn't (ops#212)."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [])
+        after = self.doc.addObject("PartDesign::AdditiveBox", "After")
+        self.body.addObject(after)
+        for prop in ("Length", "Width", "Height"):
+            setattr(after, prop, 1)
+        after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
+        self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
+        self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
+        self.assertFalse(self.body.holds(pattern), "the pattern in edit is held")
         self.assertEqual(field.objectName(), "fieldOriginals")
         self.assertTrue(waitFor(lambda: armed(field)), "the empty Originals field isn't armed")
         for name in ("buttonAddFeature", "buttonRemoveFeature"):
@@ -2158,6 +2275,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.names(field), [first.Name])
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
+        self.assertVolume(pattern, 1003)
+        self.assertTrue(self.body.holds(after), "the pick released the feature after the pattern")
+        self.assertFalse(self.body.holds(pattern))
 
     def testPatternOriginalsPicksToggle(self):
         """T2: with the field armed, a pick of a face of the second bump adds it, a pick of the
@@ -2506,9 +2626,13 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def selectReference(self, comboName):
         """The panel's "Select reference..." entry chosen, as a user does."""
-        [combo] = [
-            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()
-        ]
+
+        def shown():
+            window = Gui.getMainWindow()
+            return [c for c in window.findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()]
+
+        self.assertTrue(waitFor(lambda: shown()), f"no {comboName} box shows")
+        [combo] = shown()
         [index] = [i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")]
         self.choose(combo, index)
         self.assertEqual(combo.currentIndex(), index)
@@ -2721,12 +2845,33 @@ class TestReferenceFieldGui(unittest.TestCase):
         multi.Transformations = [sub]
         self.doc.recompute()
         self.assertAlmostEqual(multi.Shape.Volume, 1004, places=6)
+        # The body's shown feature is its first visible solid: the sub-feature, added last
+        # (ops#187's test deletes it; ops#212)
+        solids = [o for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")]
+        shown = [o for o in solids if o.Visibility]
+        self.assertEqual(shown, [sub], "the sub-feature isn't the body's shown feature")
         [field] = self.edit(multi)
         transforms = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listTransformFeatures")
         transforms.setCurrentRow(0)
         transforms.activated.emit(transforms.currentIndex())
         pump(0.3)
         return multi, sub, field
+
+    def testMultiTransformSubFeatureDeletedThenCancel(self):
+        """ops#187: the open sub-task's feature, the Mirrored (the body's shown feature when the
+        edit began), deleted from Python; then Cancel. The dialog closes and the document goes
+        on (the edit's end showed the deleted feature's view provider again: an access
+        violation)."""
+        multi, mirrored, field = self.multiTransform("PartDesign::Mirrored")
+        name = mirrored.Name
+        multi.Transformations = []
+        self.body.removeObject(mirrored)
+        self.doc.removeObject(name)
+        pump(0.3)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.doc.recompute()
+        self.assertTrue(multi.isValid(), multi.getStatusString())
 
     def testPatternReferencePickPendingThenOk(self):
         """ops#186 (2): "Select reference..." chosen and OK pressed without a pick: the
@@ -2844,6 +2989,93 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(
             mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "XZ_Plane").Name
         )
+
+    # -- ops#189: Mirrored with "Update view" off ------------------------------------------------
+
+    def mirroredOnRedrawnPad(self):
+        """The redrawn pad mirrored on its right face, x = 20 (4000 mm^3), the face guessed after
+        the redraw: the References panel lists MirrorPlane. Returns the Mirrored, the panel, and
+        the pad's left face (x = 0) by its name now."""
+        body, pad = self.redrawnPad()
+        right = face(normal=(1, 0, 0))
+        mirrored = self.doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [pad]
+        mirrored.MirrorPlane = (pad, right.one(pad.Shape))
+        body.addObject(mirrored)
+        self.doc.recompute()
+        self.assertAlmostEqual(mirrored.Shape.Volume, 4000, places=3)
+        self.redraw()
+        self.doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        rows = {(e["property"], e["index"]) for e in App.getReferenceReport(mirrored)}
+        self.assertIn(("MirrorPlane", 0), rows)
+        [field] = self.edit(mirrored)
+        tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+        self.assertTrue(tree is not None and tree.isVisible(), "no References panel")
+        [left] = face(normal=(-1, 0, 0)).one(pad.Shape)
+        return mirrored, pad, field, tree, left
+
+    def updateView(self, on):
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(on)
+        pump(0.1)
+
+    def testMirroredUpdateViewOffReferencesRepaired(self):
+        """ops#189 (1): "Update view" off, the References panel repairs MirrorPlane to the
+        pad's left face: the box shows it, and OK keeps it (the box kept the old face, which
+        OK wrote back)."""
+        mirrored, pad, field, tree, left = self.mirroredOnRedrawnPad()
+        self.updateView(False)
+        tree.setCurrentItem(tree.topLevelItem(0))
+        pick = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonPick")
+        pick.click()
+        pump(0.3)
+        self.pick(pad, left)
+        self.assertTrue(
+            waitFor(lambda: mirrored.MirrorPlane[1] == [left]), "the panel didn't repair the plane"
+        )
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(mirrored.MirrorPlane, pad, [left])
+
+    def testMirroredUpdateViewOnDuringAPick(self):
+        """ops#189 (2): "Update view" off, "Select reference..." chosen, then "Update view" on:
+        the plane stays (it was set to None from the empty entry)."""
+        first, second = self.bumps()
+        mirrored = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(mirrored)
+        self.updateView(False)
+        self.selectReference("comboPlane")
+        self.updateView(True)
+        yz = models.originFeature(self.body, "YZ_Plane")
+        self.assertIsNotNone(mirrored.MirrorPlane, "Update view on cleared the plane")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, yz.Name)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, yz.Name)
+
+    def testMirroredUpdateViewOffPlaneChosenThenOtherPaths(self):
+        """ops#189 (3): "Update view" off, the XZ plane chosen in the box; then the Originals
+        field armed and the References panel's Re-pick, both of which end a pending pick: the
+        box keeps XZ, and OK writes it."""
+        mirrored, pad, field, tree, left = self.mirroredOnRedrawnPad()
+        self.updateView(False)
+        self.choosePlane("Base XZ-plane")
+        self.arm(field, byFocus=False)
+        pump(0.2)
+        tree.setCurrentItem(tree.topLevelItem(0))
+        pick = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonPick")
+        pick.click()
+        pump(0.3)
+        [combo] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "comboPlane")
+            if c.isVisible()
+        ]
+        self.assertEqual(combo.currentText(), "Base XZ-plane")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        xz = models.originFeature(mirrored.getParentGeoFeatureGroup(), "XZ_Plane")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, xz.Name)
 
     def testPreviewOpacitySliderEnds(self):
         """PR 156 review (7): the slider at 100 % makes the pocket's preview opaque and its tool
@@ -3480,6 +3712,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual([entries(field).item(i).toolTip() for i in range(2)], ["", ""])
         self.assertTrue(Gui.Control.activeDialog())
 
+    def testLoftDeleteRemovesAllSelected(self):
+        """B12 (ops#162): Delete with both sections selected takes out both (the old loft took
+        only the current row)."""
+        loft = self.tower(("S1", "S2"))
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        clickRow(field, 0)
+        clickRow(field, 1, QtCore.Qt.ControlModifier)
+        self.assertEqual(len(entries(field).selectedItems()), 2)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == []), loft.Sections)
+        self.assertEqual(texts(field), [])
+
     def testLoftSectionPickTogglesAndReplaces(self):
         """T29, B21: S1 picked again comes out of the list (the field stays armed); picked again
         it is last; a point of it picked replaces its entry, not another one."""
@@ -3805,6 +4050,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(block, "")
         self.assertEqual(self.sectionNames(loft), ["S1"])
         self.assertIn("whole solid", statusText().lower())
+        self.assertTrue(armed(field), "a refused pick ended the pick (B21, ops#162)")
         self.pick(block, "Face6")  # its top, at z = 50
         self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
         self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])
