@@ -265,9 +265,18 @@ class TestPanelFixesGui(unittest.TestCase):
         pipe.Transformation = "Multisection"
         self.assertOpensWithoutRecompute(pipe)
 
+    def testPipeWithRoundCornersOpensWithoutRecompute(self):
+        """ops#180 round: likewise a pipe whose Transition isn't the first (Round corner): the
+        transition combo wrote its value and recomputed; it still shows the pipe's transition."""
+        pipe = self.rod()
+        pipe.Transition = "Round corner"
+        pipe.AuxiliaryCurvilinear = False
+        self.assertOpensWithoutRecompute(pipe)
+        self.assertEqual(self.widget(QtWidgets.QComboBox, "comboBoxTransition").currentIndex(), 2)
+
     def testPipeBinormalSixDecimals(self):
-        """ops#180: a binormal of thirds shows as stored, and editing X writes Y and Z unrounded
-        (the .ui's two decimals rounded both)."""
+        """ops#180: a binormal of thirds shows to 6 decimals, and editing X writes Y and Z back
+        rounded to 6 decimals (the .ui's two decimals made them 0.67)."""
         pipe = self.rod()
         pipe.Mode = "Binormal"
         pipe.Binormal = V(1 / 3, 2 / 3, 2 / 3)
@@ -336,12 +345,27 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.edit(pipe)
-        self.answerModals()
-        self.close(ok=True)
-        self.answering = False
+        written = []
+
+        class Observer:
+            def slotChangedObject(self, obj, prop):
+                if obj == pipe and prop in ("Spine", "AuxiliarySpine"):
+                    written.append(prop)
+
+        observer = Observer()
+        App.addDocumentObserver(observer)
+        try:
+            self.answerModals()
+            self.close(ok=True)
+            self.answering = False
+        finally:
+            App.removeDocumentObserver(observer)
         self.assertEqual(self.modals, ["DlgReference"])
         self.assertIs(pipe.AuxiliarySpine[0], link)
         self.assertFalse(self.body.hasObject(link))
+        # ops#180 round: the link kept is not written back (a write drops the property's shadows
+        # and its ops#127 guess record)
+        self.assertEqual(written, [])
 
     def testPipeCopiesASectionWithoutAuxiliarySpine(self):
         """4, the null: spine in the body, no auxiliary spine, one section outside the body. OK

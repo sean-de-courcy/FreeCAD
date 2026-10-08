@@ -303,7 +303,12 @@ TaskPipeParameters::TaskPipeParameters(ViewProviderPipe* PipeView, bool /*newObj
         PipeView->makeTemporaryVisible(true);
     }
 
-    ui->comboBoxTransition->setCurrentIndex(pipe->Transition.getValue());
+    {
+        // FreeCAD-CH (ops#180): show, don't write: the combo's signal would write Transition and
+        // recompute a pipe with corners (Right, Round) at every open
+        QSignalBlocker blockTransition(ui->comboBoxTransition);
+        ui->comboBoxTransition->setCurrentIndex(pipe->Transition.getValue());
+    }
     createFields();
 
     this->blockSelection(false);
@@ -501,10 +506,12 @@ bool TaskPipeParameters::accept()
                 }
                 return it->second ? it->second : obj;
             };
-            if (outside(spine)) {
+            // a property is written only when its object was copied: setValue with the original
+            // would drop its shadows and guess record (ops#127)
+            if (outside(spine) && copied(spine) != spine) {
                 pipe->Spine.setValue(copied(spine), pipe->Spine.getSubValues());
             }
-            if (outside(auxSpine)) {
+            if (outside(auxSpine) && copied(auxSpine) != auxSpine) {
                 pipe->AuxiliarySpine.setValue(
                     copied(auxSpine),
                     pipe->AuxiliarySpine.getSubValues()
