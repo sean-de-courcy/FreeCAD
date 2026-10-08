@@ -972,6 +972,28 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
+    def testDraftWithFacesOpensUnarmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
+        old panel armed on the pull direction's subs, not Base's)."""
+        box, draft = self.draft()
+        self.assertEqual(draft.PullDirection, None)
+        [faces, plane, line] = self.edit(draft, count=3)
+        pump(0.2)
+        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertFalse(armed(line))
+
+    def testDraftWithoutFacesOpensArmed(self):
+        """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field
+        armed."""
+        box, draft = self.draft()
+        [vertical] = edge("line", direction=Z, through=(0, 0, 0)).one(box.Shape)
+        draft.PullDirection = (box, [vertical])
+        draft.Base = (box, [])
+        self.doc.recompute()
+        [faces, plane, line] = self.edit(draft, count=3)
+        self.assertTrue(waitFor(lambda: armed(faces)), "a draft without faces opens unarmed")
+        self.assertEqual(draft.PullDirection[1], [vertical])
+
     def testDraftAngleEndsThePlanePick(self):
         """B3: the plane field armed, an angle edit disarms it: its gate goes (a vertex can be
         selected again) and NeutralPlane takes no pick."""
@@ -1028,7 +1050,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(texts(field), [top])
         self.assertVolume(thickness, 1000 - 8 * 8 * 9)
 
-    def testThicknessValueEditDisarmsTheField(self):
+    def testThicknessValueFocusDisarmsTheField(self):
         """B3 (ops#162): the value takes the focus: the field disarms, and a pick of the top face
         leaves Base alone (Thickness used to turn only the button off and keep the gate)."""
         box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
@@ -1040,6 +1062,22 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, top)
         self.assertEqual(thickness.Base[1], [])
         self.assertEqual(texts(field), [])
+
+    def testThicknessValueEditDisarmsTheField(self):
+        """B3 (ops#162): a value edit, the focus left in the field, disarms it (the panel's own
+        disarm, not the focus model's), and a pick of the top face leaves Base alone."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        self.assertTrue(waitFor(lambda: armed(field)), "the new thickness's field isn't armed")
+        value = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Value")
+        self.assertIsNotNone(value)
+        self.assertFalse(value.hasFocus())
+        value.setProperty("rawValue", 2.0)
+        pump(0.2)
+        self.assertAlmostEqual(thickness.Value.Value, 2.0, places=6)
+        self.assertFalse(armed(field), "still armed after a value edit")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [])
 
     def testDefeaturingField(self):
         """A new defeaturing arms its field; a face pick writes Base."""
@@ -3660,6 +3698,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(block, "")
         self.assertEqual(self.sectionNames(loft), ["S1"])
         self.assertIn("whole solid", statusText().lower())
+        self.assertTrue(armed(field), "a refused pick ended the pick (B21, ops#162)")
         self.pick(block, "Face6")  # its top, at z = 50
         self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
         self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])
