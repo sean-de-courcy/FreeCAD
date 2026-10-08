@@ -1651,6 +1651,7 @@ class UndoRedoCases(unittest.TestCase):
         def create(name):
             def step(obj, target):
                 extra[name] = obj.Document.addObject("App::FeaturePython", name)
+                static[name] = set(extra[name].PropertiesList)
 
             return step
 
@@ -1672,6 +1673,12 @@ class UndoRedoCases(unittest.TestCase):
 
         def removeObject(created):
             return lambda obj, target: obj.Document.removeObject(extra[created].Name)
+
+        def removeSelf(obj, target):
+            obj.Document.removeObject(obj.Name)
+
+        def removeTargetObject(obj, target):
+            obj.Document.removeObject(target.Name)
 
         swap = [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]
         targetWidth = {"targetWidth": True}
@@ -1740,6 +1747,12 @@ class UndoRedoCases(unittest.TestCase):
             ("add to a created object, move out, remove it",
              [create("Fresh"), addTo("Fresh", "Extra", 7), moveFrom("Fresh", "Extra"),
               removeObject("Fresh"), setTarget("Extra", 8)]),
+            # review of fork PR 222
+            ("move into a created object, remove the source",
+             [create("Fresh"), moveTo("Width", "Fresh"), setOn("Fresh", "Width", 9), removeSelf]),
+            ("add to a created object, move out, remove the target",
+             [create("Fresh"), addTo("Fresh", "Extra", 7), moveFrom("Fresh", "Extra"),
+              removeTargetObject]),
         ]
         for label, steps, *options in cases:
             options = options[0] if options else {}
@@ -1779,25 +1792,33 @@ class UndoRedoCases(unittest.TestCase):
                         if options.get("user"):
                             user.setExpression("Uses", "Vars.Width * 10 + Vars.Other")
                         doc.commitTransaction()
-                        before = state(*objs)
+
+                        def full():
+                            # the objects in the document (one removed in the transaction keeps
+                            # whatever undo left on it), with one the steps created (ops#238)
+                            fresh = doc.getObject("Fresh")
+                            inDocument = [o for o in objs if o.Name]
+                            return state(*inDocument), state(fresh) if fresh else None
+
+                        before = full()
 
                         doc.openTransaction("Task")
                         for step in steps:
                             step(obj, target)
-                        after = state(*objs)
+                        after = full()
                         self.assertNotEqual(after, before)
                         if close == "abort":
                             doc.abortTransaction()
-                            self.assertEqual(state(*objs), before)
+                            self.assertEqual(full(), before)
                         else:
                             doc.commitTransaction()
                             for _ in range(2):
                                 doc.undo()
-                                self.assertEqual(state(*objs), before)
+                                self.assertEqual(full(), before)
                                 doc.redo()
-                                self.assertEqual(state(*objs), after)
+                                self.assertEqual(full(), after)
                             doc.undo()
-                            self.assertEqual(state(*objs), before)
+                            self.assertEqual(full(), before)
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 

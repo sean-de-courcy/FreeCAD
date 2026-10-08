@@ -229,6 +229,30 @@ void Transaction::addOrRemoveProperty(TransactionalObject* Obj, const Property* 
 // separator for other implementation aspects
 
 
+namespace
+{
+// FreeCAD-CH (ops#235): one entry's failure is logged and the next entry is still applied; one
+// exception used to end Transaction::apply for every remaining entry of every object.
+template<typename Func>
+void applyEntry(const TransactionalObject* pcObj, const std::string& name, Func&& func)
+{
+    try {
+        func();
+    }
+    catch (Base::Exception& e) {
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
+                                            << e.what());
+    }
+    catch (std::exception& e) {
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
+                                            << e.what());
+    }
+    catch (...) {
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name);
+    }
+}
+}  // namespace
+
 void Transaction::apply(Document& Doc, bool forward)
 {
     std::string errMsg;
@@ -241,14 +265,42 @@ void Transaction::apply(Document& Doc, bool forward)
             auto pos = byObject.find(obj);
             return pos != byObject.end() && pos->second->status == TransactionObject::Del;
         };
+        // in this document, found without reading through the pointer (a target can be freed)
+        auto local = [this, &Doc](const TransactionalObject* obj) {
+            return _Objects.get<1>().count(obj) != 0
+                || Doc.isIn(static_cast<const DocumentObject*>(obj));
+        };
         for (auto& info : index) {
-            info.second->applyMovesOfRemoved(const_cast<TransactionalObject*>(info.first), removed);
+            info.second->applyMovesOfRemoved(const_cast<TransactionalObject*>(info.first),
+                                             removed,
+                                             local);
         }
         for (auto& info : index) {
             info.second->applyDel(Doc, const_cast<TransactionalObject*>(info.first));
         }
         for (auto& info : index) {
             info.second->applyNew(Doc, const_cast<TransactionalObject*>(info.first));
+        }
+        // FreeCAD-CH (ops#238): a property moved out of a created object into an object the
+        // transaction removed: that object is back now, and the property leaves it with its source
+        for (auto& info : index) {
+            if (info.second->status != TransactionObject::Del) {
+                continue;
+            }
+            for (auto& [key, data] : info.second->_PropChangeMap) {
+                if (data.movedEarly || !data.propertyTarget || !data.target
+                    || data.target == info.first || !local(data.target)
+                    || !data.target->isAttachedToDocument()) {
+                    continue;
+                }
+                data.movedEarly = true;
+                auto* target = data.target;
+                applyEntry(target, data.name, [&]() {
+                    if (const char* name = target->getPropertyName(data.propertyTarget)) {
+                        target->removeDynamicProperty(std::string(name).c_str());
+                    }
+                });
+            }
         }
         // FreeCAD-CH (ops#235): each pass for all objects, since a move or a name passes between
         // objects (TransactionObject::ChnPass)
@@ -320,11 +372,15 @@ void Transaction::dropMovesOfFreed(const TransactionalObject* obj, TransactionOb
         }
     }
 
-    // moved out of it: the property, still at its target, was added there in this transaction
-    // (not between documents: the target's document records that move as well)
-    auto documentOf = [](const TransactionalObject* object) -> const Document* {
-        auto* docObj = freecad_cast<const DocumentObject*>(object);
-        return docObj ? docObj->getDocument() : nullptr;
+    // moved out of it: the property, still at its target, was added there in this transaction.
+    // Not when it went back to the object itself (no entry for an object being freed), and not
+    // between documents (the target's document records that move as well). The target is found
+    // in the document and the property on the target before either pointer is read through.
+    auto* docObj = freecad_cast<const DocumentObject*>(obj);
+    const Document* doc = docObj ? docObj->getDocument() : nullptr;
+    auto local = [&](const TransactionalObject* target) {
+        return _Objects.get<1>().count(target) != 0
+            || (doc && doc->isIn(static_cast<const DocumentObject*>(target)));
     };
     std::vector<std::pair<Property*, TransactionalObject*>> added;
     std::erase_if(_MoveTargets, [&](const auto& entry) {
@@ -332,9 +388,11 @@ void Transaction::dropMovesOfFreed(const TransactionalObject* obj, TransactionOb
             return false;
         }
         auto it = to->_PropChangeMap.find(entry.second.key);
-        if (it != to->_PropChangeMap.end() && it->second.propertyTarget == entry.first
-            && documentOf(it->second.target) && documentOf(it->second.target) == documentOf(obj)) {
-            added.emplace_back(const_cast<Property*>(entry.first), it->second.target);
+        if (it != to->_PropChangeMap.end() && it->second.propertyTarget == entry.first) {
+            auto* target = it->second.target;
+            if (target && target != obj && local(target) && target->getPropertyName(entry.first)) {
+                added.emplace_back(const_cast<Property*>(entry.first), target);
+            }
         }
         return true;
     });
@@ -429,35 +487,17 @@ void TransactionObject::takeDynamicData(PropData& data, const Property* prop)
     }
 }
 
-namespace
-{
-// FreeCAD-CH (ops#235): one entry's failure is logged and the next entry is still applied; one
-// exception used to end Transaction::apply for every remaining entry of every object.
-template<typename Func>
-void applyEntry(const TransactionalObject* pcObj, const std::string& name, Func&& func)
-{
-    try {
-        func();
-    }
-    catch (Base::Exception& e) {
-        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
-                                            << e.what());
-    }
-    catch (std::exception& e) {
-        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
-                                            << e.what());
-    }
-    catch (...) {
-        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name);
-    }
-}
-}  // namespace
 
 void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, bool /* Forward */)
 {
-    applyMovesOfRemoved(pcObj, [](const TransactionalObject*) {
-        return false;
-    });
+    applyMovesOfRemoved(
+        pcObj,
+        [](const TransactionalObject*) {
+            return false;
+        },
+        [](const TransactionalObject*) {
+            return true;
+        });
     for (auto pass : {ChnPass::Removals, ChnPass::Moves, ChnPass::Renames, ChnPass::Values}) {
         applyChnPass(pcObj, pass);
     }
@@ -719,14 +759,22 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
         data.restored = obj->moveDynamicProperty(data.propertyTarget, newTarget);
     }
     catch (...) {
-        obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+        // FreeCAD-CH (ops#238): a move whose handler threw is completed: the property is on
+        // newTarget under the temporary name, to be named and restored by the next passes
+        if (obj->getPropertyName(data.propertyTarget)) {
+            obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+        }
+        else {
+            data.restored = newTarget->getDynamicPropertyByName(tmp.c_str());
+        }
         throw;
     }
 }
 
 void TransactionObject::applyMovesOfRemoved(
     TransactionalObject* pcObj,
-    const std::function<bool(const TransactionalObject*)>& removed)
+    const std::function<bool(const TransactionalObject*)>& removed,
+    const std::function<bool(const TransactionalObject*)>& local)
 {
     for (auto& v : _PropChangeMap) {
         v.second.restored = nullptr;
@@ -736,16 +784,45 @@ void TransactionObject::applyMovesOfRemoved(
     const bool ownerRemoved = status == Del;
     for (auto& v : _PropChangeMap) {
         auto& data = v.second;
-        if (!data.propertyTarget || !data.target || !(ownerRemoved || removed(data.target))) {
+        // (an entry with the object itself as target: a move from another document, recorded
+        // there too)
+        if (!data.propertyTarget || !data.target || data.target == pcObj || !local(data.target)) {
+            continue;
+        }
+        if (ownerRemoved) {
+            if (!data.target->isAttachedToDocument()) {
+                // removed in the transaction too: Transaction::apply() takes the property from it
+                // once applyNew() brought it back
+                continue;
+            }
+        }
+        else if (!removed(data.target)) {
+            continue;
+        }
+        else if (!pcObj->isAttachedToDocument()) {
+            // the source was removed in the transaction too: nothing can be moved into it before
+            // applyNew(), so the move becomes the removal of the source's property, re-created by
+            // the Values pass (nothing, if it was added in the transaction)
+            data.movedEarly = true;
+            if (!data.added) {
+                data.target = nullptr;
+                data.propertyTarget = nullptr;
+                data.source = nullptr;
+                if (!data.nameOrig.empty()) {
+                    data.name = data.nameOrig;
+                    data.nameOrig.clear();
+                }
+            }
             continue;
         }
         data.movedEarly = true;
         applyEntry(pcObj, data.name, [&]() {
             applyMove(pcObj, data);
-            // moved back into the removed object: named here, the Renames pass doesn't run
+            // moved back into the removed object: named here, the Renames pass doesn't run; a name
+            // the object took later keeps the temporary one (it is removed anyway)
             const std::string& before = data.nameOrig.empty() ? data.name : data.nameOrig;
             const char* now = data.restored ? pcObj->getPropertyName(data.restored) : nullptr;
-            if (ownerRemoved && now && before != now) {
+            if (ownerRemoved && now && before != now && !pcObj->getPropertyByName(before.c_str())) {
                 pcObj->renameDynamicProperty(data.restored, before.c_str());
             }
         });

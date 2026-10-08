@@ -340,9 +340,11 @@ protected:
 
     /// FreeCAD-CH (ops#238): takes back the moves into or out of an object that applyDel()
     /// removes (one created in the transaction), before it is removed: removing detaches it, and
-    /// on abort destroys it with the moved property; also resets the entries' apply state
+    /// on abort destroys it with the moved property; also resets the entries' apply state.
+    /// Only moves within the document (@a local; between documents: ops#238, V3/T4).
     void applyMovesOfRemoved(TransactionalObject* obj,
-                             const std::function<bool(const TransactionalObject*)>& removed);
+                             const std::function<bool(const TransactionalObject*)>& removed,
+                             const std::function<bool(const TransactionalObject*)>& local);
 
     /// FreeCAD-CH (ops#235): the property the move entry @a key moved was removed from its
     /// target: the entry becomes the removal of the source's property (nothing, if it was added).
