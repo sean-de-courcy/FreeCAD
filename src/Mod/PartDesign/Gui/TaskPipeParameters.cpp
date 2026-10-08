@@ -38,6 +38,7 @@
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
 #include <TopoDS.hxx>
 #include <fmt/format.h>
 
@@ -459,29 +460,36 @@ void TaskPipeParameters::setVisibilityOfSpineAndProfile()
 namespace
 {
 
-// The global properties that tell one element from another: its type, its length, area or point,
-// and its centre of mass, in global coordinates (a dependent copy has its own placement)
+// The shape of an element, or null when it can't be read
+TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
+{
+    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+        | Part::ShapeOption::Transform;
+    try {
+        return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+// The properties that tell one element from another: its type, its length, area or point, and
+// its centre of mass. Both are taken in the frame of the object's container (its own Placement
+// applied, its parents' not), which a copy in the body shares with an original beside the body
+// (a dependent copy has its own placement).
 bool sameElement(App::DocumentObject* original, App::DocumentObject* copy, const std::string& sub)
 {
     if (sub.empty() || original == copy) {
         return true;
     }
-    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-        | Part::ShapeOption::Transform;
-    TopoDS_Shape before;
-    TopoDS_Shape after;
-    try {
-        before = Part::Feature::getTopoShape(original, options, sub.c_str()).getShape();
-    }
-    catch (const Base::Exception&) {
-    }
+    TopoDS_Shape before = elementShape(original, sub);
+    TopoDS_Shape after = elementShape(copy, sub);
     if (before.IsNull()) {
-        return true;  // nothing to compare: the reference was already missing on the original
-    }
-    try {
-        after = Part::Feature::getTopoShape(copy, options, sub.c_str()).getShape();
-    }
-    catch (const Base::Exception&) {
+        // ops#234 round 2: the reference is already broken on the original; on a copy that has
+        // the element it would name another one, silently
+        return after.IsNull();
     }
     if (after.IsNull() || after.ShapeType() != before.ShapeType()) {
         return false;
@@ -508,8 +516,13 @@ bool sameElement(App::DocumentObject* original, App::DocumentObject* copy, const
     double sizeAfter = 0;
     gp_Pnt centerBefore;
     gp_Pnt centerAfter;
-    measure(before, sizeBefore, centerBefore);
-    measure(after, sizeAfter, centerAfter);
+    try {
+        measure(before, sizeBefore, centerBefore);
+        measure(after, sizeAfter, centerAfter);
+    }
+    catch (const Standard_Failure&) {
+        return false;  // not shown to be the same
+    }
     const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
     return std::abs(sizeAfter - sizeBefore) <= tolerance
         && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
@@ -542,9 +555,8 @@ void copyOutsideObjects(
                 // ends OK, named, with its reason
                 if (!it->second->recomputeFeature()) {
                     throw Base::RuntimeError(fmt::format(
-                        "{}: the copy '{}' of '{}' doesn't recompute: {}",
+                        "{}: a copy of '{}' doesn't recompute: {}",
                         pipe->Label.getValue(),
-                        it->second->Label.getValue(),
                         obj->Label.getValue(),
                         it->second->getStatusString()
                     ));
@@ -585,13 +597,14 @@ void copyOutsideObjects(
         for (const std::string& sub : subs) {
             if (!sameElement(obj, copied(obj), sub)) {
                 throw Base::RuntimeError(fmt::format(
-                    "{}: {} '{}' of '{}' is another element on its copy '{}', whose shape "
-                    "differs. Make a cross-reference instead, or pick it again on the copy.",
+                    "{}: {} '{}' of '{}' would name another element on a copy, whose shape "
+                    "differs (or the element can't be read). Recompute '{}' and pick the "
+                    "reference again, or make a cross-reference instead.",
                     pipe->Label.getValue(),
                     property,
                     sub,
                     obj->Label.getValue(),
-                    copied(obj)->Label.getValue()
+                    obj->Label.getValue()
                 ));
             }
         }
@@ -697,8 +710,7 @@ bool TaskPipeParameters::accept()
         }
     }
 
-    // FreeCAD-CH (ops#234 round): the choice is asked first, and the copy step runs inside the
-    // try, so a copy that fails, or a reference the copy can't keep, aborts the transaction
+    // FreeCAD-CH (ops#234 round): the choice is asked first, then the copy step runs
     bool copyOutside = false;
     bool independent = false;
     if (extReference) {
@@ -714,11 +726,40 @@ bool TaskPipeParameters::accept()
         independent = dlg.radioIndependent->isChecked();
     }
 
-    try {
-        if (copyOutside) {
+    // FreeCAD-CH (ops#234 round 2): a copy that fails, or a reference a copy can't keep, stops
+    // the copy step before it writes anything. Its copies are removed inside the edit's still-open
+    // transaction (created and removed in it, they leave nothing), and the edit stays open: the
+    // user can fix the reference and press OK again, or Cancel, which restores the state from
+    // before the edit. Aborting the transaction here undid the whole edit under the open panel.
+    if (copyOutside) {
+        auto stop = [&](const char* what) {
+            App::Document* doc = pipe->getDocument();
+            for (auto it = copies.rbegin(); it != copies.rend(); ++it) {
+                if ((*it)->isAttachedToDocument()) {
+                    doc->removeObject((*it)->getNameInDocument());
+                }
+            }
+            copies.clear();
+            QMessageBox::warning(
+                this,
+                tr("Input Error"),
+                QApplication::translate("Exception", what) + QStringLiteral("\n\n")
+                    + tr("No copy was kept, and the edit is still open.")
+            );
+            return false;
+        };
+        try {
             copyOutsideObjects(pipe, outside, independent, copies);
         }
+        catch (const Base::Exception& e) {
+            return stop(e.what());
+        }
+        catch (const Standard_Failure& e) {
+            return stop(e.GetMessageString());
+        }
+    }
 
+    try {
         setVisibilityOfSpineAndProfile();
 
         // Spine isn't written again here: the dialog sets it at selection time, and written
@@ -740,6 +781,12 @@ bool TaskPipeParameters::accept()
     catch (const Base::Exception& e) {
         pipe->getDocument()->abortTransaction();
         QMessageBox::warning(this, tr("Input Error"), QApplication::translate("Exception", e.what()));
+        return false;
+    }
+    catch (const Standard_Failure& e) {
+        // ops#234 round 2: as above, not out of accept() with the copies in the open transaction
+        pipe->getDocument()->abortTransaction();
+        QMessageBox::warning(this, tr("Input Error"), QString::fromUtf8(e.GetMessageString()));
         return false;
     }
 
