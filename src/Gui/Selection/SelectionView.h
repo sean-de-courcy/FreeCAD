@@ -211,8 +211,9 @@ private:
  * Moving through it (backtick and Down go on, Shift+backtick and Up back, both wrapping; the
  * mouse over an entry) only preselects the entry's element; nothing is selected. Enter or a click
  * on an entry adds it to the selection, one pick, as a click would (so an armed reference field
- * takes it once). Esc, a click outside, or the mouse leaving the list closes it and changes
- * nothing. The popup is not modal and deletes itself when it closes.
+ * takes it once). Esc, a click outside (not passed on to what lies under it), or the mouse
+ * leaving the list closes it and changes nothing. The popup is not modal and deletes itself when
+ * it closes.
  */
 class GuiExport SelectOtherMenu: public QMenu
 {
@@ -234,8 +235,12 @@ private:
     void preselect(QAction* action);
     void commit(QAction* action);
     void finish();
+    /// Sets the current entry's preselection again when something else removed it
+    void onSelectionChanged(const SelectionChanges& msg);
 
     std::vector<PickData> picks;
+    fastsignals::scoped_connection selectionConnection;
+    bool preselecting = false;
 };
 
 }  // namespace Gui

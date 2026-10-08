@@ -4503,7 +4503,9 @@ StdCmdSelectOther::StdCmdSelectOther()
     sToolTipText = QT_TR_NOOP(
         "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.\n"
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
-        "highlights an element. Enter or a click selects the highlighted one, Esc closes the list."
+        "highlights an element. Enter or a click selects the highlighted one, Esc closes the list.\n"
+        "Use its key with the cursor over the 3D view; from the menu, it lists what lies where the "
+        "menu closed."
     );
     sWhatsThis = "Std_SelectOther";
     sStatusTip = sToolTipText;
@@ -4522,10 +4524,13 @@ void StdCmdSelectOther::activated(int iMsg)
         return;
     }
 
-    // the list opens at the cursor, which has to be over the 3D view
+    // The list opens at the cursor, which has to be over the 3D view, not over another window in
+    // front of it (a floating panel). An overlay panel is part of the main window and counts as
+    // the view, as for a click there. From the Tools menu, the cursor is where the menu closed.
     const QPoint cursor = QCursor::pos();
     const QPoint local = widget->mapFromGlobal(cursor);
-    if (!widget->rect().contains(local)) {
+    QWidget* top = QApplication::topLevelAt(cursor);
+    if (!widget->rect().contains(local) || (top && top != widget->window())) {
         return;
     }
     const qreal devicePixelRatio = widget->devicePixelRatioF();

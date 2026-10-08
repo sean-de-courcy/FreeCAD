@@ -542,15 +542,25 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
+    def escInTheViewFirst(self, field, view):
+        """Arms the field and presses and releases Esc in the view, which disarms it; then arms it
+        again. The view's record of an Esc press it saw starts empty, whatever an earlier test
+        left (a press in the view whose release went elsewhere)."""
+        self.arm(field, byFocus=True)
+        self.assertTrue(focus(view))
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
+        self.arm(field, byFocus=False)
+        self.assertTrue(focus(view))
+
     def testEscClosingAPopupKeepsTheFieldArmed(self):
         """ops#216: Esc that closes a popup over the 3D view (Clarify, a context menu) is pressed
         in the popup; the release then reaches the view, which didn't see the press: the field
         stays armed and the edit stays."""
         box, fillet = self.newFillet()
         [field] = fields()
-        self.arm(field, byFocus=True)
         [view] = views3D()
-        self.assertTrue(focus(view))
+        self.escInTheViewFirst(field, view)
         menu = QtWidgets.QMenu(Gui.getMainWindow())
         menu.addAction("Entry")
         menu.popup(view.mapToGlobal(view.rect().center()))
@@ -566,6 +576,38 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(armed(field), "the release of the popup's Esc disarmed the field")
         self.assertTrue(Gui.Control.activeDialog(), "the release of the popup's Esc closed the dialog")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+
+    def testEscClosingTheExpressionEditorKeepsTheFieldArmed(self):
+        """ops#216: Esc that closes the '=' expression editor of the radius is pressed there; the
+        release then reaches the 3D view (where the focus went, ops#146), which didn't see the
+        press: the armed field stays armed and the edit stays."""
+        box, fillet = self.newFillet()
+        [field] = fields()
+        [view] = views3D()
+        self.escInTheViewFirst(field, view)
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(focus(radius), "the radius doesn't take the focus")
+        QtTest.QTest.keyClick(radius, QtCore.Qt.Key_Equal)
+
+        def editor():
+            for dialog in radius.findChildren(QtWidgets.QDialog, "DlgExpressionInput"):
+                if dialog.isVisible():
+                    return dialog
+            return None
+
+        self.assertTrue(waitFor(lambda: editor() is not None), "'=' opened no expression editor")
+        dialog = editor()
+        edit = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+        QtTest.QTest.keyPress(edit, QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not dialog.isVisible()), "the editor stays")
+        pump(0.3)
+        # the radius's focus disarmed the field; armed again, as a user would before the release
+        self.arm(field, byFocus=False)
+        self.assertTrue(focus(view))
+        QtTest.QTest.keyRelease(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Escape)
+        pump(0.5)
+        self.assertTrue(armed(field), "the release of the editor's Esc disarmed the field")
+        self.assertTrue(Gui.Control.activeDialog(), "the release of the editor's Esc closed the dialog")
 
     # -- T6: Delete -----------------------------------------------------------------------------
 
