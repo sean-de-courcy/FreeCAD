@@ -83,6 +83,7 @@
 #include "Navigation/NavigationStyle.h"
 #include "OverlayParams.h"
 #include "OverlayManager.h"
+#include "OverlayWidgets.h"
 #include "SceneInspector.h"
 #include "Selection.h"
 #include "Selection/BoxSelection.h"
@@ -4505,7 +4506,7 @@ StdCmdSelectOther::StdCmdSelectOther()
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
         "highlights an element. Enter or a click selects the highlighted one, Esc closes the list.\n"
         "Use its key with the cursor over the 3D view; from the menu, it lists what lies where the "
-        "menu closed."
+        "menu closed (nothing with a menu bar outside the window, as on macOS)."
     );
     sWhatsThis = "Std_SelectOther";
     sStatusTip = sToolTipText;
@@ -4524,13 +4525,26 @@ void StdCmdSelectOther::activated(int iMsg)
         return;
     }
 
-    // The list opens at the cursor, which has to be over the 3D view, not over another window in
-    // front of it (a floating panel). An overlay panel is part of the main window and counts as
-    // the view, as for a click there. From the Tools menu, the cursor is where the menu closed.
+    // The list opens at the cursor, which has to be over the 3D view itself: not over another
+    // window in front of it (a floating panel), nor over an overlay panel where it keeps the mouse.
+    // Where an overlay panel lets a click through to the view (a transparent spot, as
+    // OverlayManager decides it), it counts as the view. From the Tools menu, the cursor is where
+    // the menu closed.
     const QPoint cursor = QCursor::pos();
     const QPoint local = widget->mapFromGlobal(cursor);
-    QWidget* top = QApplication::topLevelAt(cursor);
-    if (!widget->rect().contains(local) || (top && top != widget->window())) {
+    auto overTheView = [widget, &cursor]() {
+        for (QWidget* under = QApplication::widgetAt(cursor); under; under = under->parentWidget()) {
+            if (under == widget) {
+                return true;
+            }
+            if (auto* overlay = qobject_cast<OverlayTabWidget*>(under)) {
+                return OverlayParams::getDockOverlayAutoMouseThrough()
+                    && overlay->testAlpha(cursor, 1) == 0;
+            }
+        }
+        return false;
+    };
+    if (!widget->rect().contains(local) || !overTheView()) {
         return;
     }
     const qreal devicePixelRatio = widget->devicePixelRatioF();

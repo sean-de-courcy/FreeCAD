@@ -1436,6 +1436,24 @@ class TestForkKeymapGui(unittest.TestCase):
         if QtGui.QCursor.pos() != target:
             self.skipTest("the platform doesn't move the cursor")
 
+    def topBand(self):
+        """How far (mm, for the 40 mm high cameras here) a point at the centre of the view has to
+        move up to show 90 px below its top edge: the fresh test profile docks the Tasks panel as
+        an overlay over most of the view, but not its top (a toolbar lies over the top edge in
+        sketch edit), and the list opens only where the view itself is under the cursor."""
+        _, height = Gui.getDocument(self.doc.Name).ActiveView.getSize()
+        return (height / 2 - 90) * 40 / height
+
+    def assertCursorOverTheView(self):
+        """The widget under the cursor is the 3D view's own (no panel over it there)."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        under = QtWidgets.QApplication.widgetAt(QtGui.QCursor.pos())
+        self.assertTrue(
+            under is viewport or (under is not None and viewport.isAncestorOf(under)),
+            f"a {under.metaObject().className() if under else None} is over the view here",
+        )
+
     def frontCamera(self, cx=5, cz=5):
         """An orthographic camera 100 mm in front of (cx, 0, cz) looking along +y, 40 mm high,
         with the near and far planes around the model (fitAll can put the near plane inside the
@@ -1537,7 +1555,7 @@ OrthographicCamera {{
         """Backtick and Down go on, Shift+backtick and Up go back, both wrapping; each step only
         preselects, and the window shortcut doesn't open a second list."""
         self.stack()
-        popup = self.openSelectOther()
+        self.openSelectOther()
         steps = [
             (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 10.0),
             (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 30.0),
@@ -1560,7 +1578,7 @@ OrthographicCamera {{
     def testEnterSelectsTheCurrentEntryOnce(self):
         """Enter makes one pick of the current element and closes the list."""
         a, b = self.stack()
-        popup = self.openSelectOther()
+        self.openSelectOther()
         self.listKey(QtCore.Qt.Key_QuoteLeft)
         self.listKey(QtCore.Qt.Key_QuoteLeft)
         self.assertEqual(self.preselectedY(), 30.0)
@@ -1600,7 +1618,8 @@ OrthographicCamera {{
             setattr(box, prop, 10)
         self.doc.recompute()
         self.sketch.Visibility = False
-        self.frontCamera()
+        # the box in the top band, clear of the Fillet panel
+        self.frontCamera(cz=5 - self.topBand())
         Gui.Selection.clearSelection()
         Gui.runCommand("PartDesign_Fillet")
 
@@ -1624,7 +1643,8 @@ OrthographicCamera {{
         reach the 3D view to disarm the field or cancel the Fillet panel."""
         fillet, field = self.filletScene()
         self.cursorOver(App.Vector(5, 0, 5))
-        popup = self.openSelectOther()
+        self.assertCursorOverTheView()
+        self.openSelectOther()
         self.listKey(QtCore.Qt.Key_Escape)
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
         pump(0.3)
@@ -1704,22 +1724,27 @@ OrthographicCamera {{
         the list opened (a slow machine): the current entry is preselected again while the list
         is open (ops#217, PR 189 review finding 3)."""
         self.stack()
-        popup = self.openSelectOther()
+        self.openSelectOther()
         pump(0.5)  # later than any fixed delay
         self.assertEqual(self.preselectedY(), 0.0)
         Gui.Selection.clearPreselection()
-        pump(0.2)
+        self.assertTrue(
+            waitFor(lambda: self.preselectedY() == 0.0),
+            "the current entry's preselection stays gone",
+        )
         self.assertIsNotNone(self.selectOtherList(), "the list closed")
-        self.assertEqual(self.preselectedY(), 0.0, "the current entry's preselection stays gone")
         self.listKey(QtCore.Qt.Key_Escape)
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
         self.assertIsNone(self.preselectedY())
 
     def testClickOutsideTheListSelectsNothing(self):
         """A click just outside the list, over the front box, closes the list and changes
-        nothing: it isn't passed on to the 3D view (ops#217, PR 189 review finding 4)."""
+        nothing: it isn't passed on to the 3D view (ops#217, PR 189 review finding 4). Off screen
+        Qt doesn't replay such a click with or without the attribute that stops it, so the test
+        also checks the attribute (PR 197 review finding 5)."""
         self.stack()
         popup = self.openSelectOther()
+        self.assertTrue(popup.testAttribute(QtCore.Qt.WA_NoMouseReplay))
         outside = popup.geometry().topLeft() - QtCore.QPoint(8, 8)
         window = Gui.getMainWindow()
         at = window.mapFromGlobal(outside)
@@ -1727,6 +1752,40 @@ OrthographicCamera {{
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
         pump(0.3)
         self.assertEqual(self.selectedElements(), [], "the click outside selected in the 3D view")
+
+    def testSelectOtherDoesNothingOverATaskPanelOverlay(self):
+        """With the cursor over a task panel docked as an overlay over the 3D view (its content,
+        where the panel keeps the mouse), backtick opens no list: a click there wouldn't reach
+        the view either (PR 197 review finding 2)."""
+        self.filletScene()
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        taskView = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Tasks")
+        # a point of the view where the panel's content lies
+        spot = None
+        for fy in (0.5, 0.6, 0.7, 0.4):
+            for fx in (0.5, 0.6, 0.7, 0.8):
+                target = viewport.mapToGlobal(
+                    QtCore.QPoint(int(viewport.width() * fx), int(viewport.height() * fy))
+                )
+                under = QtWidgets.QApplication.widgetAt(target)
+                if under is not None and taskView is not None and taskView.isAncestorOf(under):
+                    if under.metaObject().className() not in ("QWidget", "QScrollArea"):
+                        spot = target
+                        break
+            if spot is not None:
+                break
+        if spot is None:
+            self.skipTest("no task panel overlay over the view here")
+        QtGui.QCursor.setPos(spot)
+        pump(0.1)
+        if QtGui.QCursor.pos() != spot:
+            self.skipTest("the platform doesn't move the cursor")
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.3)
+        self.assertIsNone(self.selectOtherList(), "a list opened under the task panel")
 
     def testSelectOtherDoesNothingUnderAWindowOverTheView(self):
         """With the cursor over a window in front of the 3D view (a floating panel), backtick
@@ -1763,8 +1822,9 @@ OrthographicCamera {{
         """In a Fillet's armed field a commit toggles the element once, and cycling the list
         toggles nothing. (A face: off screen the 3D view picks no edges.)"""
         fillet, field = self.filletScene()
-        self.cursorOver(App.Vector(5, 0, 5))
-        popup = self.openSelectOther()
+        self.cursorOverSketch(App.Vector(5, 0, 5))
+        self.assertCursorOverTheView()
+        self.openSelectOther()
         self.listKey(QtCore.Qt.Key_QuoteLeft)  # the second entry
         sub = Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1]
         self.assertTrue(sub.startswith("Face"), sub)
