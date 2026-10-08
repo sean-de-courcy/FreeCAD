@@ -245,7 +245,8 @@ names it.
 | `fix/140-sketcher-external-types` | fix | ops#140 | - | `integration` `800c03ab49` | `363bb33ea0` (fork PR 214), 2026-10-08 | when upstream keeps `ExternalTypes` parallel to `ExternalGeometry` and `breakLink` keeps shadows |
 | `fix/237-pr214-followups` | fix | ops#237 | - | `fix/140-sketcher-external-types` `1218ee0079` | `1d0e0a37c1` (fork PR 218), 2026-10-08 | with `fix/140-sketcher-external-types` |
 | `fix/231-property-editor-transactions` | fix | ops#231 | - | `integration` `800c03ab49` | `db8ad21ceb` (fork PR 213), 2026-10-08 | when upstream's `PropertyEditor` Add/Delete/Move Property and `DlgAddProperty` join a booked transaction and close only their own; `DocumentObject::renameDynamicProperty` completes a rename a handler threw after |
-| `fix/235-transaction-rename-order` | fix | ops#235 | - | `integration` `79b75b8f45` (stacked on fork PR 213) | (fork PR 216) | when upstream's `TransactionObject::applyChn` applies entries in a defined order with per-entry error handling |
+| `fix/235-transaction-rename-order` | fix | ops#235 | - | `integration` `79b75b8f45` (stacked on fork PR 213) | `ecb2ada10a` (fork PR 216), 2026-10-08 | when upstream's `TransactionObject::applyChn` applies entries in a defined order with per-entry error handling |
+| `fix/239-revolution-first-solid-followups` | fix | ops#239 | - | `integration` `5169738cd5` | (fork PR 220) | with the ops#191 row: when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
 
 ## Fork-only commits in carried topics
 
