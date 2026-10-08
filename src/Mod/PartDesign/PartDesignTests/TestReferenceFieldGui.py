@@ -80,7 +80,7 @@ from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
-from PartDesignTests.Scenarios.harness import X, Z, edge, face
+from PartDesignTests.Scenarios.harness import X, Z, edge, face, vertex
 from PartDesignTests.TestDressUpDeleteKeyGui import focus, pump, taskButton, waitFor
 
 STATE_ROLE = QtCore.Qt.UserRole + 1
@@ -3964,12 +3964,13 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T34, T37: the Hole (W9) ------------------------------------------------------------------
 
-    def plate(self, positions=None, boss=False):
+    def plate(self, positions=None, boss=False, arc=False, binder=False):
         """The Plate: a 20 x 20 x 10 additive box; a sketch on its top with three circles r = 1,
         at (5, 5), (15, 5) and (10, 15), and a point at (10, 10); a hole of diameter 2 through
         all, on circles and arcs (6), from the sketch whole or the given positions. Each hole
         removes 10 pi. With boss, a cylinder r = 2, 2 high, centred at (10, 10) on the plate,
-        before the hole."""
+        before the hole. With arc, the sketch has a half circle r = 1 centred at (5, 15) too.
+        With binder, a shape binder of the sketch whole, before the hole."""
         import Part
 
         self.body = models.body(self.doc)
@@ -3983,12 +3984,17 @@ class TestReferenceFieldGui(unittest.TestCase):
             models.circle(10, 15, 1),
             Part.Point(App.Vector(10, 10, 0)),
         ]
+        if arc:
+            geometry.append(Part.ArcOfCircle(models.circle(5, 15, 1), 0, math.pi))
         self.holes = models.sketch(self.doc, "Holes", geometry, self.body, z=10)
         if boss:
             self.boss = self.body.newObject("PartDesign::AdditiveCylinder", "Boss")
             self.boss.Radius = 2
             self.boss.Height = 2
             self.boss.Placement = App.Placement(App.Vector(10, 10, 10), App.Rotation())
+        if binder:
+            self.binder = self.body.newObject("PartDesign::ShapeBinder", "Binder")
+            self.binder.Support = [(self.holes, "")]
         self.doc.recompute()
         hole = self.body.newObject("PartDesign::Hole", "Hole")
         hole.Profile = (self.holes, positions or [])
@@ -4137,3 +4143,197 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(hole.isValid(), hole.getStatusString())
         self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
+
+    def testHolePositionsArmingShowsTheSketch(self):
+        """PR 169 H1: the hole's sketch hidden, as after the hole's creation: arming the positions
+        shows it (its circles and points can be picked in the 3D view) and hides the hole;
+        disarming hides it again, and so does Cancel while armed."""
+        hole = self.plate()
+        self.holes.ViewObject.Visibility = False
+        self.doc.openTransaction("Edit Hole")
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: self.holes.ViewObject.Visibility), "the sketch is hidden")
+        self.assertFalse(hole.ViewObject.Visibility, "the hole stays shown")
+        field.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not armed(field)))
+        self.assertTrue(
+            waitFor(lambda: not self.holes.ViewObject.Visibility), "disarming left the sketch shown"
+        )
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: self.holes.ViewObject.Visibility))
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
+        self.assertFalse(self.holes.ViewObject.Visibility, "Cancel left the sketch shown")
+        self.assertTrue(hole.ViewObject.Visibility, "Cancel left the hole hidden")
+
+    def testHolePositionsRepickWidensTheType(self):
+        """PR 169 M1, L5: under "Circles and arcs", circles 1 and 2 listed (20 pi); the first
+        entry's Re-pick onto the sketch's point: the type widens to 7 in the same step, the combo
+        follows, and the point and circle 2 make two holes, 20 pi."""
+        hole = self.plate()
+        first, second = self.circleOf(5, 5), self.circleOf(15, 5)
+        hole.Profile = (self.holes, [first, second])
+        self.assertHoles(hole, 2)
+        self.edit(hole, count=1)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "BaseProfileType")
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Re-pick"].trigger()
+        menu.close()
+        pump()
+        point = self.pointOf(10, 10)
+        self.pick(self.holes, point)
+        self.assertTrue(waitFor(lambda: self.positionsSubs(hole) == [point, second]), hole.Profile)
+        self.assertEqual(hole.BaseProfileType, 7)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() == 1), "the combo didn't follow")
+        self.assertHoles(hole, 2)
+
+    def testHolePositionsUndoNarrowsTheType(self):
+        """PR 169 M2, L5: the sketch whole under "Circles and arcs" (30 pi); the point picked
+        widens the type to 7 (10 pi); the field's Ctrl+Z gives the sketch whole and type 6 back
+        (30 pi, not 40). The point and circle 1 picked (7, 20 pi), Delete on the point: circle 1
+        under 6 again. The point picked again, then Cancel: the sketch whole under 6, 30 pi."""
+        hole = self.plate()
+        self.doc.openTransaction("Edit Hole")
+        self.edit(hole, count=1)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "BaseProfileType")
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        point, first = self.pointOf(10, 10), self.circleOf(5, 5)
+        self.pick(self.holes, point)
+        self.assertEqual(self.positionsSubs(hole), [point])
+        self.assertEqual(hole.BaseProfileType, 7)
+        self.assertHoles(hole, 1)
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: self.positionsSubs(hole) == []), hole.Profile)
+        self.assertEqual(hole.BaseProfileType, 6)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() == 0), "the combo didn't follow")
+        self.assertHoles(hole, 3)
+
+        self.arm(field, byFocus=False)
+        self.pick(self.holes, point)
+        self.pick(self.holes, first)
+        self.assertEqual(self.positionsSubs(hole), [point, first])
+        self.assertEqual(hole.BaseProfileType, 7)
+        self.assertHoles(hole, 2)
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.positionsSubs(hole) == [first]), hole.Profile)
+        self.assertEqual(hole.BaseProfileType, 6)
+        self.assertHoles(hole, 1)
+
+        self.arm(field, byFocus=False)
+        self.pick(self.holes, point)
+        self.assertEqual(hole.BaseProfileType, 7)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.assertLink(hole.Profile, self.holes, [])
+        self.assertEqual(hole.BaseProfileType, 6)
+        self.assertHoles(hole, 3)
+
+    def testHolePositionsArcWidensACirclesOnlyType(self):
+        """PR 169 L3: a type set from Python, circles only (2): an arc picked widens it by the
+        arcs' bit alone, to circles and arcs (6), and the combo shows it; the arc makes a hole at
+        its centre, 10 pi."""
+        hole = self.plate(arc=True)
+        hole.BaseProfileType = 2
+        self.doc.recompute()
+        self.edit(hole, count=1)
+        combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "BaseProfileType")
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        halfCircle = self.circleOf(5, 15)
+        self.pick(self.holes, halfCircle)
+        self.assertEqual(self.positionsSubs(hole), [halfCircle])
+        self.assertEqual(hole.BaseProfileType, 6)
+        self.assertTrue(waitFor(lambda: combo.currentIndex() == 0), "the combo didn't follow")
+        self.assertHoles(hole, 1)
+
+    def testHolePositionsOnFaces(self):
+        """PR 169 M3, as stock: the boss's top face (flat, a circle among its edges) makes a hole
+        at the circle's centre from z = 12 (12 pi); its own rim, a bounding edge, is refused
+        beside it (the hole would be cut twice). The boss's cylindrical face: holes at its two
+        circles along its axis, 12 pi down or 2 pi up (Reversed), and its rim refused beside it;
+        with the rim listed, the top face is refused. A flat face with no circle is refused, with the reason."""
+        hole = self.plate(boss=True)
+        boss = self.boss
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        [top] = face(normal=(0, 0, 1), through=(10, 10, 12)).one(boss.Shape)
+        [side] = face(surface="cylinder").one(boss.Shape)
+        [rim] = edge("circle", center=(10, 10, 12), radius=2).one(boss.Shape)
+        self.pick(boss, top)
+        self.assertLink(hole.Profile, boss, [top])
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
+        self.assertIn("face", self.refusedPick(boss, rim))
+        self.assertLink(hole.Profile, boss, [top])
+
+        self.pick(self.holes, "")
+        self.assertLink(hole.Profile, self.holes, [])
+        self.pick(boss, side)
+        self.assertLink(hole.Profile, boss, [side])
+        # The direction is the cylinder's axis, either sense (Hole::guessNormalDirection): one
+        # way the holes go down through the plate (12 pi), the other up out of the boss (2 pi)
+        removed = []
+        for reversed in (False, True):
+            hole.Reversed = reversed
+            self.doc.recompute()
+            self.assertTrue(hole.isValid(), hole.getStatusString())
+            removed.append(boss.Shape.Volume - hole.Shape.Volume)
+        for got, want in zip(sorted(removed), (2 * math.pi, 12 * math.pi)):
+            self.assertAlmostEqual(got, want, places=3)
+        hole.Reversed = False
+        self.assertIn("face", self.refusedPick(boss, rim))
+        self.assertLink(hole.Profile, boss, [side])
+
+        self.pick(self.holes, "")
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [rim])
+        self.assertIn("face", self.refusedPick(boss, top))
+        self.assertLink(hole.Profile, boss, [rim])
+        [plain] = face(normal=(-1, 0, 0), through=(0, 0, 0)).one(boss.Shape)
+        self.assertIn("circle", self.refusedPick(boss, plain))
+        self.assertLink(hole.Profile, boss, [rim])
+
+    def testHolePositionsWholeBinderAndSolid(self):
+        """PR 169 M3: a shape binder of the sketch, whole, gives the sketch's three holes (30 pi);
+        a solid whole is refused, with a reason naming the solid."""
+        hole = self.plate(binder=True)
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        self.pick(self.binder, "")
+        self.assertLink(hole.Profile, self.binder, [])
+        self.assertHoles(hole, 3)
+        self.assertIn("solid", self.refusedPick(self.plateBox, ""))
+        self.assertLink(hole.Profile, self.binder, [])
+
+    def testHolePositionsVertices(self):
+        """PR 169 L1, L2: a vertex of the sketch on one of its curves (circle 1's seam) is refused,
+        as the sketch whole leaves it out; a solid's vertex is taken, as stock takes it from a
+        preselection: the plate's corner (20, 20, 10), the type widened to 7, a quarter column
+        drilled down from it, 10 pi / 4."""
+        hole = self.plate()
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        seam = None
+        for i, point in enumerate(self.holes.Shape.Vertexes):
+            if abs(point.Point.distanceToPoint(App.Vector(5, 5, 10)) - 1) < 1e-6:
+                seam = "Vertex%d" % (i + 1)
+        self.assertIsNotNone(seam)
+        self.assertIn("curve", self.refusedPick(self.holes, seam))
+        self.assertLink(hole.Profile, self.holes, [])
+        [corner] = vertex(at=(20, 20, 10)).one(self.plateBox.Shape)
+        self.pick(self.plateBox, corner)
+        self.assertLink(hole.Profile, self.plateBox, [corner])
+        self.assertEqual(hole.BaseProfileType, 7)
+        self.assertAlmostEqual(self.removed(hole), 10 * math.pi / 4, places=3)
