@@ -71,6 +71,35 @@ enum class MeasureType
     Invalid
 };
 
+// FreeCAD-CH (ops#153): Quick Measure's distances between two references
+struct DistanceResult
+{
+    bool hasMin = false;    // false: a shape is missing, or the time limit ran out first
+    bool timedOut = false;  // the time limit ran out before everything was computed
+    double min = 0.0;
+    bool inside = false;  // one shape lies inside the other (a solid): min is 0
+    Base::Vector3d minFrom, minTo;
+    bool hasMax = false;
+    double max = 0.0;
+    bool maxExact = false;  // false: a lower bound (sampled, then refined locally)
+    Base::Vector3d maxFrom, maxTo;
+    bool hasCenter = false;
+    double center = 0.0;
+    Base::Vector3d centerFrom, centerTo;
+};
+
+// FreeCAD-CH (ops#153): the summed lengths and areas of a selection, and its counts per kind
+struct SumResult
+{
+    double length = 0.0;
+    double area = 0.0;
+    int vertices = 0;
+    int edges = 0;
+    int faces = 0;
+    int solids = 0;
+    int other = 0;
+};
+
 class MeasureExport Measurement: public Base::BaseClass
 {
     TYPESYSTEM_HEADER_WITH_OVERRIDE();
@@ -88,6 +117,11 @@ public:
     /// Add a reference
     int addReference3D(App::DocumentObject* obj, const std::string& subName);
     int addReference3D(App::DocumentObject* obj, const char* subName);
+    /// FreeCAD-CH (ops#153): set all references at once (one findType())
+    void setReferences3D(
+        const std::vector<App::DocumentObject*>& objects,
+        const std::vector<std::string>& subNames
+    );
 
     MeasureType getType();
     MeasureType findType();
@@ -121,6 +155,13 @@ public:
 
     // Calculate the area of selection
     double area() const;
+
+    // FreeCAD-CH (ops#153): min, max and center distances between exactly two references,
+    // within timeLimitMs
+    DistanceResult distances(int timeLimitMs) const;
+
+    // FreeCAD-CH (ops#153): lengths and areas summed per kind, over any number of references
+    SumResult sums() const;
 
     static Base::Vector3d toVector3d(const gp_Pnt gp)
     {

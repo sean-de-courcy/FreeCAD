@@ -194,7 +194,8 @@ names it.
 | `fix/148-stale-previews` | fix | ops#148 | upstream issues 32414, 24326 | `integration` `ec7262a329` | `7e373c0303` (fork PR 165), 2026-10-07 | a new base fixes upstream issues 32414 and 24326 |
 | `fix/146-esc-and-selection-filters` | fix | ops#146, ops#147 | upstream issues 23518, 30992, 28305, 26645 | `integration` `50485c0283` | `9dd9ca6159` (fork PR 160), 2026-10-07 | a new base fixes upstream issues 23518, 30992, 28305 and 26645, and the fork-only choices go with it or are dropped: Clarify Selection on `` ` ``, the filter off in sketch edit and only on element picks, its status-bar button, "No Selection Filters" never clearing a task's gate |
 | `feat/150-w8-pipe-paths` | feat | ops#150 | - | `feat/150-w7-loft-pipe-sections` `d3a273613c` (stacked on fork PR 163) | `9c31a0250c` (fork PR 166), 2026-10-07 | never (fork feature) |
-| `fix/196-197-followups` | fix | ops#196, ops#197 | - | `integration` `9dd9ca6159` | (fork PR 167) | when upstream takes the ops#148 and ops#146 fixes (drop with them) |
+| `fix/196-197-followups` | fix | ops#196, ops#197 | - | `integration` `9dd9ca6159` | `bc94aa3404` (fork PR 167), 2026-10-07 | when upstream takes the ops#148 and ops#146 fixes (drop with them) |
+| `feat/153-quick-measure` | feat | ops#153 | - | `integration` `9dd9ca6159` | (fork PR 168) | never (fork feature); refit when upstream changes `QuickMeasure::printResult` or `Measure::Measurement` |
 
 ## Fork-only commits in carried topics
 
