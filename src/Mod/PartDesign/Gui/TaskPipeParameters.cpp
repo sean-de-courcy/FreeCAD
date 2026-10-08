@@ -41,6 +41,7 @@
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <App/Origin.h>
+#include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
@@ -501,7 +502,20 @@ bool TaskPipeParameters::accept()
                 if (added) {
                     it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent);
                     if (it->second) {
+                        // ops#225: its own shape before a link maps names in it: the shape
+                        // pasted from the original names its elements after the original, and
+                        // the pipe's references were then found again by geometry, with a warning
+                        it->second->recomputeFeature();
                         copies.push_back(it->second);
+                    }
+                    else {
+                        // ops#225: say so, since the pipe still reaches outside its body
+                        Base::Console().warning(
+                            "%s: '%s' can't be copied into the body; it stays a reference to "
+                            "outside it\n",
+                            pipe->Label.getValue(),
+                            obj->Label.getValue()
+                        );
                     }
                 }
                 return it->second ? it->second : obj;
@@ -518,17 +532,23 @@ bool TaskPipeParameters::accept()
                 );
             }
 
-            std::vector<App::PropertyLinkSubList::SubSet> subSets;
-            for (auto& subSet : pipe->Sections.getSubListValues()) {
-                if (outside(subSet.first)) {
-                    subSets.emplace_back(copied(subSet.first), subSet.second);
-                }
-                else {
-                    subSets.push_back(subSet);
+            // ops#225: the sections entry by entry, written only when one was copied; the others
+            // keep their shadows, so their guess records stay (setSubListValues dropped them all)
+            std::vector<App::DocumentObject*> objs = pipe->Sections.getValues();
+            std::vector<std::string> subs = pipe->Sections.getSubValues();
+            std::vector<App::PropertyLinkBase::ShadowSub> shadows = pipe->Sections.getShadowSubs();
+            shadows.resize(subs.size());
+            bool changed = false;
+            for (std::size_t i = 0; i < objs.size(); ++i) {
+                if (outside(objs[i]) && copied(objs[i]) != objs[i]) {
+                    objs[i] = copied(objs[i]);
+                    shadows[i] = App::PropertyLinkBase::ShadowSub();
+                    changed = true;
                 }
             }
-
-            pipe->Sections.setSubListValues(subSets);
+            if (changed) {
+                pipe->Sections.setValues(std::move(objs), std::move(subs), std::move(shadows));
+            }
         }
     }
 

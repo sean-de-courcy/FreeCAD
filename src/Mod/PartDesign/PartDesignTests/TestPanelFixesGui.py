@@ -31,6 +31,8 @@ import Part
 from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.Scenarios.harness import Z, face
+from PartDesignTests.TestDressUpDeleteKeyGui import reportText
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 
 V = App.Vector
@@ -144,9 +146,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         pump(0.2)
 
-    def answerModals(self):
-        """Until self.answering is False: answers the copy dialog (DlgReference) with its default,
-        Make independent copy, and closes any message box; records each in self.modals."""
+    def answerModals(self, choice="radioIndependent"):
+        """Until self.answering is False: answers the copy dialog (DlgReference) with `choice`
+        (default its default, Make independent copy), and closes any message box; records each in
+        self.modals."""
         self.answering = True
 
         def poll():
@@ -154,10 +157,10 @@ class TestPanelFixesGui(unittest.TestCase):
                 return
             widget = QtWidgets.QApplication.activeModalWidget()
             if widget is not None:
-                independent = widget.findChild(QtWidgets.QRadioButton, "radioIndependent")
-                if independent is not None:
+                radio = widget.findChild(QtWidgets.QRadioButton, choice)
+                if radio is not None:
                     self.modals.append("DlgReference")
-                    independent.setChecked(True)
+                    radio.setChecked(True)
                     widget.accept()
                 elif isinstance(widget, QtWidgets.QMessageBox):
                     self.modals.append("QMessageBox: " + widget.text())
@@ -314,6 +317,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+        # ops#225: the copies' edges are found by name, not again by geometry with a warning
+        self.assertNotIn("Warning", pipe.State)
+        self.assertEqual(App.getReferenceReport(pipe), [])
 
     def testPipeCopiesASpineUsedTwiceOnce(self):
         """ops#180: the spine outside the body is the auxiliary spine too: OK makes one copy, used
@@ -349,7 +355,7 @@ class TestPanelFixesGui(unittest.TestCase):
 
         class Observer:
             def slotChangedObject(self, obj, prop):
-                if obj == pipe and prop in ("Spine", "AuxiliarySpine"):
+                if obj == pipe and prop in ("Spine", "AuxiliarySpine", "Sections"):
                     written.append(prop)
 
         observer = Observer()
@@ -364,8 +370,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIs(pipe.AuxiliarySpine[0], link)
         self.assertFalse(self.body.hasObject(link))
         # ops#180 round: the link kept is not written back (a write drops the property's shadows
-        # and its ops#127 guess record)
+        # and its ops#127 guess record); ops#225: nor are the sections, none of them copied
         self.assertEqual(written, [])
+        # ops#225: the Report view says the link was kept
+        self.assertIn("'AuxLink' can't be copied into the body", reportText() or "")
 
     def testPipeCopiesASectionWithoutAuxiliarySpine(self):
         """4, the null: spine in the body, no auxiliary spine, one section outside the body. OK
@@ -388,6 +396,85 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(copy))
         self.assertIs(kept, upper)
         self.assertIsNone(pipe.AuxiliarySpine)
+
+    def testPipeDependentCopyOfASpineUsedTwice(self):
+        """ops#225: as testPipeCopiesASpineUsedTwiceOnce, with Make dependent copy: one binder,
+        used by both, and the sweep is the Rod's V = 120."""
+        pipe = self.rod(spineInBody=False)
+        pipe.AuxiliarySpine = (self.spine, ["Edge1", "Edge2"])
+        self.doc.recompute()
+        before = set(self.body.Group)
+        self.edit(pipe)
+        self.answerModals("radioDependent")
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        added = [obj for obj in self.body.Group if obj not in before]
+        self.assertEqual(len(added), 1, [obj.Name for obj in added])
+        self.assertIs(pipe.Spine[0], added[0])
+        self.assertIs(pipe.AuxiliarySpine[0], added[0])
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+        # ops#225: the copies' edges are found by name, not again by geometry with a warning
+        self.assertNotIn("Warning", pipe.State)
+        self.assertEqual(App.getReferenceReport(pipe), [])
+
+    def testPipeCopyKeepsASectionsGuess(self):
+        """ops#225: OK copies the spine from outside the body; the section, a face in the body
+        found again by geometry (the pad's rectangle drawn again the other way round), keeps its
+        guess and warning. OK wrote every section back with plain names, which dropped both."""
+        self.body = models.body(self.doc)
+        base = models.sketch(self.doc, "Base", models.rectangle(-2, -2, 2, 2), self.body)
+        pad = models.pad(self.body, base, 10)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body)
+        spine = models.sketch(self.doc, "Spine", [line(0, 0, 0, 10)], None, placement=XZ)
+        self.doc.recompute()
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = profile
+        pipe.Spine = (spine, ["Edge1"])
+        top = face("plane", normal=Z, through=(0, 0, 10)).one(pad.Shape)
+        pipe.Sections = [(pad, top)]
+        pipe.Transformation = "Multisection"
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        base.deleteAllGeometry()
+        base.addGeometry(models.polygon([(2, 2), (2, -2), (-2, -2), (-2, 2)]), False)
+        self.doc.recompute()
+        self.assertIn("Warning", pipe.State)
+        self.assertEqual([r["property"] for r in App.getReferenceReport(pipe)], ["Sections"])
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.assertIsNot(pipe.Spine[0], spine)
+        self.assertTrue(self.body.hasObject(pipe.Spine[0]))
+        self.doc.recompute()
+        self.assertIn("Warning", pipe.State)
+        self.assertEqual([r["property"] for r in App.getReferenceReport(pipe)], ["Sections"])
+
+    def testPipeWidgetsWriteAfterLoad(self):
+        """ops#225: the widgets loaded under signal blockers (ops#180) still write once the panel
+        is open: the curvilinear box (and the pipe recomputes: the stale pipe sweeps 10, V = 40),
+        the Mode combo, the Transition combo."""
+        pipe = self.rod()
+        self.stale(pipe)
+        self.edit(pipe)
+        pump(0.5)
+        curvilinear = self.widget(QtWidgets.QCheckBox, "curvilinear")
+        was = pipe.AuxiliaryCurvilinear
+        curvilinear.setChecked(not curvilinear.isChecked())
+        pump()
+        self.assertNotEqual(pipe.AuxiliaryCurvilinear, was)
+        self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+        self.widget(QtWidgets.QComboBox, "comboBoxMode").setCurrentIndex(1)
+        pump()
+        self.assertEqual(pipe.Mode, "Fixed")
+        self.widget(QtWidgets.QComboBox, "comboBoxTransition").setCurrentIndex(1)
+        pump()
+        self.assertEqual(pipe.Transition, "Right corner")
 
     # -- ops#170 5, 6: the Hole -----------------------------------------------------------------
 
