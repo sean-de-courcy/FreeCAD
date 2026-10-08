@@ -26,6 +26,7 @@
 #pragma once
 
 #include <App/DocumentObject.h>
+#include <App/DocumentObserver.h>
 #include <Gui/ViewProviderFeaturePython.h>
 #include <Gui/ViewProviderSuppressibleExtension.h>
 #include <Mod/Part/Gui/ViewProvider.h>
@@ -127,7 +128,9 @@ protected:
     virtual TaskDlgFeatureParameters* getEditDialog();
 
     std::string oldWb;
-    ViewProvider* previouslyShownViewProvider {nullptr};
+    /// The feature the body showed when the edit began, shown again when it ends; it may be
+    /// deleted during the edit (ops#187)
+    App::DocumentObjectWeakPtrT previouslyShownFeature {nullptr};
 
     bool isSetTipIcon {false};
 

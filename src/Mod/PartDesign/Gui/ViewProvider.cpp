@@ -170,11 +170,7 @@ bool ViewProvider::setEdit(int ModNum)
         // the body container. That should never happen, but in some cases we find models with a
         // problem like that.
         if (ViewProviderBody* bodyViewProvider = getBodyViewProvider()) {
-            PartDesign::Feature* shownFeature = bodyViewProvider->getShownFeature();
-
-            previouslyShownViewProvider = freecad_cast<ViewProvider*>(
-                Gui::Application::Instance->getViewProvider(shownFeature)
-            );
+            previouslyShownFeature = bodyViewProvider->getShownFeature();
         }
 
         // clear the selection (convenience)
@@ -215,9 +211,11 @@ void ViewProvider::unsetEdit(int ModNum)
         Gui::Command::assureWorkbench(oldWb.c_str());
     }
 
-    // ensure that after edit we still show the same feature
-    if (previouslyShownViewProvider) {
-        previouslyShownViewProvider->show();
+    // ensure that after edit we still show the same feature, if it is still there
+    if (auto feature = previouslyShownFeature.get<App::DocumentObject>()) {
+        if (auto shown = freecad_cast<ViewProvider*>(Gui::Application::Instance->getViewProvider(feature))) {
+            shown->show();
+        }
     }
 
     if (ModNum == ViewProvider::Default) {
