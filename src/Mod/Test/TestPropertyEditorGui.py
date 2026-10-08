@@ -521,6 +521,172 @@ class TestPropertyEditorGui(unittest.TestCase):
             App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
 
+    # Review follow-ups of fork PR 213 (ops#231, in ops#235).
+
+    def otherDocument(self):
+        other = App.newDocument("TestPropertyEditorGuiOther")
+        other.UndoMode = 1
+        return other
+
+    def testEditorCommitsInItsDocument(self):
+        """N1: "Edit" booked in the VarSet's document, and the editor closed with Return while
+        another document is active: the booking is committed where it was made, not left open
+        (a task opened later there would take it as its own). Making another document active
+        closes the editor already; Esc after that has nothing left to revert."""
+        other = self.otherDocument()
+        try:
+            App.setActiveDocument(self.doc.Name)
+            undos = self.doc.UndoCount
+            widget = self.openValueEditor("Width")
+            self.assertNotEqual(self.doc.getBookedTransactionID(), 0)
+            QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+            QtTest.QTest.keyClicks(widget, "9")
+            App.setActiveDocument(other.Name)
+            QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+            pump(0.3)
+            self.assertEqual(self.obj.Width, 9)
+            self.assertEqual(self.doc.getBookedTransactionID(), 0)
+            self.assertEqual(self.doc.UndoCount, undos + 1)
+            self.assertTrue(self.doc.UndoNames[0].startswith("Edit"), self.doc.UndoNames)
+        finally:
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
+
+    def addWithFailedCreate(self, name, retryType=None):
+        """Add Property from the menu: name typed, then a type that can't be made (an abstract
+        one: the dialog shows an error), then retryType and OK if given; then the dialog closes."""
+
+        def addDialog():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if widget is None or widget.findChild(QtWidgets.QLineEdit, "lineEditName") is None:
+                return None
+            return widget
+
+        def errorBox():
+            widget = QtWidgets.QApplication.activeModalWidget()
+            return widget if isinstance(widget, QtWidgets.QMessageBox) else None
+
+        boxes = []
+        done = []
+
+        def answerBoxes():
+            box = errorBox()
+            if box is not None:
+                boxes.append(box.text())
+                box.button(QtWidgets.QMessageBox.Ok).click()
+            if len(boxes) < 10 and not done:
+                QtCore.QTimer.singleShot(50, answerBoxes)
+
+        def answer(dialog):
+            QtTest.QTest.keyClicks(dialog.findChild(QtWidgets.QLineEdit, "lineEditName"), name)
+            pump(0.2)
+            QtCore.QTimer.singleShot(50, answerBoxes)
+            typeBox = dialog.findChild(QtWidgets.QComboBox, "comboBoxType")
+            typeBox.setCurrentText("App::PropertyLinkBase")
+            pump(0.2)
+            if retryType:
+                typeBox.setCurrentText(retryType)
+                pump(0.2)
+                dialog.accept()
+            dialog.reject()
+            done.append(True)
+
+        # the error is reported as well; the notification area's box can deadlock off screen
+        # (build notes, ops#121)
+        params = App.ParamGet("User parameter:BaseApp/Preferences/NotificationArea")
+        enabled = params.GetBool("NotificationAreaEnabled", True)
+        params.SetBool("NotificationAreaEnabled", False)
+        try:
+            self.throughMenu("Width", "Add Property", addDialog, answer)
+        finally:
+            params.SetBool("NotificationAreaEnabled", enabled)
+        self.assertEqual(self.seen, ["QMenu", "QDialog"])
+        self.assertTrue(any("Failed to add property" in text for text in boxes), boxes)
+
+    def testFailedAddThenCancelLeavesNothingBooked(self):
+        """N2: a property that couldn't be created, then Cancel: the dialog's booking is aborted."""
+        undos = self.doc.UndoCount
+        props = self.obj.PropertiesList
+        self.addWithFailedCreate("Height")
+        self.assertEqual(self.obj.PropertiesList, props)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos)
+
+    def testFailedAddThenRetryIsOneStep(self):
+        """L2: a property that couldn't be created, then another type and OK: one committed step."""
+        undos = self.doc.UndoCount
+        self.addWithFailedCreate("Height", "App::PropertyInteger")
+        self.assertIn("Height", self.obj.PropertiesList)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertEqual(self.doc.UndoCount, undos + 1)
+        self.assertEqual(self.doc.UndoNames[0], "Add property")
+        self.doc.undo()
+        self.assertNotIn("Height", self.obj.PropertiesList)
+
+    def testAddFromVarSetKeepsEditorBookingApart(self):
+        """S3: a value editor open (its "Edit" booking), and Add Property opened from the VarSet
+        (double click): the add doesn't join the editor's booking, and Esc in the editor doesn't
+        take the property away."""
+        undos = self.doc.UndoCount
+        widget = self.openValueEditor("Width")
+        self.assertNotEqual(self.doc.getBookedTransactionID(), 0)
+        Gui.getDocument(self.doc.Name).getObject(self.obj.Name).doubleClicked()
+        dialog = None
+        for _ in range(40):
+            pump(0.05)
+            dialog = next(
+                (
+                    w
+                    for w in QtWidgets.QApplication.topLevelWidgets()
+                    if w.metaObject().className() == "Gui::Dialog::DlgAddProperty"
+                    and w.isVisible()
+                ),
+                None,
+            )
+            if dialog:
+                break
+        self.assertIsNotNone(dialog, "no Add Property dialog")
+        QtTest.QTest.keyClicks(dialog.findChild(QtWidgets.QLineEdit, "lineEditName"), "Height")
+        pump(0.2)
+        dialog.accept()
+        dialog.reject()
+        pump(0.3)
+        self.assertIn("Height", self.obj.PropertiesList)
+        try:
+            alive = widget.isVisible()
+        except RuntimeError:
+            alive = False
+        if alive:
+            QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+            pump(0.3)
+        self.assertIn("Height", self.obj.PropertiesList)
+        self.assertEqual(self.obj.Width, 5)
+        self.assertEqual(self.doc.getBookedTransactionID(), 0)
+        self.assertIn("Add property", self.doc.UndoNames)
+        self.assertEqual(self.doc.UndoCount - undos, self.doc.UndoNames.index("Add property") + 1)
+
+    def testValueEditFailedMoveThenTaskCancel(self):
+        """ops#235: in a task's transaction, Width edited 5 -> 9, then a Move of Width from two
+        VarSets that the target refuses for the second; the task's Cancel brings back every value
+        and leaves the target as it was."""
+        other = self.doc.addObject("App::VarSet", "Second")
+        other.addProperty("App::PropertyInteger", "Width", "Variables")
+        other.Width = 4
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "9")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(self.obj.Width, 9)
+        self.moveThroughMenu("Width", target, objects=[self.obj, other])
+        self.assertTaskAborts(tid, undos)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertEqual(other.getPropertyByName("Width"), 4)
+        self.assertNotIn("Width", target.PropertiesList)
+
     # ops#146 (upstream issue 30992): Esc while editing a value reverted nothing. A number's editor
     # writes the property as it is typed, and Esc then committed the "Edit" transaction.
 

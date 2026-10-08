@@ -534,6 +534,51 @@ TEST_F(RenameHandlerThrows, takenBackWhenHandlerAlwaysThrows)
     EXPECT_EQ(prop->getValue(), value + 2);
 }
 
+// Tests whether a rename taken back after a handler threw, committed, leaves at most one undo
+// step (the expressions renamed and renamed back) that changes nothing on undo and redo (review of
+// fork PR 213)
+TEST_F(RenameHandlerThrows, takenBackCommitted)
+{
+    arrange(false);
+    int undos = doc->getAvailableUndos();
+
+    doc->openTransaction("Rename Property");
+    EXPECT_THROW(varSet->renameDynamicProperty(prop, "NewName"), Base::RuntimeError);
+    doc->commitTransaction();
+
+    int steps = doc->getAvailableUndos() - undos;
+    EXPECT_LE(steps, 1);
+    for (int round = 0; round < 2 * steps; ++round) {
+        EXPECT_TRUE(round % 2 == 0 ? doc->undo() : doc->redo());
+        EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+        EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
+        EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    }
+    EXPECT_EQ(doc->getAvailableUndos(), undos + steps);
+}
+
+// Tests the same when the handler throws again as the rename is taken back
+TEST_F(RenameHandlerThrows, takenBackCommittedWhenHandlerAlwaysThrows)
+{
+    arrange(true);
+    int undos = doc->getAvailableUndos();
+
+    doc->openTransaction("Rename Property");
+    EXPECT_THROW(varSet->renameDynamicProperty(prop, "NewName"), Base::RuntimeError);
+    throws = 0;
+    doc->commitTransaction();
+
+    int steps = doc->getAvailableUndos() - undos;
+    EXPECT_LE(steps, 1);
+    for (int round = 0; round < 2 * steps; ++round) {
+        EXPECT_TRUE(round % 2 == 0 ? doc->undo() : doc->redo());
+        EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+        EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), nullptr);
+        EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    }
+    EXPECT_EQ(doc->getAvailableUndos(), undos + steps);
+}
+
 // Tests whether we can rename a property, undo, and redo it
 TEST_F(RenameProperty, redo)
 {

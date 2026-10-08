@@ -28,6 +28,8 @@
 
 #include <QTreeView>
 
+#include <App/DocumentObserver.h>
+
 #include "PropertyItem.h"
 #include "PropertyModel.h"
 
@@ -63,6 +65,9 @@ GuiExport int openPropertyTransaction(
 /// Commits, or with @a commit false aborts, the transaction @a tid from openPropertyTransaction().
 /// Nothing for 0: an ID of 0 would close the active document's booking, someone else's.
 GuiExport void closePropertyTransaction(int tid, bool commit = true);
+/// FreeCAD-CH (ops#231): whether @a tid is a property editor's open "Edit" booking, which a change
+/// made elsewhere (the Variables panel, Add Property) doesn't join: the editor's Esc aborts it.
+GuiExport bool isEditorBooking(int tid);
 
 /*!
  Put this into the .qss file after Gui--PropertyEditor--PropertyEditor
@@ -210,6 +215,8 @@ private:
     int dragPreviousPos = 0;
 
     int transactionID = 0;
+    // FreeCAD-CH (ops#231): the document transactionID is booked in, where it is closed
+    App::DocumentT transactionDoc;
 
     QColor groupColor;
     QBrush background;

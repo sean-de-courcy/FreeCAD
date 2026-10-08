@@ -62,11 +62,23 @@ namespace
 {
 // FreeCAD-CH (ops#231): the property editors' "Edit" bookings, which openPropertyTransaction()
 // doesn't join (a dialog of its own, e.g. Add Property from the Variables panel, can't know them).
-// An ID is closed with its transaction or forgotten: IDs aren't reused.
+// An editor erases its ID when it closes its booking; an ID no document has booked any more (its
+// transaction closed elsewhere) is forgotten at the next registration. IDs aren't reused.
 std::unordered_set<int>& editorBookings()
 {
     static std::unordered_set<int> ids;
     return ids;
+}
+
+void registerEditorBooking(int tid)
+{
+    auto& ids = editorBookings();
+    std::unordered_set<int> booked;
+    for (auto* doc : App::GetApplication().getDocuments()) {
+        booked.insert(doc->getBookedTransactionID());
+    }
+    std::erase_if(ids, [&booked](int id) { return !booked.contains(id); });
+    ids.insert(tid);
 }
 }  // namespace
 
@@ -405,15 +417,16 @@ void PropertyEditor::openEditor(const QModelIndex& index)
         return;
     }
     // FreeCAD-CH (ops#231): a booked transaction (a task dialog's, before its first change) takes
-    // the edit too: booking "Edit" replaced it, and the dialog's Cancel no longer reverted. The
-    // editor's own booking from a previous edit isn't one to keep. The booking checked is the one
-    // in the document "Edit" books in, the active one, as closeTransaction() and revertEdit() use.
+    // the edit too: booking "Edit" replaced it, and the dialog's Cancel no longer reverted. An
+    // editor's own booking from a previous edit (this one's or another editor's) isn't one to
+    // keep. The booking checked is the one in the document "Edit" books in, the active one;
+    // closeTransaction() and revertEdit() close it there (transactionDoc), whichever is active then.
     App::Document* editDoc = App::GetApplication().getActiveDocument();
     if (!editDoc) {
         return;
     }
     int booked = editDoc->getBookedTransactionID();
-    if (booked != 0 && booked != transactionID) {
+    if (booked != 0 && booked != transactionID && !editorBookings().contains(booked)) {
         FC_LOG("booked transaction");
         return;
     }
@@ -436,7 +449,11 @@ void PropertyEditor::openEditor(const QModelIndex& index)
         str << "...";
     }
     transactionID = editDoc->openTransaction(str.str());
-    editorBookings().insert(transactionID);
+    if (transactionID == 0) {
+        return;
+    }
+    transactionDoc = editDoc;
+    registerEditorBooking(transactionID);
     FC_LOG("editor transaction " << App::GetApplication().getTransactionName(transactionID));
 }
 
@@ -491,17 +508,21 @@ void PropertyEditor::recomputeDocument(App::Document* doc)
 
 void PropertyEditor::closeTransaction()
 {
-    App::Document* doc = App::GetApplication().getActiveDocument();
-    if (!doc) {
+    if (transactionID == 0) {
         return;
     }
-    if (doc->getBookedTransactionID() == transactionID) {
+    // FreeCAD-CH (ops#231): in the document the booking was made in, which needn't be the active
+    // one any more; left open there, a task opened later took it as its own.
+    App::Document* doc = transactionDoc.getDocument();
+    int tid = transactionID;
+    transactionID = 0;
+    transactionDoc = App::DocumentT();
+    editorBookings().erase(tid);
+    if (doc && doc->getBookedTransactionID() == tid) {
         if (autoupdate) {
             recomputeDocument(doc);
         }
-        editorBookings().erase(transactionID);
         doc->commitTransaction();
-        transactionID = 0;
     }
 }
 
@@ -511,11 +532,12 @@ void PropertyEditor::closeTransaction()
 // the value from before the edit is written back.
 void PropertyEditor::revertEdit()
 {
-    App::Document* doc = App::GetApplication().getActiveDocument();
+    App::Document* doc = transactionDoc.getDocument();
     if (doc && transactionID != 0 && doc->getBookedTransactionID() == transactionID) {
         editorBookings().erase(transactionID);
-        doc->abortTransaction();
         transactionID = 0;
+        transactionDoc = App::DocumentT();
+        doc->abortTransaction();
         return;
     }
     if (editingIndex.isValid() && editingValue.isValid()) {
@@ -915,6 +937,11 @@ int Gui::PropertyEditor::openPropertyTransaction(
         return 0;
     }
     return doc->openTransaction(name);
+}
+
+bool Gui::PropertyEditor::isEditorBooking(int tid)
+{
+    return tid != 0 && editorBookings().contains(tid);
 }
 
 void Gui::PropertyEditor::closePropertyTransaction(int tid, bool commit)
@@ -1577,6 +1604,11 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 closePropertyTransaction(tid, false);
                 e.reportException();
                 break;
+            }
+            catch (...) {
+                // FreeCAD-CH (ops#231): our own transaction isn't left open by any throw
+                closePropertyTransaction(tid, false);
+                throw;
             }
             closePropertyTransaction(tid);
             break;

@@ -63,6 +63,7 @@
 #include "MainWindow.h"
 #include "Selection/Selection.h"
 #include "Dialogs/DlgAddProperty.h"
+#include "propertyeditor/PropertyEditor.h"
 #include "VariablesView.h"
 
 using namespace Gui;
@@ -181,31 +182,24 @@ bool runEdit(
     QString& error
 )
 {
-    bool own = doc->getBookedTransactionID() == 0;
-    if (own) {
-        doc->openTransaction(name);
-    }
+    // A booked transaction (a task dialog's) takes the edit; a property editor's "Edit" booking
+    // doesn't (FreeCAD-CH ops#231: the editor's Esc would abort it).
+    int tid = Gui::PropertyEditor::openPropertyTransaction(doc, name.c_str());
     try {
         for (const auto& command : commands) {
             Gui::Command::runCommand(Gui::Command::Doc, command.c_str());
         }
     }
     catch (const Base::Exception& e) {
-        if (own) {
-            doc->abortTransaction();
-        }
+        Gui::PropertyEditor::closePropertyTransaction(tid, false);
         error = QString::fromUtf8(e.what());
         return false;
     }
     catch (...) {
-        if (own) {
-            doc->abortTransaction();
-        }
+        Gui::PropertyEditor::closePropertyTransaction(tid, false);
         throw;
     }
-    if (own) {
-        doc->commitTransaction();
-    }
+    Gui::PropertyEditor::closePropertyTransaction(tid);
     return true;
 }
 
@@ -1115,7 +1109,8 @@ void VariablesView::addVariable()
     if (!target) {
         // Its own committed step: the dialog aborts and reopens its "Add property" transaction
         // as the name or the type is typed, which must not take the VarSet with it.
-        bool own = doc->getBookedTransactionID() == 0;
+        int booked = doc->getBookedTransactionID();
+        bool own = booked == 0 || Gui::PropertyEditor::isEditorBooking(booked);
         QString error;
         std::string command = std::string("App.getDocument('") + doc->getName()
             + "').addObject('App::VarSet', 'Variables')";
