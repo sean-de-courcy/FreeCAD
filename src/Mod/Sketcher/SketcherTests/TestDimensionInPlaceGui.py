@@ -514,7 +514,21 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
                 and len(self.constraints_of("DistanceY")) == 1
             )
 
-        self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
+        # where the M went: to the trim tool's shortcut (a key sent to the viewport still fires
+        # it), and not to the Dimension tool, which saw it first (with the gate open it locked)
+        trims = []
+        trim = FreeCADGui.Command.get("Sketcher_Trimming").getAction()[0]
+
+        def onTrim(*args):
+            trims.append(locked())
+
+        trim.triggered.connect(onTrim)
+        try:
+            self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
+            self.assertTrue(self.wait_until(lambda: trims, 2000), "M didn't start the trim tool")
+        finally:
+            trim.triggered.disconnect(onTrim)
+        self.assertEqual(trims, [False], "the plain M locked the dimension before the trim")
         self.assertFalse(self.wait_until(locked, 500), "the plain M switched the tool to a lock")
 
     def answer_dialogs(self, texts):
