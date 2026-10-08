@@ -228,3 +228,57 @@ class TestSketchCameraOnEditGui(SketcherGuiTestCase):
         self.flush_gui(100)
         height = self.camera()["height"]
         self.assertTrue(math.isfinite(height) and height < 1e6, f"Camera height {height}")
+
+    # C6: the grid with a camera it can't draw for (ops#175) -------------------------------------
+
+    def grid_part_count(self):
+        """The number of grid parts (line sets with their styles) under the edit mode's
+        GridRoot: none while the grid is off or too dense."""
+        from pivy import coin
+
+        search = coin.SoSearchAction()
+        search.setName(coin.SbName("GridRoot"))
+        search.setInterest(coin.SoSearchAction.FIRST)
+        search.apply(self.view.getSceneGraph())
+        path = search.getPath()
+        self.assertIsNotNone(path, "Expected the grid's root in edit mode")
+        return coin.cast(path.getTail(), "SoSeparator").getNumChildren()
+
+    def test_c6_grid_with_a_non_finite_camera(self):
+        """C6: with the grid shown (fixed 1 mm spacing), an orthographic camera of infinite
+        height, and then one centred 1e12 mm away, leave no grid (too dense, or line offsets
+        beyond what an int holds) instead of writing outside the grid's vertex array (the
+        overflow the grid's guard stops, ops#145). A camera 30 mm high over the sketch then
+        draws the grid again."""
+        self.set_param(GENERAL_PARAMS, "Bool", "OrientViewOnEdit", True)
+        self.add_line(V(0, 0, 0), V(10, 0, 0))
+        self.view.setCameraType("Orthographic")
+        self.set_edit()
+        view_provider = self.sketch.ViewObject
+        view_provider.GridAuto = False
+        view_provider.GridSize = 1.0
+        view_provider.ShowGrid = True
+        self.flush_gui(100)
+        self.assertGreater(self.grid_part_count(), 0, "Expected the grid in the fitted view")
+
+        camera = self.view.getCameraNode()
+        height = camera.height.getValue()
+        position = camera.position.getValue().getValue()  # a copy: the field's SbVec3f is live
+
+        camera.height.setValue(math.inf)
+        self.flush_gui(100)
+        self.assertEqual(self.grid_part_count(), 0, "Expected no grid for an infinite height")
+
+        camera.height.setValue(height)
+        self.flush_gui(100)
+        self.assertGreater(self.grid_part_count(), 0, "Expected the grid back")
+
+        far = list(position)
+        far[0] += 1e12
+        camera.position.setValue(far)
+        self.flush_gui(100)
+        self.assertEqual(self.grid_part_count(), 0, "Expected no grid 1e12 mm away")
+
+        camera.position.setValue(position)
+        self.flush_gui(100)
+        self.assertGreater(self.grid_part_count(), 0, "Expected the grid back")

@@ -878,3 +878,60 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.doc.recompute()
         self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 7.0, places=7)
         self.assert_one_undo_step()
+
+    # D21-D23: the review of fork PR 139, the gaps (ops#175) ------------------------------------
+
+    def click_outside(self, popup, edit):
+        """A click outside the field, as a user's: the open popup gets the mouse press."""
+        QTest.mouseClick(
+            popup, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(-20, -20)
+        )
+
+    def test_d21_click_outside_applies(self):
+        """D21: 25 typed, then a click outside the field: the Distance is 25 and the free end
+        at (25, 0), in one undo step."""
+        state = self.place_distance([{"text": "25", "act": self.click_outside}])
+        self.wait_answered(state, 1)
+
+        self.assertFalse(state["seen"][0]["open_after"], "Expected the click to close the field")
+        self.assertAlmostEqual(self.constraints_of("Distance")[0].Value, 25.0, places=9)
+        self.assert_point(self.line_end(), 25, 0)
+        self.assert_one_undo_step()
+
+    def test_d22_click_outside_keeps_the_measured_value_on_invalid_input(self):
+        """D22: 0 (no distance) typed, then a click outside: the field closes and the Distance
+        keeps its measured 10, in one undo step."""
+        state = self.place_distance([{"text": "0", "act": self.click_outside}])
+        self.wait_answered(state, 1)
+
+        self.assertFalse(state["seen"][0]["open_after"], "Expected the click to close the field")
+        distances = self.constraints_of("Distance")
+        self.assertEqual(len(distances), 1)
+        self.assertAlmostEqual(distances[0].Value, 10.0, places=9)
+        self.assert_point(self.line_end(), 10, 0)
+        self.assert_one_undo_step()
+
+    def test_d23_lock_shift_tab_goes_back(self):
+        """D23: the lock's fields: 3, Tab; 4, Shift+Tab back to the first field, which shows
+        the applied 3; 5, Tab; the second field shows the applied 4; Enter. DistanceX = 5 and
+        DistanceY = 4, the point at (5, 4), in one undo step."""
+        state = self.place_lock(
+            [
+                {"text": "3", "key": QtCore.Qt.Key_Tab},
+                {
+                    "text": "4",
+                    "key": QtCore.Qt.Key_Backtab,
+                    "modifier": QtCore.Qt.ShiftModifier,
+                },
+                {"text": "5", "key": QtCore.Qt.Key_Tab},
+                {"key": QtCore.Qt.Key_Return},
+            ]
+        )
+        self.wait_answered(state, 4)
+
+        self.assertTrue(state["seen"][2]["text_before"].startswith("3"), state["seen"][2])
+        self.assertTrue(state["seen"][3]["text_before"].startswith("4"), state["seen"][3])
+        self.assertAlmostEqual(self.constraints_of("DistanceX")[0].Value, 5.0, places=9)
+        self.assertAlmostEqual(self.constraints_of("DistanceY")[0].Value, 4.0, places=9)
+        self.assert_point(self.point(), 5, 4)
+        self.assert_one_undo_step()
