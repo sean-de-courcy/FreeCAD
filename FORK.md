@@ -197,7 +197,8 @@ names it.
 | `fix/196-197-followups` | fix | ops#196, ops#197 | - | `integration` `9dd9ca6159` | `bc94aa3404` (fork PR 167), 2026-10-07 | when upstream takes the ops#148 and ops#146 fixes (drop with them) |
 | `feat/153-quick-measure` | feat | ops#153 | - | `integration` `9dd9ca6159` | `8e39a53440` (fork PR 168), 2026-10-07 | never (fork feature); refit when upstream changes `QuickMeasure::printResult` or `Measure::Measurement` |
 | `feat/150-w9-hole-fields` | feat | ops#150 | - | `feat/150-w8-pipe-paths` `23a6d79be7` (stacked on fork PR 166) | `d162236575` (fork PR 169), 2026-10-07 | never (fork feature) |
-| `fix/149-tree-edit-highlight` | fix | ops#149 | upstream issues 20599, 30499 | `integration` `9dd9ca6159` | (fork PR 171) | a new base styles the item in edit beyond its background |
+| `fix/149-tree-edit-highlight` | fix | ops#149 | upstream issues 20599, 30499 | `integration` `9dd9ca6159` | `5e76a4a186` (fork PR 171), 2026-10-07 | a new base styles the item in edit beyond its background |
+| `fix/150-w2-w3-tests` | fix | ops#150 | - | `feat/150-w9-hole-fields` `b66289dc18` (stacked on fork PR 169) | (fork PR 172) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

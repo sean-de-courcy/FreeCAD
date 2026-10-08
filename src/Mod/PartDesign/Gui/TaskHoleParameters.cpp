@@ -29,7 +29,6 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
-#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <Standard_Failure.hxx>
 
@@ -126,45 +125,12 @@ bool onAnEdge(const TopoDS_Shape& whole, const TopoDS_Shape& vertex)
     return index > 0 && !ancestors.FindFromIndex(index).IsEmpty();
 }
 
-bool bounds(const TopoDS_Shape& face, const TopoDS_Shape& edge)
-{
-    TopTools_IndexedMapOfShape edges;
-    TopExp::MapShapes(face, TopAbs_EDGE, edges);
-    return edges.Contains(edge);
-}
-
-// A face and one of its own edges in the list: Hole::findHoles takes the circle from both, and
-// the hole is cut twice
-bool mixesFaceAndEdge(const App::DocumentObjectT& holeT,
-                      App::DocumentObject* obj,
-                      const Part::TopoShape& whole,
-                      const TopoDS_Shape& picked)
-{
-    auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
-    if (!hole || hole->Profile.getValue() != obj) {
-        return false;  // another object starts the list on it
-    }
-    const bool pickedFace = picked.ShapeType() == TopAbs_FACE;
-    for (const std::string& sub : hole->Profile.getSubValues(false)) {
-        const TopoDS_Shape listed = elementOf(whole, sub);
-        if (listed.IsNull()) {
-            continue;
-        }
-        if (pickedFace && listed.ShapeType() == TopAbs_EDGE && bounds(picked, listed)) {
-            return true;
-        }
-        if (!pickedFace && listed.ShapeType() == TopAbs_FACE && bounds(listed, picked)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // A hole's position, what Hole::execute makes a hole from and the command takes from a
 // preselection (ops#150 W9; PR 169 review M3): a circle, an arc or a point of a sketch or of a
 // solid in the hole's body; a cylindrical face, or a flat one with a circle among its edges; a
 // sketch whole, or a whole object without a solid that has circles or points (a binder of a
-// sketch)
+// sketch). A circle listed twice, as a face and its own rim or as two faces' shared edge, is
+// drilled once: Hole::findHoles takes each edge of the list once (PR 172 review L2)
 bool acceptPosition(const App::DocumentObjectT& holeT,
                     App::DocumentObject* obj,
                     const char* sub,
@@ -218,8 +184,6 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
         why = notAPosition;
         return false;
     }
-    constexpr const char* twice =
-        QT_TR_NOOP("A face and one of its own edges would cut the hole twice: pick either.");
     switch (element.ShapeType()) {
         case TopAbs_VERTEX:
             // The sketch whole leaves these out too (Hole::findHoles): a misclick on a circle's
@@ -234,20 +198,12 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
             if (BRepAdaptor_Curve(TopoDS::Edge(element)).GetType() != GeomAbs_Circle) {
                 break;
             }
-            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
-                why = twice;
-                return false;
-            }
             return true;
         case TopAbs_FACE: {
             const GeomAbs_SurfaceType surface = BRepAdaptor_Surface(TopoDS::Face(element)).GetType();
             if (surface != GeomAbs_Cylinder && (surface != GeomAbs_Plane || !hasCircle(element))) {
                 why = QT_TR_NOOP("A face takes holes when it is cylindrical, or flat with a circle "
                                  "among its edges.");
-                return false;
-            }
-            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
-                why = twice;
                 return false;
             }
             return true;

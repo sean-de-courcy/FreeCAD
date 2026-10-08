@@ -1344,19 +1344,39 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(rows, {("Base", 0)})
 
     def testMarkBrokenSurvivesAPick(self):
-        """Mark broken on the guessed entry, then another edge picked: the rejection stays (the
-        entry broken), not dropped by the write."""
-        pad, fillet, corner = self.redrawnFillet()
+        """Mark broken on the second guessed entry; the first deleted: the rejection moves up with
+        its entry (index 0 now, still broken); another edge picked: it stays broken beside the
+        new exact entry, not dropped by the count-changing writes. Without the field carrying
+        the records by entry (ReferenceField::write) the entry stays broken by its "?" name, but
+        the report loses the rejection (seen with the carry disabled, PR 142's review gap)."""
+        pad, fillet = self.redrawnTwoEdgeFillet()
         [field] = self.edit(fillet)
-        menu = openMenu(field, 0)
+        self.assertEqual(states(field), ["guessed", "guessed"])
+        menu = openMenu(field, 1)
         menuActions(menu)["Mark broken"].trigger()
         menu.close()
         pump(0.3)
-        self.assertTrue(waitFor(lambda: states(field) == ["broken"]), states(field))
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed", "broken"]), states(field))
+        second = fillet.Base[1][1]
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 1), states(field))
+        self.assertEqual(states(field), ["broken"])
+        self.assertEqual(fillet.Base[1], [second])
+        self.assertRejectedAt(fillet, 0)
         self.arm(field, byFocus=False)
-        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        [other] = edge("line", direction=Z, through=(20, 10, 0)).one(pad.Shape)
         self.pick(pad, other)
         self.assertTrue(waitFor(lambda: states(field) == ["broken", "exact"]), states(field))
+        self.assertRejectedAt(fillet, 0)
+
+    def assertRejectedAt(self, fillet, index):
+        """The reference report keeps the Mark broken record at the entry's index: the "?" of a
+        missing name alone isn't the rejection (without the record the entry is broken still)."""
+        [row] = [e for e in App.getReferenceReport(fillet) if e["index"] == index]
+        self.assertEqual(row["guess_kind"], "rejected", row)
+        self.assertEqual([a["role"] for a in row["alternatives"]], ["rejected"], row)
 
     # -- PR 142 review round ------------------------------------------------------------------------
 
@@ -1872,14 +1892,17 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(pad.Profile, (sketch, []))
         self.assertFalse(pad.AllowMultiFace)
 
-    def shadingRestoredWhenTheEditEnds(self, close, editEnds):
+    def shadingRestoredWhenTheEditEnds(self, close, editEnds, transaction=None):
         """Review 5: the field armed (the sketch shown and stronger, the pad hidden), then the
-        dialog closed other than by OK or Cancel: all as before. The pad as before the edit when
-        the edit ends (resetEdit), as in the dialog when it goes on (closeDialog)."""
+        dialog closed (OK, Cancel, or other than by them): all as before. The pad as before the
+        edit when the edit ends, as in the dialog when it goes on (closeDialog). A transaction
+        opened before the edit, as a double click opens it, for Cancel to abort."""
         pad, sketch, regions = self.regionsPad()
         sketch.ViewObject.Visibility = False
         saved = sketch.ViewObject.ShapeAppearance[0].Transparency
         padBefore = pad.ViewObject.Visibility
+        if transaction:
+            self.doc.openTransaction(transaction)
         [field] = self.edit(pad)
         padShown = padBefore if editEnds else pad.ViewObject.Visibility
         self.arm(field, byFocus=False)
@@ -4032,6 +4055,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump(0.2)
         return text
 
+    def bossRemoved(self, hole):
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        return self.boss.Shape.Volume - hole.Shape.Volume
+
     def positionsSubs(self, hole):
         return [s for s in hole.Profile[1] if s]
 
@@ -4155,7 +4183,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         field = findField("fieldProfile")
         self.arm(field, byFocus=False)
         self.assertTrue(waitFor(lambda: self.holes.ViewObject.Visibility), "the sketch is hidden")
-        self.assertFalse(hole.ViewObject.Visibility, "the hole stays shown")
+        self.assertFalse(hole.ViewObject.Visibility, "arming left the hole shown")
         field.setProperty("armed", False)
         self.assertTrue(waitFor(lambda: not armed(field)))
         self.assertTrue(
@@ -4256,10 +4284,11 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testHolePositionsOnFaces(self):
         """PR 169 M3, as stock: the boss's top face (flat, a circle among its edges) makes a hole
-        at the circle's centre from z = 12 (12 pi); its own rim, a bounding edge, is refused
-        beside it (the hole would be cut twice). The boss's cylindrical face: holes at its two
-        circles along its axis, 12 pi down or 2 pi up (Reversed), and its rim refused beside it;
-        with the rim listed, the top face is refused. A flat face with no circle is refused, with the reason."""
+        at the circle's centre from z = 12 (12 pi); its own rim beside it is taken, and the
+        circle drilled once (PR 172 review L2). The boss's cylindrical face: holes at its two
+        circles along its axis, 12 pi down or 2 pi up (Reversed), and its rim beside it changes
+        nothing; the rim, then the top face beside it, the same. A flat face with no circle is
+        refused, with the reason."""
         hole = self.plate(boss=True)
         boss = self.boss
         self.edit(hole, count=1)
@@ -4273,8 +4302,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(hole.isValid(), hole.getStatusString())
         self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
-        self.assertIn("face", self.refusedPick(boss, rim))
-        self.assertLink(hole.Profile, boss, [top])
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [top, rim])
+        self.assertAlmostEqual(self.bossRemoved(hole), 12 * math.pi, places=3)
 
         self.pick(self.holes, "")
         self.assertLink(hole.Profile, self.holes, [])
@@ -4291,17 +4321,21 @@ class TestReferenceFieldGui(unittest.TestCase):
         for got, want in zip(sorted(removed), (2 * math.pi, 12 * math.pi)):
             self.assertAlmostEqual(got, want, places=3)
         hole.Reversed = False
-        self.assertIn("face", self.refusedPick(boss, rim))
-        self.assertLink(hole.Profile, boss, [side])
+        alone = self.bossRemoved(hole)
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [side, rim])
+        self.assertAlmostEqual(self.bossRemoved(hole), alone, places=3)
 
         self.pick(self.holes, "")
         self.pick(boss, rim)
         self.assertLink(hole.Profile, boss, [rim])
-        self.assertIn("face", self.refusedPick(boss, top))
-        self.assertLink(hole.Profile, boss, [rim])
+        alone = self.bossRemoved(hole)
+        self.pick(boss, top)
+        self.assertLink(hole.Profile, boss, [rim, top])
+        self.assertAlmostEqual(self.bossRemoved(hole), alone, places=3)
         [plain] = face(normal=(-1, 0, 0), through=(0, 0, 0)).one(boss.Shape)
         self.assertIn("circle", self.refusedPick(boss, plain))
-        self.assertLink(hole.Profile, boss, [rim])
+        self.assertLink(hole.Profile, boss, [rim, top])
 
     def testHolePositionsWholeBinderAndSolid(self):
         """PR 169 M3: a shape binder of the sketch, whole, gives the sketch's three holes (30 pi);
@@ -4337,3 +4371,232 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(hole.Profile, self.plateBox, [corner])
         self.assertEqual(hole.BaseProfileType, 7)
         self.assertAlmostEqual(self.removed(hole), 10 * math.pi / 4, places=3)
+
+    def testHolePositionsRepickAFaceOntoItsRim(self):
+        """PR 169 verification, Low 1: the boss's top face listed (12 pi); its entry's Re-pick
+        onto the face's own rim replaces it: the rim alone, the same hole, 12 pi."""
+        hole = self.plate(boss=True)
+        boss = self.boss
+        [top] = face(normal=(0, 0, 1), through=(10, 10, 12)).one(boss.Shape)
+        [rim] = edge("circle", center=(10, 10, 12), radius=2).one(boss.Shape)
+        hole.Profile = (boss, [top])
+        self.doc.recompute()
+        self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Re-pick"].trigger()
+        menu.close()
+        pump()
+        self.pick(boss, rim)
+        self.assertTrue(waitFor(lambda: self.positionsSubs(hole) == [rim]), hole.Profile)
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
+
+    def testHolePositionsFacesSharingACircle(self):
+        """PR 169 verification, Low 2, and PR 172 review L2: the boss's cylindrical face listed,
+        then its top face, which shares the circle at z = 12: both taken, and the circle drilled
+        once, as with the first alone (Hole::findHoles takes each edge once; the direction is
+        the first entry's: 2 pi up the cylinder's axis). The other way round: 12 pi, the top
+        face's alone."""
+        hole = self.plate(boss=True)
+        boss = self.boss
+        [top] = face(normal=(0, 0, 1), through=(10, 10, 12)).one(boss.Shape)
+        [side] = face(surface="cylinder").one(boss.Shape)
+        self.edit(hole, count=1)
+        field = findField("fieldProfile")
+        self.arm(field, byFocus=False)
+        for first, second, removed in ((side, top, 2 * math.pi), (top, side, 12 * math.pi)):
+            self.pick(self.holes, "")
+            self.pick(boss, first)
+            self.assertLink(hole.Profile, boss, [first])
+            self.assertAlmostEqual(self.bossRemoved(hole), removed, places=3)
+            self.pick(boss, second)
+            self.assertLink(hole.Profile, boss, [first, second])
+            self.assertAlmostEqual(self.bossRemoved(hole), removed, places=3)
+
+    # -- ops#150 W2 follow-ups (PR 142's review gaps) ---------------------------------------------
+
+    def testDraftNeutralPlaneOfOriginAndDatumPlanes(self):
+        """The neutral plane picked as planes that aren't faces, each written whole: the body's
+        XY origin plane (z = 0, the bottom's plane: the bottom's draft again), then a datum plane
+        at z = 10 (the top's plane: the other way, 2000 minus the bottom's volume)."""
+        box, draft = self.draft()
+        bottomVolume = draft.Shape.Volume
+        datum = self.datumPlane(self.body, "TopPlane", 10)
+        self.doc.recompute()
+        [faces, plane, line] = self.edit(draft, count=3)
+        self.arm(plane, byFocus=False)
+        for obj, expected in (
+            (models.originFeature(self.body, "XY_Plane"), bottomVolume),
+            (datum, 2000 - bottomVolume),
+        ):
+            self.pick(obj, "")
+            self.assertLink(draft.NeutralPlane, obj, [])
+            self.assertVolume(draft, expected)
+        self.assertEqual(draft.Base[1], [self.side])
+
+    def testDraftNeutralPlaneOfACoordinateSystem(self):
+        """The neutral plane picked as a coordinate system's XY plane, the coordinate system at
+        z = 5: written whole, and the draft computes. Where it pivots is TestDraft's
+        TestNeutralPlanePlacement (ops#198)."""
+        box, draft = self.draft()
+        lcs = self.doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.body.addObject(lcs)
+        lcs.Placement = App.Placement(App.Vector(0, 0, 5), App.Rotation())
+        self.doc.recompute()
+        [lcsPlane] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        [faces, plane, line] = self.edit(draft, count=3)
+        self.arm(plane, byFocus=False)
+        self.pick(lcsPlane, "")
+        self.assertLink(draft.NeutralPlane, lcsPlane, [])
+        self.doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+
+    def testPadFaceFieldVisibilityAfterCancel(self):
+        """While the up-to-face field is armed the box (the solid before) shows and the pad
+        hides; Cancel while armed: both as before the edit."""
+        box, pad = self.padOnBox()
+        box.ViewObject.Visibility = False
+        pad.ViewObject.Visibility = True
+        self.doc.openTransaction("Edit Pad")
+        [profile, field] = self.edit(pad, count=2)
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: box.ViewObject.Visibility), "the box isn't shown")
+        self.assertFalse(pad.ViewObject.Visibility, "the pad stays shown")
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.3)
+        self.assertFalse(box.ViewObject.Visibility, "Cancel left the box shown")
+        self.assertTrue(pad.ViewObject.Visibility, "Cancel left the pad hidden")
+        self.assertLink(pad.UpToFace, self.low, [])
+
+    def testDocumentClosedWhileAFieldIsArmed(self):
+        """The document closed while the up-to-face field is armed: the dialog goes with it and
+        nothing stays armed; another document's objects keep their visibility, and an edit
+        there arms its own field."""
+        other = models.newDocument("ReferenceFieldOther")
+        otherBody = models.body(other)
+        otherSketch = models.sketch(other, "OtherSquare", models.rectangle(0, 0, 2, 2), otherBody)
+        otherPad = models.pad(otherBody, otherSketch, 3)
+        other.recompute()
+        # The other way round from what a restore of this document's pad and sketch would set:
+        # one misdirected by name into the other document flips them (PR 172 review L3)
+        otherSketch.ViewObject.Visibility = True
+        otherPad.ViewObject.Visibility = False
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        box, pad = self.padOnBox()
+        box.ViewObject.Visibility = False
+        [profile, field] = self.edit(pad, count=2)
+        self.arm(field, byFocus=False)
+        self.assertTrue(waitFor(lambda: box.ViewObject.Visibility))
+        name = self.doc.Name
+        App.closeDocument(name)
+        self.doc = other
+        pump(0.3)
+        self.assertNotIn(name, App.listDocuments())
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        self.assertTrue(waitFor(lambda: not fields(), 3.0), "a field outlived its document")
+        self.assertTrue(otherSketch.ViewObject.Visibility)
+        self.assertFalse(otherPad.ViewObject.Visibility)
+
+        otherSketch.ViewObject.Visibility = False
+        otherPad.ViewObject.Visibility = True
+        App.setActiveDocument(other.Name)
+        Gui.setActiveDocument(other.Name)
+        [otherField] = self.edit(otherPad, count=1)
+        self.arm(otherField, byFocus=False)
+        self.assertTrue(waitFor(lambda: otherSketch.ViewObject.Visibility), "the sketch is hidden")
+        otherField.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not otherSketch.ViewObject.Visibility))
+
+    # -- ops#150 W3 follow-ups (PR 144's review gaps) ---------------------------------------------
+
+    def testRepickOnAnOlderPadSetsAllowMultiFace(self):
+        """B7 through the picked handler: a pad without AllowMultiFace whose profile lists region
+        B (ignored then: the whole sketch is padded); the entry's Re-pick onto the disk sets
+        AllowMultiFace in the same step, and the pad is the disk's, 20 pi."""
+        pad, sketch, regions = self.regionsPad(allowMultiFace=False)
+        pad.Profile = (sketch, [regions["B"]])
+        self.doc.recompute()
+        self.assertFalse(pad.AllowMultiFace)
+        self.assertVolume(pad, WHOLE_SKETCH)
+        [field] = self.edit(pad)
+        self.arm(field, byFocus=False)
+        menu = openMenu(field, 0)
+        menuActions(menu)["Re-pick"].trigger()
+        menu.close()
+        pump()
+        self.pickRegion(sketch, regions["disk"])
+        self.assertTrue(waitFor(lambda: pad.Profile[1] == [regions["disk"]]), pad.Profile)
+        self.assertTrue(pad.AllowMultiFace)
+        self.assertVolume(pad, 20 * math.pi)
+
+    def testShadingRestoredOnOk(self):
+        self.shadingRestoredWhenTheEditEnds(
+            lambda: taskButton(QtWidgets.QDialogButtonBox.Ok).click(), editEnds=True
+        )
+
+    def testShadingRestoredOnCancel(self):
+        self.shadingRestoredWhenTheEditEnds(
+            lambda: taskButton(QtWidgets.QDialogButtonBox.Cancel).click(),
+            editEnds=True,
+            transaction="Edit Pad",
+        )
+
+    def testShadingRestoredOnEscIn3DView(self):
+        """Esc in the 3D view disarms the profile field and the dialog stays: the sketch hides
+        again, its regions drawn as saved, and the pad shows as in the dialog."""
+        pad, sketch, regions = self.regionsPad()
+        sketch.ViewObject.Visibility = False
+        saved = sketch.ViewObject.ShapeAppearance[0].Transparency
+        [field] = self.edit(pad)
+        padShown = pad.ViewObject.Visibility
+        self.arm(field, byFocus=False)
+        self.assertTrue(sketch.ViewObject.Visibility)
+        self.assertFalse(pad.ViewObject.Visibility)
+        self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
+        key(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
+        pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
+        self.assertFalse(sketch.ViewObject.Visibility)
+        self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
+        self.assertEqual(pad.ViewObject.Visibility, padShown)
+
+    def testRegionWhoseFaceVanished(self):
+        """Regions B and the disk listed; the disk's circle deleted from the sketch, so its
+        region is gone: the entry shows broken and B stays. Region A, now the whole rectangle
+        (200), picked beside it: added, the broken entry kept. Delete on the broken entry: B and
+        A remain, (100 + 200) x 5 = 1500 mm^3."""
+        pad, sketch, regions = self.regionsPad()
+        pad.Profile = (sketch, [regions["B"], regions["disk"]])
+        self.doc.recompute()
+        self.assertVolume(pad, 500 + 20 * math.pi)
+        circles = [i for i, g in enumerate(sketch.Geometry) if g.TypeId == "Part::GeomCircle"]
+        self.assertEqual(len(circles), 1)
+        sketch.delGeometry(circles[0])
+        self.doc.recompute()
+        [field] = self.edit(pad)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 2), states(field))
+        self.assertEqual(states(field)[1], "broken", states(field))
+        self.assertNotEqual(states(field)[0], "broken", states(field))
+        [whole] = [
+            "InternalFace%d" % (i + 1)
+            for i, f in enumerate(sketch.InternalShape.Faces)
+            if abs(f.Area - 200) < 1e-6
+        ]
+        self.arm(field, byFocus=False)
+        self.pickRegion(sketch, whole)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 3), states(field))
+        self.assertEqual(states(field)[1], "broken", states(field))
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 1)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 2), states(field))
+        self.assertNotIn("broken", states(field))
+        self.assertEqual(pad.Profile[1][1], whole)
+        self.assertVolume(pad, 1500)
