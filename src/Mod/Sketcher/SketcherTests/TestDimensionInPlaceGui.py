@@ -517,17 +517,24 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         # where the M went: to the trim tool's shortcut (a key sent to the viewport still fires
         # it), and not to the Dimension tool, which saw it first (with the gate open it locked)
         trims = []
-        trim = FreeCADGui.Command.get("Sketcher_Trimming").getAction()[0]
+        # the trim command's action, and the Curve Edition group button, which carries M too
+        # when Trim is its default tool
+        actions = [
+            FreeCADGui.Command.get(name).getAction()[0]
+            for name in ("Sketcher_Trimming", "Sketcher_CompCurveEdition")
+        ]
 
         def onTrim(*args):
             trims.append(locked())
 
-        trim.triggered.connect(onTrim)
+        for action in actions:
+            action.triggered.connect(onTrim)
         try:
             self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
             self.assertTrue(self.wait_until(lambda: trims, 2000), "M didn't start the trim tool")
         finally:
-            trim.triggered.disconnect(onTrim)
+            for action in actions:
+                action.triggered.disconnect(onTrim)
         self.assertEqual(trims, [False], "the plain M locked the dimension before the trim")
         self.assertFalse(self.wait_until(locked, 500), "the plain M switched the tool to a lock")
 

@@ -608,7 +608,13 @@ class TestForkKeymapGui(unittest.TestCase):
         self.editSketch()
         # a group's button carries its default tool's key once a tool was picked from it
         # (GroupCommand::setup(); earlier tests pick, and a workbench switch sets the buttons up)
-        tools = {name: toolKey for name, (_, _, toolKey) in groupCommands().items()}
+        # (only where the tool's key is the table's for the tool: a group whose key the table takes
+        # away must stay "")
+        tools = {
+            name: toolKey
+            for name, (_, toolName, toolKey) in groupCommands().items()
+            if toolName in ONSHAPE and toolKey and same(toolKey, ONSHAPE[toolName])
+        }
         wrong = []
         checked = 0
         for name, key in ONSHAPE.items():
@@ -800,8 +806,8 @@ class TestForkKeymapGui(unittest.TestCase):
                     f"{n}: {toolKey(n)!r}" for n, k in chords.items() if not same(toolKey(n), k)
                 ]
                 self.assertEqual(wrong, [], f"{workbench}, FreeCAD")
-                setKeymap("Onshape")
             finally:
+                setKeymap("Onshape")
                 Gui.activateWorkbench("PartDesignWorkbench")
                 pump()
         if not tried:
@@ -1122,6 +1128,32 @@ class TestForkKeymapGui(unittest.TestCase):
         self.pressFor(QtCore.Qt.Key_Space, QtCore.Qt.NoModifier, "Std_ToggleVisibility")
         self.assertNotEqual(self.visibility()[self.sketch.Name], before[self.sketch.Name])
 
+    def treeSpace(self):
+        """Presses Space with the model tree focused; the selected sketch, as the 3D view
+        would have it."""
+        tree = next(
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget)
+            if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
+        )
+        Gui.Selection.addSelection(self.doc.Name, self.sketch.Name)
+        self.assertTrue(focus(tree), "the tree doesn't take the focus")
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Space)
+        pump(0.5)
+
+    def testSpaceInTheTreeClearsTheSelection(self):
+        """With the focus in the tree, Space clears the selection under the fork's keymap (the
+        tree used to take it and hide the selected feature), and toggles the visibility under
+        FreeCAD's."""
+        before = self.visibility()
+        self.treeSpace()
+        self.assertEqual(Gui.Selection.getSelection(), [])
+        self.assertEqual(self.visibility(), before)
+        setKeymap("FreeCAD")
+        Gui.Selection.clearSelection()
+        self.treeSpace()
+        self.assertNotEqual(self.visibility()[self.sketch.Name], before[self.sketch.Name])
+
     def boxes(self):
         """Two 10 mm boxes outside the body, at x 0 and x 30."""
         a = self.doc.addObject("Part::Box", "BoxA")
@@ -1173,6 +1205,23 @@ class TestForkKeymapGui(unittest.TestCase):
         self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
         self.assertEqual(self.visibility(), before)
 
+    def testShiftIKeepsTheGroupsOfAnObjectSelectedWithoutAPath(self):
+        """An object selected without a path (a click in the tree selects the box alone) keeps
+        the group it is in: hiding the Part would hide the box."""
+        a, b = self.boxes()
+        part = self.doc.addObject("App::Part", "Part")
+        inner = part.newObject("Part::Box", "Inner")
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).getObject(part.Name).Visibility = True
+        Gui.getDocument(self.doc.Name).getObject(inner.Name).Visibility = True
+        pump()
+        self.assertTrue(self.visibility()[part.Name], "the part starts hidden")
+        Gui.Selection.addSelection(self.doc.Name, inner.Name)
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        shown = {n for n, v in self.visibility().items() if v}
+        self.assertEqual(shown & {part.Name, inner.Name}, {part.Name, inner.Name})
+        self.assertEqual(shown & {a.Name, b.Name, self.body.Name}, set())
+
     def testShiftIKeepsTheSelectedFeaturesBody(self):
         """Isolating a feature of a body (selected through the body, as a click in the 3D view
         does) keeps the body, whose hiding would hide the feature, and hides the boxes and the
@@ -1221,6 +1270,29 @@ class TestForkKeymapGui(unittest.TestCase):
         vis = self.visibility()
         self.assertEqual([vis[n] for n in ours], [True, True])
         self.assertTrue(vis[otherSketch.Name])
+
+    def testShiftHLeavesTheSketchInEditShown(self):
+        """In sketch edit the command hides and shows the body's other sketches, and leaves the
+        sketch being edited shown and in edit. (Its key does nothing there: the action sits in
+        Part Design's View menu, which sketch edit replaces; the menu of the edit's workbench
+        has no entry for it.)"""
+        hidden, _, _ = self.secondBody()
+        self.editSketch()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        action = Gui.Command.get("PartDesign_ToggleSketches").getAction()
+        self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)))
+        Gui.runCommand("PartDesign_ToggleSketches")
+        pump(0.3)
+        vis = self.visibility()
+        self.assertTrue(vis[hidden.Name], "the other sketch isn't shown")
+        self.assertTrue(vis[self.sketch.Name], "the sketch in edit was hidden")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
+        Gui.runCommand("PartDesign_ToggleSketches")
+        pump(0.3)
+        vis = self.visibility()
+        self.assertFalse(vis[hidden.Name], "the other sketch isn't hidden again")
+        self.assertTrue(vis[self.sketch.Name], "the sketch in edit was hidden")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
 
     def planesShown(self, body):
         """{role or name: shown in the 3D view} of the body's origin features and datum planes:
