@@ -959,8 +959,10 @@ int ProfileBased::getUpToShapeFromLinkSubList(
 {
     auto subSets = refShape.getSubListValues();
 
-    // early returns if only one full shape is selected
-    if (subSets.size() == 1 && (subSets[0].second.empty() || subSets[0].second[0].empty())) {
+    // early returns if only one full shape is selected. Not a datum plane: its own shape lies in
+    // its coordinate system, which makeTopoShapeFromPlane below places in the body (ops#198)
+    if (subSets.size() == 1 && !freecad_cast<App::Plane*>(subSets[0].first)
+        && (subSets[0].second.empty() || subSets[0].second[0].empty())) {
         upToShape = Part::Feature::getTopoShape(subSets[0].first, Part::ShapeOption::ResolveLink);
         return 2;  // 0 and 1 have special treatment but true face count isn't relevant
     }

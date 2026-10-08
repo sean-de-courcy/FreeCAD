@@ -727,8 +727,17 @@ gp_Pln Feature::makePlnFromPlane(const App::DocumentObject* obj)
         throw Base::ValueError("Feature: Null object");
     }
 
-    Base::Vector3d pos = plane->Placement.getValue().getPosition();
-    Base::Rotation rot = plane->Placement.getValue().getRotation();
+    // In the body's coordinates: a datum element is placed in its coordinate system, the body's
+    // Origin (at identity) or a coordinate system placed in the body (ops#198). Not the global
+    // placement, which adds the body's own
+    Base::Placement placement = plane->Placement.getValue();
+    if (auto element = dynamic_cast<const App::DatumElement*>(obj)) {
+        if (auto lcs = element->getLCS()) {
+            placement = lcs->Placement.getValue() * placement;
+        }
+    }
+    Base::Vector3d pos = placement.getPosition();
+    Base::Rotation rot = placement.getRotation();
     Base::Vector3d normal(0, 0, 1);
     rot.multVec(normal, normal);
     return gp_Pln(gp_Pnt(pos.x, pos.y, pos.z), gp_Dir(normal.x, normal.y, normal.z));

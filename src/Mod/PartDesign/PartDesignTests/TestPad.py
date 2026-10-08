@@ -600,3 +600,66 @@ class TestPad(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")
         # print ("omit closing document for debugging")
+
+
+class TestUpToPlanePlacement(unittest.TestCase):
+    """A pad up to a plane that isn't a face (FreeCAD-CH ops#198): a 2 x 2 square at z = -3 in
+    the body, padded up to the body's XY origin plane (12 mm^3), or up to a coordinate
+    system's XY plane, the coordinate system at z = 7 in the body (40 mm^3; it was taken at
+    z = 0), as the face or as the shape."""
+
+    bodyPlacement = FreeCAD.Placement()
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestUpToPlane")
+        self.Body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Body.Placement = self.bodyPlacement
+        sketch = self.Body.newObject("Sketcher::SketchObject", "Square")
+        sketch.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, -3), FreeCAD.Rotation())
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (2, 0), (2, 2), (0, 2))]
+        sketch.addGeometry(
+            [Part.LineSegment(p, q) for p, q in zip(corners, corners[1:] + corners[:1])], False
+        )
+        self.Pad = self.Body.newObject("PartDesign::Pad", "Pad")
+        self.Pad.Profile = sketch
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def xyPlane(self, coordinateSystem):
+        [plane] = [f for f in coordinateSystem.OriginFeatures if f.Role == "XY_Plane"]
+        return plane
+
+    def coordinateSystemPlane(self):
+        lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.Body.addObject(lcs)
+        lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 7), FreeCAD.Rotation())
+        return self.xyPlane(lcs)
+
+    def assertVolume(self, volume):
+        self.Doc.recompute()
+        self.assertTrue(self.Pad.isValid(), self.Pad.getStatusString())
+        self.assertAlmostEqual(self.Pad.Shape.Volume, volume, places=6)
+
+    def testUpToOriginPlane(self):
+        self.Pad.Type = "UpToFace"
+        self.Pad.UpToFace = (self.xyPlane(self.Body.Origin), [""])
+        self.assertVolume(12)
+
+    def testUpToCoordinateSystemPlane(self):
+        self.Pad.Type = "UpToFace"
+        self.Pad.UpToFace = (self.coordinateSystemPlane(), [""])
+        self.assertVolume(40)
+
+    def testUpToCoordinateSystemPlaneAsShape(self):
+        self.Pad.Type = "UpToShape"
+        self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
+        self.assertVolume(40)
+
+
+class TestUpToPlanePlacementInAPlacedBody(TestUpToPlanePlacement):
+    """The same in a body moved and turned: the same volumes."""
+
+    bodyPlacement = FreeCAD.Placement(
+        FreeCAD.Vector(5, -4, 9), FreeCAD.Rotation(FreeCAD.Vector(1, 1, 0), 30)
+    )

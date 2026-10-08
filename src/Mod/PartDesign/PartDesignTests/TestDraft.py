@@ -100,9 +100,12 @@ class TestNeutralPlanePlacement(unittest.TestCase):
     the cube loses 5 tan 2 ((10 - z)^2 - z^2) mm^3, so 1000 - 500 tan 2 at z = 0, 1000 at
     z = 5 (the two wedges cancel), 1000 + 500 tan 2 at z = 10."""
 
+    bodyPlacement = App.Placement()
+
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestNeutralPlane")
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Body.Placement = self.bodyPlacement
         self.Box = self.Body.newObject("PartDesign::AdditiveBox", "Box")
         self.Box.Length = self.Box.Width = self.Box.Height = 10
         self.Doc.recompute()
@@ -139,11 +142,17 @@ class TestNeutralPlanePlacement(unittest.TestCase):
         plane.Placement = App.Placement(App.Vector(0, 0, 10), App.Rotation())
         self.assertPivot(plane, 10)
 
-    @unittest.expectedFailure  # ops#198: Feature::makePlnFromPlane drops the LCS's placement
     def testCoordinateSystemPlane(self):
         """The coordinate system at z = 5, its XY plane: the pivot at mid height. The draft took
         the plane at z = 0 (ops#198)."""
         self.assertPivot(self.coordinateSystemPlane(5), 5)
+
+
+class TestNeutralPlanePlacementInAPlacedBody(TestNeutralPlanePlacement):
+    """The same in a body moved and turned: the planes are in the body's coordinates, so the
+    volumes don't change (the body's own placement isn't added to them)."""
+
+    bodyPlacement = App.Placement(App.Vector(5, -4, 9), App.Rotation(App.Vector(1, 1, 0), 30))
 
 def _sketch(doc, body, name, geometry, z=0):
     sketch = body.newObject("Sketcher::SketchObject", name)
