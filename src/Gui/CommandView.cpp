@@ -21,6 +21,8 @@
  ***************************************************************************/
 
 #include <cstddef>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -4106,6 +4108,182 @@ bool StdCmdAlignToSelection::isActive()
 }
 
 //===========================================================================
+// Std_ViewNormal (FreeCAD-CH, ops#194: Onshape's "normal to", N)
+//===========================================================================
+DEF_STD_CMD_A(StdCmdViewNormal)
+
+StdCmdViewNormal::StdCmdViewNormal()
+    : Command("Std_ViewNormal")
+{
+    sGroup = "View";
+    sMenuText = QT_TR_NOOP("&Normal To");
+    sToolTipText = QT_TR_NOOP(
+        "Looks at the sketch in edit, or else along the normal of the selected face or plane"
+    );
+    sWhatsThis = "Std_ViewNormal";
+    sStatusTip = sToolTipText;
+    sPixmap = "align-to-selection";
+    eType = Alter3DView;
+}
+
+void StdCmdViewNormal::activated(int /*iMsg*/)
+{
+    // Sketcher_ViewSketch is active with a sketch in edit; Gui needs no Sketcher type for it
+    CommandManager& manager = Application::Instance->commandManager();
+    Command* sketch = manager.getCommandByName("Sketcher_ViewSketch");
+    if (sketch && sketch->isActive()) {
+        sketch->invoke(0);
+    }
+    else if (Command* align = manager.getCommandByName("Std_AlignToSelection")) {
+        align->invoke(0);
+    }
+}
+
+bool StdCmdViewNormal::isActive()
+{
+    auto view = freecad_cast<View3DInventor*>(getGuiApplication()->activeView());
+    return view && view->getViewer();
+}
+
+//===========================================================================
+// Std_ClearSelection (FreeCAD-CH, ops#194: Onshape's Space)
+//===========================================================================
+DEF_STD_CMD_A(StdCmdClearSelection)
+
+StdCmdClearSelection::StdCmdClearSelection()
+    : Command("Std_ClearSelection")
+{
+    sGroup = "View";
+    sMenuText = QT_TR_NOOP("&Clear Selection");
+    sToolTipText = QT_TR_NOOP("Clears the selection");
+    sWhatsThis = "Std_ClearSelection";
+    sStatusTip = sToolTipText;
+    eType = NoTransaction | AlterSelection;
+}
+
+void StdCmdClearSelection::activated(int /*iMsg*/)
+{
+    Selection().clearCompleteSelection();
+}
+
+bool StdCmdClearSelection::isActive()
+{
+    // as Std_ToggleVisibility, Space's upstream command: with nothing selected the key goes on
+    // to the widget with the focus
+    return Selection().size() != 0;
+}
+
+//===========================================================================
+// Std_Isolate (FreeCAD-CH, ops#194: Onshape's Shift+I)
+//===========================================================================
+namespace
+{
+
+/// Per document: the objects Std_Isolate hid, which its next run shows again
+std::map<std::string, std::vector<std::string>>& isolatedObjects()
+{
+    static std::map<std::string, std::vector<std::string>> map;
+    return map;
+}
+
+/// A group's (a body's, a part's) shown contents stay with it
+void keepWithContents(App::DocumentObject* obj, std::set<App::DocumentObject*>& keep)
+{
+    if (!obj || !keep.insert(obj).second) {
+        return;
+    }
+    if (auto group = obj->getExtensionByType<App::GroupExtension>(true)) {
+        for (App::DocumentObject* child : group->Group.getValues()) {
+            keepWithContents(child, keep);
+        }
+    }
+}
+
+}  // namespace
+
+DEF_STD_CMD_A(StdCmdIsolate)
+
+StdCmdIsolate::StdCmdIsolate()
+    : Command("Std_Isolate")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("&Isolate");
+    sToolTipText = QT_TR_NOOP(
+        "Hides everything but the selection; run again, it shows what it hid"
+    );
+    sWhatsThis = "Std_Isolate";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+    // a closed document's names could come back with a new document of the same name
+    App::GetApplication().signalDeleteDocument.connect([](const App::Document& doc) {
+        isolatedObjects().erase(doc.getName());
+    });
+}
+
+void StdCmdIsolate::activated(int /*iMsg*/)
+{
+    Gui::Document* guiDoc = getActiveGuiDocument();
+    if (!guiDoc) {
+        return;
+    }
+    App::Document* doc = guiDoc->getDocument();
+    auto& isolated = isolatedObjects();
+    auto it = isolated.find(doc->getName());
+    if (it != isolated.end()) {
+        for (const auto& name : it->second) {
+            App::DocumentObject* obj = doc->getObject(name.c_str());
+            if (auto vp = obj ? guiDoc->getViewProvider(obj) : nullptr) {
+                vp->show();
+            }
+        }
+        isolated.erase(it);
+        return;
+    }
+
+    // The selected objects with the objects along their paths (hiding a body would hide its
+    // selected feature) and, for a group, its contents
+    std::set<App::DocumentObject*> keep;
+    for (const auto& sel : Selection().getCompleteSelection(ResolveMode::NoResolve)) {
+        if (sel.pDoc != doc || !sel.pObject) {
+            continue;
+        }
+        auto path = sel.pObject->getSubObjectList(sel.SubName);
+        if (path.empty()) {
+            path.push_back(sel.pObject);
+        }
+        keep.insert(path.begin(), path.end() - 1);
+        keepWithContents(path.back(), keep);
+        // a selection without a path (an object picked in the tree) keeps the groups it is in
+        for (App::DocumentObject* group = App::GroupExtension::getGroupOfObject(sel.pObject);
+             group && keep.insert(group).second;
+             group = App::GroupExtension::getGroupOfObject(group)) {
+        }
+    }
+    if (keep.empty()) {
+        return;
+    }
+    std::vector<std::string> hidden;
+    for (App::DocumentObject* obj : doc->getObjects()) {
+        auto vp = guiDoc->getViewProvider(obj);
+        if (vp && vp->isShow() && !keep.count(obj)) {
+            vp->hide();
+            hidden.emplace_back(obj->getNameInDocument());
+        }
+    }
+    if (!hidden.empty()) {
+        isolated[doc->getName()] = std::move(hidden);
+    }
+}
+
+bool StdCmdIsolate::isActive()
+{
+    Gui::Document* guiDoc = getActiveGuiDocument();
+    return guiDoc
+        && (Selection().size() != 0
+            || isolatedObjects().count(guiDoc->getDocument()->getName()) != 0);
+}
+
+//===========================================================================
 // Std_ClarifySelection
 //===========================================================================
 
@@ -4320,6 +4498,9 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdCmdViewGroup());
     rcCmdMgr.addCommand(new StdCmdAlignToSelection());
     rcCmdMgr.addCommand(new StdCmdClarifySelection());
+    rcCmdMgr.addCommand(new StdCmdViewNormal());
+    rcCmdMgr.addCommand(new StdCmdClearSelection());
+    rcCmdMgr.addCommand(new StdCmdIsolate());
 
     rcCmdMgr.addCommand(new StdCmdViewExample1());
     rcCmdMgr.addCommand(new StdCmdViewExample2());

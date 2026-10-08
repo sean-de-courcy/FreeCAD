@@ -43,7 +43,8 @@ struct SubAction
 };
 
 // Onshape's keys (notes/onshape-shortcuts.md section 2; PLAN.md decision 27). A command Onshape has
-// a key for but FreeCAD lacks comes with it (ops#194 PR B: Space, P, Shift+H, Shift+I, the arrows).
+// a key for but FreeCAD lacks comes with it (ops#194 PR B: Space, N, P, Shift+H, Shift+I; the
+// arrows are B2).
 // The other entries take away a key an Onshape key needs: one FreeCAD gave a command, or a chord
 // starting with an Onshape key (it would make that key wait ShortcutTimeout for the chord).
 const Entry table[] = {
@@ -59,6 +60,14 @@ const Entry table[] = {
     // QKeySequence::Refresh is Ctrl+R first on macOS and GNOME (Qt's qplatformtheme.cpp), which is
     // a sketch tool's own Ctrl+R (PR D), and Std_Refresh is ForEdit; F5 is its key on Windows
     {"Std_Refresh", "F5"},
+    // The fork's commands (PR B; notes/onshape-shortcuts.md section 2, section 7 Q2: Space clears
+    // the selection, hide and show are Y and Shift+Y)
+    {"Std_ClearSelection", "Space"},
+    {"Std_ToggleVisibility", ""},
+    {"Std_ViewNormal", "N"},  // Sketcher_ViewSketch in sketch edit, else Std_AlignToSelection
+    {"Std_Isolate", "Shift+I"},
+    {"PartDesign_ToggleSketches", "Shift+H"},
+    {"PartDesign_TogglePlanes", "P"},
     // 3D view
     {"Std_ViewFront", "Shift+1"},
     {"Std_ViewRear", "Shift+2"},
@@ -112,7 +121,7 @@ const Entry table[] = {
     {"Sketcher_Extend", "X"},
     {"Sketcher_Intersection", "Shift+G"},
     {"Sketcher_ToggleConstruction", "Q"},
-    {"Sketcher_ViewSketch", "N"},
+    {"Sketcher_ViewSketch", ""},  // Std_ViewNormal's N runs it
     {"Sketcher_ViewSection", ""},
     // Sketch constraints
     {"Sketcher_Dimension", "D"},
@@ -265,6 +274,28 @@ const Entry table[] = {
     {"Draft_Rectangle", ""},
     {"Draft_Rotate", ""},
     {"Draft_Upgrade", ""},
+    // Draft, BIM and CAM: starting with P or N (PR B)
+    {"Draft_Wire", ""},
+    {"Draft_Polygon", ""},
+    {"Draft_Snap_Lock", ""},  // Shift+S, once Draft has loaded (BIM loads it too)
+    {"Arch_Panel", ""},
+    {"Arch_Panel_Cut", ""},
+    {"Arch_Panel_Sheet", ""},
+    {"Arch_Pipe", ""},
+    {"Arch_PipeConnector", ""},
+    {"Arch_Profile", ""},
+    {"CAM_Camotics", ""},
+    {"CAM_Inspect", ""},
+    {"CAM_Job", ""},
+    {"CAM_Sanity", ""},
+    {"CAM_QuickValidate", ""},
+    {"CAM_Simulator", ""},
+    {"CAM_SimulatorGL", ""},
+    {"CAM_Post", ""},
+    {"CAM_PostSelected", ""},
+    {"CAM_ToolBitDock", ""},
+    {"CAM_SelectLoop", ""},
+    {"CAM_OpActiveToggle", ""},
     {"Arch_Material", ""},
     {"Arch_MultiMaterial", ""},
     {"Arch_Rebar", ""},
@@ -285,6 +316,10 @@ const Entry table[] = {
     {"Assembly_CreateJointScrew", ""},
     {"Assembly_CreateJointRigidGroup", ""},
     {"Assembly_CreateBom", ""},
+    // PR B's P (the planes) and N (normal to): Assembly_InsertNewPart is enabled with an active
+    // assembly, and the joints are ForEdit
+    {"Assembly_InsertNewPart", ""},
+    {"Assembly_CreateJointParallel", ""},
     // FEM (F, G), and Robot's single A and W (the arc and the box zoom)
     {"FEM_PostFilterGlyph", ""},
     {"Robot_InsertWaypoint", ""},
