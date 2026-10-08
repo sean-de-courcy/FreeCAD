@@ -22,11 +22,14 @@
  ***************************************************************************/
 
 #include <QCheckBox>
+#include <QCoreApplication>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMenu>
+#include <QTimer>
 #include <QTextStream>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -1204,6 +1207,211 @@ void SelectionMenu::createGroupedMenu(
         action->setData(idx);
         connect(action, &QAction::hovered, this, [this, action]() { onHover(action); });
     }
+}
+
+// SelectOtherMenu implementation (FreeCAD-CH, ops#194 PR C)
+namespace
+{
+
+/// Backtick, as the keyboard layout delivers it: the key itself, or its dead key
+bool isBacktick(const QKeyEvent* ev)
+{
+    return ev->key() == Qt::Key_QuoteLeft || ev->key() == Qt::Key_Dead_Grave;
+}
+
+bool isPlainArrow(const QKeyEvent* ev)
+{
+    return !(ev->modifiers() & ~Qt::KeypadModifier);
+}
+
+/// Shift+backtick is a tilde on most layouts
+bool isBackwards(const QKeyEvent* ev)
+{
+    return ev->key() == Qt::Key_AsciiTilde
+        || (isBacktick(ev) && (ev->modifiers() & Qt::ShiftModifier))
+        || (ev->key() == Qt::Key_Up && isPlainArrow(ev));
+}
+
+bool isForwards(const QKeyEvent* ev)
+{
+    return (isBacktick(ev) && !(ev->modifiers() & Qt::ShiftModifier))
+        || (ev->key() == Qt::Key_Down && isPlainArrow(ev));
+}
+
+/** Eats the next Esc key release, or none after a second. The list closes on Esc's press; the
+ * release then reaches the widget that has the focus, the 3D view, whose key handling acts on a
+ * release alone (a task panel's Cancel, a reference field's disarming).
+ */
+class EscReleaseEater: public QObject
+{
+public:
+    static void arm()
+    {
+        auto* eater = new EscReleaseEater(QCoreApplication::instance());
+        QCoreApplication::instance()->installEventFilter(eater);
+        QTimer::singleShot(1000, eater, [eater]() { eater->deleteLater(); });
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* ev) override
+    {
+        if (ev->type() == QEvent::KeyRelease
+            && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape) {
+            QCoreApplication::instance()->removeEventFilter(this);
+            deleteLater();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    using QObject::QObject;
+};
+
+}  // namespace
+
+SelectOtherMenu::SelectOtherMenu(QWidget* parent)
+    : QMenu(parent)
+{
+    setObjectName(QStringLiteral("SelectOtherMenu"));
+    connect(this, &QMenu::hovered, this, &SelectOtherMenu::preselect);
+    connect(this, &QMenu::triggered, this, &SelectOtherMenu::commit);
+    connect(this, &QMenu::aboutToHide, this, &SelectOtherMenu::finish);
+}
+
+void SelectOtherMenu::open(const std::vector<PickData>& list, const QPoint& pos)
+{
+    clear();
+    picks = list;
+    for (std::size_t i = 0; i < picks.size(); ++i) {
+        const PickData& pick = picks[i];
+        App::DocumentObject* sobj = pick.obj;
+        if (!pick.subName.empty()) {
+            if (App::DocumentObject* resolved = pick.obj->getSubObject(pick.subName.c_str())) {
+                sobj = resolved;
+            }
+        }
+        const char* element = Data::findElementName(pick.subName.c_str());
+        QString text = QString::fromUtf8(element && element[0] ? element : pick.element.c_str());
+        text += QStringLiteral(" %1 ").arg(QChar(0x00B7)) + QString::fromUtf8(sobj->Label.getValue());
+        QAction* action = addAction(text);
+        action->setData(static_cast<int>(i));
+    }
+
+    // the preselected entry shows over the others in the 3D view (as Clarify's menu does)
+    Gui::Selection().setClarifySelectionActive(true);
+    popup(pos);
+    if (!actions().isEmpty()) {
+        setActiveAction(actions().first());
+        preselect(actions().first());
+        // The 3D view clears a preselection once the list has taken the mouse (seen off screen,
+        // by an observer: set, set, then removed with the list still open): set it again after
+        // those events
+        for (int delay : {0, 150}) {
+            QTimer::singleShot(delay, this, [this]() {
+                if (isVisible()) {
+                    preselect(activeAction());
+                }
+            });
+        }
+    }
+}
+
+bool SelectOtherMenu::event(QEvent* ev)
+{
+    // the keys that move through the list stay with it, whatever window shortcut they are
+    if (ev->type() == QEvent::ShortcutOverride) {
+        auto* key = static_cast<QKeyEvent*>(ev);
+        if (isBacktick(key) || isForwards(key) || isBackwards(key)) {
+            ev->accept();
+            return true;
+        }
+    }
+    return QMenu::event(ev);
+}
+
+void SelectOtherMenu::keyPressEvent(QKeyEvent* ev)
+{
+    if (isForwards(ev)) {
+        step(+1);
+        ev->accept();
+    }
+    else if (isBackwards(ev)) {
+        step(-1);
+        ev->accept();
+    }
+    else {
+        if (ev->key() == Qt::Key_Escape) {
+            EscReleaseEater::arm();
+        }
+        QMenu::keyPressEvent(ev);
+    }
+}
+
+void SelectOtherMenu::mouseMoveEvent(QMouseEvent* ev)
+{
+    // the mouse leaving the list, by more than a few pixels, cancels it
+    constexpr int margin = 16;
+    const QRect reach = geometry().adjusted(-margin, -margin, margin, margin);
+    if (!reach.contains(ev->globalPosition().toPoint())) {
+        close();
+        return;
+    }
+    QMenu::mouseMoveEvent(ev);
+}
+
+void SelectOtherMenu::step(int delta)
+{
+    const QList<QAction*> entries = actions();
+    if (entries.isEmpty()) {
+        return;
+    }
+    int at = static_cast<int>(entries.indexOf(activeAction()));
+    int count = static_cast<int>(entries.size());
+    at = at < 0 ? (delta > 0 ? 0 : count - 1) : (at + delta + count) % count;
+    setActiveAction(entries[at]);  // emits hovered(), which preselects it
+}
+
+void SelectOtherMenu::preselect(QAction* action)
+{
+    if (!action) {
+        return;
+    }
+    bool ok = false;
+    int index = action->data().toInt(&ok);
+    if (!ok || index < 0 || index >= static_cast<int>(picks.size())) {
+        return;
+    }
+    const PickData& pick = picks[index];
+    Gui::Selection().rmvPreselect();
+    Gui::Selection().setPreselect(
+        pick.docName.c_str(),
+        pick.objName.c_str(),
+        pick.subName.c_str(),
+        0,
+        0,
+        0,
+        SelectionChanges::MsgSource::TreeView
+    );
+}
+
+void SelectOtherMenu::commit(QAction* action)
+{
+    bool ok = false;
+    int index = action ? action->data().toInt(&ok) : -1;
+    if (!ok || index < 0 || index >= static_cast<int>(picks.size())) {
+        return;
+    }
+    // one pick, as a click adds one (the menu has hidden, and the preselection is gone)
+    const PickData& pick = picks[index];
+    Gui::Selection().addSelection(pick.docName.c_str(), pick.objName.c_str(), pick.subName.c_str());
+}
+
+void SelectOtherMenu::finish()
+{
+    Gui::Selection().setClarifySelectionActive(false);
+    Gui::Selection().rmvPreselect();
+    deleteLater();
 }
 
 #include "moc_SelectionView.cpp"

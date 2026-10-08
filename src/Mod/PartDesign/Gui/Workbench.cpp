@@ -494,6 +494,10 @@ Gui::MenuItem* Workbench::setupMenuBar() const
         Gui::MenuItem* face = new Gui::MenuItem();
         face->setCommand("Part_ColorPerFace");
         view->insertItem(appr, face);
+        // FreeCAD-CH (ops#194): the keys Shift+H and P need the actions in a visible widget
+        if (Gui::MenuItem* visibility = view->findItem("V&isibility")) {
+            *visibility << "Separator" << "PartDesign_ToggleSketches" << "PartDesign_TogglePlanes";
+        }
     }
 
     // Replace the "Duplicate selection" menu item with a replacement that is compatible with Body

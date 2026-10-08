@@ -67,7 +67,15 @@ ONSHAPE = {
     "Std_BoxElementSelection": "",
     "Std_FreezeViews": "",
     "Std_ClarifySelection": "",
+    "Std_SelectOther": "`",  # Onshape's select other (PR C)
     "Std_Refresh": "F5",  # QKeySequence::Refresh is Ctrl+R (a tool's own key) on macOS
+    # the fork's commands (PR B), and the key Space was
+    "Std_ClearSelection": "Space",
+    "Std_ToggleVisibility": "",
+    "Std_ViewNormal": "N",
+    "Std_Isolate": "Shift+I",
+    "PartDesign_ToggleSketches": "Shift+H",
+    "PartDesign_TogglePlanes": "P",
     # 3D view
     "Std_ViewFront": "Shift+1",
     "Std_ViewRear": "Shift+2",
@@ -117,7 +125,7 @@ ONSHAPE = {
     "Sketcher_Projection": "U",
     "Sketcher_Intersection": "Shift+G",
     "Sketcher_ToggleConstruction": "Q",
-    "Sketcher_ViewSketch": "N",
+    "Sketcher_ViewSketch": "",  # N is Std_ViewNormal's, which runs it in sketch edit
     "Sketcher_ViewSection": "",
     # Sketch constraints
     "Sketcher_Dimension": "D",
@@ -199,6 +207,7 @@ FREECAD = {
     "Std_ViewIsometric": "0",
     "Std_ViewFitAll": "V, F",
     "Std_BoxElementSelection": "Shift+E",
+    "Std_SelectOther": "",
     "Std_ClarifySelection": "`",
     "PartDesign_Pad": "",
     "Sketcher_CreateLine": "G, L",
@@ -206,6 +215,10 @@ FREECAD = {
     "Sketcher_ConstrainParallel": "P",
     "Part_FaceSelection": "F, S",
     "Std_Refresh": QtGui.QKeySequence(QtGui.QKeySequence.Refresh).toString(),
+    "Std_ToggleVisibility": "Space",
+    "Std_ClearSelection": "",
+    "Std_ViewNormal": "",
+    "Sketcher_ViewSketch": "Q, P",
 }
 
 # Assembly's single letters that are the fork's keys: cleared (decision 31); upstream's
@@ -215,6 +228,8 @@ ASSEMBLY_KEYS = {
     "Assembly_CreateJointScrew": "W",
     "Assembly_CreateJointRigidGroup": "Y",
     "Assembly_CreateBom": "O",  # enabled in sketch edit too, beside Sketcher_Offset's O
+    "Assembly_InsertNewPart": "P",  # PR B: the planes
+    "Assembly_CreateJointParallel": "N",  # PR B: normal to
 }
 
 # Pairs that share a key in upstream FreeCAD too, outside the keymap's commands: the tree's
@@ -231,6 +246,37 @@ DRAFT_CHORDS = {
     "Draft_Facebinder": "F, F",
     "Draft_Move": "M, V",  # R, M and U: PR D
     "Draft_Rectangle": "R, E",
+    "Draft_Wire": "P, L",  # P and N: PR B
+    "Draft_Polygon": "P, G",
+    # Onshape's Shift+S (PR B: the clash scans see Draft's keys once BIM, which loads Draft, ran)
+    "Draft_Snap_Lock": "Shift+S",
+}
+
+# BIM's and CAM's chords starting with P or N (PR B), cleared; upstream's keys
+OTHER_CHORDS = {
+    "BIMWorkbench": {
+        "Arch_Panel": "P, A",
+        "Arch_Panel_Cut": "P, C",
+        "Arch_Panel_Sheet": "P, S",
+        "Arch_Pipe": "P, I",
+        "Arch_PipeConnector": "P, C",
+        "Arch_Profile": "P, F",
+        "Arch_Nest": "N, E",
+    },
+    "CAMWorkbench": {
+        "CAM_Camotics": "P, C",
+        "CAM_Inspect": "P, I",
+        "CAM_Job": "P, J",
+        "CAM_Sanity": "P, S",
+        "CAM_QuickValidate": "P, V",
+        "CAM_Simulator": "P, M",
+        "CAM_SimulatorGL": "P, N",
+        "CAM_Post": "P, P",
+        "CAM_PostSelected": "P, O",
+        "CAM_ToolBitDock": "P, T",
+        "CAM_SelectLoop": "P, L",
+        "CAM_OpActiveToggle": "P, X",
+    },
 }
 
 
@@ -258,6 +304,19 @@ def same(a, b):
 def shortcut(name):
     """The command's shortcut: its action's, "" while it has no action yet."""
     return Gui.Command.get(name).getShortcut()
+
+
+def toolKey(name):
+    """The key the command's actions carry: its own action's, or else that of a Python group's
+    action for it (a group's tool may have no action of its own, and then its getShortcut() is
+    ""); None where it has no action at all."""
+    if hasAction(name):
+        return shortcut(name)
+    for action in Gui.getMainWindow().findChildren(QtGui.QAction):
+        commandName = action.property("CommandName")
+        if commandName and bytes(commandName).decode() == name:
+            return action.shortcut().toString()
+    return None
 
 
 def hasAction(name):
@@ -474,6 +533,12 @@ class TestForkKeymapGui(unittest.TestCase):
         pump()
 
     def tearDown(self):
+        # a list a failed test left open takes the keys of every later test; so does a filter
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None and popup.objectName() == "SelectOtherMenu":
+            popup.close()
+            pump(0.1)
+        Gui.runCommand("Part_SelectFilter", 3)
         App.ParamGet(KEYMAP).RemString("Keymap")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
@@ -549,6 +614,15 @@ class TestForkKeymapGui(unittest.TestCase):
         away. In sketch edit, so the sketch toolbars' actions exist; a command with no action yet
         has no shortcut to check (its action takes the same default when it's made)."""
         self.editSketch()
+        # a group's button carries its default tool's key once a tool was picked from it
+        # (GroupCommand::setup(); earlier tests pick, and a workbench switch sets the buttons up)
+        # (only where the tool's key is the table's for the tool: a group whose key the table takes
+        # away must stay "")
+        tools = {
+            name: toolKey
+            for name, (_, toolName, toolKey) in groupCommands().items()
+            if toolName in ONSHAPE and toolKey and same(toolKey, ONSHAPE[toolName])
+        }
         wrong = []
         checked = 0
         for name, key in ONSHAPE.items():
@@ -557,7 +631,7 @@ class TestForkKeymapGui(unittest.TestCase):
                 continue
             checked += 1
             actual = shortcut(name)
-            if not same(actual, key):
+            if not same(actual, key) and not (name in tools and same(actual, tools[name])):
                 wrong.append(f"{name}: {actual!r}, expected {key!r}")
         self.assertEqual(wrong, [])
         self.assertGreater(
@@ -697,16 +771,55 @@ class TestForkKeymapGui(unittest.TestCase):
         try:
             Gui.activateWorkbench("DraftWorkbench")
             pump()
-            wrong = [f"{n}: {shortcut(n)!r}" for n in DRAFT_CHORDS if shortcut(n) != ""]
+            wrong = [f"{n}: {toolKey(n)!r}" for n in DRAFT_CHORDS if toolKey(n) != ""]
             self.assertEqual(wrong, [], "Onshape")
             setKeymap("FreeCAD")
             wrong = [
-                f"{n}: {shortcut(n)!r}" for n, k in DRAFT_CHORDS.items() if not same(shortcut(n), k)
+                f"{n}: {toolKey(n)!r}" for n, k in DRAFT_CHORDS.items() if not same(toolKey(n), k)
             ]
             self.assertEqual(wrong, [], "FreeCAD")
         finally:
             Gui.activateWorkbench("PartDesignWorkbench")
             pump()
+
+    def testBIMAndCAMChordsOnPAndNAreCleared(self):
+        """BIM's and CAM's chords starting with P or N have no key under the fork's keymap (P and
+        N would wait for them once the workbench is loaded), and upstream's under FreeCAD's. In
+        each workbench, so their actions exist."""
+        # BIM's first activation queues its modal Welcome dialog, which a test run never closes
+        bim = App.ParamGet("User parameter:BaseApp/Preferences/Mod/BIM")
+        firstTime = bim.GetBool("FirstTime") if "FirstTime" in bim.GetBools() else None
+        bim.SetBool("FirstTime", False)
+        self.addCleanup(
+            lambda: bim.RemBool("FirstTime")
+            if firstTime is None
+            else bim.SetBool("FirstTime", firstTime)
+        )
+        tried = 0
+        for workbench, chords in OTHER_CHORDS.items():
+            if workbench not in Gui.listWorkbenches():
+                continue
+            tried += 1
+            try:
+                Gui.activateWorkbench(workbench)
+                pump()
+                # a command with no action yet (CAM_Camotics, CAM_QuickValidate: in no toolbar
+                # or menu) takes the table's key when its action is made
+                chords = {n: k for n, k in chords.items() if command(n) and toolKey(n) is not None}
+                self.assertGreater(len(chords), len(OTHER_CHORDS[workbench]) // 2, workbench)
+                wrong = [f"{n}: {toolKey(n)!r}" for n in chords if toolKey(n) != ""]
+                self.assertEqual(wrong, [], f"{workbench}, Onshape")
+                setKeymap("FreeCAD")
+                wrong = [
+                    f"{n}: {toolKey(n)!r}" for n, k in chords.items() if not same(toolKey(n), k)
+                ]
+                self.assertEqual(wrong, [], f"{workbench}, FreeCAD")
+            finally:
+                setKeymap("Onshape")
+                Gui.activateWorkbench("PartDesignWorkbench")
+                pump()
+        if not tried:
+            self.skipTest("no BIM or CAM")
 
     # --- keys pressed
 
@@ -929,7 +1042,7 @@ class TestForkKeymapGui(unittest.TestCase):
             fixed = Gui.Command.get("Assembly_CreateJointFixed").getAction()
             self.assertTrue(waitFor(lambda: fixed and all(a.isEnabled() for a in fixed)))
             for name in ASSEMBLY_KEYS:
-                self.assertEqual(shortcut(name), "", name)
+                self.assertEqual(toolKey(name), "", name)
             with self.watching("Std_ViewFitAll", "Assembly_CreateJointFixed") as fired:
                 self.press(QtCore.Qt.Key_F)
                 self.assertTrue(waitFor(lambda: fired), "F ran nothing")
@@ -945,7 +1058,7 @@ class TestForkKeymapGui(unittest.TestCase):
             }
             self.assertNoClashes("assembly edit", only=general)
             setKeymap("FreeCAD")
-            wrong = [f"{n}: {shortcut(n)!r}" for n, k in ASSEMBLY_KEYS.items() if shortcut(n) != k]
+            wrong = [f"{n}: {toolKey(n)!r}" for n, k in ASSEMBLY_KEYS.items() if toolKey(n) != k]
             self.assertEqual(wrong, [], "FreeCAD")
         finally:
             if Gui.Control.activeDialog():
@@ -987,6 +1100,260 @@ class TestForkKeymapGui(unittest.TestCase):
     def testShiftWInSketchClosesItAndRevolves(self):
         """In sketch edit, Shift+W closes the sketch and revolves it."""
         self.editAndPress(QtCore.Qt.Key_W, "PartDesign::Revolution")
+
+    # --- the fork's commands (PR B)
+
+    def visibility(self):
+        """{name: shown} of the document's objects with a view provider."""
+        guiDoc = Gui.getDocument(self.doc.Name)
+        return {
+            o.Name: guiDoc.getObject(o.Name).Visibility
+            for o in self.doc.Objects
+            if guiDoc.getObject(o.Name) is not None
+        }
+
+    def pressFor(self, key, modifiers, name):
+        """Presses the key once the command `name` is enabled, and waits for it to run."""
+        action = Gui.Command.get(name).getAction()
+        self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)), f"{name} is off")
+        with self.watching(name) as fired:
+            self.press(key, modifiers)
+            self.assertTrue(waitFor(lambda: fired), f"{name} didn't run")
+            pump(0.2)
+
+    def testSpaceClearsTheSelection(self):
+        """Space clears the selection and leaves the visibility alone; under FreeCAD's keymap it
+        is Std_ToggleVisibility's, and hides the selected sketch."""
+        Gui.Selection.addSelection(self.doc.Name, self.sketch.Name)
+        before = self.visibility()
+        with self.watching("Std_ToggleVisibility") as toggled:
+            self.pressFor(QtCore.Qt.Key_Space, QtCore.Qt.NoModifier, "Std_ClearSelection")
+        self.assertEqual(Gui.Selection.getSelection(), [])
+        self.assertEqual(toggled, [])
+        self.assertEqual(self.visibility(), before)
+        setKeymap("FreeCAD")
+        Gui.Selection.addSelection(self.doc.Name, self.sketch.Name)
+        self.pressFor(QtCore.Qt.Key_Space, QtCore.Qt.NoModifier, "Std_ToggleVisibility")
+        self.assertNotEqual(self.visibility()[self.sketch.Name], before[self.sketch.Name])
+
+    def treeSpace(self):
+        """Presses Space with the model tree focused; the selected sketch, as the 3D view
+        would have it."""
+        tree = next(
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget)
+            if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
+        )
+        Gui.Selection.addSelection(self.doc.Name, self.sketch.Name)
+        # the commands are enabled on a timer after the selection changed
+        for name in ("Std_ClearSelection", "Std_ToggleVisibility"):
+            action = Gui.Command.get(name).getAction()
+            if action and shortcut(name):
+                self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)), name)
+        self.assertTrue(focus(tree), "the tree doesn't take the focus")
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Space)
+        pump(0.5)
+
+    def testSpaceInTheTreeClearsTheSelection(self):
+        """With the focus in the tree, Space clears the selection under the fork's keymap (the
+        tree used to take it and hide the selected feature), and toggles the visibility under
+        FreeCAD's."""
+        before = self.visibility()
+        self.treeSpace()
+        self.assertEqual(Gui.Selection.getSelection(), [])
+        self.assertEqual(self.visibility(), before)
+        setKeymap("FreeCAD")
+        Gui.Selection.clearSelection()
+        self.treeSpace()
+        self.assertNotEqual(self.visibility()[self.sketch.Name], before[self.sketch.Name])
+
+    def boxes(self):
+        """Two 10 mm boxes outside the body, at x 0 and x 30."""
+        a = self.doc.addObject("Part::Box", "BoxA")
+        b = self.doc.addObject("Part::Box", "BoxB")
+        b.Placement.Base = App.Vector(30, 0, 0)
+        self.doc.recompute()
+        pump()
+        return a, b
+
+    def viewDirection(self):
+        d = Gui.ActiveDocument.ActiveView.getViewDirection()
+        return App.Vector(d.x, d.y, d.z)
+
+    def testNIsNormalToTheSelectedFace(self):
+        """With a box's face selected, N looks along the face's normal (Std_AlignToSelection):
+        BoxA's Face1 is its x = 0 face."""
+        a, _ = self.boxes()
+        Gui.ActiveDocument.ActiveView.viewIsometric()
+        Gui.Selection.addSelection(self.doc.Name, a.Name, "Face1")
+        self.pressFor(QtCore.Qt.Key_N, QtCore.Qt.NoModifier, "Std_ViewNormal")
+        self.assertTrue(
+            waitFor(lambda: abs(abs(self.viewDirection().x) - 1) < 1e-3), self.viewDirection()
+        )
+
+    def testNInSketchEditLooksAtTheSketch(self):
+        """In sketch edit, N looks at the sketch plane (Sketcher_ViewSketch), here XY: along -Z,
+        with nothing selected."""
+        self.editSketch()
+        Gui.ActiveDocument.ActiveView.viewIsometric()
+        pump(0.2)
+        self.pressFor(QtCore.Qt.Key_N, QtCore.Qt.NoModifier, "Std_ViewNormal")
+        self.assertTrue(
+            waitFor(lambda: (self.viewDirection() - App.Vector(0, 0, -1)).Length < 1e-3),
+            self.viewDirection(),
+        )
+
+    def testShiftIIsolatesTheSelectionAndRestores(self):
+        """Shift+I with a face of BoxA selected hides every other shown object (BoxB, the body,
+        its sketch) and keeps BoxA; Shift+I again, with nothing selected, shows exactly those
+        again."""
+        a, b = self.boxes()
+        before = self.visibility()
+        self.assertTrue(before[b.Name] and before[self.body.Name])
+        Gui.Selection.addSelection(self.doc.Name, a.Name, "Face1")
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        shown = {n for n, v in self.visibility().items() if v}
+        self.assertEqual(shown, {a.Name})
+        Gui.Selection.clearSelection()
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        self.assertEqual(self.visibility(), before)
+
+    def testShiftIKeepsTheGroupsOfAnObjectSelectedWithoutAPath(self):
+        """An object selected without a path (a click in the tree selects the box alone) keeps
+        the group it is in: hiding the Part would hide the box."""
+        a, b = self.boxes()
+        part = self.doc.addObject("App::Part", "Part")
+        inner = part.newObject("Part::Box", "Inner")
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).getObject(part.Name).Visibility = True
+        Gui.getDocument(self.doc.Name).getObject(inner.Name).Visibility = True
+        pump()
+        self.assertTrue(self.visibility()[part.Name], "the part starts hidden")
+        Gui.Selection.addSelection(self.doc.Name, inner.Name)
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        shown = {n for n, v in self.visibility().items() if v}
+        self.assertEqual(shown & {part.Name, inner.Name}, {part.Name, inner.Name})
+        self.assertEqual(shown & {a.Name, b.Name, self.body.Name}, set())
+
+    def testShiftIKeepsTheSelectedFeaturesBody(self):
+        """Isolating a feature of a body (selected through the body, as a click in the 3D view
+        does) keeps the body, whose hiding would hide the feature, and hides the boxes and the
+        body's other shown features."""
+        a, b = self.boxes()
+        pad = self.body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self.sketch
+        pad.Length = 5
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).getObject(self.sketch.Name).Visibility = True
+        pump()
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, "Pad.Face1")
+        self.pressFor(QtCore.Qt.Key_I, QtCore.Qt.ShiftModifier, "Std_Isolate")
+        shown = {n for n, v in self.visibility().items() if v}
+        self.assertEqual(shown & {self.body.Name, pad.Name}, {self.body.Name, pad.Name})
+        self.assertEqual(shown & {a.Name, b.Name, self.sketch.Name}, set())
+
+    def secondBody(self):
+        """A second body with a shown sketch, and a second, hidden sketch in the first body."""
+        hidden = self.body.newObject("Sketcher::SketchObject", "Hidden")
+        hidden.AttachmentSupport = (self.body.Origin.OriginFeatures[4], [""])  # XZ_Plane
+        hidden.MapMode = "FlatFace"
+        other = self.doc.addObject("PartDesign::Body", "Other")
+        otherSketch = other.newObject("Sketcher::SketchObject", "OtherSketch")
+        otherSketch.AttachmentSupport = (other.Origin.OriginFeatures[3], [""])
+        otherSketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.getObject(hidden.Name).Visibility = False
+        guiDoc.getObject(self.sketch.Name).Visibility = True
+        guiDoc.getObject(otherSketch.Name).Visibility = True
+        Gui.ActiveDocument.ActiveView.setActiveObject("pdbody", self.body)
+        pump()
+        return hidden, other, otherSketch
+
+    def testShiftHTogglesTheBodysSketches(self):
+        """Shift+H hides the active body's sketches when one is shown, and shows them all when
+        none is; another body's sketch stays as it is."""
+        hidden, _, otherSketch = self.secondBody()
+        ours = (self.sketch.Name, hidden.Name)
+        self.pressFor(QtCore.Qt.Key_H, QtCore.Qt.ShiftModifier, "PartDesign_ToggleSketches")
+        vis = self.visibility()
+        self.assertEqual([vis[n] for n in ours], [False, False])
+        self.assertTrue(vis[otherSketch.Name])
+        self.pressFor(QtCore.Qt.Key_H, QtCore.Qt.ShiftModifier, "PartDesign_ToggleSketches")
+        vis = self.visibility()
+        self.assertEqual([vis[n] for n in ours], [True, True])
+        self.assertTrue(vis[otherSketch.Name])
+
+    def testShiftHLeavesTheSketchInEditShown(self):
+        """In sketch edit the command hides and shows the body's other sketches, and leaves the
+        sketch being edited shown and in edit. (Its key does nothing there: the action sits in
+        Part Design's View menu, which sketch edit replaces; the menu of the edit's workbench
+        has no entry for it.)"""
+        hidden, _, _ = self.secondBody()
+        self.editSketch()
+        guiDoc = Gui.getDocument(self.doc.Name)
+        # the sketch in edit is as it is while it is edited (its own state, not necessarily shown)
+        editing = self.visibility()[self.sketch.Name]
+        action = Gui.Command.get("PartDesign_ToggleSketches").getAction()
+        self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)))
+        Gui.runCommand("PartDesign_ToggleSketches")
+        pump(0.3)
+        vis = self.visibility()
+        self.assertTrue(vis[hidden.Name], "the other sketch isn't shown")
+        self.assertEqual(vis[self.sketch.Name], editing, "the sketch in edit was changed")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
+        Gui.runCommand("PartDesign_ToggleSketches")
+        pump(0.3)
+        vis = self.visibility()
+        self.assertFalse(vis[hidden.Name], "the other sketch isn't hidden again")
+        self.assertEqual(vis[self.sketch.Name], editing, "the sketch in edit was changed")
+        self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
+
+    def planesShown(self, body):
+        """{role or name: shown in the 3D view} of the body's origin features and datum planes:
+        an origin feature shows only with its origin."""
+        guiDoc = Gui.getDocument(self.doc.Name)
+        origin = guiDoc.getObject(body.Origin.Name).Visibility
+        shown = {}
+        for feature in body.Origin.OriginFeatures:
+            shown[feature.Role] = origin and guiDoc.getObject(feature.Name).Visibility
+        for o in body.Group:
+            if o.isDerivedFrom("PartDesign::Plane"):
+                shown[o.Name] = guiDoc.getObject(o.Name).Visibility
+        return shown
+
+    def testPTogglesTheBodysPlanes(self):
+        """P shows the active body's three origin planes and its datum plane (not the axes or the
+        origin point), and P again hides them; the other body's stay hidden."""
+        _, other, _ = self.secondBody()
+        datum = self.body.newObject("PartDesign::Plane", "DatumPlane")
+        self.doc.recompute()
+        Gui.getDocument(self.doc.Name).getObject(datum.Name).Visibility = False
+        pump()
+        self.assertFalse(any(self.planesShown(self.body).values()))
+        self.pressFor(QtCore.Qt.Key_P, QtCore.Qt.NoModifier, "PartDesign_TogglePlanes")
+        shown = self.planesShown(self.body)
+        self.assertEqual(
+            {k for k, v in shown.items() if v}, {"XY_Plane", "XZ_Plane", "YZ_Plane", datum.Name}
+        )
+        self.assertFalse(any(self.planesShown(other).values()))
+        self.pressFor(QtCore.Qt.Key_P, QtCore.Qt.NoModifier, "PartDesign_TogglePlanes")
+        self.assertFalse(any(self.planesShown(self.body).values()))
+
+    def testNewCommandsAreInTheMenus(self):
+        """A shortcut needs its action in a visible widget: each new command is in a menu of the
+        menu bar (the View menu; Part Design's for the body's)."""
+        inMenus = set()
+        for menu in Gui.getMainWindow().menuBar().findChildren(QtWidgets.QMenu):
+            inMenus.update(a.objectName() for a in menu.actions())
+        names = (
+            "Std_ClearSelection",
+            "Std_ViewNormal",
+            "Std_Isolate",
+            "PartDesign_ToggleSketches",
+            "PartDesign_TogglePlanes",
+        )
+        self.assertEqual([n for n in names if n not in inMenus], [])
 
     # --- conflicts
 
@@ -1047,6 +1414,312 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in offset)), "Offset stays off")
         pump(0.5)
         self.assertNoClashes("sketch edit, an edge selected")
+
+    # --- Select other on backtick (PR C)
+
+    def viewportPoint(self, point):
+        """The widget position in the 3D view's viewport where the world point shows."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        x, y = view.getPointOnViewport(point)
+        _, height = view.getSize()
+        scale = viewport.devicePixelRatioF()
+        return viewport, QtCore.QPoint(int(round(x / scale)), int(round((height - y - 1) / scale)))
+
+    def cursorOver(self, point):
+        """Moves the cursor over the world point (the command opens its list at the cursor).
+        Skips where the platform keeps the cursor where it is."""
+        viewport, at = self.viewportPoint(point)
+        target = viewport.mapToGlobal(at)
+        QtGui.QCursor.setPos(target)
+        pump(0.1)
+        if QtGui.QCursor.pos() != target:
+            self.skipTest("the platform doesn't move the cursor")
+
+    def frontCamera(self, cx=5, cz=5):
+        """An orthographic camera 100 mm in front of (cx, 0, cz) looking along +y, 40 mm high,
+        with the near and far planes around the model (fitAll can put the near plane inside the
+        front box, and a ray pick starts at the near plane)."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setCameraType("Orthographic")
+        pump(0.2)
+        view.setCamera(
+            f"""#Inventor V2.1 ascii
+OrthographicCamera {{
+  viewportMapping ADJUST_CAMERA
+  position {cx} -100 {cz}
+  orientation 1 0 0  1.5707964
+  nearDistance 10
+  farDistance 300
+  aspectRatio 1
+  focalDistance 100
+  height 40
+}}
+"""
+        )
+        pump(0.3)
+        return view
+
+    def stack(self):
+        """Two 10 mm boxes one behind the other, seen from the front (along +y) with an
+        orthographic camera, the body hidden: BoxA's faces at y = 0 and 10, BoxB's at 30 and 40,
+        all under a cursor over (5, 0, 5)."""
+        for name in (self.body.Name, self.sketch.Name):
+            Gui.getDocument(self.doc.Name).getObject(name).Visibility = False
+        a = self.doc.addObject("Part::Box", "BoxA")
+        b = self.doc.addObject("Part::Box", "BoxB")
+        b.Placement.Base = App.Vector(0, 30, 0)
+        self.doc.recompute()
+        view = self.frontCamera()
+        self.cursorOver(App.Vector(5, 0, 5))
+        # a ray through the cursor must meet all four faces, or the 3D view doesn't pick here
+        if len(view.getObjectsInfo(view.getPointOnViewport(App.Vector(5, 0, 5)), 1) or []) < 4:
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+        return a, b
+
+    def selectOtherList(self):
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None and popup.objectName() == "SelectOtherMenu":
+            return popup
+        return None
+
+    def openSelectOther(self):
+        """Presses backtick over the cursor's position; returns the list that opens."""
+        with self.watching("Std_SelectOther") as fired:
+            self.pressFor(QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, "Std_SelectOther")
+        self.assertEqual(fired, ["Std_SelectOther"])
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is not None), "no list opened")
+        return self.selectOtherList()
+
+    def listKey(self, key, modifiers=QtCore.Qt.NoModifier):
+        """A key as the window system delivers it while the list is open."""
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), key, modifiers)
+        pump(0.15)
+
+    def preselectedY(self):
+        """The y of the preselected element's centre (the boxes lie along y), None for none."""
+        presel = Gui.Selection.getPreselection()
+        if not presel.ObjectName:
+            return None
+        shape = self.doc.getObject(presel.ObjectName).Shape
+        return round(shape.getElement(presel.SubElementNames[0].split(".")[-1]).CenterOfMass.y, 6)
+
+    def selectedElements(self):
+        return [
+            (s.ObjectName, sub)
+            for s in Gui.Selection.getSelectionEx(self.doc.Name)
+            for sub in s.SubElementNames
+        ]
+
+    def testStdSelectOtherIsOnBacktick(self):
+        """Std_SelectOther has the backtick, as Onshape's select other; Std_ClarifySelection keeps
+        none (the context menu and long-press) and FreeCAD's keymap has it the other way round."""
+        self.assertTrue(same(shortcut("Std_SelectOther"), "`"), shortcut("Std_SelectOther"))
+        self.assertEqual(shortcut("Std_ClarifySelection"), "")
+        setKeymap("FreeCAD")
+        self.assertEqual(shortcut("Std_SelectOther"), "")
+        self.assertTrue(same(shortcut("Std_ClarifySelection"), "`"))
+
+    def testSelectOtherListsTheElementsUnderTheCursorNearestFirst(self):
+        """Over the front face of BoxA, the list holds the four faces the ray meets, in depth
+        order, the first preselected; nothing is selected."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        self.assertEqual(popup.actions().__len__(), 4, [x.text() for x in popup.actions()])
+        self.assertIn("BoxA", popup.actions()[0].text())
+        self.assertIn("BoxB", popup.actions()[3].text())
+        self.assertEqual(self.preselectedY(), 0.0)
+        self.assertEqual(popup.activeAction(), popup.actions()[0])
+        self.assertEqual(self.selectedElements(), [])
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testBacktickStepsThroughTheListWithoutSelecting(self):
+        """Backtick and Down go on, Shift+backtick and Up go back, both wrapping; each step only
+        preselects, and the window shortcut doesn't open a second list."""
+        self.stack()
+        popup = self.openSelectOther()
+        steps = [
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 10.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 30.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.ShiftModifier, 10.0),
+            (QtCore.Qt.Key_Down, QtCore.Qt.NoModifier, 30.0),
+            (QtCore.Qt.Key_Up, QtCore.Qt.NoModifier, 10.0),
+            (QtCore.Qt.Key_AsciiTilde, QtCore.Qt.ShiftModifier, 0.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.ShiftModifier, 40.0),  # back from the first
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 0.0),  # on from the last
+        ]
+        with self.watching("Std_SelectOther") as again:
+            for key, modifiers, expected in steps:
+                self.listKey(key, modifiers)
+                self.assertIsNotNone(self.selectOtherList(), "the list closed")
+                self.assertEqual(self.preselectedY(), expected, (key, modifiers))
+                self.assertEqual(self.selectedElements(), [])
+        self.assertEqual(again, [], "a key of the list ran the command again")
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testEnterSelectsTheCurrentEntryOnce(self):
+        """Enter makes one pick of the current element and closes the list."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.assertEqual(self.preselectedY(), 30.0)
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        picked = self.selectedElements()
+        self.assertEqual(len(picked), 1, picked)
+        name, sub = picked[0]
+        self.assertEqual(name, b.Name)
+        self.assertEqual(round(b.Shape.getElement(sub.split(".")[-1]).CenterOfMass.y, 6), 30.0)
+        self.assertIsNone(self.preselectedY())
+
+    def testClickOnAnEntrySelectsIt(self):
+        """A click on an entry picks that element."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        action = popup.actions()[3]
+        QtTest.QTest.mouseClick(
+            popup, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, popup.actionGeometry(action).center()
+        )
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        picked = self.selectedElements()
+        self.assertEqual(len(picked), 1, picked)
+        self.assertEqual(picked[0][0], b.Name)
+        self.assertEqual(
+            round(b.Shape.getElement(picked[0][1].split(".")[-1]).CenterOfMass.y, 6), 40.0
+        )
+
+    def filletScene(self):
+        """The body with a 10 mm AdditiveBox seen from the front, orthographic, and a new
+        fillet's dialog open with its edge field armed. Returns (fillet, field)."""
+        for name in (self.body.Name, self.sketch.Name):
+            Gui.getDocument(self.doc.Name).getObject(name).Visibility = True
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box")
+        self.body.addObject(box)
+        for prop in ("Length", "Width", "Height"):
+            setattr(box, prop, 10)
+        self.doc.recompute()
+        self.sketch.Visibility = False
+        self.frontCamera()
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_Fillet")
+
+        def fields():
+            return [
+                w
+                for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget)
+                if w.property("armed") is not None and w.isVisible()
+            ]
+
+        self.assertTrue(waitFor(lambda: len(fields()) == 1), "the fillet's reference field")
+        pump(0.3)
+        field = fields()[0]
+        self.assertTrue(waitFor(lambda: bool(field.property("armed"))), "not armed")
+        fillet = self.doc.getObject("Fillet")
+        self.assertEqual(fillet.Base[1], [])
+        return fillet, field
+
+    def testEscClosesTheListAndTheArmedFieldStaysArmed(self):
+        """Esc closes the list: no selection, no preselection left, and its release doesn't
+        reach the 3D view to disarm the field or cancel the Fillet panel."""
+        fillet, field = self.filletScene()
+        self.cursorOver(App.Vector(5, 0, 5))
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        pump(0.3)
+        self.assertEqual(self.selectedElements(), [])
+        self.assertIsNone(self.preselectedY())
+        self.assertTrue(Gui.Control.activeDialog(), "the Esc release closed the task panel")
+        self.assertTrue(field.property("armed"), "the Esc release disarmed the field")
+        self.assertEqual(fillet.Base[1], [])
+
+    def testMouseLeavingTheListClosesIt(self):
+        """The mouse moving away from the list closes it and changes nothing."""
+        self.stack()
+        popup = self.openSelectOther()
+        QtTest.QTest.mouseMove(popup, QtCore.QPoint(-300, -300))
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        self.assertEqual(self.selectedElements(), [])
+        self.assertIsNone(self.preselectedY())
+
+    def testSelectOtherLeavesOutWhatTheFilterRefuses(self):
+        """With the edge filter on, every face under the cursor is refused, so the list is empty
+        and nothing opens; without the filter the same position lists the four faces. (Off
+        screen the 3D view picks no edges, so a list of the edges that remain can't be
+        shown.)"""
+        self.stack()
+        Gui.runCommand("Part_SelectFilter", 1)  # edges
+        pump(0.1)
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.4)
+        self.assertIsNone(self.selectOtherList(), "a list of refused faces opened")
+        Gui.runCommand("Part_SelectFilter", 3)  # none
+        pump(0.1)
+        popup = self.openSelectOther()
+        self.assertEqual(len(popup.actions()), 4)
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testBacktickTypesInAFieldAndOpensNothing(self):
+        """With the focus in a line edit the backtick is typed, not a command."""
+        self.stack()
+        edit = QtWidgets.QLineEdit(Gui.getMainWindow())
+        edit.setGeometry(0, 0, 100, 24)
+        edit.show()
+        try:
+            self.assertTrue(focus(edit), "the field doesn't take the focus")
+            with self.watching("Std_SelectOther") as fired:
+                QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_QuoteLeft)
+                pump(0.4)
+            self.assertEqual(fired, [])
+            self.assertIsNone(self.selectOtherList())
+            self.assertEqual(edit.text(), "`")
+        finally:
+            edit.deleteLater()
+            pump(0.1)
+
+    def testSelectOtherDoesNothingWithTheCursorOutsideTheView(self):
+        """With the cursor over the model tree, backtick opens no list."""
+        self.stack()
+        tree = next(
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget)
+            if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
+        )
+        target = tree.mapToGlobal(tree.rect().center())
+        QtGui.QCursor.setPos(target)
+        pump(0.1)
+        if QtGui.QCursor.pos() != target:
+            self.skipTest("the platform doesn't move the cursor")
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.3)
+        self.assertIsNone(self.selectOtherList())
+
+    def testSelectOtherIsOffInSketchEdit(self):
+        """A sketch in edit has its own picking (PR E): the command is off there."""
+        self.editSketch()
+        action = Gui.Command.get("Std_SelectOther").getAction()
+        pump(0.5)
+        self.assertFalse(any(a.isEnabled() for a in action))
+
+    def testCommitToggleOnceInAnArmedFilletField(self):
+        """In a Fillet's armed field a commit toggles the element once, and cycling the list
+        toggles nothing. (A face: off screen the 3D view picks no edges.)"""
+        fillet, field = self.filletScene()
+        self.cursorOver(App.Vector(5, 0, 5))
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_QuoteLeft)  # the second entry
+        sub = Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1]
+        self.assertTrue(sub.startswith("Face"), sub)
+        self.assertEqual(fillet.Base[1], [], "cycling toggled an element")
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None))
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [sub])
 
 
 if __name__ == "__main__":
