@@ -1499,6 +1499,83 @@ class UndoRedoCases(unittest.TestCase):
         self.Doc.undo()
         self.assertTrue(self.Doc.recompute() >= 0)
 
+    # FreeCAD-CH (ops#229): a rename and a value change (or an add or a removal) of the same
+    # dynamic property in one transaction share its transaction entry; undo and abort took back
+    # only one of them.
+    def testRenameWithOtherChangesOfTheSameProperty(self):
+        def dynamic(obj):
+            return {p: getattr(obj, p) for p in ("Width", "Wide", "Narrow", "Extra", "Other")
+                    if p in obj.PropertiesList}
+
+        def setValue(name, value):
+            return lambda obj: setattr(obj, name, value)
+
+        def rename(old, new):
+            return lambda obj: obj.renameProperty(old, new)
+
+        def add(name, value):
+            def step(obj):
+                obj.addProperty("App::PropertyInteger", name)
+                setattr(obj, name, value)
+            return step
+
+        def remove(name):
+            return lambda obj: obj.removeProperty(name)
+
+        before = {"Width": 5, "Other": 0}
+        cases = [
+            ("rename", [rename("Width", "Wide")], {"Wide": 5, "Other": 0}),
+            ("other change, rename", [setValue("Other", 3), rename("Width", "Wide")],
+             {"Wide": 5, "Other": 3}),
+            ("change, rename", [setValue("Width", 9), rename("Width", "Wide")],
+             {"Wide": 9, "Other": 0}),
+            ("rename, change", [rename("Width", "Wide"), setValue("Wide", 9)],
+             {"Wide": 9, "Other": 0}),
+            ("change, rename twice, change",
+             [setValue("Width", 9), rename("Width", "Wide"), rename("Wide", "Narrow"),
+              setValue("Narrow", 11)], {"Narrow": 11, "Other": 0}),
+            ("add, rename", [add("Extra", 7), rename("Extra", "Wide")],
+             {"Width": 5, "Wide": 7, "Other": 0}),
+            ("rename, rename back", [rename("Width", "Wide"), rename("Wide", "Width")],
+             {"Width": 5, "Other": 0}),
+            ("change, rename, rename back",
+             [setValue("Width", 9), rename("Width", "Wide"), rename("Wide", "Width")],
+             {"Width": 9, "Other": 0}),
+            ("rename, remove", [rename("Width", "Wide"), remove("Wide")], {"Other": 0}),
+            ("change, rename, remove", [setValue("Width", 9), rename("Width", "Wide"),
+                                        remove("Wide")], {"Other": 0}),
+        ]
+        for label, steps, after in cases:
+            for close in ("abort", "undo"):
+                with self.subTest(case=label, close=close):
+                    doc = FreeCAD.newDocument("UndoRename")
+                    try:
+                        doc.UndoMode = 1
+                        doc.openTransaction("Make")
+                        obj = doc.addObject("App::FeaturePython", "Vars")
+                        obj.addProperty("App::PropertyInteger", "Width")
+                        obj.addProperty("App::PropertyInteger", "Other")
+                        obj.Width = 5
+                        doc.commitTransaction()
+
+                        doc.openTransaction("Task")
+                        for step in steps:
+                            step(obj)
+                        self.assertEqual(dynamic(obj), after)
+                        if close == "abort":
+                            doc.abortTransaction()
+                            self.assertEqual(dynamic(obj), before)
+                        else:
+                            doc.commitTransaction()
+                            doc.undo()
+                            self.assertEqual(dynamic(obj), before)
+                            doc.redo()
+                            self.assertEqual(dynamic(obj), after)
+                            doc.undo()
+                            self.assertEqual(dynamic(obj), before)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("UndoTest")

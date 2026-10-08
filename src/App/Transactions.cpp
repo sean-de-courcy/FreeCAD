@@ -295,14 +295,10 @@ TransactionObject::TransactionObject() = default;
 
 TransactionObject::~TransactionObject()
 {
+    // FreeCAD-CH (ops#229): data.property is always a copy or null; a rename entry no longer keeps
+    // the live property there, and one with a value change owns its copy.
     for (auto& v : _PropChangeMap) {
-        auto& data = v.second;
-        // If nameOrig is used, it means it is a transaction of a rename
-        // operation.  This operation does not interact with v.second.property,
-        // so it should not be deleted in that case.
-	if (data.nameOrig.empty()) {
-	    delete v.second.property;
-	}
+        delete v.second.property;
     }
 }
 
@@ -343,13 +339,19 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
                 obj->moveDynamicProperty(data.propertyTarget, newTarget);
                 continue;
             }
+            // FreeCAD-CH (ops#229): a rename and a value change of the same property share this
+            // entry. The rename is taken back first; the value is then restored under the
+            // property's name from before the transaction.
+            const std::string& nameBefore = data.nameOrig.empty() ? data.name : data.nameOrig;
             if (!data.nameOrig.empty()) {
                 // This means we are undoing/redoing a rename operation
                 Property* currentProp = pcObj->getDynamicPropertyByName(data.name.c_str());
                 if (currentProp) {
                     pcObj->renameDynamicProperty(currentProp, data.nameOrig.c_str());
                 }
-                continue;
+                if (!data.property) {
+                    continue;
+                }
             }
 
             if (!data.property) {
@@ -362,10 +364,10 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
             // been destroyed. We must prepare for the case where user removed
             // a dynamic property but does not recordered as transaction.
             auto name = pcObj->getPropertyName(prop);
-            if (!name || (!data.name.empty() && data.name != name)
+            if (!name || (!nameBefore.empty() && nameBefore != name)
                 || data.propertyType != prop->getTypeId()) {
                 // Here means the original property is not found, probably removed
-                if (data.name.empty()) {
+                if (nameBefore.empty()) {
                     // not a dynamic property, nothing to do
                     continue;
                 }
@@ -374,11 +376,11 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
                 // restored. But since restoring property is actually creating
                 // a new property, the property key inside redo stack will not
                 // match. So we search by name first.
-                prop = pcObj->getDynamicPropertyByName(data.name.c_str());
+                prop = pcObj->getDynamicPropertyByName(nameBefore.c_str());
                 if (!prop) {
                     // Still not found, re-create the property
                     prop = pcObj->addDynamicProperty(data.propertyType.getName(),
-                                                     data.name.c_str(),
+                                                     nameBefore.c_str(),
                                                      data.group.c_str(),
                                                      data.doc.c_str(),
                                                      data.attr,
@@ -423,7 +425,9 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
 void TransactionObject::setProperty(const Property* pcProp)
 {
     auto& data = _PropChangeMap[pcProp->getID()];
-    if (!data.property && data.name.empty()) {
+    // FreeCAD-CH (ops#229): also after a rename in this transaction (an entry with a name but no
+    // propertyOrig); not after an add (propertyOrig without a copy) or an earlier change.
+    if (!data.property && !data.propertyOrig && !data.target) {
         static_cast<DynamicProperty::PropData&>(data) =
             pcProp->getContainer()->getDynamicPropertyData(pcProp);
         data.propertyOrig = pcProp;
@@ -441,11 +445,29 @@ void TransactionObject::renameProperty(const Property* pcProp, const char* oldNa
 
     auto& data = _PropChangeMap[pcProp->getID()];
 
+    // FreeCAD-CH (ops#229): the entry may already hold a value change or an add of this property.
+    // It keeps the current name and the name from before the transaction (the first rename's old
+    // name); a property added in this transaction needs no rename back, only its removal.
     if (data.name.empty()) {
         static_cast<DynamicProperty::PropData&>(data) =
             pcProp->getContainer()->getDynamicPropertyData(pcProp);
+        data.property = nullptr;  // that is the live property, not a copy
     }
-    data.nameOrig = oldName;
+    if (data.target) {
+        return;  // a move: left as it was
+    }
+    bool added = data.propertyOrig && !data.property;
+    if (!added && data.nameOrig.empty()) {
+        data.nameOrig = oldName;
+    }
+    data.name = pcProp->getName();
+    if (data.name == data.nameOrig) {
+        // renamed back: no rename to take back
+        data.nameOrig.clear();
+        if (!data.property && !data.propertyOrig) {
+            _PropChangeMap.erase(pcProp->getID());
+        }
+    }
 }
 
 void TransactionObject::arrangeMoveProperty(const Property* pcProp,
@@ -481,6 +503,17 @@ void TransactionObject::addOrRemoveProperty(const Property* pcProp, bool add)
     }
 
     auto& data = _PropChangeMap[pcProp->getID()];
+    // FreeCAD-CH (ops#229): an entry holding only a rename (no propertyOrig) is not an add; its
+    // removal is recorded under the name from before the transaction.
+    if (!add && !data.property && !data.propertyOrig && !data.nameOrig.empty()) {
+        data.propertyOrig = pcProp;
+        data.property = pcProp->Copy();
+        data.propertyType = pcProp->getTypeId();
+        data.property->setStatusValue(pcProp->getStatus());
+        data.name = data.nameOrig;
+        data.nameOrig.clear();
+        return;
+    }
     if (!data.name.empty()) {
         if (!add && !data.property) {
             // this means add and remove the same property inside a single
