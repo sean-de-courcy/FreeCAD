@@ -26,6 +26,7 @@
 
 #include <QApplication>
 #include <QKeyEvent>
+#include <QPointer>
 #include <QTimer>
 #include <Inventor/SoPickedPoint.h>
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
@@ -99,12 +100,14 @@ namespace
 {
 
 // FreeCAD-CH (ops#146, ops#216, ops#220): the viewer that saw the last Esc press; an Esc release
-// counts in a viewer only after a press there (ViewProvider::eventCallback).
-const View3DInventorViewer* escapePressedIn = nullptr;
+// counts in a viewer only after a press there (ViewProvider::eventCallback). A QPointer (ops#222):
+// only compared, but a viewer closed and another made at its address mustn't match.
+QPointer<const View3DInventorViewer> escapePressedIn;
 
-// ops#220: an Esc press that goes elsewhere (a popup, a dialog, a task panel field) clears the
-// record, so a press seen in the view whose release went elsewhere (the focus moved) doesn't
-// make the release of a later popup's Esc count in the view.
+// ops#220: an Esc press that goes elsewhere (a popup, a dialog, a task panel field, another 3D
+// view, ops#222) clears the record, so a press seen in the view whose release went elsewhere (the
+// focus moved) doesn't make the release of a later Esc count in the view. Application filters run
+// before the viewer's Coin path, which records a press it handles again.
 class EscapePressWatcher: public QObject
 {
 public:
@@ -123,27 +126,27 @@ public:
     {
         if (event->type() == QEvent::KeyPress
             && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape  // NOLINT
-            && !toAViewer()) {
+            && toViewer() != escapePressedIn) {
             escapePressedIn = nullptr;
         }
         return QObject::eventFilter(obj, event);
     }
 
 private:
-    // Whether a key pressed now goes to a 3D viewer: no popup takes it and the focus is there.
+    // The 3D viewer a key pressed now goes to: no popup takes it and the focus is there.
     // Decided by the focus, not the receiver, so the press's propagation to the view's parents
     // (the main window holds every widget) doesn't count as a press elsewhere.
-    static bool toAViewer()
+    static const View3DInventorViewer* toViewer()
     {
         if (QApplication::activePopupWidget()) {
-            return false;
+            return nullptr;
         }
         for (QWidget* w = QApplication::focusWidget(); w; w = w->parentWidget()) {
-            if (qobject_cast<View3DInventorViewer*>(w)) {
-                return true;
+            if (auto viewer = qobject_cast<View3DInventorViewer*>(w)) {
+                return viewer;
             }
         }
-        return false;
+        return nullptr;
     }
 };
 

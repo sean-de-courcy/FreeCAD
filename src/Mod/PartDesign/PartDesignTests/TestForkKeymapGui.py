@@ -2295,8 +2295,8 @@ OrthographicCamera {{
         self.assertTrue(focus(self.view3d()), "the 3D view doesn't take the focus")
         window = Gui.getMainWindow().windowHandle()
         QtTest.QTest.keyPress(window, QtCore.Qt.Key_Left)
-        for type in (QtCore.QEvent.KeyRelease, QtCore.QEvent.KeyPress) * 2:
-            event = QtGui.QKeyEvent(type, QtCore.Qt.Key_Left, QtCore.Qt.NoModifier, "", True)
+        for eventType in (QtCore.QEvent.KeyRelease, QtCore.QEvent.KeyPress) * 2:
+            event = QtGui.QKeyEvent(eventType, QtCore.Qt.Key_Left, QtCore.Qt.NoModifier, "", True)
             QtWidgets.QApplication.sendEvent(window, event)
             pump(0.1)
         QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Left)
