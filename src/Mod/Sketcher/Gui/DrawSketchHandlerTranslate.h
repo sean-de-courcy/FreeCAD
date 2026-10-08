@@ -511,11 +511,11 @@ public:
 
         const Gui::InputHint elementsHint {
             tr("%1/%2 increase/decrease number of elements", "Sketcher Translate: hint"),
-            {KeyU, KeyJ}
+            {toolKey(KeyU), toolKey(KeyJ)}
         };
         const Gui::InputHint rowsHint {
             tr("%1/%2 increase/decrease number of rows", "Sketcher Translate: hint"),
-            {KeyR, KeyF}
+            {toolKey(KeyR), toolKey(KeyF)}
         };
 
         return Gui::lookupHints<SelectMode>(

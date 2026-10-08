@@ -451,7 +451,9 @@ public:
 
     void registerPressedKey(bool pressed, int key) override
     {
-        if (key == SoKeyboardEvent::M && pressed && !this->isLastState()) {
+        // FreeCAD-CH (ops#194 PR D): Ctrl+M under the fork's keymap
+        if (key == SoKeyboardEvent::M && pressed && this->isToolKey(pressed, key)
+            && !this->isLastState()) {
             this->iterateToNextConstructionMethod();
         }
         else if (key == SoKeyboardEvent::ESCAPE && pressed) {

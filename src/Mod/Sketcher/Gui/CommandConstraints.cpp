@@ -2320,7 +2320,8 @@ public:
 
     void registerPressedKey(bool pressed, int key) override
     {
-        if (key == SoKeyboardEvent::M && pressed) {
+        // FreeCAD-CH (ops#194 PR D): Ctrl+M under the fork's keymap
+        if (key == SoKeyboardEvent::M && pressed && isToolKey(pressed, key)) {
             availableConstraint = nextConstraint(availableConstraint);
             makeAppropriateConstraint(previousOnSketchPos);
             updateHint();
@@ -2563,7 +2564,7 @@ public:
             return {pickHint};
         }
 
-        return {pickHint, {modeHint, {Gui::InputHint::UserInput::KeyM}}};
+        return {pickHint, {modeHint, {SketcherGui::toolKey(Gui::InputHint::UserInput::KeyM)}}};
     }
 
 protected:

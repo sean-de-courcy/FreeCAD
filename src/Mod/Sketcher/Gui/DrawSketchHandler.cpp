@@ -31,7 +31,9 @@
 #include <utility>
 
 #include <QGuiApplication>
+#include <QKeySequence>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QTimer>
 
 #include <Inventor/events/SoKeyboardEvent.h>
@@ -41,6 +43,7 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/View3DInventor.h>
 #include <Gui/View3DInventorViewer.h>
@@ -440,6 +443,42 @@ void DrawSketchHandler::registerPressedKey(bool pressed, int key)
     if (key == SoKeyboardEvent::ESCAPE && !pressed) {
         cancelCurrentAction();
     }
+}
+
+bool DrawSketchHandler::isToolKey(bool pressed, int key)
+{
+    if (!Gui::ForkKeymap::isOnshape()) {
+        return true;
+    }
+    if (pressed) {
+        if (QGuiApplication::keyboardModifiers() & Qt::ControlModifier) {
+            toolKeysDown.insert(key);
+            return true;
+        }
+        toolKeysDown.erase(key);
+        return false;
+    }
+    return toolKeysDown.erase(key) > 0;
+}
+
+Gui::InputHint::InputSequence SketcherGui::toolKey(Gui::InputHint::UserInput key)
+{
+    if (Gui::ForkKeymap::isOnshape()) {
+        return {Gui::InputHint::UserInput::ModifierCtrl, key};
+    }
+    return {key};
+}
+
+QString SketcherGui::toolKeyLabel(const QString& label)
+{
+    static const QRegularExpression keyAtEnd(QStringLiteral("\\(([MUJRF])\\)$"));
+    QRegularExpressionMatch match = keyAtEnd.match(label);
+    if (!Gui::ForkKeymap::isOnshape() || !match.hasMatch()) {
+        return label;
+    }
+    QKeySequence key(QStringLiteral("Ctrl+") + match.captured(1));
+    return label.left(match.capturedStart()) + QStringLiteral("(")
+        + key.toString(QKeySequence::NativeText) + QStringLiteral(")");
 }
 
 void DrawSketchHandler::pressRightButton(Base::Vector2d /*onSketchPos*/)

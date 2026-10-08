@@ -121,12 +121,18 @@ private:
         using State = std::pair<ConstructionMethod, SelectMode>;
         using enum Gui::InputHint::UserInput;
 
-        const Gui::InputHint switchHint {.message = tr("%1 switch mode"), .sequences = {KeyM}};
+        const Gui::InputHint switchHint {
+            .message = tr("%1 switch mode"),
+            .sequences = {toolKey(KeyM)}
+        };
         const Gui::InputHint roundedCornersHint {
             .message = tr("%1 toggle rounded corners"),
-            .sequences = {KeyU}
+            .sequences = {toolKey(KeyU)}
         };
-        const Gui::InputHint frameHint {.message = tr("%1 toggle frame"), .sequences = {KeyJ}};
+        const Gui::InputHint frameHint {
+            .message = tr("%1 toggle frame"),
+            .sequences = {toolKey(KeyJ)}
+        };
 
         return Gui::lookupHints<State>(
             {constructionMethod(), state()},

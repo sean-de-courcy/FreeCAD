@@ -40,6 +40,7 @@
 #include <Base/Exception.h>
 
 
+#include "DrawSketchHandler.h"
 #include "ViewProviderSketch.h"
 
 #include "SketcherToolDefaultWidget.h"
@@ -661,7 +662,8 @@ void SketcherToolDefaultWidget::setCheckboxChecked(int checkboxindex, bool check
 void SketcherToolDefaultWidget::setCheckboxLabel(int checkboxindex, const QString& string)
 {
     if (checkboxindex < nCheckbox) {
-        getCheckBox(checkboxindex)->setText(string);
+        // FreeCAD-CH (ops#194 PR D): "Frame (J)" shows the active keymap's key
+        getCheckBox(checkboxindex)->setText(toolKeyLabel(string));
     }
 }
 

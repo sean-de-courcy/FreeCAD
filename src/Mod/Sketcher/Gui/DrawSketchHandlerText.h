@@ -722,7 +722,7 @@ void DSHTextController::addConstraints()
 
 Gui::InputHint DrawSketchHandlerText::switchModeHint()
 {
-    return {QObject::tr("%1 switch mode"), {Gui::InputHint::UserInput::KeyM}};
+    return {QObject::tr("%1 switch mode"), {SketcherGui::toolKey(Gui::InputHint::UserInput::KeyM)}};
 }
 
 DrawSketchHandlerText::HintTable DrawSketchHandlerText::getTextHintTable()
