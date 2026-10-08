@@ -93,14 +93,15 @@ bool DatumElement::isOriginFeature() const
 
 Base::Vector3d DatumElement::getBasePoint() const
 {
-    Base::Vector3d pos = Placement.getValue().getPosition();
+    Base::Placement placement = Placement.getValue();
 
+    // The element's position turned and moved by its coordinate system (FreeCAD-CH ops#200)
     const auto* lcs = getLCS();
     if (lcs && !lcs->isOrigin()) {
-        pos += lcs->Placement.getValue().getPosition();
+        placement = lcs->Placement.getValue() * placement;
     }
 
-    return pos;
+    return placement.getPosition();
 }
 
 Base::Vector3d DatumElement::getDirection() const

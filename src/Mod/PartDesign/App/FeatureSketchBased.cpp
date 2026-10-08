@@ -963,7 +963,11 @@ int ProfileBased::getUpToShapeFromLinkSubList(
     // its coordinate system, which makeTopoShapeFromPlane below places in the body (ops#198)
     if (subSets.size() == 1 && !freecad_cast<App::Plane*>(subSets[0].first)
         && (subSets[0].second.empty() || subSets[0].second[0].empty())) {
-        upToShape = Part::Feature::getTopoShape(subSets[0].first, Part::ShapeOption::ResolveLink);
+        // With its placement, as the faces below are taken (ops#200: a datum plane at z = 7)
+        upToShape = Part::Feature::getTopoShape(
+            subSets[0].first,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
         return 2;  // 0 and 1 have special treatment but true face count isn't relevant
     }
 

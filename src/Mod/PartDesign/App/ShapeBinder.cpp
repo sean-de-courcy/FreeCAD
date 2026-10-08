@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <gp.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <BRep_Builder.hxx>
@@ -113,7 +114,8 @@ Part::TopoShape ShapeBinder::updatedShape() const
             // V1 keeps upstream's binder, which drops the source's names (ops#29)
             shape = Part::TopoShape(shape.getShape());
         }
-        // now, shape is in object's CS, and includes local Placement of obj but nothing else.
+        // now, shape is in object's CS, and includes local Placement of obj (and of its
+        // coordinate system, for a datum element: ops#200) but nothing else.
 
         if (TraceSupport.getValue()) {
             // compute the transform, and apply it to the shape.
@@ -217,6 +219,21 @@ void ShapeBinder::getFilteredReferences(
     }
 }
 
+namespace
+{
+// A datum element in the body's coordinates: an element of a coordinate system is placed in it
+// (ops#200); an origin's sits at identity
+Base::Placement datumPlacement(const App::GeoFeature* obj)
+{
+    Base::Placement placement = obj->Placement.getValue();
+    auto element = dynamic_cast<const App::DatumElement*>(obj);
+    if (auto lcs = element ? element->getLCS() : nullptr) {
+        placement = lcs->Placement.getValue() * placement;
+    }
+    return placement;
+}
+}  // namespace
+
 Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs)
 {
 
@@ -258,24 +275,25 @@ Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std:
         return compound;
     }
     else if (obj->isDerivedFrom<App::Line>()) {
-        gp_Lin line;
+        // Along the App::Line's base direction, X (ops#200)
+        gp_Lin line(gp::Origin(), gp::DX());
         BRepBuilderAPI_MakeEdge mkEdge(line);
         Part::TopoShape shape(mkEdge.Shape());
-        shape.setPlacement(obj->Placement.getValue());
+        shape.setPlacement(datumPlacement(obj));
         return shape;
     }
     else if (obj->isDerivedFrom<App::Plane>()) {
         gp_Pln plane;
         BRepBuilderAPI_MakeFace mkFace(plane);
         Part::TopoShape shape(mkFace.Shape());
-        shape.setPlacement(obj->Placement.getValue());
+        shape.setPlacement(datumPlacement(obj));
         return shape;
     }
     else if (obj->isDerivedFrom<App::Point>()) {
         gp_Pnt point;
         BRepBuilderAPI_MakeVertex mkPoint(point);
         Part::TopoShape shape(mkPoint.Shape());
-        shape.setPlacement(obj->Placement.getValue());
+        shape.setPlacement(datumPlacement(obj));
         return shape;
     }
 

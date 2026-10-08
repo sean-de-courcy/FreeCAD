@@ -27,9 +27,19 @@
 # ---------------------------------------------------------------------------
 
 # datum tools
-from PartDesignTests.TestDatum import TestDatumPoint, TestDatumLine, TestDatumPlane
+from PartDesignTests.TestDatum import (
+    TestDatumPoint,
+    TestDatumLine,
+    TestDatumPlane,
+    TestAttachedToACoordinateSystem,
+    TestAttachedToACoordinateSystemInAPlacedBody,
+)
 from PartDesignTests.TestShapeBinder import TestShapeBinder
 from PartDesignTests.TestShapeBinder import TestSubShapeBinder
+from PartDesignTests.TestShapeBinder import (
+    TestShapeBinderOfACoordinateSystem,
+    TestShapeBinderOfACoordinateSystemInAPlacedBody,
+)
 
 # additive/subtractive features & primitives
 from PartDesignTests.TestPad import (
