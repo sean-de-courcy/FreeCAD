@@ -393,12 +393,22 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
             }
 
             cprop->Paste(*prop);
+        }
 
-            // we are a independent copy, therefore no external geometry was copied. WE therefore
-            // can delete all constraints
-            if (auto* sketchObj = freecad_cast<Sketcher::SketchObject*>(obj)) {
-                sketchObj->delConstraintsToExternal();
+        // An independent copy has no external geometry: its links weren't copied, and the pasted
+        // projections go too (only the two axes stay), since the copy's recompute would make
+        // their references links again, to objects outside the body. So its constraints to
+        // external geometry go as well. The copy's, once: the original is never touched (ops#233:
+        // this ran on obj, once per property).
+        if (auto* sketchCopy = freecad_cast<Sketcher::SketchObject*>(copy)) {
+            const auto& external = sketchCopy->ExternalGeo.getValues();
+            if (external.size() > 2) {
+                sketchCopy->ExternalGeo.setValues(
+                    std::vector<Part::Geometry*>(external.begin(), external.begin() + 2)
+                );
             }
+            sketchCopy->ExternalTypes.setValues({});
+            sketchCopy->delConstraintsToExternal();
         }
     }
     else {

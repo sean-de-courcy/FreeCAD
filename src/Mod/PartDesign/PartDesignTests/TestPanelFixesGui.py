@@ -443,3 +443,55 @@ class TestPanelFixesGui(unittest.TestCase):
     def testHoleUnlistedPointsAndCirclesKept(self):
         """6: the same for 3 (points and circles): three holes."""
         self.unlistedBaseProfileType(3, holes=3)
+
+    # -- ops#233: an independent copy leaves the original alone ---------------------------------
+
+    def testPipeCopyKeepsTheOriginalsExternalConstraints(self):
+        """ops#233: the spine outside the body has one constraint to an external edge (its start
+        on a guide line's start) and one internal (the two lines joined). OK copies it (Make
+        independent copy): the original keeps both constraints and its geometry; the copy has no
+        external geometry, keeps only the internal constraint and solves to the same lines. The
+        old code deleted the original's external constraint (once per property) and left the
+        copy's, and the copy's pasted projection linked the guide again at its recompute."""
+        import Sketcher
+
+        pipe = self.rod(spineInBody=False)
+        guide = self.doc.addObject("Part::Feature", "Guide")
+        guide.Shape = Part.makeLine(V(0, 0, 0), V(0, 0, 10))
+        self.spine.addExternal(guide.Name, "Edge1")
+        self.spine.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        self.spine.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+        self.doc.recompute()
+        self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
+        self.assertEqual(self.spine.ConstraintCount, 2)
+        lines = [(g.StartPoint, g.EndPoint) for g in self.spine.Geometry]
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copy = pipe.Spine[0]
+        self.assertIsNot(copy, self.spine)
+        self.doc.recompute()
+        # the original: untouched
+        self.assertEqual(self.spine.ConstraintCount, 2)
+        self.assertEqual(
+            [(c.Type, c.First, c.Second) for c in self.spine.Constraints],
+            [("Coincident", 0, -3), ("Coincident", 0, 1)],
+        )
+        self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
+        self.assertEqual([(g.StartPoint, g.EndPoint) for g in self.spine.Geometry], lines)
+        # the copy: the internal constraint only, the same lines
+        self.assertEqual(
+            [(c.Type, c.First, c.Second) for c in copy.Constraints], [("Coincident", 0, 1)]
+        )
+        # no external geometry (the pasted projection's reference linked the guide again)
+        self.assertEqual(copy.ExternalGeometry, [])
+        self.assertEqual(len(copy.ExternalGeo), 2)  # the axes
+        self.assertEqual(copy.ExternalTypes, [])
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        for (a0, a1), g in zip(lines, copy.Geometry):
+            self.assertLess((g.StartPoint - a0).Length, 1e-9)
+            self.assertLess((g.EndPoint - a1).Length, 1e-9)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
