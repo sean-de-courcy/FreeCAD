@@ -32,7 +32,11 @@ from PartDesignTests.TestShapeBinder import TestShapeBinder
 from PartDesignTests.TestShapeBinder import TestSubShapeBinder
 
 # additive/subtractive features & primitives
-from PartDesignTests.TestPad import TestPad
+from PartDesignTests.TestPad import (
+    TestPad,
+    TestUpToPlanePlacement,
+    TestUpToPlanePlacementInAPlacedBody,
+)
 from PartDesignTests.TestPocket import TestPocket
 from PartDesignTests.TestHelix import TestHelix
 from PartDesignTests.TestHole import TestHole
@@ -53,7 +57,12 @@ from PartDesignTests.TestBaseFeature import TestBaseFeature
 # dressup features
 from PartDesignTests.TestFillet import TestFillet
 from PartDesignTests.TestChamfer import TestChamfer
-from PartDesignTests.TestDraft import TestDraft, TestDressUpFaces, TestNeutralPlanePlacement
+from PartDesignTests.TestDraft import (
+    TestDraft,
+    TestDressUpFaces,
+    TestNeutralPlanePlacement,
+    TestNeutralPlanePlacementInAPlacedBody,
+)
 from PartDesignTests.TestThickness import TestThickness
 from PartDesignTests.TestMissingElements import TestMissingElements  # FreeCAD-CH, ops#69-71
 

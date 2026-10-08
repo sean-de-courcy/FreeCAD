@@ -198,7 +198,8 @@ names it.
 | `feat/153-quick-measure` | feat | ops#153 | - | `integration` `9dd9ca6159` | `8e39a53440` (fork PR 168), 2026-10-07 | never (fork feature); refit when upstream changes `QuickMeasure::printResult` or `Measure::Measurement` |
 | `feat/150-w9-hole-fields` | feat | ops#150 | - | `feat/150-w8-pipe-paths` `23a6d79be7` (stacked on fork PR 166) | `d162236575` (fork PR 169), 2026-10-07 | never (fork feature) |
 | `fix/149-tree-edit-highlight` | fix | ops#149 | upstream issues 20599, 30499 | `integration` `9dd9ca6159` | `5e76a4a186` (fork PR 171), 2026-10-07 | a new base styles the item in edit beyond its background |
-| `fix/150-w2-w3-tests` | fix | ops#150 | - | `feat/150-w9-hole-fields` `b66289dc18` (stacked on fork PR 169) | (fork PR 172) | never (fork feature) |
+| `fix/150-w2-w3-tests` | fix | ops#150 | - | `feat/150-w9-hole-fields` `b66289dc18` (stacked on fork PR 169) | `5da114a060` (fork PR 172), 2026-10-07 | never (fork feature) |
+| `fix/198-lcs-plane-placement` | fix | ops#198 | - | `fix/150-w2-w3-tests` `77cae0dfe6` (stacked on fork PR 172) | (fork PR 175) | when upstream places a coordinate system's plane in it (`makePlnFromPlane`, `getLCS`) |
 
 ## Fork-only commits in carried topics
 

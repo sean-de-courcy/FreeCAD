@@ -72,10 +72,12 @@ bool DatumElement::getCameraAlignmentDirection(Base::Vector3d& directionZ, Base:
 
 App::LocalCoordinateSystem* DatumElement::getLCS() const
 {
+    // The one whose OriginFeatures hold this element: a coordinate system attached to it links to
+    // it too (FreeCAD-CH ops#198)
     auto inList = getInList();
     for (auto* obj : inList) {
         auto* lcs = dynamic_cast<App::LocalCoordinateSystem*>(obj);
-        if (lcs) {
+        if (lcs && lcs->hasObject(this)) {
             return lcs;
         }
     }
