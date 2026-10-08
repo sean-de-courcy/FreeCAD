@@ -386,3 +386,53 @@ class TestTreeItemsGui(unittest.TestCase):
         sketch = self.doc.getObject("Sketch001")
         self.assertFalse(sketch.Visibility, "the left-behind sketch is shown")
         self.assertFalse(self.sketch.Visibility, "the Pad's sketch is shown after its edit")
+
+    def testCancelAfterDeletingTheShownFeatureDuringALaterEdit(self):
+        """Pad, Pad001, Pad002 with Pad002 shown; Pad001 in edit (its panel shows Pad, its base),
+        Pad002 deleted, Cancel: the Tip, Pad001, is shown, not Pad (ops#218 A: the base the edit
+        showed counted as the Body's shown feature, so the model looked rolled back)."""
+        pad2 = self.addSecondPad()
+        sketch3 = rectangleSketch(self.body, "Sketch002", 8, 4, 12, 6, z=15)
+        pad3 = self.body.newObject("PartDesign::Pad", "Pad002")
+        pad3.Profile = sketch3
+        pad3.Length = 2
+        self.doc.recompute()
+        sketch3.ViewObject.Visibility = False
+        pump()
+        self.assertTrue(pad3.isValid())
+        self.assertShown(pad3)
+        Gui.getDocument(self.doc.Name).setEdit(pad2.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+        pump()
+        self.delete(pad3)
+        self.assertNotIn("Pad002", [o.Name for o in self.doc.Objects])
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump()
+        self.assertEqual(self.body.Tip, pad2)
+        self.assertShown(pad2)
+        self.assertFalse(self.pad.Visibility, "the Tip's base is shown instead of the Tip")
+
+    def testColorEditKeepsItsFeatureShown(self):
+        """A Default edit of Pad while Pad001 is shown remembers Pad001 and shows it again at the
+        end. A later face appearance (Color) edit of Pad, with Pad shown, ended by showing that old
+        Pad001 too (ops#218 B: the remembered feature was never cleared)."""
+        pad2 = self.addSecondPad()
+        self.assertShown(pad2)
+        self.editAndEnd(self.pad)
+        self.assertShown(pad2)
+
+        pad2.ViewObject.Visibility = False
+        self.pad.ViewObject.Visibility = True
+        pump()
+        self.assertShown(self.pad)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.setEdit(self.pad.Name, 3)  # Gui::ViewProvider::Color
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no face appearance panel")
+        pump()
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        guiDoc.resetEdit()
+        pump()
+        self.assertShown(self.pad)
+        self.assertFalse(pad2.Visibility, "the Color edit's end showed an earlier edit's feature")
