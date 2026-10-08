@@ -367,8 +367,12 @@ private:
     void write(const Snapshot& value, bool undoable);
     /// Kind::Objects: writes \a objs (a step of the field's undo when \a undoable).
     void writeObjects(const std::vector<App::DocumentObject*>& objs, bool undoable = true);
-    /// Kind::Objects: a pick adds \a obj, or takes it out when it is listed.
-    void pickObject(App::DocumentObject* obj);
+    /// Kind::Objects: a pick adds \a obj, or takes it out when it is listed. \a sub is the
+    /// element of the target shown, when the pick is one (its feature is added instead).
+    void pickObject(App::DocumentObject* obj, const char* sub);
+    /// Kind::Objects: the feature that made the element \a sub of \a shape's shape and passes the
+    /// gate's tests (the deepest in its history), or null.
+    App::DocumentObject* featureOfElement(App::DocumentObject* shape, const char* sub) const;
     /// Records the current value as a step of the field's undo.
     void pushUndo();
     void pick(App::DocumentObject* obj, const std::string& sub);

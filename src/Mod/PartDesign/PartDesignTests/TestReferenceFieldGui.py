@@ -99,6 +99,10 @@ BOTTOM_BACK = edge("line", direction=X, through=(0, 10, 0))
 VERTICAL = edge("line", direction=Z, through=(10, 0, 0))
 # The Regions model padded 5 from the whole sketch: A's hole stays.
 WHOLE_SKETCH = 5 * (300 - 4 * math.pi)
+# The Pattern model's bumps (1 x 1 x 1 at x 1, y 1 and -3, on the box's top): the centres of their
+# top faces.
+FIRST_TOP = (1.5, 1.5, 11)
+SECOND_TOP = (1.5, -2.5, 11)
 
 
 def flushDeletes():
@@ -2011,6 +2015,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertAlmostEqual(bumps[-1].Shape.Volume, 1000 + len(bumps), places=6)
         return bumps
 
+    def elementNear(self, obj, kind, point):
+        """The name of the face (kind "Face"), edge or vertex of obj's shape that is at point: its
+        centre, or the vertex itself. The shape's own indices, as a pick in the 3D view gives."""
+        shape = obj.Shape
+        elements = {"Face": shape.Faces, "Edge": shape.Edges, "Vertex": shape.Vertexes}[kind]
+        wanted = App.Vector(*point)
+        for i, element in enumerate(elements, 1):
+            centre = element.Point if kind == "Vertex" else element.CenterOfMass
+            if centre.distanceToPoint(wanted) < 1e-6:
+                return "%s%d" % (kind, i)
+        self.fail("no %s of %s at %s" % (kind, obj.Name, point))
+
     def pattern(self, typeName, originals, transformBody=False):
         """A pattern of the bumps, as the Pattern model places its copies. It joins the body with
         its Originals set: a pattern of the tool shapes with none counts as a MultiTransform's
@@ -2087,7 +2103,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.arm(field, byFocus=True)
         self.assertVolume(pattern, 1003)
 
-        self.pick(second, "Face6")
+        self.pick(second, self.elementNear(second, "Face", SECOND_TOP))
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.assertVolume(pattern, 1004)
 
@@ -2100,6 +2116,54 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(models.originFeature(self.body, "XY_Plane"), "")
         self.assertEqual(self.originalNames(pattern), [second.Name])
         self.assertIn("adds or removes material", statusText())
+
+    def testPatternOriginalsPickOfAnElement(self):
+        """ops#184: while the field is armed the 3D view shows the base feature's shape (the
+        box and both bumps), and a pick of a face, an edge or a vertex of it adds the feature
+        that made the element, or takes it out: the first bump, the second, the box."""
+        first, second = self.bumps()
+        box = self.boxFeature
+        pattern = self.pattern("PartDesign::LinearPattern", [second])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=True)
+
+        # a face of the first bump, in the second bump's shape: the first bump, not the base
+        self.pick(second, self.elementNear(second, "Face", FIRST_TOP))
+        self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
+        self.assertVolume(pattern, 1004)
+
+        # a face of the second bump: the second
+        self.pick(second, self.elementNear(second, "Face", SECOND_TOP))
+        self.assertEqual(self.originalNames(pattern), [first.Name])
+        self.assertVolume(pattern, 1003)
+
+        # a side face of the box
+        self.pick(second, self.elementNear(second, "Face", (5, 0, 5)))
+        self.assertEqual(self.originalNames(pattern), [box.Name, first.Name])
+
+        # an edge of the first bump takes it out, a corner of it puts it back
+        self.pick(second, self.elementNear(second, "Edge", (1.5, 1, 11)))
+        self.assertEqual(self.originalNames(pattern), [box.Name])
+        self.pick(second, self.elementNear(second, "Vertex", (2, 2, 11)))
+        self.assertEqual(self.originalNames(pattern), [box.Name, first.Name])
+        self.assertEqual(self.names(field), [box.Name, first.Name])
+        self.assertTrue(armed(field))
+
+    def testPatternOriginalsPickThroughADressUp(self):
+        """ops#184: the base feature is a fillet; a pick of a face of its shape in the 3D view
+        reaches the features that made it, not the fillet."""
+        [bump] = self.bumps(ys=(1,))
+        box = self.boxFeature
+        fillet = self.addFillet(bump, [self.elementNear(bump, "Edge", (-5, -5, 5))])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        self.assertEqual(pattern.BaseFeature.Name, fillet.Name)
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(fillet, self.elementNear(fillet, "Face", (5, 0, 5)))
+        self.assertEqual(self.originalNames(pattern), [box.Name, bump.Name])
+        self.pick(fillet, self.elementNear(fillet, "Face", FIRST_TOP))
+        self.assertEqual(self.originalNames(pattern), [box.Name])
 
     def testPatternOriginalsOfOneLabel(self):
         """T17, B6: two originals of one Label, which the list tells apart by their names. The
@@ -2280,7 +2344,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: not armed(field)), "the sub-pattern's pick left it armed")
 
         self.arm(field, byFocus=False)
-        self.pick(second, "Face6")
+        self.pick(second, self.elementNear(second, "Face", SECOND_TOP))
         self.assertEqual(self.originalNames(multi), [first.Name])
         self.assertEqual(linear.Direction[0].Name, xAxis.Name)
         self.assertVolume(multi, 1003)
