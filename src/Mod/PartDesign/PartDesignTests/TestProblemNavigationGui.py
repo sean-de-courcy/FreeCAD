@@ -378,6 +378,63 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertEqual(self.step(), ["BadSketch"])
         self.assertEqual(self.search(":e"), sorted([second.Name, "BadSketch"]))
 
+    def checkNextAfterPickedSharedSketch(self, hidden, shown):
+        """The shared sketch selected outside the tree (as a pick in the 3D view does): the tree's
+        current item isn't one of its rows, and the search starts from a selected row that is
+        shown, not the one under the hidden Pad (ops#213). The two tests below guard as a pair:
+        which selected row came first used to depend on heap order, so either one alone may pass
+        on the old code, but not both (PR 188 review L3)."""
+        self.addBadSketch("Body003", "LaterSketch", "LaterPad", 60)
+        hidden.ViewObject.ShowInTree = False
+        pump()
+        Gui.Selection.addSelection(self.doc.Name, "BadSketch")
+        pump()
+        self.assertEqual(selectedNames(), ["BadSketch"])
+        self.assertEqual(self.step(), ["LaterPad"])
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "BadSketch")
+        pump()
+        self.assertEqual(self.step(False), [shown.Name])
+
+    def testNextAfterThePickedSharedSketchWithTheFirstPadHidden(self):
+        first, second = self.sharedSketchModel()
+        self.checkNextAfterPickedSharedSketch(first, second)
+
+    def testNextAfterThePickedSharedSketchWithTheSecondPadHidden(self):
+        first, second = self.sharedSketchModel()
+        self.checkNextAfterPickedSharedSketch(second, first)
+
+    def testSharedSketchTwoLevelsUnderARowNeverExpanded(self):
+        """A failing sketch whose Pad is hidden from the tree, also extruded by an Extrusion,
+        which two more Extrusions use, Outer (hidden from the tree) and OuterB. The tree makes a
+        row's children only once for an object already shown elsewhere, so under OuterB neither
+        the Extrusion's row nor the sketch's is made. The rows are made down the chain, OuterB's
+        first, through objects that hold the next one as a child (ops#213)."""
+        body, sketch, pad = self.addBadSketch("Body002", "BadSketch", "BadPad", 0)
+        inner = self.doc.addObject("Part::Extrusion", "BadExtrude")
+        inner.Base = sketch
+        outer = self.doc.addObject("Part::Extrusion", "Outer")
+        outer.Base = inner
+        outerB = self.doc.addObject("Part::Extrusion", "OuterB")
+        outerB.Base = inner
+        self.doc.recompute()
+        pump()
+        pad.ViewObject.ShowInTree = False
+        outer.ViewObject.ShowInTree = False
+        pump()
+        # Not recomputed after their failing sketch: they only need a recompute, which doesn't
+        # count
+        for extrusion in (inner, outer, outerB):
+            self.assertNotIn("Invalid", extrusion.State)
+        rows = visibleRows()
+        self.assertIn("OuterB", rows)
+        self.assertEqual({"BadPad", "Outer", "BadExtrude", "BadSketch"} & rows, set())
+        self.assertEqual(self.step(), ["BadSketch"])
+        self.assertEqual(self.step(), ["BadSketch"], "the only shown problem: wraps to itself")
+        rows = visibleRows()
+        self.assertTrue({"OuterB", "BadExtrude", "BadSketch"} <= rows)
+        self.assertTrue({"BadPad", "Outer"}.isdisjoint(rows))
+
     def testSharedSketchUnderTwoHiddenPadsIsSkipped(self):
         """Both rows have a hidden row above: no problem is left."""
         first, second = self.sharedSketchModel()

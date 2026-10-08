@@ -1411,23 +1411,42 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
         if (auto row = shownRow()) {
             return row;
         }
+        // Only through the objects that hold the next one as a child, not every referrer, and
+        // the whole chain, those above first: a parent's row may not be made yet either (ops#213)
         bool populated = false;
-        for (auto parent : top->getInList()) {
-            auto data = docItem->ObjectMap.find(parent);
-            if (data == docItem->ObjectMap.end()) {
-                continue;
-            }
-            for (auto parentRow : std::vector<DocumentObjectItem*>(
-                     data->second->items.begin(),
-                     data->second->items.end()
-                 )) {
-                if (!parentRow->populated && !parentRow->isHidden() && !hiddenAbove(parentRow)) {
-                    parentRow->populated = true;
-                    docItem->populateItem(parentRow, true);
-                    populated = true;
+        std::unordered_set<App::DocumentObject*> visited;
+        auto populateHolders = [&](auto& self, App::DocumentObject* obj) -> void {
+            for (auto parent : obj->getInList()) {
+                auto data = docItem->ObjectMap.find(parent);
+                if (data == docItem->ObjectMap.end()) {
+                    continue;
+                }
+                // Held, not iterated: the populating below can add to ObjectMap (a claimed child
+                // from another document) and rehash it (PR 188 review M1)
+                auto holder = data->second;
+                // The children the rows are made from. Marked only once it holds a child: a
+                // referrer of one object (the next Pad on a Pad) can hold another (the sketch
+                // both use).
+                if (!holder->childSet.contains(obj) || !visited.insert(parent).second) {
+                    continue;
+                }
+                // Up to the top: on the way only rows not populated yet are populated, so a
+                // shown, populated parent costs nothing more
+                self(self, parent);
+                for (auto parentRow : std::vector<DocumentObjectItem*>(
+                         holder->items.begin(),
+                         holder->items.end()
+                     )) {
+                    if (!parentRow->populated && !parentRow->isHidden()
+                        && !hiddenAbove(parentRow)) {
+                        parentRow->populated = true;
+                        docItem->populateItem(parentRow, true);
+                        populated = true;
+                    }
                 }
             }
-        }
+        };
+        populateHolders(populateHolders, top);
         return populated ? shownRow() : nullptr;
     };
 
@@ -1472,7 +1491,13 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
                 continue;
             }
         }
-        problems.push_back({item, top, subname, treePath(item), error});
+        problems.push_back({item, top, subname, {}, error});
+    }
+    // The paths once every row is made: populating a holder moves a root row under it, which
+    // shifts the root rows after it (PR 188 review L5). Rows are moved, not deleted, as only rows
+    // not populated yet are populated; selectNextProblem reads its start's path after this too.
+    for (auto& problem : problems) {
+        problem.path = treePath(problem.item);
     }
     std::ranges::sort(problems, {}, &ProblemItem::path);
     return problems;
@@ -1544,13 +1569,31 @@ bool TreeWidget::selectNextProblem(bool forward)
     tree->flushStatusUpdate();
 
     // From the current item when it is selected, else the first selected one (ops#149 review
-    // L2); with nothing selected, before the top (or after the end)
+    // L2); with nothing selected, before the top (or after the end). Selecting an object marks
+    // all its rows, also one under a hidden parent: a shown row comes first (ops#213).
     QTreeWidgetItem* start = nullptr;
     auto selected = tree->selectedItems();
+    auto shown = [](const QTreeWidgetItem* item) {
+        return !item->isHidden() && !hiddenAbove(item);
+    };
     if (!selected.isEmpty()) {
         start = tree->currentItem();
-        if (!start || !start->isSelected()) {
-            start = selected.front();
+        if (!start || !start->isSelected() || !shown(start)) {
+            start = nullptr;
+            std::vector<int> startPath;
+            for (auto item : selected) {
+                if (!shown(item)) {
+                    continue;
+                }
+                auto path = treePath(item);
+                if (!start || path < startPath) {
+                    start = item;
+                    startPath = std::move(path);
+                }
+            }
+            if (!start) {
+                start = selected.front();
+            }
         }
     }
 
