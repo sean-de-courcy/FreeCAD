@@ -1238,42 +1238,16 @@ bool isForwards(const QKeyEvent* ev)
         || (ev->key() == Qt::Key_Down && isPlainArrow(ev));
 }
 
-/** Eats the next Esc key release, or none after a second. The list closes on Esc's press; the
- * release then reaches the widget that has the focus, the 3D view, whose key handling acts on a
- * release alone (a task panel's Cancel, a reference field's disarming).
- */
-class EscReleaseEater: public QObject
-{
-public:
-    static void arm()
-    {
-        auto* eater = new EscReleaseEater(QCoreApplication::instance());
-        QCoreApplication::instance()->installEventFilter(eater);
-        QTimer::singleShot(1000, eater, [eater]() { eater->deleteLater(); });
-    }
-
-protected:
-    bool eventFilter(QObject*, QEvent* ev) override
-    {
-        if (ev->type() == QEvent::KeyRelease
-            && static_cast<QKeyEvent*>(ev)->key() == Qt::Key_Escape) {
-            QCoreApplication::instance()->removeEventFilter(this);
-            deleteLater();
-            return true;
-        }
-        return false;
-    }
-
-private:
-    using QObject::QObject;
-};
-
 }  // namespace
 
 SelectOtherMenu::SelectOtherMenu(QWidget* parent)
     : QMenu(parent)
 {
     setObjectName(QStringLiteral("SelectOtherMenu"));
+    // A click outside only closes the list: replayed (Windows), it would select in the 3D view.
+    // Esc closes it on its press; the 3D view ignores the release, whose press it didn't see
+    // (ops#216).
+    setAttribute(Qt::WA_NoMouseReplay);
     connect(this, &QMenu::hovered, this, &SelectOtherMenu::preselect);
     connect(this, &QMenu::triggered, this, &SelectOtherMenu::commit);
     connect(this, &QMenu::aboutToHide, this, &SelectOtherMenu::finish);
@@ -1304,17 +1278,26 @@ void SelectOtherMenu::open(const std::vector<PickData>& list, const QPoint& pos)
     if (!actions().isEmpty()) {
         setActiveAction(actions().first());
         preselect(actions().first());
-        // The 3D view clears a preselection once the list has taken the mouse (seen off screen,
-        // by an observer: set, set, then removed with the list still open): set it again after
-        // those events
-        for (int delay : {0, 150}) {
-            QTimer::singleShot(delay, this, [this]() {
-                if (isVisible()) {
-                    preselect(activeAction());
-                }
-            });
-        }
+        // The 3D view clears a preselection on its next mouse event, which can come after the
+        // list has opened (seen off screen, by an observer: set, set, then removed with the list
+        // still open): set it again whenever it goes while the list is open
+        selectionConnection = Gui::Selection().signalSelectionChanged.connect(
+            [this](const SelectionChanges& msg) { onSelectionChanged(msg); }
+        );
     }
+}
+
+void SelectOtherMenu::onSelectionChanged(const SelectionChanges& msg)
+{
+    if (msg.Type != SelectionChanges::RmvPreselect || preselecting) {
+        return;
+    }
+    // not inside the notification: the others still get this one
+    QTimer::singleShot(0, this, [this]() {
+        if (isVisible() && !Gui::Selection().hasPreselection()) {
+            preselect(activeAction());
+        }
+    });
 }
 
 bool SelectOtherMenu::event(QEvent* ev)
@@ -1341,9 +1324,6 @@ void SelectOtherMenu::keyPressEvent(QKeyEvent* ev)
         ev->accept();
     }
     else {
-        if (ev->key() == Qt::Key_Escape) {
-            EscReleaseEater::arm();
-        }
         QMenu::keyPressEvent(ev);
     }
 }
@@ -1383,7 +1363,9 @@ void SelectOtherMenu::preselect(QAction* action)
         return;
     }
     const PickData& pick = picks[index];
+    preselecting = true;
     Gui::Selection().rmvPreselect();
+    preselecting = false;
     Gui::Selection().setPreselect(
         pick.docName.c_str(),
         pick.objName.c_str(),
@@ -1409,6 +1391,7 @@ void SelectOtherMenu::commit(QAction* action)
 
 void SelectOtherMenu::finish()
 {
+    selectionConnection.disconnect();
     Gui::Selection().setClarifySelectionActive(false);
     Gui::Selection().rmvPreselect();
     deleteLater();

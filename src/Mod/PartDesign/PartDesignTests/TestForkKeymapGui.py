@@ -1699,6 +1699,59 @@ OrthographicCamera {{
         pump(0.3)
         self.assertIsNone(self.selectOtherList())
 
+    def testPreselectionClearedLateComesBack(self):
+        """The 3D view clears a preselection on its next mouse event, which can come well after
+        the list opened (a slow machine): the current entry is preselected again while the list
+        is open (ops#217, PR 189 review finding 3)."""
+        self.stack()
+        popup = self.openSelectOther()
+        pump(0.5)  # later than any fixed delay
+        self.assertEqual(self.preselectedY(), 0.0)
+        Gui.Selection.clearPreselection()
+        pump(0.2)
+        self.assertIsNotNone(self.selectOtherList(), "the list closed")
+        self.assertEqual(self.preselectedY(), 0.0, "the current entry's preselection stays gone")
+        self.listKey(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        self.assertIsNone(self.preselectedY())
+
+    def testClickOutsideTheListSelectsNothing(self):
+        """A click just outside the list, over the front box, closes the list and changes
+        nothing: it isn't passed on to the 3D view (ops#217, PR 189 review finding 4)."""
+        self.stack()
+        popup = self.openSelectOther()
+        outside = popup.geometry().topLeft() - QtCore.QPoint(8, 8)
+        window = Gui.getMainWindow()
+        at = window.mapFromGlobal(outside)
+        QtTest.QTest.mouseClick(window.windowHandle(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, at)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        pump(0.3)
+        self.assertEqual(self.selectedElements(), [], "the click outside selected in the 3D view")
+
+    def testSelectOtherDoesNothingUnderAWindowOverTheView(self):
+        """With the cursor over a window in front of the 3D view (a floating panel), backtick
+        opens no list (ops#217, PR 189 review finding 5)."""
+        self.stack()
+        cursor = QtGui.QCursor.pos()
+        panel = QtWidgets.QWidget(Gui.getMainWindow(), QtCore.Qt.Tool)
+        panel.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        panel.setGeometry(QtCore.QRect(cursor - QtCore.QPoint(50, 50), QtCore.QSize(100, 100)))
+        panel.show()
+        try:
+            self.assertTrue(waitFor(lambda: panel.isVisible()))
+            pump(0.1)
+            if QtWidgets.QApplication.widgetAt(cursor) is not panel:
+                self.skipTest("the platform doesn't put the window under the cursor")
+            with self.watching("Std_SelectOther") as fired:
+                self.press(QtCore.Qt.Key_QuoteLeft)
+                self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+            pump(0.3)
+            self.assertIsNone(self.selectOtherList(), "a list opened under the window")
+        finally:
+            panel.close()
+            panel.deleteLater()
+            pump(0.1)
+
     def testSelectOtherIsOffInSketchEdit(self):
         """A sketch in edit has its own picking (PR E): the command is off there."""
         self.editSketch()

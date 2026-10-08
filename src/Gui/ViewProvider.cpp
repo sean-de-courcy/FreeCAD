@@ -237,7 +237,8 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                     // in a task panel field is pressed there; focus then comes back to the
                     // view, which got the release and closed the panel too. Kept before the
                     // other paths, and every release clears it, so a press that one of them
-                    // takes leaves nothing behind.
+                    // takes leaves nothing behind. A press here whose release goes elsewhere
+                    // (the focus moved) leaves it set until the next release here.
                     static const View3DInventorViewer* escapePressedIn = nullptr;
                     bool pressedHere = true;
                     if (press) {
@@ -260,7 +261,7 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                         // user hits ESC to cancel while still holding the mouse button while using
                         // some SoDragger. Therefore, we shall ignore ESC while any mouse button is
                         // pressed, until this Coin bug is fixed.
-                        if (!press && pressedHere) {
+                        if (!press) {  // a release whose press this viewer saw (above)
                             // react only on key release
                             // Let first selection mode terminate
                             Gui::Document* doc = Gui::Application::Instance->activeDocument();
