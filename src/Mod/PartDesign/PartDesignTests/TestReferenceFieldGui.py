@@ -114,10 +114,18 @@ def flushDeletes():
 def settle():
     """After a dialog opens: its panel's queued focus (the value field, when the list is complete)
     lands, and so does the last dialog's late switch back to the Model tab, which hides the task
-    view off screen; the task view is put in front again."""
+    view off screen; the task view is put in front again, until the panel's buttons show (under
+    load the panel can show later than the fixed wait, ops#215)."""
     pump(0.3)
-    Gui.Control.showTaskView()
+    waitFor(panelShown)
     pump(0.05)
+
+
+def panelShown():
+    """The task view put in front; whether the open dialog's OK or Cancel shows in it."""
+    Gui.Control.showTaskView()
+    buttons = (QtWidgets.QDialogButtonBox.Ok, QtWidgets.QDialogButtonBox.Cancel)
+    return any(taskButton(which) is not None for which in buttons)
 
 
 def fields():
@@ -1624,14 +1632,23 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.low, [])
 
     def choose(self, combo, index):
-        """An entry of a combo box chosen through its popup, as a user does."""
+        """An entry of a combo box chosen through its popup, as a user does. The popup is waited
+        for until the entry has its place, and then until it closes (under load a fixed wait
+        clicked a popup not yet laid out, ops#215)."""
         combo.showPopup()
-        pump(0.2)
         view = combo.view()
+
+        def placed():
+            rect = view.visualRect(view.model().index(index, 0))
+            return view.isVisible() and rect.isValid() and not rect.isEmpty()
+
+        self.assertTrue(waitFor(placed), "the popup's entry isn't placed")
+        pump(0.05)
         rect = view.visualRect(view.model().index(index, 0))
         QtTest.QTest.mouseClick(
             view.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center()
         )
+        waitFor(lambda: not view.isVisible())
         pump(0.2)
 
     def testDirectionFieldDisarmsThroughThePopup(self):
@@ -2567,9 +2584,13 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def selectReference(self, comboName):
         """The panel's "Select reference..." entry chosen, as a user does."""
-        [combo] = [
-            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()
-        ]
+
+        def shown():
+            window = Gui.getMainWindow()
+            return [c for c in window.findChildren(QtWidgets.QComboBox, comboName) if c.isVisible()]
+
+        self.assertTrue(waitFor(lambda: shown()), f"no {comboName} box shows")
+        [combo] = shown()
         [index] = [i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")]
         self.choose(combo, index)
         self.assertEqual(combo.currentIndex(), index)
