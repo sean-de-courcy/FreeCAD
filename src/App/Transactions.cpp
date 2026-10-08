@@ -308,57 +308,149 @@ void TransactionObject::applyDel(Document& /*Doc*/, TransactionalObject* /*pcObj
 void TransactionObject::applyNew(Document& /*Doc*/, TransactionalObject* /*pcObj*/)
 {}
 
+void TransactionObject::takeDynamicData(PropData& data, const Property* prop)
+{
+    static_cast<DynamicProperty::PropData&>(data) =
+        prop->getContainer()->getDynamicPropertyData(prop);
+    data.property = nullptr;  // the live property: never kept in an entry
+    if (data.pName) {
+        data.name = data.pName;
+        data.pName = nullptr;
+    }
+}
+
+namespace
+{
+// FreeCAD-CH (ops#235): one entry's failure is logged and the next entry is still applied; one
+// exception used to end Transaction::apply for every remaining entry of every object.
+template<typename Func>
+void applyEntry(const TransactionalObject* pcObj, const std::string& name, Func&& func)
+{
+    try {
+        func();
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
+                                            << e.what());
+    }
+    catch (std::exception& e) {
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name << ": "
+                                            << e.what());
+    }
+    catch (...) {
+        FC_ERR("exception while restoring " << pcObj->getFullName() << '.' << name);
+    }
+}
+}  // namespace
+
 void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, bool /* Forward */)
 {
-    if (status == New || status == Chn) {
-        // Property change order is not preserved, as it is recursive in nature
-        for (auto& v : _PropChangeMap) {
-            auto& data = v.second;
-            auto prop = const_cast<Property*>(data.propertyOrig);
+    if (status != New && status != Chn) {
+        return;
+    }
+    auto isMove = [](const PropData& data) {
+        return data.propertyTarget && data.target;
+    };
+    // FreeCAD-CH (ops#235): the entries are applied in passes, since their order in the map is
+    // arbitrary and they can pass names between properties: moves; then the properties added in
+    // the transaction are removed, so a removed property of the same name can come back; then the
+    // renames are taken back, through temporary names, so names can be swapped or shifted; then
+    // values are restored and removed properties re-created.
 
-            if (data.propertyTarget && data.target) {
-                // This means we are undoing/redoing a move operation
-
-                if (!data.target->isAttachedToDocument()) {
-                    continue;
-                }
-
-                auto* obj = freecad_cast<DocumentObject*>(data.target);
-                if (obj == nullptr) {
-                    continue;
-                }
-                auto* newTarget = freecad_cast<DocumentObject*>(data.source);
-
-                if (data.propertyTarget->getFullName() == "?") {
-                    // This is an entry we should ignore because it was
-                    // created to register a change in another document.
-                    // The move is handled by the other document.
-                    continue;
-                }
-
-                obj->moveDynamicProperty(data.propertyTarget, newTarget);
-                continue;
+    // Moves
+    for (auto& v : _PropChangeMap) {
+        auto& data = v.second;
+        if (!isMove(data)) {
+            continue;
+        }
+        // This means we are undoing/redoing a move operation
+        applyEntry(pcObj, data.name, [&]() {
+            if (!data.target->isAttachedToDocument()) {
+                return;
             }
-            // FreeCAD-CH (ops#229): a rename and a value change of the same property share this
-            // entry. The rename is taken back first; the value is then restored under the
-            // property's name from before the transaction.
-            const std::string& nameBefore = data.nameOrig.empty() ? data.name : data.nameOrig;
+
+            auto* obj = freecad_cast<DocumentObject*>(data.target);
+            if (obj == nullptr) {
+                return;
+            }
+            auto* newTarget = freecad_cast<DocumentObject*>(data.source);
+
+            if (data.propertyTarget->getFullName() == "?") {
+                // This is an entry we should ignore because it was
+                // created to register a change in another document.
+                // The move is handled by the other document.
+                return;
+            }
+
+            // FreeCAD-CH (ops#235): a value change and a rename before the move are taken back
+            // too, on the moved property before it moves back, so that the redo transaction
+            // records them with the move (in the target's entry)
+            if (data.property) {
+                data.propertyTarget->Paste(*data.property);
+            }
             if (!data.nameOrig.empty()) {
-                // This means we are undoing/redoing a rename operation
-                Property* currentProp = pcObj->getDynamicPropertyByName(data.name.c_str());
-                if (currentProp) {
-                    pcObj->renameDynamicProperty(currentProp, data.nameOrig.c_str());
-                }
-                if (!data.property) {
-                    continue;
-                }
+                obj->renameDynamicProperty(data.propertyTarget, data.nameOrig.c_str());
             }
+            obj->moveDynamicProperty(data.propertyTarget, newTarget);
+        });
+    }
 
-            if (!data.property) {
-                // here means we are undoing/redoing and property add operation
-                pcObj->removeDynamicProperty(v.second.name.c_str());
-                continue;
+    // Properties added in the transaction: removed, found by identity
+    for (auto& v : _PropChangeMap) {
+        auto& data = v.second;
+        if (isMove(data) || data.property || !data.propertyOrig) {
+            continue;
+        }
+        applyEntry(pcObj, data.name, [&]() {
+            // getPropertyName() is safe with a property that no longer exists
+            if (const char* name = pcObj->getPropertyName(data.propertyOrig)) {
+                pcObj->removeDynamicProperty(std::string(name).c_str());
             }
+        });
+    }
+
+    // Renames, taken back: with more than one, each first gets a temporary name, so a name another
+    // of them had before the transaction is free when it is given back
+    std::vector<std::pair<Property*, const PropData*>> renames;
+    for (auto& v : _PropChangeMap) {
+        auto& data = v.second;
+        if (isMove(data) || data.nameOrig.empty()) {
+            continue;
+        }
+        // the current names are all distinct here, so the name finds the property
+        if (Property* prop = pcObj->getDynamicPropertyByName(data.name.c_str())) {
+            renames.emplace_back(prop, &data);
+        }
+    }
+    if (renames.size() > 1) {
+        int counter = 0;
+        for (auto& [prop, data] : renames) {
+            applyEntry(pcObj, data->name, [&]() {
+                std::string tmp;
+                do {
+                    tmp = "FreeCADRenameUndo" + std::to_string(++counter);
+                } while (pcObj->getPropertyByName(tmp.c_str()));
+                pcObj->renameDynamicProperty(prop, tmp.c_str());
+            });
+        }
+    }
+    for (auto& [prop, data] : renames) {
+        applyEntry(pcObj, data->nameOrig, [&]() {
+            pcObj->renameDynamicProperty(prop, data->nameOrig.c_str());
+        });
+    }
+
+    // Values restored, removed properties re-created
+    for (auto& v : _PropChangeMap) {
+        auto& data = v.second;
+        if (isMove(data) || !data.property) {
+            continue;
+        }
+        // The name to restore: the one from before the transaction (ops#229)
+        const std::string& nameBefore = data.nameOrig.empty() ? data.name : data.nameOrig;
+        applyEntry(pcObj, nameBefore, [&]() {
+            auto prop = const_cast<Property*>(data.propertyOrig);
 
             // getPropertyName() is specially coded to be safe even if prop has
             // been destroyed. We must prepare for the case where user removed
@@ -369,7 +461,7 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
                 // Here means the original property is not found, probably removed
                 if (nameBefore.empty()) {
                     // not a dynamic property, nothing to do
-                    continue;
+                    return;
                 }
 
                 // It is possible for the dynamic property to be removed and
@@ -387,7 +479,7 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
                                                      data.readonly,
                                                      data.hidden);
                     if (!prop) {
-                        continue;
+                        return;
                     }
                     prop->setStatusValue(data.property->getStatus());
                 }
@@ -397,28 +489,8 @@ void TransactionObject::applyChn(Document& /*Doc*/, TransactionalObject* pcObj, 
             // derived types just fine in Paste(). So we do not enforce type
             // matching here. But instead, strengthen type checking in all
             // Paste() implementation.
-            //
-            // if(data.propertyType != prop->getTypeId()) {
-            //     FC_WARN("Cannot " << (Forward?"redo":"undo")
-            //             << " change of property " << prop->getName()
-            //             << " because of type change: "
-            //             << data.propertyType.getName()
-            //             << " -> " << prop->getTypeId().getName());
-            //     continue;
-            // }
-            try {
-                prop->Paste(*data.property);
-            }
-            catch (Base::Exception& e) {
-                e.reportException();
-                FC_ERR("exception while restoring " << prop->getFullName() << ": " << e.what());
-            }
-            catch (std::exception& e) {
-                FC_ERR("exception while restoring " << prop->getFullName() << ": " << e.what());
-            }
-            catch (...) {
-            }
-        }
+            prop->Paste(*data.property);
+        });
     }
 }
 
@@ -428,8 +500,7 @@ void TransactionObject::setProperty(const Property* pcProp)
     // FreeCAD-CH (ops#229): also after a rename in this transaction (an entry with a name but no
     // propertyOrig); not after an add (propertyOrig without a copy) or an earlier change.
     if (!data.property && !data.propertyOrig && !data.target) {
-        static_cast<DynamicProperty::PropData&>(data) =
-            pcProp->getContainer()->getDynamicPropertyData(pcProp);
+        takeDynamicData(data, pcProp);
         data.propertyOrig = pcProp;
         data.property = pcProp->Copy();
         data.propertyType = pcProp->getTypeId();
@@ -448,10 +519,10 @@ void TransactionObject::renameProperty(const Property* pcProp, const char* oldNa
     // FreeCAD-CH (ops#229): the entry may already hold a value change or an add of this property.
     // It keeps the current name and the name from before the transaction (the first rename's old
     // name); a property added in this transaction needs no rename back, only its removal.
-    if (data.name.empty()) {
-        static_cast<DynamicProperty::PropData&>(data) =
-            pcProp->getContainer()->getDynamicPropertyData(pcProp);
-        data.property = nullptr;  // that is the live property, not a copy
+    // FreeCAD-CH (ops#235): a fresh entry by what it holds; its name can be empty with dynamic
+    // data named by pName
+    if (!data.propertyOrig && !data.property && data.nameOrig.empty() && !data.target) {
+        takeDynamicData(data, pcProp);
     }
     if (data.target) {
         return;  // a move: left as it was
@@ -459,6 +530,7 @@ void TransactionObject::renameProperty(const Property* pcProp, const char* oldNa
     bool added = data.propertyOrig && !data.property;
     if (!added && data.nameOrig.empty()) {
         data.nameOrig = oldName;
+        data.statusOrig = pcProp->getStatus();
     }
     data.name = pcProp->getName();
     if (data.name == data.nameOrig) {
@@ -480,14 +552,17 @@ void TransactionObject::arrangeMoveProperty(const Property* pcProp,
 
     auto& data = _PropChangeMap[pcProp->getID()];
     if (data.name.empty()) {
-        static_cast<DynamicProperty::PropData&>(data) =
-            pcProp->getContainer()->getDynamicPropertyData(pcProp);
+        takeDynamicData(data, pcProp);
     }
 
     // the source information
-    data.property = pcProp->Copy();
-    data.propertyType = pcProp->getTypeId();
-    data.property->setStatusValue(pcProp->getStatus());
+    // FreeCAD-CH (ops#235): an earlier change's copy holds the value from before the transaction;
+    // it was overwritten (and leaked)
+    if (!data.property) {
+        data.property = pcProp->Copy();
+        data.propertyType = pcProp->getTypeId();
+        data.property->setStatusValue(pcProp->getStatus());
+    }
     data.source = pcProp->getContainer();
 
     // the target information
@@ -509,12 +584,14 @@ void TransactionObject::addOrRemoveProperty(const Property* pcProp, bool add)
         data.propertyOrig = pcProp;
         data.property = pcProp->Copy();
         data.propertyType = pcProp->getTypeId();
-        data.property->setStatusValue(pcProp->getStatus());
+        // FreeCAD-CH (ops#235): the status from before the transaction, not from the removal
+        data.property->setStatusValue(data.statusOrig);
         data.name = data.nameOrig;
         data.nameOrig.clear();
         return;
     }
-    if (!data.name.empty()) {
+    // FreeCAD-CH (ops#235): an existing entry by what it holds, not by its name
+    if (data.propertyOrig || data.property || !data.nameOrig.empty() || data.target) {
         if (!add && !data.property) {
             // this means add and remove the same property inside a single
             // transaction, so they cancel each other out.
@@ -526,9 +603,8 @@ void TransactionObject::addOrRemoveProperty(const Property* pcProp, bool add)
         delete data.property;
         data.property = nullptr;
     }
+    takeDynamicData(data, pcProp);
     data.propertyOrig = pcProp;
-    static_cast<DynamicProperty::PropData&>(data) =
-        pcProp->getContainer()->getDynamicPropertyData(pcProp);
     if (add) {
         data.property = nullptr;
     }

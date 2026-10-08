@@ -277,17 +277,26 @@ protected:
     } status {New};
 
     /// Struct to maintain property information.
+    /// FreeCAD-CH (ops#229, ops#235): `property` (from DynamicProperty::PropData) is always a copy
+    /// owned by the entry, or null; never the live property.
     struct PropData: DynamicProperty::PropData
     {
         Base::Type propertyType;
         const Property* propertyOrig = nullptr;
         // for property renaming
         std::string nameOrig;
+        // FreeCAD-CH (ops#235): the property's status when a rename made the entry, for a removal
+        // later in the transaction
+        unsigned long statusOrig = 0;
         // for property moving
         Property* propertyTarget = nullptr;
         TransactionalObject* target = nullptr;
         PropertyContainer* source = nullptr;
     };
+
+    /// FreeCAD-CH (ops#235): copies @a prop's dynamic data into @a data, with the name as a string
+    /// (a property named by `pName` has an empty `name`); `property` is left null, not the live property
+    static void takeDynamicData(PropData& data, const Property* prop);
 
     /// A map to maintain the properties of the object.
     std::unordered_map<int64_t, PropData> _PropChangeMap;

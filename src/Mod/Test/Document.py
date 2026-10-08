@@ -1576,6 +1576,105 @@ class UndoRedoCases(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testNamesPassedBetweenProperties(self):
+        """ops#235: undo and abort restore every dynamic property, with its type, value, group,
+        tooltip and editor mode, when a transaction passes names between properties (swap,
+        shift), removes and adds one name, renames before a move, or changes a string property.
+        Each case: abort, and commit + undo + redo + undo + redo + undo (two rounds)."""
+        self.maxDiff = None
+
+        def state(*objs):
+            return {
+                (o.Name, p): (
+                    o.getTypeIdOfProperty(p),
+                    getattr(o, p),
+                    o.getGroupOfProperty(p),
+                    o.getDocumentationOfProperty(p),
+                    sorted(o.getEditorMode(p)),
+                )
+                for o in objs
+                for p in ("Width", "Other", "Note", "Wide", "Old", "Tmp", "Text")
+                if p in o.PropertiesList
+            }
+
+        def rename(old, new):
+            return lambda obj, target: obj.renameProperty(old, new)
+
+        def setValue(name, value):
+            return lambda obj, target: setattr(obj, name, value)
+
+        def add(name, value, kind="App::PropertyInteger"):
+            def step(obj, target):
+                obj.addProperty(kind, name, "Added", "added " + name)
+                setattr(obj, name, value)
+
+            return step
+
+        def remove(name):
+            return lambda obj, target: obj.removeProperty(name)
+
+        def move(name):
+            return lambda obj, target: obj.moveProperty(name, target)
+
+        cases = [
+            ("swap", [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]),
+            ("shift", [rename("Width", "Old"), rename("Other", "Width")]),
+            ("shift, change", [rename("Width", "Old"), rename("Other", "Width"),
+                               setValue("Width", 13), setValue("Old", 14)]),
+            ("remove, add", [remove("Width"), add("Width", 7)]),
+            ("remove, add other type", [remove("Width"), add("Width", "seven",
+                                                             "App::PropertyString")]),
+            ("rename, remove, add", [rename("Width", "Wide"), remove("Wide"), add("Width", 7)]),
+            ("rename, change, rename back",
+             [rename("Width", "Wide"), setValue("Wide", 9), rename("Wide", "Width")]),
+            ("remove", [remove("Width")]),
+            ("string: change, rename, remove",
+             [setValue("Note", "xyz"), rename("Note", "Text"), remove("Text")]),
+            ("string: rename, change", [rename("Note", "Text"), setValue("Text", "xyz")]),
+            ("rename, move", [rename("Width", "Wide"), move("Wide")]),
+            ("change, move", [setValue("Width", 9), move("Width")]),
+            ("change, rename, move", [setValue("Width", 9), rename("Width", "Wide"), move("Wide")]),
+        ]
+        for label, steps in cases:
+            for close in ("abort", "undo"):
+                with self.subTest(case=label, close=close):
+                    doc = FreeCAD.newDocument("UndoNames")
+                    try:
+                        doc.UndoMode = 1
+                        doc.openTransaction("Make")
+                        obj = doc.addObject("App::FeaturePython", "Vars")
+                        target = doc.addObject("App::FeaturePython", "Target")
+                        obj.addProperty("App::PropertyInteger", "Width", "Dims", "the width")
+                        obj.addProperty("App::PropertyInteger", "Other", "Misc", "the other")
+                        obj.addProperty("App::PropertyString", "Note", "Notes", "a note")
+                        obj.Width = 5
+                        obj.Other = 6
+                        obj.Note = "abc"
+                        obj.setEditorMode("Width", ["ReadOnly"])
+                        obj.setEditorMode("Note", ["Hidden"])
+                        doc.commitTransaction()
+                        before = state(obj, target)
+
+                        doc.openTransaction("Task")
+                        for step in steps:
+                            step(obj, target)
+                        after = state(obj, target)
+                        self.assertNotEqual(after, before)
+                        if close == "abort":
+                            doc.abortTransaction()
+                            self.assertEqual(state(obj, target), before)
+                        else:
+                            doc.commitTransaction()
+                            for _ in range(2):
+                                doc.undo()
+                                self.assertEqual(state(obj, target), before)
+                                doc.redo()
+                                self.assertEqual(state(obj, target), after)
+                            doc.undo()
+                            self.assertEqual(state(obj, target), before)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("UndoTest")

@@ -382,6 +382,24 @@ class TestPropertyEditorGui(unittest.TestCase):
         self.assertEqual(self.obj.getPropertyByName("Width"), 5)
         self.assertNotIn("Width", target.PropertiesList)
 
+    def testMoveAfterValueEditAborts(self):
+        """Review of fork PR 213 (M1, ops#235): in a task's transaction, Width edited 5 -> 9 and
+        then moved to another VarSet; aborting the task brings Width back to the VarSet with 5."""
+        target = self.doc.addObject("App::VarSet", "Target")
+        undos = self.doc.UndoCount
+        tid = self.openTask()
+        widget = self.openValueEditor("Width")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_A, QtCore.Qt.ControlModifier)
+        QtTest.QTest.keyClicks(widget, "9")
+        QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Return)
+        pump(0.3)
+        self.assertEqual(self.obj.Width, 9)
+        self.moveThroughMenu("Width", target)
+        self.assertEqual(target.getPropertyByName("Width"), 9)
+        self.assertTaskAborts(tid, undos)
+        self.assertEqual(self.obj.getPropertyByName("Width"), 5)
+        self.assertNotIn("Width", target.PropertiesList)
+
     def testMoveWithoutBookingIsOwnStep(self):
         target = self.doc.addObject("App::VarSet", "Target")
         undos = self.doc.UndoCount
