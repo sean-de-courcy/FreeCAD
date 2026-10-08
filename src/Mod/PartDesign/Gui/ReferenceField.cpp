@@ -1091,6 +1091,10 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // must have the element in its tool's boundary, or the search goes on. Another candidate whose
     // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch): nothing tells them
     // apart.
+    // Once a candidate's tool didn't have the element (a draft of the pad on the binder tilted its
+    // side: [draft, pad, pad below, sketch]), the element may have been changed by something its
+    // history doesn't tell: every later candidate, also a plain one, needs it too.
+    bool failed = false;
     for (auto item = history.begin(); item != history.end(); ++item) {
         auto next = std::next(item);
         if (next == history.end() || !item->obj || !next->obj) {
@@ -1102,7 +1106,8 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         }
         auto based = static_cast<PartDesign::ProfileBased*>(item->obj);
         const bool plain = next->obj == origin && based->Profile.getValue() == origin;
-        if (!plain && !touches(item->obj)) {
+        if ((!plain || failed) && !touches(item->obj)) {
+            failed = true;
             continue;
         }
         if (std::ranges::any_of(users, [&](auto user) {
@@ -1115,11 +1120,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     auto [profiles, profiled] = profiledBy(origin);
     // Not in the history: no guess unless it's a safe one (fork PR 196 review, ops#219). Several:
     // those whose tool has the element in its boundary; one left, that one, otherwise nothing
-    // tells them apart (a face where a pad's bottom meets a pocket's ceiling).
+    // tells them apart (a face where a pad's bottom meets a pocket's ceiling). After a candidate
+    // in the history failed that test, a single one needs it too.
     if (profiled.empty()) {
         return nullptr;
     }
-    if (profiled.size() > 1) {
+    if (profiled.size() > 1 || failed) {
         std::vector<App::DocumentObject*> touching;
         std::ranges::copy_if(profiled, std::back_inserter(touching), touches);
         if (touching.size() != 1) {
