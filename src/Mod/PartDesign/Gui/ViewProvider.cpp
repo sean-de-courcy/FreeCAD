@@ -174,6 +174,7 @@ bool ViewProvider::setEdit(int ModNum)
         if (ViewProviderBody* bodyViewProvider = getBodyViewProvider()) {
             previouslyShownFeature = bodyViewProvider->getShownFeature();
         }
+        hadShownFeature = !previouslyShownFeature.expired();
 
         // clear the selection (convenience)
         Gui::Selection().clearSelection();
@@ -214,7 +215,17 @@ void ViewProvider::unsetEdit(int ModNum)
     }
 
     // ensure that after edit we still show the same feature, if it is still there
-    if (auto feature = previouslyShownFeature.get<App::DocumentObject>()) {
+    // If it was deleted during the edit (ops#187), the Body's Tip is shown, so the Body isn't left
+    // empty when nothing else is shown (ops#212)
+    App::DocumentObject* feature = previouslyShownFeature.get<App::DocumentObject>();
+    if (!feature && hadShownFeature) {
+        ViewProviderBody* bodyViewProvider = getBodyViewProvider();
+        if (bodyViewProvider && !bodyViewProvider->getShownFeature()) {
+            feature = PartDesign::Body::findBodyOf(getObject())->Tip.getValue();
+        }
+    }
+    hadShownFeature = false;
+    if (feature) {
         if (auto shown = freecad_cast<ViewProvider*>(Gui::Application::Instance->getViewProvider(feature))) {
             shown->show();
         }

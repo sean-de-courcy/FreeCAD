@@ -131,6 +131,8 @@ protected:
     /// The feature the body showed when the edit began, shown again when it ends; it may be
     /// deleted during the edit (ops#187)
     App::DocumentObjectWeakPtrT previouslyShownFeature {nullptr};
+    /// The body showed a feature when the edit began (it may be gone since)
+    bool hadShownFeature {false};
 
     bool isSetTipIcon {false};
 
