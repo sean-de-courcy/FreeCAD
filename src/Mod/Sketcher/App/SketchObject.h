@@ -346,7 +346,10 @@ public:
     /// rebuilds external geometry (projection onto the sketch plane)
     // It uses std::optional because this function is actually used to both recompute external
     // geometries but also to add new external geometries. Ideally this should be refactored.
-    void rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd = std::nullopt);
+    // With typesOnly it only repairs a type list saved before ops#140 (longer than the links)
+    // and leaves the geometry as it is.
+    void rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd = std::nullopt,
+                                 bool typesOnly = false);
     /// returns the number of external Geometry entities
     int getExternalGeometryCount() const
     {

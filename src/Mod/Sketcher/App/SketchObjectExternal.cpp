@@ -129,6 +129,22 @@ void setExternalLinks(App::PropertyLinkSubList& links,
     }
     links.setValues(std::move(objs), std::move(subs), std::move(shadows));
 }
+
+// Sets the links and their types. ExternalTypes is parallel to the links by index (ops#140): a
+// path that removes or adds links passes the types of the links it keeps, in their order; an
+// entry without one is a projection. The types go first, since setting the links can rebuild.
+void setExternalLinks(App::PropertyLinkSubList& links,
+                      App::PropertyIntegerList& typeList,
+                      std::vector<App::DocumentObject*> objs,
+                      std::vector<std::string> subs,
+                      std::vector<long> types)
+{
+    types.resize(objs.size(), static_cast<long>(ExtType::Projection));
+    if (typeList.getValues() != types) {
+        typeList.setValues(types);
+    }
+    setExternalLinks(links, std::move(objs), std::move(subs));
+}
 }  // namespace
 
 void SketchObject::initExternalGeo() {
@@ -490,6 +506,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
         const std::vector<DocumentObject*> originalObjects = Objects;
         const std::vector<std::string> originalSubElements = SubElements;
+        const std::vector<long> originalTypes = ExternalTypes.getValues();
+        std::vector<long> Types = originalTypes;
+        Types.resize(Objects.size(), static_cast<long>(ExtType::Projection));
 
         std::vector<DocumentObject*> sObjects = psObj->ExternalGeometry.getValues();
         std::vector<std::string> sSubElements = psObj->ExternalGeometry.getSubValues();
@@ -520,11 +539,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
             Objects.push_back(sobj);
             SubElements.push_back(sSubElements[si]);
+            // the copied link keeps its type
+            Types.push_back(psObj->externalType(si));
 
             si++;
         }
 
-        setExternalLinks(ExternalGeometry, Objects, SubElements);
+        setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
 
         try {
             rebuildExternalGeometry();
@@ -532,7 +553,8 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         catch (const Base::Exception& e) {
             Base::Console().error("%s\n", e.what());
             // revert to original values
-            setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
+            setExternalLinks(
+                ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
             return -1;
         }
 
@@ -843,6 +865,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
 
     const std::vector<DocumentObject*> originalObjects = Objects;
     const std::vector<std::string> originalSubElements = SubElements;
+    const std::vector<long> originalTypes = ExternalTypes.getValues();
 
     if (Objects.size() != SubElements.size()) {
         assert(0 /*counts of objects and subelements in external geometry links do not match*/);
@@ -873,13 +896,13 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         Objects.push_back(Obj);
         SubElements.emplace_back(SubName);
         Types.push_back(static_cast<int>(intersection ? ExtType::Intersection : ExtType::Projection));
-        if (intersection) {
-        }
 
         // set the Link list.
-        setExternalLinks(ExternalGeometry, Objects, SubElements);
+        setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
     }
-    ExternalTypes.setValues(Types);
+    else {
+        ExternalTypes.setValues(Types);
+    }
 
     try {
         ExternalToAdd ext {Obj, std::string(SubName), defining, intersection};
@@ -888,7 +911,8 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
+        setExternalLinks(
+            ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
         return -1;
     }
 
@@ -962,20 +986,20 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
         return;
     }
 
+    // getValuesForce(): getValues() is empty while the list is flagged invalid (e.g. during a
+    // restore or before a recompute), and writing that back would delete every constraint (ops#140)
     std::vector<Constraint*> newConstraints;
-    for (const auto& cstr : Constraints.getValues()) {
-        if (geoIds.count(cstr->First)
-            || (cstr->Second != GeoEnum::GeoUndef && geoIds.count(cstr->Second))
-            || (cstr->Third != GeoEnum::GeoUndef && geoIds.count(cstr->Third))) {
+    for (const auto& cstr : Constraints.getValuesForce()) {
+        // every element, not only First/Second/Third: a group constraint has more
+        if (std::any_of(geoIds.begin(), geoIds.end(), [&cstr](int geoId) {
+                return cstr->involvesGeoId(geoId);
+            })) {
             continue;
         }
         int offset = 0;
         std::unique_ptr<Constraint> newCstr(cstr->clone());
         for (auto GeoId : geoIds) {
             GeoId += offset++;
-            if (newCstr->First >= GeoId && newCstr->Second >= GeoId && newCstr->Third >= GeoId) {
-                break;
-            }
             changeConstraintAfterDeletingGeo(newCstr.get(), GeoId);
         }
         // need to provide raw pointer because that's the only one supported by `setValues`
@@ -993,24 +1017,24 @@ void SketchObject::delExternalPrivate(const std::set<long>& ids, bool removeRef)
     if (!refs.empty()) {
         std::vector<std::string> newSubs;
         std::vector<App::DocumentObject*> newObjs;
+        std::vector<long> newTypes;
         const auto& subs = ExternalGeometry.getSubValues();
-        auto itSub = subs.begin();
         const auto& objs = ExternalGeometry.getValues();
-        auto itObj = objs.begin();
         bool touched = false;
         assert(externalGeoRef.size() == objs.size());
         assert(externalGeoRef.size() == subs.size());
-        for (auto it = externalGeoRef.begin(); it != externalGeoRef.end(); ++it, ++itObj, ++itSub) {
-            if (refs.find(*it) == refs.end()) {
-                newObjs.push_back(*itObj);
-                newSubs.push_back(*itSub);
+        for (std::size_t i = 0; i < externalGeoRef.size(); ++i) {
+            if (refs.find(externalGeoRef[i]) == refs.end()) {
+                newObjs.push_back(objs[i]);
+                newSubs.push_back(subs[i]);
+                newTypes.push_back(externalType(static_cast<int>(i)));
             }
             else {
                 touched = true;
             }
         }
         if (touched) {
-            setExternalLinks(ExternalGeometry, newObjs, newSubs);
+            setExternalLinks(ExternalGeometry, ExternalTypes, newObjs, newSubs, newTypes);
         }
     }
 
@@ -1043,6 +1067,7 @@ int SketchObject::delAllExternal()
 
     const std::vector<DocumentObject*> originalObjects = Objects;
     const std::vector<std::string> originalSubElements = SubElements;
+    const std::vector<long> originalTypes = ExternalTypes.getValues();
 
     Objects.clear();
     SubElements.clear();
@@ -1060,14 +1085,15 @@ int SketchObject::delAllExternal()
         }
     }
 
-    setExternalLinks(ExternalGeometry, Objects, SubElements);
+    setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, {});
     try {
         rebuildExternalGeometry();
     }
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
+        setExternalLinks(
+            ExternalGeometry, ExternalTypes, originalObjects, originalSubElements, originalTypes);
         for (Constraint* it : newConstraints) {
             delete it;
         }
@@ -1140,6 +1166,10 @@ int SketchObject::attachExternal(
     assert(Objects.size()==SubElements.size());
     assert(externalGeoRef.size() == Objects.size());
 
+    std::vector<long> Types;
+    // the new link gives the detached geometries, so it takes the type of the link they came from
+    std::optional<long> attachedType;
+    int entry = 0;
     for(auto &key : externalGeoRef) {
         if (*itObj == Obj  &&  *itSub == SubName){
             FC_ERR("Duplicate external element reference in " << getFullName() << ": " << key);
@@ -1149,17 +1179,23 @@ int SketchObject::attachExternal(
         if(detached.count(key)) {
             itObj = Objects.erase(itObj);
             itSub = SubElements.erase(itSub);
+            if (!attachedType) {
+                attachedType = externalType(entry);
+            }
         }else{
             ++itObj;
             ++itSub;
+            Types.push_back(externalType(entry));
         }
+        ++entry;
     }
 
     // add the new ones
     Objects.push_back(Obj);
     SubElements.push_back(std::string(SubName));
+    Types.push_back(attachedType.value_or(static_cast<long>(ExtType::Projection)));
 
-    setExternalLinks(ExternalGeometry, Objects, SubElements);
+    setExternalLinks(ExternalGeometry, ExternalTypes, Objects, SubElements, Types);
     if(externalGeoRef.size()!=Objects.size())
         return -1;
 
@@ -1431,6 +1467,7 @@ void SketchObject::validateExternalLinks()
         // a bad link that had no geometry is still there
         std::vector<DocumentObject*> objs;
         std::vector<std::string> subs;
+        std::vector<long> types;
         const auto& values = ExternalGeometry.getValues();
         const auto& subValues = ExternalGeometry.getSubValues();
         bool touched = false;
@@ -1441,9 +1478,10 @@ void SketchObject::validateExternalLinks()
             }
             objs.push_back(values[i]);
             subs.push_back(subValues[i]);
+            types.push_back(externalType(static_cast<int>(i)));
         }
         if (touched) {
-            setExternalLinks(ExternalGeometry, objs, subs);
+            setExternalLinks(ExternalGeometry, ExternalTypes, objs, subs, types);
         }
 
         rebuildExternalGeometry();
@@ -2373,7 +2411,7 @@ std::string missingReferenceMessage(
 
 }  // anonymous namespace
 
-void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd)
+void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd, bool typesOnly)
 {
     Base::StateLocker lock(managedoperation, true); // no need to check input data validity as this is an sketchobject managed operation.
 
@@ -2415,6 +2453,13 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     }
     auto keys = externalGeoRef;
     const std::size_t linkCount = Objects.size();
+    // A type list longer than the links was saved before ops#140, when deleting a link left its
+    // type behind: the types after it belong to other links. Each link then takes the type that
+    // gives back its saved geometries (below).
+    const bool repairTypes = Types.size() > linkCount;
+    if (typesOnly && !repairTypes) {
+        return;
+    }
     // links whose sub-element is set again below, because their element is back (ops#72)
     std::set<std::size_t> relinked;
 
@@ -2551,7 +2596,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             geos.emplace_back(point);
         };
 
-        try {
+        // builds the link's geometries into geos, as `projection` and `intersection` say
+        auto build = [&]() {
             TopoDS_Shape refSubShape;
 
             // Handles LCS ,resolve to actual datum object
@@ -2710,7 +2756,52 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     }
                 }
             }
+        };
 
+        if (repairTypes) {
+            std::vector<const Part::Geometry*> saved;
+            for (long id : externalGeoRefMap[key]) {
+                auto it = externalGeoMap.find(id);
+                if (it != externalGeoMap.end()) {
+                    saved.push_back(ExternalGeo[it->second]);
+                }
+            }
+            auto setType = [&](long type) {
+                projection = type == (int)ExtType::Projection || type == (int)ExtType::Both;
+                intersection = type == (int)ExtType::Intersection || type == (int)ExtType::Both;
+            };
+            // the same number of geometries of the same kinds, so the Ids map one to one
+            auto givesSaved = [&](long type) {
+                setType(type);
+                geos.clear();
+                try {
+                    build();
+                }
+                catch (...) {
+                    return false;
+                }
+                return std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
+                                  [](const auto& geo, const Part::Geometry* old) {
+                                      return geo->getTypeId() == old->getTypeId();
+                                  });
+            };
+            if (!saved.empty() && !givesSaved(Types[i])) {
+                for (auto type : {ExtType::Projection, ExtType::Intersection, ExtType::Both}) {
+                    if (static_cast<long>(type) != Types[i] && givesSaved(static_cast<long>(type))) {
+                        Types[i] = static_cast<long>(type);
+                        break;
+                    }
+                }
+            }
+            setType(Types[i]);
+            geos.clear();
+        }
+        if (typesOnly) {
+            continue;
+        }
+
+        try {
+            build();
         } catch (Base::Exception &e) {
             FC_ERR("Failed to project external geometry in "
                    << getFullName() << ": " << key << std::endl << e.what());
@@ -2741,6 +2832,12 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             ExternalGeometryFacade::getFacade(geo.get())->setRef(key);
         }
         newGeos.push_back(std::move(geos));
+    }
+
+    if (typesOnly) {
+        Types.resize(linkCount);
+        ExternalTypes.setValues(Types);
+        return;
     }
 
     // allocate unique geometry id
@@ -2849,6 +2946,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     {
         std::vector<App::DocumentObject*> newObjects;
         std::vector<std::string> newSubElements;
+        std::vector<long> newTypes;
         bool linksChanged = !relinked.empty();
         for (std::size_t index = 0; index < keys.size(); ++index) {
             bool isLink = index < linkCount;
@@ -2862,10 +2960,15 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             linksChanged = linksChanged || !isLink;
             newObjects.push_back(Objects[index]);
             newSubElements.push_back(SubElements[index]);
+            newTypes.push_back(Types[index]);
         }
         if (linksChanged) {
             // a relinked entry has a new sub, so it gets no shadow and is resolved again
-            setExternalLinks(ExternalGeometry, newObjects, newSubElements);
+            setExternalLinks(
+                ExternalGeometry, ExternalTypes, newObjects, newSubElements, newTypes);
+        }
+        else if (repairTypes) {
+            ExternalTypes.setValues(newTypes);
         }
     }
 
@@ -3004,8 +3107,11 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
     }
 
     if(touched) {
+        // the links added above are projections; the others keep their types
+        auto types = ExternalTypes.getValues();
+        types.resize(ExternalGeometry.getSize(), static_cast<long>(ExtType::Projection));
         ExternalGeo.setValues(geos);
-        setExternalLinks(ExternalGeometry, objs, subs);
+        setExternalLinks(ExternalGeometry, ExternalTypes, objs, subs, types);
         rebuildExternalGeometry();
     }
 }
@@ -3048,8 +3154,9 @@ std::vector<long> SketchObject::externalGeometryIds(int entry) const
 
 int SketchObject::externalType(int entry) const
 {
-    // ExternalTypes is parallel to the links by index but isn't pruned when a link goes (it can
-    // be longer): the type an entry gets is the one at its index, as the rebuild reads it
+    // ExternalTypes is parallel to the links by index (ops#140; a file saved before can hold a
+    // longer list until its repair): the type an entry gets is the one at its index, as the
+    // rebuild reads it
     const auto& types = ExternalTypes.getValues();
     if (entry < 0 || entry >= static_cast<int>(types.size())) {
         return static_cast<int>(ExtType::Projection);
