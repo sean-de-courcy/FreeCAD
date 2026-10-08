@@ -2819,6 +2819,204 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(bump, raisedSide)
         self.assertEqual(self.originalNames(pattern), [loft.Name, raised.Name, bump.Name])
 
+    def padOnTopOfAPad(self, onAFace):
+        """A pad 10 high on a sketch and a pad 5 high on its top face: through a SubShapeBinder of
+        the face, or with the face as its profile. A bump on top."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        pad = models.pad(self.body, profile, 10)
+        pad.Refine = False
+        self.doc.recompute()
+        [lid] = face(contains=(5, 5, 10)).one(pad.Shape)
+        if onAFace:
+            raised = models.pad(self.body, (pad, [lid]), 5, "Raised")
+        else:
+            binder = self.binder("PartDesign::SubShapeBinder", "Binder", pad, lid)
+            raised = models.pad(self.body, binder, 5, "Raised")
+        raised.Refine = False
+        self.doc.recompute()
+        self.assertTrue(raised.isValid(), raised.getStatusString())
+        bump = self.bumpOn(1, 1, 15)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertAlmostEqual(bump.Shape.Volume, 1000 + 500 + 1, places=6)
+        [raisedSide] = face(contains=(10, 5, 12.5)).one(bump.Shape)
+        [padSide] = face(contains=(10, 5, 5)).one(bump.Shape)
+        self.assertEqual(
+            self.historyNames(bump, raisedSide), [bump.Name, raised.Name, pad.Name, profile.Name]
+        )
+        self.assertEqual(self.historyNames(bump, padSide), [bump.Name, pad.Name, profile.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, raisedSide)
+        self.assertEqual(self.originalNames(pattern), [raised.Name, bump.Name])
+        self.pick(bump, padSide)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, raised.Name, bump.Name])
+
+    def testPatternOriginalsPickOfAPadOnABinderOfAPadsTop(self):
+        """Fork PR 202 review, 1: a pad stands on a SubShapeBinder of the top face of a pad in the
+        same body. Its side has [pad, pad below, sketch] in its history: a pick adds the pad on the
+        binder, which uses the pad below as its profile, not the pad below, which uses the sketch.
+        A pick of the lower pad's side adds that one."""
+        self.padOnTopOfAPad(onAFace=False)
+
+    def testPatternOriginalsPickOfAPadOnAFace(self):
+        """Fork PR 202 review, 1: a pad's profile is the top face of a pad (Profile = (Pad, Face)):
+        a pick of its side, [pad, pad below, sketch], adds it, not the pad below."""
+        self.padOnTopOfAPad(onAFace=True)
+
+    def testPatternOriginalsPickOfAnOverhangImprintedByAPocket(self):
+        """Fork PR 202 review, 2: as in ...ToldApartByTheirTools, but the pocket's binder is
+        shrunk by 1.5 only, so the pocket's tool reaches 0.5 past the box under the pad's overhang
+        and imprints the overhang's bottom: the part of it outside the imprint has the pocket and
+        the pad's binder in its history. The pocket made none of it (its tool doesn't have it in
+        its boundary): a pick adds the pad, the only candidate whose tool has it."""
+        self.box()
+        source = models.sketch(self.doc, "Source", models.rectangle(4, 2, 12, 10), z=10)
+        padBinder = self.binder("PartDesign::SubShapeBinder", "PadBinder", source)
+        pocketBinder = self.binder("PartDesign::SubShapeBinder", "PocketBinder", padBinder)
+        pocketBinder.Offset = -1.5
+        self.doc.recompute()
+        pad = models.pad(self.body, padBinder, 3)
+        pad.Refine = False
+        self.doc.recompute()
+        pocket = models.pocket(self.body, pocketBinder, 3)
+        pocket.Refine = False
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid() and pad.isValid())
+        # the box, the pad 8 x 8 x 3, the pocket 5 x 5 x 3 of which 4.5 x 5 x 3 in the box, the bump
+        self.assertAlmostEqual(bump.Shape.Volume, 1000 + 192 - 67.5 + 1, places=6)
+        [overhang] = face(contains=(11, 6, 10)).one(bump.Shape)
+        self.assertAlmostEqual(bump.Shape.getElement(overhang).Area, 16 - 2.5, places=6)
+        self.assertEqual(
+            self.historyNames(bump, overhang), [bump.Name, pocket.Name, padBinder.Name]
+        )
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, overhang)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+        self.assertNotIn("No feature", self.statusText(field))
+
+    def testPatternOriginalsPickOfAPocketOnABinderOfAnotherBodysLid(self):
+        """Fork PR 202 review, 2, a pin: as in ...PadOnABinderOfAnotherBody, with a pocket 3 deep
+        on the SubShapeBinder of the other body's pad's top instead: it trims that pad's sides. A
+        side's history ends at the other body's sketch through its pad, without the pocket: a pick
+        says no feature made it. The pocket's floor, [pocket, other pad, other sketch], adds the
+        pocket, whose tool has it in its boundary."""
+        self.body = models.body(self.doc)
+        other = models.body(self.doc)
+        otherSketch = models.sketch(
+            self.doc, "OtherSketch", models.rectangle(10, 0, 20, 10), other
+        )
+        otherPad = models.pad(other, otherSketch, 10, "OtherPad")
+        self.doc.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        models.pad(self.body, profile, 10)
+        self.doc.recompute()
+        boolean = self.body.newObject("PartDesign::Boolean", "Boolean")
+        boolean.addObject(other)
+        boolean.Type = "Fuse"
+        self.doc.recompute()
+        [lid] = face(contains=(15, 5, 10)).one(otherPad.Shape)
+        binder = self.binder("PartDesign::SubShapeBinder", "Binder", otherPad, lid)
+        pocket = models.pocket(self.body, binder, 3)
+        pocket.Refine = False
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertAlmostEqual(bump.Shape.Volume, 2000 - 300 + 1, places=6)
+        [side] = face(contains=(20, 5, 3)).one(bump.Shape)
+        [floor] = face(contains=(15, 5, 7)).one(bump.Shape)
+        self.assertEqual(
+            self.historyNames(bump, side), [bump.Name, otherPad.Name, otherSketch.Name]
+        )
+        self.assertEqual(
+            self.historyNames(bump, floor),
+            [bump.Name, pocket.Name, otherPad.Name, otherSketch.Name],
+        )
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, side)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.pick(bump, floor)
+        self.assertEqual(self.originalNames(pattern), [pocket.Name, bump.Name])
+
+    def testPatternOriginalsPickOfACeilingSharedByPadAndPocket(self):
+        """Fork PR 202 review, 3 and 6: a pad up and a pocket down on one sketch whose rectangle
+        crosses the box's top edge. The pocket's ceiling, inside the box, is the pad's bottom: its
+        history names the pocket. The pad's bottom outside the box ends at the sketch, and the
+        pocket's tool (its top covers the whole rectangle) has it in its boundary too. Both tools
+        have each face: a pick of either says no feature made it, rather than taking the one in
+        the history or the first. With the pocket suppressed, the pad is the only candidate (a
+        suppressed feature's tool is stale): a pick of the pad's bottom adds the pad."""
+        self.box()
+        sketch = models.sketch(self.doc, "Shared", models.rectangle(8, 4, 12, 6), self.body, z=10)
+        pad = models.pad(self.body, sketch, 3)
+        pad.Refine = False
+        self.doc.recompute()
+        pocket = models.pocket(self.body, sketch, 3)
+        pocket.Refine = False
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid() and pad.isValid())
+        self.assertAlmostEqual(bump.Shape.Volume, 1000 + 24 - 12 + 1, places=6)
+        [ceiling] = face(contains=(9, 5, 10)).one(bump.Shape)
+        [overhang] = face(contains=(11, 5, 10)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, ceiling), [bump.Name, pocket.Name, sketch.Name])
+        self.assertEqual(self.historyNames(bump, overhang), [bump.Name, sketch.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        for element in (ceiling, overhang):
+            self.pick(bump, element)
+            self.assertEqual(self.originalNames(pattern), [bump.Name])
+            self.assertIn("No feature", self.statusText(field))
+
+        pocket.Suppressed = True
+        self.doc.recompute()
+        [bottom] = face(contains=(11, 5, 10)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, bottom), [bump.Name, sketch.Name])
+        self.pick(bump, bottom)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+
+    def testPatternOriginalsPickOfAPadUnderAFilletWithAnExpression(self):
+        """Fork PR 202 review, 4: as in ...ReachesAPadUnderAFillet, with the fillet's radius an
+        expression of the pad's sketch. That link is no use of the sketch as a profile, section or
+        spine: the pick of the pad's bottom still adds the pad."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        pad = models.pad(self.body, profile, 5)
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 5)
+        fillet = self.addFillet(bump, [self.elementNear(bump, "Edge", (0, 0, 2.5))])
+        fillet.setExpression("Radius", "Profile.Placement.Base.z + 1")
+        self.doc.recompute()
+        self.assertIn(profile, fillet.OutList)
+        self.assertAlmostEqual(fillet.Radius.Value, 1)
+        [bottom] = face(normal=(0, 0, -1)).one(fillet.Shape)
+        self.assertEqual(self.historyNames(fillet, bottom), [fillet.Name, profile.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(fillet, bottom)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+
     def testPatternOriginalsPickOfUpToFaceLoftAndPipeCaps(self):
         """ops#214, a pin: the top of a pad up to a datum plane, the cap of a loft at its section
         and the cap of a pipe at its spine's end have histories that end at the pad's sketch, the

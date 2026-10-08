@@ -240,7 +240,7 @@ void visitLink(App::PropertyLinkBase* prop, Fn&& fn)
 }
 
 // Points that show where an element lies: its vertices, the middles of its edges and, for a face,
-// a point inside it
+// points inside it spread over it (one near a corner would let a tool face with a hole pass)
 std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
 {
     std::vector<gp_Pnt> points;
@@ -263,15 +263,21 @@ std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
     BRepAdaptor_Surface surface(face);
     BRepClass_FaceClassifier classifier;
     constexpr int steps = 8;
+    std::vector<gp_Pnt> inside;
     for (int i = 1; i < steps; ++i) {
         for (int j = 1; j < steps; ++j) {
             gp_Pnt2d uv(u0 + (u1 - u0) * i / steps, v0 + (v1 - v0) * j / steps);
             classifier.Perform(face, uv, Precision::Confusion());
             if (classifier.State() == TopAbs_IN) {
-                points.push_back(surface.Value(uv.X(), uv.Y()));
-                return points;
+                inside.push_back(surface.Value(uv.X(), uv.Y()));
             }
         }
+    }
+    // About nine of them, spread over the grid (each costs a distance computation)
+    constexpr std::size_t most = 9;
+    const std::size_t stride = std::max<std::size_t>(1, inside.size() / most);
+    for (std::size_t i = 0; i < inside.size(); i += stride) {
+        points.push_back(inside[i]);
     }
     return points;
 }
@@ -291,11 +297,16 @@ bool liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
             builder.Add(faces, it.Current());
         }
         const std::vector<gp_Pnt> points = samplePoints(element);
-        constexpr double tolerance = 1e-5;
-        return !points.empty() && std::ranges::all_of(points, [&faces](const gp_Pnt& point) {
+        // The element's own tolerance, if larger (a face from a boolean with a loose tolerance)
+        double tolerance = 1e-5;
+        for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
+            tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+        }
+        auto onTool = [&faces, tolerance](const gp_Pnt& point) {
             BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), faces);
             return distance.IsDone() && distance.Value() <= tolerance;
-        });
+        };
+        return !points.empty() && std::ranges::all_of(points, onTool);
     }
     catch (const Standard_Failure&) {
         return false;
@@ -1034,7 +1045,7 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         return std::ranges::find(bound, obj) != bound.end();
     };
     // The features whose profile is the object or a binder of it (also a binder of a binder);
-    // returns the binders too (the object first) and how many features use the object itself
+    // returns the binders too (the object first)
     auto profiledBy = [&binds, &usable](App::DocumentObject* obj) {
         std::vector<App::DocumentObject*> profiles {obj};
         for (std::size_t i = 0; i < profiles.size(); ++i) {
@@ -1045,61 +1056,76 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
                 }
             }
         }
-        // The object's own users first, then those reached through a binder
+        // The object's own users first, then those reached through a binder. A suppressed or
+        // failed feature's tool is stale: it made nothing.
         std::vector<App::DocumentObject*> profiled;
-        std::size_t direct = 0;
         for (App::DocumentObject* profile : profiles) {
             for (App::DocumentObject* user : profile->getInList()) {
                 auto based = freecad_cast<PartDesign::ProfileBased*>(user);
-                if (based && based->Profile.getValue() == profile && usable(based)
+                if (based && based->Profile.getValue() == profile && !based->Suppressed.getValue()
+                    && !based->isError() && usable(based)
                     && std::ranges::find(profiled, based) == profiled.end()) {
                     profiled.push_back(based);
                 }
             }
-            if (profile == obj) {
-                direct = profiled.size();
-            }
         }
-        return std::tuple {profiles, profiled, direct};
+        return std::pair {profiles, profiled};
     };
-    auto [profiles, profiled, direct] = profiledBy(origin);
-    // A pad and a pocket on one profile: the one that is in the element's history. Also a pad on a
-    // binder of a face of an item further up (another body's pad fused in: the new pad's top has
-    // [pad, other pad, other sketch])
-    std::vector<App::DocumentObject*> inHistory = profiled;
-    for (const Data::HistoryItem& item : history) {
-        if (item.obj && item.obj != origin) {
-            std::ranges::copy(std::get<1>(profiledBy(item.obj)), std::back_inserter(inHistory));
+    // Whether the candidate's tool (placed) has the element in its boundary
+    TopoDS_Shape element;
+    auto touches = [&element, shape, sub](App::DocumentObject* obj) {
+        if (element.IsNull()) {
+            const Part::ShapeOptions shapeOptions = Part::ShapeOption::NeedSubElement
+                | Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+            element = Part::Feature::getTopoShape(shape, shapeOptions, sub).getShape();
         }
-    }
-    for (auto item = history.rbegin(); item != history.rend(); ++item) {
-        if (std::ranges::find(inHistory, item->obj) != inHistory.end()) {
-            return item->obj;
+        auto based = static_cast<PartDesign::ProfileBased*>(obj);
+        Part::TopoShape tool = based->AddSubShape.getShape();
+        return liesOn(element, tool.moved(based->getLocation()).getShape());
+    };
+    // In the history, from the shape towards the origin: the first item that uses the next one
+    // (nearer the origin) as its profile. A pad and a pocket on one sketch: the one whose wall it
+    // is. A pad on a binder of a face of a pad: the pad on the binder, not the pad below it (its
+    // faces have [pad, pad below, sketch]). A cut that only trimmed or imprinted the element is in
+    // its history too, so a candidate reached through a binder or from an item above the origin
+    // must have the element in its tool's boundary, or the search goes on. Another candidate whose
+    // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch): nothing tells them
+    // apart.
+    for (auto item = history.begin(); item != history.end(); ++item) {
+        auto next = std::next(item);
+        if (next == history.end() || !item->obj || !next->obj) {
+            break;
         }
+        const std::vector<App::DocumentObject*> users = profiledBy(next->obj).second;
+        if (std::ranges::find(users, item->obj) == users.end()) {
+            continue;
+        }
+        auto based = static_cast<PartDesign::ProfileBased*>(item->obj);
+        const bool plain = next->obj == origin && based->Profile.getValue() == origin;
+        if (!plain && !touches(item->obj)) {
+            continue;
+        }
+        if (std::ranges::any_of(users, [&](auto user) {
+                return user != item->obj && touches(user);
+            })) {
+            return nullptr;
+        }
+        return item->obj;
     }
+    auto [profiles, profiled] = profiledBy(origin);
     // Not in the history: no guess unless it's a safe one (fork PR 196 review, ops#219). Several:
-    // those whose tool (placed) has the element in its boundary; one left, that one. Otherwise
-    // several, some through a binder: nothing tells them apart; all on the origin itself (PR 187:
-    // a pad and a pocket on one sketch), the first.
+    // those whose tool has the element in its boundary; one left, that one, otherwise nothing
+    // tells them apart (a face where a pad's bottom meets a pocket's ceiling).
     if (profiled.empty()) {
         return nullptr;
     }
     if (profiled.size() > 1) {
-        const Part::ShapeOptions options = Part::ShapeOption::NeedSubElement
-            | Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
-        const TopoDS_Shape element = Part::Feature::getTopoShape(shape, options, sub).getShape();
         std::vector<App::DocumentObject*> touching;
-        std::ranges::copy_if(profiled, std::back_inserter(touching), [&element](auto obj) {
-            auto based = static_cast<PartDesign::ProfileBased*>(obj);
-            Part::TopoShape tool = based->AddSubShape.getShape();
-            return liesOn(element, tool.moved(based->getLocation()).getShape());
-        });
-        if (touching.size() == 1) {
-            profiled = touching;
-        }
-        else if (profiled.size() > direct) {
+        std::ranges::copy_if(profiled, std::back_inserter(touching), touches);
+        if (touching.size() != 1) {
             return nullptr;
         }
+        profiled = touching;
     }
     // Every guess, also the single one: an origin that has solid faces of its own (the body's
     // base, a box cut into it, another body's feature) made the element itself: a pad on a binder
@@ -1119,9 +1145,14 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj)) {
             return nullptr;
         }
-        const std::vector<App::DocumentObject*> links = item.obj->getOutList();
-        if (std::ranges::find(links, origin) != links.end()
-            && std::ranges::find(profiles, item.obj) == profiles.end()) {
+        // Not through an expression (a fillet's radius from the sketch's placement). getOutList()
+        // keeps those even with OutListNoExpression (the engine is a link property too).
+        const std::vector<App::DepEdge> links =
+            item.obj->getOutListProp(App::DocumentObject::OutListNoExpression);
+        const bool linked = std::ranges::any_of(links, [origin](const App::DepEdge& link) {
+            return link.toObj == origin;
+        });
+        if (linked && std::ranges::find(profiles, item.obj) == profiles.end()) {
             return nullptr;
         }
     }
