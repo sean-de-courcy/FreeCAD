@@ -46,7 +46,6 @@
 #include <Gui/Utilities.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
-#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/Gui/ViewProvider.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/Part/Gui/SoBrepEdgeSet.h>
@@ -308,13 +307,25 @@ void ViewProvider::updatePreview()
     }
 }
 
-void ViewProvider::makeChildrenVisible()
+namespace
+{
+// The objects a feature is made from: a profile, a loft's or pipe's sections, a pipe's spines
+std::vector<App::DocumentObject*> profileObjects(const App::DocumentObject* feature)
+{
+    std::vector<App::DocumentObject*> objs;
+    for (auto name : {"Profile", "Sections", "Spine", "AuxiliarySpine"}) {
+        if (auto prop = freecad_cast<App::PropertyLinkBase*>(feature->getPropertyByName(name))) {
+            prop->getLinks(objs);
+        }
+    }
+    return objs;
+}
+}  // namespace
+
+void ViewProvider::makeChildrenVisible(const std::vector<App::DocumentObject*>& keepHidden)
 {
     for (const auto child : claimChildren()) {
-        // A deleted feature's sketch stays hidden, so only the previous feature shows, as when a
-        // feature without a sketch is deleted (ops#149, PLAN decision 29). Other children, e.g. a
-        // Boolean's tool bodies, are shown again.
-        if (child && child->isDerivedFrom<Part::Part2DObject>()) {
+        if (std::ranges::find(keepHidden, child) != keepHidden.end()) {
             continue;
         }
         if (auto vp = Gui::Application::Instance->getViewProvider(child)) {
@@ -402,8 +413,20 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
     // Visibility - we want:
     // 1. If the visible object is not the one being deleted, we leave that one visible.
     // 2. If the visible object is the one being deleted, we make the previous object visible.
+    bool previousShown = false;
     if (isShow() && previousfeat && Gui::Application::Instance->getViewProvider(previousfeat)) {
         Gui::Application::Instance->getViewProvider(previousfeat)->show();
+        previousShown = true;
+    }
+
+    // The deleted feature's sketch (profile, sections, spines) stays hidden, so only the previous
+    // feature shows, as when a feature without a sketch is deleted (ops#149, PLAN decision 29).
+    // With no previous feature to show (the Body's first feature, shown), the sketch is shown, so
+    // the Body isn't left empty (ops#149 review M2). Other children, e.g. a Boolean's tool bodies,
+    // are shown again. Taken before removeObject, which may relink the feature.
+    std::vector<App::DocumentObject*> keepHidden;
+    if (!isShow() || previousShown) {
+        keepHidden = profileObjects(feature);
     }
 
     // find surrounding features in the tree
@@ -427,7 +450,7 @@ bool ViewProvider::onDelete(const std::vector<std::string>&)
         FCMD_OBJ_CMD(body, "removeObject(" << Gui::Command::getObjectCmd(feature) << ')');
     }
 
-    makeChildrenVisible();
+    makeChildrenVisible(keepHidden);
 
     return true;
 }

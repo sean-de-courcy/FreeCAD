@@ -288,6 +288,10 @@ private:
 private:
     // The problems (objects in error or warning) of a document, in tree order (ops#149)
     struct ProblemItem;
+    // Applies the pending status update, so the problems include objects just recomputed
+    void flushStatusUpdate();
+    // Objects hidden from the tree (or under a hidden parent) are left out, unless the document
+    // shows hidden objects. Call flushStatusUpdate first.
     std::vector<ProblemItem> problemItems(DocumentItem* docItem, bool errors, bool warnings);
     // A :errors, :warnings or :problems search: true when text is one (ops#149)
     bool problemSearch(DocumentItem* docItem, const QString& text, bool select);

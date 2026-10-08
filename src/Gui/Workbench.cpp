@@ -681,7 +681,7 @@ void StdWorkbench::setupContextMenu(const char* recipient, MenuItem* item) const
                   << "Std_SendToPythonConsole" << "Separator";
         }
         // The next object in error or warning (ops#149)
-        *item << "Std_TreeNextProblem";
+        *item << "Std_TreeNextProblem" << "Separator";
     }
 
     if (sels.size() == 1) {

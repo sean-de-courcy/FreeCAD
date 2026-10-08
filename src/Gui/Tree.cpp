@@ -1354,6 +1354,16 @@ std::vector<int> treePath(const QTreeWidgetItem* item)
 }
 }  // namespace
 
+void TreeWidget::flushStatusUpdate()
+{
+    // Items for objects recomputed a moment ago, as checkTopParent does (ops#149 review L5)
+    if (statusTimer->isActive()) {
+        bool locked = blockSelection(true);
+        _updateStatus(false);
+        blockSelection(locked);
+    }
+}
+
 std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
     DocumentItem* docItem,
     bool errors,
@@ -1370,6 +1380,19 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
         auto top = docItem->getTopParent(obj, subname);
         if (!top) {
             continue;
+        }
+        // Skip a problem the user hid from the tree, or one under a hidden parent: finding its
+        // item would un-hide every row on the way (ops#149 review M1)
+        if (!docItem->showHidden()) {
+            auto chain = top->getSubObjectList(subname.c_str());
+            if (std::ranges::any_of(chain, [](App::DocumentObject* o) {
+                    auto vp = freecad_cast<ViewProviderDocumentObject*>(
+                        Application::Instance->getViewProvider(o)
+                    );
+                    return vp && !vp->showInTree();
+                })) {
+                continue;
+            }
         }
         // Populates collapsed parents, as a search does
         auto item = docItem->findItemByObject(true, top, subname.c_str());
@@ -1405,6 +1428,7 @@ bool TreeWidget::problemSearch(DocumentItem* docItem, const QString& text, bool 
         return false;
     }
 
+    flushStatusUpdate();
     auto problems = problemItems(docItem, errors, warnings);
     if (problems.empty()) {
         getMainWindow()->showMessage(
@@ -1441,8 +1465,33 @@ bool TreeWidget::problemSearch(DocumentItem* docItem, const QString& text, bool 
 bool TreeWidget::selectNextProblem(bool forward)
 {
     auto tree = instance();
-    auto guiDoc = Application::Instance->activeDocument();
-    auto docItem = tree && guiDoc ? tree->getDocumentItem(guiDoc) : nullptr;
+    if (!tree) {
+        return false;
+    }
+    tree->flushStatusUpdate();
+
+    // From the current item when it is selected, else the first selected one (ops#149 review
+    // L2); with nothing selected, before the top (or after the end)
+    QTreeWidgetItem* start = nullptr;
+    auto selected = tree->selectedItems();
+    if (!selected.isEmpty()) {
+        start = tree->currentItem();
+        if (!start || !start->isSelected()) {
+            start = selected.front();
+        }
+    }
+
+    // The starting item's document, else the active one (L4)
+    DocumentItem* docItem = nullptr;
+    if (start && start->type() == ObjectType) {
+        docItem = static_cast<DocumentObjectItem*>(start)->getOwnerDocument();
+    }
+    else if (start && start->type() == DocumentType) {
+        docItem = static_cast<DocumentItem*>(start);
+    }
+    else if (auto guiDoc = Application::Instance->activeDocument()) {
+        docItem = tree->getDocumentItem(guiDoc);
+    }
     if (!docItem) {
         return false;
     }
@@ -1452,14 +1501,12 @@ bool TreeWidget::selectNextProblem(bool forward)
         return false;
     }
 
-    // From the current item: the first selected one, else before the top (or after the end)
     const ProblemItem* next = nullptr;
-    auto selected = tree->selectedItems();
-    if (selected.isEmpty()) {
+    if (!start) {
         next = forward ? &problems.front() : &problems.back();
     }
     else {
-        auto current = treePath(selected.front());
+        auto current = treePath(start);
         if (forward) {
             auto it = std::ranges::upper_bound(problems, current, {}, &ProblemItem::path);
             next = it != problems.end() ? &*it : &problems.front();
