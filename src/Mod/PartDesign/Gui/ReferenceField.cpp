@@ -65,8 +65,10 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/Gui/ReferenceHighlighter.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
+#include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
@@ -940,13 +942,28 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     if (usable(origin)) {
         return origin;
     }
-    // A sketch: the feature it is the profile of. A pad and a pocket on one sketch: the one that is
-    // in the element's history, else the first.
+    // A sketch: the feature it is the profile of, also through binders: the side faces of a pad
+    // on a ShapeBinder or SubShapeBinder come from the binder's source (a sketch, a face, an inner
+    // binder). A pad and a pocket on one profile: the one that is in the element's history, else
+    // the first.
+    std::vector<App::DocumentObject*> profiles {origin};
+    for (std::size_t i = 0; i < profiles.size(); ++i) {
+        for (App::DocumentObject* user : profiles[i]->getInList()) {
+            bool binder = freecad_cast<PartDesign::ShapeBinder*>(user)
+                || freecad_cast<PartDesign::SubShapeBinder*>(user);
+            if (binder && std::ranges::find(profiles, user) == profiles.end()) {
+                profiles.push_back(user);
+            }
+        }
+    }
     std::vector<App::DocumentObject*> profiled;
-    for (App::DocumentObject* user : origin->getInList()) {
-        auto based = freecad_cast<PartDesign::ProfileBased*>(user);
-        if (based && based->Profile.getValue() == origin && usable(based)) {
-            profiled.push_back(based);
+    for (App::DocumentObject* profile : profiles) {
+        for (App::DocumentObject* user : profile->getInList()) {
+            auto based = freecad_cast<PartDesign::ProfileBased*>(user);
+            if (based && based->Profile.getValue() == profile && usable(based)
+                && std::ranges::find(profiled, based) == profiled.end()) {
+                profiled.push_back(based);
+            }
         }
     }
     for (auto item = history.rbegin(); item != history.rend(); ++item) {
@@ -954,7 +971,13 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             return item->obj;
         }
     }
-    return profiled.empty() ? nullptr : profiled.front();
+    // Not in the history: a face of the body's base feature (a Part::Box) that a pad on a binder
+    // of it left as it was is the base's, not the pad's
+    auto body = PartDesign::Body::findBodyOf(owner());
+    if (profiled.empty() || (body && body->BaseFeature.getValue() == origin)) {
+        return nullptr;
+    }
+    return profiled.front();
 }
 
 void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
