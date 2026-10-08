@@ -146,9 +146,9 @@ class SketcherGuiTestCase(unittest.TestCase):
         )
         self.pump(80)
 
-    def key_click(self, widget, key, text=""):
-        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, QtCore.Qt.NoModifier, text)
-        release = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, QtCore.Qt.NoModifier, text)
+    def key_click(self, widget, key, text="", modifiers=QtCore.Qt.NoModifier):
+        press = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, key, modifiers, text)
+        release = QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, key, modifiers, text)
         QtGui.QApplication.sendEvent(widget, press)
         QtGui.QApplication.sendEvent(widget, release)
         self.pump(60)

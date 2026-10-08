@@ -106,14 +106,14 @@ ONSHAPE = {
     "Sketcher_CreatePolyline": "L",
     "Sketcher_Create3PointArc": "A",
     "Sketcher_CreateCircle": "C",
-    "Sketcher_CreateRectangle_Center": "",  # R with ops#194 PR D
+    "Sketcher_CreateRectangle_Center": "R",
     "Sketcher_CreateRectangle": "G",
     "Sketcher_CreatePoint": "Shift+S",
     "Sketcher_CreateFillet": "Shift+F",
     "Sketcher_Offset": "O",
     "Sketcher_Extend": "X",
-    "Sketcher_Trimming": "",  # M with PR D (the tools' own M moves first)
-    "Sketcher_Projection": "",  # U with PR D
+    "Sketcher_Trimming": "M",  # the tools' own M / U / R are Ctrl+M / U / R (PR D)
+    "Sketcher_Projection": "U",
     "Sketcher_Intersection": "Shift+G",
     "Sketcher_ToggleConstruction": "Q",
     "Sketcher_ViewSketch": "N",
@@ -214,7 +214,13 @@ UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
 DRAW_STYLES = {"Std_DrawStyleAsIs": "V,1", "Std_DrawStyleShaded": "V,6"}
 
 # Draft's chords starting with an Onshape key, cleared (Python commands); upstream's keys
-DRAFT_CHORDS = {"Draft_Line": "L, I", "Draft_SelectPlane": "W, P", "Draft_Facebinder": "F, F"}
+DRAFT_CHORDS = {
+    "Draft_Line": "L, I",
+    "Draft_SelectPlane": "W, P",
+    "Draft_Facebinder": "F, F",
+    "Draft_Move": "M, V",  # R, M and U: PR D
+    "Draft_Rectangle": "R, E",
+}
 
 
 def pump(seconds=0.3):
@@ -787,6 +793,58 @@ class TestForkKeymapGui(unittest.TestCase):
         # the chord wait is 300 ms, the tool's start-up comes on top; events are pumped in 10-50
         # ms steps
         self.assertLess(elapsed, 0.28)
+
+    def testRMUSwitchToolsWhileAToolRuns(self):
+        """In sketch edit with the corner rectangle running, M starts the trim tool, R the centre
+        rectangle and U the projection (use): Onshape's keys switch tools while a tool runs, as
+        the other tool keys do. The tools' own M, U, J, R, F are Ctrl+ (PR D)."""
+        keys = [
+            (QtCore.Qt.Key_M, "Sketcher_Trimming"),
+            (QtCore.Qt.Key_R, "Sketcher_CreateRectangle_Center"),
+            (QtCore.Qt.Key_U, "Sketcher_Projection"),
+        ]
+        for key, name in keys:
+            self.editSketch()
+            with self.watching("Sketcher_CreateRectangle") as started:
+                self.press(QtCore.Qt.Key_G)
+                self.assertTrue(waitFor(lambda: started), "G ran nothing")
+            pump(0.2)
+            with self.watching(name) as fired:
+                self.press(key)
+                self.assertTrue(waitFor(lambda: fired), f"{name} didn't run")
+            self.escapeTool()
+            Gui.ActiveDocument.resetEdit()
+            pump()
+
+    def testCtrlKeyIsTheToolsOwn(self):
+        """With the rectangle running, Ctrl+U toggles its rounded corners (U is the projection)
+        and runs no command, and the option's label shows Ctrl+U; under FreeCAD's keymap the
+        plain U toggles it, as upstream."""
+        self.editSketch()
+        self.press(QtCore.Qt.Key_G)
+
+        def rounded():
+            boxes = [
+                b
+                for b in Gui.getMainWindow().findChildren(QtWidgets.QCheckBox)
+                if b.text().startswith("Rounded corners")
+            ]
+            return boxes[0] if boxes else None
+
+        self.assertTrue(waitFor(lambda: rounded() is not None), "no rectangle options")
+        ctrlU = QtGui.QKeySequence("Ctrl+U").toString(QtGui.QKeySequence.NativeText)
+        self.assertTrue(rounded().text().endswith(f"({ctrlU})"), rounded().text())
+        before = rounded().isChecked()
+        watched = ("Sketcher_Projection", "Sketcher_Trimming", "Sketcher_CreateRectangle_Center")
+        with self.watching(*watched) as fired:
+            self.press(QtCore.Qt.Key_U, QtCore.Qt.ControlModifier)
+            self.assertTrue(waitFor(lambda: rounded().isChecked() != before), "Ctrl+U")
+            pump(0.4)
+        self.assertEqual(fired, [])
+        setKeymap("FreeCAD")
+        self.press(QtCore.Qt.Key_U)
+        self.assertTrue(waitFor(lambda: rounded().isChecked() == before), "U under FreeCAD's")
+        self.escapeTool()
 
     def editAndPress(self, key, typeName):
         self.editSketch()

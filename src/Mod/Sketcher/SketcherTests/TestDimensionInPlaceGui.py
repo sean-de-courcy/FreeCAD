@@ -415,9 +415,9 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
     # D9-D11: the Dimension tool -----------------------------------------------------------------
 
     def place_lock(self, steps, arm=None):
-        """Point (2, 1); the Dimension tool on it in lock mode (M), finished by a click in empty
-        space. The fields are answered with steps, or by arm() if given. Returns the answering
-        state."""
+        """Point (2, 1); the Dimension tool on it in lock mode (M; Ctrl+M under the fork's keymap,
+        where M is the trim tool), finished by a click in empty space. The fields are answered
+        with steps, or by arm() if given. Returns the answering state."""
         self.sketch.addGeometry(Part.Point(V(2, 1, 0)), False)
         self.doc.recompute()
         self.start_edit()
@@ -429,14 +429,23 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
 
         empty = self.screen_point(8, 9)
         self.move(self.viewport, empty)
-        self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
+        onshape = (
+            FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General").GetString(
+                "Keymap", "Onshape"
+            )
+            != "FreeCAD"
+        )
+        if onshape:
+            self.key_click(self.viewport, QtCore.Qt.Key_M, "\r", QtCore.Qt.ControlModifier)
+        else:
+            self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
         self.assertTrue(
             self.wait_until(
                 lambda: len(self.constraints_of("DistanceX")) == 1
                 and len(self.constraints_of("DistanceY")) == 1,
                 2000,
             ),
-            f"Expected M to switch the tool to a lock, got "
+            f"Expected (Ctrl+)M to switch the tool to a lock, got "
             f"{[c.Type for c in self.sketch.Constraints]}",
         )
 
