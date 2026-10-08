@@ -38,6 +38,7 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternalReturns,
     TestSketchMissingExternalReturnsSolver,
 )
+from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

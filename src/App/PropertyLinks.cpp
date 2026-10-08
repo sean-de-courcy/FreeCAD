@@ -4896,6 +4896,12 @@ void PropertyLinkSubList::breakLink(App::DocumentObject* obj, bool clear)
     values.reserve(_lValueList.size());
     subs.reserve(_lSubList.size());
 
+    // The remaining references keep their shadows, records and fingerprints: without them a
+    // missing one (`?Edge3`) loses the mapped name it was saved with (ops#140).
+    const bool parallel = _ShadowSubList.size() == _lSubList.size();
+    std::vector<ShadowSub> shadows;
+    std::vector<ElementRecords> records;
+    std::vector<std::string> fingerprints;
     int i = -1;
     for (auto o : _lValueList) {
         ++i;
@@ -4904,9 +4910,32 @@ void PropertyLinkSubList::breakLink(App::DocumentObject* obj, bool clear)
         }
         values.push_back(o);
         subs.push_back(_lSubList[i]);
+        if (parallel) {
+            shadows.push_back(_ShadowSubList[i]);
+            records.push_back(i < (int)_Records.size() ? _Records[i] : ElementRecords());
+            fingerprints.push_back(i < (int)_Fingerprints.size() ? _Fingerprints[i] : std::string());
+        }
     }
-    if (values.size() != _lValueList.size()) {
+    if (values.size() == _lValueList.size()) {
+        return;
+    }
+    if (!parallel) {
         setValues(values, subs);
+        return;
+    }
+    setValues(std::move(values), std::move(subs), std::move(shadows));
+    // setValues() resets both lists when the count changes; the old value for undo is already
+    // taken, so they follow their references here
+    _Records = std::move(records);
+    if (_Fingerprints.size() == fingerprints.size()) {
+        for (std::size_t k = 0; k < fingerprints.size(); ++k) {
+            if (_Fingerprints[k].empty()) {
+                _Fingerprints[k] = std::move(fingerprints[k]);
+            }
+        }
+    }
+    else {
+        _Fingerprints = std::move(fingerprints);
     }
 }
 

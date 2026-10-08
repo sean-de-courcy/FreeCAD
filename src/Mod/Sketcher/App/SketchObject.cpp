@@ -1347,11 +1347,16 @@ void SketchObject::onExternalGeoChanged()
     // keep the other links' shadows, so a missing one keeps its old mapped name (ops#72)
     auto shadows = ExternalGeometry.getShadowSubs();
     auto itShadow = shadows.begin();
+    // the types stay parallel to the links (ops#140)
+    std::vector<long> types;
+    int entry = -1;
     for (const auto& i : externalGeoRef) {
+        ++entry;
         if (detached.count(i) == 0U) {
             ++itObj;
             ++itSub;
             ++itShadow;
+            types.push_back(externalType(entry));
             continue;
         }
 
@@ -1368,6 +1373,12 @@ void SketchObject::onExternalGeoChanged()
         }
         refs.clear();
     }
+    auto pending = pendingTypeRepair();
+    types.insert(types.end(), pending.begin(), pending.end());
+    Base::StateLocker lock(externalLinksWithTypes, true);
+    if (ExternalTypes.getValues() != types) {
+        ExternalTypes.setValues(types);
+    }
     ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
 }
 
@@ -1380,9 +1391,45 @@ void SketchObject::onExternalGeometryChanged()
     }
 
     if(!isRestoring()) {
+        const auto oldRefs = externalGeoRef;
         // must wait till onDocumentRestored() when shadow references are
         // fully restored
         updateGeometryRefs();
+
+        // The sketch's own paths set the types with the links (externalLinksWithTypes). A path
+        // outside it that drops links (PropertyLinkSubList::breakLink, when a linked object is
+        // deleted) leaves their types behind: drop them too, keeping the remaining links' types
+        // in order (ops#140). A list shorter than the old links was saved by paths that appended
+        // links without types (projections); entries after the old links wait for the repair
+        // on open and stay after them.
+        auto types = ExternalTypes.getValues();
+        if (!externalLinksWithTypes && !(doc && doc->isPerformingTransaction())
+            && externalGeoRef.size() < oldRefs.size()) {
+            std::vector<long> pending;
+            if (externalTypeRepairPending && types.size() > oldRefs.size()) {
+                pending.assign(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
+                               types.end());
+            }
+            types.resize(oldRefs.size(), static_cast<long>(ExtType::Projection));
+            std::vector<long> kept;
+            std::size_t next = 0;
+            for (std::size_t i = 0; i < oldRefs.size() && next < externalGeoRef.size(); ++i) {
+                if (oldRefs[i] == externalGeoRef[next]) {
+                    kept.push_back(types[i]);
+                    ++next;
+                }
+            }
+            if (next == externalGeoRef.size()) {
+                kept.insert(kept.end(), pending.begin(), pending.end());
+                if (kept != ExternalTypes.getValues()) {
+                    ExternalTypes.setValues(kept);
+                }
+            }
+            else {
+                FC_WARN("External links of " << getFullName()
+                        << " changed beyond a removal; their types are left as they are");
+            }
+        }
         signalElementsChanged();
     }
 }
@@ -1525,8 +1572,14 @@ void SketchObject::onSketchRestore()
             rebuildExternalGeometry();
             if(ExternalGeometry.getSize()+2!=ExternalGeo.getSize())
                 FC_WARN("Failed to restore some external geometry in " << getFullName());
-        }else
+        }else {
             acceptGeometry();
+            // a type list saved before ops#140 gets each link's own type back, from the saved
+            // geometries, before anything reads it by index
+            if (ExternalTypes.getSize() > ExternalGeometry.getSize()) {
+                rebuildExternalGeometry(std::nullopt, true);
+            }
+        }
 
         // Must run after the external geometry above: the orientations are derived from the
         // geometry the constraints reference, and projected external geometry does not exist

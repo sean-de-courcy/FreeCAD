@@ -168,6 +168,31 @@ class TestSketchMissingExternal(unittest.TestCase):
         self.assertFalse(self.sketch.isValid())
         self.assertBothLinesKept()
 
+    def testDeletingAnotherSourceKeepsTheMissingLink(self):
+        """A datum point at (0, 30, 0) gives a second link. After the edit, deleting the datum
+        drops its link outside the sketch (PropertyLinkSubList::breakLink): the missing link
+        keeps its shadow, so it still names the pad's top edge, with its frozen line and the
+        three constraints of the circle (ops#140)."""
+        datum = self.body.newObject("PartDesign::Point", "Datum")
+        datum.Placement = App.Placement(V(0, 30, 0), App.Rotation())
+        self.doc.recompute()
+        self.sketch.addExternal(datum.Name, "")
+        self.doc.recompute()
+        self.replaceRightSide()
+        self.doc.removeObject(datum.Name)
+        self.assertEqual(self.sketch.ExternalGeometry, [(self.pad, ("?" + self.topEdge,))])
+        self.sketch.touch()
+        self.doc.recompute()
+        self.assertEqual(self.sketch.ExternalGeometry, [(self.pad, ("?" + self.topEdge,))])
+        lines = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            {(round(p.x, 6), round(p.y, 6)) for p in (lines[0].StartPoint, lines[0].EndPoint)},
+            {(20, 0), (20, 20)},
+        )
+        self.assertEqual(len(self.sketch.Constraints), 3)
+        self.assertTrue(self.sketch.Geometry[0].Center.isEqual(V(20, 10, 0), TOL))
+
     def testFaceLinkNamesEachGeometry(self):
         """A missing face projected onto a parallel plane named its four edges."""
         sketch = self.body.newObject("Sketcher::SketchObject", "OnSide")
