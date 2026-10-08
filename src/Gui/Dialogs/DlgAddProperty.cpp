@@ -792,6 +792,12 @@ void DlgAddProperty::buildForBound(bool valueNeedsReset, bool supportsExpression
 {
     openTransaction();
     App::Property* prop = createProperty();
+    if (!prop) {
+        // FreeCAD-CH (ops#231): nothing to keep the booking for; left open, Cancel didn't close
+        // it. Nor an editor for the type: making its value fails as the property did, and threw.
+        closeTransaction(TransactionOption::Abort);
+        return;
+    }
     setPropertyItem(prop, supportsExpressions);
     setEditor(valueNeedsReset);
 }

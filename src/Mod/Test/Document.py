@@ -1576,6 +1576,194 @@ class UndoRedoCases(unittest.TestCase):
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
+    def testNamesPassedBetweenProperties(self):
+        """ops#235: undo and abort restore every dynamic property, with its type, value, group,
+        tooltip and editor mode, when a transaction passes names between properties (swap,
+        shift), removes and adds one name, renames before a move, or changes a string property.
+        Each case: abort, and commit + undo + redo + undo + redo + undo (two rounds).
+        Review of fork PR 216: a name freed by a move and taken again, a rename that makes room
+        for a move (and its mirror), an add then a move, a change or rename of a moved property at
+        its target (either object first in the transaction), a rotation, expressions elsewhere;
+        round 2: a move on to a third object, an add, move and move back.
+        The state is every property of the objects, so a leftover temporary name or a duplicate
+        shows."""
+        self.maxDiff = None
+        static = {}
+
+        def state(*objs):
+            result = {}
+            for o in objs:
+                result[o.Name] = sorted(o.PropertiesList)
+                for p in o.PropertiesList:
+                    if p in static[o.Name]:
+                        continue
+                    result[(o.Name, p)] = (
+                        o.getTypeIdOfProperty(p),
+                        getattr(o, p),
+                        o.getGroupOfProperty(p),
+                        o.getDocumentationOfProperty(p),
+                        sorted(o.getEditorMode(p)),
+                    )
+                if o.Name == "User":
+                    result["expressions"] = sorted(o.ExpressionEngine)
+            return result
+
+        def rename(old, new):
+            return lambda obj, target: obj.renameProperty(old, new)
+
+        def setValue(name, value):
+            return lambda obj, target: setattr(obj, name, value)
+
+        def add(name, value, kind="App::PropertyInteger"):
+            def step(obj, target):
+                obj.addProperty(kind, name, "Added", "added " + name)
+                setattr(obj, name, value)
+
+            return step
+
+        def remove(name):
+            return lambda obj, target: obj.removeProperty(name)
+
+        def move(name):
+            return lambda obj, target: obj.moveProperty(name, target)
+
+        def moveIn(name):
+            return lambda obj, target: target.moveProperty(name, obj)
+
+        def setTarget(name, value):
+            return lambda obj, target: setattr(target, name, value)
+
+        def renameTarget(old, new):
+            return lambda obj, target: target.renameProperty(old, new)
+
+        def removeTarget(name):
+            return lambda obj, target: target.removeProperty(name)
+
+        def mode(name, modes):
+            return lambda obj, target: obj.setEditorMode(name, modes)
+
+        extra = {}
+
+        def moveOn(name):
+            return lambda obj, target: target.moveProperty(name, extra["third"])
+
+        swap = [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]
+        targetWidth = {"targetWidth": True}
+        third = {"third": True}
+
+        cases = [
+            ("swap", [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]),
+            ("shift", [rename("Width", "Old"), rename("Other", "Width")]),
+            ("shift, change", [rename("Width", "Old"), rename("Other", "Width"),
+                               setValue("Width", 13), setValue("Old", 14)]),
+            ("remove, add", [remove("Width"), add("Width", 7)]),
+            ("remove, add other type", [remove("Width"), add("Width", "seven",
+                                                             "App::PropertyString")]),
+            ("rename, remove, add", [rename("Width", "Wide"), remove("Wide"), add("Width", 7)]),
+            ("rename, change, rename back",
+             [rename("Width", "Wide"), setValue("Wide", 9), rename("Wide", "Width")]),
+            ("remove", [remove("Width")]),
+            ("string: change, rename, remove",
+             [setValue("Note", "xyz"), rename("Note", "Text"), remove("Text")]),
+            ("string: rename, change", [rename("Note", "Text"), setValue("Text", "xyz")]),
+            ("rename, move", [rename("Width", "Wide"), move("Wide")]),
+            ("change, move", [setValue("Width", 9), move("Width")]),
+            ("change, rename, move", [setValue("Width", 9), rename("Width", "Wide"), move("Wide")]),
+            # review of fork PR 216
+            ("M1 move, add the freed name", [move("Width"), add("Width", 7)]),
+            ("M1 move, rename into the freed name", [move("Width"), rename("Other", "Width")]),
+            ("M2b rename, move to a target with the name",
+             [rename("Width", "Wide"), move("Wide")], targetWidth),
+            ("M2c rename, move the name in", [rename("Width", "Wide"), moveIn("Width")], targetWidth),
+            ("M2c target first", [setTarget("Spare", 2), rename("Width", "Wide"), moveIn("Width")],
+             targetWidth),
+            ("M3 add, move", [add("Extra", 7), move("Extra")]),
+            ("M3 add, change, move, change", [add("Extra", 7), setValue("Extra", 8), move("Extra"),
+                                              setTarget("Extra", 9)]),
+            ("S2 move, change at the target", [move("Width"), setTarget("Width", 9)]),
+            ("S2 target first, move, change",
+             [setTarget("Spare", 2), move("Width"), setTarget("Width", 9)]),
+            ("S2 move, rename at the target", [move("Width"), renameTarget("Width", "Wider")]),
+            ("S2 target first, move, rename",
+             [setTarget("Spare", 2), move("Width"), renameTarget("Width", "Wider")]),
+            ("move, remove at the target", [move("Width"), removeTarget("Width")]),
+            ("move, change, move back", [move("Width"), setTarget("Width", 9), moveIn("Width")]),
+            ("L1 change, rename, remove, rename another into the name",
+             [setValue("Width", 9), rename("Width", "Tmp"), remove("Tmp"), rename("Other", "Tmp")]),
+            ("rotate three", [rename("Width", "Tmp"), rename("Other", "Width"),
+                              rename("Note", "Other"), rename("Tmp", "Note")]),
+            ("swap, expression elsewhere", swap, {"user": True}),
+            ("shift, expression elsewhere", [rename("Width", "Old"), rename("Other", "Width")],
+             {"user": True}),
+            ("L3 rename, editor mode, remove", [rename("Width", "Wide"), mode("Wide", []),
+                                                remove("Wide")]),
+            # review round 2 of fork PR 216
+            ("move, move on to a third object", [move("Width"), moveOn("Width")], third),
+            ("move, rename at the target, move on to a third object",
+             [move("Width"), renameTarget("Width", "Wider"), moveOn("Wider")], third),
+            ("add, move, move back", [add("Extra", 7), move("Extra"), moveIn("Extra")]),
+            ("V1 move, move back, change", [move("Width"), moveIn("Width"), setValue("Width", 9)]),
+        ]
+        for label, steps, *options in cases:
+            options = options[0] if options else {}
+            for close in ("abort", "undo"):
+                with self.subTest(case=label, close=close):
+                    doc = FreeCAD.newDocument("UndoNames")
+                    try:
+                        doc.UndoMode = 1
+                        doc.openTransaction("Make")
+                        obj = doc.addObject("App::FeaturePython", "Vars")
+                        target = doc.addObject("App::FeaturePython", "Target")
+                        objs = [obj, target]
+                        for o in objs:
+                            static[o.Name] = set(o.PropertiesList)
+                        target.addProperty("App::PropertyInteger", "Spare", "Misc", "a spare")
+                        target.Spare = 1
+                        if options.get("targetWidth"):
+                            target.addProperty("App::PropertyInteger", "Width", "T", "its width")
+                            target.Width = 3
+                        if options.get("third"):
+                            extra["third"] = doc.addObject("App::FeaturePython", "Third")
+                            static["Third"] = set(extra["third"].PropertiesList)
+                            objs.append(extra["third"])
+                        if options.get("user"):
+                            user = doc.addObject("App::FeaturePython", "User")
+                            static[user.Name] = set(user.PropertiesList)
+                            user.addProperty("App::PropertyInteger", "Uses", "Misc", "uses")
+                            objs.append(user)
+                        obj.addProperty("App::PropertyInteger", "Width", "Dims", "the width")
+                        obj.addProperty("App::PropertyInteger", "Other", "Misc", "the other")
+                        obj.addProperty("App::PropertyString", "Note", "Notes", "a note")
+                        obj.Width = 5
+                        obj.Other = 6
+                        obj.Note = "abc"
+                        obj.setEditorMode("Width", ["ReadOnly"])
+                        obj.setEditorMode("Note", ["Hidden"])
+                        if options.get("user"):
+                            user.setExpression("Uses", "Vars.Width * 10 + Vars.Other")
+                        doc.commitTransaction()
+                        before = state(*objs)
+
+                        doc.openTransaction("Task")
+                        for step in steps:
+                            step(obj, target)
+                        after = state(*objs)
+                        self.assertNotEqual(after, before)
+                        if close == "abort":
+                            doc.abortTransaction()
+                            self.assertEqual(state(*objs), before)
+                        else:
+                            doc.commitTransaction()
+                            for _ in range(2):
+                                doc.undo()
+                                self.assertEqual(state(*objs), before)
+                                doc.redo()
+                                self.assertEqual(state(*objs), after)
+                            doc.undo()
+                            self.assertEqual(state(*objs), before)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("UndoTest")
