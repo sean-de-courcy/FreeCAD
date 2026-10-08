@@ -28,6 +28,7 @@
 
 #include "Base/Console.h"
 #include "ComplexGeoData.h"
+#include "Datums.h"
 #include "Document.h"
 #include "GeoFeature.h"
 #include "GeoFeatureGroupExtension.h"
@@ -377,6 +378,14 @@ Base::Placement GeoFeature::getGlobalPlacement(const DocumentObject* obj)
 
     if (!placementProperty) {
         return {};
+    }
+
+    // An element of a coordinate system is placed in it; its group is the coordinate system's
+    // (FreeCAD-CH ops#210)
+    if (auto* element = freecad_cast<const DatumElement*>(obj)) {
+        if (auto* lcs = element->getLCS()) {
+            return getGlobalPlacement(lcs) * placementProperty->getValue();
+        }
     }
 
     auto* group = GeoFeatureGroupExtension::getGroupOfObject(obj);

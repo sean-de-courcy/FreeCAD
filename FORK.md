@@ -234,7 +234,8 @@ names it.
 | `fix/180-pipe-panel-followups` | fix | ops#180 | - | `integration` `d5e044c6a4` | `ea0d025ff5` (fork PR 204), 2026-10-08 | never (fork fix) |
 | `fix/223-autoconstraint-review-followups` | fix | ops#223 | - | `integration` `819fdb26db` | `fb2a4a9229` (fork PR 206), 2026-10-08 | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
 | `fix/219-originals-pick-geometry` | fix | ops#219 | none (fork code, ops#150) | `integration` `d5e044c6a4` | `144785fdd0` (fork PR 202), 2026-10-08 | never (fork code) |
-| `fix/192-variables-text-hint` | fix | ops#192 | - | `integration` `fb2a4a9229` | (fork PR 207) | never (fork feature: the Variables panel) |
+| `fix/192-variables-text-hint` | fix | ops#192 | - | `integration` `fb2a4a9229` | `59652b168e` (fork PR 207), 2026-10-08 | never (fork feature: the Variables panel) |
+| `fix/210-lcs-element-global-placement` | fix | ops#210 | - | `integration` `ea0d025ff5` | (fork PR 208) | when upstream's `getGlobalPlacement` places a coordinate system's elements in it |
 
 ## Fork-only commits in carried topics
 

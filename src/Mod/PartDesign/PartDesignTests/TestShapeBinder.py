@@ -302,6 +302,45 @@ class TestShapeBinderOfACoordinateSystem(unittest.TestCase):
         [vertex] = binder.Shape.Vertexes
         self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(-2, 6, 1)), 1e-9)
 
+    def testGlobalPlacementOfTheElement(self):
+        """An element's global placement goes through its coordinate system: body, coordinate
+        system, element (FreeCAD-CH ops#210). It skipped the coordinate system."""
+        [element] = [f for f in self.Lcs.OriginFeatures if f.Role == "Y_Axis"]
+        expected = self.bodyPlacement.multiply(self.Lcs.Placement).multiply(element.Placement)
+        self.assertTrue(element.getGlobalPlacement().isSame(expected, 1e-9))
+        # The body's own origin: at identity in the body
+        [axis] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "Z_Axis"]
+        expected = self.bodyPlacement.multiply(axis.Placement)
+        self.assertTrue(axis.getGlobalPlacement().isSame(expected, 1e-9))
+
+    def testTracedBinderInAnotherBody(self):
+        """A traced ShapeBinder of the plane, in a second body placed elsewhere: the plane stays
+        where it is in the document, whichever body moves. The trace composes the element's
+        global placement with its placement in the body, so it stays single (FreeCAD-CH
+        ops#210)."""
+        other = self.Doc.addObject("PartDesign::Body", "Other")
+        other.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-7, 2, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 1), 50)
+        )
+        [element] = [f for f in self.Lcs.OriginFeatures if f.Role == "XY_Plane"]
+        binder = other.newObject("PartDesign::ShapeBinder", "Traced")
+        binder.TraceSupport = True
+        binder.Support = [(element, "")]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+
+        def inDocument():
+            shape = binder.Shape.copy()
+            shape.Placement = other.Placement.multiply(shape.Placement)
+            return shape
+
+        self.assertPlaneAt(inDocument(), self.bodyPlacement)
+        self.Doc.recompute()
+        self.assertPlaneAt(inDocument(), self.bodyPlacement)
+        other.Placement = FreeCAD.Placement(FreeCAD.Vector(4, 0, -3), FreeCAD.Rotation())
+        self.Doc.recompute()
+        self.assertPlaneAt(inDocument(), self.bodyPlacement)
+
 
 class TestShapeBinderOfACoordinateSystemInAPlacedBody(TestShapeBinderOfACoordinateSystem):
     """The same in a body moved and turned: the binder's shape is in the body."""
