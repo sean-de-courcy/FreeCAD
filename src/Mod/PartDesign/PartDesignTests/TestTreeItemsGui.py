@@ -29,7 +29,8 @@
   also when the deleted feature has a nested sketch. This didn't fail on integration in any
   variant tried (ops#149): the tests pin it. The left-behind sketch stays hidden (PLAN decision
   29; upstream's makeChildrenVisible showed it), so only the previous feature shows, as when a
-  feature without a sketch is deleted.
+  feature without a sketch is deleted. The same for a profile that isn't a sketch (a binder) and
+  for a hidden feature. With no previous feature (the Body's only feature), the sketch is shown.
 
 Designed model, built by the test: a Body with a 20 x 10 rectangle padded 10, and a second
 rectangle (5..15 x 2..8) on the pad's top plane (z = 10) padded 5. The second sketch is the
@@ -283,3 +284,46 @@ class TestTreeItemsGui(unittest.TestCase):
         self.delete(box)
         self.assertEqual(self.body.Tip, self.pad)
         self.assertShown(self.pad)
+
+    def testDeletingTheOnlyFeatureShowsItsSketch(self):
+        """With no previous feature to show, the sketch is shown, so the Body isn't left empty
+        (ops#149 review M2)."""
+        self.sketch.ViewObject.Visibility = False
+        pump()
+        self.assertShown(self.pad)
+        self.delete(self.pad)
+        self.assertNotIn("Pad", [o.Name for o in self.doc.Objects])
+        self.assertShown(self.sketch)
+
+    def testDeletingAHiddenFeatureLeavesItsSketchHidden(self):
+        """A hidden feature's deletion changes nothing on screen: its sketch stays hidden and the
+        shown feature stays shown."""
+        pad2 = self.addSecondPad()
+        pad2.ViewObject.Visibility = False
+        self.pad.ViewObject.Visibility = True
+        pump()
+        self.delete(pad2)
+        self.assertNotIn("Pad001", [o.Name for o in self.doc.Objects])
+        sketch = self.doc.getObject("Sketch001")
+        self.assertFalse(sketch.Visibility, "the hidden feature's sketch is shown")
+        self.assertShown(self.pad)
+
+    def testDeletingAFeatureOnABinderKeepsTheBinderHidden(self):
+        """A profile that isn't a sketch, a SubShapeBinder of one, stays hidden as a sketch does
+        (ops#149 review L1)."""
+        sketch = rectangleSketch(self.body, "Sketch001", 5, 2, 15, 8, z=10)
+        binder = self.body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(sketch, ("",))]
+        pad2 = self.body.newObject("PartDesign::Pad", "Pad001")
+        pad2.Profile = binder
+        pad2.Length = 5
+        self.doc.recompute()
+        for obj in (self.sketch, sketch, binder):
+            obj.ViewObject.Visibility = False
+        pump()
+        self.assertTrue(pad2.isValid())
+        self.assertAlmostEqual(self.body.Shape.Volume, 20 * 10 * 10 + 10 * 6 * 5, places=6)
+        self.assertShown(pad2)
+        self.delete(pad2)
+        self.assertShown(self.pad)
+        self.assertFalse(binder.Visibility, "the left-behind binder is shown")

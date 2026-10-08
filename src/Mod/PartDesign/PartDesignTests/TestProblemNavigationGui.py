@@ -27,6 +27,8 @@
   (Std_TreePreviousProblem, Shift+F8) goes back. Objects that only need a recompute don't count.
 - The tree's search box takes :errors, :warnings and :problems (or any start of them, ":e"):
   typing highlights the matches, Enter selects them all.
+- Both skip an object hidden from the tree (ShowInTree off, or under a hidden parent) while the
+  document's "Show hidden" is off, and un-hide no row (review M1).
 
 Designed model, built by the test (the reference solver on, V2):
 - Body: a 20 x 10 rectangle padded 10 ("Pad"), a fillet of radius 1 on its vertical edge at
@@ -89,6 +91,29 @@ def highlighted():
         except RuntimeError:
             continue
     return sorted(labels)
+
+
+def visibleRows():
+    """The labels of the rows shown in every model tree that answers: neither the row nor a
+    parent hidden (rows of collapsed parents count as shown)."""
+    labels = set()
+
+    def walk(item):
+        if item.isHidden():
+            return
+        labels.add(item.text(0))
+        for i in range(item.childCount()):
+            walk(item.child(i))
+
+    for tree in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget):
+        try:
+            if tree.metaObject().className() != "Gui::TreeWidget":
+                continue
+            for i in range(tree.topLevelItemCount()):
+                walk(tree.topLevelItem(i))
+        except RuntimeError:
+            continue
+    return labels
 
 
 def selectedNames():
@@ -188,6 +213,54 @@ class TestProblemNavigationGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, "Body", "Pocket.Square.")
         pump()
         self.assertEqual(self.step(False), ["Pocket"])
+
+    def hideFromTree(self):
+        """Pocket hidden from the tree, and Body001 (so Pad001 under it), with "Show hidden" off."""
+        self.model()
+        self.assertFalse(self.doc.ShowHidden)
+        self.doc.getObject("Pocket").ViewObject.ShowInTree = False
+        self.doc.getObject("Body001").ViewObject.ShowInTree = False
+        pump()
+        self.assertTrue({"Pocket", "Body001", "Pad001"}.isdisjoint(visibleRows()))
+
+    def assertStillHidden(self):
+        rows = visibleRows()
+        self.assertIn("Fillet", rows)
+        for label in ("Pocket", "Body001", "Pad001"):
+            self.assertNotIn(label, rows, f"{label} un-hidden in the tree")
+
+    def testNextSkipsProblemsHiddenFromTheTree(self):
+        """A problem hidden from the tree, or under a hidden parent, is skipped and no hidden row
+        comes back (ops#149 review M1)."""
+        self.hideFromTree()
+        self.assertEqual(self.step(), ["Fillet"])
+        self.assertEqual(self.step(), ["Fillet"], "the only shown problem: wraps to itself")
+        self.assertEqual(self.step(False), ["Fillet"])
+        self.assertStillHidden()
+        # "Show hidden" on: they count again
+        self.doc.ShowHidden = True
+        pump()
+        self.assertEqual(self.step(), ["Pocket"])
+
+    def testTokensSkipProblemsHiddenFromTheTree(self):
+        self.hideFromTree()
+        self.assertEqual(self.search(":e"), [])
+        self.assertEqual(self.search(":problems"), ["Fillet"])
+        self.assertStillHidden()
+
+    def testPreviousFindsAProblemMadeAMomentAgo(self):
+        """Run right after the recompute, before the tree's pending update: the new object's row
+        is made first (ops#149 review L5)."""
+        self.model()
+        body3 = self.doc.addObject("PartDesign::Body", "Body002")
+        profile3 = models.sketch(self.doc, "Profile002", models.rectangle(60, 0, 70, 10), body3)
+        pad3 = models.pad(body3, profile3, 10, "Pad002")
+        pad3.Type = "UpToLast"
+        self.doc.recompute()
+        self.assertIn("Invalid", pad3.State)
+        Gui.runCommand("Std_TreePreviousProblem", 0)  # no events in between
+        pump()
+        self.assertEqual(selectedNames(), ["Pad002"])
 
     def testTouchedDoesNotCount(self):
         """A model without errors or warnings, only an object that needs a recompute: Next
