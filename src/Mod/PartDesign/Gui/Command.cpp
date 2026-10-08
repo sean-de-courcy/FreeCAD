@@ -2881,6 +2881,132 @@ public:
 // Initialization
 //===========================================================================
 
+//===========================================================================
+// PartDesign_ToggleSketches, PartDesign_TogglePlanes (FreeCAD-CH, ops#194: Onshape's Shift+H, P)
+//===========================================================================
+
+namespace
+{
+
+Gui::ViewProvider* viewProviderOf(App::DocumentObject* obj)
+{
+    Gui::Document* guiDoc = obj ? Gui::Application::Instance->getDocument(obj->getDocument())
+                                : nullptr;
+    return guiDoc ? guiDoc->getViewProvider(obj) : nullptr;
+}
+
+/// Hides them all when one is shown, else shows them all
+void toggleTogether(const std::vector<Gui::ViewProvider*>& vps, bool anyShown)
+{
+    for (Gui::ViewProvider* vp : vps) {
+        if (anyShown) {
+            vp->hide();
+        }
+        else {
+            vp->show();
+        }
+    }
+}
+
+}  // namespace
+
+DEF_STD_CMD_A(CmdPartDesignToggleSketches)
+
+CmdPartDesignToggleSketches::CmdPartDesignToggleSketches()
+    : Command("PartDesign_ToggleSketches")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Show/Hide &Sketches");
+    sToolTipText = QT_TR_NOOP(
+        "Hides the active body's sketches if one is shown, otherwise shows them all"
+    );
+    sWhatsThis = "PartDesign_ToggleSketches";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+}
+
+void CmdPartDesignToggleSketches::activated(int /*iMsg*/)
+{
+    PartDesign::Body* body = PartDesignGui::getBody(/*messageIfNot = */ false, false);
+    if (!body) {
+        return;
+    }
+    std::vector<Gui::ViewProvider*> sketches;
+    bool anyShown = false;
+    for (App::DocumentObject* obj : body->Group.getValues()) {
+        Gui::ViewProvider* vp = viewProviderOf(obj);
+        if (vp && obj->isDerivedFrom<Part::Part2DObject>()) {
+            sketches.push_back(vp);
+            anyShown = anyShown || vp->isShow();
+        }
+    }
+    toggleTogether(sketches, anyShown);
+}
+
+bool CmdPartDesignToggleSketches::isActive()
+{
+    return PartDesignGui::getBody(/*messageIfNot = */ false, false) != nullptr;
+}
+
+DEF_STD_CMD_A(CmdPartDesignTogglePlanes)
+
+CmdPartDesignTogglePlanes::CmdPartDesignTogglePlanes()
+    : Command("PartDesign_TogglePlanes")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Show/Hide &Planes");
+    sToolTipText = QT_TR_NOOP(
+        "Hides the active body's origin and datum planes if one is shown, otherwise shows them all"
+    );
+    sWhatsThis = "PartDesign_TogglePlanes";
+    sStatusTip = sToolTipText;
+    eType = Alter3DView;
+}
+
+void CmdPartDesignTogglePlanes::activated(int /*iMsg*/)
+{
+    PartDesign::Body* body = PartDesignGui::getBody(/*messageIfNot = */ false, false);
+    App::Origin* origin = body ? body->getOrigin() : nullptr;
+    Gui::ViewProvider* originVp = viewProviderOf(origin);
+    if (!originVp) {
+        return;
+    }
+    // An origin's planes show only with the origin
+    std::vector<Gui::ViewProvider*> planes;
+    bool anyShown = false;
+    for (App::Plane* plane : origin->planes()) {
+        if (Gui::ViewProvider* vp = viewProviderOf(plane)) {
+            planes.push_back(vp);
+            anyShown = anyShown || (originVp->isShow() && vp->isShow());
+        }
+    }
+    for (App::DocumentObject* obj : body->Group.getValues()) {
+        Gui::ViewProvider* vp = viewProviderOf(obj);
+        if (vp && obj->isDerivedFrom<PartDesign::Plane>()) {
+            planes.push_back(vp);
+            anyShown = anyShown || vp->isShow();
+        }
+    }
+    if (!anyShown && !originVp->isShow()) {
+        // show the origin for its planes only: its axes and point stay hidden
+        for (App::DocumentObject* obj : origin->OriginFeatures.getValues()) {
+            Gui::ViewProvider* vp = viewProviderOf(obj);
+            if (vp && !obj->isDerivedFrom<App::Plane>()) {
+                vp->hide();
+            }
+        }
+        originVp->show();
+    }
+    toggleTogether(planes, anyShown);
+}
+
+bool CmdPartDesignTogglePlanes::isActive()
+{
+    return PartDesignGui::getBody(/*messageIfNot = */ false, false) != nullptr;
+}
+
 void CreatePartDesignCommands()
 {
     Gui::CommandManager& rcCmdMgr = Gui::Application::Instance->commandManager();
@@ -2922,4 +3048,6 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignBoolean());
     rcCmdMgr.addCommand(new CmdPartDesignCompDatums());
     rcCmdMgr.addCommand(new CmdPartDesignCompSketches());
+    rcCmdMgr.addCommand(new CmdPartDesignToggleSketches());
+    rcCmdMgr.addCommand(new CmdPartDesignTogglePlanes());
 }

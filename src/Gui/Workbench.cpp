@@ -719,7 +719,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
     *edit << "Std_Undo" << "Std_Redo" << "Separator" << "Std_Cut" << "Std_Copy"
           << "Std_Paste" << "Std_DuplicateSelection" << "Separator"
           << "Std_Refresh" << "Std_BoxSelection" << "Std_BoxElementSelection"
-          << "Std_SelectAll" << "Std_Delete" << "Std_SendToPythonConsole"
+          << "Std_SelectAll" << "Std_ClearSelection" << "Std_Delete" << "Std_SendToPythonConsole"
           << "Separator" << "Std_Placement" << "Std_TransformManip" << "Std_Alignment"
           << "Std_Edit" << "Std_Properties" << "Separator" << "Std_UserEditMode" << "Separator"
           << "Std_DlgPreferences";
@@ -733,7 +733,8 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // Standard views
     auto stdviews = new MenuItem;
     stdviews->setCommand("Standard &Views");
-    *stdviews << "Std_ViewFitAll" << "Std_ViewFitSelection" << "Std_AlignToSelection" << axoviews
+    *stdviews << "Std_ViewFitAll" << "Std_ViewFitSelection" << "Std_AlignToSelection"
+              << "Std_ViewNormal" << axoviews
               << "Separator" << "Std_ViewHome" << "Std_ViewFront" << "Std_ViewTop"
               << "Std_ViewRight" << "Std_ViewRear" << "Std_ViewBottom" << "Std_ViewLeft"
               << "Separator" << "Std_ViewRotateLeft" << "Std_ViewRotateRight" << "Separator"
@@ -747,7 +748,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
     // Visibility
     auto visu = new MenuItem;
     visu->setCommand("V&isibility");
-    *visu << "Std_ToggleVisibility" << "Std_ShowSelection" << "Std_HideSelection"
+    *visu << "Std_ToggleVisibility" << "Std_ShowSelection" << "Std_HideSelection" << "Std_Isolate"
           << "Std_SelectVisibleObjects"
           << "Separator" << "Std_ToggleObjects" << "Std_ShowObjects" << "Std_HideObjects"
           << "Separator" << "Std_ToggleSelectability";
