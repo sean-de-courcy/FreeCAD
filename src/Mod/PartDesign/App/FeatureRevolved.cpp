@@ -557,16 +557,19 @@ TopoShape Revolved::tryToRevolveToFace(
     }
 
     // BRepFeat_MakeRevol needs a solid base, and its result holds the base besides the revolved
-    // tool. Without a solid before this feature, give it a unit box on the axis beyond the
-    // profile's full revolution, so that it can't touch the tool, and cut it out again below.
-    // The profile itself as the base, as makeElementPrismUntil() does for Pad, gives a null
-    // shape (ops#191).
+    // tool. Without a solid before this feature, give it a unit box on the axis, and cut it out
+    // again below. The profile itself as the base, as makeElementPrismUntil() does for Pad, gives
+    // a null shape (ops#191).
+    // The box can't touch the tool: a rotation about the axis keeps each point's position along
+    // the axis, so the whole sweep lies within |location - center| + diagonal / 2 of the axis
+    // location along it, and the box starts more than half a diagonal beyond that. A Groove
+    // without a base gets the same box: makeRemovedVolume() then fails and the tool itself
+    // becomes the result, as for a Groove by angle or a Pocket as the first feature.
     TopoShape featureBase = base;
     if (featureBase.isNull()) {
-        Base::BoundBox3d sweep = sketchshape.makeElementRevolve(axis, 2.0 * std::numbers::pi)
-                                     .getBoundBox();
-        gp_Pnt center(sweep.GetCenter().x, sweep.GetCenter().y, sweep.GetCenter().z);
-        double clearance = axis.Location().Distance(center) + sweep.CalcDiagonalLength() + 1.0;
+        Base::BoundBox3d profile = sketchshape.getBoundBox();
+        gp_Pnt center(profile.GetCenter().x, profile.GetCenter().y, profile.GetCenter().z);
+        double clearance = axis.Location().Distance(center) + profile.CalcDiagonalLength() + 1.0;
         gp_Pnt corner = axis.Location().Translated(gp_Vec(axis.Direction()) * clearance);
         featureBase = TopoShape(BRepPrimAPI_MakeBox(gp_Ax2(corner, axis.Direction()), 1.0, 1.0, 1.0)
                                     .Shape());
