@@ -446,25 +446,35 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#233: an independent copy leaves the original alone ---------------------------------
 
-    def testPipeCopyKeepsTheOriginalsExternalConstraints(self):
-        """ops#233: the spine outside the body has one constraint to an external edge (its start
-        on a guide line's start) and one internal (the two lines joined). OK copies it (Make
-        independent copy): the original keeps both constraints and its geometry; the copy has no
-        external geometry, keeps only the internal constraint and solves to the same lines. The
-        old code deleted the original's external constraint (once per property) and left the
-        copy's, and the copy's pasted projection linked the guide again at its recompute."""
+    def guidedSpine(self, defining=False):
+        """The Rod with its spine outside the body; the spine projects a guide line (x 0..5 at
+        z = 10, GeoId -3) and has three constraints, all holding as drawn: its first line's end on
+        the guide's start (external), its start on the H axis (-1), and its two lines joined."""
         import Sketcher
 
         pipe = self.rod(spineInBody=False)
         guide = self.doc.addObject("Part::Feature", "Guide")
-        guide.Shape = Part.makeLine(V(0, 0, 0), V(0, 0, 10))
-        self.spine.addExternal(guide.Name, "Edge1")
-        self.spine.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        guide.Shape = Part.makeLine(V(0, 0, 10), V(5, 0, 10))
+        self.spine.addExternal(guide.Name, "Edge1", defining)
+        self.spine.addConstraint(Sketcher.Constraint("Coincident", 0, 2, -3, 1))
+        self.spine.addConstraint(Sketcher.Constraint("PointOnObject", 0, 1, -1))
         self.spine.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
         self.doc.recompute()
         self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
-        self.assertEqual(self.spine.ConstraintCount, 2)
-        lines = [(g.StartPoint, g.EndPoint) for g in self.spine.Geometry]
+        return pipe
+
+    def constraints(self, sketch):
+        return [(c.Type, c.First, c.Second) for c in sketch.Constraints]
+
+    def edges(self, shape):
+        """Each edge's end points, rounded, in order."""
+
+        def point(v):
+            return tuple(round(c, 9) for c in v.Point)
+
+        return sorted((point(e.Vertexes[0]), point(e.Vertexes[-1])) for e in shape.Edges)
+
+    def copySpine(self, pipe):
         self.edit(pipe)
         self.answerModals()
         self.close(ok=True)
@@ -472,26 +482,88 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(self.modals, ["DlgReference"])
         copy = pipe.Spine[0]
         self.assertIsNot(copy, self.spine)
-        self.doc.recompute()
-        # the original: untouched
-        self.assertEqual(self.spine.ConstraintCount, 2)
+        return copy
+
+    def assertIndependentCopy(self, copy, constraints, lines, edges):
+        """The copy links nothing outside, keeps the original's constraints, lines and shape, and
+        solves."""
+        self.assertEqual(copy.ExternalGeometry, [])
+        self.assertEqual(copy.ExternalTypes, [])
+        self.assertEqual(len(copy.ExternalGeo), 3)  # the axes and the detached projection
+        self.assertEqual(self.constraints(copy), constraints)
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertEqual([(g.StartPoint, g.EndPoint) for g in copy.Geometry], lines)
+        self.assertEqual(self.edges(copy.Shape), edges)
+
+    def testPipeCopyKeepsTheOriginalsExternalConstraints(self):
+        """ops#233: OK copies the guided spine (Make independent copy). The original keeps its
+        three constraints and its lines. The copy keeps them too, on its projection detached (no
+        reference, so its recompute doesn't link the guide outside the body again), and solves to
+        the same lines. The old code deleted the original's external constraint (once per
+        property), and the copy linked the guide again."""
+        pipe = self.guidedSpine()
+        constraints = self.constraints(self.spine)
         self.assertEqual(
-            [(c.Type, c.First, c.Second) for c in self.spine.Constraints],
-            [("Coincident", 0, -3), ("Coincident", 0, 1)],
+            constraints, [("Coincident", 0, -3), ("PointOnObject", 0, -1), ("Coincident", 0, 1)]
         )
+        lines = [(g.StartPoint, g.EndPoint) for g in self.spine.Geometry]
+        edges = self.edges(self.spine.Shape)
+        copy = self.copySpine(pipe)
+        self.doc.recompute()
+        self.assertEqual(self.constraints(self.spine), constraints)
         self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
         self.assertEqual([(g.StartPoint, g.EndPoint) for g in self.spine.Geometry], lines)
-        # the copy: the internal constraint only, the same lines
-        self.assertEqual(
-            [(c.Type, c.First, c.Second) for c in copy.Constraints], [("Coincident", 0, 1)]
-        )
-        # no external geometry (the pasted projection's reference linked the guide again)
-        self.assertEqual(copy.ExternalGeometry, [])
-        self.assertEqual(len(copy.ExternalGeo), 2)  # the axes
-        self.assertEqual(copy.ExternalTypes, [])
-        self.assertTrue(copy.isValid(), copy.getStatusString())
-        for (a0, a1), g in zip(lines, copy.Geometry):
-            self.assertLess((g.StartPoint - a0).Length, 1e-9)
-            self.assertLess((g.EndPoint - a1).Length, 1e-9)
+        self.assertEqual(len(self.spine.ExternalGeometry), 1)
+        self.assertIndependentCopy(copy, constraints, lines, edges)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testPipeCopyKeepsADefiningExternalEdge(self):
+        """ops#233 round: the guide is projected as defining geometry, so it is an edge of the
+        spine's shape (ExternalEdge1). The copy's shape has the same edges, the guide's
+        included; trimming the projection dropped it."""
+        pipe = self.guidedSpine(defining=True)
+        edges = self.edges(self.spine.Shape)
+        self.assertEqual(len(edges), 3)
+        lines = [(g.StartPoint, g.EndPoint) for g in self.spine.Geometry]
+        constraints = self.constraints(self.spine)
+        copy = self.copySpine(pipe)
+        self.doc.recompute()
+        self.assertIndependentCopy(copy, constraints, lines, edges)
+
+    def testPipeCopySavedAndRestored(self):
+        """ops#233 round: the copy saved and opened again still links nothing, keeps its
+        constraints and lines, and solves."""
+        import os
+        import tempfile
+
+        pipe = self.guidedSpine()
+        lines = [(g.StartPoint, g.EndPoint) for g in self.spine.Geometry]
+        edges = self.edges(self.spine.Shape)
+        constraints = self.constraints(self.spine)
+        copy = self.copySpine(pipe)
+        self.doc.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "CopyRestored.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        copy = self.doc.getObject("CopySpine")
+        self.assertIsNotNone(copy)
+        self.doc.recompute()
+        self.assertIndependentCopy(copy, constraints, lines, edges)
+        pipe = self.doc.getObject("Pipe")
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testPipeCopyUndoneLeavesTheOriginal(self):
+        """ops#233 round: undoing the OK that made the copy removes the copy and leaves the
+        original's constraints as they were."""
+        pipe = self.guidedSpine()
+        constraints = self.constraints(self.spine)
+        self.copySpine(pipe)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("CopySpine"))
+        self.assertIs(pipe.Spine[0], self.spine)
+        self.assertEqual(self.constraints(self.spine), constraints)
+        self.assertTrue(self.spine.isValid(), self.spine.getStatusString())

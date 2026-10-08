@@ -48,6 +48,7 @@
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/FeaturePrimitive.h>
+#include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "ui_TaskFeaturePick.h"
@@ -395,20 +396,25 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
             cprop->Paste(*prop);
         }
 
-        // An independent copy has no external geometry: its links weren't copied, and the pasted
-        // projections go too (only the two axes stay), since the copy's recompute would make
-        // their references links again, to objects outside the body. So its constraints to
-        // external geometry go as well. The copy's, once: the original is never touched (ops#233:
-        // this ran on obj, once per property).
+        // An independent copy links nothing outside (its links weren't copied). Its projections
+        // stay, detached as a parked link's are (SketchObject::parkExternalGeometry): no
+        // reference, not Missing. So the constraints on them, its degrees of freedom and its
+        // Shape (defining external edges included) stay the original's, and its recompute keeps
+        // them fixed: a reference left on a projection would be linked again by
+        // rebuildExternalGeometry's re-check of missing elements. The copy only: the original is
+        // never touched (ops#233: delConstraintsToExternal() ran on obj, once per property).
         if (auto* sketchCopy = freecad_cast<Sketcher::SketchObject*>(copy)) {
-            const auto& external = sketchCopy->ExternalGeo.getValues();
+            std::vector<Part::Geometry*> external = sketchCopy->ExternalGeo.getValues();
             if (external.size() > 2) {
-                sketchCopy->ExternalGeo.setValues(
-                    std::vector<Part::Geometry*>(external.begin(), external.begin() + 2)
-                );
+                for (auto it = external.begin() + 2; it != external.end(); ++it) {
+                    *it = (*it)->clone();
+                    auto facade = Sketcher::ExternalGeometryFacade::getFacade(*it);
+                    facade->setRef(std::string());
+                    facade->setFlag(Sketcher::ExternalGeometryExtension::Missing, false);
+                }
+                sketchCopy->ExternalGeo.setValues(std::move(external));
             }
             sketchCopy->ExternalTypes.setValues({});
-            sketchCopy->delConstraintsToExternal();
         }
     }
     else {
