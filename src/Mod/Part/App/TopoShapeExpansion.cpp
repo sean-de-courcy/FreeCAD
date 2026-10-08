@@ -1031,7 +1031,8 @@ void TopoShape::mapSubElementTypeForShape(
                 else if (!sids[0].isFromSameHasher(Hasher)) {
                     if (!warned) {
                         warned = true;
-                        FC_WARN("hasher mismatch");  // NOLINT
+                        FC_LOG("hasher mismatch: dropping the string IDs of names from another "
+                               "string table");  // NOLINT
                     }
                     sids.clear();
                 }
@@ -1100,14 +1101,19 @@ void TopoShape::mapSubElement(
     auto checkHasher = [this](const TopoShape& other) {
         if (Hasher) {
             if (other.Hasher != Hasher) {
+                // The input has another string table (hasher) than this shape, e.g. another
+                // document's, or none. The user can't act on it, so it goes only to the log
+                // (ops#151, upstream issue 24567). Retagging the input to this hasher instead of
+                // switching would keep this shape's names valid: ops#201.
                 if (!getElementMapSize(false)) {
-                    if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
-                        FC_WARN("hasher mismatch");
-                    }
+                    FC_LOG("hasher mismatch: the shape takes the string table of its input");
                 }
                 else {
                     // FC_THROWM(Base::RuntimeError, "hasher mismatch");
-                    FC_ERR("hasher mismatch");
+                    FC_LOG(
+                        "hasher mismatch: the shape takes the string table of its input while "
+                        "it already has element names"
+                    );
                 }
                 Hasher = other.Hasher;
             }
@@ -1198,7 +1204,8 @@ void TopoShape::mapSubElement(
                         else if (!sids[0].isFromSameHasher(Hasher)) {
                             if (!warned) {
                                 warned = true;
-                                FC_WARN("hasher mismatch");
+                                FC_LOG("hasher mismatch: dropping the string IDs of names from "
+                                       "another string table");
                             }
                             sids.clear();
                         }

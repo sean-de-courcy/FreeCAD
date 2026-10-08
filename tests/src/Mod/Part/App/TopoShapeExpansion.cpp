@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <TColgp_Array2OfPnt.hxx>
+#include <algorithm>
 #include <gtest/gtest.h>
 #include "src/App/InitApplication.h"
+#include <Base/Console.h>
 #include <Mod/Part/App/TopoShape.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -187,6 +189,103 @@ TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoShapesGeneratesMapV2)
     EXPECT_TRUE(elementHasNames(topoShape, "Vertex3", {unmappedName("Vertex1", 3)}));
     EXPECT_TRUE(elementHasNames(topoShape, "Vertex4", {unmappedName("Vertex2", 3)}));
     EXPECT_EQ(unmappedName("Vertex2", 3).toString(), "Vertex2;_;3;MKR;0;V;0;IDX,SRC;_");
+}
+
+namespace
+{
+// Collects the console's messages by level while it lives
+class ConsoleCollector final: public Base::ILogger
+{
+public:
+    ConsoleCollector()
+    {
+        Base::Console().attachObserver(this);
+    }
+    ~ConsoleCollector() override
+    {
+        Base::Console().detachObserver(this);
+    }
+    ConsoleCollector(const ConsoleCollector&) = delete;
+    ConsoleCollector(ConsoleCollector&&) = delete;
+    ConsoleCollector& operator=(const ConsoleCollector&) = delete;
+    ConsoleCollector& operator=(ConsoleCollector&&) = delete;
+
+    void sendLog(
+        const std::string& /*notifiername*/,
+        const std::string& msg,
+        Base::LogStyle level,
+        Base::IntendedRecipient /*recipient*/,
+        Base::ContentType /*content*/
+    ) override
+    {
+        messages.emplace_back(level, msg);
+    }
+    const char* name() override
+    {
+        return "ConsoleCollector";
+    }
+
+    size_t count(const std::string& text, Base::LogStyle level) const
+    {
+        return std::ranges::count_if(messages, [&](const auto& message) {
+            return message.first == level && message.second.find(text) != std::string::npos;
+        });
+    }
+
+    std::vector<std::pair<Base::LogStyle, std::string>> messages;
+};
+
+// Sets a log tag's level while it lives
+class LogLevelScope
+{
+public:
+    LogLevelScope(const char* tag, int level)
+        : level(Base::Console().getLogLevel(tag))
+        , oldLevel(*this->level)
+    {
+        *this->level = level;
+    }
+    ~LogLevelScope()
+    {
+        *level = oldLevel;
+    }
+    LogLevelScope(const LogLevelScope&) = delete;
+    LogLevelScope(LogLevelScope&&) = delete;
+    LogLevelScope& operator=(const LogLevelScope&) = delete;
+    LogLevelScope& operator=(LogLevelScope&&) = delete;
+
+private:
+    int* level;
+    int oldLevel;
+};
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, mapSubElementOtherHasherOnlyLogs)
+{
+    // Arrange: the second input belongs to another document's string table (hasher). The user
+    // can't act on that, so it goes to the log only, not to the Report view as an error or
+    // warning (ops#151, upstream issue 24567)
+    auto edge1 = BRepBuilderAPI_MakeEdge(gp_Pnt(0.0, 0.0, 0.0), gp_Pnt(1.0, 0.0, 0.0)).Edge();
+    auto edge2 = BRepBuilderAPI_MakeEdge(gp_Pnt(1.0, 0.0, 0.0), gp_Pnt(2.0, 0.0, 0.0)).Edge();
+    App::StringHasherRef hasher1(new App::StringHasher);
+    App::StringHasherRef hasher2(new App::StringHasher);
+    TopoShape plain {1L};
+    plain.makeElementCompound({TopoShape(edge1, 2L), TopoShape(edge2, 3L)});
+    // The compound's shape alone, named from its inputs one by one below
+    TopoShape topoShape(plain.getShape(), 1L, hasher1);
+    topoShape.mapSubElement(TopoShape(edge1, 2L, hasher1));
+    ASSERT_GT(topoShape.getElementMapSize(), 0);
+    // Act: at the log level, restored however the test ends
+    {
+        LogLevelScope logLevel("TopoShape", FC_LOGLEVEL_LOG);
+        ConsoleCollector collector;
+        topoShape.mapSubElement(TopoShape(edge2, 3L, hasher2));
+        // Assert: the mismatch was seen, and reported at the log level only
+        EXPECT_GE(collector.count("hasher mismatch", Base::LogStyle::Log), 1);
+        EXPECT_EQ(collector.count("hasher mismatch", Base::LogStyle::Error), 0);
+        EXPECT_EQ(collector.count("hasher mismatch", Base::LogStyle::Warning), 0);
+    }
+    EXPECT_EQ(topoShape.getElementMapSize(), 6);
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementCompoundTwoCubes)
