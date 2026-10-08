@@ -391,7 +391,7 @@ bool LocalCoordinateSystem::extensionGetSubObject(DocumentObject*& ret,
                                                                 const char* subname,
                                                                 PyObject** pyobj,
                                                                 Base::Matrix4D* mat,
-                                                                bool,
+                                                                bool transform,
                                                                 int depth) const
 {
     if (Base::Tools::isNullOrEmpty(subname)) {
@@ -426,6 +426,11 @@ bool LocalCoordinateSystem::extensionGetSubObject(DocumentObject*& ret,
         }
         else {
             subname = "";
+        }
+        // The element is placed in this coordinate system, as a group's child is (FreeCAD-CH
+        // ops#207: a path through the body, "LCS.XY_Plane001.", gave it at the body's origin)
+        if (mat && transform) {
+            *mat *= Placement.getValue().toMatrix();
         }
         ret = ret->getSubObject(subname, pyobj, mat, true, depth + 1);
         return true;
