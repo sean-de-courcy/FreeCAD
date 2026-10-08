@@ -231,7 +231,8 @@ names it.
 | `fix/204-autoconstraint-followups` | fix | ops#204 | - | `integration` `d5e044c6a4` | `819fdb26db` (fork PR 203), 2026-10-08 | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
 | `feat/194-keymap-e` | feat | ops#194 | - | fork PR 197's head `df78c6e22b` (stacked) | `53033e161c` (fork PR 198), 2026-10-08 | never (fork feature); refit when upstream changes the sketch's edit-mode preselection (`EditModeCoinManager::detectPreselection`, `ViewProviderSketch::detectAndShowPreselection`) or `Std_ClarifySelection`'s picking |
 | `fix/222-esc-record-followups` | fix | ops#222 | - | `fix/220-esc-autorepeat` `55d57d873e` + `integration` `d5e044c6a4` (stacked on fork PR 201) | `b3ae78d04e` (fork PR 205), 2026-10-08 | never (fork fix) |
-| `fix/180-pipe-panel-followups` | fix | ops#180 | - | `integration` `d5e044c6a4` | (fork PR 204) | never (fork fix) |
+| `fix/180-pipe-panel-followups` | fix | ops#180 | - | `integration` `d5e044c6a4` | `ea0d025ff5` (fork PR 204), 2026-10-08 | never (fork fix) |
+| `fix/223-autoconstraint-review-followups` | fix | ops#223 | - | `integration` `819fdb26db` | (fork PR 206) | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
 
 ## Fork-only commits in carried topics
 
