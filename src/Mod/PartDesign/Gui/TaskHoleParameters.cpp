@@ -133,27 +133,51 @@ bool bounds(const TopoDS_Shape& face, const TopoDS_Shape& edge)
     return edges.Contains(edge);
 }
 
-// A face and one of its own edges in the list: Hole::findHoles takes the circle from both, and
-// the hole is cut twice
-bool mixesFaceAndEdge(const App::DocumentObjectT& holeT,
-                      App::DocumentObject* obj,
-                      const Part::TopoShape& whole,
-                      const TopoDS_Shape& picked)
+bool sharesACircle(const TopoDS_Shape& face, const TopoDS_Shape& other)
+{
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(other, TopAbs_EDGE, edges);
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        if (edges.Contains(it.Current())
+            && BRepAdaptor_Curve(TopoDS::Edge(it.Current())).GetType() == GeomAbs_Circle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A pick that Hole::findHoles would drill twice with a listed element of the same object: a face
+// and one of its own edges, or two faces sharing a circle (PR 169 review M3, follow-up 2). The
+// entry a Re-pick replaces doesn't count (follow-up 1)
+bool cutsTwice(const App::DocumentObjectT& holeT,
+               App::DocumentObject* obj,
+               const Part::TopoShape& whole,
+               const TopoDS_Shape& picked,
+               int repicking)
 {
     auto hole = freecad_cast<PartDesign::Hole*>(holeT.getObject());
     if (!hole || hole->Profile.getValue() != obj) {
         return false;  // another object starts the list on it
     }
     const bool pickedFace = picked.ShapeType() == TopAbs_FACE;
+    int index = -1;
     for (const std::string& sub : hole->Profile.getSubValues(false)) {
-        const TopoDS_Shape listed = elementOf(whole, sub);
-        if (listed.IsNull()) {
+        if (sub.empty()) {
             continue;
+        }
+        ++index;
+        const TopoDS_Shape listed = elementOf(whole, sub);
+        if (index == repicking || listed.IsNull() || listed.IsSame(picked)) {
+            continue;
+        }
+        const bool listedFace = listed.ShapeType() == TopAbs_FACE;
+        if (pickedFace && listedFace && sharesACircle(picked, listed)) {
+            return true;
         }
         if (pickedFace && listed.ShapeType() == TopAbs_EDGE && bounds(picked, listed)) {
             return true;
         }
-        if (!pickedFace && listed.ShapeType() == TopAbs_FACE && bounds(listed, picked)) {
+        if (!pickedFace && listedFace && bounds(listed, picked)) {
             return true;
         }
     }
@@ -168,6 +192,7 @@ bool mixesFaceAndEdge(const App::DocumentObjectT& holeT,
 bool acceptPosition(const App::DocumentObjectT& holeT,
                     App::DocumentObject* obj,
                     const char* sub,
+                    int repicking,
                     std::string& why)
 {
     constexpr const char* notAPosition =
@@ -218,8 +243,8 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
         why = notAPosition;
         return false;
     }
-    constexpr const char* twice =
-        QT_TR_NOOP("A face and one of its own edges would cut the hole twice: pick either.");
+    constexpr const char* twice = QT_TR_NOOP("This would cut a hole twice: a face and one of its "
+                                             "own edges, or two faces sharing a circle.");
     switch (element.ShapeType()) {
         case TopAbs_VERTEX:
             // The sketch whole leaves these out too (Hole::findHoles): a misclick on a circle's
@@ -234,7 +259,7 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
             if (BRepAdaptor_Curve(TopoDS::Edge(element)).GetType() != GeomAbs_Circle) {
                 break;
             }
-            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
+            if (cutsTwice(holeT, obj, whole, element, repicking)) {
                 why = twice;
                 return false;
             }
@@ -246,7 +271,7 @@ bool acceptPosition(const App::DocumentObjectT& holeT,
                                  "among its edges.");
                 return false;
             }
-            if (mixesFaceAndEdge(holeT, obj, whole, element)) {
+            if (cutsTwice(holeT, obj, whole, element, repicking)) {
                 why = twice;
                 return false;
             }
@@ -1309,13 +1334,15 @@ void TaskHoleParameters::createFields()
     positions.noDependents = true;
     positions.label = tr("Positions");
     positions.kinds = tr("Circles, arcs, points, faces with circles, or a sketch whole");
-    positions.accept = [holeT](App::DocumentObject* obj, const char* sub, std::string& why) {
-        return acceptPosition(holeT, obj, sub, why);
-    };
+    auto positionsSelf = std::make_shared<QPointer<ReferenceField>>();
+    positions.accept =
+        [holeT, positionsSelf](App::DocumentObject* obj, const char* sub, std::string& why) {
+            const int repicking = *positionsSelf ? (*positionsSelf)->repicking() : -1;
+            return acceptPosition(holeT, obj, sub, repicking, why);
+        };
     if (auto hole = getObject<PartDesign::Hole>()) {
         savedBaseProfileType = hole->BaseProfileType.getValue();
     }
-    auto positionsSelf = std::make_shared<QPointer<ReferenceField>>();
     auto writePositions = [this, positionsSelf](App::DocumentObject* obj,
                                                 const std::vector<std::string>& subs) {
         fitBaseProfileType(obj, subs);
