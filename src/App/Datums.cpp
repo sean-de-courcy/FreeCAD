@@ -95,9 +95,11 @@ Base::Vector3d DatumElement::getBasePoint() const
 {
     Base::Placement placement = Placement.getValue();
 
-    // The element's position turned and moved by its coordinate system (FreeCAD-CH ops#200)
+    // The element's position turned and moved by its coordinate system (FreeCAD-CH ops#200). An
+    // origin's too: it is at identity unless set from Python, and the Attacher and ShapeBinder
+    // apply it (ops#206)
     const auto* lcs = getLCS();
-    if (lcs && !lcs->isOrigin()) {
+    if (lcs) {
         placement = lcs->Placement.getValue() * placement;
     }
 
@@ -112,7 +114,7 @@ Base::Vector3d DatumElement::getDirection() const
     rot.multVec(dir, dir);
 
     const auto* lcs = getLCS();
-    if (lcs && !lcs->isOrigin()) {
+    if (lcs) {
         Base::Rotation lcsRot = lcs->Placement.getValue().getRotation();
         lcsRot.multVec(dir, dir);
     }
@@ -343,6 +345,27 @@ void LocalCoordinateSystem::onDocumentRestored()
 
     // In 0.22 origins did not have point.
     migrateOriginPoint();
+}
+
+void LocalCoordinateSystem::onChanged(const Property* prop)
+{
+    // A link to an element alone, (element, ""), is placed in this coordinate system too, but it
+    // names only the element, which the move leaves unchanged: recompute what holds such a link.
+    // Changed in a recompute (attached), it marks them again, so one that ran before this
+    // coordinate system runs again in the document's second pass (FreeCAD-CH ops#206)
+    if (prop == &Placement && !isRestoring()) {
+        for (auto* element : OriginFeatures.getValues()) {
+            if (!element) {
+                continue;
+            }
+            for (auto* obj : element->getInList()) {
+                if (obj != this) {
+                    obj->enforceRecompute();
+                }
+            }
+        }
+    }
+    GeoFeature::onChanged(prop);
 }
 
 void LocalCoordinateSystem::migrateOriginPoint()

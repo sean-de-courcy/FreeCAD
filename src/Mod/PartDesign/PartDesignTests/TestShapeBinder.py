@@ -256,6 +256,15 @@ class TestShapeBinderOfACoordinateSystem(unittest.TestCase):
         [vertex] = self.binder("Origin").Shape.Vertexes
         self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(3, 4, 5)), 1e-9)
 
+    def testPointFollowsTheMove(self):
+        """The coordinate system moved after the binder was made: the binder follows it at the
+        next recompute (FreeCAD-CH ops#206)."""
+        binder = self.binder("Origin")
+        self.Lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(-2, 6, 1), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [vertex] = binder.Shape.Vertexes
+        self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(-2, 6, 1)), 1e-9)
+
 
 class TestShapeBinderOfACoordinateSystemInAPlacedBody(TestShapeBinderOfACoordinateSystem):
     """The same in a body moved and turned: the binder's shape is in the body."""

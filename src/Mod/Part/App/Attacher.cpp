@@ -81,7 +81,8 @@ namespace
 {
 // An element of a coordinate system linked bare, as (element, ""): its own placement is in the
 // coordinate system, so the coordinate system's comes first (ops#200). A link through the
-// coordinate system, (LCS, "XY_Plane"), has it already. An origin's sits at identity
+// coordinate system, (LCS, "XY_Plane"), has it already. An origin's is applied too, as
+// DatumElement::getBasePoint does: it is at identity unless set from Python (ops#206)
 Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
 {
     auto element = dynamic_cast<const App::DatumElement*>(obj);

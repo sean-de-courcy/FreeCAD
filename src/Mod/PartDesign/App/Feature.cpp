@@ -728,7 +728,7 @@ gp_Pln Feature::makePlnFromPlane(const App::DocumentObject* obj)
     }
 
     // In the body's coordinates: a datum element is placed in its coordinate system, the body's
-    // Origin (at identity) or a coordinate system placed in the body (ops#198). Not the global
+    // Origin (at identity unless set from Python) or a coordinate system placed in the body (ops#198). Not the global
     // placement, which adds the body's own
     Base::Placement placement = plane->Placement.getValue();
     if (auto element = dynamic_cast<const App::DatumElement*>(obj)) {

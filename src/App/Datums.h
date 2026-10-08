@@ -232,6 +232,8 @@ protected:
     /// Removes all planes and axis if they are still linked to the document
     void unsetupObject() override;
     void onDocumentRestored() override;
+    /// A new Placement recomputes what links the elements bare
+    void onChanged(const Property* prop) override;
 
 private:
     struct SetupData;
