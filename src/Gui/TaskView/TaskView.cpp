@@ -65,8 +65,9 @@ namespace
  * Shows the text the tree's tooltip shows: the recompute error, or the warning of a recompute
  * that succeeded on a guessed reference. It is refreshed after each recompute, undo and redo,
  * and hidden while the object is fine. The label changes only when the text does, and it takes
- * no focus, so typing in the panel isn't disturbed. It shows only after a short delay, and hides
- * at once, so a value typed through a failing one ("0.5" passes through "0") doesn't flash it.
+ * no focus, so typing in the panel isn't disturbed. It shows only after a short delay from the
+ * last failing refresh, and hides at once, so a value typed through a failing one ("0.5" passes
+ * through "0" and "0.") doesn't flash it.
  *
  * The edited object comes from the document's edit view provider, which stays set while another
  * view is active (getInEdit() is null then). An object edited in place through a link belongs to
@@ -229,7 +230,8 @@ private:
                 setVisible(false);
             }
         }
-        else if (isHidden() && !showTimer.isActive()) {
+        else if (isHidden()) {
+            // Restarted by each failing refresh: it shows 300 ms after the last one (ops#202)
             showTimer.start();
         }
     }
