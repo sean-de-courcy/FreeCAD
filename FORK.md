@@ -238,7 +238,8 @@ names it.
 | `fix/210-lcs-element-global-placement` | fix | ops#210 | - | `integration` `ea0d025ff5` | `3e711888ba` (fork PR 208), 2026-10-08 | when upstream's `getGlobalPlacement` places a coordinate system's elements in it |
 | `fix/227-fem-axis-direction` | fix | ops#227 | - | `fix/210-lcs-element-global-placement` `dbfbb898d1` (stacked on fork PR 208) | `c5fd5fbf35` (fork PR 209), 2026-10-08 | when upstream's FEM `Constraint::getDirection` takes an App::Line's direction along its base direction |
 | `fix/178-181-rename-move-transactions` | fix | ops#178, ops#181 | - | `integration` `fb2a4a9229` | `800c03ab49` (fork PR 210), 2026-10-08 | Rename part: when upstream's `PropertyEditor` Rename joins a booked transaction and guards its commit; `openPendingTransaction`: never (fork code, fork PR 148) |
-| `fix/229-rename-value-rollback` | fix | ops#229 | - | `fix/178-181-rename-move-transactions` `5d982c82f5` (fork PR 210) | (fork PR 212) | when upstream's `TransactionObject` keeps a rename and a value change of one property apart (one entry per property ID) |
+| `fix/229-rename-value-rollback` | fix | ops#229 | - | `fix/178-181-rename-move-transactions` `5d982c82f5` (fork PR 210) | `79b75b8f45` (fork PR 212), 2026-10-08 | when upstream's `TransactionObject` keeps a rename and a value change of one property apart (one entry per property ID) |
+| `fix/225-pipe-copy-followups` | fix | ops#225 | - | `integration` `144785fdd0` | (fork PR 211) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
