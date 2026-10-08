@@ -1344,19 +1344,39 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(rows, {("Base", 0)})
 
     def testMarkBrokenSurvivesAPick(self):
-        """Mark broken on the guessed entry, then another edge picked: the rejection stays (the
-        entry broken), not dropped by the write."""
-        pad, fillet, corner = self.redrawnFillet()
+        """Mark broken on the second guessed entry; the first deleted: the rejection moves up with
+        its entry (index 0 now, still broken); another edge picked: it stays broken beside the
+        new exact entry, not dropped by the count-changing writes. Without the field carrying
+        the records by entry (ReferenceField::write) the entry stays broken by its "?" name, but
+        the report loses the rejection (seen with the carry disabled, PR 142's review gap)."""
+        pad, fillet = self.redrawnTwoEdgeFillet()
         [field] = self.edit(fillet)
-        menu = openMenu(field, 0)
+        self.assertEqual(states(field), ["guessed", "guessed"])
+        menu = openMenu(field, 1)
         menuActions(menu)["Mark broken"].trigger()
         menu.close()
         pump(0.3)
-        self.assertTrue(waitFor(lambda: states(field) == ["broken"]), states(field))
+        self.assertTrue(waitFor(lambda: states(field) == ["guessed", "broken"]), states(field))
+        second = fillet.Base[1][1]
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: len(states(field)) == 1), states(field))
+        self.assertEqual(states(field), ["broken"])
+        self.assertEqual(fillet.Base[1], [second])
+        self.assertRejectedAt(fillet, 0)
         self.arm(field, byFocus=False)
-        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        [other] = edge("line", direction=Z, through=(20, 10, 0)).one(pad.Shape)
         self.pick(pad, other)
         self.assertTrue(waitFor(lambda: states(field) == ["broken", "exact"]), states(field))
+        self.assertRejectedAt(fillet, 0)
+
+    def assertRejectedAt(self, fillet, index):
+        """The reference report keeps the Mark broken record at the entry's index: the "?" of a
+        missing name alone isn't the rejection (without the record the entry is broken still)."""
+        [row] = [e for e in App.getReferenceReport(fillet) if e["index"] == index]
+        self.assertEqual(row["guess_kind"], "rejected", row)
+        self.assertEqual([a["role"] for a in row["alternatives"]], ["rejected"], row)
 
     # -- PR 142 review round ------------------------------------------------------------------------
 
