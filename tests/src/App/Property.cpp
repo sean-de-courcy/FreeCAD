@@ -694,6 +694,75 @@ TEST_F(RenameProperty, redo)
     EXPECT_EQ(varSet->getDynamicPropertyByName("NewName"), prop);
 }
 
+// Tests whether an expression in another object, changed in a transaction that swaps the names of
+// the properties it refers to, comes back referring to the same properties (ops#238 probe: undo's
+// temporary names rename the expressions in every container, the undo entries' copies included)
+TEST_F(RenameProperty, swapWithExpressionChangedInOtherObject)
+{
+    auto* other = freecad_cast<App::PropertyInteger*>(
+        varSet->addDynamicProperty("App::PropertyInteger", "Other", "Variables")
+    );
+    other->setValue(7);
+    auto* varSet2 = freecad_cast<App::VarSet*>(doc->addObject("App::VarSet", "VarSet2"));
+    auto* result = freecad_cast<App::PropertyInteger*>(
+        varSet2->addDynamicProperty("App::PropertyInteger", "Result", "Variables")
+    );
+    const App::ObjectIdentifier path(*result);
+    auto setExpression = [&](const char* text) {
+        varSet2->setExpression(
+            path,
+            std::shared_ptr<App::Expression>(App::Expression::parse(varSet2, text))
+        );
+    };
+    auto expression = [&] {
+        auto expressions = varSet2->ExpressionEngine.getExpressions();
+        auto it = expressions.find(path);
+        return it == expressions.end() ? std::string() : it->second->toString();
+    };
+    auto evaluate = [&] {
+        varSet2->ExpressionEngine.execute();
+        return result->getValue();
+    };
+    setExpression("VarSet.Variable + 1");
+    EXPECT_EQ(evaluate(), value + 1);
+    const std::string before = expression();
+    ErrorCollector errors;
+
+    for (const bool commit : {false, true}) {
+        doc->openTransaction("Swap");
+        EXPECT_TRUE(varSet->renameDynamicProperty(prop, "Tmp"));
+        EXPECT_TRUE(varSet->renameDynamicProperty(other, "Variable"));
+        EXPECT_TRUE(varSet->renameDynamicProperty(prop, "Other"));
+        EXPECT_EQ(evaluate(), value + 1);
+        setExpression("VarSet.Variable * 2");
+        EXPECT_EQ(evaluate(), 14);
+        const std::string changed = expression();
+        if (commit) {
+            doc->commitTransaction();
+            EXPECT_TRUE(doc->undo());
+        }
+        else {
+            doc->abortTransaction();
+        }
+        EXPECT_STREQ(varSet->getPropertyName(prop), "Variable");
+        EXPECT_STREQ(varSet->getPropertyName(other), "Other");
+        EXPECT_EQ(expression(), before) << (commit ? "undo" : "abort");
+        EXPECT_EQ(evaluate(), value + 1);
+        if (commit) {
+            EXPECT_TRUE(doc->redo());
+            EXPECT_STREQ(varSet->getPropertyName(prop), "Other");
+            EXPECT_EQ(expression(), changed);
+            EXPECT_EQ(evaluate(), 14);
+            EXPECT_TRUE(doc->undo());
+            EXPECT_EQ(expression(), before);
+            EXPECT_EQ(evaluate(), value + 1);
+        }
+    }
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc->clearUndos();
+    doc->removeObject(varSet2->getNameInDocument());
+}
+
 /*
  * For these tests we have the following variables that correspond to the
  * following names:
