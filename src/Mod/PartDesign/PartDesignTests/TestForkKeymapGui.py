@@ -206,6 +206,14 @@ FREECAD = {
     "Part_FaceSelection": "F, S",
 }
 
+# Assembly's single letters that are the fork's general keys: cleared (decision 31); upstream's
+ASSEMBLY_KEYS = {
+    "Assembly_CreateJointFixed": "F",
+    "Assembly_SolveAssembly": "Z",
+    "Assembly_CreateJointScrew": "W",
+    "Assembly_CreateJointRigidGroup": "Y",
+}
+
 # Pairs that share a key in upstream FreeCAD too, outside the keymap's commands: the tree's
 # "Recompute Object" and Std_Recompute (Ctrl+Shift+R; the tree's action works on its selection)
 UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
@@ -319,10 +327,12 @@ def groupCommands():
             own = command(toolName).getAction() if command(toolName) else []
             if not own or not sameObject(own[0], tool):
                 continue
+        # the tool's action, not the command's getShortcut(): a Python group's tool (Assembly's
+        # Insert, Gears/Belt) may have no action of its own, and then its getShortcut() is ""
         groups[main[0].objectName()] = (
             main[0].shortcut().toString(),
             toolName,
-            Gui.Command.get(toolName).getShortcut(),
+            tool.shortcut().toString(),
         )
     return groups
 
@@ -845,6 +855,46 @@ class TestForkKeymapGui(unittest.TestCase):
         self.press(QtCore.Qt.Key_U)
         self.assertTrue(waitFor(lambda: rounded().isChecked() == before), "U under FreeCAD's")
         self.escapeTool()
+
+    def testFFitsTheViewInAssemblyEdit(self):
+        """In assembly edit, F fits the view, not a Fixed joint (Assembly's joints are ForEdit, so
+        the tie rule gave them F): Assembly's F, Z, W, Y are cleared under the fork's keymap, and
+        back under FreeCAD's. An assembly of two boxes, in edit in the Assembly workbench."""
+        if "AssemblyWorkbench" not in Gui.listWorkbenches():
+            self.skipTest("no Assembly")
+        doc = App.newDocument("ForkKeymapAssembly")
+        try:
+            Gui.activateWorkbench("AssemblyWorkbench")
+            assembly = doc.addObject("Assembly::AssemblyObject", "Assembly")
+            for name in ("BoxA", "BoxB"):
+                assembly.addObject(doc.addObject("Part::Box", name))
+            doc.recompute()
+            Gui.ActiveDocument = Gui.getDocument(doc.Name)
+            Gui.ActiveDocument.setEdit(assembly.Name)
+            self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
+            fixed = Gui.Command.get("Assembly_CreateJointFixed").getAction()
+            self.assertTrue(waitFor(lambda: fixed and all(a.isEnabled() for a in fixed)))
+            for name in ASSEMBLY_KEYS:
+                self.assertEqual(shortcut(name), "", name)
+            with self.watching("Std_ViewFitAll", "Assembly_CreateJointFixed") as fired:
+                self.press(QtCore.Qt.Key_F)
+                self.assertTrue(waitFor(lambda: fired), "F ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Std_ViewFitAll"])
+            setKeymap("FreeCAD")
+            wrong = [f"{n}: {shortcut(n)!r}" for n, k in ASSEMBLY_KEYS.items() if shortcut(n) != k]
+            self.assertEqual(wrong, [], "FreeCAD")
+        finally:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            guiDoc = Gui.getDocument(doc.Name)
+            if guiDoc.getInEdit():
+                guiDoc.resetEdit()
+            pump()
+            App.closeDocument(doc.Name)
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+            Gui.activateWorkbench("PartDesignWorkbench")
+            pump()
 
     def editAndPress(self, key, typeName):
         self.editSketch()
