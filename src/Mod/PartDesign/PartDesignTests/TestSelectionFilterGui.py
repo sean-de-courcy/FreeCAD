@@ -106,6 +106,13 @@ class TestSelectionFilterGui(unittest.TestCase):
         Gui.Selection.clearSelection()
 
     def tearDown(self):
+        # Review round 3 (L-l): through the status-bar button first, which also works with no 3D
+        # view active (Part_SelectFilter then does nothing), so a test that failed with another
+        # view in front doesn't leak its filter into later classes
+        button = self.filterButton()
+        if button is not None and not button.isHidden():
+            button.click()
+            pump(0.05)
         setFilter(NONE)
         guiDoc = Gui.getDocument(self.doc.Name)
         if Gui.Control.activeDialog():

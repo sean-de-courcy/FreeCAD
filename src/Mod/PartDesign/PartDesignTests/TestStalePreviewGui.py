@@ -31,9 +31,10 @@
 
 Designed models, each built by the test:
 - Box: a 10 x 10 x 10 additive box. A Chamfer or Fillet made with nothing selected has no edges
-  and fails. The chamfer of all 12 edges, size 1, is the cube cut by the 12 planes |x| + |y| = 9
-  (centred): 12 prisms of 5 mm^3 off, less each corner's three pairwise overlaps of 1/3 mm^3,
-  plus their common part, 1/3 mm^3: 945.33 mm^3 left.
+  and fails. The chamfer of all 12 edges, size 1: each edge loses a prism of 1/2 mm^2 section
+  over its middle 8 mm (4 mm^3), and OCCT cuts each corner's 1 mm cube by one plane through the
+  three edge chamfers' ends, keeping a tetrahedron of 1/6 mm^3 (5/6 mm^3 off): 1000 - (12 * 4 +
+  8 * 5/6) = 945.33 mm^3 left. (Twelve planes |x| + |y| = 9 alone would leave 946.)
 - Plate: a 10 x 10 rectangle padded 10 as the Body's first feature: To last and To first have
   no solid to reach, Up to face and Up to shape nothing picked; all four fail.
 - Pocket: a 2 x 2 square on the box's top, pocketed 3 (988 mm^3 left); Up to face and Up to
@@ -50,7 +51,7 @@ from PySide import QtWidgets
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
 
-CHAMFERED_BOX = 1000 - (12 * 5 - 8 * (3 * 1 / 3) + 8 * 1 / 3)
+CHAMFERED_BOX = 1000 - (12 * 4 + 8 * 5 / 6)
 
 
 def previewNodes(feature):

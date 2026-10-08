@@ -207,7 +207,9 @@ bool PropertyItemDelegate::editorEvent(
 // FreeCAD-CH (ops#146): whether a key or wheel event into the editor changes what it holds: a key
 // that types or deletes, not one that ends the edit, moves the cursor or the focus, copies or only
 // holds a modifier; the up/down keys and the wheel only in a spin box, which they step; nothing
-// in a read-only line edit. So a row whose dialog writes keeps it after Esc (review round 3, L-g)
+// in a read-only line edit. So a row whose dialog writes keeps it after Esc (review round 3, L-g).
+// A combo box (an Enumeration row) is a pick, not typing: its up/down keys and wheel choose an
+// item, which writes at once (QComboBox::activated) and stays after Esc (L-j)
 static bool changesEditor(QObject* o, QEvent* ev)
 {
     if (auto lineEdit = qobject_cast<QLineEdit*>(o); lineEdit && lineEdit->isReadOnly()) {

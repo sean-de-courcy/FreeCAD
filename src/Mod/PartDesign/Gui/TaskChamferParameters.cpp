@@ -162,6 +162,9 @@ void TaskChamferParameters::onCheckBoxUseAllEdgesToggled(bool checked)
         baseField->setEnabled(!checked);
         chamfer->UseAllEdges.setValue(checked);
         chamfer->recomputeFeature();
+        // FreeCAD-CH (ops#196): don't rely on the scheduled preview update alone for the
+        // error colour (it would run first if a recompute ever processed Qt events)
+        hideOnError();
     }
 }
 

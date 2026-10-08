@@ -323,3 +323,59 @@ class TestPropertyEditorGui(unittest.TestCase):
         QtTest.QTest.keyClick(lineEdit, QtCore.Qt.Key_Escape)
         pump(0.3)
         self.assertEqual(self.obj.Source, "C:/new.txt", "Esc undid the dialog's pick")
+
+    def testEscapeRevertsSteppedSpinBox(self):
+        """Review round 3 (L-k): the up/down keys, page keys and the wheel step a number row's
+        spin box, which writes as it goes: they count as typing, and Esc reverts the value."""
+
+        def wheel(widget):
+            center = QtCore.QPointF(widget.rect().center())
+            event = QtGui.QWheelEvent(
+                center,
+                QtCore.QPointF(widget.mapToGlobal(widget.rect().center())),
+                QtCore.QPoint(),
+                QtCore.QPoint(0, 120),
+                QtCore.Qt.NoButton,
+                QtCore.Qt.NoModifier,
+                QtCore.Qt.NoScrollPhase,
+                False,
+            )
+            QtWidgets.QApplication.sendEvent(widget, event)
+
+        steps = (
+            ("up", lambda w: QtTest.QTest.keyClick(w, QtCore.Qt.Key_Up)),
+            ("down", lambda w: QtTest.QTest.keyClick(w, QtCore.Qt.Key_Down)),
+            ("page up", lambda w: QtTest.QTest.keyClick(w, QtCore.Qt.Key_PageUp)),
+            ("wheel", wheel),
+        )
+        for name, step in steps:
+            with self.subTest(step=name):
+                undos = self.doc.UndoCount
+                widget = self.openValueEditor("Width")
+                step(widget)
+                pump(0.2)
+                self.assertNotEqual(self.obj.Width, 5, "the step wrote nothing")
+                QtTest.QTest.keyClick(widget, QtCore.Qt.Key_Escape)
+                pump(0.3)
+                self.assertEqual(self.obj.Width, 5)
+                self.assertEqual(self.doc.getBookedTransactionID(), 0)
+                self.assertEqual(self.doc.UndoCount, undos)
+
+    def testEscapeKeepsEnumerationPick(self):
+        """Review round 3 (L-j), the documented rule: an Enumeration row's combo box writes on
+        every pick, and the arrow keys pick (QComboBox::activated), so Esc keeps the picked item,
+        as it keeps a color or a file from a dialog."""
+        self.obj.addProperty("App::PropertyEnumeration", "Mode", "Variables")
+        self.obj.Mode = ["Thin", "Medium", "Thick"]
+        self.obj.Mode = "Thin"
+        widget = self.openValueEditor("Mode")
+        combo = widget if isinstance(widget, QtWidgets.QComboBox) else widget.findChild(
+            QtWidgets.QComboBox
+        )
+        self.assertIsNotNone(combo, "no combo box in the enumeration's editor")
+        QtTest.QTest.keyClick(combo, QtCore.Qt.Key_Down)
+        pump(0.2)
+        self.assertEqual(self.obj.Mode, "Medium", "the arrow key picked nothing")
+        QtTest.QTest.keyClick(combo, QtCore.Qt.Key_Escape)
+        pump(0.3)
+        self.assertEqual(self.obj.Mode, "Medium", "Esc undid the pick")
