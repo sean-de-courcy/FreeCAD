@@ -1584,7 +1584,8 @@ class UndoRedoCases(unittest.TestCase):
         Review of fork PR 216: a name freed by a move and taken again, a rename that makes room
         for a move (and its mirror), an add then a move, a change or rename of a moved property at
         its target (either object first in the transaction), a rotation, expressions elsewhere;
-        round 2: a move on to a third object, an add, move and move back.
+        round 2: a move on to a third object, an add, move and move back. ops#238: moves into
+        and out of an object created in the transaction, removed in it or not.
         The state is every property of the objects, so a leftover temporary name or a duplicate
         shows."""
         self.maxDiff = None
@@ -1647,6 +1648,38 @@ class UndoRedoCases(unittest.TestCase):
         def moveOn(name):
             return lambda obj, target: target.moveProperty(name, extra["third"])
 
+        def create(name):
+            def step(obj, target):
+                extra[name] = obj.Document.addObject("App::FeaturePython", name)
+                static[name] = set(extra[name].PropertiesList)
+
+            return step
+
+        def moveTo(name, created):
+            return lambda obj, target: obj.moveProperty(name, extra[created])
+
+        def addTo(created, name, value):
+            def step(obj, target):
+                extra[created].addProperty("App::PropertyInteger", name, "Added", "added " + name)
+                setattr(extra[created], name, value)
+
+            return step
+
+        def moveFrom(created, name):
+            return lambda obj, target: extra[created].moveProperty(name, target)
+
+        def setOn(created, name, value):
+            return lambda obj, target: setattr(extra[created], name, value)
+
+        def removeObject(created):
+            return lambda obj, target: obj.Document.removeObject(extra[created].Name)
+
+        def removeSelf(obj, target):
+            obj.Document.removeObject(obj.Name)
+
+        def removeTargetObject(obj, target):
+            obj.Document.removeObject(target.Name)
+
         swap = [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]
         targetWidth = {"targetWidth": True}
         third = {"third": True}
@@ -1703,6 +1736,23 @@ class UndoRedoCases(unittest.TestCase):
              [move("Width"), renameTarget("Width", "Wider"), moveOn("Wider")], third),
             ("add, move, move back", [add("Extra", 7), move("Extra"), moveIn("Extra")]),
             ("V1 move, move back, change", [move("Width"), moveIn("Width"), setValue("Width", 9)]),
+            # ops#238: objects created in the transaction
+            ("move into a created object", [create("Fresh"), moveTo("Width", "Fresh"),
+                                            setOn("Fresh", "Width", 9)]),
+            ("move into a created object, remove it",
+             [create("Fresh"), moveTo("Width", "Fresh"), setOn("Fresh", "Width", 9),
+              removeObject("Fresh")]),
+            ("add to a created object, move out",
+             [create("Fresh"), addTo("Fresh", "Extra", 7), moveFrom("Fresh", "Extra")]),
+            ("add to a created object, move out, remove it",
+             [create("Fresh"), addTo("Fresh", "Extra", 7), moveFrom("Fresh", "Extra"),
+              removeObject("Fresh"), setTarget("Extra", 8)]),
+            # review of fork PR 222
+            ("move into a created object, remove the source",
+             [create("Fresh"), moveTo("Width", "Fresh"), setOn("Fresh", "Width", 9), removeSelf]),
+            ("add to a created object, move out, remove the target",
+             [create("Fresh"), addTo("Fresh", "Extra", 7), moveFrom("Fresh", "Extra"),
+              removeTargetObject]),
         ]
         for label, steps, *options in cases:
             options = options[0] if options else {}
@@ -1742,25 +1792,33 @@ class UndoRedoCases(unittest.TestCase):
                         if options.get("user"):
                             user.setExpression("Uses", "Vars.Width * 10 + Vars.Other")
                         doc.commitTransaction()
-                        before = state(*objs)
+
+                        def full():
+                            # the objects in the document (one removed in the transaction keeps
+                            # whatever undo left on it), with one the steps created (ops#238)
+                            fresh = doc.getObject("Fresh")
+                            inDocument = [o for o in objs if o.Name]
+                            return state(*inDocument), state(fresh) if fresh else None
+
+                        before = full()
 
                         doc.openTransaction("Task")
                         for step in steps:
                             step(obj, target)
-                        after = state(*objs)
+                        after = full()
                         self.assertNotEqual(after, before)
                         if close == "abort":
                             doc.abortTransaction()
-                            self.assertEqual(state(*objs), before)
+                            self.assertEqual(full(), before)
                         else:
                             doc.commitTransaction()
                             for _ in range(2):
                                 doc.undo()
-                                self.assertEqual(state(*objs), before)
+                                self.assertEqual(full(), before)
                                 doc.redo()
-                                self.assertEqual(state(*objs), after)
+                                self.assertEqual(full(), after)
                             doc.undo()
-                            self.assertEqual(state(*objs), before)
+                            self.assertEqual(full(), before)
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 

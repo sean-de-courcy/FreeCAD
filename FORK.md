@@ -248,7 +248,8 @@ names it.
 | `fix/235-transaction-rename-order` | fix | ops#235 | - | `integration` `79b75b8f45` (stacked on fork PR 213) | `ecb2ada10a` (fork PR 216), 2026-10-08 | when upstream's `TransactionObject::applyChn` applies entries in a defined order with per-entry error handling |
 | `fix/239-revolution-first-solid-followups` | fix | ops#239 | - | `integration` `5169738cd5` | `6089fc009f` (fork PR 220), 2026-10-08 | with the ops#191 row: when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
 | `fix/242-revolution-small-base-trim` | fix | ops#242 | - | `fix/239-revolution-first-solid-followups` `f52c8a07bb` (fork PR 220) | `278b805640` (fork PR 221), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` gives BRepFeat a base large enough for its up-to face trim |
-| `fix/234-pipe-copy-step-followups` | fix | ops#234 | - | `fix/225-pipe-copy-followups` `97d11994a2` | (fork PR 219) | never (fork fix) |
+| `fix/234-pipe-copy-step-followups` | fix | ops#234 | - | `fix/225-pipe-copy-followups` `97d11994a2` | `5206f693a5` (fork PR 219), 2026-10-08 | never (fork fix) |
+| `fix/238-transaction-move-del-gaps` | fix | ops#238 | - | `integration` `ecb2ada10a` | (fork PR 222) | when upstream's `Transaction` takes back moves into and out of objects created in the transaction and `moveDynamicProperty` completes a move a handler threw from |
 
 ## Fork-only commits in carried topics
 

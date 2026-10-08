@@ -184,6 +184,10 @@ private:
     /// FreeCAD-CH (ops#235): the move entry of a property moved in this transaction, found by the
     /// moved property (the target's), or null.
     std::pair<TransactionObject*, int64_t> movedHere(const Property* prop);
+    /// FreeCAD-CH (ops#238): drops the move entries that involve @a obj, created and removed in
+    /// this transaction, before it is freed: a move into it becomes the removal of the moved
+    /// property, and a property moved out of it counts as added to its target
+    void dropMovesOfFreed(const TransactionalObject* obj, TransactionObject* to);
 
 private:
     int transID;
@@ -326,7 +330,21 @@ protected:
         // FreeCAD-CH (ops#235): while applying, the property a move or a rename restored, for the
         // value pass
         Property* restored = nullptr;
+        // FreeCAD-CH (ops#238): while applying, a move taken back before the objects created in
+        // the transaction are removed (applyMovesOfRemoved())
+        bool movedEarly = false;
     };
+
+    /// FreeCAD-CH (ops#238): takes back the move of @a data (the Moves pass of one entry)
+    void applyMove(TransactionalObject* obj, PropData& data);
+
+    /// FreeCAD-CH (ops#238): takes back the moves into or out of an object that applyDel()
+    /// removes (one created in the transaction), before it is removed: removing detaches it, and
+    /// on abort destroys it with the moved property; also resets the entries' apply state.
+    /// Only moves within the document (@a local; between documents: ops#238, V3/T4).
+    void applyMovesOfRemoved(TransactionalObject* obj,
+                             const std::function<bool(const TransactionalObject*)>& removed,
+                             const std::function<bool(const TransactionalObject*)>& local);
 
     /// FreeCAD-CH (ops#235): the property the move entry @a key moved was removed from its
     /// target: the entry becomes the removal of the source's property (nothing, if it was added).

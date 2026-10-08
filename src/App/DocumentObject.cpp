@@ -1082,13 +1082,35 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // Phases 2, 3, and 4
-    arrangeMoveProperty(prop, newProp, targetObj);
+    // FreeCAD-CH (ops#238): a failure in phases 2 to 4 (a handler of the move that throws) used to
+    // leave the property on both objects. The move is recorded once phase 2 starts, so it is
+    // completed: the value pasted (the failure can come before phase 3), the source's property
+    // removed, then the exception passed on
+    std::exception_ptr error;
+    try {
+        arrangeMoveProperty(prop, newProp, targetObj);
+    }
+    catch (...) {
+        error = std::current_exception();
+        try {
+            auto guard = targetObj->_pDoc->setDefiningTransaction();
+            newProp->Paste(*prop);
+        }
+        catch (...) {
+        }
+    }
 
     // Phase 5 remove the property from the source object
     if (!dynamicProps.removeDynamicProperty(propertyName)) {
+        if (error) {
+            std::rethrow_exception(error);
+        }
         FC_THROWM(Base::RuntimeError,
                   "Failed to remove property " << propertyName << " from container "
                                                 << prop->getContainer()->getFullName());
+    }
+    if (error) {
+        std::rethrow_exception(error);
     }
 
     return newProp;
