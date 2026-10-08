@@ -558,6 +558,8 @@ public:
     }
 
     void setHighlight(bool set, HighlightMode mode = HighlightMode::LightBlue);
+    // Styles the item in edit: bold text and the edit colour (ops#149)
+    void setEditing(bool set, const QColor& color = QColor());
 
     const char* getName() const;
     const char* getTreeName() const;
@@ -595,6 +597,8 @@ private:
     bool populated;
     bool held = false;  // shown as held by a roll-back bar (ops#127)
     bool highlightItalic = false;  // the last setHighlight() asked for italic (ops#127)
+    bool highlightBold = false;    // the last setHighlight() asked for bold (ops#149)
+    bool editing = false;          // shown as the item in edit (ops#149)
 
     friend class TreeWidget;
     friend class DocumentItem;

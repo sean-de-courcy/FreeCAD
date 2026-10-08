@@ -4830,15 +4830,23 @@ const char* DocumentItem::getTreeName() const
     }
 
 
-void DocumentItem::slotInEdit(const Gui::ViewProviderDocumentObject& v)
+namespace
 {
-    (void)v;
-
+QColor treeEditColor()
+{
     ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/TreeView"
     );
     unsigned long col = hGrp->GetUnsigned("TreeEditColor", 11272191);
-    QColor color(Base::Color::fromPackedRGB<QColor>(col));
+    return Base::Color::fromPackedRGB<QColor>(col);
+}
+}  // namespace
+
+void DocumentItem::slotInEdit(const Gui::ViewProviderDocumentObject& v)
+{
+    (void)v;
+
+    QColor color = treeEditColor();
 
     if (!getTree()->editingItem) {
         // In which cases would this return? theo-vt
@@ -4857,11 +4865,11 @@ void DocumentItem::slotInEdit(const Gui::ViewProviderDocumentObject& v)
     }
 
     if (getTree()->editingItem) {
-        getTree()->editingItem->setBackground(0, color);
+        getTree()->editingItem->setEditing(true, color);
     }
     else {
         FOREACH_ITEM(item, v)
-        item->setBackground(0, color);
+        item->setEditing(true, color);
         END_FOREACH_ITEM
     }
 }
@@ -4869,18 +4877,16 @@ void DocumentItem::slotInEdit(const Gui::ViewProviderDocumentObject& v)
 void DocumentItem::slotResetEdit(const Gui::ViewProviderDocumentObject& v)
 {
     auto tree = getTree();
-    FOREACH_ITEM_ALL(item)
     if (tree->editingItem) {
-        if (item == tree->editingItem) {
-            item->setData(0, Qt::BackgroundRole, QVariant());
-            break;
-        }
+        tree->editingItem->setEditing(false);
+        tree->editingItem = nullptr;
     }
-    else if (item->object() == &v) {
-        item->setData(0, Qt::BackgroundRole, QVariant());
+    // The edited object's other items: those styled without an editingItem, or made later
+    FOREACH_ITEM(item, v)
+    if (item->editing) {
+        item->setEditing(false);
     }
     END_FOREACH_ITEM
-    tree->editingItem = nullptr;
 }
 
 void DocumentItem::slotNewObject(const Gui::ViewProviderDocumentObject& obj)
@@ -4952,6 +4958,12 @@ bool DocumentItem::createNewItem(
         item->setHidden(true);
     }
     item->testStatus(true);
+    // An item made after the edit started (a nested sketch under a collapsed feature) is styled
+    // as the item in edit too (ops#149)
+    // getEditViewProvider(): getInEdit() is null while another view is active
+    if (!getTree()->editingItem && document()->getEditViewProvider() == &obj) {
+        item->setEditing(true, treeEditColor());
+    }
 
     populateItem(item);
     return true;
@@ -6645,6 +6657,14 @@ DocumentObjectItem::~DocumentObjectItem()
         myData->rootItem = nullptr;
     }
 
+    // createNewItem() and slotResetEdit() read editingItem (ops#149)
+    if (myOwner) {
+        auto tree = myOwner->getTree();
+        if (tree && tree->editingItem == this) {
+            tree->editingItem = nullptr;
+        }
+    }
+
     if (myOwner && myData->items.empty()) {
         auto it = myOwner->_ParentMap.find(object()->getObject());
         if (it != myOwner->_ParentMap.end() && !it->second.empty()) {
@@ -6656,25 +6676,24 @@ DocumentObjectItem::~DocumentObjectItem()
 
 void DocumentObjectItem::restoreBackground()
 {
-    this->setBackground(0, this->bgBrush);
+    // The item in edit keeps the edit colour, e.g. after a tree search painted it (ops#149)
+    this->setBackground(0, editing ? QBrush(treeEditColor()) : this->bgBrush);
 }
 
 void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
 {
     QFont f = this->font(0);
     auto highlight = [this, set](const QColor& col) {
-        if (set) {
-            this->setBackground(0, col);
+        this->bgBrush = set ? QBrush(col) : QBrush();
+        // The item in edit keeps the edit colour until the edit ends (ops#149)
+        if (!editing) {
+            this->setBackground(0, this->bgBrush);
         }
-        else {
-            this->setBackground(0, QBrush());
-        }
-        this->bgBrush = this->background(0);
     };
 
     switch (high) {
         case HighlightMode::Bold:
-            f.setBold(set);
+            highlightBold = set;
             break;
         case HighlightMode::Italic:
             highlightItalic = set;
@@ -6704,7 +6723,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
                 bool italic = hGrp->GetBool("TreeActiveItalic", false);
                 bool underlined = hGrp->GetBool("TreeActiveUnderlined", false);
                 bool overlined = hGrp->GetBool("TreeActiveOverlined", false);
-                f.setBold(bold);
+                highlightBold = bold;
                 highlightItalic = italic;
                 f.setUnderline(underlined);
                 f.setOverline(overlined);
@@ -6713,7 +6732,7 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
                 color = Base::Color::fromPackedRGB<QColor>(col);
             }
             else {
-                f.setBold(false);
+                highlightBold = false;
                 highlightItalic = false;
                 f.setUnderline(false);
                 f.setOverline(false);
@@ -6725,7 +6744,26 @@ void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
     }
     // A held item stays italic whatever the highlight says (ops#127)
     f.setItalic(held || highlightItalic);
+    // The item in edit stays bold (ops#149)
+    f.setBold(editing || highlightBold);
     this->setFont(0, f);
+}
+
+void DocumentObjectItem::setEditing(bool set, const QColor& color)
+{
+    editing = set;
+    // Bold text shows the item in edit where a style sheet paints over item backgrounds, or the
+    // item is selected (upstream issue 20599)
+    QFont f = this->font(0);
+    f.setBold(editing || highlightBold);
+    this->setFont(0, f);
+    if (set) {
+        this->setBackground(0, color);
+    }
+    else {
+        // An active Body or Part gets its highlight colour back
+        restoreBackground();
+    }
 }
 
 const char* DocumentObjectItem::getTreeName() const
