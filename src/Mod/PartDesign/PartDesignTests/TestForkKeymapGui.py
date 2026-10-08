@@ -38,6 +38,7 @@ Keys go to the main window's QWindow, through the shortcut map as a user's key d
 its key code only, so the Shift+digit check doesn't prove a real keyboard's `!` maps to Shift+1."""
 
 import contextlib
+import math
 import os
 import tempfile
 import time
@@ -106,6 +107,13 @@ ONSHAPE = {
     "Std_TreeRecordSelection": "",
     "Std_TreeDrag": "",
     "Std_DockOverlayMouseTransparent": "",
+    # The arrows orbit the view (B2): the chords the viewer takes are off the commands
+    "Std_ViewRotateLeft": "",
+    "Std_ViewRotateRight": "",
+    "Std_DockOverlayToggleLeft": "",
+    "Std_DockOverlayToggleRight": "",
+    "Std_DockOverlayToggleTop": "",
+    "Std_DockOverlayToggleBottom": "",
     # The Part selection filters move off their chords (C, E, X and F are Onshape keys)
     "Part_VertexSelection": "Shift+Alt+V",
     "Part_EdgeSelection": "Shift+Alt+E",
@@ -219,6 +227,12 @@ FREECAD = {
     "Std_ClearSelection": "",
     "Std_ViewNormal": "",
     "Sketcher_ViewSketch": "Q, P",
+    "Std_ViewRotateLeft": "Shift+Left",
+    "Std_ViewRotateRight": "Shift+Right",
+    "Std_DockOverlayToggleLeft": "Ctrl+Left",
+    "Std_DockOverlayToggleRight": "Ctrl+Right",
+    "Std_DockOverlayToggleTop": "Ctrl+Up",
+    "Std_DockOverlayToggleBottom": "Ctrl+Down",
 }
 
 # Assembly's single letters that are the fork's keys: cleared (decision 31); upstream's
@@ -1770,6 +1784,179 @@ OrthographicCamera {{
         self.assertTrue(waitFor(lambda: self.selectOtherList() is None))
         pump(0.3)
         self.assertEqual(fillet.Base[1], [sub])
+
+    # --- the orbit arrows (B2)
+
+    def orbitView(self):
+        """The designed view: an orthographic camera in front of (5, 0, 5) looking along +y, up
+        +z, right +x. The point is the camera's focal point."""
+        view = self.frontCamera()
+        self.assertTrue(waitFor(lambda: (self.cameraDirection() - App.Vector(0, 1, 0)).Length < 1e-3))
+        return view
+
+    def cameraDirection(self):
+        """The camera's view direction from its orientation (getViewDirection() reads the view
+        volume of the last render, which off screen is stale)."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        d = view.getCameraOrientation().multVec(App.Vector(0, 0, -1))
+        return App.Vector(d.x, d.y, d.z)
+
+    def focalOnScreen(self):
+        """Where the focal point (5, 0, 5) shows in the viewport."""
+        _, at = self.viewportPoint(App.Vector(5, 0, 5))
+        return at
+
+    def arrow(self, key, modifiers=QtCore.Qt.NoModifier):
+        self.press(key, modifiers)
+        pump(0.3)
+
+    def assertDirection(self, expected, message=""):
+        self.assertTrue(
+            waitFor(lambda: (self.cameraDirection() - expected).Length < 2e-3),
+            f"{message}: the view direction is {self.cameraDirection()}, expected {expected}",
+        )
+
+    def turned(self, angle, toward):
+        """The view direction after turning the designed view's (0, 1, 0) by `angle` degrees
+        toward the unit vector `toward`."""
+        c, s = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        return App.Vector(0, 1, 0) * c + toward * s
+
+    LEFT, RIGHT = App.Vector(-1, 0, 0), App.Vector(1, 0, 0)
+    UP, DOWN = App.Vector(0, 0, 1), App.Vector(0, 0, -1)
+    NONE, CTRL = QtCore.Qt.NoModifier, QtCore.Qt.ControlModifier
+    SHIFT = QtCore.Qt.ShiftModifier
+    ARROWS = {
+        QtCore.Qt.Key_Left: LEFT,
+        QtCore.Qt.Key_Right: RIGHT,
+        QtCore.Qt.Key_Up: UP,
+        QtCore.Qt.Key_Down: DOWN,
+    }
+
+    def testArrowsOrbitTheViewByFixedSteps(self):
+        """In the 3D view the arrows turn the view direction about the focal point: 15 degrees,
+        5 with Ctrl, 90 with Shift; Left turns it toward the left of the screen, Up toward the
+        top. The steps are fixed: the navigation cube's step setting (here 7 steps a turn) isn't
+        theirs."""
+        naviSetting = App.ParamGet("User parameter:BaseApp/Preferences/View")
+        oldSteps = naviSetting.GetInt("NaviStepByTurn", 8)
+        naviSetting.SetInt("NaviStepByTurn", 7)
+        self.addCleanup(naviSetting.SetInt, "NaviStepByTurn", oldSteps)
+        for key, toward in self.ARROWS.items():
+            for modifiers, angle in ((self.NONE, 15), (self.CTRL, 5), (self.SHIFT, 90)):
+                self.orbitView()
+                before = self.focalOnScreen()
+                self.arrow(key, modifiers)
+                self.assertDirection(self.turned(angle, toward), f"{key} {modifiers} {angle}")
+                # about the focal point: it stays where it was on the screen
+                after = self.focalOnScreen()
+                self.assertLessEqual(abs(after.x() - before.x()) + abs(after.y() - before.y()), 2)
+
+    def testShiftArrowsDoNotRunTheViewRotateCommands(self):
+        """Shift+Left / Right are the orbit's 90 degrees, not Std_ViewRotateLeft / Right (the
+        roll about the view direction), whose window shortcuts the table clears."""
+        self.orbitView()
+        with self.watching("Std_ViewRotateLeft", "Std_ViewRotateRight") as fired:
+            self.arrow(QtCore.Qt.Key_Left, self.SHIFT)
+            self.arrow(QtCore.Qt.Key_Right, self.SHIFT)
+            pump(0.3)
+        self.assertEqual(fired, [])
+        self.assertDirection(App.Vector(0, 1, 0), "left 90, right 90")
+        for name in ("Std_ViewRotateLeft", "Std_ViewRotateRight"):
+            self.assertEqual(shortcut(name), "", name)
+
+    def testCtrlShiftArrowsPanAndCtrlArrowsAreNoOverlayToggles(self):
+        """Ctrl+Shift+arrows move the camera without turning it, as the plain arrows do under
+        FreeCAD's keymap. Ctrl+arrows are the 5 degree orbit: the dock overlay's toggles lose
+        them."""
+        self.orbitView()
+        before = self.focalOnScreen()
+        with self.watching(
+            "Std_DockOverlayToggleLeft",
+            "Std_DockOverlayToggleRight",
+            "Std_DockOverlayToggleTop",
+            "Std_DockOverlayToggleBottom",
+        ) as fired:
+            self.arrow(QtCore.Qt.Key_Left, self.CTRL | self.SHIFT)
+            self.assertDirection(App.Vector(0, 1, 0), "ctrl+shift+left")
+            moved = self.focalOnScreen()
+            self.assertGreater(abs(moved.x() - before.x()), 10, "the camera didn't move")
+            self.arrow(QtCore.Qt.Key_Right, self.CTRL)
+            self.assertDirection(self.turned(5, self.RIGHT), "ctrl+right")
+        self.assertEqual(fired, [])
+
+    def testArrowsPanUnderFreeCADsKeymap(self):
+        """The default keymap is unchanged: the arrows move the camera without turning it,
+        Shift+Left is Std_ViewRotateLeft and Ctrl+Left the dock overlay's toggle."""
+        setKeymap("FreeCAD")
+        pump(0.2)
+        self.orbitView()
+        before = self.focalOnScreen()
+        self.arrow(QtCore.Qt.Key_Left)
+        self.assertDirection(App.Vector(0, 1, 0), "left")
+        self.assertGreater(abs(self.focalOnScreen().x() - before.x()), 10)
+        with self.watching("Std_ViewRotateLeft") as fired:
+            self.press(QtCore.Qt.Key_Left, self.SHIFT)
+            self.assertTrue(waitFor(lambda: fired), "Shift+Left didn't run Std_ViewRotateLeft")
+        self.assertEqual(shortcut("Std_DockOverlayToggleLeft"), "Ctrl+Left")
+
+    def testArrowsOrbitInSketchEditToo(self):
+        """Sketch edit has no arrow handling of its own (the viewer panned on them before the
+        sketch saw a key): the arrows orbit there too, the sketch stays in edit, and its other
+        keys still reach its tools."""
+        self.editSketch()
+        pump(0.3)
+        before = self.cameraDirection()
+        self.arrow(QtCore.Qt.Key_Left)
+        after = self.cameraDirection()
+        self.assertAlmostEqual(math.degrees(before.getAngle(after)), 15, delta=0.1)
+        self.arrow(QtCore.Qt.Key_Right)
+        self.assertDirection(before, "left, then right")
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit())
+        with self.watching("Sketcher_CreateFillet") as fired:
+            self.press(QtCore.Qt.Key_F, self.SHIFT)
+            self.assertTrue(waitFor(lambda: fired), "the sketch's Shift+F")
+        self.escapeTool()
+
+    def testArrowsStayWithTheTreeAndATaskPanelList(self):
+        """With the focus in the model tree or in a list of a task panel, the arrows move the
+        current item and leave the camera alone."""
+        self.orbitView()
+        direction = self.cameraDirection()
+        window = Gui.getMainWindow().windowHandle()
+        tree = self.modelTree()
+        tree.expandAll()
+        pump(0.2)
+        first = tree.topLevelItem(0)
+        tree.setCurrentItem(first)
+        pump(0.1)
+        self.assertTrue(focus(tree), "the tree doesn't take the focus")
+        QtTest.QTest.keyClick(window, QtCore.Qt.Key_Down)
+        pump(0.3)
+        self.assertIsNot(tree.currentItem(), first)
+        self.assertDirection(direction, "tree")
+
+        class ListPanel:
+            def __init__(self):
+                self.list = QtWidgets.QListWidget()
+                self.list.addItems(["one", "two", "three"])
+                self.form = self.list
+
+            def getStandardButtons(self):
+                return int(QtWidgets.QDialogButtonBox.Close)
+
+            def reject(self):
+                Gui.Control.closeDialog()
+
+        panel = ListPanel()
+        Gui.Control.showDialog(panel)
+        pump(0.3)
+        panel.list.setCurrentRow(0)
+        self.assertTrue(focus(panel.list), "the list doesn't take the focus")
+        QtTest.QTest.keyClick(window, QtCore.Qt.Key_Down)
+        pump(0.3)
+        self.assertEqual(panel.list.currentRow(), 1)
+        self.assertDirection(direction, "task panel list")
 
 
 if __name__ == "__main__":
