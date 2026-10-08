@@ -55,6 +55,7 @@
 #include <App/DocumentObject.h>
 #include <App/DocumentObjectGroup.h>
 #include <App/DocumentObserver.h>
+#include <App/ElementNamingUtils.h>
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/Part.h>
@@ -4253,7 +4254,7 @@ void StdCmdIsolate::activated(int /*iMsg*/)
         }
         keep.insert(path.begin(), path.end() - 1);
         keepWithContents(path.back(), keep);
-        // a selection without a path (an object picked in the tree) keeps the groups it is in
+        // a selection without a path (a feature picked in the tree) keeps the groups it is in
         for (App::DocumentObject* group = App::GroupExtension::getGroupOfObject(sel.pObject);
              group && keep.insert(group).second;
              group = App::GroupExtension::getGroupOfObject(group)) {
@@ -4282,6 +4283,114 @@ bool StdCmdIsolate::isActive()
         && (Selection().size() != 0
             || isolatedObjects().count(guiDoc->getDocument()->getName()) != 0);
 }
+
+namespace
+{
+
+/** The elements under point, nearest first: a pick-all ray pick of the radius
+ * viewer->getPickRadius() * radiusMultiplier. With withRelated the elements related to a
+ * pick (a face's edges...) follow it (Std_ClarifySelection's list). Shared with Std_SelectOther.
+ */
+std::vector<PickData> picksAt(
+    View3DInventorViewer* viewer,
+    const SbVec2s& point,
+    double radiusMultiplier,
+    bool withRelated
+)
+{
+    // Use ray picking to get all objects under cursor
+    SoRayPickAction pickAction(viewer->getSoRenderManager()->getViewportRegion());
+    pickAction.setPoint(point);
+    pickAction.setRadius(viewer->getPickRadius() * radiusMultiplier);
+    pickAction.setPickAll(static_cast<SbBool>(true));  // Get all objects under cursor
+    pickAction.apply(viewer->getSoRenderManager()->getSceneGraph());
+
+    const SoPickedPointList& pplist = pickAction.getPickedPointList();
+    std::vector<PickData> selections;
+    if (pplist.getLength() == 0) {
+        return selections;
+    }
+
+    // Convert picked points to PickData list
+    for (int i = 0; i < pplist.getLength(); ++i) {
+        SoPickedPoint* pp = pplist[i];
+        if (!pp || !pp->getPath()) {
+            continue;
+        }
+
+        ViewProvider* vp = viewer->getViewProviderByPath(pp->getPath());
+        if (!vp) {
+            continue;
+        }
+
+        // Cast to ViewProviderDocumentObject to get the object
+        auto vpDoc = freecad_cast<Gui::ViewProviderDocumentObject*>(vp);
+        if (!vpDoc) {
+            continue;
+        }
+
+        App::DocumentObject* obj = vpDoc->getObject();
+        if (!obj) {
+            continue;
+        }
+
+        // Get element information - handle sub-objects like Assembly parts
+        std::string elementName = vp->getElement(pp->getDetail());
+        std::string subName;
+
+        // Try to get more detailed sub-object information
+        bool hasSubObject = false;
+        if (vp->getElementPicked(pp, subName)) {
+            hasSubObject = true;
+        }
+
+        // Create PickData with selection information
+        PickData pickData {
+            .obj = obj,
+            .element = elementName,
+            .docName = obj->getDocument()->getName(),
+            .objName = obj->getNameInDocument(),
+            .subName = hasSubObject ? subName : elementName
+        };
+
+        selections.push_back(pickData);
+
+        if (!withRelated) {
+            continue;
+        }
+
+        // Split a dotted container path (e.g. "Body.Pad.Face1") so getRelatedElements
+        // dispatches on the leaf object's view provider, not the outer container's.
+        std::string subObjPath;
+        std::string pickedElement = pickData.subName;
+        auto lastDot = pickData.subName.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            subObjPath = pickData.subName.substr(0, lastDot + 1);
+            pickedElement = pickData.subName.substr(lastDot + 1);
+        }
+        auto* subObj = obj->getSubObject(subObjPath.c_str());
+        auto* subVP = subObj ? Application::Instance->getViewProvider(subObj) : nullptr;
+        if (!subVP) {
+            subVP = vp;
+        }
+        for (const auto& [relElement, relSubName] :
+             subVP->getRelatedElements(pickedElement, pp->getPoint())) {
+            selections.push_back(
+                PickData {
+                    .obj = obj,
+                    .element = relElement,
+                    .docName = obj->getDocument()->getName(),
+                    .objName = obj->getNameInDocument(),
+                    .subName = subObjPath + relSubName
+                }
+            );
+        }
+    }
+
+    return selections;
+}
+
+}  // namespace
 
 //===========================================================================
 // Std_ClarifySelection
@@ -4344,99 +4453,14 @@ void StdCmdClarifySelection::activated(int iMsg)
         );
     }
 
-    // Use ray picking to get all objects under cursor
-    SoRayPickAction pickAction(viewer->getSoRenderManager()->getViewportRegion());
-    pickAction.setPoint(point);
-
     constexpr double defaultMultiplier = 5.0F;
     double clarifyRadiusMultiplier
         = App::GetApplication()
               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
               ->GetFloat("ClarifySelectionRadiusMultiplier", defaultMultiplier);
 
-    pickAction.setRadius(viewer->getPickRadius() * clarifyRadiusMultiplier);
-    pickAction.setPickAll(static_cast<SbBool>(true));  // Get all objects under cursor
-    pickAction.apply(viewer->getSoRenderManager()->getSceneGraph());
-
-    const SoPickedPointList& pplist = pickAction.getPickedPointList();
-    if (pplist.getLength() == 0) {
-        return;
-    }
-
-    // Convert picked points to PickData list
-    std::vector<PickData> selections;
-
-    for (int i = 0; i < pplist.getLength(); ++i) {
-        SoPickedPoint* pp = pplist[i];
-        if (!pp || !pp->getPath()) {
-            continue;
-        }
-
-        ViewProvider* vp = viewer->getViewProviderByPath(pp->getPath());
-        if (!vp) {
-            continue;
-        }
-
-        // Cast to ViewProviderDocumentObject to get the object
-        auto vpDoc = freecad_cast<Gui::ViewProviderDocumentObject*>(vp);
-        if (!vpDoc) {
-            continue;
-        }
-
-        App::DocumentObject* obj = vpDoc->getObject();
-        if (!obj) {
-            continue;
-        }
-
-        // Get element information - handle sub-objects like Assembly parts
-        std::string elementName = vp->getElement(pp->getDetail());
-        std::string subName;
-
-        // Try to get more detailed sub-object information
-        bool hasSubObject = false;
-        if (vp->getElementPicked(pp, subName)) {
-            hasSubObject = true;
-        }
-
-        // Create PickData with selection information
-        PickData pickData {
-            .obj = obj,
-            .element = elementName,
-            .docName = obj->getDocument()->getName(),
-            .objName = obj->getNameInDocument(),
-            .subName = hasSubObject ? subName : elementName
-        };
-
-        selections.push_back(pickData);
-
-        // Split a dotted container path (e.g. "Body.Pad.Face1") so getRelatedElements
-        // dispatches on the leaf object's view provider, not the outer container's.
-        std::string subObjPath;
-        std::string pickedElement = pickData.subName;
-        auto lastDot = pickData.subName.find_last_of('.');
-        if (lastDot != std::string::npos) {
-            subObjPath = pickData.subName.substr(0, lastDot + 1);
-            pickedElement = pickData.subName.substr(lastDot + 1);
-        }
-        auto* subObj = obj->getSubObject(subObjPath.c_str());
-        auto* subVP = subObj ? Application::Instance->getViewProvider(subObj) : nullptr;
-        if (!subVP) {
-            subVP = vp;
-        }
-        for (const auto& [relElement, relSubName] :
-             subVP->getRelatedElements(pickedElement, pp->getPoint())) {
-            selections.push_back(
-                PickData {
-                    .obj = obj,
-                    .element = relElement,
-                    .docName = obj->getDocument()->getName(),
-                    .objName = obj->getNameInDocument(),
-                    .subName = subObjPath + relSubName
-                }
-            );
-        }
-    }
-
+    std::vector<PickData> selections
+        = picksAt(viewer, point, clarifyRadiusMultiplier, /*withRelated=*/true);
     if (selections.empty()) {
         return;
     }
@@ -4463,6 +4487,94 @@ void StdCmdClarifySelection::activated(int iMsg)
 bool StdCmdClarifySelection::isActive()
 {
     return qobject_cast<View3DInventor*>(getMainWindow()->activeWindow()) != nullptr;
+}
+
+//===========================================================================
+// Std_SelectOther (FreeCAD-CH, ops#194 PR C: Onshape's "select other" on backtick)
+//===========================================================================
+
+DEF_STD_CMD_A(StdCmdSelectOther)
+
+StdCmdSelectOther::StdCmdSelectOther()
+    : Command("Std_SelectOther")
+{
+    sGroup = "View";
+    sMenuText = QT_TR_NOOP("Select Other");
+    sToolTipText = QT_TR_NOOP(
+        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.
+"
+        "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
+        "highlights an element. Enter or a click selects the highlighted one, Esc closes the list."
+    );
+    sWhatsThis = "Std_SelectOther";
+    sStatusTip = sToolTipText;
+    sPixmap = "tree-pre-sel";
+    eType = NoTransaction | AlterSelection;
+}
+
+void StdCmdSelectOther::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+
+    auto view3d = freecad_cast<View3DInventor*>(Application::Instance->activeView());
+    auto viewer = view3d ? view3d->getViewer() : nullptr;
+    QWidget* widget = viewer ? viewer->getGLWidget() : nullptr;
+    if (!widget) {
+        return;
+    }
+
+    // the list opens at the cursor, which has to be over the 3D view
+    const QPoint cursor = QCursor::pos();
+    const QPoint local = widget->mapFromGlobal(cursor);
+    if (!widget->rect().contains(local)) {
+        return;
+    }
+    const qreal devicePixelRatio = widget->devicePixelRatioF();
+    const SbVec2s point(
+        static_cast<short>(local.x() * devicePixelRatio),
+        static_cast<short>((widget->height() - local.y() - 1) * devicePixelRatio)
+    );
+
+    // The elements under the cursor at the normal pick radius, nearest first; each once, and
+    // only those a click could select (the gate and the user's filter)
+    std::vector<PickData> candidates;
+    std::set<std::pair<std::string, std::string>> seen;
+    for (PickData& pick : picksAt(viewer, point, 1.0, /*withRelated=*/false)) {
+        const char* element = Data::findElementName(pick.subName.c_str());
+        std::string name = element && element[0] ? element : pick.element;
+        if (name.rfind("Face", 0) != 0 && name.rfind("Edge", 0) != 0
+            && name.rfind("Vertex", 0) != 0) {
+            continue;
+        }
+        if (!seen.emplace(pick.objName, pick.subName).second) {
+            continue;
+        }
+        if (!Selection().testSelection(pick.obj->getDocument(), pick.obj, pick.subName.c_str())) {
+            continue;
+        }
+        candidates.push_back(std::move(pick));
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    auto menu = new SelectOtherMenu(getMainWindow());
+    menu->open(candidates, cursor);
+}
+
+bool StdCmdSelectOther::isActive()
+{
+    if (!qobject_cast<View3DInventor*>(getMainWindow()->activeWindow())) {
+        return false;
+    }
+    // A sketch in edit has its own picking (PR E)
+    if (Gui::Document* doc = Application::Instance->editDocument()) {
+        const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+        if (ViewProvider* vp = doc->getInEdit(); vp && !sketch.isBad() && vp->isDerivedFrom(sketch)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 //===========================================================================
@@ -4498,6 +4610,7 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdCmdViewGroup());
     rcCmdMgr.addCommand(new StdCmdAlignToSelection());
     rcCmdMgr.addCommand(new StdCmdClarifySelection());
+    rcCmdMgr.addCommand(new StdCmdSelectOther());
     rcCmdMgr.addCommand(new StdCmdViewNormal());
     rcCmdMgr.addCommand(new StdCmdClearSelection());
     rcCmdMgr.addCommand(new StdCmdIsolate());

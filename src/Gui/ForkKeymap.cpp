@@ -57,6 +57,7 @@ const Entry table[] = {
     {"Std_BoxElementSelection", ""},
     {"Std_FreezeViews", ""},
     {"Std_ClarifySelection", ""},  // the context menu and long-press stay
+    {"Std_SelectOther", "`"},      // Onshape's "select other" (PR C)
     // QKeySequence::Refresh is Ctrl+R first on macOS and GNOME (Qt's qplatformtheme.cpp), which is
     // a sketch tool's own Ctrl+R (PR D), and Std_Refresh is ForEdit; F5 is its key on Windows
     {"Std_Refresh", "F5"},
