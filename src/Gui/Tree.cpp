@@ -1352,6 +1352,17 @@ std::vector<int> treePath(const QTreeWidgetItem* item)
     std::reverse(path.begin(), path.end());
     return path;
 }
+
+// Whether a row of the tree has a hidden row above it
+bool hiddenAbove(const QTreeWidgetItem* item)
+{
+    for (auto parent = item->parent(); parent; parent = parent->parent()) {
+        if (parent->isHidden()) {
+            return true;
+        }
+    }
+    return false;
+}
 }  // namespace
 
 void TreeWidget::flushStatusUpdate()
@@ -1400,13 +1411,26 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
             continue;  // not shown in the tree
         }
         // A problem under a non-group parent is its own top parent, so the chain above doesn't
-        // reach the rows over it, e.g. a sketch's Pad and Body (ops#208)
-        if (!docItem->showHidden()) {
-            bool hiddenAbove = false;
-            for (auto parent = item->parent(); parent && !hiddenAbove; parent = parent->parent()) {
-                hiddenAbove = parent->isHidden();
+        // reach the rows over it, e.g. a sketch's Pad and Body (ops#208). An object with several
+        // rows (a sketch used by a Pad and a Pocket) counts if any one of them is shown, and the
+        // first of those in tree order stands for it (ops#209).
+        if (!docItem->showHidden() && hiddenAbove(item)) {
+            item = nullptr;
+            auto data = subname.empty() ? docItem->ObjectMap.find(top) : docItem->ObjectMap.end();
+            if (data != docItem->ObjectMap.end()) {
+                std::vector<int> best;
+                for (auto row : data->second->items) {
+                    if (row->isHidden() || hiddenAbove(row)) {
+                        continue;
+                    }
+                    auto path = treePath(row);
+                    if (!item || path < best) {
+                        item = row;
+                        best = std::move(path);
+                    }
+                }
             }
-            if (hiddenAbove) {
+            if (!item) {
                 continue;
             }
         }
