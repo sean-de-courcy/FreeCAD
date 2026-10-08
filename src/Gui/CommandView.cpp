@@ -72,6 +72,7 @@
 #include "Dialogs/DlgSettingsImageImp.h"
 #include "Document.h"
 #include "FileDialog.h"
+#include "ForkKeymap.h"
 #include "ImageView.h"
 #include "Inventor/SoAxisCrossKit.h"
 #include "Macro.h"
@@ -784,43 +785,51 @@ Gui::Action* StdCmdDrawStyle::createAction()
     a0->setIcon(BitmapFactory().iconFromTheme("DrawStyleAsIs"));
     a0->setChecked(true);
     a0->setObjectName(QStringLiteral("Std_DrawStyleAsIs"));
-    a0->setShortcut(QKeySequence(QStringLiteral("V,1")));
+    a0->setShortcut(QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleAsIs", "V,1"))));
     a0->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a1 = pcAction->addAction(QString());
     a1->setCheckable(true);
     a1->setIcon(BitmapFactory().iconFromTheme("DrawStylePoints"));
     a1->setObjectName(QStringLiteral("Std_DrawStylePoints"));
-    a1->setShortcut(QKeySequence(QStringLiteral("V,2")));
+    a1->setShortcut(QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStylePoints", "V,2"))));
     a1->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a2 = pcAction->addAction(QString());
     a2->setCheckable(true);
     a2->setIcon(BitmapFactory().iconFromTheme("DrawStyleWireFrame"));
     a2->setObjectName(QStringLiteral("Std_DrawStyleWireframe"));
-    a2->setShortcut(QKeySequence(QStringLiteral("V,3")));
+    a2->setShortcut(
+        QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleWireframe", "V,3")))
+    );
     a2->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a3 = pcAction->addAction(QString());
     a3->setCheckable(true);
     a3->setIcon(BitmapFactory().iconFromTheme("DrawStyleHiddenLine"));
     a3->setObjectName(QStringLiteral("Std_DrawStyleHiddenLine"));
-    a3->setShortcut(QKeySequence(QStringLiteral("V,4")));
+    a3->setShortcut(
+        QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleHiddenLine", "V,4")))
+    );
     a3->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a4 = pcAction->addAction(QString());
     a4->setCheckable(true);
     a4->setIcon(BitmapFactory().iconFromTheme("DrawStyleNoShading"));
     a4->setObjectName(QStringLiteral("Std_DrawStyleNoShading"));
-    a4->setShortcut(QKeySequence(QStringLiteral("V,5")));
+    a4->setShortcut(
+        QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleNoShading", "V,5")))
+    );
     a4->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a5 = pcAction->addAction(QString());
     a5->setCheckable(true);
     a5->setIcon(BitmapFactory().iconFromTheme("DrawStyleShaded"));
     a5->setObjectName(QStringLiteral("Std_DrawStyleShaded"));
-    a5->setShortcut(QKeySequence(QStringLiteral("V,6")));
+    a5->setShortcut(QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleShaded", "V,6"))));
     a5->setWhatsThis(QString::fromLatin1(getWhatsThis()));
     QAction* a6 = pcAction->addAction(QString());
     a6->setCheckable(true);
     a6->setIcon(BitmapFactory().iconFromTheme("DrawStyleFlatLines"));
     a6->setObjectName(QStringLiteral("Std_DrawStyleFlatLines"));
-    a6->setShortcut(QKeySequence(QStringLiteral("V,7")));
+    a6->setShortcut(
+        QKeySequence(QString::fromLatin1(ForkKeymap::accel("Std_DrawStyleFlatLines", "V,7")))
+    );
     a6->setWhatsThis(QString::fromLatin1(getWhatsThis()));
 
     pcAction->setIcon(a0->icon());

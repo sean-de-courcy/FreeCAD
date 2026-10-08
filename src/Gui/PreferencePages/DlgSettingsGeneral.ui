@@ -396,6 +396,30 @@ and spin boxes with hover focus</string>
          </property>
         </widget>
        </item>
+       <item row="8" column="0">
+        <widget class="QLabel" name="keymapLabel">
+         <property name="text">
+          <string>Keyboard shortcuts</string>
+         </property>
+        </widget>
+       </item>
+       <item row="8" column="1">
+        <widget class="QComboBox" name="Keymap">
+         <property name="toolTip">
+          <string>The default keys of the commands. A key set in Tools &gt; Customize &gt; Keyboard is kept either way.</string>
+         </property>
+         <item>
+          <property name="text">
+           <string>Onshape (FreeCAD-CH default)</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>FreeCAD</string>
+          </property>
+         </item>
+        </widget>
+       </item>
       </layout>
      </widget>
     </item>

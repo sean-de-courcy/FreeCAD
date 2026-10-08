@@ -29,7 +29,9 @@
 #include <Base/Console.h>
 #include <Base/Tools.h>
 #include "ShortcutManager.h"
+#include "Application.h"
 #include "Command.h"
+#include "ForkKeymap.h"
 #include "Window.h"
 #include "Action.h"
 
@@ -89,6 +91,9 @@ void ShortcutManager::OnChange(Base::Subject<const char*>& src, const char* reas
     if (hSetting == &src) {
         if (boost::equals(reason, "ShortcutTimeout")) {
             timeout = hSetting->GetInt("ShortcutTimeout");
+        }
+        else if (boost::equals(reason, "Keymap")) {
+            ForkKeymap::reload();
         }
         return;
     }
@@ -470,6 +475,30 @@ void ShortcutManager::setTopPriority(const char* cmdName)
     hPriorities->SetInt(cmdName, topPriority);
 }
 
+namespace
+{
+
+// Command's type flags are protected: a member pointer taken in a derived class reads them
+struct CommandType: Command
+{
+    static bool isForEdit(const Command* cmd)
+    {
+        return ((cmd->*(&CommandType::eType)) & Command::ForEdit) != 0;
+    }
+};
+
+// FreeCAD-CH (ops#194): whether the action's command works in the edit in progress, e.g.
+// Sketcher_CreateFillet in a sketch. On a tie it wins over a command that doesn't, so Shift+F in a
+// sketch is the sketch fillet, not PartDesign_Fillet (both enabled).
+bool isForEdit(QAction* action)
+{
+    auto fcAction = action ? qobject_cast<Action*>(action->parent()) : nullptr;
+    Command* cmd = fcAction ? fcAction->command() : nullptr;
+    return cmd && CommandType::isForEdit(cmd) && Application::Instance->editDocument();
+}
+
+}  // namespace
+
 void ShortcutManager::onTimer()
 {
     timer.stop();
@@ -477,14 +506,18 @@ void ShortcutManager::onTimer()
     QAction* found = nullptr;
     int priority = -std::numeric_limits<int>::max();
     int seq_length = 0;
+    bool forEdit = false;
     for (const auto& info : pendingActions) {
         if (info.action) {
             info.action->setEnabled(true);
+            bool edit = isForEdit(info.action);
             if (info.seq_length > seq_length
-                || (info.seq_length == seq_length && info.priority > priority)) {
+                || (info.seq_length == seq_length && info.priority > priority)
+                || (info.seq_length == seq_length && info.priority == priority && edit && !forEdit)) {
                 priority = info.priority;
                 seq_length = info.seq_length;
                 found = info.action;
+                forEdit = edit;
             }
         }
     }
