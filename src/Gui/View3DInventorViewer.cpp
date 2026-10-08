@@ -3563,12 +3563,14 @@ namespace
  * Qt::KeypadModifier; Quarter reads only Shift, Ctrl and Alt, so the flag is ignored here too
  * (and Ctrl is Cmd on a Mac, which Qt reports as ControlModifier).
  *
+ * A box or polygon selection keeps the keys (its mouse model takes them in the navigation style).
+ *
  * \return whether the event is the orbit's (a release too, so the navigation style sees neither)
  */
 bool orbitByArrowKey(Gui::View3DInventorViewer* viewer, const SoKeyboardEvent* event)
 {
     if (!Gui::ForkKeymap::isOnshape() || event->wasAltDown()
-        || (event->wasCtrlDown() && event->wasShiftDown())) {
+        || (event->wasCtrlDown() && event->wasShiftDown()) || viewer->isSelecting()) {
         return false;
     }
     SbVec3f axis;
@@ -3609,6 +3611,12 @@ bool orbitByArrowKey(Gui::View3DInventorViewer* viewer, const SoKeyboardEvent* e
         step = 90.0F;
     }
     const float angle = step * degrees;
+
+    // A running animation (a standard view, a sketch's edit entry, a spin) would set the camera
+    // again at its next frame: stop it and turn from where it is, as a mouse drag does
+    if (navigation->isAnimating()) {
+        navigation->stopAnimating();
+    }
 
     const SbRotation current = camera->orientation.getValue();
     SbVec3f direction;

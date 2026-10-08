@@ -1867,6 +1867,74 @@ OrthographicCamera {{
                 after = self.focalOnScreen()
                 self.assertLessEqual(abs(after.x() - before.x()) + abs(after.y() - before.y()), 2)
 
+    def testKeypadArrowsOrbitToo(self):
+        """Qt reports the arrows of a Mac keyboard (and the keypad's) with KeypadModifier: they
+        orbit the same, Shift+Left 90 degrees."""
+        self.orbitView()
+        self.arrow(QtCore.Qt.Key_Left, QtCore.Qt.KeypadModifier | self.SHIFT)
+        self.assertDirection(self.turned(90, self.LEFT), "keypad shift+left")
+
+    def testAnArrowStopsAViewAnimation(self):
+        """An arrow during a view animation (a standard view, the sketch's edit entry) stops it
+        and turns the camera from where it is, as a mouse drag does; the animation used to set
+        the orientation again at its next frame, and the step was lost. The animation is slowed
+        to 10 s, so that the arrow lands in it."""
+        view = self.orbitView()
+        viewSettings = App.ParamGet("User parameter:BaseApp/Preferences/View")
+        hadDuration = "AnimationDuration" in viewSettings.GetInts()
+        oldDuration = viewSettings.GetInt("AnimationDuration", 500)
+        animated = view.isAnimationEnabled()
+        viewSettings.SetInt("AnimationDuration", 10000)
+        view.setAnimationEnabled(True)
+        front, top = App.Vector(0, 1, 0), App.Vector(0, 0, -1)
+        try:
+            view.viewTop()
+            self.assertTrue(
+                waitFor(lambda: math.degrees(self.cameraDirection().getAngle(front)) > 1),
+                "the view animation didn't start",
+            )
+            before = self.cameraDirection()
+            self.assertGreater(math.degrees(before.getAngle(top)), 45, "the animation ran ahead")
+            self.press(QtCore.Qt.Key_Left)
+            pump(0.1)
+            after = self.cameraDirection()
+            self.assertAlmostEqual(math.degrees(before.getAngle(after)), 15, delta=1)
+            pump(1.0)
+            moved = math.degrees(after.getAngle(self.cameraDirection()))
+            self.assertLess(moved, 0.1, "the animation went on after the arrow")
+        finally:
+            view.stopAnimating()
+            view.setAnimationEnabled(animated)
+            if hadDuration:
+                viewSettings.SetInt("AnimationDuration", oldDuration)
+            else:
+                viewSettings.RemInt("AnimationDuration")
+
+    def testArrowsDoNotOrbitDuringABoxSelection(self):
+        """While a box selection (Std_BoxSelection) waits for its box, its mouse model takes the
+        keys, as before the orbit: an arrow leaves the camera alone; once the box is done, the
+        arrows orbit again."""
+        self.orbitView()
+        self.assertTrue(focus(self.view3d()), "the 3D view doesn't take the focus")
+        Gui.runCommand("Std_BoxSelection")
+        pump(0.2)
+        self.arrow(QtCore.Qt.Key_Left)
+        pump(0.3)
+        self.assertLess(
+            math.degrees(self.cameraDirection().getAngle(App.Vector(0, 1, 0))),
+            0.1,
+            "an arrow turned the view during a box selection",
+        )
+        # the rubber band ends only on a click (Esc is no key of its): an empty corner
+        viewport = Gui.getDocument(self.doc.Name).ActiveView.graphicsView().viewport()
+        QtTest.QTest.mouseClick(
+            viewport, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, QtCore.QPoint(3, 3)
+        )
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        self.arrow(QtCore.Qt.Key_Left)
+        self.assertDirection(self.turned(15, self.LEFT), "left after the box")
+
     def testShiftArrowsDoNotRunTheViewRotateCommands(self):
         """Shift+Left / Right are the orbit's 90 degrees, not Std_ViewRotateLeft / Right (the
         roll about the view direction), whose window shortcuts the table clears."""
@@ -1920,6 +1988,8 @@ OrthographicCamera {{
         sketch saw a key): the arrows orbit there too, the sketch stays in edit, and its other
         keys still reach its tools."""
         self.editSketch()
+        # the edit entry turns the view to the sketch with an animation: read the camera after it
+        self.assertDirection(App.Vector(0, 0, -1), "the sketch's view")
         pump(0.3)
         before = self.cameraDirection()
         self.arrow(QtCore.Qt.Key_Left)
