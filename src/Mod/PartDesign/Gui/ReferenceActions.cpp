@@ -29,11 +29,15 @@
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/CommandT.h>
 #include <Gui/ViewProvider.h>
 #include <Gui/ViewProviderDocumentObject.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
 
 #include "ReferenceActions.h"
@@ -161,6 +165,26 @@ std::string ReferenceActions::subElementType(const std::string& sub)
 {
     const char* element = Data::findElementName(sub.c_str());
     return elementType(Data::oldElementName(element ? element : sub.c_str()));
+}
+
+bool ReferenceActions::wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
+{
+    if (!obj) {
+        why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
+        return false;
+    }
+    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
+        return true;
+    }
+    const Part::TopoShape shape = Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink);
+    // A datum point is one vertex: the feature takes it as a point section (PR 163 review)
+    const bool datum = obj->isDerivedFrom<Part::Datum>()
+        && (shape.hasSubShape(TopAbs_EDGE) || shape.hasSubShape(TopAbs_FACE));
+    if (datum || shape.hasSubShape(TopAbs_SOLID)) {
+        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
+        return false;
+    }
+    return true;
 }
 
 TargetDisplay::~TargetDisplay()

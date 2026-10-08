@@ -78,83 +78,22 @@
         </widget>
        </item>
        <item>
-        <widget class="QGroupBox" name="groupBox">
-         <property name="title">
-          <string>Profile</string>
-         </property>
-         <layout class="QVBoxLayout" name="verticalLayout">
-          <item>
-           <layout class="QHBoxLayout" name="horizontalLayout_2">
-            <item>
-             <widget class="QToolButton" name="buttonProfileBase">
-              <property name="text">
-               <string>Object</string>
-              </property>
-              <property name="checkable">
-               <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QLineEdit" name="profileBaseEdit"/>
-            </item>
-            <item>
-             <widget class="QToolButton" name="buttonProfileClear">
-              <property name="icon">
-               <iconset resource="../../../Gui/Icons/resource.qrc">
-                <normaloff>:/icons/edit-cleartext.svg</normaloff>:/icons/edit-cleartext.svg</iconset>
-              </property>
-             </widget>
-            </item>
-           </layout>
-          </item>
-          <item>
-           <layout class="QHBoxLayout" name="horizontalLayout_4">
-            <item>
-             <widget class="QToolButton" name="buttonRefAdd">
-              <property name="enabled">
-               <bool>true</bool>
-              </property>
-              <property name="sizePolicy">
-               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-                <horstretch>0</horstretch>
-                <verstretch>0</verstretch>
-               </sizepolicy>
-              </property>
-              <property name="text">
-               <string>Add Edge</string>
-              </property>
-              <property name="checkable">
-               <bool>true</bool>
-              </property>
-              <property name="checked">
-               <bool>false</bool>
-              </property>
-             </widget>
-            </item>
-            <item>
-             <widget class="QToolButton" name="buttonRefRemove">
-              <property name="sizePolicy">
-               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-                <horstretch>0</horstretch>
-                <verstretch>0</verstretch>
-               </sizepolicy>
-              </property>
-              <property name="text">
-               <string>Remove Edge</string>
-              </property>
-              <property name="checkable">
-               <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-           </layout>
-          </item>
-          <item>
-           <widget class="QListWidget" name="listWidgetReferences"/>
-          </item>
-         </layout>
-        </widget>
+        <layout class="QHBoxLayout" name="horizontalLayout_2">
+         <item>
+          <widget class="QWidget" name="auxiliarySpineFieldPlaceholder" native="true"/>
+         </item>
+         <item alignment="Qt::AlignTop">
+          <widget class="QToolButton" name="buttonProfileClear">
+           <property name="toolTip">
+            <string>Clear the auxiliary path</string>
+           </property>
+           <property name="icon">
+            <iconset resource="../../../Gui/Icons/resource.qrc">
+             <normaloff>:/icons/edit-cleartext.svg</normaloff>:/icons/edit-cleartext.svg</iconset>
+           </property>
+          </widget>
+         </item>
+        </layout>
        </item>
       </layout>
      </widget>

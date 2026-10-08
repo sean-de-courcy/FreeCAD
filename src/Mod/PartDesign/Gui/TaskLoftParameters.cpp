@@ -36,7 +36,6 @@
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
 #include <Gui/Selection/Selection.h>
-#include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureLoft.h>
 
@@ -66,22 +65,6 @@ QString loftTaskTitle(ViewProviderLoft* view)
 {
     return isSubtractiveLoft(view) ? TaskLoftParameters::tr("Subtractive Loft Parameters")
                                    : TaskLoftParameters::tr("Additive Loft Parameters");
-}
-
-// A whole object picked as a section or a profile (a tree pick): a sketch or a shape of wires or
-// points. A solid or a datum gives no section whole: one of its faces does (ops#150)
-bool wholeObjectFits(App::DocumentObject* obj, const char* sub, std::string& why)
-{
-    if (!Base::Tools::isNullOrEmpty(sub) || obj->isDerivedFrom<Part::Part2DObject>()) {
-        return true;
-    }
-    if (obj->isDerivedFrom<Part::Datum>()
-        || Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink)
-               .hasSubShape(TopAbs_SOLID)) {
-        why = QT_TR_NOOP("A whole solid or datum isn't a section: pick one of its faces.");
-        return false;
-    }
-    return true;
 }
 
 // A sketch is taken whole, unless one of its points is picked: the loft takes the whole sketch for
@@ -152,7 +135,7 @@ void TaskLoftParameters::createFields()
             why = QT_TR_NOOP("Pick a sketch, a sketch point or a face.");
             return false;
         }
-        return wholeObjectFits(obj, sub, why);
+        return ReferenceActions::wholeObjectFits(obj, sub, why);
     };
 
     // The profile: one sketch, sketch point or face (Q8 (a): its own field, above the sections)

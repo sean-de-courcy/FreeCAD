@@ -1197,17 +1197,32 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
     if (!linked || !stored.empty() || linked->isDerivedFrom<Part::Part2DObject>()) {
         return false;
     }
-    message = tr(
-        "The profile keeps its last element: pick another element of the solid first, or "
-        "another profile."
-    );
+    // A path of a wire's edges goes back to the wire whole, as a sketch's does (PR 166 review)
+    if (options.path) {
+        try {
+            const Part::TopoShape shape = Part::Feature::getTopoShape(
+                linked,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+            if (shape.hasSubShape(TopAbs_EDGE) && !shape.hasSubShape(TopAbs_FACE)) {
+                return false;
+            }
+        }
+        catch (const Base::Exception&) {
+        }
+    }
+    message = options.path
+        ? tr("The path keeps its last edge: pick another edge of the object first, or another "
+             "object.")
+        : tr("The profile keeps its last element: pick another element of the solid first, or "
+             "another profile.");
     updateLook();
     return true;
 }
 
 bool ReferenceField::lacksRegions() const
 {
-    App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
+    App::DocumentObject* linked = isProfile() && !options.path ? linkedObject() : nullptr;
     auto makeInternals = linked
         ? freecad_cast<App::PropertyBool*>(linked->getPropertyByName("MakeInternals"))
         : nullptr;
@@ -1485,6 +1500,11 @@ void ReferenceField::replaceEntries(const std::vector<std::string>& subs)
     write(subs);
 }
 
+void ReferenceField::clear()
+{
+    write(nullptr, {});
+}
+
 void ReferenceField::removeSelected()
 {
     // A list of sections by position, the others by slot
@@ -1496,7 +1516,14 @@ void ReferenceField::removeSelected()
     if (indexes.empty() && entryList->currentItem()) {
         indexes.push_back(entryList->currentItem()->data(role).toInt());
     }
-    // A profile's whole object isn't removed: the profile is required
+    // A profile's whole object isn't removed while the profile is required; an optional one
+    // (an auxiliary path) is cleared
+    if (isProfile() && !options.required && std::ranges::any_of(indexes, [](int index) {
+            return index < 0;
+        })) {
+        write(nullptr, {});
+        return;
+    }
     std::erase_if(indexes, [](int index) { return index < 0; });
     if (indexes.empty()) {
         return;
@@ -2000,7 +2027,8 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
         if (!storedSubs().empty() && freecad_cast<Part::Part2DObject*>(linkedObject())) {
             QAction* useWholeAction = menu->addAction(tr("Use whole sketch"));
             useWholeAction->setToolTip(
-                tr("The profile is the whole sketch again, not its regions")
+                options.path ? tr("The path is the whole sketch again, not its edges")
+                             : tr("The profile is the whole sketch again, not its regions")
             );
             connect(useWholeAction, &QAction::triggered, this, [this]() { useWhole(); });
         }
