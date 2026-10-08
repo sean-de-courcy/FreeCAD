@@ -573,12 +573,24 @@ TopoShape Revolved::tryToRevolveToFace(
     // nearly full ring instead of a quarter (ops#239). So the box is centred radially on the
     // axis, and its side is twice the distance from the global origin to anything involved:
     // its largest coordinate then exceeds that distance in any direction.
-    // A base gets the box too, beside it in a compound: a small base made the square just as
-    // small, with the same wrong ring (ops#242). The box then clears the base as well.
+    // With an unbounded up-to face (no wire, as a datum or origin plane, or an infinite bounding
+    // box), which is what FaceUntil trims, a base gets the box too, beside it in a compound: a
+    // small base made the square just as small, with the same wrong ring (ops#242). The box then
+    // clears the base as well. A bounded up-to face isn't trimmed and keeps the base alone.
     // A Groove without a base gets the same box: makeRemovedVolume() then fails and the tool
     // itself becomes the result, as for a Groove by angle or a Pocket as the first feature.
+    auto isUnbounded = [](const TopoShape& face) {
+        if (face.isNull()) {
+            return false;
+        }
+        if (!TopExp_Explorer(face.getShape(), TopAbs_WIRE).More()) {
+            return true;
+        }
+        Base::BoundBox3d faceBox = face.getBoundBox();
+        return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
+    };
     TopoShape featureBase = base;
-    {
+    if (base.isNull() || isUnbounded(upToFace)) {
         Base::BoundBox3d bounds = sketchshape.getBoundBox();
         if (!base.isNull()) {
             bounds.Add(base.getBoundBox());
