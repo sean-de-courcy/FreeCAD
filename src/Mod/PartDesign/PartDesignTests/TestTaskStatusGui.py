@@ -43,6 +43,7 @@ Off screen: QT_QPA_PLATFORM=offscreen, a fresh FREECAD_USER_HOME (notes/build.md
 import os
 import shutil
 import tempfile
+import time
 import unittest
 
 import FreeCAD as App
@@ -289,3 +290,73 @@ class TestTaskStatusGui(unittest.TestCase):
             shown = shown or banner.isVisible()
         self.assertNotIn("Invalid", pad.State)
         self.assertFalse(shown, "the label flashed")
+
+    # -- PR 173 follow-ups (ops#202) -------------------------------------------------------------
+
+    def testShowDelayRestartsOnEachFailingRefresh(self):
+        """The label shows 300 ms after the *last* failing refresh: a feature failing, failing
+        again 200 ms later, and fixed 400 ms after the first failure (200 after the second)
+        never shows it. (Timed from the first failure, the label showed at 300 ms and hid again
+        at 400.) The recomputes are made through the document, to keep the times tight."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        start = time.monotonic()
+        log = []
+
+        def watch(until):
+            while time.monotonic() - start < until:
+                pump(0.01)
+                if banner.isVisible():
+                    log.append(round(time.monotonic() - start, 3))
+
+        pad.Type = "UpToLast"
+        self.doc.recompute()  # t = 0: fails
+        self.assertIn("Invalid", pad.State)
+        watch(0.2)
+        pad.touch()
+        self.doc.recompute()  # t = 0.2: fails again
+        self.assertIn("Invalid", pad.State)
+        watch(0.4)
+        pad.Type = "Length"
+        self.doc.recompute()  # t = 0.4: fixed
+        fixed = round(time.monotonic() - start, 3)
+        self.assertNotIn("Invalid", pad.State)
+        watch(1.0)
+        self.assertEqual(log, [], f"the label flashed (fixed at {fixed} s)")
+        self.assertEqual(banner.text(), "")
+
+    def testShowsAfterTheDelayOfTheLastFailure(self):
+        """The restarted delay still ends: a failure that stays shows the label."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        self.setMode("To last")
+        pump(0.2)
+        pad.touch()
+        self.doc.recompute()
+        self.assertTrue(waitFor(banner.isVisible), "the error isn't shown")
+
+    def testUndoAndRedoRefreshTheLabel(self):
+        """The edited feature failing in a transaction of its own: undo clears the label, redo
+        brings it back."""
+        pad = self.plate()
+        self.edit(pad)
+        banner = self.banner()
+        self.doc.openTransaction("Fail")
+        pad.Type = "UpToLast"
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", pad.State)
+        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays after undo")
+        self.assertEqual(banner.text(), "")
+
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
