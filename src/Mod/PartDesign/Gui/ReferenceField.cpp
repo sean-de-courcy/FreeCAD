@@ -987,8 +987,10 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // Not in the history: no guess unless it's a safe one (fork PR 196 review). Several, some
     // through a binder: nothing tells them apart. An origin that has solid faces of its own (the
     // body's base, a box cut into it, another body's feature) made the element itself: a pad on
-    // a binder of its face left that face as it was. Otherwise (PR 187: a pad and a pocket on one
-    // sketch) the first.
+    // a binder of its face left that face as it was. So did an object between the origin and the
+    // shape that isn't a feature of the body (another body's pad of the sketch a binder binds, an
+    // extrusion of it as the base). Otherwise (PR 187: a pad and a pocket on one sketch) the
+    // first.
     if (profiled.empty() || (profiled.size() > 1 && profiled.size() > direct)) {
         return nullptr;
     }
@@ -996,6 +998,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     PartDesign::Body* body = feature ? feature->getFeatureBody() : nullptr;
     if (!body || body->BaseFeature.getValue() == origin) {
         return nullptr;
+    }
+    for (const Data::HistoryItem& item : history) {
+        if (item.obj != origin
+            && (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj))) {
+            return nullptr;
+        }
     }
     const bool flat = origin->isDerivedFrom<Part::Part2DObject>()
         || freecad_cast<PartDesign::ShapeBinder*>(origin)

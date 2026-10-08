@@ -2557,16 +2557,19 @@ class TestReferenceFieldGui(unittest.TestCase):
             self.assertIn("No feature", self.statusText(field))
 
     def testPatternOriginalsPickOfPadAndPocketOnTwoBindersOfOneSketch(self):
-        """Fork PR 196 review, 1: a pad and a pocket stand on two SubShapeBinders of one sketch
-        outside the body, the sketch's square at the box's top. Their walls end at the sketch,
-        and each wall's history names its feature: a pick of the pad's wall adds the pad, of the
-        pocket's the pocket, and of the pocket's again takes it out (getInList's order doesn't
-        decide). No element of the model ends at the sketch without its feature, so the case of
-        several candidates outside the history (now: no feature) has no pick here."""
+        """Fork PR 196 review, 1 (round 2: reaches the "several candidates" case): a pad stands on
+        a SubShapeBinder of a sketch outside the body, a pocket on a SubShapeBinder of that
+        binder; the sketch's rectangle crosses the box's top edge, so the pad overhangs. The
+        walls' histories name their features: a pick of the pad's wall adds the pad, of the
+        pocket's the pocket, and of the pocket's again takes it out. The overhang's bottom ends
+        at the pad's binder without a feature, and both the pad (on it) and the pocket (through
+        the other binder) are candidates: no guess (a geometric choice is ops#219). With two
+        binders of the sketch itself, that bottom ends at the pad's binder, which only the pad
+        uses: a single candidate, so this case needs the chain."""
         box = self.box()
-        source = models.sketch(self.doc, "Source", models.rectangle(4, 4, 6, 6), z=10)
+        source = models.sketch(self.doc, "Source", models.rectangle(8, 4, 12, 6), z=10)
         padBinder = self.binder("PartDesign::SubShapeBinder", "PadBinder", source)
-        pocketBinder = self.binder("PartDesign::SubShapeBinder", "PocketBinder", source)
+        pocketBinder = self.binder("PartDesign::SubShapeBinder", "PocketBinder", padBinder)
         pad = models.pad(self.body, padBinder, 3)
         pad.Refine = False
         self.doc.recompute()
@@ -2574,11 +2577,15 @@ class TestReferenceFieldGui(unittest.TestCase):
         pocket.Refine = False
         self.doc.recompute()
         bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
         self.assertTrue(pocket.isValid() and pad.isValid())
-        padWall = self.elementNear(bump, "Face", (4, 5, 11.5))
-        pocketWall = self.elementNear(bump, "Face", (4, 5, 8.5))
+        [padWall] = face(contains=(8, 5, 11.5)).one(bump.Shape)
+        [pocketWall] = face(contains=(8, 5, 8.5)).one(bump.Shape)
+        [overhang] = face(contains=(11, 5, 10)).one(bump.Shape)
         self.assertEqual(self.historyNames(bump, padWall)[-2:], [pad.Name, source.Name])
         self.assertEqual(self.historyNames(bump, pocketWall)[-2:], [pocket.Name, source.Name])
+        self.assertEqual(self.historyNames(bump, overhang), [bump.Name, padBinder.Name])
         pattern = self.pattern("PartDesign::LinearPattern", [bump])
         [field] = self.edit(pattern)
         self.arm(field, byFocus=False)
@@ -2588,6 +2595,95 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(bump, pocketWall)
         self.assertEqual(self.originalNames(pattern), [pad.Name, pocket.Name, bump.Name])
         self.pick(bump, pocketWall)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+        self.pick(bump, overhang)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+
+    def testPatternOriginalsPickOfAnotherBodysPadOfABoundSketch(self):
+        """Fork PR 196 round 2: a Boolean fuses another body's pad into the body, and a pad
+        reversed below it stands on a SubShapeBinder of the other body's sketch. The other pad's
+        top ends at that sketch through the other pad: a pick says no feature made it (the
+        other body's pad did), rather than taking the pad on the binder. The reversed pad's side,
+        whose history names it, adds it."""
+        self.body = models.body(self.doc)
+        other = models.body(self.doc)
+        otherSketch = models.sketch(
+            self.doc, "OtherSketch", models.rectangle(10, 0, 20, 10), other
+        )
+        otherPad = models.pad(other, otherSketch, 10, "OtherPad")
+        self.doc.recompute()
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        models.pad(self.body, profile, 8).Refine = False
+        self.doc.recompute()
+        boolean = self.body.newObject("PartDesign::Boolean", "Boolean")
+        boolean.addObject(other)
+        boolean.Type = "Fuse"
+        boolean.Refine = False
+        self.doc.recompute()
+        binder = self.binder("PartDesign::SubShapeBinder", "Binder", otherSketch)
+        below = models.pad(self.body, binder, 5, "Below")
+        below.Reversed = True
+        below.Refine = False
+        self.doc.recompute()
+        self.assertTrue(below.isValid(), below.getStatusString())
+        bump = self.bumpOn(1, 1, 8)
+        bump.Refine = False
+        self.doc.recompute()
+        [otherTop] = face(contains=(15, 5, 10)).one(bump.Shape)
+        [belowSide] = face(contains=(20, 5, -2.5)).one(bump.Shape)
+        self.assertEqual(
+            self.historyNames(bump, otherTop), [bump.Name, otherPad.Name, otherSketch.Name]
+        )
+        self.assertEqual(self.historyNames(bump, belowSide)[-2:], [below.Name, otherSketch.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, otherTop)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.pick(bump, belowSide)
+        self.assertEqual(self.originalNames(pattern), [below.Name, bump.Name])
+
+    def testPatternOriginalsPickOfAnExtrusionBaseOfABoundSketch(self):
+        """Fork PR 196 round 2: the body's base feature is a Part::Extrusion of a sketch, and a
+        pad reversed below it stands on a SubShapeBinder of that sketch. The extrusion's side
+        ends at the sketch through the extrusion: a pick says no feature made it, rather than
+        taking the pad. The pad's side, whose history names it, adds it."""
+        self.body = models.body(self.doc)
+        sketch = models.sketch(self.doc, "S", models.rectangle(0, 0, 10, 10))
+        extrusion = self.doc.addObject("Part::Extrusion", "Extrusion")
+        extrusion.Base = sketch
+        extrusion.Dir = App.Vector(0, 0, 1)
+        extrusion.LengthFwd = 10
+        extrusion.Solid = True
+        self.doc.recompute()
+        self.body.BaseFeature = extrusion
+        self.doc.recompute()
+        binder = self.binder("PartDesign::SubShapeBinder", "Binder", sketch)
+        pad = models.pad(self.body, binder, 5)
+        pad.Reversed = True
+        pad.Refine = False
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        [extrusionSide] = face(contains=(5, 0, 5)).one(bump.Shape)
+        [padSide] = face(contains=(5, 0, -2.5)).one(bump.Shape)
+        self.assertEqual(
+            self.historyNames(bump, extrusionSide), [bump.Name, extrusion.Name, sketch.Name]
+        )
+        self.assertEqual(self.historyNames(bump, padSide)[-2:], [pad.Name, sketch.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, extrusionSide)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.pick(bump, padSide)
         self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
 
     def testPatternOriginalsPickOfUpToFaceLoftAndPipeCaps(self):
