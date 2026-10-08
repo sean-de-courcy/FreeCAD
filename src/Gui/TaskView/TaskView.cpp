@@ -231,7 +231,7 @@ private:
             }
         }
         else if (isHidden()) {
-            // Restarted by each failing refresh: it shows 300 ms after the last one (ops#202)
+            // Restarted by each failing refresh: it shows showDelayMs after the last one (ops#202)
             showTimer.start();
         }
     }
