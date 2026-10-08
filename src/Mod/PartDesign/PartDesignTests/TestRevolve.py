@@ -21,6 +21,7 @@
 # *                                                                         *
 # ***************************************************************************
 
+import math
 import unittest
 
 import FreeCAD
@@ -129,6 +130,76 @@ class TestRevolve(unittest.TestCase):
         )
         for actual, expected in zip(reference_values, direct_values):
             self.assertAlmostEqual(actual, expected)
+
+    def revolveUpToWall(self, sideType, core):
+        """An additive Revolution up to a datum plane, as the body's first solid or after a core
+        cylinder (ops#191). The profile is the rectangle x in [1, 3], z in [0, 2] on XZ (area 4,
+        centroid 2 from the axis), revolved about the global Z axis; the wall is the YZ plane, a
+        quarter turn away on either side."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        if core:
+            cylinder = body.newObject("PartDesign::AdditiveCylinder", "Core")
+            cylinder.Radius = 1
+            cylinder.Height = 2
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        wall = body.newObject("PartDesign::Plane", "Wall")
+        wall.MapMode = "Deactivated"
+        wall.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
+        )
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = sideType
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, [""])
+        if sideType == "Two sides":
+            revolution.Type2 = "UpToFace"
+            revolution.UpToFace2 = (wall, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        return revolution
+
+    # Pappus: a full turn of the profile sweeps 2 pi * 2 * 4 = 16 pi, so a quarter turn 4 pi and
+    # a half turn 8 pi. The core cylinder adds pi * 1^2 * 2 = 2 pi.
+
+    def testRevolutionUpToFaceFirstSolid(self):
+        revolution = self.revolveUpToWall("One side", core=False)
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 2, places=6)
+
+    def testRevolutionUpToFaceTwoSidesFirstSolid(self):
+        revolution = self.revolveUpToWall("Two sides", core=False)
+        self.assertAlmostEqual(revolution.Shape.Volume, 8 * math.pi, places=6)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 2, places=6)
+
+    def testRevolutionUpToFaceSymmetricFirstSolid(self):
+        revolution = self.revolveUpToWall("Symmetric", core=False)
+        self.assertAlmostEqual(revolution.Shape.Volume, 8 * math.pi, places=6)
+
+    def testRevolutionUpToFaceAfterCore(self):
+        revolution = self.revolveUpToWall("One side", core=True)
+        self.assertAlmostEqual(revolution.Shape.Volume, 6 * math.pi, places=6)
+
+    def testRevolutionUpToFaceTwoSidesAfterCore(self):
+        revolution = self.revolveUpToWall("Two sides", core=True)
+        self.assertAlmostEqual(revolution.Shape.Volume, 10 * math.pi, places=6)
 
     def tearDown(self):
         # closing doc

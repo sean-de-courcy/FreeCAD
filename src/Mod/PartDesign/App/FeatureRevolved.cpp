@@ -30,6 +30,7 @@
 #include <ranges>
 #include <utility>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -555,10 +556,26 @@ TopoShape Revolved::tryToRevolveToFace(
         supportface = TopoDS_Face();
     }
 
+    // BRepFeat_MakeRevol needs a solid base, and its result holds the base besides the revolved
+    // tool. Without a solid before this feature, give it a unit box on the axis beyond the
+    // profile's full revolution, so that it can't touch the tool, and cut it out again below.
+    // The profile itself as the base, as makeElementPrismUntil() does for Pad, gives a null
+    // shape (ops#191).
+    TopoShape featureBase = base;
+    if (featureBase.isNull()) {
+        Base::BoundBox3d sweep = sketchshape.makeElementRevolve(axis, 2.0 * std::numbers::pi)
+                                     .getBoundBox();
+        gp_Pnt center(sweep.GetCenter().x, sweep.GetCenter().y, sweep.GetCenter().z);
+        double clearance = axis.Location().Distance(center) + sweep.CalcDiagonalLength() + 1.0;
+        gp_Pnt corner = axis.Location().Translated(gp_Vec(axis.Direction()) * clearance);
+        featureBase = TopoShape(BRepPrimAPI_MakeBox(gp_Ax2(corner, axis.Direction()), 1.0, 1.0, 1.0)
+                                    .Shape());
+    }
+
     auto makeRevolution = [&](Part::RevolMode mode, Standard_Boolean modify) {
         TopoShape revolution = makeTopoShape();
         revolution.makeElementRevolution(
-            base,
+            featureBase,
             TopoDS::Face(sketchshape.getShape()),
             axis,
             TopoDS::Face(supportface.getShape()),
@@ -574,12 +591,8 @@ TopoShape Revolved::tryToRevolveToFace(
     };
 
     auto makeGeneratedTool = [&](const TopoShape& baseResult) {
-        if (base.isNull()) {
-            return baseResult;
-        }
-
         TopoShape tool = makeTopoShape();
-        tool.makeElementCut({baseResult, base}, Part::OpCodes::Revolve);
+        tool.makeElementCut({baseResult, featureBase}, Part::OpCodes::Revolve);
         if (tool.isNull() || tool.getShape().IsNull()) {
             throw Base::RuntimeError("Could not extract generated revolution tool!");
         }
