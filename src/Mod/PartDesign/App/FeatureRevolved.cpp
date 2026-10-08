@@ -563,23 +563,29 @@ TopoShape Revolved::tryToRevolveToFace(
     // tool. Without a solid before this feature, give it a box on the axis, and cut it out again
     // below. The profile itself as the base, as makeElementPrismUntil() does for Pad, gives a null
     // shape (ops#191).
-    // The box can't touch the tool: a rotation about the axis keeps each point's position along
-    // the axis, so the whole sweep lies within |location - center| + diagonal / 2 of the axis
-    // location along it, and the box starts more than half a diagonal beyond that.
+    // The box can't touch the tool or the base: a rotation about the axis keeps each point's
+    // position along the axis, so the whole sweep lies within |location - center| + diagonal / 2
+    // of the axis location along it (center and diagonal of the bounding box of the profile and
+    // the base), and the box starts more than half a diagonal beyond that.
     // The box is also what BRepFeat trims an unbounded up-to face to (BRepFeat::FaceUntil: a
     // square sized from 10 times the base's largest bounding box coordinate).
     // A small box near the axis made that square miss part of the sweep: a loud failure, or a
     // nearly full ring instead of a quarter (ops#239). So the box is centred radially on the
     // axis, and its side is twice the distance from the global origin to anything involved:
     // its largest coordinate then exceeds that distance in any direction.
+    // A base gets the box too, beside it in a compound: a small base made the square just as
+    // small, with the same wrong ring (ops#242). The box then clears the base as well.
     // A Groove without a base gets the same box: makeRemovedVolume() then fails and the tool
     // itself becomes the result, as for a Groove by angle or a Pocket as the first feature.
     TopoShape featureBase = base;
-    if (featureBase.isNull()) {
-        Base::BoundBox3d profile = sketchshape.getBoundBox();
-        gp_Pnt center(profile.GetCenter().x, profile.GetCenter().y, profile.GetCenter().z);
+    {
+        Base::BoundBox3d bounds = sketchshape.getBoundBox();
+        if (!base.isNull()) {
+            bounds.Add(base.getBoundBox());
+        }
+        gp_Pnt center(bounds.GetCenter().x, bounds.GetCenter().y, bounds.GetCenter().z);
         const gp_Pnt& location = axis.Location();
-        double clearance = location.Distance(center) + profile.CalcDiagonalLength() + 1.0;
+        double clearance = location.Distance(center) + bounds.CalcDiagonalLength() + 1.0;
         // The up-to face's reach is a margin: a datum plane's origin far from the profile made no
         // difference in probes (ops#239). An infinite face's bounding box (about 1e100) would
         // make the cube lose the clearance to rounding, so only a finite box counts, and an
@@ -606,7 +612,8 @@ TopoShape Revolved::tryToRevolveToFace(
             (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-side / 2.0)
         );
         gp_Ax2 boxFrame(corner, axis.Direction(), frame.XDirection());
-        featureBase = TopoShape(BRepPrimAPI_MakeBox(boxFrame, side, side, side).Shape());
+        TopoShape box(BRepPrimAPI_MakeBox(boxFrame, side, side, side).Shape());
+        featureBase = base.isNull() ? box : TopoShape().makeElementCompound({base, box});
     }
 
     auto makeRevolution = [&](Part::RevolMode mode, Standard_Boolean modify) {

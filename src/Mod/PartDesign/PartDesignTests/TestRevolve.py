@@ -431,6 +431,72 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
         self.assertAlmostEqual(revolution.Shape.BoundBox.YMin, 0, places=6)
 
+    def revolveAroundSmallCore(self, sideType, reversed=False):
+        """A Revolution up to the YZ origin plane after a small core (ops#242): the cylinder of
+        radius 1 and height 2 at the origin, and the profile x in [0, 50], z in [0, 50] on XZ
+        about Z (area 2500, centroid 25 from the axis: a full turn is 125000 pi). BRepFeat trims
+        the unbounded plane by the size of the base it gets; the core alone made that square
+        about 20 across, and a quarter came out as a nearly full ring without an error."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        core = body.newObject("PartDesign::AdditiveCylinder", "Core")
+        core.Radius = 1
+        core.Height = 2
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(0, 0),
+            FreeCAD.Vector(50, 0),
+            FreeCAD.Vector(50, 50),
+            FreeCAD.Vector(0, 50),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Reversed = reversed
+        revolution.SideType = sideType
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (yz, [""])
+        if sideType == "Two sides":
+            revolution.Type2 = "UpToFace"
+            revolution.UpToFace2 = (yz, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        return revolution
+
+    # A quarter is 125000 pi / 4 = 31250 pi; the core's part outside it adds 3/4 * 2 pi = 1.5 pi.
+    # A half is 62500 pi, and the core's other half adds pi.
+
+    def testRevolutionUpToFaceAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("One side")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMax, 50, places=6)
+
+    def testRevolutionUpToFaceAroundSmallCoreReversed(self):
+        revolution = self.revolveAroundSmallCore("One side", reversed=True)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.YMin, -50, places=6)
+        self.assertAlmostEqual(bounds.YMax, 1, places=6)
+
+    def testRevolutionUpToFaceTwoSidesAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("Two sides")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+
+    def testRevolutionUpToFaceSymmetricAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("Symmetric")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error and gives no solid."""
