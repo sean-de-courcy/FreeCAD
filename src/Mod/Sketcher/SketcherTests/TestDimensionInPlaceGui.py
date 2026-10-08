@@ -493,6 +493,30 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assert_point(self.point(), 3, 1)
         self.assert_one_undo_step()
 
+    def test_d9_plain_m_is_not_the_tools_under_the_fork_keymap(self):
+        """D9, Onshape's keymap: the plain M reaching the Dimension tool leaves it alone. Its lock
+        is Ctrl+M (place_lock); M is the trim tool's key, whose shortcut also takes this M."""
+        self.set_param("User parameter:BaseApp/Preferences/General", "String", "Keymap", "Onshape")
+        self.flush_gui(100)
+        self.sketch.addGeometry(Part.Point(V(2, 1, 0)), False)
+        self.doc.recompute()
+        self.start_edit()
+
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.Selection.addSelection(self.doc.Name, self.sketch.Name, "Vertex1")
+        FreeCADGui.runCommand("Sketcher_Dimension")
+        self.flush_gui(150)
+        self.move(self.viewport, self.screen_point(8, 9))
+
+        def locked():
+            return (
+                len(self.constraints_of("DistanceX")) == 1
+                and len(self.constraints_of("DistanceY")) == 1
+            )
+
+        self.key_click(self.viewport, QtCore.Qt.Key_M, "m")
+        self.assertFalse(self.wait_until(locked, 500), "the plain M switched the tool to a lock")
+
     def answer_dialogs(self, texts):
         """Fills in and accepts the modal datum dialog once per text, in order."""
         state = {"stop": False, "answered": [], "waited": 0}
