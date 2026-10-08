@@ -504,8 +504,18 @@ bool TaskPipeParameters::accept()
                     if (it->second) {
                         // ops#225: its own shape before a link maps names in it: the shape
                         // pasted from the original names its elements after the original, and
-                        // the pipe's references were then found again by geometry, with a warning
-                        it->second->recomputeFeature();
+                        // the pipe's references were then found again by geometry, with a warning.
+                        // ops#234: a copy that fails (or that an ops#127 reorder continuation
+                        // blocks) is named, with its reason
+                        if (!it->second->recomputeFeature()) {
+                            Base::Console().warning(
+                                "%s: the copy '%s' of '%s' doesn't recompute: %s\n",
+                                pipe->Label.getValue(),
+                                it->second->Label.getValue(),
+                                obj->Label.getValue(),
+                                it->second->getStatusString()
+                            );
+                        }
                         copies.push_back(it->second);
                     }
                     else {
@@ -520,34 +530,66 @@ bool TaskPipeParameters::accept()
                 }
                 return it->second ? it->second : obj;
             };
+            // ops#234: every copy is made (and recomputed) before any of the three properties is
+            // written
+            for (auto obj : {spine, auxSpine}) {
+                if (outside(obj)) {
+                    copied(obj);
+                }
+            }
+            std::vector<App::DocumentObject*> objs = pipe->Sections.getValues();
+            for (auto obj : objs) {
+                if (outside(obj)) {
+                    copied(obj);
+                }
+            }
+
+            // ops#234: a guess stays a guess on the copy, which has the same element under the
+            // same index name: its record is carried over (the re-target record was about the
+            // original, so it ends), else the copy's exact match hid the guess and its warning
+            auto carried = [](std::vector<App::ElementRecords> records) {
+                for (auto& record : records) {
+                    record.retarget = App::RetargetRecord();
+                }
+                return records;
+            };
+
             // a property is written only when its object was copied: setValue with the original
             // would drop its shadows and guess record (ops#127)
-            if (outside(spine) && copied(spine) != spine) {
-                pipe->Spine.setValue(copied(spine), pipe->Spine.getSubValues());
-            }
-            if (outside(auxSpine) && copied(auxSpine) != auxSpine) {
-                pipe->AuxiliarySpine.setValue(
-                    copied(auxSpine),
-                    pipe->AuxiliarySpine.getSubValues()
-                );
-            }
+            auto writeSpine = [&](App::PropertyLinkSub& prop, App::DocumentObject* obj) {
+                if (outside(obj) && copied(obj) != obj) {
+                    auto records = carried(prop.getElementRecords());
+                    prop.setValue(copied(obj), prop.getSubValues(false));
+                    prop.setElementRecords(std::move(records));
+                }
+            };
+            writeSpine(pipe->Spine, spine);
+            writeSpine(pipe->AuxiliarySpine, auxSpine);
 
             // ops#225: the sections entry by entry, written only when one was copied; the others
             // keep their shadows, so their guess records stay (setSubListValues dropped them all)
-            std::vector<App::DocumentObject*> objs = pipe->Sections.getValues();
             std::vector<std::string> subs = pipe->Sections.getSubValues();
             std::vector<App::PropertyLinkBase::ShadowSub> shadows = pipe->Sections.getShadowSubs();
             shadows.resize(subs.size());
+            std::vector<App::ElementRecords> records = pipe->Sections.getElementRecords();
+            records.resize(subs.size());
             bool changed = false;
             for (std::size_t i = 0; i < objs.size(); ++i) {
                 if (outside(objs[i]) && copied(objs[i]) != objs[i]) {
                     objs[i] = copied(objs[i]);
+                    // the index name, as for the spines (ops#234)
+                    if (!shadows[i].oldName.empty()) {
+                        subs[i] = shadows[i].oldName;
+                    }
                     shadows[i] = App::PropertyLinkBase::ShadowSub();
+                    records[i].retarget = App::RetargetRecord();
                     changed = true;
                 }
             }
             if (changed) {
                 pipe->Sections.setValues(std::move(objs), std::move(subs), std::move(shadows));
+                // the copied entries' guesses (ops#234); the kept entries' records are unchanged
+                pipe->Sections.setElementRecords(std::move(records));
             }
         }
     }
