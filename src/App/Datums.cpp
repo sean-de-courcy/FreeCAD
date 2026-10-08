@@ -352,8 +352,17 @@ void LocalCoordinateSystem::onChanged(const Property* prop)
     // A link to an element alone, (element, ""), is placed in this coordinate system too, but it
     // names only the element, which the move leaves unchanged: recompute what holds such a link.
     // Changed in a recompute (attached), it marks them again, so one that ran before this
-    // coordinate system runs again in the document's second pass (FreeCAD-CH ops#206)
-    if (prop == &Placement && !isRestoring()) {
+    // coordinate system runs again in the document's second pass (FreeCAD-CH ops#206). That pass
+    // reruns one such inversion only: in a longer chain run backwards (a datum on a second
+    // coordinate system on a first) the rest stays touched until the next recompute, which logs
+    // "still touched". An attached coordinate system writes its Placement on each of its
+    // recomputes (positionBySupport, twice, without comparing), so these recompute with it even
+    // when it didn't move: a cost, not a wrong result. Not while the document is restoring: an
+    // attached one is positioned again in its onDocumentRestored, after the document cleared
+    // what links it (PR 181 review)
+    const auto* doc = getDocument();
+    const bool restoring = isRestoring() || (doc && doc->testStatus(App::Document::Restoring));
+    if (prop == &Placement && !restoring) {
         for (auto* element : OriginFeatures.getValues()) {
             if (!element) {
                 continue;

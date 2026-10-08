@@ -276,8 +276,11 @@ class TestAttachedToACoordinateSystem(unittest.TestCase):
     def testCoordinateSystemOnAnAttachedOne(self):
         """A second coordinate system attached bare to the XY plane of a first that is itself
         attached (to the body's XY plane, offset to (3, 4, 5) turned about X). Nothing orders
-        the second after the first; after the first's offset changes, a recompute must still
-        leave the second on it."""
+        the second after the first, and the second is made first, so the recompute runs it
+        before the first: the document's second pass must run it again, after the first's
+        offset changes too (PR 181 review, Low 2)."""
+        second = self.Body.newObject("Part::LocalCoordinateSystem", "Second")
+        second.MapMode = "Deactivated"
         [xy] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "XY_Plane"]
         first = self.Body.newObject("Part::LocalCoordinateSystem", "First")
         first.AttachmentSupport = [(xy, "")]
@@ -285,13 +288,55 @@ class TestAttachedToACoordinateSystem(unittest.TestCase):
         first.AttachmentOffset = self.lcsPlacement
         self.Doc.recompute()
         [firstXY] = [f for f in first.OriginFeatures if f.Role == "XY_Plane"]
-        second = self.attach("Part::LocalCoordinateSystem", [(firstXY, "")], "FlatFace")
+        second.AttachmentSupport = [(firstXY, "")]
+        second.MapMode = "FlatFace"
+        self.Doc.recompute()
+        self.assertTrue(second.isValid(), second.getStatusString())
         self.assertPlacement(second.Placement, self.lcsPlacement)
         first.AttachmentOffset = self.movedPlacement
         self.Doc.recompute()
         self.assertPlacement(first.Placement, self.movedPlacement)
         self.assertPlacement(second.Placement, self.movedPlacement)
-        self.assertNotIn("Touched", second.State)
+        for obj in (first, second):
+            self.assertNotIn("Touched", obj.State, obj.Name)
+
+    def testReopenedFileIsUpToDate(self):
+        """A sketch attached bare to the XY plane of a coordinate system that is attached itself,
+        and a pad of it: saved and opened again, nothing needs a recompute. The coordinate
+        system's restore positions it (writes its Placement), which marked the sketch again
+        after the document had cleared it (PR 181 review, Medium 1)."""
+        import os
+        import tempfile
+
+        import Part
+        import Sketcher
+
+        [xy] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        lcs = self.Body.newObject("Part::LocalCoordinateSystem", "Carrier")
+        lcs.AttachmentSupport = [(xy, "")]
+        lcs.MapMode = "FlatFace"
+        lcs.AttachmentOffset = self.lcsPlacement
+        self.Doc.recompute()
+        [lcsXY] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        sketch = self.attach("Sketcher::SketchObject", [(lcsXY, "")], "FlatFace")
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (2, 0), (2, 2), (0, 2))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]), False)
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        pad = self.Body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 1
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 4, places=6)
+
+        path = os.path.join(tempfile.mkdtemp(), "ReopenedLCS.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        touched = [obj.Name for obj in self.Doc.Objects if "Touched" in obj.State]
+        self.assertEqual(touched, [])
 
 
 class TestAttachedToACoordinateSystemInAPlacedBody(TestAttachedToACoordinateSystem):
