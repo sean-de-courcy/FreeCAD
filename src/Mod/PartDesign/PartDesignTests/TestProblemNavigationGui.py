@@ -28,7 +28,8 @@
 - The tree's search box takes :errors, :warnings and :problems (or any start of them, ":e"):
   typing highlights the matches, Enter selects them all.
 - Both skip an object hidden from the tree (ShowInTree off, or under a hidden parent) while the
-  document's "Show hidden" is off, and un-hide no row (review M1).
+  document's "Show hidden" is off, and un-hide no row (review M1). A failing sketch nested under
+  its Pad counts too: the Pad's or the Body's row may be the hidden one (ops#208).
 
 Designed model, built by the test (the reference solver on, V2):
 - Body: a 20 x 10 rectangle padded 10 ("Pad"), a fillet of radius 1 on its vertical edge at
@@ -47,6 +48,7 @@ import unittest
 
 import FreeCAD as App
 import FreeCADGui as Gui
+import Sketcher
 from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
@@ -247,6 +249,52 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertEqual(self.search(":e"), [])
         self.assertEqual(self.search(":problems"), ["Fillet"])
         self.assertStillHidden()
+
+    def addBadSketch(self, bodyName, sketchName, padName, x):
+        """A body whose Pad takes a sketch with two conflicting length constraints on one side:
+        the sketch fails (a problem inside a Pad's row), and so does the Pad."""
+        body = self.doc.addObject("PartDesign::Body", bodyName)
+        sketch = models.sketch(self.doc, sketchName, models.rectangle(x, 0, x + 10, 10), body)
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 20))
+        pad = models.pad(body, sketch, 10, padName)
+        self.doc.recompute()
+        pump()
+        self.assertIn("Invalid", sketch.State)
+        self.assertIn("Invalid", pad.State)
+        return body, sketch, pad
+
+    def testFailingSketchUnderHiddenBodyIsSkipped(self):
+        """A failing sketch nested under its Pad, in a Body hidden from the tree: the sketch's
+        top parent is itself (its row's parent is not a group), so only the Pad and Body rows
+        above it say it is out of sight (ops#208)."""
+        self.hideFromTree()
+        body, sketch, pad = self.addBadSketch("Body002", "BadSketch", "BadPad", 60)
+        body.ViewObject.ShowInTree = False
+        pump()
+        self.assertTrue({"Body002", "BadPad", "BadSketch"}.isdisjoint(visibleRows()))
+        self.assertEqual(self.step(), ["Fillet"])
+        self.assertEqual(self.step(False), ["Fillet"])
+        self.assertEqual(self.search(":e"), [])
+        self.assertEqual(self.search(":problems"), ["Fillet"])
+        self.assertTrue({"Body002", "BadPad", "BadSketch"}.isdisjoint(visibleRows()))
+        # "Show hidden" on: the sketch counts again
+        self.doc.ShowHidden = True
+        pump()
+        self.assertIn("BadSketch", self.search(":errors"))
+
+    def testFailingSketchUnderHiddenPadIsSkipped(self):
+        """The same with the Body shown and its Pad hidden from the tree."""
+        self.hideFromTree()
+        body, sketch, pad = self.addBadSketch("Body002", "BadSketch", "BadPad", 60)
+        pad.ViewObject.ShowInTree = False
+        pump()
+        rows = visibleRows()
+        self.assertIn("Body002", rows)
+        self.assertTrue({"BadPad", "BadSketch"}.isdisjoint(rows))
+        self.assertEqual(self.step(), ["Fillet"])
+        self.assertEqual(self.search(":e"), [])
+        self.assertTrue({"BadPad", "BadSketch"}.isdisjoint(visibleRows()))
 
     def testPreviousFindsAProblemMadeAMomentAgo(self):
         """Run right after the recompute, before the tree's pending update: the new object's row
