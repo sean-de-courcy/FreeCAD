@@ -11,8 +11,11 @@ redundancy are dropped.
 
 Each test draws a line with Sketcher_CreateLine, two clicks, the first on an end point of line 0
 (an automatic Coincident), the second where the new line is vertical or horizontal (an
-automatic Vertical or Horizontal).
+automatic Vertical or Horizontal); A6 starts on a line's extension, and A7 draws an arc by its
+centre, start and end.
 """
+
+import math
 
 import FreeCAD
 import Part
@@ -107,10 +110,14 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
 
     def draw_line(self, start, end):
         """Sketcher_CreateLine from sketch point start to end, by two clicks."""
+        self.draw("Sketcher_CreateLine", (start, end), "a line")
+
+    def draw(self, command, points, what):
+        """Run a drawing tool and click at each sketch point in turn."""
         before = self.sketch.GeometryCount
-        FreeCADGui.runCommand("Sketcher_CreateLine")
+        FreeCADGui.runCommand(command)
         self.flush_gui(150)
-        for x, y in (start, end):
+        for x, y in points:
             # The first move can change the tool's panel and with it the viewport's size: map
             # again after it settles.
             self.move(self.viewport, self.screen_point(x, y))
@@ -121,7 +128,7 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
             self.flush_gui(200)
         self.assertTrue(
             self.wait_until(lambda: self.sketch.GeometryCount == before + 1, 2000),
-            "Expected the line tool to add a line",
+            f"Expected {command} to add {what}",
         )
         self.flush_gui(150)
 
@@ -145,10 +152,13 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         return False
 
     def describe(self):
-        """The constraints and the lines' ends, for failure messages."""
+        """The constraints and the curves' ends (a circle itself), for failure messages."""
         return [
             (c.Type, c.First, c.FirstPos, c.Second, c.SecondPos) for c in self.sketch.Constraints
-        ] + [(g.StartPoint, g.EndPoint) for g in self.sketch.Geometry]
+        ] + [
+            (g.StartPoint, g.EndPoint) if hasattr(g, "StartPoint") else g
+            for g in self.sketch.Geometry
+        ]
 
     # Models ----------------------------------------------------------------------------------
 
@@ -264,25 +274,69 @@ class TestAutoConstraintsGui(SketcherGuiTestCase):
         self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)
 
     def test_a6_independent_point_on_object_kept_when_the_solver_renames_an_old_redundancy(self):
-        """A6 (ops#223): line 0 with three Horizontal constraints (the sketch names one of them
-        redundant), then line 1 from (3, 2), on line 0 (not its midpoint, which would give a Symmetric), to
-        (7, 9): an automatic PointOnObject
-        of line 1's start on line 0. It fixes the start's height, an equation of its own, but
-        with it the solver names another of line 0's Horizontals. A one-equation constraint
-        that lowers the DoF by one is kept whatever old constraint the solver names. Drawn
-        this way the drawing tool's diagnosis names the same Horizontal as before (a full
-        solve with the constraint appended names another), so the one-diagnosis skip keeps it:
-        this guards the outcome, not yet the renamed case."""
+        """A6 (ops#223, item 2 of the PR 203 review): line 0 from (0, 2) to (10, 2) with three
+        Horizontal constraints (the solver names one of them redundant), then line 1 from
+        (13, 2), on line 0's extension, to (16, 8): an automatic PointOnObject of line 1's start
+        on line 0 (the line-extension hint). It fixes the start's height, an equation of its own
+        (the DoF falls by one), but with it the solver names another of line 0's Horizontals
+        than the sketch alone does. The tool kept an autoconstraint only if the solver named
+        nothing but the old redundant constraints, so it dropped this one; a one-equation
+        autoconstraint that lowers the DoF by one is now kept whatever old constraint the
+        solver names."""
         self.add_horizontal_line(3)
         self.assertEqual(len(self.sketch.RedundantConstraints), 1)
         self.start_edit()
-        self.draw_line((3, 2), (7, 9))
+        self.draw_line((13, 2), (16, 8))
 
+        line = self.sketch.Geometry[1]
+        # the hint snaps the start onto the extension's line; along it, the click lands near
+        # x = 13 (12.98 off screen), past line 0's end, which is what moves the solver's choice
+        self.assertAlmostEqual(line.StartPoint.y, 2, delta=1e-7, msg="Line 1's start")
+        self.assertAlmostEqual(line.StartPoint.x, 13, delta=0.5, msg="Line 1's start")
         self.assertTrue(
             self.has_constraint("PointOnObject", 1, 1, 0),
-            f"Expected line 1's start on line 0, got {self.describe()}",
+            f"Expected line 1's start on line 0's extension, got {self.describe()}",
         )
         self.assertEqual(len(self.sketch.Constraints), 4, f"Got {self.describe()}")
         self.sketch.solve()
         self.assertEqual(len(self.sketch.RedundantConstraints), 1, f"Got {self.describe()}")
+        self.assertEqual(list(self.sketch.ConflictingConstraints), [])
+
+    def test_a7_coincident_kept_before_a_point_on_object_sharing_its_dependency(self):
+        """A7 (ops#223, L3 of ops#204): line 0 with two Horizontal constraints (redundant before
+        the tool runs); arc 1, centre (5, 9), radius 4 (a Radius), from 60 to 180 degrees; point
+        2 at (9, 9), 4 from arc 1's centre (a Distance), off the arc. Then an arc by its centre
+        (arc 1's centre), its start (5, 13) on arc 1 and its end at point 2: an automatic
+        Coincident of the centres, a PointOnObject of the start on arc 1 and a Coincident of
+        the end with point 2, in that order. Each of the PointOnObject and the end's Coincident
+        sets the new radius to 4, so one equation is redundant. Tried in their order, the
+        PointOnObject is kept and the solver then blames it for the end's Coincident, which is
+        dropped; the tool tries the two-equation Coincidents first, so both are kept, only the
+        PointOnObject is dropped, and the sketch keeps only its own (old) redundancy."""
+        self.add_horizontal_line(2)
+        circle = Part.Circle(V(5, 9, 0), V(0, 0, 1), 4)
+        self.sketch.addGeometry(Part.ArcOfCircle(circle, math.radians(60), math.pi), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Radius", 1, 4))
+        self.sketch.addGeometry(Part.Point(V(9, 9, 0)), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Distance", 2, 1, 1, 3, 4))
+        self.doc.recompute()
+        old_redundant = list(self.sketch.RedundantConstraints)
+        self.assertEqual(len(old_redundant), 1)
+        self.start_edit()
+        self.draw("Sketcher_CreateArc", ((5, 9), (5, 13), (9, 9)), "an arc")
+
+        self.assertTrue(self.has_constraint("Coincident", 3, 3, 1, 3), f"Got {self.describe()}")
+        ends = [pos for pos in (1, 2) if (self.sketch.getPoint(3, pos) - V(9, 9, 0)).Length < 1e-6]
+        self.assertEqual(len(ends), 1, f"Expected an arc end at (9, 9), got {self.describe()}")
+        self.assertTrue(
+            self.has_constraint("Coincident", 3, ends[0], 2, 1),
+            f"Expected the arc's end on point 2, got {self.describe()}",
+        )
+        self.assertFalse(
+            any(c.Type == "PointOnObject" and c.First == 3 for c in self.sketch.Constraints),
+            f"Got {self.describe()}",
+        )
+        self.assertEqual(len(self.sketch.Constraints), 6, f"Got {self.describe()}")
+        self.sketch.solve()
+        self.assertEqual(list(self.sketch.RedundantConstraints), old_redundant)
         self.assertEqual(list(self.sketch.ConflictingConstraints), [])
