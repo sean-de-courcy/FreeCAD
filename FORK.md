@@ -214,7 +214,8 @@ names it.
 | `feat/194-keymap-d` | feat | ops#194 | - | fork PR 170's head `f5186e0a21` (stacked) | `45ca797def` (fork PR 178), 2026-10-08 | never (fork feature); refit when upstream changes the sketch handlers' key handling (`registerPressedKey`), the tool widgets' labels or the mapped commands' names |
 | `fix/184-originals-3d-pick` | fix | ops#184 | - | `integration` `b4a8adad3f` | `e8ad709d94` (fork PR 187), 2026-10-08 | never (fork feature: the Originals field is the fork's) |
 | `feat/194-keymap-b` | feat | ops#194 | - | fork PR 178's head `0a839ecc4b` (stacked) | `2d2c878f05` (fork PR 185), 2026-10-08 | never (fork feature); refit when upstream adds commands with these names or keys, or changes the mapped commands' names |
-| `feat/194-keymap-c` | feat | ops#194 | - | fork PR 185's head (stacked) | (fork PR 189) | never (fork feature); refit when upstream changes `Std_ClarifySelection`'s picking or adds a command on the backtick |
+| `feat/194-keymap-c` | feat | ops#194 | - | fork PR 185's head (stacked) | `dd587e77db` (fork PR 189), 2026-10-08 | never (fork feature); refit when upstream changes `Std_ClarifySelection`'s picking or adds a command on the backtick |
+| `fix/182-187-189-pattern-minors` | fix | ops#182, ops#187, ops#189, ops#212 | - | `integration` `06ab4c32e5` | (fork PR 184) | when upstream keeps the shown feature by a weak pointer and computes an empty pattern in its edit (ops#182 is fork code: the roll-back bar) |
 
 ## Fork-only commits in carried topics
 

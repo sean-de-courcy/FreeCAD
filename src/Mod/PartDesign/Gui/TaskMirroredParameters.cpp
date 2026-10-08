@@ -210,7 +210,9 @@ void TaskMirroredParameters::onUpdateView(bool on)
         App::DocumentObject* obj = nullptr;
 
         getMirrorPlane(obj, mirrorPlanes);
-        if (!isSameLink(pcMirrored->MirrorPlane, obj, mirrorPlanes)) {
+        // The empty entry is a pending "Select reference...": the pick goes on, and the plane
+        // stays until it is made (it was set to None, ops#189)
+        if (obj && !isSameLink(pcMirrored->MirrorPlane, obj, mirrorPlanes)) {
             pcMirrored->MirrorPlane.setValue(obj, mirrorPlanes);
         }
 
@@ -241,6 +243,9 @@ void TaskMirroredParameters::apply()
 
 void TaskMirroredParameters::onReferencesRepaired()
 {
+    // The box shows the repaired plane with "Update view" off too, or OK's apply() writes the old
+    // one back (ops#189)
+    Base::StateLocker unblock(blockUpdate, false);
     updateUI();
 }
 

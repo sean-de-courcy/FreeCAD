@@ -2075,12 +2075,23 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testPatternOriginalsArmOnOpen(self):
         """T1: an edit of a linear pattern with no originals arms its Originals field (no Add and
-        Remove buttons); a pick of a bump in the tree adds it. (A pattern that opens with none
-        doesn't recompute until the edit ends: the edit's roll-back point takes it for a
-        MultiTransform's step, ops#182; so no volume here.)"""
+        Remove buttons); a pick of a bump in the tree adds it, and the pattern computes during
+        the edit (ops#182: the edit's roll-back point took it for a MultiTransform's step and
+        held it until the edit ended). A bump made after the pattern stays held during the edit,
+        and the pattern doesn't (ops#212)."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [])
+        after = self.doc.addObject("PartDesign::AdditiveBox", "After")
+        self.body.addObject(after)
+        for prop in ("Length", "Width", "Height"):
+            setattr(after, prop, 1)
+        after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
+        self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
+        self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
+        self.assertFalse(self.body.holds(pattern), "the pattern in edit is held")
         self.assertEqual(field.objectName(), "fieldOriginals")
         self.assertTrue(waitFor(lambda: armed(field)), "the empty Originals field isn't armed")
         for name in ("buttonAddFeature", "buttonRemoveFeature"):
@@ -2091,6 +2102,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.names(field), [first.Name])
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
+        self.assertVolume(pattern, 1003)
+        self.assertTrue(self.body.holds(after), "the pick released the feature after the pattern")
+        self.assertFalse(self.body.holds(pattern))
 
     def testPatternOriginalsPicksToggle(self):
         """T2: with the field armed, a pick of a face of the second bump adds it, a pick of the
@@ -2654,12 +2668,33 @@ class TestReferenceFieldGui(unittest.TestCase):
         multi.Transformations = [sub]
         self.doc.recompute()
         self.assertAlmostEqual(multi.Shape.Volume, 1004, places=6)
+        # The body's shown feature is its first visible solid: the sub-feature, added last
+        # (ops#187's test deletes it; ops#212)
+        solids = [o for o in self.body.Group if o.isDerivedFrom("PartDesign::Feature")]
+        shown = [o for o in solids if o.Visibility]
+        self.assertEqual(shown, [sub], "the sub-feature isn't the body's shown feature")
         [field] = self.edit(multi)
         transforms = Gui.getMainWindow().findChild(QtWidgets.QListWidget, "listTransformFeatures")
         transforms.setCurrentRow(0)
         transforms.activated.emit(transforms.currentIndex())
         pump(0.3)
         return multi, sub, field
+
+    def testMultiTransformSubFeatureDeletedThenCancel(self):
+        """ops#187: the open sub-task's feature, the Mirrored (the body's shown feature when the
+        edit began), deleted from Python; then Cancel. The dialog closes and the document goes
+        on (the edit's end showed the deleted feature's view provider again: an access
+        violation)."""
+        multi, mirrored, field = self.multiTransform("PartDesign::Mirrored")
+        name = mirrored.Name
+        multi.Transformations = []
+        self.body.removeObject(mirrored)
+        self.doc.removeObject(name)
+        pump(0.3)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.doc.recompute()
+        self.assertTrue(multi.isValid(), multi.getStatusString())
 
     def testPatternReferencePickPendingThenOk(self):
         """ops#186 (2): "Select reference..." chosen and OK pressed without a pick: the
@@ -2777,6 +2812,93 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(
             mirrored.MirrorPlane[0].Name, models.originFeature(self.body, "XZ_Plane").Name
         )
+
+    # -- ops#189: Mirrored with "Update view" off ------------------------------------------------
+
+    def mirroredOnRedrawnPad(self):
+        """The redrawn pad mirrored on its right face, x = 20 (4000 mm^3), the face guessed after
+        the redraw: the References panel lists MirrorPlane. Returns the Mirrored, the panel, and
+        the pad's left face (x = 0) by its name now."""
+        body, pad = self.redrawnPad()
+        right = face(normal=(1, 0, 0))
+        mirrored = self.doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [pad]
+        mirrored.MirrorPlane = (pad, right.one(pad.Shape))
+        body.addObject(mirrored)
+        self.doc.recompute()
+        self.assertAlmostEqual(mirrored.Shape.Volume, 4000, places=3)
+        self.redraw()
+        self.doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        rows = {(e["property"], e["index"]) for e in App.getReferenceReport(mirrored)}
+        self.assertIn(("MirrorPlane", 0), rows)
+        [field] = self.edit(mirrored)
+        tree = Gui.getMainWindow().findChild(QtWidgets.QTreeWidget, "references")
+        self.assertTrue(tree is not None and tree.isVisible(), "no References panel")
+        [left] = face(normal=(-1, 0, 0)).one(pad.Shape)
+        return mirrored, pad, field, tree, left
+
+    def updateView(self, on):
+        update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
+        update.setChecked(on)
+        pump(0.1)
+
+    def testMirroredUpdateViewOffReferencesRepaired(self):
+        """ops#189 (1): "Update view" off, the References panel repairs MirrorPlane to the
+        pad's left face: the box shows it, and OK keeps it (the box kept the old face, which
+        OK wrote back)."""
+        mirrored, pad, field, tree, left = self.mirroredOnRedrawnPad()
+        self.updateView(False)
+        tree.setCurrentItem(tree.topLevelItem(0))
+        pick = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonPick")
+        pick.click()
+        pump(0.3)
+        self.pick(pad, left)
+        self.assertTrue(
+            waitFor(lambda: mirrored.MirrorPlane[1] == [left]), "the panel didn't repair the plane"
+        )
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertLink(mirrored.MirrorPlane, pad, [left])
+
+    def testMirroredUpdateViewOnDuringAPick(self):
+        """ops#189 (2): "Update view" off, "Select reference..." chosen, then "Update view" on:
+        the plane stays (it was set to None from the empty entry)."""
+        first, second = self.bumps()
+        mirrored = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(mirrored)
+        self.updateView(False)
+        self.selectReference("comboPlane")
+        self.updateView(True)
+        yz = models.originFeature(self.body, "YZ_Plane")
+        self.assertIsNotNone(mirrored.MirrorPlane, "Update view on cleared the plane")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, yz.Name)
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, yz.Name)
+
+    def testMirroredUpdateViewOffPlaneChosenThenOtherPaths(self):
+        """ops#189 (3): "Update view" off, the XZ plane chosen in the box; then the Originals
+        field armed and the References panel's Re-pick, both of which end a pending pick: the
+        box keeps XZ, and OK writes it."""
+        mirrored, pad, field, tree, left = self.mirroredOnRedrawnPad()
+        self.updateView(False)
+        self.choosePlane("Base XZ-plane")
+        self.arm(field, byFocus=False)
+        pump(0.2)
+        tree.setCurrentItem(tree.topLevelItem(0))
+        pick = Gui.getMainWindow().findChild(QtWidgets.QPushButton, "buttonPick")
+        pick.click()
+        pump(0.3)
+        [combo] = [
+            c for c in Gui.getMainWindow().findChildren(QtWidgets.QComboBox, "comboPlane")
+            if c.isVisible()
+        ]
+        self.assertEqual(combo.currentText(), "Base XZ-plane")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
+        xz = models.originFeature(mirrored.getParentGeoFeatureGroup(), "XZ_Plane")
+        self.assertEqual(mirrored.MirrorPlane[0].Name, xz.Name)
 
     def testPreviewOpacitySliderEnds(self):
         """PR 156 review (7): the slider at 100 % makes the pocket's preview opaque and its tool

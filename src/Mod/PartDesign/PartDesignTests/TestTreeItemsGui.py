@@ -327,3 +327,62 @@ class TestTreeItemsGui(unittest.TestCase):
         self.delete(pad2)
         self.assertShown(self.pad)
         self.assertFalse(binder.Visibility, "the left-behind binder is shown")
+
+    # -- the shown feature at the end of an edit -------------------------------------------------
+
+    def addBox(self, name, x):
+        box = self.body.newObject("PartDesign::AdditiveBox", name)
+        for prop in ("Length", "Width", "Height"):
+            setattr(box, prop, 2)
+        box.Placement = App.Placement(App.Vector(x, 4, 10), App.Rotation())
+        self.doc.recompute()
+        self.assertTrue(box.isValid(), box.getStatusString())
+        return box
+
+    def editAndEnd(self, feature):
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.setEdit(feature.Name)
+        pump()
+        self.assertEqual(guiDoc.getInEdit().Object, feature)
+        guiDoc.resetEdit()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the panel stays")
+        pump()
+
+    def testEditOutsideABodyKeepsAnEarlierShownFeatureHidden(self):
+        """An edit ends by showing the feature the Body showed when it began. A feature edited in
+        a Body, then taken out of it and edited again, showed the Body's feature of its first edit
+        at the end of the second (ops#212: the remembered feature was set only with a Body)."""
+        box = self.addBox("Box", 2)
+        top = self.addBox("Top", 12)
+        self.assertShown(top)
+        self.editAndEnd(box)
+        self.assertShown(top)
+
+        self.body.removeObject(box)
+        self.doc.recompute()
+        self.assertNotIn(box, self.body.Group)
+        top.ViewObject.Visibility = False
+        box.ViewObject.Visibility = True
+        pump()
+        self.editAndEnd(box)
+        self.assertFalse(top.Visibility, "the edit outside the Body showed the Body's old feature")
+
+    def testDeletingTheShownFeatureDuringAnotherEdit(self):
+        """The shown last feature, with its own sketch, deleted while the first Pad is in edit
+        (ops#187 and ops#149 together): Cancel ends the edit without showing the deleted feature,
+        the Pad shows and the deleted feature's sketch stays hidden."""
+        pad2 = self.addSecondPad()
+        self.assertShown(pad2)
+        Gui.getDocument(self.doc.Name).setEdit(self.pad.Name)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
+        pump()
+        self.delete(pad2)
+        self.assertNotIn("Pad001", [o.Name for o in self.doc.Objects])
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump()
+        self.assertEqual(self.body.Tip, self.pad)
+        self.assertShown(self.pad)
+        sketch = self.doc.getObject("Sketch001")
+        self.assertFalse(sketch.Visibility, "the left-behind sketch is shown")
+        self.assertFalse(self.sketch.Visibility, "the Pad's sketch is shown after its edit")
