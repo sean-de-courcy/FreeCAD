@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <set>
+
 #include <QPixmap>
 #include <QCoreApplication>
 
@@ -189,6 +191,14 @@ public:
     /// Cancels the current tool action. Used by Esc, right click, and OVP cancel.
     virtual void cancelCurrentAction();
     virtual void registerPressedKey(bool pressed, int key);
+
+    /** FreeCAD-CH (ops#194 PR D): whether a key event is the tool's own key \a key (M switches the
+     * construction method, U/J/R/F the tool's options). Under the fork's keymap that is Ctrl+key,
+     * since the plain letters switch tools there (R, M, U); under FreeCAD's the plain key, as
+     * upstream. A release counts when this tool saw its press with Ctrl, so the release of the U
+     * that started this tool doesn't toggle its option. Call it once per event and key.
+     */
+    bool isToolKey(bool pressed, int key);
     virtual void pressRightButton(Base::Vector2d pos);
 
     virtual bool onSelectionChanged(const Gui::SelectionChanges&)
@@ -449,7 +459,15 @@ private:
     bool parallelPerpendicularRefFromEndpoint {false};
     int lastHoveredGeoId {Sketcher::GeoEnum::GeoUndef};
     QTimer* hoverTimer {nullptr};
+    std::set<int> toolKeysDown;  // isToolKey()
 };
+
+/// FreeCAD-CH (ops#194 PR D): a tool's own key in a hint: Ctrl+key under the fork's keymap
+Gui::InputHint::InputSequence toolKey(Gui::InputHint::UserInput key);
+
+/// FreeCAD-CH (ops#194 PR D): a tool option's label ending in its key, "Frame (J)": the key as
+/// the active keymap has it ("Frame (Ctrl+J)" under the fork's)
+QString toolKeyLabel(const QString& label);
 
 
 }  // namespace SketcherGui

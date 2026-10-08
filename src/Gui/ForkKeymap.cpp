@@ -56,6 +56,9 @@ const Entry table[] = {
     {"Std_BoxElementSelection", ""},
     {"Std_FreezeViews", ""},
     {"Std_ClarifySelection", ""},  // the context menu and long-press stay
+    // QKeySequence::Refresh is Ctrl+R first on macOS and GNOME (Qt's qplatformtheme.cpp), which is
+    // a sketch tool's own Ctrl+R (PR D), and Std_Refresh is ForEdit; F5 is its key on Windows
+    {"Std_Refresh", "F5"},
     // 3D view
     {"Std_ViewFront", "Shift+1"},
     {"Std_ViewRear", "Shift+2"},
@@ -129,13 +132,11 @@ const Entry table[] = {
     {"Sketcher_ConstrainHorVer", ""},
     {"Sketcher_CompConstrainRadDia", ""},
     {"Sketcher_Translate", ""},
-    // R, M and U (centre rectangle, trim, use) wait for PR D, which moves the sketch tools' own
-    // keys (M, U, J, R, F) off them first: a geometry tool stays enabled while another runs, so its
-    // key would take the running tool's (ops#194 PR D). Until then they have no key (their chords
-    // start with G).
-    {"Sketcher_CreateRectangle_Center", ""},
-    {"Sketcher_Trimming", ""},
-    {"Sketcher_Projection", ""},
+    // A geometry tool stays enabled while another runs, so these take the running tool's own
+    // M / U / R, which move to Ctrl+M / U / J / R / F (DrawSketchHandler::isToolKey(), PR D)
+    {"Sketcher_CreateRectangle_Center", "R"},
+    {"Sketcher_Trimming", "M"},
+    {"Sketcher_Projection", "U"},
     // The G, ... and Z, ... chords of the sketch tools Onshape has no key for
     {"Sketcher_CompLine", ""},
     {"Sketcher_CreateLine", ""},
@@ -192,8 +193,7 @@ const Entry table[] = {
     {"Sketcher_SwitchVirtualSpace", ""},
     // Other workbenches' chords starting with an Onshape key: once such a workbench is loaded, the
     // key would wait for the chord everywhere (ShortcutManager counts every enabled action). Most
-    // are Python commands, whose key PythonCommand::getAccel() asks of this table. Chords starting
-    // with R, M or U go with those keys in PR D.
+    // are Python commands, whose key PythonCommand::getAccel() asks of this table.
     // Draft
     {"Draft_Arc", ""},
     {"Draft_Arc_3Points", ""},
@@ -259,6 +259,32 @@ const Entry table[] = {
     {"IFC_Diff", ""},
     {"IFC_Expand", ""},
     {"IFC_MakeProject", ""},
+    // Draft, BIM and FEM: starting with R, M or U (PR D)
+    {"Draft_Mirror", ""},
+    {"Draft_Move", ""},
+    {"Draft_Rectangle", ""},
+    {"Draft_Rotate", ""},
+    {"Draft_Upgrade", ""},
+    {"Arch_Material", ""},
+    {"Arch_MultiMaterial", ""},
+    {"Arch_Rebar", ""},
+    {"Arch_Roof", ""},
+    {"BIM_Material", ""},
+    {"BIM_Rewire", ""},
+    {"FEM_MaterialSolid", ""},
+    {"FEM_ResultShow", ""},
+    {"FEM_ResultsPurge", ""},
+    // Assembly's single letters that are the fork's keys (PLAN.md decision 31: the fork's keys
+    // win). Its joint commands are ForEdit and an active assembly counts as an edit, so the tie
+    // rule gave them F (fit), Z (zoom out), W (box zoom) and Y (hide). The BOM's O is ForEdit and
+    // always enabled once Assembly has loaded, sketch edit included, where it took the O of
+    // Sketcher_Offset (or made it wait the chord timeout). Assembly's other commands are disabled
+    // while a task dialog is open (a sketch in edit has one), so their letters meet no fork key.
+    {"Assembly_CreateJointFixed", ""},
+    {"Assembly_SolveAssembly", ""},
+    {"Assembly_CreateJointScrew", ""},
+    {"Assembly_CreateJointRigidGroup", ""},
+    {"Assembly_CreateBom", ""},
     // FEM (F, G), and Robot's single A and W (the arc and the box zoom)
     {"FEM_PostFilterGlyph", ""},
     {"Robot_InsertWaypoint", ""},

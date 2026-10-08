@@ -268,7 +268,7 @@ public:
             {{.state = SelectMode::SeekFirst,
               .hints
               = {{tr("%1 pick edge to trim", "Sketcher Trimming: hint"), {MouseLeft}},
-                 {tr("%1 toggle include axes as trim boundaries"), {KeyU}}}}}
+                 {tr("%1 toggle include axes as trim boundaries"), {toolKey(KeyU)}}}}}
         );
     }
 };

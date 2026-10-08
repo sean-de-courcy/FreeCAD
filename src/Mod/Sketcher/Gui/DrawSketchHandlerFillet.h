@@ -431,10 +431,13 @@ public:
     {
         using enum Gui::InputHint::UserInput;
 
-        const Gui::InputHint switchModeHint {.message = tr("%1 switch mode"), .sequences = {KeyM}};
+        const Gui::InputHint switchModeHint {
+            .message = tr("%1 switch mode"),
+            .sequences = {toolKey(KeyM)}
+        };
         const Gui::InputHint preserveCornerHint {
             .message = tr("%1 toggle preserve corner"),
-            .sequences = {KeyU}
+            .sequences = {toolKey(KeyU)}
         };
 
         return Gui::lookupHints<SelectMode>(

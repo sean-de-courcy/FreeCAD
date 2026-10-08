@@ -106,8 +106,9 @@ public:
 
     void registerPressedKey(bool pressed, int key) override
     {
+        // FreeCAD-CH (ops#194 PR D): Ctrl+M under the fork's keymap
         if (Mode == STATUS_SEEK_Second && key == SoKeyboardEvent::M && pressed
-            && previousCurve != -1) {
+            && previousCurve != -1 && isToolKey(pressed, key)) {
             // loop through the following modes:
             // SEGMENT_MODE_Line, TRANSITION_MODE_Free / TRANSITION_MODE_Tangent
             // SEGMENT_MODE_Line, TRANSITION_MODE_Perpendicular_L
@@ -809,7 +810,7 @@ private:
                      {
                          {tr("%1 pick next point"), {MouseLeft}},
                          {tr("%1 finish"), {MouseRight}},
-                         {tr("%1 switch mode"), {KeyM}},
+                         {tr("%1 switch mode"), {toolKey(KeyM)}},
                      }},
             });
         // clang-format on
@@ -1011,10 +1012,10 @@ private:
         const Gui::InputHint switchModeHint {
             constructionMethod() == ConstructionMethod::Line ? tr("%1 switch to arc")
                                                              : tr("%1 switch to line"),
-            {KeyM}
+            {toolKey(KeyM)}
         };
-        const Gui::InputHint filletHint {tr("%1 toggle fillet"), {KeyF}};
-        const Gui::InputHint undoHint {tr("%1 undo last point"), {KeyR}};
+        const Gui::InputHint filletHint {tr("%1 toggle fillet"), {toolKey(KeyF)}};
+        const Gui::InputHint undoHint {tr("%1 undo last point"), {toolKey(KeyR)}};
 
         return Gui::lookupHints<SelectMode>(
             state(),

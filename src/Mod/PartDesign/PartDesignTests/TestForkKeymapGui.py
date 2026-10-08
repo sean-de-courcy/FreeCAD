@@ -67,6 +67,7 @@ ONSHAPE = {
     "Std_BoxElementSelection": "",
     "Std_FreezeViews": "",
     "Std_ClarifySelection": "",
+    "Std_Refresh": "F5",  # QKeySequence::Refresh is Ctrl+R (a tool's own key) on macOS
     # 3D view
     "Std_ViewFront": "Shift+1",
     "Std_ViewRear": "Shift+2",
@@ -106,14 +107,14 @@ ONSHAPE = {
     "Sketcher_CreatePolyline": "L",
     "Sketcher_Create3PointArc": "A",
     "Sketcher_CreateCircle": "C",
-    "Sketcher_CreateRectangle_Center": "",  # R with ops#194 PR D
+    "Sketcher_CreateRectangle_Center": "R",
     "Sketcher_CreateRectangle": "G",
     "Sketcher_CreatePoint": "Shift+S",
     "Sketcher_CreateFillet": "Shift+F",
     "Sketcher_Offset": "O",
     "Sketcher_Extend": "X",
-    "Sketcher_Trimming": "",  # M with PR D (the tools' own M moves first)
-    "Sketcher_Projection": "",  # U with PR D
+    "Sketcher_Trimming": "M",  # the tools' own M / U / R are Ctrl+M / U / R (PR D)
+    "Sketcher_Projection": "U",
     "Sketcher_Intersection": "Shift+G",
     "Sketcher_ToggleConstruction": "Q",
     "Sketcher_ViewSketch": "N",
@@ -204,6 +205,16 @@ FREECAD = {
     "Sketcher_CreateRectangle": "G, R",
     "Sketcher_ConstrainParallel": "P",
     "Part_FaceSelection": "F, S",
+    "Std_Refresh": QtGui.QKeySequence(QtGui.QKeySequence.Refresh).toString(),
+}
+
+# Assembly's single letters that are the fork's keys: cleared (decision 31); upstream's
+ASSEMBLY_KEYS = {
+    "Assembly_CreateJointFixed": "F",
+    "Assembly_SolveAssembly": "Z",
+    "Assembly_CreateJointScrew": "W",
+    "Assembly_CreateJointRigidGroup": "Y",
+    "Assembly_CreateBom": "O",  # enabled in sketch edit too, beside Sketcher_Offset's O
 }
 
 # Pairs that share a key in upstream FreeCAD too, outside the keymap's commands: the tree's
@@ -214,7 +225,13 @@ UPSTREAM_CLASHES = [("Recompute Object", "Std_Recompute")]
 DRAW_STYLES = {"Std_DrawStyleAsIs": "V,1", "Std_DrawStyleShaded": "V,6"}
 
 # Draft's chords starting with an Onshape key, cleared (Python commands); upstream's keys
-DRAFT_CHORDS = {"Draft_Line": "L, I", "Draft_SelectPlane": "W, P", "Draft_Facebinder": "F, F"}
+DRAFT_CHORDS = {
+    "Draft_Line": "L, I",
+    "Draft_SelectPlane": "W, P",
+    "Draft_Facebinder": "F, F",
+    "Draft_Move": "M, V",  # R, M and U: PR D
+    "Draft_Rectangle": "R, E",
+}
 
 
 def pump(seconds=0.3):
@@ -313,10 +330,12 @@ def groupCommands():
             own = command(toolName).getAction() if command(toolName) else []
             if not own or not sameObject(own[0], tool):
                 continue
+        # the tool's action, not the command's getShortcut(): a Python group's tool (Assembly's
+        # Insert, Gears/Belt) may have no action of its own, and then its getShortcut() is ""
         groups[main[0].objectName()] = (
             main[0].shortcut().toString(),
             toolName,
-            Gui.Command.get(toolName).getShortcut(),
+            tool.shortcut().toString(),
         )
     return groups
 
@@ -788,6 +807,158 @@ class TestForkKeymapGui(unittest.TestCase):
         # ms steps
         self.assertLess(elapsed, 0.28)
 
+    def testRMUSwitchToolsWhileAToolRuns(self):
+        """In sketch edit with the corner rectangle running, M starts the trim tool, R the centre
+        rectangle and U the projection (use): Onshape's keys switch tools while a tool runs, as
+        the other tool keys do. The tools' own M, U, J, R, F are Ctrl+ (PR D)."""
+        keys = [
+            (QtCore.Qt.Key_M, "Sketcher_Trimming"),
+            (QtCore.Qt.Key_R, "Sketcher_CreateRectangle_Center"),
+            (QtCore.Qt.Key_U, "Sketcher_Projection"),
+        ]
+        for key, name in keys:
+            self.editSketch()
+            with self.watching("Sketcher_CreateRectangle") as started:
+                self.press(QtCore.Qt.Key_G)
+                self.assertTrue(waitFor(lambda: started), "G ran nothing")
+            pump(0.2)
+            with self.watching(name) as fired:
+                self.press(key)
+                self.assertTrue(waitFor(lambda: fired), f"{name} didn't run")
+            self.escapeTool()
+            Gui.ActiveDocument.resetEdit()
+            pump()
+
+    def toolOption(self, prefix):
+        boxes = [
+            b
+            for b in Gui.getMainWindow().findChildren(QtWidgets.QCheckBox)
+            if b.text().startswith(prefix) and b.isVisible()
+        ]
+        return boxes[0] if boxes else None
+
+    def checked(self, prefix):
+        """The tool option's state, None while it isn't shown; looked up each time, since a
+        toggle can rebuild the tool's widget."""
+        box = self.toolOption(prefix)
+        return box.isChecked() if box else None
+
+    def allCommands(self):
+        return [n for n in Gui.Command.listAll() if hasAction(n)]
+
+    def testCtrlKeyIsTheToolsOwn(self):
+        """With the rectangle running, Ctrl+U and Ctrl+J toggle its rounded corners and frame and
+        run no command, and the options' labels and the construction method's show Ctrl+U,
+        Ctrl+J and Ctrl+M; the plain J, which no shortcut takes, reaches the tool and leaves the
+        frame alone (the plain U, R, F and M are shortcuts); under FreeCAD's keymap the plain U
+        toggles the rounded corners, as upstream."""
+        self.editSketch()
+        self.press(QtCore.Qt.Key_G)
+        self.assertTrue(waitFor(lambda: self.toolOption("Rounded corners")), "no rectangle options")
+        rounded = self.toolOption("Rounded corners")
+        frame = self.toolOption("Frame")
+
+        def native(key):
+            return QtGui.QKeySequence(key).toString(QtGui.QKeySequence.NativeText)
+
+        self.assertTrue(rounded.text().endswith(f"({native('Ctrl+U')})"), rounded.text())
+        self.assertTrue(frame.text().endswith(f"({native('Ctrl+J')})"), frame.text())
+        modes = [
+            label.text()
+            for label in Gui.getMainWindow().findChildren(QtWidgets.QLabel)
+            if label.objectName() == "comboLabel1" and label.isVisible()
+        ]
+        self.assertEqual(modes, [f"Mode ({native('Ctrl+M')})"])
+
+        def options():
+            return (self.checked("Rounded corners"), self.checked("Frame"))
+
+        before = options()
+        with self.watching(*self.allCommands()) as fired:
+            self.press(QtCore.Qt.Key_J)
+            pump(0.4)
+            self.assertEqual(options(), before, "plain J")
+            self.press(QtCore.Qt.Key_U, QtCore.Qt.ControlModifier)
+            self.assertTrue(waitFor(lambda: options() == (not before[0], before[1])), "Ctrl+U")
+            self.press(QtCore.Qt.Key_J, QtCore.Qt.ControlModifier)
+            self.assertTrue(waitFor(lambda: options() == (not before[0], not before[1])), "Ctrl+J")
+            pump(0.4)
+        self.assertEqual(fired, [])
+        setKeymap("FreeCAD")
+        self.press(QtCore.Qt.Key_U)
+        self.assertTrue(
+            waitFor(lambda: options() == (before[0], not before[1])), "U under FreeCAD's"
+        )
+        self.escapeTool()
+
+    def testCtrlFAndRAreThePolylinesOwn(self):
+        """With the polyline running and the document needing a recompute, Ctrl+F toggles its
+        fillet option and Ctrl+R (undo the last point) runs no command: Std_Refresh is F5, not
+        QKeySequence::Refresh, which is Ctrl+R on macOS."""
+        self.editSketch()
+        self.assertTrue(same(shortcut("Std_Refresh"), "F5"), shortcut("Std_Refresh"))
+        self.press(QtCore.Qt.Key_L)
+        self.assertTrue(waitFor(lambda: self.toolOption("Fillet")), "no polyline options")
+        before = self.checked("Fillet")
+        self.body.touch()
+        with self.watching(*self.allCommands()) as fired:
+            self.press(QtCore.Qt.Key_F, QtCore.Qt.ControlModifier)
+            self.assertTrue(waitFor(lambda: self.checked("Fillet") == (not before)), "Ctrl+F")
+            self.press(QtCore.Qt.Key_R, QtCore.Qt.ControlModifier)
+            pump(0.4)
+        self.assertEqual(fired, [])
+        self.escapeTool()
+
+    def testFFitsTheViewInAssemblyEdit(self):
+        """In assembly edit, F fits the view, not a Fixed joint (Assembly's joints are ForEdit, so
+        the tie rule gave them F): Assembly's F, Z, W, Y and the BOM's O are cleared under the
+        fork's keymap, nothing clashes in assembly edit, and the keys are back under FreeCAD's.
+        An assembly of two boxes, in edit in the Assembly workbench."""
+        if "AssemblyWorkbench" not in Gui.listWorkbenches():
+            self.skipTest("no Assembly")
+        doc = App.newDocument("ForkKeymapAssembly")
+        try:
+            Gui.activateWorkbench("AssemblyWorkbench")
+            assembly = doc.addObject("Assembly::AssemblyObject", "Assembly")
+            for name in ("BoxA", "BoxB"):
+                assembly.addObject(doc.addObject("Part::Box", name))
+            doc.recompute()
+            Gui.ActiveDocument = Gui.getDocument(doc.Name)
+            Gui.ActiveDocument.setEdit(assembly.Name)
+            self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
+            fixed = Gui.Command.get("Assembly_CreateJointFixed").getAction()
+            self.assertTrue(waitFor(lambda: fixed and all(a.isEnabled() for a in fixed)))
+            for name in ASSEMBLY_KEYS:
+                self.assertEqual(shortcut(name), "", name)
+            with self.watching("Std_ViewFitAll", "Assembly_CreateJointFixed") as fired:
+                self.press(QtCore.Qt.Key_F)
+                self.assertTrue(waitFor(lambda: fired), "F ran nothing")
+                pump(0.4)
+            self.assertEqual(fired, ["Std_ViewFitAll"])
+            # the fork's general keys: the sketch's keys meet Assembly's letters only on actions
+            # that aren't reachable there (D: the sketch's dimension group, its toolbar hidden),
+            # and Assembly's letters meet upstream's own (S and Std_LinkSelectActions' S, G)
+            general = {
+                QtGui.QKeySequence(k).toString()
+                for n, k in ONSHAPE.items()
+                if k and not n.startswith("Sketcher_")
+            }
+            self.assertNoClashes("assembly edit", only=general)
+            setKeymap("FreeCAD")
+            wrong = [f"{n}: {shortcut(n)!r}" for n, k in ASSEMBLY_KEYS.items() if shortcut(n) != k]
+            self.assertEqual(wrong, [], "FreeCAD")
+        finally:
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            guiDoc = Gui.getDocument(doc.Name)
+            if guiDoc.getInEdit():
+                guiDoc.resetEdit()
+            pump()
+            App.closeDocument(doc.Name)
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+            Gui.activateWorkbench("PartDesignWorkbench")
+            pump()
+
     def editAndPress(self, key, typeName):
         self.editSketch()
         self.press(key, QtCore.Qt.ShiftModifier)
@@ -819,21 +990,27 @@ class TestForkKeymapGui(unittest.TestCase):
 
     # --- conflicts
 
-    def assertNoClashes(self, context, allowed=UPSTREAM_CLASHES):
+    def assertNoClashes(self, context, allowed=UPSTREAM_CLASHES, only=None):
         """No two enabled actions share a key, except a group with its default tool (the same
-        command), where the tie rule picks one (a Sketcher command against a general one, in
-        sketch edit), or where `allowed` lists the pair; and no enabled chord starts with an
-        enabled single key (that key would wait 300 ms)."""
+        command), where the tie rule picks one (in an edit, one Sketcher command against general
+        or Part Design ones, which aren't ForEdit where they share a key), or where `allowed`
+        lists the pair; and no enabled chord starts with an enabled single key (that key would
+        wait 300 ms). Another workbench's command beside a Sketcher one is a clash: it may be
+        ForEdit too (Assembly_CreateBom's O), and then the tie rule can't choose. With `only`
+        (key strings), just the clashes on those keys."""
         keys = enabledShortcuts()
         tools = {name: tool for name, (key, tool, toolKey) in groupCommands().items()}
         inEdit = Gui.ActiveDocument.getInEdit() is not None
         clashes = []
         for key, names in keys.items():
+            if only is not None and key not in only:
+                continue
             names = {n for n in names if tools.get(n) not in names}
             if len(names) < 2:
                 continue
             sketcher = [n for n in names if n.startswith("Sketcher_")]
-            if inEdit and len(sketcher) == 1:
+            general = [n for n in names if n.startswith(("Std_", "PartDesign_"))]
+            if inEdit and len(sketcher) == 1 and len(sketcher) + len(general) == len(names):
                 continue
             if frozenset(names) in {frozenset(a) for a in allowed}:
                 continue
@@ -843,6 +1020,8 @@ class TestForkKeymapGui(unittest.TestCase):
             sequence = QtGui.QKeySequence(key)
             if sequence.count() > 1:
                 first = QtGui.QKeySequence(sequence[0]).toString()
+                if only is not None and first not in only:
+                    continue
                 if first in singles:
                     clashes.append(f"{key} {sorted(names)} delays {first} {sorted(keys[first])}")
         self.assertEqual(clashes, [], context)
@@ -853,9 +1032,21 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertNoClashes("PartDesign")
 
     def testNoClashesInSketchEdit(self):
+        """In sketch edit, and again with an edge selected, which enables the commands that work
+        on geometry (Sketcher_Offset's O met Assembly_CreateBom's only then). Assembly loaded
+        first: its commands stay registered and enabled in Part Design."""
+        if "AssemblyWorkbench" in Gui.listWorkbenches():
+            Gui.activateWorkbench("AssemblyWorkbench")
+            Gui.activateWorkbench("PartDesignWorkbench")
+            pump()
         self.editSketch()
         pump(0.5)
         self.assertNoClashes("sketch edit")
+        Gui.Selection.addSelection(self.doc.Name, self.sketch.Name, "Edge1")
+        offset = Gui.Command.get("Sketcher_Offset").getAction()
+        self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in offset)), "Offset stays off")
+        pump(0.5)
+        self.assertNoClashes("sketch edit, an edge selected")
 
 
 if __name__ == "__main__":

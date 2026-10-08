@@ -40,6 +40,7 @@
 #include <Base/Exception.h>
 
 
+#include "DrawSketchHandler.h"
 #include "ViewProviderSketch.h"
 
 #include "SketcherToolDefaultWidget.h"
@@ -55,6 +56,8 @@ SketcherToolDefaultWidget::SketcherToolDefaultWidget(QWidget* parent)
     , blockParameterFocusPassing(false)
 {
     ui->setupUi(this);
+    // FreeCAD-CH (ops#194 PR D): "Mode (M)" shows the active keymap's key
+    ui->comboLabel1->setText(toolKeyLabel(ui->comboLabel1->text()));
 
     ui->comboBox1->setMaxVisibleItems(25);
     ui->comboBox2->setMaxVisibleItems(25);
@@ -661,7 +664,8 @@ void SketcherToolDefaultWidget::setCheckboxChecked(int checkboxindex, bool check
 void SketcherToolDefaultWidget::setCheckboxLabel(int checkboxindex, const QString& string)
 {
     if (checkboxindex < nCheckbox) {
-        getCheckBox(checkboxindex)->setText(string);
+        // FreeCAD-CH (ops#194 PR D): "Frame (J)" shows the active keymap's key
+        getCheckBox(checkboxindex)->setText(toolKeyLabel(string));
     }
 }
 
@@ -797,7 +801,7 @@ void SketcherToolDefaultWidget::setComboboxIndex(int comboboxindex, int value)
 void SketcherToolDefaultWidget::setComboboxLabel(int comboboxindex, const QString& string)
 {
     if (comboboxindex < nCombobox) {
-        getComboBoxLabel(comboboxindex)->setText(string);
+        getComboBoxLabel(comboboxindex)->setText(toolKeyLabel(string));
     }
 }
 
@@ -967,6 +971,7 @@ void SketcherToolDefaultWidget::changeEvent(QEvent* ev)
     QWidget::changeEvent(ev);
     if (ev->type() == QEvent::LanguageChange) {
         ui->retranslateUi(this);
+        ui->comboLabel1->setText(toolKeyLabel(ui->comboLabel1->text()));
     }
 }
 

@@ -94,7 +94,7 @@ private:
         using State = std::pair<ConstructionMethod, SelectMode>;
         using enum Gui::InputHint::UserInput;
 
-        const Gui::InputHint switchModeHint {tr("%1 switch mode"), {KeyM}};
+        const Gui::InputHint switchModeHint {tr("%1 switch mode"), {toolKey(KeyM)}};
 
         return Gui::lookupHints<State>(
             {constructionMethod(), state()},

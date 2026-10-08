@@ -427,11 +427,14 @@ private:
             constructionMethod() == ConstructionMethod::ControlPoints
                 ? tr("%1 switch to knots")
                 : tr("%1 switch to control points"),
-            {KeyM}
+            {toolKey(KeyM)}
         };
-        const Gui::InputHint periodicHint {tr("%1 toggle periodic"), {KeyF}};
-        const Gui::InputHint undoHint {tr("%1 undo last point"), {KeyR}};
-        const Gui::InputHint degreeHint {tr("%1/%2 increase/decrease degree"), {KeyU, KeyJ}};
+        const Gui::InputHint periodicHint {tr("%1 toggle periodic"), {toolKey(KeyF)}};
+        const Gui::InputHint undoHint {tr("%1 undo last point"), {toolKey(KeyR)}};
+        const Gui::InputHint degreeHint {
+            tr("%1/%2 increase/decrease degree"),
+            {toolKey(KeyU), toolKey(KeyJ)}
+        };
 
         return Gui::lookupHints<State>(
             {constructionMethod(), state()},
