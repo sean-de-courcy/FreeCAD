@@ -109,7 +109,8 @@ class TestTreeItemsGui(unittest.TestCase):
                 pump()
         if Gui.Control.activeDialog():
             Gui.Control.closeDialog()
-        if Gui.ActiveDocument and Gui.ActiveDocument.getInEdit():
+        # getInEdit() is None while another view is active; resetEdit() ends the edit anyway
+        if Gui.ActiveDocument:
             Gui.ActiveDocument.resetEdit()
         pump()
         App.closeDocument(self.doc.Name)
@@ -174,6 +175,7 @@ class TestTreeItemsGui(unittest.TestCase):
         self.assertEqual(self.styleOf("Pad"), (False, None), "the edit style stays after Cancel")
 
     def testNestedSketchInEditIsBold(self):
+        body = self.styleOf("Body")
         Gui.Selection.clearSelection()
         self.sketch.ViewObject.doubleClicked()
         pump()
@@ -181,9 +183,45 @@ class TestTreeItemsGui(unittest.TestCase):
         bold, colour = self.styleOf("Sketch")
         self.assertTrue(bold, "the sketch in edit isn't bold")
         self.assertEqual(colour, editColor().name())
+        self.assertEqual(self.styleOf("Pad"), (False, None), "the Pad isn't in edit")
+        self.assertEqual(self.styleOf("Body"), body, "the Body isn't in edit")
         Gui.ActiveDocument.resetEdit()
         pump()
         self.assertEqual(self.styleOf("Sketch"), (False, None))
+
+    def testItemMadeWhileAnotherViewIsActiveIsStyled(self):
+        """The sketch's item under the collapsed Pad is made after the edit started; a second 3D
+        view of the document is active by then, so Document.getInEdit() is None."""
+        Gui.Selection.clearSelection()
+        self.sketch.ViewObject.doubleClicked()
+        Gui.runCommand("Std_ViewCreate", 0)
+        pump()
+        self.assertIsNone(Gui.ActiveDocument.getInEdit(), "the editing view is still active")
+        self.assertEqual(self.styleOf("Sketch"), (True, editColor().name()))
+        Gui.ActiveDocument.resetEdit()
+        pump()
+        self.assertEqual(self.styleOf("Sketch"), (False, None))
+
+    def testSearchKeepsTheEditColour(self):
+        """The tree search paints its match yellow; ending the search painted the item's highlight
+        background back, also over the edit colour."""
+        Gui.Selection.clearSelection()
+        self.sketch.ViewObject.doubleClicked()
+        pump()
+        self.assertEqual(self.styleOf("Sketch"), (True, editColor().name()))
+        search = None
+        for edit in Gui.getMainWindow().findChildren(QtWidgets.QLineEdit):
+            parent = edit.parentWidget()
+            if parent and parent.metaObject().className() == "Gui::TreePanel":
+                search = edit
+                break
+        self.assertIsNotNone(search, "no tree search box")
+        search.setText("Sketch")
+        pump()
+        self.assertNotEqual(self.styleOf("Sketch")[1], editColor().name(), "no search match")
+        search.setText("")
+        pump()
+        self.assertEqual(self.styleOf("Sketch"), (True, editColor().name()))
 
     def testActiveBodyKeepsItsHighlightAfterAnEdit(self):
         """The edit end restored no background, so it wiped an active container's highlight: edit
@@ -197,6 +235,23 @@ class TestTreeItemsGui(unittest.TestCase):
         Gui.ActiveDocument.resetEdit()
         pump()
         self.assertEqual(self.styleOf("Body"), before)
+
+    def testActiveBodyChangingDuringAnEdit(self):
+        """Another Body made active while the first is in edit: the first keeps the edit style until
+        the edit ends, then shows neither highlight."""
+        active = self.styleOf("Body")
+        other = self.doc.addObject("PartDesign::Body", "Body001")
+        pump()
+        Gui.ActiveDocument.setEdit(self.body, 1)  # Transform
+        pump()
+        Gui.activeView().setActiveObject("pdbody", other)
+        pump()
+        self.assertEqual(self.styleOf("Body001"), active)
+        self.assertEqual(self.styleOf("Body"), (True, editColor().name()))
+        Gui.ActiveDocument.resetEdit()
+        pump()
+        self.assertEqual(self.styleOf("Body"), (False, None))
+        self.assertEqual(self.styleOf("Body001"), active)
 
     # -- visibility on delete --------------------------------------------------------------------
 

@@ -4877,18 +4877,16 @@ void DocumentItem::slotInEdit(const Gui::ViewProviderDocumentObject& v)
 void DocumentItem::slotResetEdit(const Gui::ViewProviderDocumentObject& v)
 {
     auto tree = getTree();
-    FOREACH_ITEM_ALL(item)
     if (tree->editingItem) {
-        if (item == tree->editingItem) {
-            item->setEditing(false);
-            break;
-        }
+        tree->editingItem->setEditing(false);
+        tree->editingItem = nullptr;
     }
-    else if (item->object() == &v) {
+    // The edited object's other items: those styled without an editingItem, or made later
+    FOREACH_ITEM(item, v)
+    if (item->editing) {
         item->setEditing(false);
     }
     END_FOREACH_ITEM
-    tree->editingItem = nullptr;
 }
 
 void DocumentItem::slotNewObject(const Gui::ViewProviderDocumentObject& obj)
@@ -4962,7 +4960,8 @@ bool DocumentItem::createNewItem(
     item->testStatus(true);
     // An item made after the edit started (a nested sketch under a collapsed feature) is styled
     // as the item in edit too (ops#149)
-    if (!getTree()->editingItem && document()->getInEdit() == &obj) {
+    // getEditViewProvider(): getInEdit() is null while another view is active
+    if (!getTree()->editingItem && document()->getEditViewProvider() == &obj) {
         item->setEditing(true, treeEditColor());
     }
 
@@ -6658,6 +6657,14 @@ DocumentObjectItem::~DocumentObjectItem()
         myData->rootItem = nullptr;
     }
 
+    // createNewItem() and slotResetEdit() read editingItem (ops#149)
+    if (myOwner) {
+        auto tree = myOwner->getTree();
+        if (tree && tree->editingItem == this) {
+            tree->editingItem = nullptr;
+        }
+    }
+
     if (myOwner && myData->items.empty()) {
         auto it = myOwner->_ParentMap.find(object()->getObject());
         if (it != myOwner->_ParentMap.end() && !it->second.empty()) {
@@ -6669,7 +6676,8 @@ DocumentObjectItem::~DocumentObjectItem()
 
 void DocumentObjectItem::restoreBackground()
 {
-    this->setBackground(0, this->bgBrush);
+    // The item in edit keeps the edit colour, e.g. after a tree search painted it (ops#149)
+    this->setBackground(0, editing ? QBrush(treeEditColor()) : this->bgBrush);
 }
 
 void DocumentObjectItem::setHighlight(bool set, Gui::HighlightMode high)
