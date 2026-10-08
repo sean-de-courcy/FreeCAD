@@ -46,11 +46,7 @@ TYPESYSTEM_SOURCE(App::Transaction, Base::Persistence)
 //**************************************************************************
 // Construction/Destruction
 
-// FreeCAD-CH (ops#152)
-void Transaction::openPendingTransaction(Document& doc)
-{
-    doc._checkTransaction(nullptr, nullptr, __LINE__);
-}
+// FreeCAD-CH (ops#152, ops#181): Transaction::openPendingTransaction is in Document.cpp.
 
 Transaction::Transaction(int id)
 {

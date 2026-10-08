@@ -792,6 +792,16 @@ bool Document::transacting() const
     return isPerformingTransaction() || d->committing;
 }
 
+// FreeCAD-CH (ops#152, ops#181): defined here for globalIsRelabeling. onBeforeChangeProperty's
+// guards: no transaction while rolling back, relabeling or defining one, as for the change itself.
+// The definingTransaction guard is defensive: a move has opened the target's transaction by then.
+void Transaction::openPendingTransaction(Document& doc)
+{
+    if (!doc.d->rollback && !globalIsRelabeling && !doc.d->definingTransaction) {
+        doc._checkTransaction(nullptr, nullptr, __LINE__);
+    }
+}
+
 void Document::_checkTransaction(DocumentObject* pcDelObj, const Property* What, int line)
 {
     // if no transaction open, open one!

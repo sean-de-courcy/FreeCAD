@@ -513,7 +513,9 @@ class TestSaveAndRename(VariablesBase):
 
     def test_rename_unchanged_object_redo_holds_keeps_redo(self):
         """The same, for an object in the redo stack that doesn't use the variable: nothing
-        changes there, so no transaction opens and the redo stack stays."""
+        changes there, so no transaction opens and the redo stack stays. Also the test for the
+        `ObjectIdentifier.cpp` crash (fork PR 148): the Box's `Width`, a reference to its own
+        property, resolved through its owner's null name while the redo stack held it."""
         varSet = self.addVarSet(Width=20)
         other = FreeCAD.newDocument("VarRenameRedoKept")
         self.extraDocs.append(other)
@@ -534,6 +536,58 @@ class TestSaveAndRename(VariablesBase):
         self.assertEqual(other.RedoCount, 1)
         other.redo()
         self.assertEqual(expressionText(other.getObject("Box"), "Length"), "Width * 2")
+
+    def test_rename_while_relabeling_keeps_redo_elsewhere(self):
+        """ops#181: changes made while a document is relabeled aren't recorded. A rename made then
+        (by an observer of the relabel), under an application transaction, changes a deleted Box
+        in another document that uses the variable: that document opens no transaction and keeps
+        its redo stack, and undoing the delete brings back the Box with the new name. (Known
+        limitation, upstream's rule: the rename's changes made during the relabel aren't recorded,
+        so they can't be undone.)"""
+        varSet = self.addVarSet(Width=20)
+        other = FreeCAD.newDocument("VarRenameRelabel")
+        self.extraDocs.append(other)
+        other.UndoMode = 1
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        self.doc.saveAs(os.path.join(self.tempDir, "variables.FCStd"))
+        other.saveAs(os.path.join(self.tempDir, "other.FCStd"))
+        box = other.addObject("Part::Box", "Box")
+        box.setExpression("Length", f"{self.doc.Name}#VarSet.Width * 2")
+        del box
+        other.openTransaction("Delete box")
+        other.removeObject("Box")
+        other.commitTransaction()
+        other.openTransaction("Extra")
+        other.addObject("App::FeaturePython", "Extra")
+        other.commitTransaction()
+        other.undo()
+        self.assertEqual((other.UndoCount, other.RedoCount), (1, 1))
+
+        docName = self.doc.Name
+
+        class RenameOnRelabel:
+            def slotRelabelDocument(self, doc):
+                if doc.Name == docName and "Width" in varSet.PropertiesList:
+                    varSet.renameProperty("Width", "BoxWidth")
+
+        observer = RenameOnRelabel()
+        FreeCAD.addDocumentObserver(observer)
+        # The application transaction books the active document: `other`, where it would open.
+        self.assertEqual(FreeCAD.ActiveDocument.Name, other.Name)
+        FreeCAD.setActiveTransaction("Relabel")
+        try:
+            self.doc.Label = "Relabeled"
+        finally:
+            FreeCAD.closeActiveTransaction()
+            FreeCAD.removeDocumentObserver(observer)
+        self.assertIn("BoxWidth", varSet.PropertiesList)
+        self.assertEqual((other.UndoCount, other.RedoCount), (1, 1))
+        self.assertEqual(other.UndoNames, ["Delete box"])
+
+        other.undo()
+        self.assertEqual(
+            expressionText(other.getObject("Box"), "Length"), f"{self.doc.Name}#VarSet.BoxWidth * 2"
+        )
 
     def buildDeletedSheet(self):
         """A VarSet variable used by a Box and a sheet cell (and a cell using that cell), then the

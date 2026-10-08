@@ -236,7 +236,8 @@ names it.
 | `fix/219-originals-pick-geometry` | fix | ops#219 | none (fork code, ops#150) | `integration` `d5e044c6a4` | `144785fdd0` (fork PR 202), 2026-10-08 | never (fork code) |
 | `fix/192-variables-text-hint` | fix | ops#192 | - | `integration` `fb2a4a9229` | `59652b168e` (fork PR 207), 2026-10-08 | never (fork feature: the Variables panel) |
 | `fix/210-lcs-element-global-placement` | fix | ops#210 | - | `integration` `ea0d025ff5` | `3e711888ba` (fork PR 208), 2026-10-08 | when upstream's `getGlobalPlacement` places a coordinate system's elements in it |
-| `fix/227-fem-axis-direction` | fix | ops#227 | - | `fix/210-lcs-element-global-placement` `dbfbb898d1` (stacked on fork PR 208) | (fork PR 209) | when upstream's FEM `Constraint::getDirection` takes an App::Line's direction along its base direction |
+| `fix/227-fem-axis-direction` | fix | ops#227 | - | `fix/210-lcs-element-global-placement` `dbfbb898d1` (stacked on fork PR 208) | `c5fd5fbf35` (fork PR 209), 2026-10-08 | when upstream's FEM `Constraint::getDirection` takes an App::Line's direction along its base direction |
+| `fix/178-181-rename-move-transactions` | fix | ops#178, ops#181 | - | `integration` `fb2a4a9229` | (fork PR 210) | Rename part: when upstream's `PropertyEditor` Rename joins a booked transaction and guards its commit; `openPendingTransaction`: never (fork code, fork PR 148) |
 
 ## Fork-only commits in carried topics
 
