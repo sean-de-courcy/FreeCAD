@@ -31,6 +31,7 @@
 #include <utility>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
@@ -557,22 +558,47 @@ TopoShape Revolved::tryToRevolveToFace(
     }
 
     // BRepFeat_MakeRevol needs a solid base, and its result holds the base besides the revolved
-    // tool. Without a solid before this feature, give it a unit box on the axis, and cut it out
-    // again below. The profile itself as the base, as makeElementPrismUntil() does for Pad, gives
-    // a null shape (ops#191).
+    // tool. Without a solid before this feature, give it a box on the axis, and cut it out again
+    // below. The profile itself as the base, as makeElementPrismUntil() does for Pad, gives a null
+    // shape (ops#191).
     // The box can't touch the tool: a rotation about the axis keeps each point's position along
     // the axis, so the whole sweep lies within |location - center| + diagonal / 2 of the axis
-    // location along it, and the box starts more than half a diagonal beyond that. A Groove
-    // without a base gets the same box: makeRemovedVolume() then fails and the tool itself
-    // becomes the result, as for a Groove by angle or a Pocket as the first feature.
+    // location along it, and the box starts more than half a diagonal beyond that.
+    // The box is also what BRepFeat trims an unbounded up-to face to (BRepFeat::FaceUntil: a
+    // square of 10 times the base's largest bounding box coordinate around the face's origin).
+    // A small box near the axis made that square miss part of the sweep: a loud failure, or a
+    // nearly full ring instead of a quarter (ops#239). So the box is centred radially on the
+    // axis, and its side is twice the distance from the global origin to anything involved:
+    // its largest coordinate then exceeds that distance in any direction.
+    // A Groove without a base gets the same box: makeRemovedVolume() then fails and the tool
+    // itself becomes the result, as for a Groove by angle or a Pocket as the first feature.
     TopoShape featureBase = base;
     if (featureBase.isNull()) {
         Base::BoundBox3d profile = sketchshape.getBoundBox();
         gp_Pnt center(profile.GetCenter().x, profile.GetCenter().y, profile.GetCenter().z);
-        double clearance = axis.Location().Distance(center) + profile.CalcDiagonalLength() + 1.0;
-        gp_Pnt corner = axis.Location().Translated(gp_Vec(axis.Direction()) * clearance);
-        featureBase = TopoShape(BRepPrimAPI_MakeBox(gp_Ax2(corner, axis.Direction()), 1.0, 1.0, 1.0)
-                                    .Shape());
+        const gp_Pnt& location = axis.Location();
+        double clearance = location.Distance(center) + profile.CalcDiagonalLength() + 1.0;
+        double faceReach = 0.0;
+        gp_Pln upToPlane;
+        if (upToFace.findPlane(upToPlane)) {
+            faceReach = upToPlane.Location().Distance(gp::Origin());
+        }
+        else {
+            Base::BoundBox3d faceBox = upToFace.getBoundBox();
+            if (faceBox.IsValid()) {
+                faceReach = faceBox.GetCenter().Length()
+                    + faceBox.CalcDiagonalLength() / 2.0;
+            }
+        }
+        double side = 2.0 * (location.Distance(gp::Origin()) + clearance + faceReach) + 2.0;
+        gp_Ax2 frame(location.Translated(gp_Vec(axis.Direction()) * clearance), axis.Direction());
+        gp_Pnt corner = frame.Location().Translated(
+            (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-side / 2.0)
+        );
+        featureBase = TopoShape(
+            BRepPrimAPI_MakeBox(gp_Ax2(corner, axis.Direction(), frame.XDirection()), side, side, side)
+                .Shape()
+        );
     }
 
     auto makeRevolution = [&](Part::RevolMode mode, Standard_Boolean modify) {
