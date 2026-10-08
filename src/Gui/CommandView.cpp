@@ -4253,6 +4253,11 @@ void StdCmdIsolate::activated(int /*iMsg*/)
         }
         keep.insert(path.begin(), path.end() - 1);
         keepWithContents(path.back(), keep);
+        // a selection without a path (an object picked in the tree) keeps the groups it is in
+        for (App::DocumentObject* group = App::GroupExtension::getGroupOfObject(sel.pObject);
+             group && keep.insert(group).second;
+             group = App::GroupExtension::getGroupOfObject(group)) {
+        }
     }
     if (keep.empty()) {
         return;

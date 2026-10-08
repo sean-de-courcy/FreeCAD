@@ -2888,11 +2888,14 @@ public:
 namespace
 {
 
+/// The object's view provider; none for the one in edit (hiding the sketch being edited, or the
+/// datum plane in its panel, would pull it from under the user)
 Gui::ViewProvider* viewProviderOf(App::DocumentObject* obj)
 {
     Gui::Document* guiDoc = obj ? Gui::Application::Instance->getDocument(obj->getDocument())
                                 : nullptr;
-    return guiDoc ? guiDoc->getViewProvider(obj) : nullptr;
+    Gui::ViewProvider* vp = guiDoc ? guiDoc->getViewProvider(obj) : nullptr;
+    return vp && vp != guiDoc->getInEdit() ? vp : nullptr;
 }
 
 /// Hides them all when one is shown, else shows them all

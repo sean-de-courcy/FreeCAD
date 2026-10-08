@@ -66,6 +66,7 @@
 #include "Control.h"
 #include "Document.h"
 #include "ExpressionCompleter.h"
+#include "ForkKeymap.h"
 #include "Macro.h"
 #include "MainWindow.h"
 #include "MenuManager.h"
@@ -2313,7 +2314,10 @@ bool TreeWidget::event(QEvent* e)
 {
     if (e->type() == QEvent::ShortcutOverride) {
         auto ke = static_cast<QKeyEvent*>(e);
-        if (ke->key() == Qt::Key_Space && ke->modifiers() == Qt::NoModifier) {
+        // FreeCAD-CH (ops#194 PR B): under the fork's keymap Space is Std_ClearSelection's, which
+        // the tree leaves to the shortcut
+        if (ke->key() == Qt::Key_Space && ke->modifiers() == Qt::NoModifier
+            && !ForkKeymap::isOnshape()) {
             // Claim the Space key so Qt does not fire the global
             // Std_ToggleVisibility
             ke->accept();
@@ -2441,7 +2445,8 @@ void TreeWidget::keyPressEvent(QKeyEvent* event)
         }
     }
 
-    else if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier) {
+    else if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier
+             && !ForkKeymap::isOnshape()) {
         // Toggle each selected feature's own visibility directly
         for (auto* raw : selectedItems()) {
             if (raw->type() != ObjectType) {
