@@ -131,11 +131,21 @@ class TestObjectCreate(unittest.TestCase):
         lcs.Placement = FreeCAD.Placement(
             FreeCAD.Vector(3, 4, 5), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
         )
-        [plane] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
-        force = ObjectsFem.makeConstraintForce(doc)
-        force.Direction = (plane, [""])
-        doc.recompute()
-        self.assertLess(force.DirectionVector.sub(FreeCAD.Vector(1, 0, 0)).Length, 1e-9)
+        # The axes run along the coordinate system's X, Y and Z, turned by both: X along +Y in
+        # the document, Y along +Z, Z along +X; an axis pointed along Z whatever its role
+        # (FreeCAD-CH ops#227)
+        expected = {
+            "XY_Plane": FreeCAD.Vector(1, 0, 0),
+            "X_Axis": FreeCAD.Vector(0, 1, 0),
+            "Y_Axis": FreeCAD.Vector(0, 0, 1),
+            "Z_Axis": FreeCAD.Vector(1, 0, 0),
+        }
+        for role, direction in expected.items():
+            [element] = [f for f in lcs.OriginFeatures if f.Role == role]
+            force = ObjectsFem.makeConstraintForce(doc)
+            force.Direction = (element, [""])
+            doc.recompute()
+            self.assertLess(force.DirectionVector.sub(direction).Length, 1e-9, role)
 
 
 # ************************************************************************************************

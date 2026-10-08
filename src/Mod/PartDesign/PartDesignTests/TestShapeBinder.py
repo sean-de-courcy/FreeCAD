@@ -312,6 +312,15 @@ class TestShapeBinderOfACoordinateSystem(unittest.TestCase):
         [axis] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "Z_Axis"]
         expected = self.bodyPlacement.multiply(axis.Placement)
         self.assertTrue(axis.getGlobalPlacement().isSame(expected, 1e-9))
+        # A coordinate system at the document root, in no group: coordinate system, element
+        # (FreeCAD-CH ops#227)
+        free = self.Doc.addObject("Part::LocalCoordinateSystem", "FreeLCS")
+        free.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-2, 6, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 30)
+        )
+        [element] = [f for f in free.OriginFeatures if f.Role == "Z_Axis"]
+        expected = free.Placement.multiply(element.Placement)
+        self.assertTrue(element.getGlobalPlacement().isSame(expected, 1e-9))
 
     def testTracedBinderInAnotherBody(self):
         """A traced ShapeBinder of the plane, in a second body placed elsewhere: the plane stays

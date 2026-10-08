@@ -531,7 +531,15 @@ const Base::Vector3d Constraint::getDirection(const App::PropertyLinkSub& direct
     }
     Base::Rotation rot = obj->globalPlacement().getRotation();
     if (obj->isDerivedFrom<App::DatumElement>() || obj->isDerivedFrom<Part::Datum>()) {
-        return rot.multVec(Base::Vector3d(0, 0, 1));
+        // A plane's normal; an App::Line runs along its base direction, X (FreeCAD-CH ops#227).
+        // A point has none and keeps Z
+        Base::Vector3d dir(0, 0, 1);
+        if (const auto* element = Base::freecad_cast<App::DatumElement*>(obj)) {
+            if (element->getBaseDirection().Length() > 0) {
+                dir = element->getBaseDirection();
+            }
+        }
+        return rot.multVec(dir);
     }
 
     if (!obj->isDerivedFrom<Part::Feature>()) {
