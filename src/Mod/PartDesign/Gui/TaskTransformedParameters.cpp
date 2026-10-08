@@ -101,8 +101,8 @@ void TaskTransformedParameters::setupUI()
     // Get the feature data
     auto pcTransformed = getObject<PartDesign::Transformed>();
 
-    // The Originals: a pick of a feature in the tree adds it or takes it out (a pick in the 3D
-    // view takes the base feature shown there)
+    // The Originals: a pick of a feature in the tree adds it or takes it out, and so does a pick
+    // of an element in the 3D view, for the feature that made the element (ops#184)
     // (ops#150 W4; B6: the entries are objects, not Labels)
     ReferenceField::Options options;
     options.kind = ReferenceField::Kind::Objects;

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <list>
 #include <map>
 #include <optional>
 
@@ -47,6 +48,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
+#include <App/MappedElement.h>
 #include <App/PropertyLinks.h>
 #include <App/PropertyStandard.h>
 #include <App/ReferenceReport.h>
@@ -64,6 +66,7 @@
 #include <Mod/Part/Gui/ReferenceHighlighter.h>
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureSketchBased.h>
 
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
@@ -174,6 +177,12 @@ public:
                 return false;
             }
         }
+        if (kind == ReferenceField::Kind::Objects && obj == support
+            && !Base::Tools::isNullOrEmpty(sub)) {
+            // An element of the shape shown: the pick maps it to the feature that made it, which
+            // is tested then (the shape's own feature may be a fillet)
+            return true;
+        }
         std::string why;
         if (accept && !accept(obj, sub, why)) {
             notAllowedReason = why;
@@ -267,8 +276,9 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
                      "Drag the entries, or Alt+Up / Alt+Down, to change the order.\n"
                      "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
             : isObjects()
-                ? tr("Click here, then pick features in the tree: a pick adds a feature or "
-                     "takes it out.\n"
+                ? tr("Click here, then pick features in the tree, or a face or edge in the 3D "
+                     "view for the feature that made it: a pick adds a feature or takes it "
+                     "out.\n"
                      "Delete removes the selected entries; Ctrl+Z undoes the last change here.")
                 : tr("Click here, then pick in the 3D view: a pick adds an element or takes it "
                      "out.\n"
@@ -848,7 +858,7 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
     }
     // The gate let through only what the field takes
     if (isObjects()) {
-        pickObject(obj);
+        pickObject(obj, msg.pSubName);
         return;
     }
     if (isSingle()) {
@@ -905,13 +915,64 @@ void ReferenceField::pick(App::DocumentObject* obj, const std::string& sub)
     write(stored);
 }
 
-void ReferenceField::pickObject(App::DocumentObject* obj)
+App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape,
+                                                      const char* sub) const
+{
+    // The gate's tests, on the feature the element comes from
+    auto usable = [this](App::DocumentObject* feature) {
+        std::string why;
+        if (!feature || (options.accept && !options.accept(feature, nullptr, why))) {
+            return false;
+        }
+        if (options.noDependents) {
+            NoDependentsSelection independent(owner());
+            return independent.allow(feature->getDocument(), feature, "");
+        }
+        return true;
+    };
+    // The history runs from the shape's feature down to where the element comes from; the items
+    // above that only changed it (a fillet, a fuse), so the last one decides
+    const std::list<Data::HistoryItem> history = Part::Feature::getElementHistory(shape, sub, true);
+    App::DocumentObject* origin = history.empty() ? nullptr : history.back().obj;
+    if (!origin) {
+        return nullptr;
+    }
+    if (usable(origin)) {
+        return origin;
+    }
+    // A sketch: the feature it is the profile of. A pad and a pocket on one sketch: the one that is
+    // in the element's history, else the first.
+    std::vector<App::DocumentObject*> profiled;
+    for (App::DocumentObject* user : origin->getInList()) {
+        auto based = freecad_cast<PartDesign::ProfileBased*>(user);
+        if (based && based->Profile.getValue() == origin && usable(based)) {
+            profiled.push_back(based);
+        }
+    }
+    for (auto item = history.rbegin(); item != history.rend(); ++item) {
+        if (std::ranges::find(profiled, item->obj) != profiled.end()) {
+            return item->obj;
+        }
+    }
+    return profiled.empty() ? nullptr : profiled.front();
+}
+
+void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
 {
     {
         Base::StateLocker lock(busy, true);
         Gui::Selection().clearSelection();
     }
     message.clear();
+    if (obj == target() && !Base::Tools::isNullOrEmpty(sub)) {
+        // A face, edge or vertex of the shape shown: the feature that made it
+        obj = featureOfElement(obj, sub);
+        if (!obj) {
+            message = tr("No feature that adds or removes material made this element.");
+            updateLook();
+            return;
+        }
+    }
     std::vector<App::DocumentObject*> objs = linkedObjects();
     if (auto found = std::ranges::find(objs, obj); found != objs.end()) {
         objs.erase(found);
@@ -1647,7 +1708,8 @@ void ReferenceField::updateLook()
         }
         else if (isObjects()) {
             hint->setText(
-                tr("Select %1 in the tree.").arg(options.kinds.toLower())
+                tr("Select %1 in the tree, or a face or edge in the 3D view.")
+                    .arg(options.kinds.toLower())
             );
         }
         else {
