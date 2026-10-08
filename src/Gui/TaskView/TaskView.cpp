@@ -25,7 +25,9 @@
 #include <QActionEvent>
 #include <QApplication>
 #include <QCursor>
+#include <QCoreApplication>
 #include <QDockWidget>
+#include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -35,6 +37,7 @@
 #include <FCConfig.h>
 
 #include <App/Document.h>
+#include <App/DocumentObject.h>
 #include <Gui/ActionFunction.h>
 #include <Gui/Application.h>
 #include <Gui/Document.h>
@@ -54,6 +57,145 @@
 
 using namespace Gui::TaskView;
 namespace sp = std::placeholders;
+
+namespace
+{
+/** The edited object's error or warning, at the top of its dialog's panel (ops#151)
+ *
+ * Shows the text the tree's tooltip shows: the recompute error, or the warning of a recompute
+ * that succeeded on a guessed reference. It is refreshed after each recompute, undo and redo,
+ * and hidden while the object is fine. The label changes only when the text does, and it takes
+ * no focus, so typing in the panel isn't disturbed.
+ */
+class EditStatusBanner: public QLabel
+{
+public:
+    EditStatusBanner(App::Document* doc, QWidget* parent)
+        : QLabel(parent)
+        , doc(doc)
+    {
+        setObjectName(QStringLiteral("TaskEditStatus"));
+        setWordWrap(true);
+        setTextFormat(Qt::RichText);
+        setTextInteractionFlags(Qt::TextSelectableByMouse);
+        setFocusPolicy(Qt::NoFocus);
+        setContentsMargins(6, 4, 6, 4);
+        setVisible(false);
+
+        auto schedule = [this](const App::Document& changed) {
+            if (&changed == this->doc) {
+                scheduleUpdate();
+            }
+        };
+        auto scheduleVp = [this](const Gui::ViewProviderDocumentObject& vp) {
+            if (vp.getDocument() && vp.getDocument()->getDocument() == this->doc) {
+                scheduleUpdate();
+            }
+        };
+        // clang-format off
+        docConnections.emplace_back(doc->signalRecomputed.connect(
+            [this](const App::Document&, const std::vector<App::DocumentObject*>&) {
+                scheduleUpdate();
+            }));
+        docConnections.emplace_back(doc->signalRecomputedObject.connect(
+            [this](const App::DocumentObject&) { scheduleUpdate(); }));
+        connections.emplace_back(App::GetApplication().signalUndoDocument.connect(schedule));
+        connections.emplace_back(App::GetApplication().signalRedoDocument.connect(schedule));
+        connections.emplace_back(Gui::Application::Instance->signalInEdit.connect(scheduleVp));
+        connections.emplace_back(Gui::Application::Instance->signalResetEdit.connect(scheduleVp));
+        connections.emplace_back(App::GetApplication().signalDeleteDocument.connect(
+            [this](const App::Document& deleted) {
+                if (&deleted == this->doc) {
+                    this->doc = nullptr;
+                    docConnections.clear();
+                    setVisible(false);
+                }
+            }));
+        // clang-format on
+        scheduleUpdate();
+    }
+
+private:
+    // Coalesces the signals of one recompute into one update, after the status bits are final
+    void scheduleUpdate()
+    {
+        if (pending) {
+            return;
+        }
+        pending = true;
+        QTimer::singleShot(0, this, [this] {
+            pending = false;
+            refresh();
+        });
+    }
+
+    const App::DocumentObject* editedObject() const
+    {
+        auto* guiDoc = doc ? Gui::Application::Instance->getDocument(doc) : nullptr;
+        auto* vp = guiDoc ? dynamic_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getInEdit())
+                          : nullptr;
+        return vp ? vp->getObject() : nullptr;
+    }
+
+    void refresh()
+    {
+        QString html;
+        QString style;
+        const App::DocumentObject* obj = editedObject();
+        if (obj && obj->isAttachedToDocument()) {
+            if (obj->isError()) {
+                const char* text = doc->getErrorDescription(obj);
+                html = format(
+                    QCoreApplication::translate("Gui::TaskView::TaskView", "Error:"),
+                    text && *text ? QString::fromUtf8(text)
+                                  : QCoreApplication::translate(
+                                        "Gui::TaskView::TaskView",
+                                        "The feature failed to recompute."
+                                    )
+                );
+                style = QStringLiteral(
+                    "QLabel#TaskEditStatus { background-color: rgba(220, 50, 50, 40);"
+                    " border: 1px solid rgba(200, 40, 40, 160); border-radius: 3px; }"
+                );
+            }
+            else if (obj->isWarning()) {
+                const char* text = obj->getWarningDescription();
+                html = format(
+                    QCoreApplication::translate("Gui::TaskView::TaskView", "Warning:"),
+                    QString::fromUtf8(text ? text : "")
+                );
+                style = QStringLiteral(
+                    "QLabel#TaskEditStatus { background-color: rgba(230, 160, 0, 45);"
+                    " border: 1px solid rgba(200, 140, 0, 170); border-radius: 3px; }"
+                );
+            }
+        }
+        if (html != text()) {
+            setText(html);
+        }
+        if (style != styleSheet()) {
+            setStyleSheet(style);
+        }
+        // isHidden(), not isVisible(): the panel of another document's dialog may be hidden
+        if (html.isEmpty() != isHidden()) {
+            setVisible(!html.isEmpty());
+        }
+    }
+
+    static QString format(const QString& prefix, const QString& text)
+    {
+        return QStringLiteral("<b>%1</b> %2").arg(
+            prefix.toHtmlEscaped(),
+            text.trimmed().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"))
+        );
+    }
+
+    App::Document* doc;
+    bool pending = false;
+    std::vector<fastsignals::scoped_connection> docConnections;
+    std::vector<fastsignals::scoped_connection> connections;
+};
+}  // namespace
 
 
 //**************************************************************************
@@ -611,6 +753,10 @@ bool TaskView::showDialog(TaskDialog* dlg, App::Document* doc)
     dlg->modifyStandardButtons(outInfo.ActiveCtrl->buttonBox);
 
     outInfo.taskPanel = new TaskPanel(this);
+    // The edited object's error or warning, above the dialog (ops#151)
+    if (doc) {
+        outInfo.taskPanel->mainLayout->insertWidget(1, new EditStatusBanner(doc, outInfo.taskPanel));
+    }
     if (dlg->buttonPosition() == TaskDialog::North) {
         // Add button box to the top of the main layout
         outInfo.taskPanel->dialogLayout->insertWidget(0, outInfo.ActiveCtrl);
