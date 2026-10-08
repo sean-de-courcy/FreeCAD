@@ -246,6 +246,11 @@ void ViewProvider::eventCallback(void* ud, SoEventCallback* node)
                     else {
                         pressedHere = std::exchange(escapePressedIn, nullptr) == viewer;
                     }
+                    // ops#216: nor does the view provider see such a release (PartDesign's
+                    // disarms an armed reference field on it, e.g. after Esc closed Clarify)
+                    if (!pressedHere) {
+                        break;
+                    }
                     if (self->keyPressed(press, ke->getKey())) {
                         node->setHandled();
                     }

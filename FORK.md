@@ -217,7 +217,8 @@ names it.
 | `feat/194-keymap-c` | feat | ops#194 | - | fork PR 185's head (stacked) | `dd587e77db` (fork PR 189), 2026-10-08 | never (fork feature); refit when upstream changes `Std_ClarifySelection`'s picking or adds a command on the backtick |
 | `fix/182-187-189-pattern-minors` | fix | ops#182, ops#187, ops#189, ops#212 | - | `integration` `06ab4c32e5` | `57d4f3dd20` (fork PR 184), 2026-10-08 | when upstream keeps the shown feature by a weak pointer and computes an empty pattern in its edit (ops#182 is fork code: the roll-back bar) |
 | `fix/205-datum-type-change` | fix | ops#205 | - | `integration` `45ca797def` | `b8c02a82e5` (fork PR 190), 2026-10-08 | a new base's `EditDatumDialog::accepted` changes the Radius/Diameter type through the property |
-| `fix/162-reference-test-gaps` | fix | ops#162 | none (fork code, ops#150) | `integration` `45ca797def` | (fork PR 191) | never (fork code) |
+| `fix/162-reference-test-gaps` | fix | ops#162 | none (fork code, ops#150) | `integration` `45ca797def` | `35bfb296f7` (fork PR 191), 2026-10-08 | never (fork code) |
+| `fix/216-unseen-key-release` | fix | ops#216 | - | `integration` `e8ad709d94` | (fork PR 192) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

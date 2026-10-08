@@ -542,6 +542,31 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
+    def testEscClosingAPopupKeepsTheFieldArmed(self):
+        """ops#216: Esc that closes a popup over the 3D view (Clarify, a context menu) is pressed
+        in the popup; the release then reaches the view, which didn't see the press: the field
+        stays armed and the edit stays."""
+        box, fillet = self.newFillet()
+        [field] = fields()
+        self.arm(field, byFocus=True)
+        [view] = views3D()
+        self.assertTrue(focus(view))
+        menu = QtWidgets.QMenu(Gui.getMainWindow())
+        menu.addAction("Entry")
+        menu.popup(view.mapToGlobal(view.rect().center()))
+        self.assertTrue(waitFor(lambda: QtWidgets.QApplication.activePopupWidget() is menu))
+        window = Gui.getMainWindow().windowHandle()
+        QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not menu.isVisible()), "Esc didn't close the popup")
+        # focus goes back to the view, as on screen (off screen it can stay with no widget)
+        self.assertTrue(focus(view))
+        QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
+        pump(0.5)
+        menu.deleteLater()
+        self.assertTrue(armed(field), "the release of the popup's Esc disarmed the field")
+        self.assertTrue(Gui.Control.activeDialog(), "the release of the popup's Esc closed the dialog")
+        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+
     # -- T6: Delete -----------------------------------------------------------------------------
 
     def testDeleteRemovesSelectedEntries(self):
