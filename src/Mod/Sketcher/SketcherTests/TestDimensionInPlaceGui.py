@@ -1154,3 +1154,144 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assertEqual(self.expressions(), {})
         self.assert_point(self.line_end(), 10, 0)
         self.assert_one_undo_step()
+
+    # D29-D34: changing an existing Radius or Diameter's type in the dialog (ops#205) ---------
+
+    def edit_radius_in_dialog(
+        self, reference, text=None, driving=True, kind="Radius", choose="rbDiameter", ok=True
+    ):
+        """A circle of radius 5 on the origin with a Radius of 5 (or a Diameter of 10;
+        constraint 2; a reference one if not `driving`), edited with "Edit Value" (the dialog):
+        `choose` picked, Reference checked or not, `text` typed, then OK (or Cancel). A message
+        box the dialog shows for a refused value is closed."""
+        self.sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 5), False)
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 3, -1, 1))
+        self.sketch.addConstraint(Sketcher.Constraint(kind, 0, 5 if kind == "Radius" else 10))
+        if not driving:
+            self.sketch.setDriving(1, False)
+        self.doc.recompute()
+        self.start_edit()
+
+        seen = {"dialog": False, "stop": False}
+
+        def close_boxes():
+            if seen["stop"]:
+                return
+            for widget in QtGui.QApplication.topLevelWidgets():
+                if isinstance(widget, QtGui.QMessageBox) and widget.isVisible():
+                    widget.reject()
+            QtCore.QTimer.singleShot(50, close_boxes)
+
+        def fill():
+            dialog = QtGui.QApplication.activeModalWidget()
+            spinbox = dialog.findChild(QtGui.QAbstractSpinBox, "labelEdit") if dialog else None
+            if spinbox is None:
+                QtCore.QTimer.singleShot(50, fill)
+                return
+            seen["dialog"] = True
+            if reference:
+                dialog.findChild(QtGui.QCheckBox, "cbDriving").setChecked(True)
+            dialog.findChild(QtGui.QRadioButton, choose).setChecked(True)
+            if text is not None:
+                line_edit = spinbox.findChild(QtGui.QLineEdit)
+                line_edit.selectAll()
+                line_edit.insert(text)
+            QtCore.QTimer.singleShot(50, close_boxes)
+            if ok:
+                dialog.accept()
+            else:
+                dialog.reject()
+
+        QtCore.QTimer.singleShot(50, fill)
+        self.run_with_selection(["Constraint2"], "Sketcher_ChangeDimensionConstraint")
+        self.assertTrue(self.wait_until(lambda: seen["dialog"], 3000), "Expected the dialog")
+        seen["stop"] = True
+
+    def assert_circle(self, kind, value, radius, driving=True):
+        self.doc.recompute()
+        other = "Diameter" if kind == "Radius" else "Radius"
+        self.assertEqual(self.constraints_of(other), [])
+        found = self.constraints_of(kind)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].Driving, driving)
+        self.assertAlmostEqual(found[0].Value, value, places=7)
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, radius, places=7)
+
+    def assert_unchanged(self):
+        """No undo step and nothing open: the Radius of 5 and the circle as they were."""
+        self.assertFalse(self.doc.HasPendingTransaction, "Expected no transaction left open")
+        self.assertEqual(self.doc.UndoCount, self.undo_start, "Expected no undo step")
+        self.assert_circle("Radius", 5.0, 5.0)
+
+    def assert_radius_restored_by_undo(self, driving=True):
+        self.assert_one_undo_step()
+        self.doc.undo()
+        self.assert_circle("Radius", 5.0, 5.0, driving)
+
+    def test_d29_dialog_radius_to_diameter_undoes(self):
+        """D29 (ops#205): an existing Radius of 5 changed to a Diameter of 14 in the dialog gives
+        a circle of radius 7; undo gives the Radius of 5 and the circle back. The type used to be
+        changed on the constraint in place, before setDatum recorded the list for undo, so undo
+        restored a Diameter of 5 (the circle halved)."""
+        self.edit_radius_in_dialog(reference=False, text="14 mm")
+        self.assertEqual(self.constraints_of("Radius"), [])
+        diameters = self.constraints_of("Diameter")
+        self.assertEqual(len(diameters), 1)
+        self.assertTrue(diameters[0].Driving)
+        self.assertAlmostEqual(diameters[0].Value, 14.0, places=9)
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 7.0, places=7)
+        self.assert_radius_restored_by_undo()
+
+    def test_d30_dialog_radius_to_reference_diameter(self):
+        """D30 (ops#205): the same with Reference checked: a reference Diameter measuring 10,
+        the circle unchanged; undo gives the driving Radius of 5. A guard: it passes on the old
+        code too, as checking Reference runs setDriving, which records the list before the type
+        changes."""
+        self.edit_radius_in_dialog(reference=True)
+        self.assertEqual(self.constraints_of("Radius"), [])
+        diameters = self.constraints_of("Diameter")
+        self.assertEqual(len(diameters), 1)
+        self.assertFalse(diameters[0].Driving)
+        self.doc.recompute()
+        self.assertAlmostEqual(diameters[0].Value, 10.0, places=7)
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 5.0, places=7)
+        self.assert_radius_restored_by_undo()
+
+    def test_d31_dialog_reference_radius_to_diameter(self):
+        """D31 (ops#205): a reference Radius, Reference left checked, changed to a Diameter: a
+        reference Diameter measuring 10; undo gives the reference Radius of 5. Neither setDatum
+        nor setDriving runs here, so the type changed in place was neither recorded nor
+        notified."""
+        self.edit_radius_in_dialog(reference=False, driving=False)
+        self.assertEqual(self.constraints_of("Radius"), [])
+        diameters = self.constraints_of("Diameter")
+        self.assertEqual(len(diameters), 1)
+        self.assertFalse(diameters[0].Driving)
+        self.doc.recompute()
+        self.assertAlmostEqual(diameters[0].Value, 10.0, places=7)
+        self.assertAlmostEqual(self.sketch.Geometry[0].Radius, 5.0, places=7)
+        self.assert_radius_restored_by_undo(driving=False)
+
+    def test_d32_dialog_refused_value_changes_nothing(self):
+        """D32 (ops#205): Radius changed to a Diameter of 0, which setDatum refuses: the Radius
+        of 5 stays and nothing is left open. The old code had changed the type in place, out of
+        the transaction the refusal aborts, and left a Diameter of 5."""
+        self.edit_radius_in_dialog(reference=False, text="0 mm")
+        self.assert_unchanged()
+
+    def test_d33_dialog_diameter_to_radius_undoes(self):
+        """D33 (ops#205): a Diameter of 10 changed to a Radius of 7: a circle of radius 7; undo
+        gives the Diameter of 10 back."""
+        self.edit_radius_in_dialog(
+            reference=False, text="7 mm", kind="Diameter", choose="rbRadius"
+        )
+        self.assert_circle("Radius", 7.0, 7.0)
+        self.assert_one_undo_step()
+        self.doc.undo()
+        self.assert_circle("Diameter", 10.0, 5.0)
+
+    def test_d34_dialog_cancel_after_choosing_diameter(self):
+        """D34 (ops#205): Diameter chosen and 14 typed, then Cancel: nothing changes."""
+        self.edit_radius_in_dialog(reference=False, text="14 mm", ok=False)
+        self.assert_unchanged()

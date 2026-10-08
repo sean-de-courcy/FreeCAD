@@ -51,6 +51,7 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/FeatureBase.h>
+#include <Mod/PartDesign/App/FeatureMultiTransform.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ViewProviderBody.h"
@@ -651,6 +652,20 @@ App::DocumentObject* ViewProviderBody::editRollPointFor(const PartDesign::Body* 
 {
     if (!body || !member || !body->hasObject(member)) {
         return nullptr;
+    }
+    // A pattern of features with no originals yet isn't a solid feature (it looks like a
+    // MultiTransform's step), but it becomes one when the edit adds them: the point is the
+    // pattern itself, or the edit would hold it until it ends (ops#182). A MultiTransform's step
+    // keeps the rule below.
+    if (auto pattern = freecad_cast<PartDesign::Transformed*>(member)) {
+        auto stepOf = [pattern](App::DocumentObject* obj) {
+            auto multi = freecad_cast<PartDesign::MultiTransform*>(obj);
+            return multi && std::ranges::find(multi->Transformations.getValues(), pattern)
+                != multi->Transformations.getValues().end();
+        };
+        if (!PartDesign::Body::isSolidFeature(member) && std::ranges::none_of(member->getInList(), stepOf)) {
+            return member;
+        }
     }
     if (auto feature = barFeatureFor(body, member)) {
         return feature;

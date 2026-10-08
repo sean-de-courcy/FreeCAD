@@ -707,14 +707,6 @@ void EditDatumDialog::accepted()
     // through setDriving, which replaces the constraint objects: read it afresh (ops#172).
     Constr = sketch->Constraints.getValues()[ConstrNbr];
 
-    // Check if we need to swap Radius <-> Diameter
-    if (Constr->Type == Sketcher::Radius && ui_ins_datum->rbDiameter->isChecked()) {
-        Constr->Type = Sketcher::Diameter;
-    }
-    else if (Constr->Type == Sketcher::Diameter && ui_ins_datum->rbRadius->isChecked()) {
-        Constr->Type = Sketcher::Radius;
-    }
-
     Base::Quantity newQuant = ui_ins_datum->labelEdit->value();
     if (Constr->Type == Sketcher::SnellsLaw || Constr->Type == Sketcher::Weight
         || !newQuant.isDimensionless()) {
@@ -725,6 +717,24 @@ void EditDatumDialog::accepted()
         double newDatum = newQuant.getValue();
 
         try {
+            // Check if we need to swap Radius <-> Diameter. A copy with the new type goes
+            // through the property, so that the change is recorded for undo before setDatum and
+            // also when setDatum isn't called (a reference); changed in place, undo kept it
+            // (ops#205). Inside the try, so that a refused value aborts it with the rest, and an
+            // invalid value changes nothing.
+            Sketcher::ConstraintType newType = Constr->Type;
+            if (Constr->Type == Sketcher::Radius && ui_ins_datum->rbDiameter->isChecked()) {
+                newType = Sketcher::Diameter;
+            }
+            else if (Constr->Type == Sketcher::Diameter && ui_ins_datum->rbRadius->isChecked()) {
+                newType = Sketcher::Radius;
+            }
+            if (newType != Constr->Type) {
+                std::unique_ptr<Sketcher::Constraint> changed(Constr->clone());
+                changed->Type = newType;
+                sketch->Constraints.set1Value(ConstrNbr, changed.get());
+                Constr = sketch->Constraints.getValues()[ConstrNbr];
+            }
 
             /*if (ui_ins_datum->cbDriving->isChecked() == Constr->isDriving) {
                 Gui::cmdAppObjectArgs(sketch, "toggleDriving(%i)", ConstrNbr);

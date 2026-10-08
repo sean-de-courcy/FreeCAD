@@ -168,14 +168,13 @@ bool ViewProvider::setEdit(int ModNum)
 
         // This is handling for an erroneous case where features are for some reason placed outside
         // the body container. That should never happen, but in some cases we find models with a
-        // problem like that.
+        // problem like that. Without a Body, no feature is shown again at the end (an earlier
+        // edit's would be: ops#212).
+        previouslyShownFeature = nullptr;
         if (ViewProviderBody* bodyViewProvider = getBodyViewProvider()) {
-            PartDesign::Feature* shownFeature = bodyViewProvider->getShownFeature();
-
-            previouslyShownViewProvider = freecad_cast<ViewProvider*>(
-                Gui::Application::Instance->getViewProvider(shownFeature)
-            );
+            previouslyShownFeature = bodyViewProvider->getShownFeature();
         }
+        hadShownFeature = !previouslyShownFeature.expired();
 
         // clear the selection (convenience)
         Gui::Selection().clearSelection();
@@ -215,9 +214,21 @@ void ViewProvider::unsetEdit(int ModNum)
         Gui::Command::assureWorkbench(oldWb.c_str());
     }
 
-    // ensure that after edit we still show the same feature
-    if (previouslyShownViewProvider) {
-        previouslyShownViewProvider->show();
+    // ensure that after edit we still show the same feature, if it is still there
+    // If it was deleted during the edit (ops#187), the Body's Tip is shown, so the Body isn't left
+    // empty when nothing else is shown (ops#212)
+    App::DocumentObject* feature = previouslyShownFeature.get<App::DocumentObject>();
+    if (!feature && hadShownFeature) {
+        ViewProviderBody* bodyViewProvider = getBodyViewProvider();
+        if (bodyViewProvider && !bodyViewProvider->getShownFeature()) {
+            feature = PartDesign::Body::findBodyOf(getObject())->Tip.getValue();
+        }
+    }
+    hadShownFeature = false;
+    if (feature) {
+        if (auto shown = freecad_cast<ViewProvider*>(Gui::Application::Instance->getViewProvider(feature))) {
+            shown->show();
+        }
     }
 
     if (ModNum == ViewProvider::Default) {
