@@ -76,6 +76,7 @@
 #include <Gui/MenuManager.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionObject.h>
+#include <Gui/Selection/SelectionView.h>
 #include <Gui/Selection/SoFCUnifiedSelection.h>
 // #include <Gui/Inventor/SoFCSwitch.h>
 #include <Gui/Utilities.h>
@@ -1041,6 +1042,59 @@ EditModeCoinManager::PreselectionResult ViewProviderSketch::resolveClickPreselec
     return viewProviderParameters.lastPreselectionResult;
 }
 
+namespace
+{
+
+/// The sub-element names of a preselection result: one, or one per constraint
+std::vector<std::string> preselectionNames(const EditModeCoinManager::PreselectionResult& result)
+{
+    std::vector<std::string> subElementNames;
+    switch (result.Kind) {
+        case EditModeCoinManager::PreselectionResult::HitKind::Point:
+            subElementNames.emplace_back("Vertex" + std::to_string(result.PointIndex + 1));
+            break;
+        case EditModeCoinManager::PreselectionResult::HitKind::Edge:
+            if (result.GeoIndex >= 0) {
+                subElementNames.emplace_back("Edge" + std::to_string(result.GeoIndex + 1));
+            }
+            else {
+                subElementNames.emplace_back(
+                    "ExternalEdge"
+                    + std::to_string(-result.GeoIndex + Sketcher::GeoEnum::RefExt + 1)
+                );
+            }
+            break;
+        case EditModeCoinManager::PreselectionResult::HitKind::Axis:
+            switch (result.Cross) {
+                case EditModeCoinManager::PreselectionResult::Axes::RootPoint:
+                    subElementNames.emplace_back("RootPoint");
+                    break;
+                case EditModeCoinManager::PreselectionResult::Axes::HorizontalAxis:
+                    subElementNames.emplace_back("H_Axis");
+                    break;
+                case EditModeCoinManager::PreselectionResult::Axes::VerticalAxis:
+                    subElementNames.emplace_back("V_Axis");
+                    break;
+                case EditModeCoinManager::PreselectionResult::Axes::None:
+                    break;
+            }
+            break;
+        case EditModeCoinManager::PreselectionResult::HitKind::Constraint:
+            subElementNames.reserve(result.ConstrIndices.size());
+            for (int constraintId : result.ConstrIndices) {
+                subElementNames.emplace_back(
+                    Sketcher::PropertyConstraintList::getConstraintName(constraintId)
+                );
+            }
+            break;
+        case EditModeCoinManager::PreselectionResult::HitKind::None:
+            break;
+    }
+    return subElementNames;
+}
+
+}  // namespace
+
 bool ViewProviderSketch::getPreselectionAtViewportPos(
     const SbVec2s& pos,
     const Gui::View3DInventorViewer* viewer,
@@ -1056,50 +1110,80 @@ bool ViewProviderSketch::getPreselectionAtViewportPos(
     }
 
     pickedPoint = result.pickedPoint();
+    subElementNames = preselectionNames(result);
+    return !subElementNames.empty();
+}
 
-    switch (result.Kind) {
-        case EditModeCoinManager::PreselectionResult::HitKind::Point:
-            subElementNames.emplace_back("Vertex" + std::to_string(result.PointIndex + 1));
-            return true;
-        case EditModeCoinManager::PreselectionResult::HitKind::Edge:
-            if (result.GeoIndex >= 0) {
-                subElementNames.emplace_back("Edge" + std::to_string(result.GeoIndex + 1));
-            }
-            else {
-                subElementNames.emplace_back(
-                    "ExternalEdge"
-                    + std::to_string(-result.GeoIndex + Sketcher::GeoEnum::RefExt + 1)
-                );
-            }
-            return true;
-        case EditModeCoinManager::PreselectionResult::HitKind::Axis:
-            switch (result.Cross) {
-                case EditModeCoinManager::PreselectionResult::Axes::RootPoint:
-                    subElementNames.emplace_back("RootPoint");
-                    break;
-                case EditModeCoinManager::PreselectionResult::Axes::HorizontalAxis:
-                    subElementNames.emplace_back("H_Axis");
-                    break;
-                case EditModeCoinManager::PreselectionResult::Axes::VerticalAxis:
-                    subElementNames.emplace_back("V_Axis");
-                    break;
-                case EditModeCoinManager::PreselectionResult::Axes::None:
-                    break;
-            }
-            return !subElementNames.empty();
-        case EditModeCoinManager::PreselectionResult::HitKind::Constraint:
-            subElementNames.reserve(result.ConstrIndices.size());
-            for (int constraintId : result.ConstrIndices) {
-                subElementNames.emplace_back(
-                    Sketcher::PropertyConstraintList::getConstraintName(constraintId)
-                );
-            }
-            return true;
-        case EditModeCoinManager::PreselectionResult::HitKind::None:
-            break;
+void ViewProviderSketch::getSelectOtherPicks(
+    const SbVec2s& pos,
+    const Gui::View3DInventorViewer* viewer,
+    std::vector<Gui::PickData>& picks
+)
+{
+    using Result = EditModeCoinManager::PreselectionResult;
+
+    picks.clear();
+    // as for a hover: not while a tool, a drag or a box selection runs
+    if (!isInEditMode() || Mode != STATUS_NONE || sketchHandler) {
+        return;
     }
 
-    return false;
+    Sketcher::SketchObject* sketch = getSketchObject();
+    const std::string docName = sketch->getDocument()->getName();
+    const std::string objName = sketch->getNameInDocument();
+    // An entry finds the sketch again when it runs, and does nothing once the sketch has left the
+    // edit or something else runs in it
+    auto idleSketch = [docName, objName]() -> ViewProviderSketch* {
+        App::Document* doc = App::GetApplication().getDocument(docName.c_str());
+        App::DocumentObject* obj = doc ? doc->getObject(objName.c_str()) : nullptr;
+        auto* vp = obj ? dynamic_cast<ViewProviderSketch*>(
+                             Gui::Application::Instance->getViewProvider(obj)
+                         )
+                       : nullptr;
+        return vp && vp->isInEditMode() && vp->Mode == STATUS_NONE && !vp->sketchHandler ? vp
+                                                                                          : nullptr;
+    };
+
+    std::set<std::string> seen;
+    SoPickedPointList points = getPickedPointsOnRay(pos, viewer);
+    for (Result result : editCoinManager->detectAllPreselections(points, pos)) {
+        if (!result.hasPickedPoint()) {
+            continue;
+        }
+        // an edge in a group is shown and taken as the group's handle, as for a hover
+        if (result.Kind == Result::HitKind::Edge) {
+            result.GeoIndex = sketch->getGroupHandleIfInGroup(result.GeoIndex);
+        }
+        std::vector<std::string> names = preselectionNames(result);
+        if (names.size() != 1 || !seen.insert(names.front()).second) {
+            continue;
+        }
+        const std::string name = names.front();
+        const Base::Vector3d pickedPoint = result.pickedPoint();
+
+        Gui::PickData pick;
+        pick.obj = sketch;
+        pick.element = name;
+        pick.docName = docName;
+        pick.objName = objName;
+        pick.subName = name;
+        pick.preselect = [idleSketch, result]() {
+            if (ViewProviderSketch* vp = idleSketch()) {
+                if (vp->detectAndShowPreselection(result)) {
+                    vp->editCoinManager->drawConstraintIcons();
+                    vp->updateColor();
+                }
+            }
+        };
+        pick.select = [idleSketch, name, pickedPoint]() {
+            if (ViewProviderSketch* vp = idleSketch()) {
+                std::stringstream ss;
+                ss << name;
+                vp->preselectToSelection(ss, pickedPoint, /*toggle=*/false);
+            }
+        };
+        picks.push_back(std::move(pick));
+    }
 }
 
 bool ViewProviderSketch::keyPressed(bool pressed, int key)

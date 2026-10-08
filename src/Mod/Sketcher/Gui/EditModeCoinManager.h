@@ -283,6 +283,16 @@ public:
         const SbVec2s& cursorPos,
         int hoveredPointIndex = PreselectionResult::InvalidPoint
     );
+    /** Everything under the cursor (FreeCAD-CH, ops#194 PR E: Select other): first what
+     * detectPreselection() picks, then the rest by the same priorities (points, constraint icons,
+     * datum labels, edges, axes), each kind nearest first. One entry per constraint (a merged icon
+     * gives one per constraint in it); an element the ray and the screen test both find comes
+     * once.
+     */
+    std::vector<PreselectionResult> detectAllPreselections(
+        const SoPickedPointList& points,
+        const SbVec2s& cursorPos
+    );
     /// The client is responsible for unref-ing the SoGroup to release the memory.
     SoGroup* getSelectedConstraints();
     //@}

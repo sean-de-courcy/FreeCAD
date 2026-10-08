@@ -2226,10 +2226,11 @@ EditModeConstraintCoinManager::ConstraintPreselectionResult EditModeConstraintCo
 
 EditModeConstraintCoinManager::ConstraintPreselectionResult EditModeConstraintCoinManager::detectPreselectionConstr(
     const SbVec2s& cursorScreenPos,
-    Base::Vector3d* pickedPoint
+    Base::Vector3d* pickedPoint,
+    std::vector<ConstraintPreselectionResult>* all
 )
 {
-    ConstraintPreselectionResult result;
+    ConstraintPreselectionResult first;
 
     for (int i = 0; i < editModeScenegraphNodes.constrGroup->getNumChildren(); ++i) {
         auto* sep = dynamic_cast<SoSeparator*>(editModeScenegraphNodes.constrGroup->getChild(i));
@@ -2237,30 +2238,39 @@ EditModeConstraintCoinManager::ConstraintPreselectionResult EditModeConstraintCo
             continue;
         }
 
-        if (int iconIndex = static_cast<int>(ConstraintNodePosition::FirstIconIndex);
-            iconIndex < sep->getNumChildren()) {
+        for (auto position :
+             {ConstraintNodePosition::FirstIconIndex, ConstraintNodePosition::SecondIconIndex}) {
+            int iconIndex = static_cast<int>(position);
+            if (iconIndex >= sep->getNumChildren()) {
+                continue;
+            }
             auto* iconNode = dynamic_cast<SoImage*>(sep->getChild(iconIndex));
-            if (iconNode) {
-                result = detectPreselectionIcon(sep, iconNode, iconIndex, cursorScreenPos, pickedPoint);
-                if (result.hasHit()) {
-                    return result;
+            if (!iconNode) {
+                continue;
+            }
+            Base::Vector3d iconPoint;
+            ConstraintPreselectionResult result
+                = detectPreselectionIcon(sep, iconNode, iconIndex, cursorScreenPos, &iconPoint);
+            if (!result.hasHit()) {
+                continue;
+            }
+            if (!all) {
+                if (pickedPoint) {
+                    *pickedPoint = iconPoint;
+                }
+                return result;
+            }
+            if (!first.hasHit()) {
+                first = result;
+                if (pickedPoint) {
+                    *pickedPoint = iconPoint;
                 }
             }
-        }
-
-        if (int iconIndex = static_cast<int>(ConstraintNodePosition::SecondIconIndex);
-            iconIndex < sep->getNumChildren()) {
-            auto* iconNode = dynamic_cast<SoImage*>(sep->getChild(iconIndex));
-            if (iconNode) {
-                result = detectPreselectionIcon(sep, iconNode, iconIndex, cursorScreenPos, pickedPoint);
-                if (result.hasHit()) {
-                    return result;
-                }
-            }
+            all->push_back(result);
         }
     }
 
-    return result;
+    return first;
 }
 
 std::set<int> EditModeConstraintCoinManager::parseConstraintIds(const QString& constrIdsStr) const

@@ -4502,7 +4502,8 @@ StdCmdSelectOther::StdCmdSelectOther()
     sGroup = "View";
     sMenuText = QT_TR_NOOP("Select Other");
     sToolTipText = QT_TR_NOOP(
-        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.\n"
+        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first; "
+        "in a sketch in edit, its edges, vertices and constraints.\n"
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
         "highlights an element. Enter or a click selects the highlighted one, Esc closes the list.\n"
         "Use its key with the cursor over the 3D view; from the menu, it lists what lies where the "
@@ -4553,6 +4554,19 @@ void StdCmdSelectOther::activated(int iMsg)
         static_cast<short>((widget->height() - local.y() - 1) * devicePixelRatio)
     );
 
+    // An edit mode with a picking of its own (a sketch in edit) lists what it would pick there
+    // (PR E): nothing opens where it picks nothing, or while one of its tools runs
+    if (Gui::Document* doc = Application::Instance->editDocument()) {
+        std::vector<PickData> editPicks;
+        if (selectOtherEditPicks(doc->getInEdit(), viewer, point, editPicks)) {
+            if (!editPicks.empty()) {
+                auto menu = new SelectOtherMenu(getMainWindow());
+                menu->open(editPicks, cursor);
+            }
+            return;
+        }
+    }
+
     // The elements under the cursor at the normal pick radius, nearest first; each once, and
     // only those a click could select (the gate and the user's filter)
     std::vector<PickData> candidates;
@@ -4582,17 +4596,8 @@ void StdCmdSelectOther::activated(int iMsg)
 
 bool StdCmdSelectOther::isActive()
 {
-    if (!qobject_cast<View3DInventor*>(getMainWindow()->activeWindow())) {
-        return false;
-    }
-    // A sketch in edit has its own picking (PR E)
-    if (Gui::Document* doc = Application::Instance->editDocument()) {
-        const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
-        if (ViewProvider* vp = doc->getInEdit(); vp && !sketch.isBad() && vp->isDerivedFrom(sketch)) {
-            return false;
-        }
-    }
-    return true;
+    // in sketch edit too: the sketch lists what its own picking finds (PR E)
+    return qobject_cast<View3DInventor*>(getMainWindow()->activeWindow()) != nullptr;
 }
 
 //===========================================================================

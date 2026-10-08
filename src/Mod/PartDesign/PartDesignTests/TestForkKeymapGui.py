@@ -1811,12 +1811,197 @@ OrthographicCamera {{
             panel.deleteLater()
             pump(0.1)
 
-    def testSelectOtherIsOffInSketchEdit(self):
-        """A sketch in edit has its own picking (PR E): the command is off there."""
-        self.editSketch()
-        action = Gui.Command.get("Std_SelectOther").getAction()
-        pump(0.5)
-        self.assertFalse(any(a.isEnabled() for a in action))
+    # --- Select other in sketch edit (PR E)
+
+    def sketchInEdit(self, lines=(), points=()):
+        """A sketch in the XY plane with the given lines ((x1, y1), (x2, y2)) and points, in edit,
+        seen from the top by an orthographic camera 40 mm high, with (10, 5) in the top band of
+        the view. Its edges are Edge1, Edge2, ... in the order given; the points' vertices follow
+        the lines' ends. The sketch is not in the body: off screen, a sketch in a body picks
+        nothing in edit, not even through its own hover (SketcherGui.getActiveSketchPreselection),
+        seen 2026-10-08 and not understood."""
+        sketch = self.doc.addObject("Sketcher::SketchObject", "SketchE")
+        for (ax, ay), (bx, by) in lines:
+            sketch.addGeometry(Part.LineSegment(App.Vector(ax, ay, 0), App.Vector(bx, by, 0)))
+        for x, y in points:
+            sketch.addGeometry(Part.Point(App.Vector(x, y, 0)))
+        self.doc.recompute()
+        Gui.ActiveDocument.setEdit(sketch.Name)
+        self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setCameraType("Orthographic")
+        pump(0.2)
+        view.setCamera(
+            f"""#Inventor V2.1 ascii
+OrthographicCamera {{
+  viewportMapping ADJUST_CAMERA
+  position 10 {5 - self.topBand()} 100
+  orientation 0 0 1  0
+  nearDistance 10
+  farDistance 300
+  aspectRatio 1
+  focalDistance 100
+  height 40
+}}
+"""
+        )
+        pump(0.3)
+        return sketch
+
+    def cursorOverSketch(self, point):
+        self.cursorOver(point)
+        self.assertCursorOverTheView()
+
+    def entries(self, popup):
+        """The list's element names, in order ("Edge1 · SketchE" -> "Edge1")."""
+        return [action.text().split(" ")[0] for action in popup.actions()]
+
+    def preselectedName(self):
+        """The preselected element's name (the sketch's preselection carries the path to it)."""
+        presel = Gui.Selection.getPreselection()
+        if not presel.ObjectName or not presel.SubElementNames:
+            return None
+        return presel.SubElementNames[0].split(".")[-1]
+
+    def selectedNames(self):
+        return [sub.split(".")[-1] for _, sub in self.selectedElements()]
+
+    def testSelectOtherInSketchListsBothOverlappingLines(self):
+        """Two overlapping lines in sketch edit: the list holds both, the first preselected;
+        backtick preselects the other and selects nothing, Enter selects it and the sketch stays
+        in edit."""
+        self.sketchInEdit(lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))])
+        self.cursorOverSketch(App.Vector(10, 5, 0))
+        popup = self.openSelectOther()
+        names = self.entries(popup)
+        self.assertEqual(sorted(names), ["Edge1", "Edge2"], names)
+        self.assertTrue(waitFor(lambda: self.preselectedName() == names[0]), self.preselectedName())
+        self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.assertTrue(waitFor(lambda: self.preselectedName() == names[1]), self.preselectedName())
+        self.assertEqual(self.selectedNames(), [])
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        self.assertTrue(waitFor(lambda: self.selectedNames() == [names[1]]), self.selectedNames())
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit(), "the sketch left the edit")
+
+    def testSelectOtherInSketchPutsTheVertexBeforeTheLine(self):
+        """A point on a line: the vertex comes first, as a hover picks it, then the line; Enter on
+        the line selects the line only."""
+        self.sketchInEdit(lines=[((0, 5), (20, 5))], points=[(10, 5)])
+        self.cursorOverSketch(App.Vector(10, 5, 0))
+        popup = self.openSelectOther()
+        self.assertEqual(self.entries(popup), ["Vertex3", "Edge1"])
+        self.assertTrue(
+            waitFor(lambda: self.preselectedName() == "Vertex3"), self.preselectedName()
+        )
+        self.listKey(QtCore.Qt.Key_Down)
+        self.assertTrue(waitFor(lambda: self.preselectedName() == "Edge1"), self.preselectedName())
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectedNames() == ["Edge1"]), self.selectedNames())
+
+    def iconPixels(self, name, around, span=40):
+        """The viewport points (Coin's, y up) near the world point `around` where the sketch's
+        hover picks the constraint `name`."""
+        import SketcherGui
+
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        x0, y0 = (int(v) for v in view.getPointOnViewport(around))
+        found = []
+        for dy in range(-span, span + 1, 2):
+            for dx in range(-span, span + 1, 2):
+                info = SketcherGui.getActiveSketchPreselection((x0 + dx, y0 + dy)) or {}
+                if name in (info.get("SubElementNames") or []):
+                    found.append((x0 + dx, y0 + dy))
+        return found
+
+    def cursorAtPixel(self, x, y):
+        """Moves the cursor to the viewport point (Coin's, y up)."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        _, height = view.getSize()
+        scale = viewport.devicePixelRatioF()
+        target = viewport.mapToGlobal(
+            QtCore.QPoint(int(round(x / scale)), int(round((height - y - 1) / scale)))
+        )
+        QtGui.QCursor.setPos(target)
+        pump(0.1)
+        if QtGui.QCursor.pos() != target:
+            self.skipTest("the platform doesn't move the cursor")
+        self.assertCursorOverTheView()
+
+    def testSelectOtherInSketchListsAConstraintIconAndTheLineUnderIt(self):
+        """A constraint icon over a line: the icon of the first line's Horizontal constraint, and
+        a second, vertical line drawn through it. The constraint comes first (a hover picks the
+        icon), the line under it is listed too and Enter on it selects it."""
+        import Sketcher
+
+        sketch = self.sketchInEdit(lines=[((0, 5), (20, 5))])
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        self.doc.recompute()
+        pump(0.3)
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        hits = self.iconPixels("Constraint1", App.Vector(10, 5, 0))
+        self.assertTrue(hits, "the constraint's icon isn't under any probe")
+        cx = sum(x for x, _ in hits) // len(hits)
+        cy = sum(y for _, y in hits) // len(hits)
+        through = view.getPoint(cx, cy)
+        sketch.addGeometry(
+            Part.LineSegment(
+                App.Vector(through.x, through.y - 8, 0), App.Vector(through.x, through.y + 8, 0)
+            )
+        )
+        self.doc.recompute()
+        pump(0.3)
+        # the icon again (a redraw can move it a little), at its pixel nearest the new line
+        lineX = view.getPointOnViewport(App.Vector(through.x, through.y, 0))[0]
+        hits = []
+
+        def iconBack():
+            hits.extend(self.iconPixels("Constraint1", App.Vector(10, 5, 0)))
+            return bool(hits)
+
+        self.assertTrue(waitFor(iconBack), "the constraint's icon is gone")
+        x, y = min(hits, key=lambda hit: abs(hit[0] - lineX))
+        self.assertLessEqual(abs(x - lineX), 2, "the new line doesn't run under the icon")
+        self.cursorAtPixel(x, y)
+        popup = self.openSelectOther()
+        names = self.entries(popup)
+        self.assertEqual(names[0], "Constraint1", names)
+        self.assertIn("Edge2", names)
+        for _ in range(names.index("Edge2")):
+            self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.assertTrue(waitFor(lambda: self.preselectedName() == "Edge2"), self.preselectedName())
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectedNames() == ["Edge2"]), self.selectedNames())
+
+    def testEscClosesTheSketchListAndTheSketchStaysInEdit(self):
+        """Esc closes the list in sketch edit: nothing is selected or preselected, and the sketch
+        stays in edit (the view ignores the release of an Esc it didn't see pressed)."""
+        self.sketchInEdit(lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))])
+        self.cursorOverSketch(App.Vector(10, 5, 0))
+        self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        pump(0.3)
+        self.assertEqual(self.selectedNames(), [])
+        self.assertIsNone(self.preselectedName())
+        self.assertIsNotNone(Gui.ActiveDocument.getInEdit(), "the sketch left the edit")
+
+    def testSelectOtherOpensNothingWhileASketchToolRuns(self):
+        """With a sketch tool running (the line tool), backtick opens no list: a click there is
+        the tool's."""
+        self.sketchInEdit(lines=[((0, 5), (20, 5)), ((5, 5), (15, 5))])
+        self.cursorOverSketch(App.Vector(10, 5, 0))
+        Gui.runCommand("Sketcher_CreateLine")
+        pump(0.3)
+        try:
+            with self.watching("Std_SelectOther") as fired:
+                self.press(QtCore.Qt.Key_QuoteLeft)
+                self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+            pump(0.3)
+            self.assertIsNone(self.selectOtherList(), "a list opened while the line tool runs")
+        finally:
+            self.escapeTool()
 
     def testCommitToggleOnceInAnArmedFilletField(self):
         """In a Fillet's armed field a commit toggles the element once, and cycling the list

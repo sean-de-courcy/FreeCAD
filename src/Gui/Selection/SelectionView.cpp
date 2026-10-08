@@ -1213,6 +1213,12 @@ void SelectionMenu::createGroupedMenu(
 namespace
 {
 
+std::vector<SelectOtherEditPicker>& editPickers()
+{
+    static std::vector<SelectOtherEditPicker> pickers;
+    return pickers;
+}
+
 /// Backtick, as the keyboard layout delivers it: the key itself, or its dead key
 bool isBacktick(const QKeyEvent* ev)
 {
@@ -1239,6 +1245,26 @@ bool isForwards(const QKeyEvent* ev)
 }
 
 }  // namespace
+
+void Gui::addSelectOtherEditPicker(SelectOtherEditPicker picker)
+{
+    editPickers().push_back(std::move(picker));
+}
+
+bool Gui::selectOtherEditPicks(
+    ViewProvider* inEdit,
+    View3DInventorViewer* viewer,
+    const SbVec2s& point,
+    std::vector<PickData>& picks
+)
+{
+    for (const SelectOtherEditPicker& picker : editPickers()) {
+        if (picker(inEdit, viewer, point, picks)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 SelectOtherMenu::SelectOtherMenu(QWidget* parent)
     : QMenu(parent)
@@ -1366,6 +1392,10 @@ void SelectOtherMenu::preselect(QAction* action)
     preselecting = true;
     Gui::Selection().rmvPreselect();
     preselecting = false;
+    if (pick.preselect) {
+        pick.preselect();
+        return;
+    }
     Gui::Selection().setPreselect(
         pick.docName.c_str(),
         pick.objName.c_str(),
@@ -1386,6 +1416,10 @@ void SelectOtherMenu::commit(QAction* action)
     }
     // one pick, as a click adds one (the menu has hidden, and the preselection is gone)
     const PickData& pick = picks[index];
+    if (pick.select) {
+        pick.select();
+        return;
+    }
     Gui::Selection().addSelection(pick.docName.c_str(), pick.objName.c_str(), pick.subName.c_str());
 }
 
