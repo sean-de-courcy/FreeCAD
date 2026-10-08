@@ -222,7 +222,7 @@ void ShapeBinder::getFilteredReferences(
 namespace
 {
 // A datum element in the body's coordinates: an element of a coordinate system is placed in it
-// (ops#200); an origin's sits at identity
+// (ops#200); an origin's too, at identity unless set from Python (ops#206)
 Base::Placement datumPlacement(const App::GeoFeature* obj)
 {
     Base::Placement placement = obj->Placement.getValue();

@@ -256,6 +256,52 @@ class TestShapeBinderOfACoordinateSystem(unittest.TestCase):
         [vertex] = self.binder("Origin").Shape.Vertexes
         self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(3, 4, 5)), 1e-9)
 
+    def assertPlaneAt(self, shape, placement):
+        """The XY plane of the coordinate system, carried by placement: its normal is -Y, it
+        passes through (3, 4, 5)."""
+        [face] = shape.Faces
+        plane = face.Surface
+        axis = placement.Rotation.multVec(FreeCAD.Vector(0, -1, 0))
+        self.assertLess(plane.Axis.cross(axis).Length, 1e-9)
+        point = placement.multVec(FreeCAD.Vector(3, 4, 5))
+        self.assertLess(abs((point - plane.Position).dot(plane.Axis)), 1e-9)
+
+    def testPathThroughTheBody(self):
+        """The plane reached through the body, (Body, "LCS.XY_Plane001."): in the coordinate
+        system, as the coordinate system's own path gives it. It was at the body's origin
+        (FreeCAD-CH ops#207: LocalCoordinateSystem::extensionGetSubObject)."""
+        import Part
+
+        [element] = [f for f in self.Lcs.OriginFeatures if f.Role == "XY_Plane"]
+        path = "%s.%s." % (self.Lcs.Name, element.Name)
+        self.assertPlaneAt(Part.getShape(self.Body, path, transform=False), FreeCAD.Placement())
+        self.assertPlaneAt(Part.getShape(self.Body, path), self.bodyPlacement)
+        # The coordinate system's own path, unchanged
+        self.assertPlaneAt(
+            Part.getShape(self.Lcs, element.Name + "."), FreeCAD.Placement()
+        )
+        placement = self.Body.getSubObject(path, retType=3)
+        self.assertTrue(placement.isSame(self.bodyPlacement.multiply(self.Lcs.Placement), 1e-9))
+
+    def testSubShapeBinderOfThePath(self):
+        """A SubShapeBinder outside the body, of the plane through the body: where the plane
+        is in the document."""
+        [element] = [f for f in self.Lcs.OriginFeatures if f.Role == "XY_Plane"]
+        binder = self.Doc.addObject("PartDesign::SubShapeBinder", "PathBinder")
+        binder.Support = [(self.Body, "%s.%s." % (self.Lcs.Name, element.Name))]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertPlaneAt(binder.Shape, self.bodyPlacement)
+
+    def testPointFollowsTheMove(self):
+        """The coordinate system moved after the binder was made: the binder follows it at the
+        next recompute (FreeCAD-CH ops#206)."""
+        binder = self.binder("Origin")
+        self.Lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(-2, 6, 1), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [vertex] = binder.Shape.Vertexes
+        self.assertLess(vertex.Point.distanceToPoint(FreeCAD.Vector(-2, 6, 1)), 1e-9)
+
 
 class TestShapeBinderOfACoordinateSystemInAPlacedBody(TestShapeBinderOfACoordinateSystem):
     """The same in a body moved and turned: the binder's shape is in the body."""

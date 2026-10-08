@@ -178,6 +178,166 @@ class TestAttachedToACoordinateSystem(unittest.TestCase):
         plane = self.attach("PartDesign::Plane", [(xy, "")], "FlatFace")
         self.assertPlacement(plane.Placement, FreeCAD.Placement())
 
+    def testOriginPlacedFromPython(self):
+        """The body's Origin is at identity unless its read-only Placement is set from Python:
+        then its planes follow it alike for the Attacher and a Mirrored. Lifted 2, the XY plane
+        is z = 2 and a 2 x 3 x 2 box mirrored on it reaches z = 4. The Mirrored took the
+        Origin's plane at z = 0 (PR 177 review, Low 1: DatumElement::getBasePoint)."""
+        origin = self.Body.Origin
+        origin.setPropertyStatus("Placement", "-ReadOnly")
+        origin.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 2), FreeCAD.Rotation())
+        [xy] = [f for f in origin.OriginFeatures if f.Role == "XY_Plane"]
+        plane = self.attach("PartDesign::Plane", [(xy, "")], "FlatFace")
+        self.assertPlacement(plane.Placement, origin.Placement)
+        box = self.Body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Height = 2
+        box.Width = 3
+        self.Doc.recompute()
+        mirrored = self.Doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [box]
+        mirrored.MirrorPlane = (xy, [""])
+        self.Body.addObject(mirrored)
+        self.Doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.ZMin, 0, places=6)
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.ZMax, 4, places=6)
+
+    def testLineIntersection(self):
+        """A datum line on the coordinate system's XY and XZ planes (IntersectionLine): its X
+        axis, through its origin. The line engine puts the line's base at the foot of the
+        reference's origin on it, which is (3, 4, 5) taken in the coordinate system and
+        (0, 4, 5) taken as the element's own (PR 177 review, Low 2: AttachEngineLine)."""
+        line = self.attach(
+            "PartDesign::Line",
+            [(self.element("XY_Plane"), ""), (self.element("XZ_Plane"), "")],
+            "IntersectionLine",
+        )
+        direction = line.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        self.assertLess(direction.cross(FreeCAD.Vector(1, 0, 0)).Length, 1e-9)
+        self.assertLess(line.Placement.Base.distanceToPoint(FreeCAD.Vector(3, 4, 5)), 1e-9)
+
+    # The coordinate system moved after the attachment: whatever links its elements bare follows
+    # it at the next recompute (FreeCAD-CH ops#206). Nothing else touched them: their links name
+    # the elements, which the move leaves unchanged.
+    movedPlacement = FreeCAD.Placement(
+        FreeCAD.Vector(-2, 6, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 90)
+    )
+
+    def testPlaneFollowsTheMove(self):
+        plane = self.attach("PartDesign::Plane", [(self.element("XY_Plane"), "")], "FlatFace")
+        self.Lcs.Placement = self.movedPlacement
+        self.Doc.recompute()
+        self.assertPlacement(plane.Placement, self.movedPlacement)
+
+    def testSketchFollowsTheMove(self):
+        sketch = self.attach(
+            "Sketcher::SketchObject", [(self.element("XY_Plane"), "")], "FlatFace"
+        )
+        self.Lcs.Placement = self.movedPlacement
+        self.Doc.recompute()
+        self.assertPlacement(sketch.Placement, self.movedPlacement)
+
+    def testMirroredFollowsTheMove(self):
+        """A 2 x 3 x 2 box at the body's origin, mirrored on the coordinate system's XZ plane:
+        at (3, 4, 5) turned about X that is the plane z = 5, so the mirror reaches z = 10. Moved
+        to (-2, 6, 1) turned about Z, the plane is x = -2, and the mirror reaches x = -6."""
+        box = self.Body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = box.Height = 2
+        box.Width = 3
+        self.Doc.recompute()
+        mirrored = self.Doc.addObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [box]
+        mirrored.MirrorPlane = (self.element("XZ_Plane"), [""])
+        self.Body.addObject(mirrored)
+        self.Doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.ZMax, 10, places=6)
+        self.Lcs.Placement = self.movedPlacement
+        self.Doc.recompute()
+        self.assertTrue(mirrored.isValid(), mirrored.getStatusString())
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.XMin, -6, places=6)
+        self.assertAlmostEqual(mirrored.Shape.BoundBox.ZMax, 2, places=6)
+
+    def testUndoOfTheMove(self):
+        self.Doc.UndoMode = 1
+        plane = self.attach("PartDesign::Plane", [(self.element("XY_Plane"), "")], "FlatFace")
+        self.Doc.openTransaction("Move")
+        self.Lcs.Placement = self.movedPlacement
+        self.Doc.commitTransaction()
+        self.Doc.recompute()
+        self.assertPlacement(plane.Placement, self.movedPlacement)
+        self.Doc.undo()
+        self.Doc.recompute()
+        self.assertPlacement(plane.Placement, self.lcsPlacement)
+        self.Doc.redo()
+        self.Doc.recompute()
+        self.assertPlacement(plane.Placement, self.movedPlacement)
+
+    def testCoordinateSystemOnAnAttachedOne(self):
+        """A second coordinate system attached bare to the XY plane of a first that is itself
+        attached (to the body's XY plane, offset to (3, 4, 5) turned about X). Nothing orders
+        the second after the first, and the second is made first, so the recompute runs it
+        before the first: the document's second pass must run it again, after the first's
+        offset changes too (PR 181 review, Low 2)."""
+        second = self.Body.newObject("Part::LocalCoordinateSystem", "Second")
+        second.MapMode = "Deactivated"
+        [xy] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        first = self.Body.newObject("Part::LocalCoordinateSystem", "First")
+        first.AttachmentSupport = [(xy, "")]
+        first.MapMode = "FlatFace"
+        first.AttachmentOffset = self.lcsPlacement
+        self.Doc.recompute()
+        [firstXY] = [f for f in first.OriginFeatures if f.Role == "XY_Plane"]
+        second.AttachmentSupport = [(firstXY, "")]
+        second.MapMode = "FlatFace"
+        self.Doc.recompute()
+        self.assertTrue(second.isValid(), second.getStatusString())
+        self.assertPlacement(second.Placement, self.lcsPlacement)
+        first.AttachmentOffset = self.movedPlacement
+        self.Doc.recompute()
+        self.assertPlacement(first.Placement, self.movedPlacement)
+        self.assertPlacement(second.Placement, self.movedPlacement)
+        for obj in (first, second):
+            self.assertNotIn("Touched", obj.State, obj.Name)
+
+    def testReopenedFileIsUpToDate(self):
+        """A sketch attached bare to the XY plane of a coordinate system that is attached itself,
+        and a pad of it: saved and opened again, nothing needs a recompute. The coordinate
+        system's restore positions it (writes its Placement), which marked the sketch again
+        after the document had cleared it (PR 181 review, Medium 1)."""
+        import os
+        import tempfile
+
+        import Part
+        import Sketcher
+
+        [xy] = [f for f in self.Body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        lcs = self.Body.newObject("Part::LocalCoordinateSystem", "Carrier")
+        lcs.AttachmentSupport = [(xy, "")]
+        lcs.MapMode = "FlatFace"
+        lcs.AttachmentOffset = self.lcsPlacement
+        self.Doc.recompute()
+        [lcsXY] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        sketch = self.attach("Sketcher::SketchObject", [(lcsXY, "")], "FlatFace")
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (2, 0), (2, 2), (0, 2))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]), False)
+        for i in range(4):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        pad = self.Body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 1
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 4, places=6)
+
+        path = os.path.join(tempfile.mkdtemp(), "ReopenedLCS.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        touched = [obj.Name for obj in self.Doc.Objects if "Touched" in obj.State]
+        self.assertEqual(touched, [])
+
 
 class TestAttachedToACoordinateSystemInAPlacedBody(TestAttachedToACoordinateSystem):
     """The same in a body moved and turned: the attached placements are in the body."""

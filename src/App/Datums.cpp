@@ -95,9 +95,11 @@ Base::Vector3d DatumElement::getBasePoint() const
 {
     Base::Placement placement = Placement.getValue();
 
-    // The element's position turned and moved by its coordinate system (FreeCAD-CH ops#200)
+    // The element's position turned and moved by its coordinate system (FreeCAD-CH ops#200). An
+    // origin's too: it is at identity unless set from Python, and the Attacher and ShapeBinder
+    // apply it (ops#206)
     const auto* lcs = getLCS();
-    if (lcs && !lcs->isOrigin()) {
+    if (lcs) {
         placement = lcs->Placement.getValue() * placement;
     }
 
@@ -112,7 +114,7 @@ Base::Vector3d DatumElement::getDirection() const
     rot.multVec(dir, dir);
 
     const auto* lcs = getLCS();
-    if (lcs && !lcs->isOrigin()) {
+    if (lcs) {
         Base::Rotation lcsRot = lcs->Placement.getValue().getRotation();
         lcsRot.multVec(dir, dir);
     }
@@ -345,6 +347,36 @@ void LocalCoordinateSystem::onDocumentRestored()
     migrateOriginPoint();
 }
 
+void LocalCoordinateSystem::onChanged(const Property* prop)
+{
+    // A link to an element alone, (element, ""), is placed in this coordinate system too, but it
+    // names only the element, which the move leaves unchanged: recompute what holds such a link.
+    // Changed in a recompute (attached), it marks them again, so one that ran before this
+    // coordinate system runs again in the document's second pass (FreeCAD-CH ops#206). That pass
+    // reruns one such inversion only: in a longer chain run backwards (a datum on a second
+    // coordinate system on a first) the rest stays touched until the next recompute, which logs
+    // "still touched". An attached coordinate system writes its Placement on each of its
+    // recomputes (positionBySupport, twice, without comparing), so these recompute with it even
+    // when it didn't move: a cost, not a wrong result. Not while the document is restoring: an
+    // attached one is positioned again in its onDocumentRestored, after the document cleared
+    // what links it (PR 181 review)
+    const auto* doc = getDocument();
+    const bool restoring = isRestoring() || (doc && doc->testStatus(App::Document::Restoring));
+    if (prop == &Placement && !restoring) {
+        for (auto* element : OriginFeatures.getValues()) {
+            if (!element) {
+                continue;
+            }
+            for (auto* obj : element->getInList()) {
+                if (obj != this) {
+                    obj->enforceRecompute();
+                }
+            }
+        }
+    }
+    GeoFeature::onChanged(prop);
+}
+
 void LocalCoordinateSystem::migrateOriginPoint()
 {
     auto features = OriginFeatures.getValues();
@@ -368,7 +400,7 @@ bool LocalCoordinateSystem::extensionGetSubObject(DocumentObject*& ret,
                                                                 const char* subname,
                                                                 PyObject** pyobj,
                                                                 Base::Matrix4D* mat,
-                                                                bool,
+                                                                bool transform,
                                                                 int depth) const
 {
     if (Base::Tools::isNullOrEmpty(subname)) {
@@ -403,6 +435,11 @@ bool LocalCoordinateSystem::extensionGetSubObject(DocumentObject*& ret,
         }
         else {
             subname = "";
+        }
+        // The element is placed in this coordinate system, as a group's child is (FreeCAD-CH
+        // ops#207: a path through the body, "LCS.XY_Plane001.", gave it at the body's origin)
+        if (mat && transform) {
+            *mat *= Placement.getValue().toMatrix();
         }
         ret = ret->getSubObject(subname, pyobj, mat, true, depth + 1);
         return true;
