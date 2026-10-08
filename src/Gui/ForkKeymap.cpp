@@ -271,6 +271,14 @@ const Entry table[] = {
     {"FEM_MaterialSolid", ""},
     {"FEM_ResultShow", ""},
     {"FEM_ResultsPurge", ""},
+    // Assembly's single letters that are the fork's general keys (F fit, Z zoom out, W box zoom,
+    // Y hide): its joint commands are ForEdit and an active assembly counts as an edit, so the tie
+    // rule gave them the key (PLAN.md decision 31). Its other letters stay: no fork key is enabled
+    // with them (the sketch tools' keys need a sketch in edit, whose dialog disables Assembly's).
+    {"Assembly_CreateJointFixed", ""},
+    {"Assembly_SolveAssembly", ""},
+    {"Assembly_CreateJointScrew", ""},
+    {"Assembly_CreateJointRigidGroup", ""},
     // FEM (F, G), and Robot's single A and W (the arc and the box zoom)
     {"FEM_PostFilterGlyph", ""},
     {"Robot_InsertWaypoint", ""},
