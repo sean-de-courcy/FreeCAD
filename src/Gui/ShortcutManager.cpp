@@ -45,6 +45,7 @@ ShortcutManager::ShortcutManager()
     hPriorities->Attach(this);
     hSetting = hShortcuts->GetGroup("Settings");
     hSetting->Attach(this);
+    ForkKeymap::preferenceGroup()->Attach(this);  // FreeCAD-CH: the keymap (ops#194)
     timeout = hSetting->GetInt("ShortcutTimeout", 300);
     timer.setSingleShot(true);
 
@@ -69,6 +70,7 @@ ShortcutManager::~ShortcutManager()
     hShortcuts->Detach(this);
     hSetting->Detach(this);
     hPriorities->Detach(this);
+    ForkKeymap::preferenceGroup()->Detach(this);
 }
 
 static ShortcutManager* Instance;
@@ -92,7 +94,12 @@ void ShortcutManager::OnChange(Base::Subject<const char*>& src, const char* reas
         if (boost::equals(reason, "ShortcutTimeout")) {
             timeout = hSetting->GetInt("ShortcutTimeout");
         }
-        else if (boost::equals(reason, "Keymap")) {
+        return;
+    }
+
+    if (ForkKeymap::preferenceGroup() == &src) {
+        // "" when the group is cleared (a reset of the General preferences)
+        if (Base::Tools::isNullOrEmpty(reason) || boost::equals(reason, "Keymap")) {
             ForkKeymap::reload();
         }
         return;
@@ -488,10 +495,14 @@ struct CommandType: Command
 };
 
 // FreeCAD-CH (ops#194): whether the action's command works in the edit in progress, e.g.
-// Sketcher_CreateFillet in a sketch. On a tie it wins over a command that doesn't, so Shift+F in a
-// sketch is the sketch fillet, not PartDesign_Fillet (both enabled).
+// Sketcher_CreateFillet in a sketch. On a tie it wins over a command that doesn't, so a user key
+// shared with a general command runs the sketch's in a sketch. The fork's keymap only: FreeCAD's
+// keeps upstream's rule.
 bool isForEdit(QAction* action)
 {
+    if (!ForkKeymap::isOnshape()) {
+        return false;
+    }
     auto fcAction = action ? qobject_cast<Action*>(action->parent()) : nullptr;
     Command* cmd = fcAction ? fcAction->command() : nullptr;
     return cmd && CommandType::isForEdit(cmd) && Application::Instance->editDocument();

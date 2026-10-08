@@ -190,6 +190,79 @@ const Entry table[] = {
     {"Sketcher_Rotate", ""},
     {"Sketcher_Scale", ""},
     {"Sketcher_SwitchVirtualSpace", ""},
+    // Other workbenches' chords starting with an Onshape key: once such a workbench is loaded, the
+    // key would wait for the chord everywhere (ShortcutManager counts every enabled action). Most
+    // are Python commands, whose key PythonCommand::getAccel() asks of this table. Chords starting
+    // with R, M or U go with those keys in PR D.
+    // Draft
+    {"Draft_Arc", ""},
+    {"Draft_Arc_3Points", ""},
+    {"Draft_BezCurve", ""},
+    {"Draft_BSpline", ""},
+    {"Draft_Circle", ""},
+    {"Draft_Clone", ""},
+    {"Draft_Dimension", ""},
+    {"Draft_Downgrade", ""},
+    {"Draft_Edit", ""},
+    {"Draft_Ellipse", ""},
+    {"Draft_Facebinder", ""},
+    {"Draft_Fillet", ""},
+    {"Draft_Hatch", ""},
+    {"Draft_Label", ""},
+    {"Draft_Line", ""},
+    {"Draft_Offset", ""},
+    {"Draft_SelectPlane", ""},
+    {"Draft_SubelementHighlight", ""},
+    {"Draft_Text", ""},
+    {"Draft_ToggleConstructionMode", ""},
+    {"Draft_ToggleGrid", ""},
+    {"Draft_Trimex", ""},
+    // BIM
+    {"Arch_Axis", ""},
+    {"Arch_AxisSystem", ""},
+    {"Arch_Building", ""},
+    {"Arch_CloneComponent", ""},
+    {"Arch_Component", ""},
+    {"Arch_CurtainWall", ""},
+    {"Arch_Equipment", ""},
+    {"Arch_Floor", ""},
+    {"Arch_Frame", ""},
+    {"Arch_Grid", ""},
+    {"Arch_IfcSpreadsheet", ""},
+    {"Arch_Level", ""},
+    {"Arch_Nest", ""},
+    {"Arch_Reference", ""},
+    {"Arch_Truss", ""},
+    {"Arch_Wall", ""},
+    {"Arch_Window", ""},
+    {"BIM_Beam", ""},
+    {"BIM_Clone", ""},
+    {"BIM_Column", ""},
+    {"BIM_Copy", ""},
+    {"BIM_Covering", ""},
+    {"BIM_DimensionAligned", ""},
+    {"BIM_DimensionHorizontal", ""},
+    {"BIM_DimensionVertical", ""},
+    {"BIM_Door", ""},
+    {"BIM_DrawingView", ""},
+    {"BIM_Leader", ""},
+    {"BIM_LinkMake", ""},
+    {"BIM_ResetCloneColors", ""},
+    {"BIM_SetWPFront", ""},
+    {"BIM_SetWPSide", ""},
+    {"BIM_SetWPTop", ""},
+    {"BIM_Shape2DCut", ""},
+    {"BIM_Shape2DView", ""},
+    {"BIM_TDPage", ""},
+    {"BIM_TDView", ""},
+    {"BIM_Text", ""},
+    {"IFC_Diff", ""},
+    {"IFC_Expand", ""},
+    {"IFC_MakeProject", ""},
+    // FEM (F, G), and Robot's single A and W (the arc and the box zoom)
+    {"FEM_PostFilterGlyph", ""},
+    {"Robot_InsertWaypoint", ""},
+    {"Robot_InsertWaypointPreselect", ""},
 };
 
 // The draw styles' and the Part selection filters' actions (CommandView.cpp, Part's
@@ -230,10 +303,8 @@ const Entry* find(const char* name)
 
 bool readPreference()
 {
-    auto hGrp = App::GetApplication().GetParameterGroupByPath(
-        "User parameter:BaseApp/Preferences/Shortcut/Settings"
-    );
-    return hGrp->GetASCII("Keymap", "Onshape") != "FreeCAD";
+    // Not under Shortcut: Customize > Keyboard > Reset All clears that group and every subgroup
+    return preferenceGroup()->GetASCII("Keymap", "Onshape") != "FreeCAD";
 }
 
 bool& onshape()
@@ -249,7 +320,33 @@ std::map<std::string, std::string>& upstreamAccels()
     return map;
 }
 
+bool isReachable(const Command* cmd)
+{
+    return cmd && std::any_of(std::begin(reachable), std::end(reachable), [cmd](const char* name) {
+               return std::strcmp(name, cmd->getName()) == 0;
+           });
+}
+
+/// The widget keeping the actions of reachable[]
+QPointer<QWidget>& holder()
+{
+    static QPointer<QWidget> widget;
+    return widget;
+}
+
+bool isPython(Command* cmd)
+{
+    return dynamic_cast<PythonCommand*>(cmd) || dynamic_cast<PythonGroupCommand*>(cmd);
+}
+
 }  // namespace
+
+ParameterGrp::handle preferenceGroup()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/General"
+    );
+}
 
 bool isOnshape()
 {
@@ -274,8 +371,7 @@ const char* accel(const char* name, const char* upstream)
 void applyTo(Command* cmd)
 {
     // A Python command's key is its resource, which PythonCommand::getAccel() looks up itself
-    if (!cmd || dynamic_cast<PythonCommand*>(cmd) || dynamic_cast<PythonGroupCommand*>(cmd)
-        || dynamic_cast<MacroCommand*>(cmd) || !find(cmd->getName())) {
+    if (!cmd || isPython(cmd) || dynamic_cast<MacroCommand*>(cmd) || !find(cmd->getName())) {
         return;
     }
     const char* own = cmd->getAccel();
@@ -289,25 +385,22 @@ void applyTo(Command* cmd)
 
 void actionCreated(Command* cmd)
 {
-    if (!onshape() || !cmd || !cmd->getAction()
-        || std::none_of(std::begin(reachable), std::end(reachable), [cmd](const char* name) {
-               return std::strcmp(name, cmd->getName()) == 0;
-           })) {
+    if (!onshape() || !isReachable(cmd) || !cmd->getAction()) {
         return;
     }
-    static QPointer<QWidget> holder;
-    if (!holder) {
+    auto& widget = holder();
+    if (!widget) {
         if (!getMainWindow()) {
             return;
         }
         // As ToolBarManager's action widget: zero size and out of the way, but shown
-        holder = new QWidget(getMainWindow());
-        holder->setObjectName(QStringLiteral("_fc_ch_keymap_actions_"));
-        holder->resize(0, 0);
-        holder->move(QPoint(-100, -100));
-        holder->show();
+        widget = new QWidget(getMainWindow());
+        widget->setObjectName(QStringLiteral("_fc_ch_keymap_actions_"));
+        widget->resize(0, 0);
+        widget->move(QPoint(-100, -100));
+        widget->show();
     }
-    holder->addAction(cmd->getAction()->action());
+    widget->addAction(cmd->getAction()->action());
 }
 
 void reload()
@@ -319,8 +412,14 @@ void reload()
     onshape() = value;
 
     auto& manager = Application::Instance->commandManager();
+    auto shortcuts = ShortcutManager::instance();
     for (const auto& entry : table) {
-        applyTo(manager.getCommandByName(entry.name));
+        Command* cmd = manager.getCommandByName(entry.name);
+        applyTo(cmd);
+        // A Python command's getAccel() asks the table itself: only its action needs the new key
+        if (isPython(cmd) && cmd->getAction()) {
+            cmd->setShortcut(shortcuts->getShortcut(cmd->getName(), cmd->getAccel()));
+        }
     }
     for (const auto& sub : subActions) {
         Command* cmd = manager.getCommandByName(sub.group);
@@ -331,12 +430,41 @@ void reload()
         }
     }
     for (const char* name : reachable) {
-        actionCreated(manager.getCommandByName(name));
+        Command* cmd = manager.getCommandByName(name);
+        if (onshape()) {
+            actionCreated(cmd);
+        }
+        else if (holder() && cmd && cmd->getAction()) {
+            holder()->removeAction(cmd->getAction()->action());  // as upstream: no key in an edit
+        }
     }
     if (Command* cmd = manager.getCommandByName("Std_Workbench")) {
         if (auto group = qobject_cast<WorkbenchGroup*>(cmd->getAction())) {
             group->refreshWorkbenchList();
         }
+    }
+    // A group's button carries its default tool's key (GroupCommand::setup()), and a Python
+    // group's drop-down has actions of its own: set them again
+    for (Command* cmd : manager.getAllCommands()) {
+        auto group = qobject_cast<ActionGroup*>(cmd->getAction());
+        if (!group) {
+            continue;
+        }
+        if (dynamic_cast<PythonGroupCommand*>(cmd)) {
+            for (QAction* action : group->actions()) {
+                QByteArray name = action->property("CommandName").toByteArray();
+                if (!name.isEmpty()) {
+                    action->setShortcut(shortcuts->getShortcut(name.constData()));
+                }
+            }
+        }
+        if (dynamic_cast<GroupCommand*>(cmd) || dynamic_cast<PythonGroupCommand*>(cmd)) {
+            cmd->languageChange();
+        }
+    }
+    // Pad's and Revolution's isActive() depend on the keymap in sketch edit
+    if (MainWindow* mainWindow = getMainWindow()) {
+        mainWindow->updateActions(true);
     }
 }
 

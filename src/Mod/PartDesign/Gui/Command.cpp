@@ -44,6 +44,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionObject.h>
@@ -1227,9 +1228,10 @@ static Sketcher::SketchObject* sketchInEdit()
 }
 
 // What Command::testActive() checks for a command that isn't ForEdit, but a sketch in edit passes
+// under the fork's keymap (FreeCAD's keeps upstream's: disabled in the sketch)
 static bool allowedOrSketchInEdit(App::Document* doc)
 {
-    return sketchInEdit()
+    return (Gui::ForkKeymap::isOnshape() && sketchInEdit())
         || (Gui::Control().isAllowedAlterDocument(doc) && Gui::Control().isAllowedAlterView(doc)
             && Gui::Control().isAllowedAlterSelection(doc));
 }
