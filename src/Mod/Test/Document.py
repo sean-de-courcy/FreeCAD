@@ -1583,7 +1583,8 @@ class UndoRedoCases(unittest.TestCase):
         Each case: abort, and commit + undo + redo + undo + redo + undo (two rounds).
         Review of fork PR 216: a name freed by a move and taken again, a rename that makes room
         for a move (and its mirror), an add then a move, a change or rename of a moved property at
-        its target (either object first in the transaction), a rotation, expressions elsewhere.
+        its target (either object first in the transaction), a rotation, expressions elsewhere;
+        round 2: a move on to a third object, an add, move and move back.
         The state is every property of the objects, so a leftover temporary name or a duplicate
         shows."""
         self.maxDiff = None
@@ -1641,8 +1642,14 @@ class UndoRedoCases(unittest.TestCase):
         def mode(name, modes):
             return lambda obj, target: obj.setEditorMode(name, modes)
 
+        extra = {}
+
+        def moveOn(name):
+            return lambda obj, target: target.moveProperty(name, extra["third"])
+
         swap = [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]
         targetWidth = {"targetWidth": True}
+        third = {"third": True}
 
         cases = [
             ("swap", [rename("Width", "Tmp"), rename("Other", "Width"), rename("Tmp", "Other")]),
@@ -1690,6 +1697,12 @@ class UndoRedoCases(unittest.TestCase):
              {"user": True}),
             ("L3 rename, editor mode, remove", [rename("Width", "Wide"), mode("Wide", []),
                                                 remove("Wide")]),
+            # review round 2 of fork PR 216
+            ("move, move on to a third object", [move("Width"), moveOn("Width")], third),
+            ("move, rename at the target, move on to a third object",
+             [move("Width"), renameTarget("Width", "Wider"), moveOn("Wider")], third),
+            ("add, move, move back", [add("Extra", 7), move("Extra"), moveIn("Extra")]),
+            ("V1 move, move back, change", [move("Width"), moveIn("Width"), setValue("Width", 9)]),
         ]
         for label, steps, *options in cases:
             options = options[0] if options else {}
@@ -1709,6 +1722,10 @@ class UndoRedoCases(unittest.TestCase):
                         if options.get("targetWidth"):
                             target.addProperty("App::PropertyInteger", "Width", "T", "its width")
                             target.Width = 3
+                        if options.get("third"):
+                            extra["third"] = doc.addObject("App::FeaturePython", "Third")
+                            static["Third"] = set(extra["third"].PropertiesList)
+                            objs.append(extra["third"])
                         if options.get("user"):
                             user = doc.addObject("App::FeaturePython", "User")
                             static[user.Name] = set(user.PropertiesList)

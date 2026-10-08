@@ -27,6 +27,7 @@
 
 #include <FCConfig.h>
 
+#include <Base/Console.h>
 #include <Base/Writer.h>
 #include <Base/Reader.h>
 #include <Base/Interpreter.h>
@@ -44,6 +45,46 @@
 #include <xercesc/util/PlatformUtils.hpp>
 
 #include "Property.h"
+
+namespace
+{
+// Collects the errors sent to the console while it is attached (ops#235)
+class ErrorCollector final: public Base::ILogger
+{
+public:
+    ErrorCollector()
+    {
+        Base::Console().attachObserver(this);
+    }
+    ~ErrorCollector() override
+    {
+        Base::Console().detachObserver(this);
+    }
+    ErrorCollector(const ErrorCollector&) = delete;
+    ErrorCollector(ErrorCollector&&) = delete;
+    ErrorCollector& operator=(const ErrorCollector&) = delete;
+    ErrorCollector& operator=(ErrorCollector&&) = delete;
+
+    void sendLog(
+        const std::string& /*notifiername*/,
+        const std::string& msg,
+        Base::LogStyle level,
+        Base::IntendedRecipient /*recipient*/,
+        Base::ContentType /*content*/
+    ) override
+    {
+        if (level == Base::LogStyle::Error) {
+            errors.push_back(msg);
+        }
+    }
+    const char* name() override
+    {
+        return "ErrorCollector";
+    }
+
+    std::vector<std::string> errors;
+};
+}  // namespace
 
 TEST(PropertyLink, TestSetValues)
 {
@@ -579,6 +620,41 @@ TEST_F(RenameHandlerThrows, takenBackCommittedWhenHandlerAlwaysThrows)
     EXPECT_EQ(doc->getAvailableUndos(), undos + steps);
 }
 
+// Tests whether undo goes on when a handler refuses the rename back (ops#231: a rename whose
+// handler throws is taken back): the property keeps its new name, the rest of the transaction (a
+// value) is undone, an error is logged, and redo and a second undo restore the value without the
+// handler throwing (review of fork PR 216). The expression engine is restored as it was before the
+// transaction, under the old name, which no property has then (ops#238).
+TEST_F(RenameHandlerThrows, failingRenameBack)
+{
+    arrange(false);
+    throws = 0;
+
+    doc->openTransaction("Rename Property");
+    EXPECT_TRUE(varSet->renameDynamicProperty(prop, "NewName"));
+    prop2->setValue(value + 5);
+    doc->commitTransaction();
+    EXPECT_EQ(expressionOf("NewName"), "Variable2 + 1");
+    auto assertState = [this](long value2) {
+        EXPECT_STREQ(varSet->getPropertyName(prop), "NewName");
+        EXPECT_EQ(varSet->getDynamicPropertyByName("Variable"), nullptr);
+        EXPECT_EQ(prop2->getValue(), value2);
+    };
+
+    ErrorCollector errors;
+    throws = 1;
+    EXPECT_NO_THROW(doc->undo());
+    EXPECT_EQ(throws, 0);
+    EXPECT_EQ(errors.errors.size(), 1);
+    assertState(value);
+    EXPECT_EQ(expressionOf("Variable"), "Variable2 + 1");
+    EXPECT_EQ(expressionOf("NewName"), "");
+    EXPECT_NO_THROW(doc->redo());
+    assertState(value + 5);
+    EXPECT_NO_THROW(doc->undo());
+    assertState(value);
+}
+
 // Tests whether we can rename a property, undo, and redo it
 TEST_F(RenameProperty, redo)
 {
@@ -1088,4 +1164,104 @@ TEST_F(MoveProperty, redoExpressionOriginatingContainerOtherDoc)
 TEST_F(MoveProperty, redoExpressionTargetContainerOtherDoc)
 {
     testRedoMovePropertyExpression(varSetDoc2, varSetDoc2, "Variable", "test#VarSet.Variable");
+}
+
+// Tests whether a property moved to another object and back in one transaction is undone, aborted
+// and redone without an error (it used to be renamed to its own name), its value restored and the
+// expression that uses it unchanged (review of fork PR 216)
+TEST_F(MoveProperty, moveBack)
+{
+    auto* prop2 = freecad_cast<App::PropertyInteger*>(
+        varSet1Doc1->addDynamicProperty("App::PropertyInteger", "Variable2", "Variables")
+    );
+    varSet1Doc1->setExpression(
+        App::ObjectIdentifier(*prop2),
+        std::shared_ptr<App::Expression>(App::Expression::parse(varSet1Doc1, "Variable + 1"))
+    );
+    auto expressions = [this] {
+        std::vector<std::string> result;
+        for (const auto& [path, expr] : varSet1Doc1->ExpressionEngine.getExpressions()) {
+            result.push_back(path.toString() + " = " + expr->toString());
+        }
+        return result;
+    };
+    const auto expressionsBefore = expressions();
+    auto variable = [this] {
+        return freecad_cast<App::PropertyInteger*>(varSet1Doc1->getDynamicPropertyByName("Variable"));
+    };
+    // (a move taken back moves a new property back: prop is gone after the first abort)
+    auto moveThereAndBack = [this, &variable] {
+        App::Property* moved = varSet1Doc1->moveDynamicProperty(variable(), varSet2Doc1);
+        App::Property* back = varSet2Doc1->moveDynamicProperty(moved, varSet1Doc1);
+        freecad_cast<App::PropertyInteger*>(back)->setValue(value + 1);
+    };
+    auto assertState = [&](long expected) {
+        ASSERT_NE(variable(), nullptr);
+        EXPECT_EQ(variable()->getValue(), expected);
+        EXPECT_EQ(varSet2Doc1->getPropertyByName("Variable"), nullptr);
+        EXPECT_EQ(expressions(), expressionsBefore);
+    };
+    ErrorCollector errors;
+
+    doc1->openTransaction("Move Property");
+    moveThereAndBack();
+    doc1->abortTransaction();
+    assertState(value);
+
+    doc1->openTransaction("Move Property");
+    moveThereAndBack();
+    doc1->commitTransaction();
+    for (int round = 0; round < 2; ++round) {
+        EXPECT_TRUE(doc1->undo());
+        assertState(value);
+        EXPECT_TRUE(doc1->redo());
+        assertState(value + 1);
+    }
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+}
+
+// Tests whether a property moved out of an object created and then removed in the same
+// transaction can still be changed, renamed and moved: the removed object's move entry went with
+// it (review of fork PR 216: it was read after it was freed). What the target keeps is ops#238's.
+TEST_F(MoveProperty, sourceRemovedInTransaction)
+{
+    for (const bool commit : {false, true}) {
+        doc1->openTransaction("Move Property");
+        auto* source = doc1->addObject("App::VarSet", "Source");
+        App::Property* added =
+            source->addDynamicProperty("App::PropertyInteger", "Moved", "Variables");
+        App::Property* moved = source->moveDynamicProperty(added, varSet2Doc1);
+        ASSERT_NE(moved, nullptr);
+        doc1->removeObject(source->getNameInDocument());
+        freecad_cast<App::PropertyInteger*>(moved)->setValue(5);
+        EXPECT_TRUE(varSet2Doc1->renameDynamicProperty(moved, "Renamed"));
+        moved = varSet2Doc1->moveDynamicProperty(moved, varSet1Doc1);
+        ASSERT_NE(moved, nullptr);
+        freecad_cast<App::PropertyInteger*>(moved)->setValue(6);
+        if (commit) {
+            doc1->commitTransaction();
+            EXPECT_TRUE(doc1->undo());
+        }
+        else {
+            doc1->abortTransaction();
+        }
+
+        EXPECT_EQ(doc1->getObject("Source"), nullptr);
+        EXPECT_EQ(varSet1Doc1->getPropertyByName("Renamed"), nullptr);
+        ASSERT_EQ(varSet1Doc1->getDynamicPropertyByName("Variable"), prop);
+        EXPECT_EQ(prop->getValue(), value);
+        std::vector<std::string> names;
+        for (auto* obj : {varSet1Doc1, varSet2Doc1}) {
+            for (const char* name : {"Moved", "Renamed"}) {
+                if (obj->getDynamicPropertyByName(name)) {
+                    names.push_back(std::string(obj->getNameInDocument()) + "." + name);
+                    obj->removeDynamicProperty(name);
+                }
+            }
+        }
+        // ops#238: a property moved out of an object created in the transaction stays on the
+        // target, under its name at the move
+        EXPECT_EQ(names, std::vector<std::string>({"VarSet001.Moved"}))
+            << (commit ? "undo" : "abort");
+    }
 }

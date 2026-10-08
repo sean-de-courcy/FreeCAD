@@ -277,6 +277,10 @@ void Transaction::addObjectNew(TransactionalObject* Obj)
             auto second = pos->second;
             auto first = pos->first;
             index.erase(pos);
+            // FreeCAD-CH (ops#235): its move entries go with it
+            std::erase_if(_MoveTargets, [second](const auto& entry) {
+                return entry.second.to == second;
+            });
             delete second;
             delete first;
         }
@@ -303,6 +307,10 @@ void Transaction::addObjectDel(const TransactionalObject* Obj)
     // is it created in this transaction ?
     if (pos != index.end() && pos->second->status == TransactionObject::New) {
         // remove completely from transaction
+        // FreeCAD-CH (ops#235): its move entries go with it
+        std::erase_if(_MoveTargets, [to = pos->second](const auto& entry) {
+            return entry.second.to == to;
+        });
         delete pos->second;
         index.erase(pos);
     }
@@ -539,8 +547,14 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
             std::vector<Rename> renames;
             for (auto& v : _PropChangeMap) {
                 auto& data = v.second;
+                // a property that has its name from before already isn't renamed (moved there and
+                // back: renaming to its own name throws)
+                auto hasNameBefore = [&](const Property* prop) {
+                    const char* now = pcObj->getPropertyName(prop);
+                    return now && nameBefore(data) == now;
+                };
                 if (isMove(data)) {
-                    if (data.restored) {
+                    if (data.restored && !hasNameBefore(data.restored)) {
                         renames.push_back({data.restored, &data});
                     }
                     continue;
@@ -555,7 +569,9 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
                     continue;
                 }
                 data.restored = prop;
-                renames.push_back({prop, &data});
+                if (!hasNameBefore(prop)) {
+                    renames.push_back({prop, &data});
+                }
             }
             if (renames.size() > 1) {
                 int counter = 0;
