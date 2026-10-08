@@ -2586,6 +2586,13 @@ void TreeWidget::keyPressEvent(QKeyEvent* event)
         event->accept();
         return;
     }
+    else if (event->key() == Qt::Key_Space && event->modifiers() == Qt::NoModifier) {
+        // FreeCAD-CH (ops#194): under the fork's keymap Space is Std_ClearSelection's. With nothing
+        // selected the command is off and Space would reach QTreeWidget, which selects the current
+        // item (Space twice: clear, then select again). A rename editor takes its Space itself.
+        event->accept();
+        return;
+    }
 
     QTreeWidget::keyPressEvent(event);
 }

@@ -1167,6 +1167,37 @@ class TestForkKeymapGui(unittest.TestCase):
         self.treeSpace()
         self.assertNotEqual(self.visibility()[self.sketch.Name], before[self.sketch.Name])
 
+    def modelTree(self):
+        return next(
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget)
+            if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
+        )
+
+    def testSpaceInTheTreeWithNothingSelectedSelectsNothing(self):
+        """With nothing selected, Std_ClearSelection is off and Space goes on to the tree, whose
+        own handling selects the current item (so Space twice would clear, then select again):
+        under the fork's keymap the tree drops a plain Space."""
+        tree = self.modelTree()
+        tree.expandAll()
+        pump(0.2)
+        item = None
+        for found in tree.findItems("Body", QtCore.Qt.MatchRecursive | QtCore.Qt.MatchStartsWith):
+            item = found
+        self.assertIsNotNone(item, "the body's tree item")
+        # the current item without selecting it
+        tree.selectionModel().setCurrentIndex(
+            tree.indexFromItem(item), QtCore.QItemSelectionModel.NoUpdate
+        )
+        Gui.Selection.clearSelection()
+        pump(0.2)
+        self.assertEqual(Gui.Selection.getSelection(), [])
+        self.assertTrue(focus(tree), "the tree doesn't take the focus")
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Space)
+        pump(0.5)
+        self.assertEqual(Gui.Selection.getSelection(), [])
+        self.assertEqual(tree.selectedItems(), [])
+
     def boxes(self):
         """Two 10 mm boxes outside the body, at x 0 and x 30."""
         a = self.doc.addObject("Part::Box", "BoxA")
