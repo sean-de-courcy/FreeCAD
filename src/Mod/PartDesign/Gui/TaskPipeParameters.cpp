@@ -146,7 +146,8 @@ bool usedAlike(App::DocumentObject* obj,
 }
 
 // The profile or a section as the pipe takes it: a sketch whole unless a point
-std::vector<std::string> sectionElements(App::DocumentObject* obj, const std::vector<std::string>& subs)
+std::vector<std::string> sectionElements(App::DocumentObject* obj,
+                                         const std::vector<std::string>& subs)
 {
     std::vector<std::string> elements;
     for (const std::string& sub : subs) {
@@ -255,7 +256,7 @@ ReferenceField::Options pathOptions(const App::DocumentObjectT& pipeT)
 {
     ReferenceField::Options options;
     options.kind = ReferenceField::Kind::Profile;
-    options.path = true;
+    options.use = ReferenceField::ProfileUse::Path;
     options.noDependents = true;
     options.kinds = TaskPipeParameters::tr("Edges, or a sketch or a wire whole");
     options.accept = [pipeT](App::DocumentObject* obj, const char* sub, std::string& why) {

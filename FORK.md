@@ -195,7 +195,8 @@ names it.
 | `fix/146-esc-and-selection-filters` | fix | ops#146, ops#147 | upstream issues 23518, 30992, 28305, 26645 | `integration` `50485c0283` | `9dd9ca6159` (fork PR 160), 2026-10-07 | a new base fixes upstream issues 23518, 30992, 28305 and 26645, and the fork-only choices go with it or are dropped: Clarify Selection on `` ` ``, the filter off in sketch edit and only on element picks, its status-bar button, "No Selection Filters" never clearing a task's gate |
 | `feat/150-w8-pipe-paths` | feat | ops#150 | - | `feat/150-w7-loft-pipe-sections` `d3a273613c` (stacked on fork PR 163) | `9c31a0250c` (fork PR 166), 2026-10-07 | never (fork feature) |
 | `fix/196-197-followups` | fix | ops#196, ops#197 | - | `integration` `9dd9ca6159` | `bc94aa3404` (fork PR 167), 2026-10-07 | when upstream takes the ops#148 and ops#146 fixes (drop with them) |
-| `feat/153-quick-measure` | feat | ops#153 | - | `integration` `9dd9ca6159` | (fork PR 168) | never (fork feature); refit when upstream changes `QuickMeasure::printResult` or `Measure::Measurement` |
+| `feat/153-quick-measure` | feat | ops#153 | - | `integration` `9dd9ca6159` | `8e39a53440` (fork PR 168), 2026-10-07 | never (fork feature); refit when upstream changes `QuickMeasure::printResult` or `Measure::Measurement` |
+| `feat/150-w9-hole-fields` | feat | ops#150 | - | `feat/150-w8-pipe-paths` `23a6d79be7` (stacked on fork PR 166) | (fork PR 169) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -62,6 +62,7 @@ public:
     void apply() override;
     void onReferencesRepaired() override;
     void onReferenceSelectionTaken() override;
+    std::vector<ReferenceField*> referenceFields() const override;
 
     bool getThreaded() const;
     long getThreadType() const;
@@ -121,7 +122,6 @@ private Q_SLOTS:
     void baseProfileTypeChanged(int index);
     void startTypeChanged(int index);
     void startOffsetChanged(double value);
-    void selectStartReference(bool checked);
     void setCutDiagram();
 
 private:
@@ -157,9 +157,12 @@ private:
     void updateHoleCutLimits(PartDesign::Hole* hole);
     void updateHoleTypeCombo();
     void updateStartUI();
-    void updateStartReferenceName();
-    void selectedStartReference(const Gui::SelectionChanges& msg);
-    QString getStartReference() const;
+    /// The positions and the start reference as fields (ops#150 W9)
+    void createFields();
+    /// The base profile type the positions need: the saved type plus a point's, a circle's or
+    /// an arc's bit for each picked element (else the pick makes no hole), written in the pick's
+    /// command when it differs; true if written (notes 11.6, 10.9)
+    bool fitBaseProfileType(App::DocumentObject* obj, const std::vector<std::string>& subs);
 
 private:
     using Connection = fastsignals::scoped_connection;
@@ -172,7 +175,10 @@ private:
     std::unique_ptr<Gui::GizmoContainer> gizmoContainer;
     Gui::LinearGizmo* holeDepthGizmo = nullptr;
     Gui::LinearGizmo* startOffsetGizmo = nullptr;
-    bool selectingStartReference = false;
+    ReferenceField* positionsField = nullptr;
+    ReferenceField* startField = nullptr;
+    /// BaseProfileType when the panel opened, or the combo's last choice (PR 169 M2)
+    long savedBaseProfileType = 0;
     void setupGizmos(ViewProviderHole* vp);
     void setGizmoPositions();
 };

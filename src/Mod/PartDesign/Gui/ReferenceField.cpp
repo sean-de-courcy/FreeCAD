@@ -1198,7 +1198,7 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
         return false;
     }
     // A path of a wire's edges goes back to the wire whole, as a sketch's does (PR 166 review)
-    if (options.path) {
+    if (options.use == ProfileUse::Path) {
         try {
             const Part::TopoShape shape = Part::Feature::getTopoShape(
                 linked,
@@ -1211,18 +1211,28 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
         catch (const Base::Exception&) {
         }
     }
-    message = options.path
-        ? tr("The path keeps its last edge: pick another edge of the object first, or another "
-             "object.")
-        : tr("The profile keeps its last element: pick another element of the solid first, or "
-             "another profile.");
+    switch (options.use) {
+        case ProfileUse::Path:
+            message = tr("The path keeps its last edge: pick another edge of the object first, "
+                         "or another object.");
+            break;
+        case ProfileUse::Positions:
+            message = tr("The positions keep their last element: pick another circle or point "
+                         "of the solid first, or a sketch.");
+            break;
+        case ProfileUse::Profile:
+            message = tr("The profile keeps its last element: pick another element of the solid "
+                         "first, or another profile.");
+            break;
+    }
     updateLook();
     return true;
 }
 
 bool ReferenceField::lacksRegions() const
 {
-    App::DocumentObject* linked = isProfile() && !options.path ? linkedObject() : nullptr;
+    App::DocumentObject* linked =
+        isProfile() && options.use == ProfileUse::Profile ? linkedObject() : nullptr;
     auto makeInternals = linked
         ? freecad_cast<App::PropertyBool*>(linked->getPropertyByName("MakeInternals"))
         : nullptr;
@@ -2027,8 +2037,11 @@ QMenu* ReferenceField::buildMenu(QListWidgetItem* item)
         if (!storedSubs().empty() && freecad_cast<Part::Part2DObject*>(linkedObject())) {
             QAction* useWholeAction = menu->addAction(tr("Use whole sketch"));
             useWholeAction->setToolTip(
-                options.path ? tr("The path is the whole sketch again, not its edges")
-                             : tr("The profile is the whole sketch again, not its regions")
+                options.use == ProfileUse::Path
+                    ? tr("The path is the whole sketch again, not its edges")
+                    : options.use == ProfileUse::Positions
+                    ? tr("The positions are the whole sketch again, not the elements picked")
+                    : tr("The profile is the whole sketch again, not its regions")
             );
             connect(useWholeAction, &QAction::triggered, this, [this]() { useWhole(); });
         }
