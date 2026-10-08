@@ -56,6 +56,8 @@ SketcherToolDefaultWidget::SketcherToolDefaultWidget(QWidget* parent)
     , blockParameterFocusPassing(false)
 {
     ui->setupUi(this);
+    // FreeCAD-CH (ops#194 PR D): "Mode (M)" shows the active keymap's key
+    ui->comboLabel1->setText(toolKeyLabel(ui->comboLabel1->text()));
 
     ui->comboBox1->setMaxVisibleItems(25);
     ui->comboBox2->setMaxVisibleItems(25);
@@ -799,7 +801,7 @@ void SketcherToolDefaultWidget::setComboboxIndex(int comboboxindex, int value)
 void SketcherToolDefaultWidget::setComboboxLabel(int comboboxindex, const QString& string)
 {
     if (comboboxindex < nCombobox) {
-        getComboBoxLabel(comboboxindex)->setText(string);
+        getComboBoxLabel(comboboxindex)->setText(toolKeyLabel(string));
     }
 }
 
@@ -969,6 +971,7 @@ void SketcherToolDefaultWidget::changeEvent(QEvent* ev)
     QWidget::changeEvent(ev);
     if (ev->type() == QEvent::LanguageChange) {
         ui->retranslateUi(this);
+        ui->comboLabel1->setText(toolKeyLabel(ui->comboLabel1->text()));
     }
 }
 

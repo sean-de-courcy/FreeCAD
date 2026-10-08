@@ -56,6 +56,9 @@ const Entry table[] = {
     {"Std_BoxElementSelection", ""},
     {"Std_FreezeViews", ""},
     {"Std_ClarifySelection", ""},  // the context menu and long-press stay
+    // QKeySequence::Refresh is Ctrl+R first on macOS and GNOME (Qt's qplatformtheme.cpp), which is
+    // a sketch tool's own Ctrl+R (PR D), and Std_Refresh is ForEdit; F5 is its key on Windows
+    {"Std_Refresh", "F5"},
     // 3D view
     {"Std_ViewFront", "Shift+1"},
     {"Std_ViewRear", "Shift+2"},
@@ -271,14 +274,17 @@ const Entry table[] = {
     {"FEM_MaterialSolid", ""},
     {"FEM_ResultShow", ""},
     {"FEM_ResultsPurge", ""},
-    // Assembly's single letters that are the fork's general keys (F fit, Z zoom out, W box zoom,
-    // Y hide): its joint commands are ForEdit and an active assembly counts as an edit, so the tie
-    // rule gave them the key (PLAN.md decision 31). Its other letters stay: no fork key is enabled
-    // with them (the sketch tools' keys need a sketch in edit, whose dialog disables Assembly's).
+    // Assembly's single letters that are the fork's keys (PLAN.md decision 31: the fork's keys
+    // win). Its joint commands are ForEdit and an active assembly counts as an edit, so the tie
+    // rule gave them F (fit), Z (zoom out), W (box zoom) and Y (hide). The BOM's O is ForEdit and
+    // always enabled once Assembly has loaded, sketch edit included, where it took the O of
+    // Sketcher_Offset (or made it wait the chord timeout). Assembly's other commands are disabled
+    // while a task dialog is open (a sketch in edit has one), so their letters meet no fork key.
     {"Assembly_CreateJointFixed", ""},
     {"Assembly_SolveAssembly", ""},
     {"Assembly_CreateJointScrew", ""},
     {"Assembly_CreateJointRigidGroup", ""},
+    {"Assembly_CreateBom", ""},
     // FEM (F, G), and Robot's single A and W (the arc and the box zoom)
     {"FEM_PostFilterGlyph", ""},
     {"Robot_InsertWaypoint", ""},

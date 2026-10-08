@@ -204,23 +204,23 @@ private:
         DSDefaultHandler::registerPressedKey(pressed, key);
 
         // FreeCAD-CH (ops#194 PR D): Ctrl+U/J/R/F under the fork's keymap
-        bool toolKey = (key == SoKeyboardEvent::U || key == SoKeyboardEvent::J
-                        || key == SoKeyboardEvent::R || key == SoKeyboardEvent::F)
+        bool ownKey = (key == SoKeyboardEvent::U || key == SoKeyboardEvent::J
+                       || key == SoKeyboardEvent::R || key == SoKeyboardEvent::F)
             && this->isToolKey(pressed, key);
 
-        if (key == SoKeyboardEvent::U && !pressed && toolKey && !this->isLastState()) {
+        if (key == SoKeyboardEvent::U && !pressed && ownKey && !this->isLastState()) {
             toolWidgetManager.firstKeyShortcut();
         }
 
-        if (key == SoKeyboardEvent::J && !pressed && toolKey && !this->isLastState()) {
+        if (key == SoKeyboardEvent::J && !pressed && ownKey && !this->isLastState()) {
             toolWidgetManager.secondKeyShortcut();
         }
 
-        if (key == SoKeyboardEvent::R && !pressed && toolKey && !this->isLastState()) {
+        if (key == SoKeyboardEvent::R && !pressed && ownKey && !this->isLastState()) {
             toolWidgetManager.thirdKeyShortcut();
         }
 
-        if (key == SoKeyboardEvent::F && !pressed && toolKey && !this->isLastState()) {
+        if (key == SoKeyboardEvent::F && !pressed && ownKey && !this->isLastState()) {
             toolWidgetManager.fourthKeyShortcut();
         }
 
