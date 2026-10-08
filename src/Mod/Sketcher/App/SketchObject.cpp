@@ -1563,6 +1563,13 @@ void SketchObject::onSketchRestore()
         fixMissingAxisInExternalGeo();
 
         if(ExternalGeo.getSize()<=2) {
+            // no saved geometry to repair a type list saved before ops#140 from: each link reads
+            // the type at its index
+            if (ExternalTypes.getSize() > ExternalGeometry.getSize()
+                && ExternalGeometry.getSize() > 0) {
+                FC_WARN("External link types of " << getFullName() << " were saved before "
+                        << "ops#140 without their geometry; they are read by index");
+            }
             for(auto &key : externalGeoRef) {
                 long id = getDocument()->getStringHasher()->getID(key.c_str()).value();
                 if(geoLastId < id)
@@ -1577,7 +1584,26 @@ void SketchObject::onSketchRestore()
             // a type list saved before ops#140 gets each link's own type back, from the saved
             // geometries, before anything reads it by index
             if (ExternalTypes.getSize() > ExternalGeometry.getSize()) {
-                rebuildExternalGeometry(std::nullopt, true);
+                // its own try: a failure leaves the list as saved, and the rest of the restore
+                // (orientations, geometry state, solve) still runs (ops#237). The repair follows
+                // from the file alone, so it leaves the sketch untouched (it runs again on the next
+                // open until a save).
+                try {
+                    rebuildExternalGeometry(std::nullopt, true);
+                    ExternalTypes.purgeTouched();
+                }
+                catch (const Base::Exception& e) {
+                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
+                           << e.what());
+                }
+                catch (const Standard_Failure& e) {
+                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
+                           << e.GetMessageString());
+                }
+                catch (const std::exception& e) {
+                    FC_ERR("Failed to repair the external link types of " << getFullName() << ": "
+                           << e.what());
+                }
             }
         }
 

@@ -15,6 +15,7 @@ the two points: two constraints, neither on the rail."""
 
 import os
 import re
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -51,6 +52,14 @@ class TestSketchExternalTypes(unittest.TestCase):
     def tearDown(self):
         if hasattr(self, "doc"):
             App.closeDocument(self.doc.Name)
+        for folder in getattr(self, "folders", []):
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def tempPath(self, name):
+        """A path for a saved file, in a folder that tearDown removes."""
+        folder = tempfile.mkdtemp()
+        self.folders = getattr(self, "folders", []) + [folder]
+        return os.path.join(folder, name)
 
     def addEdge(self, name, edge):
         obj = self.doc.addObject("Part::Feature", name)
@@ -119,7 +128,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         the ring reads a projection by index. Opening it gives each link the type that gives back
         its saved geometries: the ring's two points."""
         self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION]
-        path = os.path.join(tempfile.mkdtemp(), "StaleTypes.FCStd")
+        path = self.tempPath("StaleTypes.FCStd")
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
         del self.doc
@@ -131,7 +140,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertRingPoints(sketch)
 
     def saveAndReopen(self, name):
-        path = os.path.join(tempfile.mkdtemp(), name + ".FCStd")
+        path = self.tempPath(name + ".FCStd")
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
         del self.doc
@@ -296,7 +305,7 @@ class TestSketchExternalTypes(unittest.TestCase):
         The repair builds frozen links too: the ring gets its intersection back. Its points stay
         frozen: moving the ring doesn't move them."""
         self.sketch.ExternalTypes = [PROJECTION, PROJECTION, INTERSECTION]
-        path = os.path.join(tempfile.mkdtemp(), "Frozen.FCStd")
+        path = self.tempPath("Frozen.FCStd")
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
         del self.doc
@@ -434,3 +443,79 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc.recompute()
         radius = (100 - 6.5**2) ** 0.5
         self.assertEqual(self.circleRadii(sketch), [round(radius, 6)])
+
+    def testDeletingTwoSourcesKeepsTheThirdLinksTypeAndConstraints(self):
+        """Links to the rail, the ring and a second rail; deleting both rails' objects leaves the
+        ring with its intersection and the two constraints on its points."""
+        rail2 = self.addEdge("Rail2", Part.makeLine(V(-20, -20, 0), V(20, -20, 0)))
+        self.doc.recompute()
+        self.sketch.addExternal(rail2.Name, "Edge1", False, False)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION])
+        self.doc.removeObject(rail2.Name)
+        self.doc.removeObject(self.rail.Name)
+        self.assertEqual(self.sketch.ExternalGeometry, [(self.ring, ("Edge1",))])
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
+        self.doc.recompute()
+        self.assertRingPoints()
+
+    def testCarbonCopyKeepsEachLinksType(self):
+        """The rail's link deleted, a second sketch with a link to a second rail copies the first:
+        it gets the ring's intersection after its own projection, and the line and both
+        constraints on the ring's points."""
+        self.sketch.delExternal(0)
+        self.doc.recompute()
+        rail2 = self.addEdge("Rail2", Part.makeLine(V(-20, -20, 0), V(20, -20, 0)))
+        copy = self.doc.addObject("Sketcher::SketchObject", "Copy")
+        self.doc.recompute()
+        copy.addExternal(rail2.Name, "Edge1", False, False)
+        self.doc.recompute()
+        copy.carbonCopy(self.sketch.Name, False)
+        self.assertEqual(list(copy.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.doc.recompute()
+        self.assertRingPoints(copy)
+        lines = [g for g in list(copy.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 1)
+        self.assertAlmostEqual(lines[0].StartPoint.y, -20, delta=TOL)
+
+    def testUndoRedoOfDeletingASource(self):
+        """Deleting the rail's object drops its link outside the sketch; undo brings the link and
+        its type back, redo drops them again."""
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Delete the rail object")
+        self.doc.removeObject(self.rail.Name)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeometry), 2)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.assertRingPoints()
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeometry), 1)
+        self.assertEqual(list(self.sketch.ExternalTypes), [INTERSECTION])
+        self.assertRingPoints()
+
+    def testStaleFileWhoseGeometryCameFromTheWrongType(self):
+        """A file saved before the fix, in which the ring was already rebuilt by the stale
+        projection type: its saved geometry is the projection, the line (-10, 0)-(10, 0). The
+        repair keeps what the file shows: the ring stays a projection, and opening changes neither
+        its geometry nor the document."""
+        self.sketch.delExternal(1)
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, False)
+        self.doc.recompute()
+        lines = [g for g in list(self.sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 2)
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION, PROJECTION]
+        # such a file was saved recomputed: a touched object is saved as touched
+        self.sketch.purgeTouched()
+        self.assertFalse(self.doc.isTouched())
+        sketch = self.saveAndReopen("WrongType")
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, PROJECTION])
+        self.assertFalse(self.doc.isTouched())
+        self.assertNotIn("Touched", sketch.State)
+        lines = [g for g in list(sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(self.externalPoints(sketch), [])

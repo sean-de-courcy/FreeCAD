@@ -454,6 +454,54 @@ TEST_F(SketchObjectParkTest, unparkReplacesADeletedMiddleGeometry)
     unparkReplacesADeletedGeometry(2);
 }
 
+// unpark puts a new geometry in place of a deleted one and moves the external GeoIds after it
+// one on, in every constraint. With the constraint list flagged invalid (here the sketch's own
+// geometry is gone) it read the list with getValues(), empty while flagged, and wrote that back:
+// every constraint was gone (ops#237). The list stays flagged until the geometry is back.
+TEST_F(SketchObjectParkTest, unparkWithInvalidConstraintListKeepsConstraints)
+{
+    // Arrange
+    auto sketch = getObject();
+    ASSERT_EQ(projectFace().size(), 4U);
+    const auto ids = sketch->externalGeometryIds(0);
+    Part::GeomLineSegment segment;
+    segment.setPoints(Base::Vector3d(1, 1, 0), Base::Vector3d(4, 6, 0));
+    const int line = sketch->addGeometry(&segment);
+    for (int edge : {1, 3}) {
+        auto coincident = new Sketcher::Constraint();
+        coincident->Type = Sketcher::Coincident;
+        coincident->First = line;
+        coincident->FirstPos = edge == 1 ? Sketcher::PointPos::start : Sketcher::PointPos::end;
+        coincident->Second = GeoEnum::RefExt - edge;
+        coincident->SecondPos = Sketcher::PointPos::start;
+        sketch->addConstraint(coincident);
+    }
+    doc->recompute();
+    ASSERT_TRUE(sketch->isValid());
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    ASSERT_EQ(sketch->delExternal(0), 0);
+    std::vector<Part::Geometry*> geometry;
+    for (auto* geo : sketch->Geometry.getValues()) {
+        geometry.push_back(geo->clone());
+    }
+    sketch->Geometry.setValues(std::vector<Part::Geometry*> {});
+    ASSERT_TRUE(sketch->Constraints.getValues().empty());  // flagged invalid
+
+    // Act
+    int replaced = sketch->unparkExternalGeometry(box, sub, std::move(shadow), 0, ids);
+
+    // Assert
+    EXPECT_EQ(replaced, 1);
+    EXPECT_TRUE(sketch->Constraints.getValues().empty());  // still flagged
+    sketch->Geometry.setValues(std::move(geometry));
+    const auto& constraints = sketch->Constraints.getValues();
+    ASSERT_EQ(constraints.size(), 2U);
+    EXPECT_EQ(constraints[0]->Second, GeoEnum::RefExt - 1);
+    EXPECT_EQ(constraints[1]->Second, GeoEnum::RefExt - 3);
+}
+
 TEST_F(SketchObjectParkTest, unparkLeavesAFrozenEntryAlone)
 {
     // Arrange: the face's projection frozen, parked, its third geometry deleted

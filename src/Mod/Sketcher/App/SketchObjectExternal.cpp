@@ -1209,6 +1209,7 @@ int SketchObject::attachExternal(
 
     std::vector<long> Types;
     // the new link gives the detached geometries, so it takes the type of the link they came from
+    // (of the first, when they came from several links of different types)
     std::optional<long> attachedType;
     int entry = 0;
     for(auto &key : externalGeoRef) {
@@ -3381,7 +3382,9 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
     }
 
     if(touched) {
-        // the links added above are projections; the others keep their types
+        // the links added above are projections; the others keep their types. A missing
+        // intersection comes back as a projection: the missing geometry doesn't keep its link's
+        // type (nothing in the fork calls this; ops#237)
         auto types = ExternalTypes.getValues();
         types.resize(ExternalGeometry.getSize(), static_cast<long>(ExtType::Projection));
         ExternalGeo.setValues(geos);
@@ -3624,9 +3627,12 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     }
     else {
         // The reverse of delExternalPrivate: each external GeoId at or after an inserted index
-        // moves one on, so every constraint stays on its geometry
+        // moves one on, so every constraint stays on its geometry. getValuesForce(): getValues()
+        // is empty while the list is flagged invalid, and writing that back would delete every
+        // constraint; a flagged list stays flagged (ops#140, ops#237)
+        const bool invalidConstraints = Constraints.hasInvalidGeometry();
         std::vector<Constraint*> constraints;
-        for (const auto& cstr : Constraints.getValues()) {
+        for (const auto& cstr : Constraints.getValuesForce()) {
             auto shifted = cstr->clone();
             for (int at : inserted) {
                 const int geoId = -at - 1;
@@ -3643,7 +3649,13 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
         ExternalGeo.setValues(std::move(geos));
         solverNeedsUpdate = true;
         Constraints.setValues(std::move(constraints));
-        acceptGeometry();
+        if (invalidConstraints) {
+            rebuildVertexIndex();
+            signalElementsChanged();
+        }
+        else {
+            acceptGeometry();
+        }
     }
     externalGeoRefMap[key] = std::move(refs);
     return replaced;
