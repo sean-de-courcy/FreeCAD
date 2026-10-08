@@ -976,6 +976,28 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
+    def testDraftWithFacesOpensUnarmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
+        old panel armed on the pull direction's subs, not Base's)."""
+        box, draft = self.draft()
+        self.assertEqual(draft.PullDirection, None)
+        [faces, plane, line] = self.edit(draft, count=3)
+        pump(0.2)
+        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertFalse(armed(line))
+
+    def testDraftWithoutFacesOpensArmed(self):
+        """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field
+        armed."""
+        box, draft = self.draft()
+        [vertical] = edge("line", direction=Z, through=(0, 0, 0)).one(box.Shape)
+        draft.PullDirection = (box, [vertical])
+        draft.Base = (box, [])
+        self.doc.recompute()
+        [faces, plane, line] = self.edit(draft, count=3)
+        self.assertTrue(waitFor(lambda: armed(faces)), "a draft without faces opens unarmed")
+        self.assertEqual(draft.PullDirection[1], [vertical])
+
     def testDraftAngleEndsThePlanePick(self):
         """B3: the plane field armed, an angle edit disarms it: its gate goes (a vertex can be
         selected again) and NeutralPlane takes no pick."""
@@ -1031,6 +1053,35 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(thickness.Base[1], [top])
         self.assertEqual(texts(field), [top])
         self.assertVolume(thickness, 1000 - 8 * 8 * 9)
+
+    def testThicknessValueFocusDisarmsTheField(self):
+        """B3 (ops#162): the value takes the focus: the field disarms, and a pick of the top face
+        leaves Base alone (Thickness used to turn only the button off and keep the gate)."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        value = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Value")
+        self.assertIsNotNone(value)
+        self.assertTrue(focus(value), "the value doesn't take the focus")
+        self.assertTrue(waitFor(lambda: not armed(field)), "still armed with the value focused")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [])
+        self.assertEqual(texts(field), [])
+
+    def testThicknessValueEditDisarmsTheField(self):
+        """B3 (ops#162): a value edit, the focus left in the field, disarms it (the panel's own
+        disarm, not the focus model's), and a pick of the top face leaves Base alone."""
+        box, thickness, field = self.emptyDressUp("PartDesign::Thickness", "Thickness")
+        self.assertTrue(waitFor(lambda: armed(field)), "the new thickness's field isn't armed")
+        value = Gui.getMainWindow().findChild(QtWidgets.QWidget, "Value")
+        self.assertIsNotNone(value)
+        self.assertFalse(value.hasFocus())
+        value.setProperty("rawValue", 2.0)
+        pump(0.2)
+        self.assertAlmostEqual(thickness.Value.Value, 2.0, places=6)
+        self.assertFalse(armed(field), "still armed after a value edit")
+        [top] = face(normal=(0, 0, 1)).one(box.Shape)
+        self.pick(box, top)
+        self.assertEqual(thickness.Base[1], [])
 
     def testDefeaturingField(self):
         """A new defeaturing arms its field; a face pick writes Base."""
@@ -1169,6 +1220,44 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertTrue(armed(field))
         self.assertEqual(texts(field), [self.high.Label])
+
+    def testPadFaceRefusesAWholeSketch(self):
+        """B20 (ops#162): a sketch picked whole gives an up-to-face no face: refused with the
+        reason, UpToFace and the field stay as they were, and the field stays armed."""
+        box, pad = self.padOnBox(toFace=False)
+        self.edit(pad, count=1)
+        self.padModeBox().setCurrentIndex(3)
+        pump(0.2)
+        field = findField("fieldUpToFace")
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "the face field isn't armed"
+        )
+        self.pick(self.doc.getObject("Square"), "")
+        self.assertIsNone(pad.UpToFace)
+        self.assertEqual(texts(field), [])
+        self.assertIn("isn't a face", statusText())
+        self.assertTrue(armed(field))
+
+    def testPadFaceTakesACoordinateSystemPlane(self):
+        """B20 (ops#162): the XY plane of a coordinate system at z = 15 is linked through the
+        system (the plane's name as the sub), the field shows it and the pad goes up to it."""
+        box, pad = self.padOnBox(toFace=False)
+        lcs = self.doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.body.addObject(lcs)
+        lcs.Placement = App.Placement(App.Vector(0, 0, 15), App.Rotation())
+        self.doc.recompute()
+        [lcsPlane] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        self.edit(pad, count=1)
+        self.padModeBox().setCurrentIndex(3)
+        pump(0.2)
+        field = findField("fieldUpToFace")
+        self.assertTrue(
+            waitFor(lambda: field.isVisible() and armed(field)), "the face field isn't armed"
+        )
+        self.pick(lcsPlane, "")
+        self.assertLink(pad.UpToFace, lcs, [lcsPlane.Name])
+        self.assertEqual(len(texts(field)), 1)
+        self.assertVolume(pad, 1020)
 
     def testPadOffsetDisarmsTheFace(self):
         """T3: the offset takes the focus: the face field disarms, a pick leaves UpToFace."""
@@ -3535,6 +3624,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual([entries(field).item(i).toolTip() for i in range(2)], ["", ""])
         self.assertTrue(Gui.Control.activeDialog())
 
+    def testLoftDeleteRemovesAllSelected(self):
+        """B12 (ops#162): Delete with both sections selected takes out both (the old loft took
+        only the current row)."""
+        loft = self.tower(("S1", "S2"))
+        self.edit(loft, count=2)
+        field = self.sectionsField()
+        clickRow(field, 0)
+        clickRow(field, 1, QtCore.Qt.ControlModifier)
+        self.assertEqual(len(entries(field).selectedItems()), 2)
+        key(QtCore.Qt.Key_Delete)
+        self.assertTrue(waitFor(lambda: self.sectionNames(loft) == []), loft.Sections)
+        self.assertEqual(texts(field), [])
+
     def testLoftSectionPickTogglesAndReplaces(self):
         """T29, B21: S1 picked again comes out of the list (the field stays armed); picked again
         it is last; a point of it picked replaces its entry, not another one."""
@@ -3860,6 +3962,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(block, "")
         self.assertEqual(self.sectionNames(loft), ["S1"])
         self.assertIn("whole solid", statusText().lower())
+        self.assertTrue(armed(field), "a refused pick ended the pick (B21, ops#162)")
         self.pick(block, "Face6")  # its top, at z = 50
         self.assertEqual(self.sectionNames(loft), ["S1", "Block"])
         self.assertEqual([list(subs) for obj, subs in loft.Sections], [[""], ["Face6"]])
