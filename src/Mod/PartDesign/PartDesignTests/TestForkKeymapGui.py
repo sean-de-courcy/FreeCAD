@@ -529,6 +529,8 @@ class TestForkKeymapGui(unittest.TestCase):
         pump(0.1)
 
     def setUp(self):
+        # the Select Other tests move the cursor over the 3D view; it goes back in tearDown
+        self.cursor = QtGui.QCursor.pos()
         App.ParamGet(KEYMAP).RemString("Keymap")
         self.doc = App.newDocument("ForkKeymapGui")
         self.body = self.doc.addObject("PartDesign::Body", "Body")
@@ -570,6 +572,9 @@ class TestForkKeymapGui(unittest.TestCase):
             pump()
         Gui.Selection.clearSelection()
         App.closeDocument(self.doc.Name)
+        # Left over the 3D view, the cursor broke a later test's synthesized click on an entry of
+        # a combo box's popup: the popup stayed open (ops#221)
+        QtGui.QCursor.setPos(self.cursor)
         pump()
 
     # --- helpers
