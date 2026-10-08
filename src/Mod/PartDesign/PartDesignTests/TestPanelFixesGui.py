@@ -11,6 +11,9 @@ Each test drives the panel as a user does and fails on the old panel code:
   outside the body copies the section and adds no null object;
 - Hole: OK keeps the thread class when the size combo is blank, and a BaseProfileType the combo
   doesn't list.
+Follow-ups (ops#180): opening a pipe recomputes nothing; the Binormal boxes keep six decimals;
+OK makes one copy of an object used as both spines, and keeps an outside object it can't copy
+(an App::Link).
 
 Designed models (notes/reference-list-widget.md 11.7):
 - Rod: a 2 x 2 square on XY at z = 0 (A = 4), swept along a spine on XZ of two collinear lines
@@ -218,14 +221,75 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIsNone(pipe.AuxiliarySpine)
         self.assertIn("Invalid", pipe.State)
 
+    def stale(self, pipe):
+        """Changes the pipe's spine to its first edge without a recompute: a recompute of the pipe
+        would sweep 10 instead of 30 (V = 40, not 120). Returns the volume before."""
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        volume = pipe.Shape.Volume
+        pipe.Spine = (pipe.Spine[0], ["Edge1"])
+        return volume
+
+    def assertOpensWithoutRecompute(self, pipe):
+        volume = self.stale(pipe)
+        self.edit(pipe)
+        pump(0.5)  # the panels' queued updateUI
+        self.assertNotIn("Invalid", pipe.State)
+        self.assertAlmostEqual(pipe.Shape.Volume, volume, places=3)
+
+    def testPipeOpensWithoutRecompute(self):
+        """ops#180: opening a pipe's panel recomputes nothing. The curvilinear box (checked in
+        every pipe by default, not in the .ui) wrote its value and recomputed the pipe at every
+        open."""
+        self.assertOpensWithoutRecompute(self.rod())
+
+    def testPipeInAnotherModeOpensWithoutRecompute(self):
+        """ops#180: likewise a pipe whose Mode isn't the first (Binormal): the mode combo wrote its
+        value and recomputed; the mode's page still shows (the blocked combo no longer turns it)."""
+        pipe = self.rod()
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(0, 1, 0)
+        pipe.AuxiliaryCurvilinear = False
+        self.assertOpensWithoutRecompute(pipe)
+        pages = self.widget(QtWidgets.QComboBox, "comboBoxMode").parentWidget()
+        stack = pages.findChild(QtWidgets.QStackedWidget, "stackedWidget")
+        self.assertIsNotNone(stack)
+        self.assertEqual(stack.currentIndex(), 4)
+        self.assertEqual(self.widget(QtWidgets.QComboBox, "comboBoxMode").currentIndex(), 4)
+
+    def testMultisectionPipeOpensWithoutRecompute(self):
+        """ops#170/ops#180: a Multisection pipe opens without a recompute (its scaling combo is
+        blocked since ops#170, the orientation panel's widgets since ops#180)."""
+        pipe = self.rod()
+        pipe.Sections = list(self.sections())
+        pipe.Transformation = "Multisection"
+        self.assertOpensWithoutRecompute(pipe)
+
+    def testPipeBinormalSixDecimals(self):
+        """ops#180: a binormal of thirds shows as stored, and editing X writes Y and Z unrounded
+        (the .ui's two decimals rounded both)."""
+        pipe = self.rod()
+        pipe.Mode = "Binormal"
+        pipe.Binormal = V(1 / 3, 2 / 3, 2 / 3)
+        self.doc.recompute()
+        self.edit(pipe)
+        boxes = [self.widget(QtWidgets.QDoubleSpinBox, "doubleSpinBox" + c) for c in "XYZ"]
+        for box, value in zip(boxes, (1 / 3, 2 / 3, 2 / 3)):
+            self.assertAlmostEqual(box.value(), value, places=6)
+        boxes[0].setValue(0.5)
+        pump()
+        self.assertAlmostEqual(pipe.Binormal.x, 0.5, places=6)
+        self.assertAlmostEqual(pipe.Binormal.y, 2 / 3, places=6)
+        self.assertAlmostEqual(pipe.Binormal.z, 2 / 3, places=6)
+
     # -- ops#170 4: the Pipe's OK copies what is outside the body ---------------------------------
 
     def testPipeCopiesBothExternalSpines(self):
         """4: spine and auxiliary spine both outside the body: OK copies both into it (Make
-        independent copy), not only the spine."""
+        independent copy), not only the spine; the spine's copy keeps its edges. Mode Standard
+        (the auxiliary spine unused), so the sweep is the Rod's exact V = 120."""
         pipe = self.rod(spineInBody=False)
         aux = self.auxiliarySpine(inBody=False)
-        pipe.Mode = "Auxiliary"
         pipe.AuxiliarySpine = (aux, ["Edge1"])
         self.doc.recompute()
         self.edit(pipe)
@@ -237,12 +301,47 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(self.body.hasObject(pipe.AuxiliarySpine[0]))
         self.assertIsNot(pipe.Spine[0], self.spine)
         self.assertIsNot(pipe.AuxiliarySpine[0], aux)
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
-        # swept along the whole spine (Auxiliary mode turns the profile, so no exact volume)
-        box = pipe.Shape.BoundBox
-        self.assertAlmostEqual(box.ZMin, 0, places=3)
-        self.assertAlmostEqual(box.ZMax, 30, places=3)
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testPipeCopiesASpineUsedTwiceOnce(self):
+        """ops#180: the spine outside the body is the auxiliary spine too: OK makes one copy, used
+        by both (it made two)."""
+        pipe = self.rod(spineInBody=False)
+        pipe.AuxiliarySpine = (self.spine, ["Edge1", "Edge2"])
+        self.doc.recompute()
+        before = set(self.body.Group)
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        added = [obj for obj in self.body.Group if obj not in before]
+        self.assertEqual(len(added), 1, [obj.Name for obj in added])
+        self.assertIs(pipe.Spine[0], added[0])
+        self.assertIs(pipe.AuxiliarySpine[0], added[0])
+        self.doc.recompute()
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testPipeKeepsAnOutsideObjectItCannotCopy(self):
+        """ops#180: an auxiliary spine outside the body that the copy dialog can't copy (an
+        App::Link to a sketch): OK keeps the link and closes. It was set to nothing, and adding
+        that nothing to the body failed after the commit ("Input Error")."""
+        pipe = self.rod()
+        link = self.doc.addObject("App::Link", "AuxLink")
+        link.LinkedObject = self.auxiliarySpine(inBody=False)
+        pipe.AuxiliarySpine = (link, ["Edge1"])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.assertIs(pipe.AuxiliarySpine[0], link)
+        self.assertFalse(self.body.hasObject(link))
 
     def testPipeCopiesASectionWithoutAuxiliarySpine(self):
         """4, the null: spine in the body, no auxiliary spine, one section outside the body. OK
@@ -264,6 +363,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIsNot(copy, outside)
         self.assertTrue(self.body.hasObject(copy))
         self.assertIs(kept, upper)
+        self.assertIsNone(pipe.AuxiliarySpine)
 
     # -- ops#170 5, 6: the Hole -----------------------------------------------------------------
 

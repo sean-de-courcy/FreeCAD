@@ -29,6 +29,7 @@
 
 
 #include <cstring>
+#include <map>
 #include <memory>
 
 #include <QPointer>
@@ -484,39 +485,36 @@ bool TaskPipeParameters::accept()
         }
 
         if (!dlg.radioXRef->isChecked()) {
-            // FreeCAD-CH (ops#170): each spine on its own (both can be outside the body), and
-            // neither when missing (makeCopy(nullptr) put a null into the body after the commit)
+            // FreeCAD-CH (ops#170, ops#180): each spine on its own (both can be outside the body),
+            // neither when missing (makeCopy(nullptr) put a null into the body after the commit),
+            // one copy of an object used twice (the spine as the auxiliary spine too), and the
+            // original kept where makeCopy makes none (an App::Link)
+            const bool independent = dlg.radioIndependent->isChecked();
+            std::map<App::DocumentObject*, App::DocumentObject*> copyOf;
+            auto copied = [&](App::DocumentObject* obj) {
+                auto [it, added] = copyOf.try_emplace(obj, nullptr);
+                if (added) {
+                    it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent);
+                    if (it->second) {
+                        copies.push_back(it->second);
+                    }
+                }
+                return it->second ? it->second : obj;
+            };
             if (outside(spine)) {
-                pipe->Spine.setValue(
-                    PartDesignGui::TaskFeaturePick::makeCopy(spine, "", dlg.radioIndependent->isChecked()),
-                    pipe->Spine.getSubValues()
-                );
-                copies.push_back(pipe->Spine.getValue());
+                pipe->Spine.setValue(copied(spine), pipe->Spine.getSubValues());
             }
             if (outside(auxSpine)) {
                 pipe->AuxiliarySpine.setValue(
-                    PartDesignGui::TaskFeaturePick::makeCopy(
-                        auxSpine,
-                        "",
-                        dlg.radioIndependent->isChecked()
-                    ),
+                    copied(auxSpine),
                     pipe->AuxiliarySpine.getSubValues()
                 );
-                copies.push_back(pipe->AuxiliarySpine.getValue());
             }
 
             std::vector<App::PropertyLinkSubList::SubSet> subSets;
             for (auto& subSet : pipe->Sections.getSubListValues()) {
                 if (outside(subSet.first)) {
-                    subSets.emplace_back(
-                        PartDesignGui::TaskFeaturePick::makeCopy(
-                            subSet.first,
-                            "",
-                            dlg.radioIndependent->isChecked()
-                        ),
-                        subSet.second
-                    );
-                    copies.push_back(subSets.back().first);
+                    subSets.emplace_back(copied(subSet.first), subSet.second);
                 }
                 else {
                     subSets.push_back(subSet);
@@ -541,7 +539,7 @@ bool TaskPipeParameters::accept()
         pipe->getDocument()->commitTransaction();
 
         // we need to add the copied features to the body after the command action, as otherwise
-        // FreeCAD crashes unexplainably
+        // FreeCAD crashes unexplainably (copies holds no null, ops#180)
         for (auto obj : copies) {
             pcActiveBody->addObject(obj);
         }
@@ -591,15 +589,28 @@ TaskPipeOrientation::TaskPipeOrientation(ViewProviderPipe* PipeView, bool /*newO
 
     PartDesign::Pipe* pipe = PipeView->getObject<PartDesign::Pipe>();
 
-    ui->comboBoxMode->setCurrentIndex(pipe->Mode.getValue());
-    ui->curvilinear->setChecked(pipe->AuxiliaryCurvilinear.getValue());
+    {
+        // FreeCAD-CH (ops#180): loading writes nothing and recomputes nothing. The mode and the
+        // curvilinear box (checked by default in the pipe, not in the .ui) wrote their value back
+        // and recomputed the pipe at every open. The blocked combo doesn't turn the page (its .ui
+        // connection), so the page is set here.
+        QSignalBlocker blockMode(ui->comboBoxMode);
+        QSignalBlocker blockCurvilinear(ui->curvilinear);
+        ui->comboBoxMode->setCurrentIndex(pipe->Mode.getValue());
+        ui->stackedWidget->setCurrentIndex(pipe->Mode.getValue());
+        ui->curvilinear->setChecked(pipe->AuxiliaryCurvilinear.getValue());
+    }
     {
         // FreeCAD-CH (ops#170): the binormal as stored. The boxes kept their 0, and editing one
-        // wrote all three. Loading writes nothing.
+        // wrote all three. Loading writes nothing. Six decimals (ops#180): with the .ui's two,
+        // (1/3, ...) showed rounded, and editing one box wrote the other two rounded.
         const Base::Vector3d& binormal = pipe->Binormal.getValue();
         QSignalBlocker blockX(ui->doubleSpinBoxX);
         QSignalBlocker blockY(ui->doubleSpinBoxY);
         QSignalBlocker blockZ(ui->doubleSpinBoxZ);
+        for (QDoubleSpinBox* box : {ui->doubleSpinBoxX, ui->doubleSpinBoxY, ui->doubleSpinBoxZ}) {
+            box->setDecimals(6);
+        }
         ui->doubleSpinBoxX->setValue(binormal.x);
         ui->doubleSpinBoxY->setValue(binormal.y);
         ui->doubleSpinBoxZ->setValue(binormal.z);
