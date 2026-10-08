@@ -46,6 +46,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchEditCameraGui.py
           SketcherTests/TestDimensionInPlaceGui.py
           SketcherTests/TestSketchCameraOnEditGui.py
+          SketcherTests/TestAutoConstraintsGui.py
     )
 endif(BUILD_GUI)
 
