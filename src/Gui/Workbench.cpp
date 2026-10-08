@@ -794,6 +794,7 @@ MenuItem* StdWorkbench::setupMenuBar() const
           << "Std_AnnotationLabel"
           << "Std_UnitsCalculator"
           << "Std_ClarifySelection"
+          << "Std_SelectOther"
           << "Separator"
           << "Std_ViewLoadImage"
           << "Std_ViewScreenShot"

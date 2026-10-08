@@ -205,4 +205,37 @@ private:
     std::vector<PickData> currentSelections;
 };
 
+/** The list of Std_SelectOther (FreeCAD-CH, ops#194 PR C): a flat popup of the elements under the
+ * cursor, nearest first, as Onshape's "select other".
+ *
+ * Moving through it (backtick and Down go on, Shift+backtick and Up back, both wrapping; the
+ * mouse over an entry) only preselects the entry's element; nothing is selected. Enter or a click
+ * on an entry adds it to the selection, one pick, as a click would (so an armed reference field
+ * takes it once). Esc, a click outside, or the mouse leaving the list closes it and changes
+ * nothing. The popup is not modal and deletes itself when it closes.
+ */
+class GuiExport SelectOtherMenu: public QMenu
+{
+    Q_OBJECT
+public:
+    explicit SelectOtherMenu(QWidget* parent = nullptr);
+
+    /// Shows the list at pos with its first entry current and preselected
+    void open(const std::vector<PickData>& picks, const QPoint& pos);
+
+protected:
+    bool event(QEvent*) override;
+    void keyPressEvent(QKeyEvent*) override;
+    void mouseMoveEvent(QMouseEvent*) override;
+
+private:
+    /// Moves the current entry by @ delta, wrapping at the ends
+    void step(int delta);
+    void preselect(QAction* action);
+    void commit(QAction* action);
+    void finish();
+
+    std::vector<PickData> picks;
+};
+
 }  // namespace Gui

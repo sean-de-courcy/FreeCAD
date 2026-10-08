@@ -67,6 +67,7 @@ ONSHAPE = {
     "Std_BoxElementSelection": "",
     "Std_FreezeViews": "",
     "Std_ClarifySelection": "",
+    "Std_SelectOther": "`",  # Onshape's select other (PR C)
     "Std_Refresh": "F5",  # QKeySequence::Refresh is Ctrl+R (a tool's own key) on macOS
     # the fork's commands (PR B), and the key Space was
     "Std_ClearSelection": "Space",
@@ -206,6 +207,7 @@ FREECAD = {
     "Std_ViewIsometric": "0",
     "Std_ViewFitAll": "V, F",
     "Std_BoxElementSelection": "Shift+E",
+    "Std_SelectOther": "",
     "Std_ClarifySelection": "`",
     "PartDesign_Pad": "",
     "Sketcher_CreateLine": "G, L",
@@ -531,6 +533,12 @@ class TestForkKeymapGui(unittest.TestCase):
         pump()
 
     def tearDown(self):
+        # a list a failed test left open takes the keys of every later test; so does a filter
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None and popup.objectName() == "SelectOtherMenu":
+            popup.close()
+            pump(0.1)
+        Gui.runCommand("Part_SelectFilter", 3)
         App.ParamGet(KEYMAP).RemString("Keymap")
         App.ParamGet(SHORTCUTS).RemString("Std_ViewFitAll")
         pump(0.1)
@@ -1406,6 +1414,312 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in offset)), "Offset stays off")
         pump(0.5)
         self.assertNoClashes("sketch edit, an edge selected")
+
+    # --- Select other on backtick (PR C)
+
+    def viewportPoint(self, point):
+        """The widget position in the 3D view's viewport where the world point shows."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        viewport = view.graphicsView().viewport()
+        x, y = view.getPointOnViewport(point)
+        _, height = view.getSize()
+        scale = viewport.devicePixelRatioF()
+        return viewport, QtCore.QPoint(int(round(x / scale)), int(round((height - y - 1) / scale)))
+
+    def cursorOver(self, point):
+        """Moves the cursor over the world point (the command opens its list at the cursor).
+        Skips where the platform keeps the cursor where it is."""
+        viewport, at = self.viewportPoint(point)
+        target = viewport.mapToGlobal(at)
+        QtGui.QCursor.setPos(target)
+        pump(0.1)
+        if QtGui.QCursor.pos() != target:
+            self.skipTest("the platform doesn't move the cursor")
+
+    def frontCamera(self, cx=5, cz=5):
+        """An orthographic camera 100 mm in front of (cx, 0, cz) looking along +y, 40 mm high,
+        with the near and far planes around the model (fitAll can put the near plane inside the
+        front box, and a ray pick starts at the near plane)."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setCameraType("Orthographic")
+        pump(0.2)
+        view.setCamera(
+            f"""#Inventor V2.1 ascii
+OrthographicCamera {{
+  viewportMapping ADJUST_CAMERA
+  position {cx} -100 {cz}
+  orientation 1 0 0  1.5707964
+  nearDistance 10
+  farDistance 300
+  aspectRatio 1
+  focalDistance 100
+  height 40
+}}
+"""
+        )
+        pump(0.3)
+        return view
+
+    def stack(self):
+        """Two 10 mm boxes one behind the other, seen from the front (along +y) with an
+        orthographic camera, the body hidden: BoxA's faces at y = 0 and 10, BoxB's at 30 and 40,
+        all under a cursor over (5, 0, 5)."""
+        for name in (self.body.Name, self.sketch.Name):
+            Gui.getDocument(self.doc.Name).getObject(name).Visibility = False
+        a = self.doc.addObject("Part::Box", "BoxA")
+        b = self.doc.addObject("Part::Box", "BoxB")
+        b.Placement.Base = App.Vector(0, 30, 0)
+        self.doc.recompute()
+        view = self.frontCamera()
+        self.cursorOver(App.Vector(5, 0, 5))
+        # a ray through the cursor must meet all four faces, or the 3D view doesn't pick here
+        if len(view.getObjectsInfo(view.getPointOnViewport(App.Vector(5, 0, 5)), 1) or []) < 4:
+            self.skipTest("the 3D view doesn't pick here (off screen without OpenGL)")
+        return a, b
+
+    def selectOtherList(self):
+        popup = QtWidgets.QApplication.activePopupWidget()
+        if popup is not None and popup.objectName() == "SelectOtherMenu":
+            return popup
+        return None
+
+    def openSelectOther(self):
+        """Presses backtick over the cursor's position; returns the list that opens."""
+        with self.watching("Std_SelectOther") as fired:
+            self.pressFor(QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, "Std_SelectOther")
+        self.assertEqual(fired, ["Std_SelectOther"])
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is not None), "no list opened")
+        return self.selectOtherList()
+
+    def listKey(self, key, modifiers=QtCore.Qt.NoModifier):
+        """A key as the window system delivers it while the list is open."""
+        QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), key, modifiers)
+        pump(0.15)
+
+    def preselectedY(self):
+        """The y of the preselected element's centre (the boxes lie along y), None for none."""
+        presel = Gui.Selection.getPreselection()
+        if not presel.ObjectName:
+            return None
+        shape = self.doc.getObject(presel.ObjectName).Shape
+        return round(shape.getElement(presel.SubElementNames[0].split(".")[-1]).CenterOfMass.y, 6)
+
+    def selectedElements(self):
+        return [
+            (s.ObjectName, sub)
+            for s in Gui.Selection.getSelectionEx(self.doc.Name)
+            for sub in s.SubElementNames
+        ]
+
+    def testStdSelectOtherIsOnBacktick(self):
+        """Std_SelectOther has the backtick, as Onshape's select other; Std_ClarifySelection keeps
+        none (the context menu and long-press) and FreeCAD's keymap has it the other way round."""
+        self.assertTrue(same(shortcut("Std_SelectOther"), "`"), shortcut("Std_SelectOther"))
+        self.assertEqual(shortcut("Std_ClarifySelection"), "")
+        setKeymap("FreeCAD")
+        self.assertEqual(shortcut("Std_SelectOther"), "")
+        self.assertTrue(same(shortcut("Std_ClarifySelection"), "`"))
+
+    def testSelectOtherListsTheElementsUnderTheCursorNearestFirst(self):
+        """Over the front face of BoxA, the list holds the four faces the ray meets, in depth
+        order, the first preselected; nothing is selected."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        self.assertEqual(popup.actions().__len__(), 4, [x.text() for x in popup.actions()])
+        self.assertIn("BoxA", popup.actions()[0].text())
+        self.assertIn("BoxB", popup.actions()[3].text())
+        self.assertEqual(self.preselectedY(), 0.0)
+        self.assertEqual(popup.activeAction(), popup.actions()[0])
+        self.assertEqual(self.selectedElements(), [])
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testBacktickStepsThroughTheListWithoutSelecting(self):
+        """Backtick and Down go on, Shift+backtick and Up go back, both wrapping; each step only
+        preselects, and the window shortcut doesn't open a second list."""
+        self.stack()
+        popup = self.openSelectOther()
+        steps = [
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 10.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 30.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.ShiftModifier, 10.0),
+            (QtCore.Qt.Key_Down, QtCore.Qt.NoModifier, 30.0),
+            (QtCore.Qt.Key_Up, QtCore.Qt.NoModifier, 10.0),
+            (QtCore.Qt.Key_AsciiTilde, QtCore.Qt.ShiftModifier, 0.0),
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.ShiftModifier, 40.0),  # back from the first
+            (QtCore.Qt.Key_QuoteLeft, QtCore.Qt.NoModifier, 0.0),  # on from the last
+        ]
+        with self.watching("Std_SelectOther") as again:
+            for key, modifiers, expected in steps:
+                self.listKey(key, modifiers)
+                self.assertIsNotNone(self.selectOtherList(), "the list closed")
+                self.assertEqual(self.preselectedY(), expected, (key, modifiers))
+                self.assertEqual(self.selectedElements(), [])
+        self.assertEqual(again, [], "a key of the list ran the command again")
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testEnterSelectsTheCurrentEntryOnce(self):
+        """Enter makes one pick of the current element and closes the list."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.listKey(QtCore.Qt.Key_QuoteLeft)
+        self.assertEqual(self.preselectedY(), 30.0)
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        picked = self.selectedElements()
+        self.assertEqual(len(picked), 1, picked)
+        name, sub = picked[0]
+        self.assertEqual(name, b.Name)
+        self.assertEqual(round(b.Shape.getElement(sub.split(".")[-1]).CenterOfMass.y, 6), 30.0)
+        self.assertIsNone(self.preselectedY())
+
+    def testClickOnAnEntrySelectsIt(self):
+        """A click on an entry picks that element."""
+        a, b = self.stack()
+        popup = self.openSelectOther()
+        action = popup.actions()[3]
+        QtTest.QTest.mouseClick(
+            popup, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, popup.actionGeometry(action).center()
+        )
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        picked = self.selectedElements()
+        self.assertEqual(len(picked), 1, picked)
+        self.assertEqual(picked[0][0], b.Name)
+        self.assertEqual(
+            round(b.Shape.getElement(picked[0][1].split(".")[-1]).CenterOfMass.y, 6), 40.0
+        )
+
+    def filletScene(self):
+        """The body with a 10 mm AdditiveBox seen from the front, orthographic, and a new
+        fillet's dialog open with its edge field armed. Returns (fillet, field)."""
+        for name in (self.body.Name, self.sketch.Name):
+            Gui.getDocument(self.doc.Name).getObject(name).Visibility = True
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box")
+        self.body.addObject(box)
+        for prop in ("Length", "Width", "Height"):
+            setattr(box, prop, 10)
+        self.doc.recompute()
+        self.sketch.Visibility = False
+        self.frontCamera()
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_Fillet")
+
+        def fields():
+            return [
+                w
+                for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget)
+                if w.property("armed") is not None and w.isVisible()
+            ]
+
+        self.assertTrue(waitFor(lambda: len(fields()) == 1), "the fillet's reference field")
+        pump(0.3)
+        field = fields()[0]
+        self.assertTrue(waitFor(lambda: bool(field.property("armed"))), "not armed")
+        fillet = self.doc.getObject("Fillet")
+        self.assertEqual(fillet.Base[1], [])
+        return fillet, field
+
+    def testEscClosesTheListAndTheArmedFieldStaysArmed(self):
+        """Esc closes the list: no selection, no preselection left, and its release doesn't
+        reach the 3D view to disarm the field or cancel the Fillet panel."""
+        fillet, field = self.filletScene()
+        self.cursorOver(App.Vector(5, 0, 5))
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        pump(0.3)
+        self.assertEqual(self.selectedElements(), [])
+        self.assertIsNone(self.preselectedY())
+        self.assertTrue(Gui.Control.activeDialog(), "the Esc release closed the task panel")
+        self.assertTrue(field.property("armed"), "the Esc release disarmed the field")
+        self.assertEqual(fillet.Base[1], [])
+
+    def testMouseLeavingTheListClosesIt(self):
+        """The mouse moving away from the list closes it and changes nothing."""
+        self.stack()
+        popup = self.openSelectOther()
+        QtTest.QTest.mouseMove(popup, QtCore.QPoint(-300, -300))
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None), "the list stays open")
+        self.assertEqual(self.selectedElements(), [])
+        self.assertIsNone(self.preselectedY())
+
+    def testSelectOtherLeavesOutWhatTheFilterRefuses(self):
+        """With the edge filter on, every face under the cursor is refused, so the list is empty
+        and nothing opens; without the filter the same position lists the four faces. (Off
+        screen the 3D view picks no edges, so a list of the edges that remain can't be
+        shown.)"""
+        self.stack()
+        Gui.runCommand("Part_SelectFilter", 1)  # edges
+        pump(0.1)
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.4)
+        self.assertIsNone(self.selectOtherList(), "a list of refused faces opened")
+        Gui.runCommand("Part_SelectFilter", 3)  # none
+        pump(0.1)
+        popup = self.openSelectOther()
+        self.assertEqual(len(popup.actions()), 4)
+        self.listKey(QtCore.Qt.Key_Escape)
+
+    def testBacktickTypesInAFieldAndOpensNothing(self):
+        """With the focus in a line edit the backtick is typed, not a command."""
+        self.stack()
+        edit = QtWidgets.QLineEdit(Gui.getMainWindow())
+        edit.setGeometry(0, 0, 100, 24)
+        edit.show()
+        try:
+            self.assertTrue(focus(edit), "the field doesn't take the focus")
+            with self.watching("Std_SelectOther") as fired:
+                QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_QuoteLeft)
+                pump(0.4)
+            self.assertEqual(fired, [])
+            self.assertIsNone(self.selectOtherList())
+            self.assertEqual(edit.text(), "`")
+        finally:
+            edit.deleteLater()
+            pump(0.1)
+
+    def testSelectOtherDoesNothingWithTheCursorOutsideTheView(self):
+        """With the cursor over the model tree, backtick opens no list."""
+        self.stack()
+        tree = next(
+            w
+            for w in Gui.getMainWindow().findChildren(QtWidgets.QTreeWidget)
+            if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
+        )
+        target = tree.mapToGlobal(tree.rect().center())
+        QtGui.QCursor.setPos(target)
+        pump(0.1)
+        if QtGui.QCursor.pos() != target:
+            self.skipTest("the platform doesn't move the cursor")
+        with self.watching("Std_SelectOther") as fired:
+            self.press(QtCore.Qt.Key_QuoteLeft)
+            self.assertTrue(waitFor(lambda: fired), "the command didn't run")
+        pump(0.3)
+        self.assertIsNone(self.selectOtherList())
+
+    def testSelectOtherIsOffInSketchEdit(self):
+        """A sketch in edit has its own picking (PR E): the command is off there."""
+        self.editSketch()
+        action = Gui.Command.get("Std_SelectOther").getAction()
+        pump(0.5)
+        self.assertFalse(any(a.isEnabled() for a in action))
+
+    def testCommitToggleOnceInAnArmedFilletField(self):
+        """In a Fillet's armed field a commit toggles the element once, and cycling the list
+        toggles nothing. (A face: off screen the 3D view picks no edges.)"""
+        fillet, field = self.filletScene()
+        self.cursorOver(App.Vector(5, 0, 5))
+        popup = self.openSelectOther()
+        self.listKey(QtCore.Qt.Key_QuoteLeft)  # the second entry
+        sub = Gui.Selection.getPreselection().SubElementNames[0].split(".")[-1]
+        self.assertTrue(sub.startswith("Face"), sub)
+        self.assertEqual(fillet.Base[1], [], "cycling toggled an element")
+        self.listKey(QtCore.Qt.Key_Return)
+        self.assertTrue(waitFor(lambda: self.selectOtherList() is None))
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [sub])
 
 
 if __name__ == "__main__":
