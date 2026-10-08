@@ -53,7 +53,7 @@ from PartDesignTests.TestBaseFeature import TestBaseFeature
 # dressup features
 from PartDesignTests.TestFillet import TestFillet
 from PartDesignTests.TestChamfer import TestChamfer
-from PartDesignTests.TestDraft import TestDraft, TestDressUpFaces
+from PartDesignTests.TestDraft import TestDraft, TestDressUpFaces, TestNeutralPlanePlacement
 from PartDesignTests.TestThickness import TestThickness
 from PartDesignTests.TestMissingElements import TestMissingElements  # FreeCAD-CH, ops#69-71
 

@@ -4055,6 +4055,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump(0.2)
         return text
 
+    def bossRemoved(self, hole):
+        self.doc.recompute()
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+        return self.boss.Shape.Volume - hole.Shape.Volume
+
     def positionsSubs(self, hole):
         return [s for s in hole.Profile[1] if s]
 
@@ -4279,10 +4284,11 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testHolePositionsOnFaces(self):
         """PR 169 M3, as stock: the boss's top face (flat, a circle among its edges) makes a hole
-        at the circle's centre from z = 12 (12 pi); its own rim, a bounding edge, is refused
-        beside it (the hole would be cut twice). The boss's cylindrical face: holes at its two
-        circles along its axis, 12 pi down or 2 pi up (Reversed), and its rim refused beside it;
-        with the rim listed, the top face is refused. A flat face with no circle is refused, with the reason."""
+        at the circle's centre from z = 12 (12 pi); its own rim beside it is taken, and the
+        circle drilled once (PR 172 review L2). The boss's cylindrical face: holes at its two
+        circles along its axis, 12 pi down or 2 pi up (Reversed), and its rim beside it changes
+        nothing; the rim, then the top face beside it, the same. A flat face with no circle is
+        refused, with the reason."""
         hole = self.plate(boss=True)
         boss = self.boss
         self.edit(hole, count=1)
@@ -4296,8 +4302,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(hole.isValid(), hole.getStatusString())
         self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
-        self.assertIn("face", self.refusedPick(boss, rim))
-        self.assertLink(hole.Profile, boss, [top])
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [top, rim])
+        self.assertAlmostEqual(self.bossRemoved(hole), 12 * math.pi, places=3)
 
         self.pick(self.holes, "")
         self.assertLink(hole.Profile, self.holes, [])
@@ -4314,17 +4321,21 @@ class TestReferenceFieldGui(unittest.TestCase):
         for got, want in zip(sorted(removed), (2 * math.pi, 12 * math.pi)):
             self.assertAlmostEqual(got, want, places=3)
         hole.Reversed = False
-        self.assertIn("face", self.refusedPick(boss, rim))
-        self.assertLink(hole.Profile, boss, [side])
+        alone = self.bossRemoved(hole)
+        self.pick(boss, rim)
+        self.assertLink(hole.Profile, boss, [side, rim])
+        self.assertAlmostEqual(self.bossRemoved(hole), alone, places=3)
 
         self.pick(self.holes, "")
         self.pick(boss, rim)
         self.assertLink(hole.Profile, boss, [rim])
-        self.assertIn("face", self.refusedPick(boss, top))
-        self.assertLink(hole.Profile, boss, [rim])
+        alone = self.bossRemoved(hole)
+        self.pick(boss, top)
+        self.assertLink(hole.Profile, boss, [rim, top])
+        self.assertAlmostEqual(self.bossRemoved(hole), alone, places=3)
         [plain] = face(normal=(-1, 0, 0), through=(0, 0, 0)).one(boss.Shape)
         self.assertIn("circle", self.refusedPick(boss, plain))
-        self.assertLink(hole.Profile, boss, [rim])
+        self.assertLink(hole.Profile, boss, [rim, top])
 
     def testHolePositionsWholeBinderAndSolid(self):
         """PR 169 M3: a shape binder of the sketch, whole, gives the sketch's three holes (30 pi);
@@ -4363,8 +4374,7 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testHolePositionsRepickAFaceOntoItsRim(self):
         """PR 169 verification, Low 1: the boss's top face listed (12 pi); its entry's Re-pick
-        onto the face's own rim replaces it, not refused as the face's edge beside it: the rim
-        alone, the same hole, 12 pi."""
+        onto the face's own rim replaces it: the rim alone, the same hole, 12 pi."""
         hole = self.plate(boss=True)
         boss = self.boss
         [top] = face(normal=(0, 0, 1), through=(10, 10, 12)).one(boss.Shape)
@@ -4386,9 +4396,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertAlmostEqual(boss.Shape.Volume - hole.Shape.Volume, 12 * math.pi, places=3)
 
     def testHolePositionsFacesSharingACircle(self):
-        """PR 169 verification, Low 2: the boss's cylindrical face listed; its top face, which
-        shares the circle at z = 12, is refused (the hole would be cut twice), and so the other
-        way round."""
+        """PR 169 verification, Low 2, and PR 172 review L2: the boss's cylindrical face listed,
+        then its top face, which shares the circle at z = 12: both taken, and the circle drilled
+        once, as with the first alone (Hole::findHoles takes each edge once; the direction is
+        the first entry's: 2 pi up the cylinder's axis). The other way round: 12 pi, the top
+        face's alone."""
         hole = self.plate(boss=True)
         boss = self.boss
         [top] = face(normal=(0, 0, 1), through=(10, 10, 12)).one(boss.Shape)
@@ -4396,15 +4408,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.edit(hole, count=1)
         field = findField("fieldProfile")
         self.arm(field, byFocus=False)
-        self.pick(boss, side)
-        self.assertLink(hole.Profile, boss, [side])
-        self.assertIn("twice", self.refusedPick(boss, top))
-        self.assertLink(hole.Profile, boss, [side])
-        self.pick(self.holes, "")
-        self.pick(boss, top)
-        self.assertLink(hole.Profile, boss, [top])
-        self.assertIn("twice", self.refusedPick(boss, side))
-        self.assertLink(hole.Profile, boss, [top])
+        for first, second, removed in ((side, top, 2 * math.pi), (top, side, 12 * math.pi)):
+            self.pick(self.holes, "")
+            self.pick(boss, first)
+            self.assertLink(hole.Profile, boss, [first])
+            self.assertAlmostEqual(self.bossRemoved(hole), removed, places=3)
+            self.pick(boss, second)
+            self.assertLink(hole.Profile, boss, [first, second])
+            self.assertAlmostEqual(self.bossRemoved(hole), removed, places=3)
 
     # -- ops#150 W2 follow-ups (PR 142's review gaps) ---------------------------------------------
 
@@ -4427,11 +4438,10 @@ class TestReferenceFieldGui(unittest.TestCase):
             self.assertVolume(draft, expected)
         self.assertEqual(draft.Base[1], [self.side])
 
-    @unittest.expectedFailure  # ops#198: Feature::makePlnFromPlane drops the LCS's placement
     def testDraftNeutralPlaneOfACoordinateSystem(self):
         """The neutral plane picked as a coordinate system's XY plane, the coordinate system at
-        z = 5: written whole, and the pivot at mid height, where the two wedges cancel (1000
-        mm^3). The draft takes the plane at z = 0 instead (ops#198)."""
+        z = 5: written whole, and the draft computes. Where it pivots is TestDraft's
+        TestNeutralPlanePlacement (ops#198)."""
         box, draft = self.draft()
         lcs = self.doc.addObject("Part::LocalCoordinateSystem", "LCS")
         self.body.addObject(lcs)
@@ -4442,7 +4452,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.arm(plane, byFocus=False)
         self.pick(lcsPlane, "")
         self.assertLink(draft.NeutralPlane, lcsPlane, [])
-        self.assertVolume(draft, 1000)
+        self.doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
 
     def testPadFaceFieldVisibilityAfterCancel(self):
         """While the up-to-face field is armed the box (the solid before) shows and the pad
@@ -4471,8 +4482,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         otherSketch = models.sketch(other, "OtherSquare", models.rectangle(0, 0, 2, 2), otherBody)
         otherPad = models.pad(otherBody, otherSketch, 3)
         other.recompute()
-        otherSketch.ViewObject.Visibility = False
-        otherPad.ViewObject.Visibility = True
+        # The other way round from what a restore of this document's pad and sketch would set:
+        # one misdirected by name into the other document flips them (PR 172 review L3)
+        otherSketch.ViewObject.Visibility = True
+        otherPad.ViewObject.Visibility = False
         App.setActiveDocument(self.doc.Name)
         Gui.setActiveDocument(self.doc.Name)
         box, pad = self.padOnBox()
@@ -4487,9 +4500,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(name, App.listDocuments())
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
         self.assertTrue(waitFor(lambda: not fields(), 3.0), "a field outlived its document")
-        self.assertFalse(otherSketch.ViewObject.Visibility)
-        self.assertTrue(otherPad.ViewObject.Visibility)
+        self.assertTrue(otherSketch.ViewObject.Visibility)
+        self.assertFalse(otherPad.ViewObject.Visibility)
 
+        otherSketch.ViewObject.Visibility = False
+        otherPad.ViewObject.Visibility = True
         App.setActiveDocument(other.Name)
         Gui.setActiveDocument(other.Name)
         [otherField] = self.edit(otherPad, count=1)

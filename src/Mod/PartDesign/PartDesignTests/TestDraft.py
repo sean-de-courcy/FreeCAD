@@ -87,6 +87,64 @@ class TestDraft(unittest.TestCase):
         # print ("omit closing document for debugging")
 
 
+
+def _xyPlane(coordinateSystem):
+    [plane] = [f for f in coordinateSystem.OriginFeatures if f.Role == "XY_Plane"]
+    return plane
+
+
+class TestNeutralPlanePlacement(unittest.TestCase):
+    """Where a draft pivots when its neutral plane is a plane that isn't a face (FreeCAD-CH
+    ops#150 W2, ops#198). A 10 mm cube in a body; its front face (y = 0) drafted 2 degrees, the
+    neutral plane parallel to XY at height z in the body. The face turns about its line at z:
+    the cube loses 5 tan 2 ((10 - z)^2 - z^2) mm^3, so 1000 - 500 tan 2 at z = 0, 1000 at
+    z = 5 (the two wedges cancel), 1000 + 500 tan 2 at z = 10."""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestNeutralPlane")
+        self.Body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Box = self.Body.newObject("PartDesign::AdditiveBox", "Box")
+        self.Box.Length = self.Box.Width = self.Box.Height = 10
+        self.Doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def expected(self, z):
+        return 1000 - 5 * math.tan(math.radians(2)) * ((10 - z) ** 2 - z * z)
+
+    def assertPivot(self, plane, z):
+        front = _faceAt(self.Box.Shape, App.Vector(5, 0, 5), App.Vector(0, -1, 0))
+        draft = self.Body.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (self.Box, [front])
+        draft.NeutralPlane = (plane, [""])
+        draft.Angle = 2
+        self.Doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertAlmostEqual(draft.Shape.Volume, self.expected(z), places=3)
+
+    def coordinateSystemPlane(self, z):
+        lcs = self.Doc.addObject("Part::LocalCoordinateSystem", "LCS")
+        self.Body.addObject(lcs)
+        lcs.Placement = App.Placement(App.Vector(0, 0, z), App.Rotation())
+        self.Doc.recompute()
+        return _xyPlane(lcs)
+
+    def testOriginPlane(self):
+        self.assertPivot(_xyPlane(self.Body.Origin), 0)
+
+    def testDatumPlane(self):
+        plane = self.Body.newObject("PartDesign::Plane", "DatumPlane")
+        plane.MapMode = "Deactivated"
+        plane.Placement = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        self.assertPivot(plane, 10)
+
+    @unittest.expectedFailure  # ops#198: Feature::makePlnFromPlane drops the LCS's placement
+    def testCoordinateSystemPlane(self):
+        """The coordinate system at z = 5, its XY plane: the pivot at mid height. The draft took
+        the plane at z = 0 (ops#198)."""
+        self.assertPivot(self.coordinateSystemPlane(5), 5)
+
 def _sketch(doc, body, name, geometry, z=0):
     sketch = body.newObject("Sketcher::SketchObject", name)
     sketch.Placement = App.Placement(App.Vector(0, 0, z), App.Rotation())

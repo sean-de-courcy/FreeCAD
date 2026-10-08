@@ -201,12 +201,6 @@ public:
     {
         return armed;
     }
-    /// The entry a pending Re-pick replaces, -1 when none: a gate that compares a pick with the
-    /// other entries leaves that one out.
-    int repicking() const
-    {
-        return repickIndex;
-    }
     /// Arms or disarms the field; arming disarms the group's other fields.
     void setArmed(bool on);
     /// The entries' subs, old-style (`?Edge5` when missing); a list of objects' names.
