@@ -3499,6 +3499,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertVolume(feature, 16 * math.pi)
         self.assertIn("empty", field.findChild(QtWidgets.QLabel, "status").text())
 
+    # Flaky (ops#215): fails now and then in a full TestPartDesignGui run, "0 != 5" in selectReference(),
+    # and passes alone straight after
     def testAxisComboFollowsFieldUndo(self):
         """Review (6): the x = -1 line picked in the row, then the row's own undo (Ctrl+Z, the row
         disarmed): the axis is the V axis again and the box shows it, the row hidden."""
