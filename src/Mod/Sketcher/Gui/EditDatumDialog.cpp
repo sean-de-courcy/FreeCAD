@@ -30,6 +30,7 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QPointer>
 #include <functional>
 
 
@@ -38,6 +39,7 @@
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
 #include <Gui/CommandT.h>
+#include <Gui/Dialogs/DlgExpressionInput.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Notifications.h>
@@ -88,6 +90,21 @@ bool SketcherGui::checkConstraintName(const Sketcher::SketchObject* sketch, std:
 namespace
 {
 
+/// How the popup ends when the field's formula editor opens: execInPlace runs the editor, then
+/// opens the field again (ops#203).
+constexpr int InPlaceFormula = 100;
+
+/// The field's formula editor ('=', or the field's formula icon) while it is on screen.
+Gui::Dialog::DlgExpressionInput* visibleFormulaEditor(QWidget* field)
+{
+    for (auto* dialog : field->findChildren<Gui::Dialog::DlgExpressionInput*>()) {
+        if (dialog->isVisible()) {
+            return dialog;
+        }
+    }
+    return nullptr;
+}
+
 /// The popup of EditDatumDialog::execInPlace. A click outside closes a popup through reject():
 /// that applies valid input, or keeps the current value. Esc doesn't come here (eventFilter).
 class DatumInPlacePopup: public QDialog
@@ -100,6 +117,12 @@ public:
 
     void reject() override
     {
+        // The formula editor is a window of its own: as it shows, Qt closes the popup. Nothing
+        // is applied yet (ops#203).
+        if (visibleFormulaEditor(this)) {
+            done(InPlaceFormula);
+            return;
+        }
         done(apply() ? EditDatumDialog::InPlaceApplied : EditDatumDialog::InPlaceKept);
     }
 
@@ -439,10 +462,29 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
     }
     placeCentred(&popup, centre, area);
 
+    // '=' or the formula icon opens the field's formula editor. The popup can't stay open under
+    // another window (it takes all input), so it ends, the editor runs modal, as over the
+    // dialog, and its result goes to the field (QuantitySpinBox::openFormulaDialog), which
+    // opens again for Enter, Tab or Esc (ops#203).
+    QObject::connect(box, &Gui::QuantitySpinBox::showFormulaDialog, &popup, [&popup](bool shown) {
+        if (shown && popup.isVisible()) {
+            popup.done(InPlaceFormula);
+        }
+    });
+
     popup.show();
     box->setFocus();
     box->selectNumber();
     int result = popup.exec();
+    while (result == InPlaceFormula) {
+        if (QPointer<Gui::Dialog::DlgExpressionInput> formula = visibleFormulaEditor(box)) {
+            formula->hide();
+            formula->exec();
+        }
+        popup.show();
+        box->setFocus();
+        result = popup.exec();
+    }
 
     inPlacePopup = nullptr;
     valueEdit = nullptr;
