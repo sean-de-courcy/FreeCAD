@@ -2165,6 +2165,84 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(fillet, self.elementNear(fillet, "Face", FIRST_TOP))
         self.assertEqual(self.originalNames(pattern), [box.Name])
 
+    def bumpOn(self, x, y, z, name="Bump"):
+        bump = self.doc.addObject("PartDesign::AdditiveBox", name)
+        self.body.addObject(bump)
+        for prop in ("Length", "Width", "Height"):
+            setattr(bump, prop, 1)
+        bump.Placement = App.Placement(App.Vector(x, y, z), App.Rotation())
+        self.doc.recompute()
+        return bump
+
+    def testPatternOriginalsPickReachesAPadUnderAFillet(self):
+        """ops#184 review F1: the pad's bottom face, seen through a fillet, has the fillet and
+        the sketch in its history and not the pad: the sketch maps to the pad (the fillet, the
+        base, made the element no more than the pad did)."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        pad = models.pad(self.body, profile, 5)
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 5)
+        fillet = self.addFillet(bump, [self.elementNear(bump, "Edge", (0, 0, 2.5))])
+        [bottom] = face(normal=(0, 0, -1)).one(fillet.Shape)
+        history = fillet.getElementHistory(bottom, recursive=True)
+        self.assertEqual([item[0].Name for item in history], ["Fillet", "Profile"], history)
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        self.assertEqual(pattern.BaseFeature.Name, fillet.Name)
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(fillet, bottom)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+
+    def testPatternOriginalsPickOfPadAndPocketOnOneSketch(self):
+        """ops#184 review F2, F4: a pad and a pocket share a sketch, the sketch's square at the
+        box's top: a pick of the pad's wall adds the pad, a pick of the pocket's wall the pocket
+        (the one in the element's history), and a pick of the pocket's wall again takes it out."""
+        box = self.box()
+        sketch = models.sketch(self.doc, "Shared", models.rectangle(4, 4, 6, 6), self.body, z=10)
+        pad = models.pad(self.body, sketch, 3)
+        pad.Refine = False
+        self.doc.recompute()
+        pocket = models.pocket(self.body, sketch, 3)
+        pocket.Refine = False
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 10)
+        self.assertTrue(pocket.isValid() and pad.isValid())
+        self.assertAlmostEqual(bump.Shape.Volume, 1000 + 12 - 12 + 1, places=6)
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, self.elementNear(bump, "Face", (4, 5, 11.5)))
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+        self.pick(bump, self.elementNear(bump, "Face", (4, 5, 8.5)))
+        self.assertEqual(self.originalNames(pattern), [pad.Name, pocket.Name, bump.Name])
+        self.pick(bump, self.elementNear(bump, "Face", (4, 5, 8.5)))
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+
+    def testPatternOriginalsPickOfAnElementNoFeatureMade(self):
+        """ops#184 review F5: the body's base feature is a Part::Box, which is no feature of the
+        body: a pick of its face in the bump's shape says so, and changes neither the Originals
+        nor the armed field."""
+        self.body = models.body(self.doc)
+        partBox = self.doc.addObject("Part::Box", "PartBox")
+        self.body.BaseFeature = partBox
+        bump = self.bumpOn(1, 1, 10)
+        self.assertAlmostEqual(bump.Shape.Volume, 1001, places=6)
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, self.elementNear(bump, "Face", (0, 5, 5)))
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.assertTrue(armed(field))
+        # the next pick clears it
+        self.pick(bump, self.elementNear(bump, "Face", (1.5, 1.5, 11)))
+        self.assertEqual(self.originalNames(pattern), [])
+        self.assertNotIn("No feature", self.statusText(field))
+
     def testPatternOriginalsOfOneLabel(self):
         """T17, B6: two originals of one Label, which the list tells apart by their names. The
         second taken out, by a pick or by Delete on its row, is the one that goes, from the

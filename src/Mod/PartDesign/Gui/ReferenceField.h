@@ -371,7 +371,8 @@ private:
     /// element of the target shown, when the pick is one (its feature is added instead).
     void pickObject(App::DocumentObject* obj, const char* sub);
     /// Kind::Objects: the feature that made the element \a sub of \a shape's shape and passes the
-    /// gate's tests (the deepest in its history), or null.
+    /// gate's tests (where its history ends, or the feature a sketch there is the profile of),
+    /// or null.
     App::DocumentObject* featureOfElement(App::DocumentObject* shape, const char* sub) const;
     /// Records the current value as a step of the field's undo.
     void pushUndo();

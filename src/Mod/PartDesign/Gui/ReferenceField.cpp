@@ -930,27 +930,31 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         }
         return true;
     };
-    // The history runs from the shape's feature down to the one that made the element
+    // The history runs from the shape's feature down to where the element comes from; the items
+    // above that only changed it (a fillet, a fuse), so the last one decides
     const std::list<Data::HistoryItem> history = Part::Feature::getElementHistory(shape, sub, true);
+    App::DocumentObject* origin = history.empty() ? nullptr : history.back().obj;
+    if (!origin) {
+        return nullptr;
+    }
+    if (usable(origin)) {
+        return origin;
+    }
+    // A sketch: the feature it is the profile of. A pad and a pocket on one sketch: the one that is
+    // in the element's history, else the first.
+    std::vector<App::DocumentObject*> profiled;
+    for (App::DocumentObject* user : origin->getInList()) {
+        auto based = freecad_cast<PartDesign::ProfileBased*>(user);
+        if (based && based->Profile.getValue() == origin && usable(based)) {
+            profiled.push_back(based);
+        }
+    }
     for (auto item = history.rbegin(); item != history.rend(); ++item) {
-        if (usable(item->obj)) {
+        if (std::ranges::find(profiled, item->obj) != profiled.end()) {
             return item->obj;
         }
     }
-    // An element that only a sketch's name reaches (the top of a pad under a fillet): the
-    // feature the sketch is the profile of
-    for (auto item = history.rbegin(); item != history.rend(); ++item) {
-        if (!item->obj) {
-            continue;
-        }
-        for (App::DocumentObject* user : item->obj->getInList()) {
-            auto based = freecad_cast<PartDesign::ProfileBased*>(user);
-            if (based && based->Profile.getValue() == item->obj && usable(based)) {
-                return based;
-            }
-        }
-    }
-    return nullptr;
+    return profiled.empty() ? nullptr : profiled.front();
 }
 
 void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
