@@ -27,6 +27,7 @@
 #include "Selection.h"
 #include <QMenu>
 #include <QPointer>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -37,6 +38,7 @@ class QListWidget;
 class QListWidgetItem;
 class QCheckBox;
 class QLabel;
+class SbVec2s;
 
 namespace App
 {
@@ -135,7 +137,30 @@ struct PickData
     std::string docName;
     std::string objName;
     std::string subName;
+    // FreeCAD-CH (ops#194 PR E): an entry of an edit mode's own picking (a sketch in edit) shows
+    // and takes itself, as a hover and a click there would; empty for the 3D view's picks
+    std::function<void()> preselect;
+    std::function<void()> select;
 };
+
+class ViewProvider;
+class View3DInventorViewer;
+
+/** FreeCAD-CH (ops#194 PR E): Select other in an edit mode with a picking of its own (a sketch in
+ * edit, whose module registers it): fills @a picks with what lies under @a point (viewport pixels)
+ * and returns true when the picker handles @a inEdit; Std_SelectOther then lists those instead of
+ * the 3D view's picks.
+ */
+using SelectOtherEditPicker = std::function<
+    bool(ViewProvider* inEdit, View3DInventorViewer* viewer, const SbVec2s& point, std::vector<PickData>& picks)>;
+GuiExport void addSelectOtherEditPicker(SelectOtherEditPicker picker);
+/// Asks the registered pickers in turn; false when none handles @a inEdit
+GuiExport bool selectOtherEditPicks(
+    ViewProvider* inEdit,
+    View3DInventorViewer* viewer,
+    const SbVec2s& point,
+    std::vector<PickData>& picks
+);
 
 // Add SelectionMenu class outside the DockWnd namespace
 class GuiExport SelectionMenu: public QMenu

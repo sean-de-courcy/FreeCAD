@@ -93,7 +93,8 @@ class Geometry;
 namespace Gui
 {
 class View3DInventorViewer;
-}
+struct PickData;
+}  // namespace Gui
 
 namespace Sketcher
 {
@@ -765,6 +766,17 @@ public:
         const Gui::View3DInventorViewer* viewer,
         std::vector<std::string>& subElementNames,
         Base::Vector3d& pickedPoint
+    );
+
+    /** FreeCAD-CH (ops#194 PR E): the entries of Select other (Std_SelectOther) at a viewport
+     * position: everything the sketch's own picking finds there, the hover's pick first. An entry
+     * shows itself as a hover would and is taken as a click would, except that it only adds to the
+     * selection. None while a tool, a drag or a box selection runs.
+     */
+    void getSelectOtherPicks(
+        const SbVec2s& pos,
+        const Gui::View3DInventorViewer* viewer,
+        std::vector<Gui::PickData>& picks
     );
 
     /// Where the text of a constraint's datum label is on the screen (global coordinates), and

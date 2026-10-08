@@ -31,7 +31,9 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/Document.h>
 #include <Gui/Language/Translator.h>
+#include <Gui/Selection/SelectionView.h>
 #include <Gui/View3DInventor.h>
+#include <Gui/View3DInventorViewer.h>
 #include <Gui/WidgetFactory.h>
 
 #include "PropertyConstraintListItem.h"
@@ -107,9 +109,18 @@ private:
             return Py::None();
         }
 
-        auto* view = dynamic_cast<Gui::View3DInventor*>(
-            editDoc->getEditingViewOfViewProvider(sketchViewProvider)
-        );
+        // FreeCAD-CH (ops#194): the view that edits the sketch. Not getEditingViewOfViewProvider,
+        // which needs the viewer to hold the view provider: a viewer drops those a parent claims,
+        // so it finds nothing for a sketch in a body
+        Gui::View3DInventor* view = nullptr;
+        for (Gui::MDIView* mdi :
+             editDoc->getMDIViewsOfType(Gui::View3DInventor::getClassTypeId())) {
+            auto* view3d = static_cast<Gui::View3DInventor*>(mdi);
+            if (view3d->getViewer()->getEditingViewProvider() == sketchViewProvider) {
+                view = view3d;
+                break;
+            }
+        }
         if (!view) {
             return Py::None();
         }
@@ -185,6 +196,21 @@ PyMOD_INIT_FUNC(SketcherGui)
     Gui::BitmapFactory().addPath(QStringLiteral(":/icons/splines"));
     Gui::BitmapFactory().addPath(QStringLiteral(":/icons/tools"));
     Gui::BitmapFactory().addPath(QStringLiteral(":/icons/overlay"));
+
+    // FreeCAD-CH (ops#194 PR E): Select other lists what the sketch in edit picks
+    Gui::addSelectOtherEditPicker([](Gui::ViewProvider* inEdit,
+                                     Gui::View3DInventorViewer* viewer,
+                                     const SbVec2s& point,
+                                     std::vector<Gui::PickData>& picks) {
+        // only in the view that edits the sketch, and in its default edit (not Transform or
+        // Attachment, which have no picking of their own): elsewhere the 3D view's list
+        auto* sketch = dynamic_cast<SketcherGui::ViewProviderSketch*>(inEdit);
+        if (!sketch || !sketch->isInEditMode() || viewer->getEditingViewProvider() != inEdit) {
+            return false;
+        }
+        sketch->getSelectOtherPicks(point, viewer, picks);
+        return true;
+    });
 
     // instantiating the commands
     CreateSketcherCommands();

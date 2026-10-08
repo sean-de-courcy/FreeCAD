@@ -161,9 +161,12 @@ public:
         const SoPickedPoint* Point,
         const SbVec2s& cursorScreenPos
     );
+    /// The first constraint icon under the cursor; with @a all (FreeCAD-CH, ops#194 PR E, Select
+    /// other), every icon under it is added there too
     ConstraintPreselectionResult detectPreselectionConstr(
         const SbVec2s& cursorScreenPos,
-        Base::Vector3d* pickedPoint = nullptr
+        Base::Vector3d* pickedPoint = nullptr,
+        std::vector<ConstraintPreselectionResult>* all = nullptr
     );
 
     SoSeparator* getConstraintIdSeparator(int i) const;

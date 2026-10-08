@@ -83,6 +83,7 @@
 #include "Navigation/NavigationStyle.h"
 #include "OverlayParams.h"
 #include "OverlayManager.h"
+#include "OverlayWidgets.h"
 #include "SceneInspector.h"
 #include "Selection.h"
 #include "Selection/BoxSelection.h"
@@ -4350,7 +4351,9 @@ std::vector<PickData> picksAt(
             .element = elementName,
             .docName = obj->getDocument()->getName(),
             .objName = obj->getNameInDocument(),
-            .subName = hasSubObject ? subName : elementName
+            .subName = hasSubObject ? subName : elementName,
+            .preselect = {},
+            .select = {}
         };
 
         selections.push_back(pickData);
@@ -4381,7 +4384,9 @@ std::vector<PickData> picksAt(
                     .element = relElement,
                     .docName = obj->getDocument()->getName(),
                     .objName = obj->getNameInDocument(),
-                    .subName = subObjPath + relSubName
+                    .subName = subObjPath + relSubName,
+                    .preselect = {},
+                    .select = {}
                 }
             );
         }
@@ -4501,11 +4506,12 @@ StdCmdSelectOther::StdCmdSelectOther()
     sGroup = "View";
     sMenuText = QT_TR_NOOP("Select Other");
     sToolTipText = QT_TR_NOOP(
-        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first.\n"
+        "Lists the faces, edges and vertices under the mouse cursor in the 3D view, nearest first; "
+        "in a sketch in edit, its edges, vertices and constraints.\n"
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
         "highlights an element. Enter or a click selects the highlighted one, Esc closes the list.\n"
         "Use its key with the cursor over the 3D view; from the menu, it lists what lies where the "
-        "menu closed."
+        "menu closed (nothing with a menu bar outside the window, as on macOS)."
     );
     sWhatsThis = "Std_SelectOther";
     sStatusTip = sToolTipText;
@@ -4524,13 +4530,26 @@ void StdCmdSelectOther::activated(int iMsg)
         return;
     }
 
-    // The list opens at the cursor, which has to be over the 3D view, not over another window in
-    // front of it (a floating panel). An overlay panel is part of the main window and counts as
-    // the view, as for a click there. From the Tools menu, the cursor is where the menu closed.
+    // The list opens at the cursor, which has to be over the 3D view itself: not over another
+    // window in front of it (a floating panel), nor over an overlay panel where it keeps the mouse.
+    // Where an overlay panel lets a click through to the view (a transparent spot, as
+    // OverlayManager decides it), it counts as the view. From the Tools menu, the cursor is where
+    // the menu closed.
     const QPoint cursor = QCursor::pos();
     const QPoint local = widget->mapFromGlobal(cursor);
-    QWidget* top = QApplication::topLevelAt(cursor);
-    if (!widget->rect().contains(local) || (top && top != widget->window())) {
+    auto overTheView = [widget, &cursor]() {
+        for (QWidget* under = QApplication::widgetAt(cursor); under; under = under->parentWidget()) {
+            if (under == widget) {
+                return true;
+            }
+            if (auto* overlay = qobject_cast<OverlayTabWidget*>(under)) {
+                return OverlayParams::getDockOverlayAutoMouseThrough()
+                    && overlay->testAlpha(cursor, 1) == 0;
+            }
+        }
+        return false;
+    };
+    if (!widget->rect().contains(local) || !overTheView()) {
         return;
     }
     const qreal devicePixelRatio = widget->devicePixelRatioF();
@@ -4538,6 +4557,19 @@ void StdCmdSelectOther::activated(int iMsg)
         static_cast<short>(local.x() * devicePixelRatio),
         static_cast<short>((widget->height() - local.y() - 1) * devicePixelRatio)
     );
+
+    // An edit mode with a picking of its own (a sketch in edit) lists what it would pick there
+    // (PR E): nothing opens where it picks nothing, or while one of its tools runs
+    if (Gui::Document* doc = Application::Instance->editDocument()) {
+        std::vector<PickData> editPicks;
+        if (selectOtherEditPicks(doc->getInEdit(), viewer, point, editPicks)) {
+            if (!editPicks.empty()) {
+                auto menu = new SelectOtherMenu(getMainWindow());
+                menu->open(editPicks, cursor);
+            }
+            return;
+        }
+    }
 
     // The elements under the cursor at the normal pick radius, nearest first; each once, and
     // only those a click could select (the gate and the user's filter)
@@ -4568,17 +4600,8 @@ void StdCmdSelectOther::activated(int iMsg)
 
 bool StdCmdSelectOther::isActive()
 {
-    if (!qobject_cast<View3DInventor*>(getMainWindow()->activeWindow())) {
-        return false;
-    }
-    // A sketch in edit has its own picking (PR E)
-    if (Gui::Document* doc = Application::Instance->editDocument()) {
-        const Base::Type sketch = Base::Type::fromName("SketcherGui::ViewProviderSketch");
-        if (ViewProvider* vp = doc->getInEdit(); vp && !sketch.isBad() && vp->isDerivedFrom(sketch)) {
-            return false;
-        }
-    }
-    return true;
+    // in sketch edit too: the sketch lists what its own picking finds (PR E)
+    return qobject_cast<View3DInventor*>(getMainWindow()->activeWindow()) != nullptr;
 }
 
 //===========================================================================

@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <ranges>
+#include <tuple>
 
 #include <Inventor/SbVec2f.h>
 #include <Inventor/SbVec3f.h>
@@ -194,9 +195,13 @@ struct GeometryScreenPreselector
         );
     }
 
+    /// Every hit with its squared screen distance (FreeCAD-CH, ops#194 PR E: Select other)
+    using AllHits = std::vector<std::pair<float, SketcherGui::EditModeCoinManager::PreselectionResult>>;
+
     bool detectNearbyPointPreselection(
         const SbVec2s& cursorPos,
-        SketcherGui::EditModeCoinManager::PreselectionResult& result
+        SketcherGui::EditModeCoinManager::PreselectionResult& result,
+        AllHits* all = nullptr
     )
     {
         float bestDistanceSquared = std::numeric_limits<float>::max();
@@ -228,6 +233,9 @@ struct GeometryScreenPreselector
                     )) {
                     continue;
                 }
+                if (all) {
+                    all->emplace_back(distanceSquared, candidate);
+                }
 
                 if (distanceSquared > bestDistanceSquared) {
                     continue;
@@ -244,7 +252,8 @@ struct GeometryScreenPreselector
 
     bool detectNearbyCurvePreselection(
         const SbVec2s& cursorPos,
-        SketcherGui::EditModeCoinManager::PreselectionResult& result
+        SketcherGui::EditModeCoinManager::PreselectionResult& result,
+        AllHits* all = nullptr
     )
     {
         float bestDistanceSquared = std::numeric_limits<float>::max();
@@ -311,7 +320,8 @@ struct GeometryScreenPreselector
                     }
 
                     vertexOffset += vertexCount;
-                    if (bestSegmentStart < 0 || bestCurveDistanceSquared >= bestDistanceSquared) {
+                    if (bestSegmentStart < 0
+                        || (!all && bestCurveDistanceSquared >= bestDistanceSquared)) {
                         continue;
                     }
 
@@ -332,13 +342,20 @@ struct GeometryScreenPreselector
                         interpolation = std::clamp(interpolation, 0.0F, 1.0F);
                     }
 
-                    result.clear();
-                    result.Kind = SketcherGui::EditModeCoinManager::PreselectionResult::HitKind::Edge;
-                    result.GeoIndex = geoIndex;
-                    result.setPickedPoint(sketchPlanePointToWorld(
+                    SketcherGui::EditModeCoinManager::PreselectionResult candidate;
+                    candidate.Kind = SketcherGui::EditModeCoinManager::PreselectionResult::HitKind::Edge;
+                    candidate.GeoIndex = geoIndex;
+                    candidate.setPickedPoint(sketchPlanePointToWorld(
                         startPoint[0] + (endPoint[0] - startPoint[0]) * interpolation,
                         startPoint[1] + (endPoint[1] - startPoint[1]) * interpolation
                     ));
+                    if (all) {
+                        all->emplace_back(bestCurveDistanceSquared, candidate);
+                        if (bestCurveDistanceSquared >= bestDistanceSquared) {
+                            continue;
+                        }
+                    }
+                    result = candidate;
                     bestDistanceSquared = bestCurveDistanceSquared;
                     found = true;
                 }
@@ -1238,35 +1255,45 @@ void EditModeCoinManager::setAxisPickStyle(bool on)
     }
 }
 
+namespace
+{
+
+void toPreselectionResult(
+    const EditModeConstraintCoinManager::ConstraintPreselectionResult& hit,
+    EditModeCoinManager::PreselectionResult& target
+)
+{
+    using ConstraintResult = EditModeConstraintCoinManager::ConstraintPreselectionResult;
+    using PreselectionResult = EditModeCoinManager::PreselectionResult;
+
+    target.Kind = PreselectionResult::HitKind::Constraint;
+    target.ConstrIndices = hit.ConstrIndices;
+    target.setPickedPoint(hit.PickedPoint);
+
+    switch (hit.Kind) {
+        case ConstraintResult::HitKind::Icon:
+            target.ConstraintKind = PreselectionResult::ConstraintHitKind::Icon;
+            break;
+        case ConstraintResult::HitKind::DatumPresentation:
+            target.ConstraintKind = PreselectionResult::ConstraintHitKind::DatumPresentation;
+            break;
+        case ConstraintResult::HitKind::DatumAnnotation:
+            target.ConstraintKind = PreselectionResult::ConstraintHitKind::DatumAnnotation;
+            break;
+        case ConstraintResult::HitKind::None:
+            target.ConstraintKind = PreselectionResult::ConstraintHitKind::None;
+            break;
+    }
+}
+
+}  // namespace
+
 EditModeCoinManager::PreselectionResult EditModeCoinManager::detectConstraintPreselection(
     const SoPickedPointList& points,
     const SbVec2s& cursorPos
 )
 {
     PreselectionResult result;
-    auto toPreselectionResult = [](const auto& hit, PreselectionResult& target) {
-        using ConstraintResult = EditModeConstraintCoinManager::ConstraintPreselectionResult;
-
-        target.Kind = PreselectionResult::HitKind::Constraint;
-        target.ConstrIndices = hit.ConstrIndices;
-        target.setPickedPoint(hit.PickedPoint);
-
-        switch (hit.Kind) {
-            case ConstraintResult::HitKind::Icon:
-                target.ConstraintKind = PreselectionResult::ConstraintHitKind::Icon;
-                break;
-            case ConstraintResult::HitKind::DatumPresentation:
-                target.ConstraintKind = PreselectionResult::ConstraintHitKind::DatumPresentation;
-                break;
-            case ConstraintResult::HitKind::DatumAnnotation:
-                target.ConstraintKind = PreselectionResult::ConstraintHitKind::DatumAnnotation;
-                break;
-            case ConstraintResult::HitKind::None:
-                target.ConstraintKind = PreselectionResult::ConstraintHitKind::None;
-                break;
-        }
-    };
-
     auto constraintHit = pEditModeConstraintCoinManager->detectPreselectionConstr(cursorPos);
     if (constraintHit.hasHit()) {
         toPreselectionResult(constraintHit, result);
@@ -1584,6 +1611,128 @@ EditModeCoinManager::PreselectionResult EditModeCoinManager::detectPreselection(
     return resolvePreselectionCandidates(
         collectPreselectionCandidates(points, cursorPos, hoveredPointIndex)
     );
+}
+
+std::vector<EditModeCoinManager::PreselectionResult> EditModeCoinManager::detectAllPreselections(
+    const SoPickedPointList& points,
+    const SbVec2s& cursorPos,
+    int hoveredPointIndex
+)
+{
+    // (priority, squared screen distance, hit); the ray's hits count as distance 0
+    std::vector<std::tuple<int, float, PreselectionResult>> hits;
+    auto add = [&hits](const PreselectionResult& result, float distanceSquared) {
+        if (!result.hasWinner()) {
+            return;
+        }
+        if (result.Kind != PreselectionResult::HitKind::Constraint) {
+            hits.emplace_back(preselectionPriority(result), distanceSquared, result);
+            return;
+        }
+        for (int id : result.ConstrIndices) {
+            PreselectionResult single = result;
+            single.ConstrIndices = {id};
+            hits.emplace_back(preselectionPriority(single), distanceSquared, single);
+        }
+    };
+
+    // constraints: every icon under the cursor, then the icons and datum labels the ray met
+    std::vector<EditModeConstraintCoinManager::ConstraintPreselectionResult> constraintHits;
+    pEditModeConstraintCoinManager->detectPreselectionConstr(cursorPos, nullptr, &constraintHits);
+    for (int i = 0; i < points.getLength(); ++i) {
+        if (SoPickedPoint* point = points[i]) {
+            auto hit = pEditModeConstraintCoinManager->detectPreselectionConstr(point, cursorPos);
+            if (hit.hasHit()) {
+                constraintHits.push_back(hit);
+            }
+        }
+    }
+    for (const auto& hit : constraintHits) {
+        PreselectionResult result;
+        toPreselectionResult(hit, result);
+        add(result, 0.0F);
+    }
+
+    // geometry and axes the ray met
+    for (int i = 0; i < points.getLength(); ++i) {
+        SoPickedPoint* point = points[i];
+        if (!point) {
+            continue;
+        }
+        PreselectionResult result;
+        if (detectOriginPreselection(point, result)) {
+            add(result, 0.0F);
+        }
+        for (int layerIndex = 0; layerIndex < geometryLayerParameters.getCoinLayerCount();
+             ++layerIndex) {
+            result.clear();
+            if (detectPointPreselection(point, layerIndex, result)) {
+                add(result, 0.0F);
+            }
+            result.clear();
+            if (detectCurvePreselection(point, layerIndex, result)) {
+                add(result, 0.0F);
+            }
+        }
+        result.clear();
+        if (detectAxisPreselection(point, result)) {
+            add(result, 0.0F);
+        }
+    }
+
+    // points and curves near the cursor on the screen
+    const GeoList geolist = ViewProviderSketchCoinAttorney::getGeoList(viewProvider);
+    auto projectToScreen = [this](const SbVec3f& point) {
+        return ViewProviderSketchCoinAttorney::getScreenCoordinates(viewProvider, point);
+    };
+    GeometryScreenPreselector screenPreselector {
+        geometryLayerParameters,
+        editModeScenegraphNodes,
+        coinMapping,
+        drawingParameters,
+        geolist,
+        projectToScreen,
+        ViewProviderSketchCoinAttorney::getEditingPlacement(viewProvider)
+    };
+    GeometryScreenPreselector::AllHits nearby;
+    PreselectionResult unused;
+    screenPreselector.detectNearbyPointPreselection(cursorPos, unused, &nearby);
+    screenPreselector.detectNearbyCurvePreselection(cursorPos, unused, &nearby);
+    for (const auto& [distanceSquared, result] : nearby) {
+        add(result, distanceSquared);
+    }
+
+    std::ranges::stable_sort(hits, [](const auto& lhs, const auto& rhs) {
+        if (std::get<0>(lhs) != std::get<0>(rhs)) {
+            return std::get<0>(lhs) > std::get<0>(rhs);
+        }
+        return std::get<1>(lhs) < std::get<1>(rhs);
+    });
+
+    // the hover's own pick first, then the others, each element once
+    std::vector<PreselectionResult> all;
+    auto sameElement = [](const PreselectionResult& lhs, const PreselectionResult& rhs) {
+        return lhs.Kind == rhs.Kind && lhs.PointIndex == rhs.PointIndex
+            && lhs.GeoIndex == rhs.GeoIndex && lhs.Cross == rhs.Cross
+            && lhs.ConstrIndices == rhs.ConstrIndices;
+    };
+    auto append = [&all, &sameElement](const PreselectionResult& result) {
+        if (std::ranges::none_of(all, [&](const auto& seen) { return sameElement(seen, result); })) {
+            all.push_back(result);
+        }
+    };
+    PreselectionResult winner = detectPreselection(points, cursorPos, hoveredPointIndex);
+    if (winner.hasWinner() && winner.Kind == PreselectionResult::HitKind::Constraint) {
+        // a merged icon: its first constraint leads
+        winner.ConstrIndices = {*winner.ConstrIndices.begin()};
+    }
+    if (winner.hasWinner()) {
+        append(winner);
+    }
+    for (const auto& hit : hits) {
+        append(std::get<2>(hit));
+    }
+    return all;
 }
 
 SoGroup* EditModeCoinManager::getSelectedConstraints()

@@ -228,7 +228,8 @@ names it.
 | `fix/193-revolution-update-view-off` | fix | ops#193 | - | `integration` `f66704e59b` | `d5e044c6a4` (fork PR 199), 2026-10-08 | when upstream's `updateUI` no longer returns on `blockUpdate` (the early return is upstream's, in `base`) |
 | `fix/221-axis-combo-test-isolation` | fix | ops#221 | none (fork tests) | `integration` `d5e044c6a4` | `6aac1f53ee` (fork PR 200), 2026-10-08 | never (fork tests) |
 | `fix/220-esc-autorepeat` | fix | ops#220 | - | `integration` `d5e044c6a4` | `2794a38da5` (fork PR 201), 2026-10-08 | never (fork fix) |
-| `fix/204-autoconstraint-followups` | fix | ops#204 | - | `integration` `d5e044c6a4` | (fork PR 203) | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
+| `fix/204-autoconstraint-followups` | fix | ops#204 | - | `integration` `d5e044c6a4` | `819fdb26db` (fork PR 203), 2026-10-08 | when upstream's auto-constraint filter keeps the automatic constraints that bring no new redundancy |
+| `feat/194-keymap-e` | feat | ops#194 | - | fork PR 197's head `df78c6e22b` (stacked) | (fork PR 198) | never (fork feature); refit when upstream changes the sketch's edit-mode preselection (`EditModeCoinManager::detectPreselection`, `ViewProviderSketch::detectAndShowPreselection`) or `Std_ClarifySelection`'s picking |
 
 ## Fork-only commits in carried topics
 
