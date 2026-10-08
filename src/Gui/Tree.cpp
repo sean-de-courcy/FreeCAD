@@ -1399,6 +1399,17 @@ std::vector<TreeWidget::ProblemItem> TreeWidget::problemItems(
         if (!item) {
             continue;  // not shown in the tree
         }
+        // A problem under a non-group parent is its own top parent, so the chain above doesn't
+        // reach the rows over it, e.g. a sketch's Pad and Body (ops#208)
+        if (!docItem->showHidden()) {
+            bool hiddenAbove = false;
+            for (auto parent = item->parent(); parent && !hiddenAbove; parent = parent->parent()) {
+                hiddenAbove = parent->isHidden();
+            }
+            if (hiddenAbove) {
+                continue;
+            }
+        }
         problems.push_back({item, top, subname, treePath(item), error});
     }
     std::ranges::sort(problems, {}, &ProblemItem::path);
