@@ -1137,6 +1137,11 @@ class TestForkKeymapGui(unittest.TestCase):
             if w.metaObject().className() == "Gui::TreeWidget" and w.isVisible()
         )
         Gui.Selection.addSelection(self.doc.Name, self.sketch.Name)
+        # the commands are enabled on a timer after the selection changed
+        for name in ("Std_ClearSelection", "Std_ToggleVisibility"):
+            action = Gui.Command.get(name).getAction()
+            if action and shortcut(name):
+                self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)), name)
         self.assertTrue(focus(tree), "the tree doesn't take the focus")
         QtTest.QTest.keyClick(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Space)
         pump(0.5)
@@ -1279,19 +1284,21 @@ class TestForkKeymapGui(unittest.TestCase):
         hidden, _, _ = self.secondBody()
         self.editSketch()
         guiDoc = Gui.getDocument(self.doc.Name)
+        # the sketch in edit is as it is while it is edited (its own state, not necessarily shown)
+        editing = self.visibility()[self.sketch.Name]
         action = Gui.Command.get("PartDesign_ToggleSketches").getAction()
         self.assertTrue(waitFor(lambda: all(a.isEnabled() for a in action)))
         Gui.runCommand("PartDesign_ToggleSketches")
         pump(0.3)
         vis = self.visibility()
         self.assertTrue(vis[hidden.Name], "the other sketch isn't shown")
-        self.assertTrue(vis[self.sketch.Name], "the sketch in edit was hidden")
+        self.assertEqual(vis[self.sketch.Name], editing, "the sketch in edit was changed")
         self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
         Gui.runCommand("PartDesign_ToggleSketches")
         pump(0.3)
         vis = self.visibility()
         self.assertFalse(vis[hidden.Name], "the other sketch isn't hidden again")
-        self.assertTrue(vis[self.sketch.Name], "the sketch in edit was hidden")
+        self.assertEqual(vis[self.sketch.Name], editing, "the sketch in edit was changed")
         self.assertIsNotNone(guiDoc.getInEdit(), "the sketch left edit")
 
     def planesShown(self, body):

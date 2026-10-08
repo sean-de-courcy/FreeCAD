@@ -535,7 +535,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         finally:
             for action in actions:
                 action.triggered.disconnect(onTrim)
-        self.assertEqual(trims, [False], "the plain M locked the dimension before the trim")
+        # the tool's action and, when Trim is the default, the group button's both fire
+        self.assertTrue(trims and not any(trims), "the plain M locked the dimension before the trim")
         self.assertFalse(self.wait_until(locked, 500), "the plain M switched the tool to a lock")
 
     def answer_dialogs(self, texts):
