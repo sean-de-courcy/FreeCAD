@@ -115,6 +115,28 @@ class TestObjectCreate(unittest.TestCase):
         fcc_print(f"Save FreeCAD all objects file to {save_fc_file} ...")
         self.document.saveAs(save_fc_file)
 
+    # ********************************************************************************************
+    def test_force_direction_of_a_coordinate_system_element(self):
+        # A force whose direction is a plane of a coordinate system: the plane's normal in the
+        # document goes through the coordinate system's placement and its part's
+        # (FreeCAD-CH ops#210; it skipped the coordinate system)
+        doc = self.document
+        part = doc.addObject("App::Part", "Part")
+        part.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(5, -4, 9), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 90)
+        )
+        lcs = doc.addObject("App::LocalCoordinateSystem", "LCS")
+        part.addObject(lcs)
+        # Turned 90 degrees about X: the XY plane faces -Y in the part, +X in the document
+        lcs.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(3, 4, 5), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        [plane] = [f for f in lcs.OriginFeatures if f.Role == "XY_Plane"]
+        force = ObjectsFem.makeConstraintForce(doc)
+        force.Direction = (plane, [""])
+        doc.recompute()
+        self.assertLess(force.DirectionVector.sub(FreeCAD.Vector(1, 0, 0)).Length, 1e-9)
+
 
 # ************************************************************************************************
 # ************************************************************************************************
