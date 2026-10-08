@@ -1430,6 +1430,24 @@ void SketchObject::onExternalGeometryChanged()
                         << " changed beyond a removal; their types are left as they are");
             }
         }
+        else if (!externalLinksWithTypes && !(doc && doc->isPerformingTransaction())
+                 && externalGeoRef.size() > oldRefs.size() && externalTypeRepairPending
+                 && types.size() > oldRefs.size()) {
+            if (std::equal(oldRefs.begin(), oldRefs.end(), externalGeoRef.begin())) {
+                // links appended outside the sketch while entries wait for the repair: the new
+                // links are projections, before those entries, which would otherwise be read as
+                // the new links' types (the mark builds nothing) (ops#237)
+                types.insert(types.begin() + static_cast<std::ptrdiff_t>(oldRefs.size()),
+                             externalGeoRef.size() - oldRefs.size(),
+                             static_cast<long>(ExtType::Projection));
+                ExternalTypes.setValues(types);
+            }
+            else {
+                FC_WARN("External links of " << getFullName() << " changed beyond an append "
+                        << "while their types wait for a repair; their types are left as they "
+                        << "are, and links past the old ones can read a pending entry");
+            }
+        }
         signalElementsChanged();
     }
 }
@@ -1563,6 +1581,13 @@ void SketchObject::onSketchRestore()
         fixMissingAxisInExternalGeo();
 
         if(ExternalGeo.getSize()<=2) {
+            // no saved geometry to repair a type list saved before ops#140 from: each link reads
+            // the type at its index
+            if (ExternalTypes.getSize() > ExternalGeometry.getSize()
+                && ExternalGeometry.getSize() > 0) {
+                FC_WARN("External link types of " << getFullName() << " were saved before "
+                        << "ops#140 without their geometry; they are read by index");
+            }
             for(auto &key : externalGeoRef) {
                 long id = getDocument()->getStringHasher()->getID(key.c_str()).value();
                 if(geoLastId < id)
@@ -1577,7 +1602,37 @@ void SketchObject::onSketchRestore()
             // a type list saved before ops#140 gets each link's own type back, from the saved
             // geometries, before anything reads it by index
             if (ExternalTypes.getSize() > ExternalGeometry.getSize()) {
-                rebuildExternalGeometry(std::nullopt, true);
+                // its own try, so the rest of the restore (orientations, geometry state, solve)
+                // still runs (ops#237). A failure puts the list back as saved and keeps its extra
+                // entries pending, so they survive edits and a save, and the next open repairs
+                // again; until then each link reads the type at its index.
+                const auto savedTypes = ExternalTypes.getValues();
+                auto failed = [&](const std::string& why) {
+                    FC_ERR("Failed to repair the external link types of "
+                           << getFullName() << " (" << why << "); until the file is opened "
+                           << "again, each link reads the type at its index, which can be "
+                           << "another link's");
+                    undecidedTypeKeys.clear();
+                    if (ExternalTypes.getValues() != savedTypes) {
+                        ExternalTypes.setValues(savedTypes);
+                    }
+                    externalTypeRepairPending = true;
+                };
+                try {
+                    rebuildExternalGeometry(std::nullopt, true);
+                }
+                catch (const Base::Exception& e) {
+                    failed(e.what());
+                }
+                catch (const Standard_Failure& e) {
+                    failed(e.GetMessageString());
+                }
+                catch (const std::exception& e) {
+                    failed(e.what());
+                }
+                catch (...) {
+                    failed("unknown exception");
+                }
             }
         }
 

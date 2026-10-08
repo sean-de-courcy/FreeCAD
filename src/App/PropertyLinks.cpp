@@ -4923,9 +4923,29 @@ void PropertyLinkSubList::breakLink(App::DocumentObject* obj, bool clear)
         setValues(values, subs);
         return;
     }
-    setValues(std::move(values), std::move(subs), std::move(shadows));
-    // setValues() resets both lists when the count changes; the old value for undo is already
-    // taken, so they follow their references here
+    // As setValues() with shadows, but the kept references' records and fingerprints are back
+    // before hasSetValue(): observers of the change (a reference field, a report) read them
+    // (ops#140, ops#237)
+    auto parent = freecad_cast<App::DocumentObject*>(getContainer());
+    if (parent && !parent->testStatus(ObjectStatus::Destroy) && _pcScope != LinkScope::Hidden) {
+        for (auto* o : _lValueList) {
+            if (o) {
+                o->_removeBackLink(parent);
+                o->_removeBackLinkProp(getName(), parent);
+            }
+        }
+        for (auto* o : values) {
+            if (o) {
+                o->_addBackLink(parent);
+                o->_addBackLinkProp(getName(), parent);
+            }
+        }
+    }
+    aboutToSetValue();
+    _lValueList = std::move(values);
+    _lSubList = std::move(subs);
+    _ShadowSubList = std::move(shadows);
+    onContainerRestored();  // re-register element references
     _Records = std::move(records);
     if (_Fingerprints.size() == fingerprints.size()) {
         for (std::size_t k = 0; k < fingerprints.size(); ++k) {
@@ -4937,6 +4957,8 @@ void PropertyLinkSubList::breakLink(App::DocumentObject* obj, bool clear)
     else {
         _Fingerprints = std::move(fingerprints);
     }
+    checkLabelReferences(_lSubList);
+    hasSetValue();
 }
 
 bool PropertyLinkSubList::adjustLink(const std::set<App::DocumentObject*>& inList)

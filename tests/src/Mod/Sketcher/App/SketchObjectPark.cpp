@@ -6,8 +6,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Tool.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -454,6 +457,54 @@ TEST_F(SketchObjectParkTest, unparkReplacesADeletedMiddleGeometry)
     unparkReplacesADeletedGeometry(2);
 }
 
+// unpark puts a new geometry in place of a deleted one and moves the external GeoIds after it
+// one on, in every constraint. With the constraint list flagged invalid (here the sketch's own
+// geometry is gone) it read the list with getValues(), empty while flagged, and wrote that back:
+// every constraint was gone (ops#237). The list stays flagged until the geometry is back.
+TEST_F(SketchObjectParkTest, unparkWithInvalidConstraintListKeepsConstraints)
+{
+    // Arrange
+    auto sketch = getObject();
+    ASSERT_EQ(projectFace().size(), 4U);
+    const auto ids = sketch->externalGeometryIds(0);
+    Part::GeomLineSegment segment;
+    segment.setPoints(Base::Vector3d(1, 1, 0), Base::Vector3d(4, 6, 0));
+    const int line = sketch->addGeometry(&segment);
+    for (int edge : {1, 3}) {
+        auto coincident = new Sketcher::Constraint();
+        coincident->Type = Sketcher::Coincident;
+        coincident->First = line;
+        coincident->FirstPos = edge == 1 ? Sketcher::PointPos::start : Sketcher::PointPos::end;
+        coincident->Second = GeoEnum::RefExt - edge;
+        coincident->SecondPos = Sketcher::PointPos::start;
+        sketch->addConstraint(coincident);
+    }
+    doc->recompute();
+    ASSERT_TRUE(sketch->isValid());
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    ASSERT_EQ(sketch->delExternal(0), 0);
+    std::vector<Part::Geometry*> geometry;
+    for (auto* geo : sketch->Geometry.getValues()) {
+        geometry.push_back(geo->clone());
+    }
+    sketch->Geometry.setValues(std::vector<Part::Geometry*> {});
+    ASSERT_TRUE(sketch->Constraints.getValues().empty());  // flagged invalid
+
+    // Act
+    int replaced = sketch->unparkExternalGeometry(box, sub, std::move(shadow), 0, ids);
+
+    // Assert
+    EXPECT_EQ(replaced, 1);
+    EXPECT_TRUE(sketch->Constraints.getValues().empty());  // still flagged
+    sketch->Geometry.setValues(std::move(geometry));
+    const auto& constraints = sketch->Constraints.getValues();
+    ASSERT_EQ(constraints.size(), 2U);
+    EXPECT_EQ(constraints[0]->Second, GeoEnum::RefExt - 1);
+    EXPECT_EQ(constraints[1]->Second, GeoEnum::RefExt - 3);
+}
+
 TEST_F(SketchObjectParkTest, unparkLeavesAFrozenEntryAlone)
 {
     // Arrange: the face's projection frozen, parked, its third geometry deleted
@@ -589,4 +640,66 @@ TEST_F(SketchObjectParkTest, markMissingFlagsTheParkedGeometry)
     // A geometry that has a reference isn't touched
     EXPECT_EQ(sketch->markExternalGeometryMissing(ids, "Other.Edge1"), 0);
     EXPECT_EQ(refOf(projection()), ref);
+}
+
+// A link appended to ExternalGeometry outside the sketch while an open's type repair is pending
+// (the list ends in the mark) is a projection, before the mark: read by index, the mark would be
+// its type, and it would build nothing (ops#237)
+TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
+{
+    auto* sketch = getObject();
+    // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
+    auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
+    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    doc->recompute();
+    ASSERT_GE(sketch->addExternal(box, edge.c_str(), false, false), 0);
+    ASSERT_GE(sketch->addExternal(ball, "Face1", false, true), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 1}));
+    // the ball loses its face: its saved circle can't tell its type
+    ball->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
+    doc->recompute();
+    // a list saved before ops#140: the ball reads a projection by index
+    sketch->ExternalTypes.setValues({0, 0, 1});
+
+    const std::string name = doc->getName();
+    const std::string sketchName = sketch->getNameInDocument();
+    // under the same name, which TearDown closes
+    auto path = std::filesystem::temp_directory_path() / (name + ".FCStd");
+    doc->saveAs(Base::FileInfo::pathToString(path).c_str());
+    App::GetApplication().closeDocument(name.c_str());
+    doc = App::GetApplication().openDocument(Base::FileInfo::pathToString(path).c_str());
+    std::filesystem::remove(path);
+    ASSERT_NE(doc, nullptr);
+    ASSERT_EQ(std::string(doc->getName()), name);
+    sketch = static_cast<Sketcher::SketchObject*>(doc->getObject(sketchName.c_str()));
+    ASSERT_NE(sketch, nullptr);
+    box = doc->getObject("Box");
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+
+    auto objs = sketch->ExternalGeometry.getValues();
+    auto subs = sketch->ExternalGeometry.getSubValues();
+    objs.push_back(box);
+    subs.push_back(otherEdge);
+    sketch->ExternalGeometry.setValues(objs, subs);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, 0, -1}));
+    doc->recompute();
+    ASSERT_EQ(sketch->externalGeometryIds(2).size(), 1U);
+    // it is the other edge's projection: the last external geometry, between its ends
+    auto shape = Part::Feature::getTopoShape(box, Part::ShapeOption::NoFlag);
+    auto other = TopoDS::Edge(shape.getSubShape(otherEdge.c_str()));
+    auto p1 = BRep_Tool::Pnt(TopExp::FirstVertex(other));
+    auto p2 = BRep_Tool::Pnt(TopExp::LastVertex(other));
+    auto* line =
+        dynamic_cast<const Part::GeomLineSegment*>(sketch->ExternalGeo.getValues().back());
+    ASSERT_NE(line, nullptr);
+    std::vector<Base::Vector3d> ends {line->getStartPoint(), line->getEndPoint()};
+    std::vector<Base::Vector3d> expected {Base::Vector3d(p1.X(), p1.Y(), 0),
+                                          Base::Vector3d(p2.X(), p2.Y(), 0)};
+    auto byX = [](const Base::Vector3d& a, const Base::Vector3d& b) { return a.x < b.x; };
+    std::sort(ends.begin(), ends.end(), byX);
+    std::sort(expected.begin(), expected.end(), byX);
+    for (std::size_t k = 0; k < 2; ++k) {
+        EXPECT_TRUE(ends[k].IsEqual(expected[k], tolerance));
+    }
 }

@@ -1209,6 +1209,7 @@ int SketchObject::attachExternal(
 
     std::vector<long> Types;
     // the new link gives the detached geometries, so it takes the type of the link they came from
+    // (of the first, when they came from several links of different types)
     std::optional<long> attachedType;
     int entry = 0;
     for(auto &key : externalGeoRef) {
@@ -2491,8 +2492,9 @@ std::optional<long> typeFromSavedGeometry(const std::string& sub,
 
 // How far a built geometry lies from a saved one of the same kind (ops#140): for points their
 // distance; for full circles and ellipses the distance of the centres plus the radii's
-// differences, which doesn't depend on where their parameter starts; for other curves the largest
-// distance of a point sampled on one from the other, both ways.
+// differences (and for ellipses how far the turn of the major axis moves the curve), which
+// doesn't depend on where their parameter starts; for other curves the largest distance of a
+// point sampled on one from the other, both ways, each to the nearer of the foot and the ends.
 double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
 {
     if (auto* point = freecad_cast<const Part::GeomPoint*>(geo)) {
@@ -2506,9 +2508,18 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
     }
     if (auto* ellipse = freecad_cast<const Part::GeomEllipse*>(geo)) {
         auto* other = static_cast<const Part::GeomEllipse*>(saved);
+        // and how far turning the major axis moves the curve, about (a - b) sin(angle): nothing
+        // for a near-circular ellipse, whose axis direction is noise (ops#237). The axis has no
+        // sense, so the angle is at most a quarter turn.
+        double angle = ellipse->getMajorAxisDir().GetAngle(other->getMajorAxisDir());
+        angle = std::min(angle, std::numbers::pi - angle);
+        const double eccentricity =
+            std::max(ellipse->getMajorRadius() - ellipse->getMinorRadius(),
+                     other->getMajorRadius() - other->getMinorRadius());
         return Base::Distance(ellipse->getCenter(), other->getCenter())
             + std::abs(ellipse->getMajorRadius() - other->getMajorRadius())
-            + std::abs(ellipse->getMinorRadius() - other->getMinorRadius());
+            + std::abs(ellipse->getMinorRadius() - other->getMinorRadius())
+            + eccentricity * std::sin(angle);
     }
     auto* curve = freecad_cast<const Part::GeomCurve*>(geo);
     auto* savedCurve = freecad_cast<const Part::GeomCurve*>(saved);
@@ -3381,7 +3392,9 @@ void SketchObject::fixExternalGeometry(const std::vector<int> &geoIds) {
     }
 
     if(touched) {
-        // the links added above are projections; the others keep their types
+        // the links added above are projections; the others keep their types. A missing
+        // intersection comes back as a projection: the missing geometry doesn't keep its link's
+        // type (nothing in the fork calls this; ops#237)
         auto types = ExternalTypes.getValues();
         types.resize(ExternalGeometry.getSize(), static_cast<long>(ExtType::Projection));
         ExternalGeo.setValues(geos);
@@ -3624,9 +3637,12 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     }
     else {
         // The reverse of delExternalPrivate: each external GeoId at or after an inserted index
-        // moves one on, so every constraint stays on its geometry
+        // moves one on, so every constraint stays on its geometry. getValuesForce(): getValues()
+        // is empty while the list is flagged invalid, and writing that back would delete every
+        // constraint; a flagged list stays flagged (ops#140, ops#237)
+        const bool invalidConstraints = Constraints.hasInvalidGeometry();
         std::vector<Constraint*> constraints;
-        for (const auto& cstr : Constraints.getValues()) {
+        for (const auto& cstr : Constraints.getValuesForce()) {
             auto shifted = cstr->clone();
             for (int at : inserted) {
                 const int geoId = -at - 1;
@@ -3643,7 +3659,13 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
         ExternalGeo.setValues(std::move(geos));
         solverNeedsUpdate = true;
         Constraints.setValues(std::move(constraints));
-        acceptGeometry();
+        if (invalidConstraints) {
+            rebuildVertexIndex();
+            signalElementsChanged();
+        }
+        else {
+            acceptGeometry();
+        }
     }
     externalGeoRefMap[key] = std::move(refs);
     return replaced;

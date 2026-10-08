@@ -7,6 +7,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/FeatureTest.h>
 #include <App/Link.h>
 #include <Base/Placement.h>
 #include <Base/Vector3D.h>
@@ -339,6 +340,50 @@ TEST_F(LinkTest, linkPlacementAndPlacementStayInSync)
     EXPECT_DOUBLE_EQ(synced2.getPosition().x, 7.0);
     EXPECT_DOUBLE_EQ(synced2.getPosition().y, 8.0);
     EXPECT_DOUBLE_EQ(synced2.getPosition().z, 9.0);
+}
+
+// Deleting one of three linked objects drops its reference (PropertyLinkSubList::breakLink). The
+// other two keep their shadows and records, and an observer of the change already reads them
+// (ops#140, ops#237): a reference field or a report reads the records when the property changes.
+TEST_F(LinkTest, breakLinkKeepsTheOtherReferencesRecords)
+{
+    // Arrange
+    auto* owner = static_cast<App::FeatureTest*>(_doc->addObject("App::FeatureTest", "Owner"));
+    auto* first = _doc->addObject("App::FeatureTest", "First");
+    auto* second = _doc->addObject("App::FeatureTest", "Second");
+    auto* third = _doc->addObject("App::FeatureTest", "Third");
+    owner->LinkSubList.setValues({first, second, third}, {"Edge1", "Edge2", "Edge3"});
+    App::RetargetRecord secondRecord;
+    secondRecord.target = "Solid2";
+    secondRecord.origIndex = "Face2";
+    App::RetargetRecord thirdRecord;
+    thirdRecord.target = "Solid3";
+    thirdRecord.origIndex = "Face3";
+    owner->LinkSubList.setRetargets({{}, secondRecord, thirdRecord});
+    ASSERT_EQ(owner->LinkSubList.getRetargets().size(), 3U);
+    std::vector<std::string> seen;
+    auto connection = _doc->signalChangedObject.connect(
+        [&](const App::DocumentObject& obj, const App::Property& prop) {
+            if (&obj == owner && &prop == &owner->LinkSubList) {
+                for (const auto& record : owner->LinkSubList.getRetargets()) {
+                    seen.push_back(record.target);
+                }
+            }
+        });
+
+    // Act
+    _doc->removeObject(first->getNameInDocument());
+    connection.disconnect();
+
+    // Assert
+    ASSERT_EQ(owner->LinkSubList.getValues().size(), 2U);
+    EXPECT_EQ(owner->LinkSubList.getValues()[0], second);
+    EXPECT_EQ(owner->LinkSubList.getShadowSubs().size(), 2U);
+    auto records = owner->LinkSubList.getRetargets();
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records[0].target, "Solid2");
+    EXPECT_EQ(records[1].target, "Solid3");
+    EXPECT_EQ(seen, (std::vector<std::string> {"Solid2", "Solid3"}));
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
