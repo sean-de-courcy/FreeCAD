@@ -29,6 +29,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import Part
 from PySide import QtCore, QtWidgets
+from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import Z, face
@@ -1060,3 +1061,275 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.constraints(self.spine), constraints)
         self.assertTrue(self.spine.isValid(), self.spine.getStatusString())
+
+    # -- ops#230: makeCopy's independent copy is recomputed before a caller links it ----------------
+
+    def chooseInPopup(self, combo, index):
+        """An entry of a combo box chosen through its popup, as a user does (as
+        TestReferenceFieldGui.choose)."""
+        combo.showPopup()
+        view = combo.view()
+
+        def placed():
+            rect = view.visualRect(view.model().index(index, 0))
+            return view.isVisible() and rect.isValid() and not rect.isEmpty()
+
+        self.assertTrue(waitFor(placed), "the popup's entry isn't placed")
+        pump(0.05)
+        rect = view.visualRect(view.model().index(index, 0))
+        QtTest.QTest.mouseClick(
+            view.viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, rect.center()
+        )
+        self.assertTrue(waitFor(lambda: not view.isVisible()), "the popup stays")
+        pump(0.1)
+
+    def testRevolutionAxisCopiedFromOutside(self):
+        """ops#230 (getReferencedSelection): the Revolution's axis picked on a sketch outside the
+        body, Make independent copy. The axis links (CopyAxis, Edge1) at once; the copy was not
+        recomputed then, so the name mapped in its pasted shape was lost at its first recompute
+        and the axis came back resolved by geometry, with a Warning. Model: the Ring profile
+        (x 1..3, z 0..2 on XZ) turned 360 degrees about a line x = -1 along Z outside the body:
+        radii 2..4, V = 2 pi (16 - 4) = 24 pi."""
+        self.body = models.body(self.doc)
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        axis = models.sketch(self.doc, "Axis", [line(-1, 0, -1, 5)], None, placement=XZ)
+        self.doc.recompute()
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+        self.assertAlmostEqual(revolution.Shape.Volume, 16 * math.pi, places=3)
+
+        self.edit(revolution)
+        combo = self.widget(QtWidgets.QComboBox, "axis")
+        [index] = [
+            i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")
+        ]
+        self.chooseInPopup(combo, index)
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, axis.Name, "Edge1")
+        self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.close(ok=True)
+
+        copy = self.doc.getObject("CopyAxis")
+        self.assertIsNotNone(copy)
+        self.assertIn(copy, self.body.Group)
+        self.assertEqual(revolution.ReferenceAxis[0], copy)
+        self.assertEqual(revolution.ReferenceAxis[1], ["Edge1"])
+        self.doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertNotIn("Warning", revolution.State)
+        self.assertEqual(App.getReferenceReport(revolution), [])
+        self.assertAlmostEqual(revolution.Shape.Volume, 24 * math.pi, places=3)
+
+    def runNewSketchOnCopiedFace(self, feature, face):
+        """Runs New Sketch on `face` of feature (in another body) and answers Make independent
+        copy, and any message box; the answers go to self.modals."""
+        # the command is active only in its workbench (an earlier unit can leave another one)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        guiDoc = Gui.getDocument(self.doc.Name)
+        # the command acts on the active document: this one's view in front (the suite's earlier
+        # units can leave theirs open)
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        self.assertEqual(Gui.ActiveDocument.Document.Name, self.doc.Name)
+        guiDoc.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.addSelection(self.doc.Name, feature.Name, face)
+        # New Sketch with Shift held goes to the attachment dialog: a guard against a unit that
+        # leaves the application's modifier state at Shift (TestForkKeymapGui did, off screen)
+        self.assertEqual(
+            QtWidgets.QApplication.queryKeyboardModifiers(), QtCore.Qt.KeyboardModifier.NoModifier
+        )
+        self.answerModals()
+        Gui.runCommand("PartDesign_NewSketch")
+
+    def newSketchOnCopiedFace(self, feature, face="Face1"):
+        """New Sketch on `face` of feature (in another body), answered Make independent copy;
+        returns the sketch, left edit."""
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.runNewSketchOnCopiedFace(feature, face)
+        self.assertTrue(
+            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0),
+            f"no sketch in edit; modals {self.modals}, workbench {Gui.activeWorkbench().name()}",
+        )
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        guiDoc.resetEdit()
+        pump(0.3)
+        [sketch] = [o for o in self.body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        return sketch
+
+    def testNewSketchOnAFaceCopiedFromAnotherBody(self):
+        """ops#230 (SketchWorkflow): New Sketch on a face of a box in another body, Make
+        independent copy. The sketch's support links (CopyBox, Face1) before the copy's first
+        recompute, so the name mapped in its pasted shape was lost and the support came back
+        resolved by geometry, with a Warning. Model: a 10 mm box at the origin in the other body;
+        its Face1, the face picked, is the plane x = 0, so the sketch's normal is along X at
+        x = 0."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        sketch = self.newSketchOnCopiedFace(box)
+
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertIn(copy, self.body.Group)
+        self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertNotIn("Warning", sketch.State)
+        self.assertEqual(App.getReferenceReport(sketch), [])
+        normal = sketch.Placement.Rotation.multVec(Z)
+        self.assertAlmostEqual(abs(normal.x), 1, places=6)
+        self.assertAlmostEqual(sketch.Placement.Base.x, 0, places=6)
+
+    def primitivesOnABase(self):
+        """Another body: Base, a 20 x 20 x 10 box at (-5, -5, 0); Box, a 10 x 10 x 20 box at the
+        origin on it; Cut, a 2 mm subtractive box at the origin on Box. The fused shape's Face1
+        is the plane x = -5 (the base's side), the bare box's Face1 the plane x = 0."""
+        other = models.body(self.doc)
+        base = other.newObject("PartDesign::AdditiveBox", "Base")
+        base.Length = 20
+        base.Width = 20
+        base.Placement.Base = V(-5, -5, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Height = 20
+        cut = other.newObject("PartDesign::SubtractiveBox", "Cut")
+        cut.Length = 2
+        cut.Width = 2
+        cut.Height = 2
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        self.assertIs(box.BaseFeature, base)
+        self.assertAlmostEqual(box.Shape.Faces[0].CenterOfMass.x, -5, places=6)
+        return box, cut
+
+    def testNewSketchOnACopiedPrimitiveOnABase(self):
+        """PR 223 review M1: as testNewSketchOnAFaceCopiedFromAnotherBody, on Box, which sits on
+        Base. Its copy has no BaseFeature, so a recompute in makeCopy made it the bare box before
+        the sketch linked its Face1, and the sketch went on the bare box's Face1 (x = 0), another
+        plane than the Face1 picked (x = -5), silently. The copy keeps its pasted shape until the
+        command's recompute (which still makes it the bare box, ops#244 P5): the sketch is on the
+        picked plane, or flagged; never valid elsewhere without a warning."""
+        box, _ = self.primitivesOnABase()
+        sketch = self.newSketchOnCopiedFace(box)
+        self.doc.recompute()
+        onPicked = abs(sketch.Placement.Base.x + 5) < 1e-6
+        flagged = "Warning" in sketch.State or not sketch.isValid()
+        self.assertTrue(onPicked or flagged, (sketch.Placement, sketch.State))
+
+    def testNewSketchOnACopiedSubtractivePrimitive(self):
+        """PR 223 review M2: New Sketch on a face of Cut (a subtractive box on Box), Make
+        independent copy. Recomputed without a base, the copy failed ("Cannot subtract primitive
+        feature without base feature") and makeCopy reported it. It keeps its pasted shape (the
+        command's own recompute then fails it in the body, as before ops#230: ops#244 P5)."""
+        _, cut = self.primitivesOnABase()
+        before = len(reportText() or "")
+        self.newSketchOnCopiedFace(cut)
+        self.assertIsNotNone(self.doc.getObject("CopyCut"))
+        self.assertNotIn("doesn't recompute", (reportText() or "")[before:])
+
+    def boxElement(self, box, kind, where):
+        """The index name of the box's element of `kind` ("Face" or "Edge") whose centre of mass
+        satisfies where(point); asserted not to be the first one, which the copies linked
+        whatever was picked (ops#244 P1)."""
+        elements = box.Shape.Faces if kind == "Face" else box.Shape.Edges
+        [name] = [
+            f"{kind}{i + 1}" for i, e in enumerate(elements) if where(e.CenterOfMass)
+        ]
+        self.assertNotEqual(name, kind + "1")
+        return name
+
+    def testNewSketchOnTheTopFaceOfACopiedBox(self):
+        """PR 223 review N1: New Sketch on the top face of a box in another body (no base), Make
+        independent copy. makeCopy recomputes such a copy, so it has its own element names, and
+        the sketch went on the copy's Face1 (the plane x = 0) whatever face was picked, valid and
+        silent. It links the picked face, which the recomputed copy has under the same index.
+        Model: a 10 mm box at the origin; its top face is the plane z = 10."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        sketch = self.newSketchOnCopiedFace(box, top)
+
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertNotIn("Warning", sketch.State)
+        self.assertEqual(App.getReferenceReport(sketch), [])
+        normal = sketch.Placement.Rotation.multVec(Z)
+        self.assertAlmostEqual(abs(normal.z), 1, places=6)
+        self.assertAlmostEqual(sketch.Placement.Base.z, 10, places=6)
+
+    def testNewSketchOnAStaleCopiedBoxStops(self):
+        """PR 223 review N1, the check: the box was lengthened and not recomputed, so its copy,
+        recomputed in makeCopy, is longer, and the picked face (the end x = 10) is another face
+        there. New Sketch stops with a message and leaves no copy and no sketch."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        end = self.boxElement(box, "Face", lambda p: abs(p.x - 10) < 1e-6)
+        box.Length = 20
+        self.runNewSketchOnCopiedFace(box, end)
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: " + end), self.modals)
+        pump(0.3)
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertIsNone(self.doc.getObject("CopyBox"))
+        self.assertEqual(
+            [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
+        )
+
+    def testRevolutionAxisOnAnEdgeOfACopiedBox(self):
+        """PR 223 review N1 (getReferencedSelection): the Revolution's axis picked on an edge of
+        a box in another body (no base), Make independent copy. The axis went to the copy's
+        Edge1 whatever edge was picked; it is the picked edge, the same line on the copy. Checked
+        at the pick: once the panel closes, the copy sits after the Revolution in the body with
+        the Revolution as its BaseFeature, a cycle that breaks the axis, loudly (ops#244 P3).
+        Model: a 10 mm box at the origin; the axis is its edge x = 10, y = 0 along Z."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        self.doc.recompute()
+        edge = self.boxElement(
+            box, "Edge", lambda p: abs(p.x - 10) < 1e-6 and abs(p.y) < 1e-6 and abs(p.z - 5) < 1e-6
+        )
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+
+        self.edit(revolution)
+        combo = self.widget(QtWidgets.QComboBox, "axis")
+        [index] = [
+            i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")
+        ]
+        self.chooseInPopup(combo, index)
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertEqual(revolution.ReferenceAxis, (copy, [edge]))
+        picked = copy.Shape.getElement(edge)
+        self.assertAlmostEqual(picked.CenterOfMass.distanceToPoint(V(10, 0, 5)), 0, places=6)
+        self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
+        self.close(ok=False)

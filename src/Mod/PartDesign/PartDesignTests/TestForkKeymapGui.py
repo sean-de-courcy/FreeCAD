@@ -549,6 +549,11 @@ class TestForkKeymapGui(unittest.TestCase):
         pump()
 
     def tearDown(self):
+        # QTest.keyClick with a modifier leaves the application's modifier state at it, off
+        # screen, for every later test of the process (New Sketch with Shift "held" opened the
+        # attachment dialog in TestPanelFixesGui, ops#230): a key release without modifiers
+        # clears it
+        QtTest.QTest.keyRelease(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift)
         # a list a failed test left open takes the keys of every later test; so does a filter
         popup = QtWidgets.QApplication.activePopupWidget()
         if popup is not None and popup.objectName() == "SelectOtherMenu":
