@@ -432,7 +432,17 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
         // it (ops#230; the Pipe panel did it for its spines and sections since ops#225). A sketch
         // copy has no attachment and links nothing outside (above); a primitive gets its
         // BaseFeature only when its caller adds it to a body.
-        if (!copy->recomputeFeature()) {
+        // Only when the recompute keeps the original's shape (PR 223 review M1, M2): a primitive
+        // whose original sits on a BaseFeature would become the bare primitive, and a caller's
+        // Face1 would then name another face, silently; a subtractive one fails without a base.
+        // Those keep the pasted shape, and the old resolution by geometry, with its Warning.
+        auto keepsShape = [obj]() {
+            auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(obj);
+            return !primitive
+                || (!primitive->BaseFeature.getValue()
+                    && primitive->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive);
+        };
+        if (keepsShape() && !copy->recomputeFeature()) {
             Base::Console().warning(
                 "The copy '%s' of '%s' doesn't recompute: %s\n",
                 copy->Label.getValue(),

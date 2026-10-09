@@ -731,17 +731,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
         self.assertAlmostEqual(revolution.Shape.Volume, 24 * math.pi, places=3)
 
-    def testNewSketchOnAFaceCopiedFromAnotherBody(self):
-        """ops#230 (SketchWorkflow): New Sketch on a face of a box in another body, Make
-        independent copy. The sketch's support links (CopyBox, Face1) before the copy's first
-        recompute, so the name mapped in its pasted shape was lost and the support came back
-        resolved by geometry, with a Warning. Model: a 10 mm box at the origin in the other body;
-        its Face1 is the plane x = 0 (the workflow attaches to Face1 of the copy whatever face
-        was picked, ops#230's side bug), so the sketch's normal is along X at x = 0."""
-        other = models.body(self.doc)
-        box = other.newObject("PartDesign::AdditiveBox", "Box")
-        self.body = models.body(self.doc)
-        self.doc.recompute()
+    def newSketchOnCopiedFace(self, feature):
+        """New Sketch on Face1 of feature (in another body), answered Make independent copy;
+        returns the sketch, left edit."""
         # the command is active only in its workbench (an earlier unit can leave another one)
         Gui.activateWorkbench("PartDesignWorkbench")
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -752,18 +744,14 @@ class TestPanelFixesGui(unittest.TestCase):
         pump(0.2)
         self.assertEqual(Gui.ActiveDocument.Document.Name, self.doc.Name)
         guiDoc.ActiveView.setActiveObject("pdbody", self.body)
-        Gui.Selection.addSelection(self.doc.Name, box.Name, "Face1")
-        # New Sketch with Shift held goes to the attachment dialog. An earlier unit's
-        # QTest.keyClick with Shift (TestForkKeymapGui) leaves the application's modifier state
-        # at Shift off screen; a Shift release without modifiers clears it
-        QtTest.QTest.keyRelease(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift)
-        pump(0.1)
+        Gui.Selection.addSelection(self.doc.Name, feature.Name, "Face1")
+        # New Sketch with Shift held goes to the attachment dialog: a guard against a unit that
+        # leaves the application's modifier state at Shift (TestForkKeymapGui did, off screen)
         self.assertEqual(
             QtWidgets.QApplication.queryKeyboardModifiers(), QtCore.Qt.KeyboardModifier.NoModifier
         )
         self.answerModals()
         Gui.runCommand("PartDesign_NewSketch")
-        guiDoc = Gui.getDocument(self.doc.Name)
         self.assertTrue(
             waitFor(lambda: guiDoc.getInEdit() is not None, 10.0),
             f"no sketch in edit; modals {self.modals}, workbench {Gui.activeWorkbench().name()}",
@@ -772,11 +760,25 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(self.modals, ["DlgReference"])
         guiDoc.resetEdit()
         pump(0.3)
+        [sketch] = [o for o in self.body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        return sketch
+
+    def testNewSketchOnAFaceCopiedFromAnotherBody(self):
+        """ops#230 (SketchWorkflow): New Sketch on a face of a box in another body, Make
+        independent copy. The sketch's support links (CopyBox, Face1) before the copy's first
+        recompute, so the name mapped in its pasted shape was lost and the support came back
+        resolved by geometry, with a Warning. Model: a 10 mm box at the origin in the other body;
+        its Face1 is the plane x = 0 (the workflow attaches to Face1 of the copy whatever face
+        was picked, ops#244), so the sketch's normal is along X at x = 0."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        sketch = self.newSketchOnCopiedFace(box)
 
         copy = self.doc.getObject("CopyBox")
         self.assertIsNotNone(copy)
         self.assertIn(copy, self.body.Group)
-        [sketch] = [o for o in self.body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
         self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
         self.doc.recompute()
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
@@ -785,3 +787,49 @@ class TestPanelFixesGui(unittest.TestCase):
         normal = sketch.Placement.Rotation.multVec(Z)
         self.assertAlmostEqual(abs(normal.x), 1, places=6)
         self.assertAlmostEqual(sketch.Placement.Base.x, 0, places=6)
+
+    def primitivesOnABase(self):
+        """Another body: Base, a 20 x 20 x 10 box at (-5, -5, 0); Box, a 10 x 10 x 20 box at the
+        origin on it; Cut, a 2 mm subtractive box at the origin on Box. The fused shape's Face1
+        is the plane x = -5 (the base's side), the bare box's Face1 the plane x = 0."""
+        other = models.body(self.doc)
+        base = other.newObject("PartDesign::AdditiveBox", "Base")
+        base.Length = 20
+        base.Width = 20
+        base.Placement.Base = V(-5, -5, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Height = 20
+        cut = other.newObject("PartDesign::SubtractiveBox", "Cut")
+        cut.Length = 2
+        cut.Width = 2
+        cut.Height = 2
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        self.assertIs(box.BaseFeature, base)
+        self.assertAlmostEqual(box.Shape.Faces[0].CenterOfMass.x, -5, places=6)
+        return box, cut
+
+    def testNewSketchOnACopiedPrimitiveOnABase(self):
+        """PR 223 review M1: as testNewSketchOnAFaceCopiedFromAnotherBody, on Box, which sits on
+        Base. Its copy has no BaseFeature, so a recompute in makeCopy made it the bare box before
+        the sketch linked its Face1, and the sketch went on the bare box's Face1 (x = 0), another
+        plane than the Face1 picked (x = -5), silently. The copy keeps its pasted shape until the
+        command's recompute (which still makes it the bare box, ops#244): the sketch is on the
+        picked plane, or flagged; never valid elsewhere without a warning."""
+        box, _ = self.primitivesOnABase()
+        sketch = self.newSketchOnCopiedFace(box)
+        self.doc.recompute()
+        onPicked = abs(sketch.Placement.Base.x + 5) < 1e-6
+        flagged = "Warning" in sketch.State or not sketch.isValid()
+        self.assertTrue(onPicked or flagged, (sketch.Placement, sketch.State))
+
+    def testNewSketchOnACopiedSubtractivePrimitive(self):
+        """PR 223 review M2: New Sketch on a face of Cut (a subtractive box on Box), Make
+        independent copy. Recomputed without a base, the copy failed ("Cannot subtract primitive
+        feature without base feature") and makeCopy reported it. It keeps its pasted shape (the
+        command's own recompute then fails it in the body, as before ops#230: ops#244)."""
+        _, cut = self.primitivesOnABase()
+        before = len(reportText() or "")
+        self.newSketchOnCopiedFace(cut)
+        self.assertIsNotNone(self.doc.getObject("CopyCut"))
+        self.assertNotIn("doesn't recompute", (reportText() or "")[before:])
