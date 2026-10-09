@@ -39,6 +39,8 @@
 #include <fmt/format.h>
 
 #include <App/Document.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/Part.h>
@@ -380,11 +382,8 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         // copy over all properties
         std::vector<App::Property*> props;
-        std::vector<App::Property*> cprops;
         obj->getPropertyList(props);
-        copy->getPropertyList(cprops);
 
-        auto it = cprops.begin();
         for (App::Property* prop : props) {
 
             // independent copies don't have links and are not attached
@@ -394,19 +393,68 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     || prop->isDerivedFrom<App::PropertyLinkSub>()
                     || prop->isDerivedFrom<App::PropertyLinkSubList>()
                     || (prop->getGroup() && strcmp(prop->getGroup(), "Attachment") == 0))) {
-
-                ++it;
+                continue;
+            }
+            // the expressions are made again for the copy, below
+            if (prop == &obj->ExpressionEngine) {
                 continue;
             }
 
-            App::Property* cprop = *it++;
+            // FreeCAD-CH (ops#236): paired by name. The two lists were walked side by side, and
+            // the original's dynamic properties (listed first) put every pair one place off (a
+            // Paste between other types threw a bad cast). A dynamic property is made on the copy.
+            const char* propName = prop->getName();
+            App::Property* cprop = copy->getPropertyByName(propName);
+            if (!cprop) {
+                cprop = copy->addDynamicProperty(
+                    prop->getTypeId().getName(),
+                    propName,
+                    prop->getGroup(),
+                    prop->getDocumentation(),
+                    prop->getType()
+                );
+            }
+            if (!cprop || cprop->getTypeId() != prop->getTypeId()) {
+                continue;
+            }
 
-            if (prop->getName() && strcmp(prop->getName(), "Label") == 0) {
+            if (strcmp(propName, "Label") == 0) {
                 static_cast<App::PropertyString*>(cprop)->setValue(name.c_str());
                 continue;
             }
 
             cprop->Paste(*prop);
+        }
+
+        // FreeCAD-CH (ops#241): a primitive keeps its place. Detached (the Attachment group isn't
+        // copied), it is placed by its Placement alone: the original's, in the same container
+        // frame as the original's shape.
+        if (auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(copy)) {
+            primitive->Placement.setValue(
+                static_cast<PartDesign::FeaturePrimitive*>(obj)->Placement.getValue()
+            );
+        }
+
+        // FreeCAD-CH (ops#236): the expressions belong to the copy. Pasted, their paths and
+        // expressions kept the original as their owner: they read the original's values, a
+        // constraint deletion on the copy didn't renumber them, and the copy's recompute threw
+        // "Invalid property owner". Made again from their text, for the copy.
+        for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+            try {
+                copy->setExpression(
+                    App::ObjectIdentifier::parse(copy, path.toString()),
+                    App::Expression::parse(copy, expression->toString())
+                );
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().warning(
+                    "The copy '%s' of '%s' doesn't take the expression of %s: %s\n",
+                    copy->Label.getValue(),
+                    obj->Label.getValue(),
+                    path.toString().c_str(),
+                    e.what()
+                );
+            }
         }
 
         // An independent copy links nothing outside (its links weren't copied). Its projections

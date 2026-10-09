@@ -44,6 +44,11 @@ def line(x0, y0, x1, y1):
     return Part.LineSegment(V(x0, y0, 0), V(x1, y1, 0))
 
 
+def expressions(obj):
+    """obj's expressions as (path without its leading ".", expression)."""
+    return [(path.lstrip("."), text) for path, text in obj.ExpressionEngine]
+
+
 def sliceArea(shape, z):
     """The area of the shape's section at height z."""
     wires = shape.slice(V(0, 0, 1), z)
@@ -938,3 +943,95 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(picked.CenterOfMass.distanceToPoint(V(10, 0, 5)), 0, places=6)
         self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
         self.close(ok=False)
+
+    # -- ops#236, ops#241: makeCopy's independent copy -------------------------------------------
+
+    def copySpineIn(self, pipe):
+        """OK on the pipe's panel, answered Make independent copy; returns the spine's copy."""
+        self.edit(pipe)
+        self.answerModals()
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copy = pipe.Spine[0]
+        self.assertTrue(self.body.hasObject(copy))
+        return copy
+
+    def testIndependentCopyOwnsItsExpressions(self):
+        """ops#236: the Rod's spine outside the body has constraints: an unrelated one first
+        (index 0), "Len" (the first line's height, 10), and the second line's height driven by
+        the expression Len * 2. On its independent copy the expression belongs to the copy: it
+        reads the copy's Len, and it follows its constraint when constraint 0 is deleted. The
+        pasted keys and expressions kept the original as their owner."""
+        import Sketcher
+
+        pipe = self.rod(spineInBody=False)
+        spine = self.spine
+        spine.addConstraint(Sketcher.Constraint("Coincident", 0, 2, 1, 1))
+        spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 10))
+        spine.renameConstraint(1, "Len")
+        spine.addConstraint(Sketcher.Constraint("DistanceY", 1, 1, 1, 2, 20))
+        spine.setExpression("Constraints[2]", ".Constraints.Len * 2")
+        self.doc.recompute()
+        self.assertTrue(spine.isValid(), spine.getStatusString())
+        copy = self.copySpineIn(pipe)
+        self.assertIsNot(copy, spine)
+        self.assertEqual(expressions(copy), [("Constraints[2]", ".Constraints.Len * 2")])
+        # the copy's own Len drives it
+        copy.setDatum("Len", App.Units.Quantity("5 mm"))
+        copy.recompute()
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertAlmostEqual(copy.Shape.Edges[1].Length, 10, places=6)
+        self.assertAlmostEqual(spine.Shape.Edges[1].Length, 20, places=6)
+        # deleting constraint 0 renumbers the expression's key with its constraint
+        copy.delConstraint(0)
+        self.assertEqual(expressions(copy), [("Constraints[1]", ".Constraints.Len * 2")])
+        copy.recompute()
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertAlmostEqual(copy.Shape.Edges[1].Length, 10, places=6)
+        self.assertEqual(expressions(spine), [("Constraints[2]", ".Constraints.Len * 2")])
+
+    def testIndependentCopyWithADynamicProperty(self):
+        """ops#236 (PR 215 verification N2): the spine outside the body has a dynamic property
+        (Extra = 3), listed before the static ones. The copy's properties are paired by name: the
+        copy gets Extra = 3 and the spine's geometry (V = 120). The two lists were walked side by
+        side, so every property was pasted one place off."""
+        pipe = self.rod(spineInBody=False)
+        self.spine.addProperty("App::PropertyFloat", "Extra", "Test")
+        self.spine.Extra = 3
+        self.doc.recompute()
+        copy = self.copySpineIn(pipe)
+        self.assertEqual(copy.Extra, 3)
+        self.assertEqual(len(copy.Geometry), 2)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+
+    def testIndependentCopyOfAPlacedPrimitive(self):
+        """ops#241: the spine is a vertical edge of a 10 mm box at (5, 5, 10) in another body.
+        The independent copy keeps the box's place (its Placement was skipped with the
+        Attachment group, so the copy sat at the origin, and the Pipe panel stopped on it):
+        OK closes, and the copy's edge is the box's, from (5, 5, 10) to (5, 5, 20)."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Placement.Base = V(5, 5, 10)
+        self.body = models.body(self.doc)
+        self.profile = models.sketch(self.doc, "Profile", models.rectangle(4, 4, 6, 6), self.body, z=10)
+        self.doc.recompute()
+        [sub] = [
+            f"Edge{i}"
+            for i, e in enumerate(box.Shape.Edges, 1)
+            if (e.CenterOfMass - V(5, 5, 15)).Length < 1e-6
+        ]
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (box, [sub])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        copy = self.copySpineIn(pipe)
+        self.assertIsNot(copy, box)
+        self.assertEqual(copy.MapMode, "Deactivated")
+        self.assertTrue(copy.Placement.isSame(box.Placement, 1e-9), copy.Placement)
+        edge = copy.getSubObject(pipe.Spine[1][0])
+        self.assertLess((edge.CenterOfMass - V(5, 5, 15)).Length, 1e-6)
+        self.assertAlmostEqual(edge.Length, 10, places=6)
