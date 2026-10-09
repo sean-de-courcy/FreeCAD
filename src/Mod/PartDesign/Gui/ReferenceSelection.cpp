@@ -32,7 +32,6 @@
 #include <TopoDS_Face.hxx>
 #include <QDialog>
 #include <QMessageBox>
-#include <fmt/format.h>
 
 
 #include <App/Document.h>
@@ -369,16 +368,18 @@ bool getReferencedSelection(
                         QMessageBox::warning(
                             Gui::getMainWindow(),
                             QObject::tr("Copy differs"),
-                            QString::fromStdString(fmt::format(
-                                "{} of '{}' is another element on its copy, whose shape differs "
-                                "(or the element can't be read). Recompute '{}' and select the "
-                                "element again, or make a cross-reference instead.",
-                                subname,
-                                selObj->Label.getValue(),
-                                selObj->Label.getValue()
-                            ))
+                            QObject::tr(
+                                "%1 of '%2' is another element on its copy, whose shape differs "
+                                "(or the element can't be read). Recompute '%2' and select the "
+                                "element again, or make a cross-reference instead."
+                            )
+                                .arg(
+                                    QString::fromStdString(subname),
+                                    QString::fromUtf8(selObj->Label.getValue())
+                                )
                         );
-                        document->removeObject(copy->getNameInDocument());
+                        // makeCopy made it in the active document
+                        copy->getDocument()->removeObject(copy->getNameInDocument());
                         selObj = nullptr;
                         return false;
                     }

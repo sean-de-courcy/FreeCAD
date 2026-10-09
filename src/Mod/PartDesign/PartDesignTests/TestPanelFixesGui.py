@@ -884,6 +884,9 @@ class TestPanelFixesGui(unittest.TestCase):
         """PR 223 review N1, the check: the box was lengthened and not recomputed, so its copy,
         recomputed in makeCopy, is longer, and the picked face (the end x = 10) is another face
         there. New Sketch stops with a message and leaves no copy and no sketch."""
+        self.newSketchOnAStaleCopiedBox()
+
+    def newSketchOnAStaleCopiedBox(self):
         other = models.body(self.doc)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
@@ -902,13 +905,10 @@ class TestPanelFixesGui(unittest.TestCase):
             [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
         )
 
-    def testRevolutionAxisOnAnEdgeOfACopiedBox(self):
-        """PR 223 review N1 (getReferencedSelection): the Revolution's axis picked on an edge of
-        a box in another body (no base), Make independent copy. The axis went to the copy's
-        Edge1 whatever edge was picked; it is the picked edge, the same line on the copy. Checked
-        at the pick: once the panel closes, the copy sits after the Revolution in the body with
-        the Revolution as its BaseFeature, a cycle that breaks the axis, loudly (ops#244 P3).
-        Model: a 10 mm box at the origin; the axis is its edge x = 10, y = 0 along Z."""
+    def revolutionBesideABox(self):
+        """A 10 mm box at the origin in another body, and in this one the Ring profile (x 1..3,
+        z 0..2 on XZ) turned about its own V axis; returns the box, the revolution and the box's
+        edge x = 10, y = 0 along Z."""
         other = models.body(self.doc)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
@@ -922,13 +922,26 @@ class TestPanelFixesGui(unittest.TestCase):
         revolution.ReferenceAxis = (ring, ["V_Axis"])
         revolution.Angle = 360
         self.doc.recompute()
+        return box, revolution, edge
 
-        self.edit(revolution)
+    def armAxisField(self):
+        """Chooses "Select reference..." in the open Revolution panel's axis box."""
         combo = self.widget(QtWidgets.QComboBox, "axis")
         [index] = [
             i for i in range(combo.count()) if combo.itemText(i).startswith("Select reference")
         ]
         self.chooseInPopup(combo, index)
+
+    def testRevolutionAxisOnAnEdgeOfACopiedBox(self):
+        """PR 223 review N1 (getReferencedSelection): the Revolution's axis picked on an edge of
+        a box in another body (no base), Make independent copy. The axis went to the copy's
+        Edge1 whatever edge was picked; it is the picked edge, the same line on the copy. Checked
+        at the pick: once the panel closes, the copy sits after the Revolution in the body with
+        the Revolution as its BaseFeature, a cycle that breaks the axis, loudly (ops#244 P3).
+        Model: a 10 mm box at the origin; the axis is its edge x = 10, y = 0 along Z."""
+        box, revolution, edge = self.revolutionBesideABox()
+        self.edit(revolution)
+        self.armAxisField()
         self.answerModals()
         Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
         self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
@@ -942,6 +955,42 @@ class TestPanelFixesGui(unittest.TestCase):
         picked = copy.Shape.getElement(edge)
         self.assertAlmostEqual(picked.CenterOfMass.distanceToPoint(V(10, 0, 5)), 0, places=6)
         self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
+        self.close(ok=False)
+
+    def testRevolutionAxisOnAStaleCopiedBoxStops(self):
+        """PR 223 verification L3 (getReferencedSelection's check): as
+        testRevolutionAxisOnAnEdgeOfACopiedBox, with the box lengthened to 20 and not
+        recomputed, so the picked edge (x = 10) is at x = 20 on the copy. The pick stops with a
+        message, leaves no copy and the axis as it was, and the field stays armed: once the box
+        is recomputed, the same pick links the copy's edge."""
+        box, revolution, edge = self.revolutionBesideABox()
+        box.Length = 20
+        self.edit(revolution)
+        self.armAxisField()
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: " + edge), self.modals)
+        self.assertEqual(
+            [o.Name for o in self.doc.Objects if o.Name.startswith("CopyBox")], []
+        )
+        self.assertEqual(revolution.ReferenceAxis[1], ["V_Axis"])
+
+        self.doc.recompute()
+        Gui.Selection.clearSelection()
+        self.modals = []
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.assertTrue(waitFor(lambda: self.modals), "the field isn't armed")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copy = revolution.ReferenceAxis[0]
+        self.assertTrue(copy.Name.startswith("CopyBox"), copy.Name)
+        self.assertEqual(revolution.ReferenceAxis[1], [edge])
         self.close(ok=False)
 
     # -- ops#236, ops#241: makeCopy's independent copy -------------------------------------------
