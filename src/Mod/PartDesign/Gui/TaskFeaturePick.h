@@ -73,7 +73,23 @@ public:
     void showExternal(bool val);
     bool isSingleSelectionEnabled() const;
 
-    static App::DocumentObject* makeCopy(App::DocumentObject* obj, std::string sub, bool independent);
+    /// `recomputed`, when given, tells whether the copy got its own shape here (an independent
+    /// sketch or additive primitive with no base): it then has the original's elements under the
+    /// same index names, which `sameElement` checks
+    static App::DocumentObject* makeCopy(
+        App::DocumentObject* obj,
+        std::string sub,
+        bool independent,
+        bool* recomputed = nullptr
+    );
+
+    /// Whether `sub` (an index name) names the same element on `copy` as on `original`: its
+    /// type, size and centre of mass, in each object's own frame
+    static bool sameElement(
+        App::DocumentObject* original,
+        App::DocumentObject* copy,
+        const std::string& sub
+    );
 
 protected Q_SLOTS:
     void onUpdate(bool);

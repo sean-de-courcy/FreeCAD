@@ -27,6 +27,7 @@
 #include <boost/signals2.hpp>
 #include <map>
 #include <string>
+#include <fmt/format.h>
 #include <vector>
 #include <QApplication>
 #include <QMessageBox>
@@ -49,6 +50,7 @@
 #include <Mod/Sketcher/Gui/ViewProviderSketch.h>
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Link.h>
 #include <App/Origin.h>
 #include <App/Datums.h>
@@ -84,6 +86,12 @@ struct SupportNotPlanarException
 
 struct MissingPlanesException
 {
+};
+
+// The copy's element under the picked face's name isn't that face (PR 223 review N1)
+struct CopyMismatchException
+{
+    std::string message;
 };
 
 class SupportFaceValidator
@@ -326,8 +334,14 @@ private:
 
                 if (!dlg.radioXRef->isChecked()) {
                     guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "Make copy"));
-                    auto copy = makeCopy(selectedObject, dlg.radioIndependent->isChecked());
-                    supportString = supportFromCopy(copy);
+                    try {
+                        auto copy = makeCopy(selectedObject, dlg.radioIndependent->isChecked());
+                        supportString = supportFromCopy(copy);
+                    }
+                    catch (const CopyMismatchException&) {
+                        guidocument->abortCommand();
+                        throw;
+                    }
                     guidocument->commitCommand();
                 }
             }
@@ -340,7 +354,31 @@ private:
         if (faceFilter.match()) {
             sub = faceFilter.Result[0][0].getSubNames()[0];
         }
-        auto copy = PartDesignGui::TaskFeaturePick::makeCopy(selectedObject, sub, independent);
+        bool recomputed = false;
+        auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
+            selectedObject,
+            sub,
+            independent,
+            &recomputed
+        );
+
+        // A copy recomputed in makeCopy has its own element names, the original's indices: the
+        // support is the picked face, once it's shown to be the same face on the copy (PR 223
+        // review N1). Other copies keep Face1, resolved by geometry when it's another face.
+        copiedFace = "Face1";
+        if (recomputed && !sub.empty()) {
+            copiedFace = Data::oldElementName(sub.c_str());
+            if (!PartDesignGui::TaskFeaturePick::sameElement(selectedObject, copy, copiedFace)) {
+                throw CopyMismatchException {fmt::format(
+                    "{} of '{}' is another face on its copy, whose shape differs (or the face "
+                    "can't be read). Recompute '{}' and select the face again, or make a "
+                    "cross-reference instead.",
+                    copiedFace,
+                    selectedObject->Label.getValue(),
+                    selectedObject->Label.getValue()
+                )};
+            }
+        }
 
         addToBodyOrPart(copy);
 
@@ -354,9 +392,10 @@ private:
             supportString = Gui::Command::getObjectCmd(copy, "(", ",'')");
         }
         else {
-            // it is ensured that only a single face is selected, hence it must always be Face1 of
-            // the shapebinder
-            supportString = Gui::Command::getObjectCmd(copy, "(", ",'Face1')");
+            // it is ensured that only a single face is selected, hence it is Face1 of a
+            // shapebinder, or the picked face of a recomputed copy (makeCopy above)
+            const std::string end = ",'" + copiedFace + "')";
+            supportString = Gui::Command::getObjectCmd(copy, "(", end.c_str());
         }
         return supportString;
     }
@@ -379,6 +418,7 @@ private:
     Gui::SelectionFilter planeFilter;
     Gui::SelectionFilter sketchFilter;
     std::string supportString;
+    std::string copiedFace {"Face1"};
 };
 
 class PlaneFinder
@@ -865,6 +905,13 @@ void SketchWorkflow::createSketch()
             Gui::getMainWindow(),
             QObject::tr("No valid planes in this document"),
             QObject::tr("Create a plane first or select a face to sketch on")
+        );
+    }
+    catch (const CopyMismatchException& e) {
+        QMessageBox::warning(
+            Gui::getMainWindow(),
+            QObject::tr("Copy differs"),
+            QString::fromStdString(e.message)
         );
     }
 }

@@ -31,9 +31,12 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <QDialog>
+#include <QMessageBox>
+#include <fmt/format.h>
 
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/Part.h>
@@ -348,16 +351,48 @@ bool getReferencedSelection(
             if (!dlg.radioXRef->isChecked()) {
                 App::Document* document = thisObj->getDocument();
                 document->openTransaction("Make copy");
+                bool recomputed = false;
                 auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                     selObj,
                     subname,
-                    dlg.radioIndependent->isChecked()
+                    dlg.radioIndependent->isChecked(),
+                    &recomputed
                 );
+
+                // A copy recomputed in makeCopy has its own element names, the original's
+                // indices: the reference is the picked element, once it's shown to be the same
+                // one on the copy (PR 223 review N1). Other copies keep their first element,
+                // resolved by geometry when it's another one.
+                if (recomputed && !subname.empty()) {
+                    subname = Data::oldElementName(subname.c_str());
+                    if (!PartDesignGui::TaskFeaturePick::sameElement(selObj, copy, subname)) {
+                        QMessageBox::warning(
+                            Gui::getMainWindow(),
+                            QObject::tr("Copy differs"),
+                            QString::fromStdString(fmt::format(
+                                "{} of '{}' is another element on its copy, whose shape differs "
+                                "(or the element can't be read). Recompute '{}' and select the "
+                                "element again, or make a cross-reference instead.",
+                                subname,
+                                selObj->Label.getValue(),
+                                selObj->Label.getValue()
+                            ))
+                        );
+                        document->removeObject(copy->getNameInDocument());
+                        selObj = nullptr;
+                        return false;
+                    }
+                }
+                else {
+                    subname.erase(
+                        std::remove_if(subname.begin(), subname.end(), &isdigit),
+                        subname.end()
+                    );
+                    subname.append("1");
+                }
                 body->addObject(copy);
 
                 selObj = copy;
-                subname.erase(std::remove_if(subname.begin(), subname.end(), &isdigit), subname.end());
-                subname.append("1");
             }
         }
     }

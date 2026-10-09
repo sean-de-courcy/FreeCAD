@@ -240,10 +240,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         mainWindow.activateWindow()
 
     def tearDown(self):
-        # QTest.keyClick with a modifier leaves the application's modifier state at it, off
-        # screen, for every later test of the process (New Sketch with Shift "held" opened the
-        # attachment dialog in TestPanelFixesGui, ops#230): a key release without modifiers
-        # clears it
+        # key() and clickRow() send Ctrl, Shift and Alt here, and QTest leaves the application's
+        # modifier state at the last one sent, off screen, for every later test of the process
+        # (New Sketch with Shift "held" opened the attachment dialog in TestPanelFixesGui,
+        # ops#230): a key release without modifiers clears the whole state
         QtTest.QTest.keyRelease(Gui.getMainWindow().windowHandle(), QtCore.Qt.Key_Shift)
         guiDoc = Gui.getDocument(self.doc.Name)
         if Gui.Control.activeDialog():

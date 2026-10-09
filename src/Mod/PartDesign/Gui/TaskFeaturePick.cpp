@@ -28,6 +28,11 @@
 #include <QListWidgetItem>
 #include <QTimer>
 
+#include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <Precision.hxx>
+#include <TopoDS.hxx>
 
 #include <ranges>
 
@@ -347,10 +352,18 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
     return result;
 }
 
-App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::string sub, bool independent)
+App::DocumentObject* TaskFeaturePick::makeCopy(
+    App::DocumentObject* obj,
+    std::string sub,
+    bool independent,
+    bool* recomputed
+)
 {
 
     App::DocumentObject* copy = nullptr;
+    if (recomputed) {
+        *recomputed = false;
+    }
     // Check for null to avoid segfault
     if (!obj) {
         return copy;
@@ -442,13 +455,23 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
                 || (!primitive->BaseFeature.getValue()
                     && primitive->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive);
         };
-        if (keepsShape() && !copy->recomputeFeature()) {
-            Base::Console().warning(
-                "The copy '%s' of '%s' doesn't recompute: %s\n",
-                copy->Label.getValue(),
-                obj->Label.getValue(),
-                copy->getStatusString()
-            );
+        // A recomputed copy has its own element names, so a caller's Face1/Edge1 would no longer
+        // be flagged when it names another element than the one picked (PR 223 review N1): the
+        // callers link the picked element instead, once sameElement shows it's the same one.
+        if (keepsShape()) {
+            if (copy->recomputeFeature()) {
+                if (recomputed) {
+                    *recomputed = true;
+                }
+            }
+            else {
+                Base::Console().warning(
+                    "The copy '%s' of '%s' doesn't recompute: %s\n",
+                    copy->Label.getValue(),
+                    obj->Label.getValue(),
+                    copy->getStatusString()
+                );
+            }
         }
     }
     else {
@@ -537,6 +560,84 @@ App::DocumentObject* TaskFeaturePick::makeCopy(App::DocumentObject* obj, std::st
     }
 
     return copy;
+}
+
+namespace
+{
+
+// The shape of an element, or null when it can't be read
+TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
+{
+    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+        | Part::ShapeOption::Transform;
+    try {
+        return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+}  // namespace
+
+// The properties that tell one element from another: its type, its length, area or point, and
+// its centre of mass. Both are taken in the frame of the object's container (its own Placement
+// applied, its parents' not), which a copy in the body shares with an original beside the body.
+// The same check as the Pipe panel's copy step (ops#234), which can use this one once both are
+// on integration.
+bool TaskFeaturePick::sameElement(
+    App::DocumentObject* original,
+    App::DocumentObject* copy,
+    const std::string& sub
+)
+{
+    if (sub.empty() || original == copy) {
+        return true;
+    }
+    TopoDS_Shape before = elementShape(original, sub);
+    TopoDS_Shape after = elementShape(copy, sub);
+    if (before.IsNull()) {
+        // the reference is already broken on the original; on a copy that has the element it
+        // would name another one, silently
+        return after.IsNull();
+    }
+    if (after.IsNull() || after.ShapeType() != before.ShapeType()) {
+        return false;
+    }
+    auto measure = [](const TopoDS_Shape& shape, double& size, gp_Pnt& center) {
+        GProp_GProps props;
+        switch (shape.ShapeType()) {
+            case TopAbs_VERTEX:
+                size = 0;
+                center = BRep_Tool::Pnt(TopoDS::Vertex(shape));
+                return;
+            case TopAbs_EDGE:
+            case TopAbs_WIRE:
+                BRepGProp::LinearProperties(shape, props);
+                break;
+            default:
+                BRepGProp::SurfaceProperties(shape, props);
+                break;
+        }
+        size = props.Mass();
+        center = props.CentreOfMass();
+    };
+    double sizeBefore = 0;
+    double sizeAfter = 0;
+    gp_Pnt centerBefore;
+    gp_Pnt centerAfter;
+    try {
+        measure(before, sizeBefore, centerBefore);
+        measure(after, sizeAfter, centerAfter);
+    }
+    catch (const Standard_Failure&) {
+        return false;  // not shown to be the same
+    }
+    const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
+    return std::abs(sizeAfter - sizeBefore) <= tolerance
+        && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
 }
 
 bool TaskFeaturePick::isSingleSelectionEnabled() const
