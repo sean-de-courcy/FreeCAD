@@ -75,14 +75,6 @@ set +x
 echo '[Paths]' >> ${copy_dir}/bin/qt6.conf
 echo 'Prefix = ../lib/qt6' >> ${copy_dir}/bin/qt6.conf
 
-# convenient shortcuts to run the binaries
-if [ -x /c/ProgramData/chocolatey/tools/shimgen.exe ]; then
-    pushd ${copy_dir}
-    /c/ProgramData/chocolatey/tools/shimgen.exe -p "bin/${app_cmd_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_cmd_exe}"
-    /c/ProgramData/chocolatey/tools/shimgen.exe --gui -p "bin/${app_exe}" -i "$(pwd)/../../../WindowsInstaller/icons/FreeCAD.ico" -o "$(pwd)/${app_exe}"
-    popd
-fi
-
 version_name="${app_name}_${BUILD_TAG}-Windows-$(uname -m)"
 
 echo -e "################"
@@ -116,7 +108,6 @@ if [[ "${WINDOWS_SIGN_RELEASE:-0}" == "1" ]]; then
     shopt -s nullglob
 
     FILES=(
-      "$SIGN_DIR"/*.exe
       "$SIGN_DIR"/bin/*.exe
       "$SIGN_DIR"/bin/*.dll
       "$SIGN_DIR"/bin/*.pyd
