@@ -564,14 +564,16 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)
 
-    def assertOkStops(self, pipe, text, edit=True, transaction=True):
+    def assertOkStops(self, pipe, text, edit=True, transaction=True, ok=None):
         """OK answered Make independent copy shows a message box with text and leaves the panel
-        open, with the edit's transaction still open and no copy left (round 2 of PR 219: the
-        stop aborted the whole edit under the open panel). edit=False: the panel is open already."""
+        open, with the edit's transaction still open and no new object left (round 2 of PR 219:
+        the stop aborted the whole edit under the open panel). edit=False: the panel is open
+        already. ok: the OK button, found earlier (the panel is hidden)."""
         if edit:
             self.edit(pipe, transaction)
+        objects = self.doc.Objects
         self.answerModals()
-        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        (ok or taskButton(QtWidgets.QDialogButtonBox.Ok)).click()
         self.assertTrue(waitFor(lambda: len(self.modals) >= 2, 5.0), self.modals)
         self.answering = False
         pump(0.2)
@@ -581,7 +583,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIn("No copy was kept, and the edit is still open.", self.modals[1])
         self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
         self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
-        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
+        self.assertEqual([o for o in self.doc.Objects if o not in objects], [])
 
     def staleOuterSpine(self):
         """The Rod's spine as a sketch "Outer" beside the body, recomputed, then its first line
@@ -724,27 +726,153 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
 
     def testPipeCopyAbortedWithThePipe(self):
-        """ops#234 (PR 211 review): the profile is open (three sides of the square), so the pipe
-        fails. OK copies the spine from outside the body, recomputes it, then fails on the pipe
-        (Input Error) and aborts: the copy is gone, the spine is the original again and the body
-        is as before."""
+        """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so
+        the pipe fails. OK copies the spine from outside the body, recomputes it, then fails on
+        the pipe (Input Error): the copy is gone, the spine is the original again, the body is as
+        before, and the panel and the edit's transaction are still open."""
         pipe = self.rod(spineInBody=False)
-        self.profile.deleteAllGeometry()
-        self.profile.addGeometry(models.polyline([(-1, -1), (1, -1), (1, 1), (-1, 1)]), False)
+        self.openProfile()
         self.doc.recompute()
         self.assertFalse(pipe.isValid())
         before = self.body.Group
         self.edit(pipe)
-        self.answerModals()
-        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
-        self.assertTrue(waitFor(lambda: len(self.modals) >= 2, 5.0), self.modals)
-        self.answering = False
-        pump(0.2)
-        self.assertEqual(self.modals[0], "DlgReference")
-        self.assertTrue(self.modals[1].startswith("QMessageBox: "), self.modals)
+        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
         self.assertIsNone(self.doc.getObject("CopySpine"))
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)
+
+    def openProfile(self):
+        """The Rod's profile as three sides of its square: the pipe fails."""
+        self.profile.deleteAllGeometry()
+        self.profile.addGeometry(models.polyline([(-1, -1), (1, -1), (1, 1), (-1, 1)]), False)
+
+    def closeProfile(self):
+        self.profile.deleteAllGeometry()
+        self.profile.addGeometry(models.rectangle(-1, -1, 1, 1), False)
+
+    def outerSpine(self):
+        """The Rod's spine as a sketch "Outer" beside the body, recomputed."""
+        outer = models.sketch(
+            self.doc, "Outer", [line(0, 0, 0, 10), line(0, 10, 0, 30)], None, placement=XZ
+        )
+        self.doc.recompute()
+        return outer
+
+    def failAfterTheCopy(self):
+        """ops#243 (PR 219 verification P1): in the edit of the Rod (spine in the body) the spine
+        is picked again on a sketch beside the body and the profile opened. OK (Make independent
+        copy) copies the spine, and the pipe then fails: only the copy step is undone. The copy is
+        gone, the spine is the picked one again, the panel and the edit's transaction are open
+        (the abort undid the whole edit under the open panel, and OK again committed the old
+        spine, outside undo)."""
+        pipe = self.rod()
+        self.doc.recompute()
+        outer = self.outerSpine()
+        self.before = self.body.Group
+        self.undos = self.doc.UndoCount
+        self.edit(pipe)
+        pipe.Spine = (outer, ["Edge1", "Edge2"])
+        self.openProfile()
+        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
+        self.assertIs(pipe.Spine[0], outer)
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
+        self.assertEqual(self.body.Group, self.before)
+        return pipe, outer
+
+    def testPipeRecomputeFailureThenRetry(self):
+        """ops#243: after failAfterTheCopy the profile is closed again and OK pressed again: one
+        copy, the pipe sweeps it (V = 120), and the edit is one transaction: one undo removes the
+        copy and restores the spine and the profile."""
+        pipe, outer = self.failAfterTheCopy()
+        self.closeProfile()
+        self.modals = []
+        self.answerModals()
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), self.modals)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copies = [o for o in self.doc.Objects if o.Name.startswith("Copy")]
+        self.assertEqual(len(copies), 1, [o.Name for o in copies])
+        self.assertIs(pipe.Spine[0], copies[0])
+        self.assertTrue(self.body.hasObject(copies[0]))
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+        self.assertEqual(self.doc.UndoCount, self.undos + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
+        self.assertIs(pipe.Spine[0], self.spine)
+        self.assertEqual(self.body.Group, self.before)
+        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+
+    def testPipeRecomputeFailureThenCancel(self):
+        """ops#243: after failAfterTheCopy, Cancel restores the state from before the edit: the
+        spine in the body, the closed profile, no copy, nothing to undo."""
+        pipe, outer = self.failAfterTheCopy()
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertIs(pipe.Spine[0], self.spine)
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
+        self.assertEqual(self.body.Group, self.before)
+        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertEqual(self.doc.UndoCount, self.undos)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+
+    def testPipeCopyOfALostElementStops(self):
+        """ops#243 L4: the spine is Edge2 of a sketch beside the body, valid when picked; the
+        sketch then loses its second line and is recomputed. Neither the original nor its copy
+        can read Edge2: OK stops in the copy step (it passed the check, and the pipe's failure
+        then took the abort path)."""
+        self.body = models.body(self.doc)
+        self.profile = models.sketch(self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body)
+        outer = models.sketch(
+            self.doc, "Outer", [line(0, 0, 0, 10), line(0, 10, 0, 30)], None, placement=XZ
+        )
+        self.doc.recompute()
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (outer, ["Edge2"])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        outer.Geometry = [line(0, 0, 0, 10)]
+        outer.recompute()
+        self.assertEqual(len(outer.Shape.Edges), 1)
+        self.assertOkStops(pipe, "would name another element on a copy")
+        self.assertIs(pipe.Spine[0], outer)
+
+    def testPipeCopyStopInAnotherActiveDocument(self):
+        """ops#243 L3: another document is active when OK is pressed, so makeCopy makes the copy
+        there; the pipe's document has an object of the copy's name. The stop of
+        testPipeCopyStopKeepsTheEdit removes the copy from its own document, and the pipe's
+        document keeps its object (the stop removed by name from the pipe's document)."""
+        pipe = self.rod()
+        self.doc.recompute()
+        outer = self.staleOuterSpine()
+        mine = self.doc.addObject("App::FeaturePython", "CopyOuter")
+        # hidden, so its view doesn't take over the GUI's active document (setEdit then fails);
+        # makeCopy goes by the App's active document
+        other = App.newDocument("PanelFixesOther", hidden=True)
+        try:
+            App.setActiveDocument(self.doc.Name)
+            self.edit(pipe)
+            pipe.Spine = (outer, ["Edge1", "Edge2"])
+            # the Tasks panel shows the active document's dialog only, so a user can't press OK
+            # here; the button is clicked while hidden (the removal by document is defensive)
+            ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
+            App.setActiveDocument(other.Name)
+            self.assertOkStops(
+                pipe,
+                "Pipe: Spine 'Edge1' of 'Outer' would name another element",
+                edit=False,
+                ok=ok,
+            )
+            self.assertIs(self.doc.getObject("CopyOuter"), mine)
+            self.assertEqual([o.Name for o in other.Objects], [])
+        finally:
+            App.setActiveDocument(self.doc.Name)
+            App.closeDocument(other.Name)
 
     def testPipeCopyUndoRedo(self):
         """ops#234 (PR 211 review): OK copies the spine from outside the body, recomputed and
