@@ -34,12 +34,7 @@
 #include <map>
 #include <memory>
 
-#include <BRepGProp.hxx>
-#include <BRep_Tool.hxx>
-#include <GProp_GProps.hxx>
-#include <Precision.hxx>
 #include <Standard_Failure.hxx>
-#include <TopoDS.hxx>
 #include <fmt/format.h>
 
 #include <QPointer>
@@ -460,80 +455,13 @@ void TaskPipeParameters::setVisibilityOfSpineAndProfile()
 namespace
 {
 
-// The shape of an element, or null when it can't be read
-TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
-{
-    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-        | Part::ShapeOption::Transform;
-    try {
-        return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
-    }
-    catch (const Base::Exception&) {
-    }
-    catch (const Standard_Failure&) {
-    }
-    return {};
-}
-
-// The properties that tell one element from another: its type, its length, area or point, and
-// its centre of mass. Both are taken in the frame of the object's container (its own Placement
-// applied, its parents' not), which a copy in the body shares with an original beside the body
-// (a dependent copy has its own placement).
-bool sameElement(App::DocumentObject* original, App::DocumentObject* copy, const std::string& sub)
-{
-    if (sub.empty() || original == copy) {
-        return true;
-    }
-    TopoDS_Shape before = elementShape(original, sub);
-    TopoDS_Shape after = elementShape(copy, sub);
-    if (before.IsNull()) {
-        // ops#234 round 2: the reference is already broken on the original; on a copy that has
-        // the element it would name another one, silently
-        return after.IsNull();
-    }
-    if (after.IsNull() || after.ShapeType() != before.ShapeType()) {
-        return false;
-    }
-    auto measure = [](const TopoDS_Shape& shape, double& size, gp_Pnt& center) {
-        GProp_GProps props;
-        switch (shape.ShapeType()) {
-            case TopAbs_VERTEX:
-                size = 0;
-                center = BRep_Tool::Pnt(TopoDS::Vertex(shape));
-                return;
-            case TopAbs_EDGE:
-            case TopAbs_WIRE:
-                BRepGProp::LinearProperties(shape, props);
-                break;
-            default:
-                BRepGProp::SurfaceProperties(shape, props);
-                break;
-        }
-        size = props.Mass();
-        center = props.CentreOfMass();
-    };
-    double sizeBefore = 0;
-    double sizeAfter = 0;
-    gp_Pnt centerBefore;
-    gp_Pnt centerAfter;
-    try {
-        measure(before, sizeBefore, centerBefore);
-        measure(after, sizeAfter, centerAfter);
-    }
-    catch (const Standard_Failure&) {
-        return false;  // not shown to be the same
-    }
-    const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
-    return std::abs(sizeAfter - sizeBefore) <= tolerance
-        && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
-}
-
 // FreeCAD-CH (ops#170, ops#180): each spine on its own (both can be outside the body), neither
 // when missing (makeCopy(nullptr) put a null into the body after the commit), one copy of an
 // object used twice (the spine as the auxiliary spine too), and the original kept where makeCopy
 // makes none (an App::Link). Throws when a copy fails or doesn't keep a reference (ops#234).
 void copyOutsideObjects(
     PartDesign::Pipe* pipe,
+    PartDesign::Body* body,
     const std::function<bool(App::DocumentObject*)>& outside,
     bool independent,
     std::vector<App::DocumentObject*>& copies
@@ -545,7 +473,7 @@ void copyOutsideObjects(
     auto copied = [&](App::DocumentObject* obj) {
         auto [it, added] = copyOf.try_emplace(obj, nullptr);
         if (added) {
-            it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent);
+            it->second = PartDesignGui::TaskFeaturePick::makeCopy(obj, "", independent, body);
             if (it->second) {
                 copies.push_back(it->second);
                 // ops#225: its own shape before a link maps names in it: the shape pasted from
@@ -595,7 +523,7 @@ void copyOutsideObjects(
                          App::DocumentObject* obj,
                          const std::vector<std::string>& subs) {
         for (const std::string& sub : subs) {
-            if (!sameElement(obj, copied(obj), sub)) {
+            if (!PartDesignGui::TaskFeaturePick::sameElement(obj, copied(obj), sub)) {
                 throw Base::RuntimeError(fmt::format(
                     "{}: {} '{}' of '{}' would name another element on a copy, whose shape "
                     "differs (or the element can't be read). Recompute '{}' and pick the "
@@ -749,7 +677,7 @@ bool TaskPipeParameters::accept()
             return false;
         };
         try {
-            copyOutsideObjects(pipe, outside, independent, copies);
+            copyOutsideObjects(pipe, pcActiveBody, outside, independent, copies);
         }
         catch (const Base::Exception& e) {
             return stop(e.what());

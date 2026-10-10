@@ -27,7 +27,6 @@
 #include <boost/signals2.hpp>
 #include <map>
 #include <string>
-#include <fmt/format.h>
 #include <vector>
 #include <QApplication>
 #include <QMessageBox>
@@ -91,7 +90,7 @@ struct MissingPlanesException
 // The copy's element under the picked face's name isn't that face (PR 223 review N1)
 struct CopyMismatchException
 {
-    std::string message;
+    QString message;
 };
 
 class SupportFaceValidator
@@ -359,6 +358,7 @@ private:
             selectedObject,
             sub,
             independent,
+            activeBody,
             &recomputed
         );
 
@@ -369,14 +369,17 @@ private:
         if (recomputed && !sub.empty()) {
             copiedFace = Data::oldElementName(sub.c_str());
             if (!PartDesignGui::TaskFeaturePick::sameElement(selectedObject, copy, copiedFace)) {
-                throw CopyMismatchException {fmt::format(
-                    "{} of '{}' is another face on its copy, whose shape differs (or the face "
-                    "can't be read). Recompute '{}' and select the face again, or make a "
-                    "cross-reference instead.",
-                    copiedFace,
-                    selectedObject->Label.getValue(),
-                    selectedObject->Label.getValue()
-                )};
+                // removed here too, not left to the command's abort (PR 223 verification L2)
+                copy->getDocument()->removeObject(copy->getNameInDocument());
+                const QString label = QString::fromUtf8(selectedObject->Label.getValue());
+                throw CopyMismatchException {
+                    QObject::tr(
+                        "%1 of '%2' is another face on its copy, whose shape differs (or the "
+                        "face can't be read). Recompute '%2' and select the face again, or make "
+                        "a cross-reference instead."
+                    )
+                        .arg(QString::fromStdString(copiedFace), label)
+                };
             }
         }
 
@@ -911,7 +914,7 @@ void SketchWorkflow::createSketch()
         QMessageBox::warning(
             Gui::getMainWindow(),
             QObject::tr("Copy differs"),
-            QString::fromStdString(e.message)
+            e.message
         );
     }
 }

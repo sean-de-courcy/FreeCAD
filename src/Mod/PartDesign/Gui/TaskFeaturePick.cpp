@@ -39,6 +39,8 @@
 #include <fmt/format.h>
 
 #include <App/Document.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <App/Origin.h>
 #include <App/Datums.h>
 #include <App/Part.h>
@@ -298,7 +300,12 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
                 // build the dependent copy or reference if wanted by the user
                 if (status == otherBody || status == otherPart || status == notInBody) {
                     if (!ui->radioXRef->isChecked()) {
-                        auto copy = makeCopy(obj, "", ui->radioIndependent->isChecked());
+                        // where it's added below
+                        App::DocumentObject* target = activeBody;
+                        if (status == otherPart && !PartDesignGui::getBodyFor(obj, false)) {
+                            target = activePart;
+                        }
+                        auto copy = makeCopy(obj, "", ui->radioIndependent->isChecked(), target);
 
                         if (status == otherBody) {
                             activeBody->addObject(copy);
@@ -356,6 +363,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
     bool independent,
+    App::DocumentObject* target,
     bool* recomputed
 )
 {
@@ -380,33 +388,108 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         // copy over all properties
         std::vector<App::Property*> props;
-        std::vector<App::Property*> cprops;
         obj->getPropertyList(props);
-        copy->getPropertyList(cprops);
 
-        auto it = cprops.begin();
         for (App::Property* prop : props) {
 
-            // independent copies don't have links and are not attached
-            if (independent
-                && (prop->isDerivedFrom<App::PropertyLink>()
-                    || prop->isDerivedFrom<App::PropertyLinkList>()
-                    || prop->isDerivedFrom<App::PropertyLinkSub>()
-                    || prop->isDerivedFrom<App::PropertyLinkSubList>()
-                    || (prop->getGroup() && strcmp(prop->getGroup(), "Attachment") == 0))) {
-
-                ++it;
+            // independent copies don't have links and are not attached. Every link property,
+            // also an XLink list or container (a dynamic one would be made and pasted below,
+            // PR 224 review L2); the ExpressionEngine is one too: the expressions are made again
+            // for the copy, below
+            if (prop->isDerivedFrom<App::PropertyLinkBase>()
+                || (prop->getGroup() && strcmp(prop->getGroup(), "Attachment") == 0)) {
                 continue;
             }
 
-            App::Property* cprop = *it++;
+            // FreeCAD-CH (ops#236): paired by name. The two lists were walked side by side, and
+            // the original's dynamic properties (listed first) put every pair one place off (a
+            // Paste between other types threw a bad cast). A dynamic property is made on the copy.
+            const char* propName = prop->getName();
+            App::Property* cprop = copy->getPropertyByName(propName);
+            if (!cprop) {
+                cprop = copy->addDynamicProperty(
+                    prop->getTypeId().getName(),
+                    propName,
+                    prop->getGroup(),
+                    prop->getDocumentation(),
+                    prop->getType()
+                );
+                // with the status bits set after it was made: Hidden, ReadOnly, ... (PR 224
+                // review L3)
+                if (cprop) {
+                    cprop->setStatusValue(prop->getStatus());
+                }
+            }
+            if (!cprop || cprop->getTypeId() != prop->getTypeId()) {
+                continue;
+            }
 
-            if (prop->getName() && strcmp(prop->getName(), "Label") == 0) {
+            if (strcmp(propName, "Label") == 0) {
                 static_cast<App::PropertyString*>(cprop)->setValue(name.c_str());
                 continue;
             }
 
             cprop->Paste(*prop);
+        }
+
+        // FreeCAD-CH (ops#241, PR 224 review M2): the copy keeps the original's global place.
+        // Detached (the Attachment group isn't copied), it is placed by its Placement alone, which
+        // is relative to its container: the pasted one placed it in the target container's frame
+        // as the original is in its own, so a copy into a body placed otherwise moved, silently.
+        if (auto* geoCopy = freecad_cast<App::GeoFeature*>(copy)) {
+            const Base::Placement targetPlacement =
+                target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+            geoCopy->Placement.setValue(
+                targetPlacement.inverse() * App::GeoFeature::getGlobalPlacement(obj)
+            );
+        }
+
+        // FreeCAD-CH (ops#236): the expressions belong to the copy. Pasted, their paths and
+        // expressions kept the original as their owner: they read the original's values, a
+        // constraint deletion on the copy didn't renumber them, and the copy's recompute threw
+        // "Invalid property owner". Made again from their text, for the copy.
+        // An expression that names its own object (Sketch.Constraints.Len, <<Label>>...) prints
+        // as .Constraints.Len, so it names the copy (PR 224 review M1, tested). One on Label isn't
+        // made again: it would replace the copy's label (L4).
+        // An expression on Placement gives the original's place in its own container: where the
+        // copy's container is placed otherwise (its Placement converted above), its recompute
+        // would move the copy back there, silently (PR 224 round 2). Not made again then, with a
+        // warning.
+        const Base::Placement& copyPlacement =
+            static_cast<App::GeoFeature*>(copy)->Placement.getValue();
+        const bool movedPlacement = !copyPlacement.isSame(
+            static_cast<App::GeoFeature*>(obj)->Placement.getValue(),
+            Precision::Confusion()
+        );
+        for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+            if (path.getPropertyName() == "Label") {
+                continue;
+            }
+            if (movedPlacement && path.getPropertyName() == "Placement") {
+                Base::Console().warning(
+                    "The copy '%s' of '%s' doesn't take the expression of %s: its container is "
+                    "placed otherwise\n",
+                    copy->Label.getValue(),
+                    obj->Label.getValue(),
+                    path.toString().c_str()
+                );
+                continue;
+            }
+            try {
+                copy->setExpression(
+                    App::ObjectIdentifier::parse(copy, path.toString()),
+                    App::Expression::parse(copy, expression->toString())
+                );
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().warning(
+                    "The copy '%s' of '%s' doesn't take the expression of %s: %s\n",
+                    copy->Label.getValue(),
+                    obj->Label.getValue(),
+                    path.toString().c_str(),
+                    e.what()
+                );
+            }
         }
 
         // An independent copy links nothing outside (its links weren't copied). Its projections
@@ -556,6 +639,18 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                 entity.empty() ? featureObj->Shape.getValue()
                                : featureObj->Shape.getShape().getSubShape(entity.c_str())
             );
+            // FreeCAD-CH (PR 224 round 2, decision 40): where the original is, as for the copies
+            // above. The binder took the shape's placement, relative to the original's container:
+            // a copy into a container placed otherwise moved, silently. (A dependent binder still
+            // does, ops#244.)
+            auto* binder = static_cast<PartDesign::ShapeBinder*>(copy);
+            const Base::Placement container = App::GeoFeature::getGlobalPlacement(obj)
+                * featureObj->Placement.getValue().inverse();
+            const Base::Placement targetPlacement =
+                target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+            binder->Placement.setValue(
+                targetPlacement.inverse() * container * binder->Placement.getValue()
+            );
         }
     }
 
@@ -565,11 +660,14 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 namespace
 {
 
-// The shape of an element, or null when it can't be read
-TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
+// The shape of an element, or null when it can't be read; placed by the object's Placement when
+// `placed`
+TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub, bool placed)
 {
-    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-        | Part::ShapeOption::Transform;
+    const Part::ShapeOptions options = placed
+        ? Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform
+        : Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink;
     try {
         return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
     }
@@ -583,10 +681,8 @@ TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
 }  // namespace
 
 // The properties that tell one element from another: its type, its length, area or point, and
-// its centre of mass. Both are taken in the frame of the object's container (its own Placement
-// applied, its parents' not), which a copy in the body shares with an original beside the body.
-// The same check as the Pipe panel's copy step (ops#234), which can use this one once both are
-// on integration.
+// its centre of mass, in the frames described below. The Pipe panel's copy step uses it too
+// (ops#234).
 bool TaskFeaturePick::sameElement(
     App::DocumentObject* original,
     App::DocumentObject* copy,
@@ -596,8 +692,15 @@ bool TaskFeaturePick::sameElement(
     if (sub.empty() || original == copy) {
         return true;
     }
-    TopoDS_Shape before = elementShape(original, sub);
-    TopoDS_Shape after = elementShape(copy, sub);
+    // An independent copy keeps the original's global place, so its own Placement differs from
+    // the original's when their containers are placed differently (PR 224 review M2, round 2):
+    // both are compared without it, in their own frame. A dependent copy (a shape binder with a
+    // support) in the frame of its container, which a copy in the body shares with an original
+    // beside the body.
+    auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
+    const bool placed = binder && !binder->Support.getValues().empty();
+    TopoDS_Shape before = elementShape(original, sub, placed);
+    TopoDS_Shape after = elementShape(copy, sub, placed);
     if (before.IsNull()) {
         // the reference is already broken on the original; on a copy that has the element it
         // would name another one, silently
