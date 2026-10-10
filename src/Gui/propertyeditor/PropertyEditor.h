@@ -28,6 +28,8 @@
 
 #include <QTreeView>
 
+#include <App/DocumentObserver.h>
+
 #include "PropertyItem.h"
 #include "PropertyModel.h"
 
@@ -35,6 +37,7 @@
 namespace App
 {
 class Property;
+class PropertyContainer;
 class Document;
 }  // namespace App
 
@@ -48,6 +51,24 @@ namespace PropertyEditor
 
 class PropertyItemDelegate;
 class PropertyModel;
+
+/// FreeCAD-CH (ops#178, ops#231): opens the transaction @a name for a change to @a container's
+/// properties (Add, Remove, Move or Rename Property) in its document, unless the document has
+/// booked one already (a task dialog's): that one takes the change, since opening another would
+/// commit it, past the dialog's Cancel. @a ownBooking (the property editor's "Edit" booking) isn't
+/// one to join. Returns the ID for closePropertyTransaction(), or 0 when the change joins a booking.
+GuiExport int openPropertyTransaction(
+    App::PropertyContainer* container,
+    const char* name,
+    int ownBooking = 0
+);
+/// Commits, or with @a commit false aborts, the transaction @a tid from openPropertyTransaction().
+/// Nothing for 0: an ID of 0 would close the active document's booking, someone else's.
+GuiExport void closePropertyTransaction(int tid, bool commit = true);
+/// FreeCAD-CH (ops#231): whether @a tid is a property editor's open "Edit" booking, which a change
+/// made elsewhere (the Variables panel, Add Property) doesn't join: the editor's Esc aborts it.
+GuiExport bool isEditorBooking(int tid);
+
 /*!
  Put this into the .qss file after Gui--PropertyEditor--PropertyEditor
 
@@ -194,6 +215,8 @@ private:
     int dragPreviousPos = 0;
 
     int transactionID = 0;
+    // FreeCAD-CH (ops#231): the document transactionID is booked in, where it is closed
+    App::DocumentT transactionDoc;
 
     QColor groupColor;
     QBrush background;

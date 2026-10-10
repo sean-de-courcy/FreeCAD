@@ -917,31 +917,50 @@ bool DocumentObject::renameDynamicProperty(Property* prop, const char* name)
             ExpressionEngine.setValue(idsWithExprsToRemove[i], expressionsToMove[i]);
         }
     };
+    // Records the rename and gives the property its expressions under the new name
+    auto finishRename = [&]() {
+        if (_pDoc) {
+            _pDoc->renamePropertyOfObject(this, prop, oldName.c_str());
+        }
+        App::ObjectIdentifier idNewProp(prop->getContainer(), std::string(name));
+        for (auto& exprToMove : expressionsToMove) {
+            ExpressionEngine.setValue(idNewProp, exprToMove);
+        }
+    };
     bool renamed = false;
     try {
         renamed = TransactionalObject::renameDynamicProperty(prop, name);
     }
     catch (...) {
-        if (oldName == prop->getName()) {
-            restoreExpressions();
+        if (oldName != prop->getName()) {
+            // FreeCAD-CH (ops#231): a handler of signalRenameDynamicProperty threw after the
+            // rename, which left the new name with no expressions and no record of the rename.
+            // The rename is taken back, as a refused one (the handlers see the old name again; the
+            // name changes before they run). Should the name stay new, the rename is completed
+            // instead. The first exception is kept.
+            try {
+                TransactionalObject::renameDynamicProperty(prop, oldName.c_str());
+            }
+            catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+            if (oldName != prop->getName()) {
+                try {
+                    finishRename();
+                }
+                catch (...) {  // NOLINT(bugprone-empty-catch)
+                }
+                throw;
+            }
         }
+        restoreExpressions();
         throw;
     }
     if (!renamed) {
         restoreExpressions();
         return false;
     }
-    if (renamed && _pDoc) {
-        _pDoc->renamePropertyOfObject(this, prop, oldName.c_str());
-    }
-
-
-    App::ObjectIdentifier idNewProp(prop->getContainer(), std::string(name));
-    for (auto& exprToMove : expressionsToMove) {
-        ExpressionEngine.setValue(idNewProp, exprToMove);
-    }
-
-    return renamed;
+    finishRename();
+    return true;
 }
 
 void DocumentObject::moveExpressionTargetingProp(Property* prop,
@@ -1063,13 +1082,35 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // Phases 2, 3, and 4
-    arrangeMoveProperty(prop, newProp, targetObj);
+    // FreeCAD-CH (ops#238): a failure in phases 2 to 4 (a handler of the move that throws) used to
+    // leave the property on both objects. The move is recorded once phase 2 starts, so it is
+    // completed: the value pasted (the failure can come before phase 3), the source's property
+    // removed, then the exception passed on
+    std::exception_ptr error;
+    try {
+        arrangeMoveProperty(prop, newProp, targetObj);
+    }
+    catch (...) {
+        error = std::current_exception();
+        try {
+            auto guard = targetObj->_pDoc->setDefiningTransaction();
+            newProp->Paste(*prop);
+        }
+        catch (...) {
+        }
+    }
 
     // Phase 5 remove the property from the source object
     if (!dynamicProps.removeDynamicProperty(propertyName)) {
+        if (error) {
+            std::rethrow_exception(error);
+        }
         FC_THROWM(Base::RuntimeError,
                   "Failed to remove property " << propertyName << " from container "
                                                 << prop->getContainer()->getFullName());
+    }
+    if (error) {
+        std::rethrow_exception(error);
     }
 
     return newProp;

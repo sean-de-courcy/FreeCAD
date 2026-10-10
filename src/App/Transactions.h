@@ -176,8 +176,26 @@ private:
     void changeProperty(TransactionalObject* Obj,
                         std::function<void(TransactionObject* to)> changeFunc);
 
+    struct MoveEntry
+    {
+        TransactionObject* to;
+        int64_t key;
+    };
+    /// FreeCAD-CH (ops#235): the move entry of a property moved in this transaction, found by the
+    /// moved property (the target's), or null.
+    std::pair<TransactionObject*, int64_t> movedHere(const Property* prop);
+    /// FreeCAD-CH (ops#238): drops the move entries that involve @a obj, created and removed in
+    /// this transaction, before it is freed: a move into it becomes the removal of the moved
+    /// property, and a property moved out of it counts as added to its target
+    void dropMovesOfFreed(const TransactionalObject* obj, TransactionObject* to);
+
 private:
     int transID;
+    /// FreeCAD-CH (ops#235): the properties moved in this transaction, at their target, with
+    /// their move entries. A later change, rename, removal or move of one is the move entry's:
+    /// recorded in the target's entries, it was applied in an order that depended on which object
+    /// came first, before or after the property moved back.
+    std::unordered_map<const Property*, MoveEntry> _MoveTargets;
     using Info = std::pair<const TransactionalObject*, TransactionObject*>;
     bmi::multi_index_container<
         Info,
@@ -229,6 +247,20 @@ public:
      */
     virtual void applyChn(Document& doc, TransactionalObject* obj, bool forward);
 
+    /// FreeCAD-CH (ops#235): the passes of applyChn(), which Transaction::apply() runs for all
+    /// objects one after the other, since entries pass names and properties between objects:
+    /// properties added in the transaction removed; moved properties moved back (or removed, if
+    /// added in the transaction too); renames taken back; values restored and removed properties
+    /// re-created.
+    enum class ChnPass
+    {
+        Removals,
+        Moves,
+        Renames,
+        Values
+    };
+    void applyChnPass(TransactionalObject* obj, ChnPass pass);
+
     /**
      * @brief Set the property of the object that is affected by the transaction.
      *
@@ -277,17 +309,50 @@ protected:
     } status {New};
 
     /// Struct to maintain property information.
+    /// FreeCAD-CH (ops#229, ops#235): `property` (from DynamicProperty::PropData) is always a copy
+    /// owned by the entry, or null; never the live property.
     struct PropData: DynamicProperty::PropData
     {
         Base::Type propertyType;
         const Property* propertyOrig = nullptr;
         // for property renaming
         std::string nameOrig;
+        // FreeCAD-CH (ops#235): the property's status when a rename made the entry, for a removal
+        // later in the transaction
+        unsigned long statusOrig = 0;
         // for property moving
         Property* propertyTarget = nullptr;
         TransactionalObject* target = nullptr;
         PropertyContainer* source = nullptr;
+        // FreeCAD-CH (ops#235): a move of a property added in this transaction: undone by its
+        // removal from the target
+        bool added = false;
+        // FreeCAD-CH (ops#235): while applying, the property a move or a rename restored, for the
+        // value pass
+        Property* restored = nullptr;
+        // FreeCAD-CH (ops#238): while applying, a move taken back before the objects created in
+        // the transaction are removed (applyMovesOfRemoved())
+        bool movedEarly = false;
     };
+
+    /// FreeCAD-CH (ops#238): takes back the move of @a data (the Moves pass of one entry)
+    void applyMove(TransactionalObject* obj, PropData& data);
+
+    /// FreeCAD-CH (ops#238): takes back the moves into or out of an object that applyDel()
+    /// removes (one created in the transaction), before it is removed: removing detaches it, and
+    /// on abort destroys it with the moved property; also resets the entries' apply state.
+    /// Only moves within the document (@a local; between documents: ops#238, V3/T4).
+    void applyMovesOfRemoved(TransactionalObject* obj,
+                             const std::function<bool(const TransactionalObject*)>& removed,
+                             const std::function<bool(const TransactionalObject*)>& local);
+
+    /// FreeCAD-CH (ops#235): the property the move entry @a key moved was removed from its
+    /// target: the entry becomes the removal of the source's property (nothing, if it was added).
+    void movedPropertyRemoved(int64_t key);
+
+    /// FreeCAD-CH (ops#235): copies @a prop's dynamic data into @a data, with the name as a string
+    /// (a property named by `pName` has an empty `name`); `property` is left null, not the live property
+    static void takeDynamicData(PropData& data, const Property* prop);
 
     /// A map to maintain the properties of the object.
     std::unordered_map<int64_t, PropData> _PropChangeMap;

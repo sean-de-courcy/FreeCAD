@@ -131,46 +131,102 @@ class TestRevolve(unittest.TestCase):
         for actual, expected in zip(reference_values, direct_values):
             self.assertAlmostEqual(actual, expected)
 
-    def revolveUpToWall(self, sideType, core):
-        """An additive Revolution up to a datum plane, as the body's first solid or after a core
-        cylinder (ops#191). The profile is the rectangle x in [1, 3], z in [0, 2] on XZ (area 4,
-        centroid 2 from the axis), revolved about the global Z axis; the wall is the YZ plane, a
-        quarter turn away on either side."""
+    def revolveUpToWall(
+        self,
+        sideType,
+        core,
+        kind="Revolution",
+        reversed=False,
+        offset=0,
+        wall="datum",
+        scale=1,
+        wallHeight=0,
+    ):
+        """A Revolution or Groove up to a wall, as the body's first solid or after a core cylinder
+        (ops#191, ops#239). The profile is the rectangle x in [1, 3] * scale + offset,
+        z in [0, 2] * scale on XZ (area 4 * scale^2, centroid 2 * scale from the axis), revolved
+        about the vertical line x = offset, y = 0: the sketch's V axis when offset is 0, else a
+        datum line. The wall is the plane x = offset, a quarter turn away on either side: a datum
+        plane with its origin at z = wallHeight, or (wall="binder" or "part") the bounded face
+        y in [0.5, 4], z in [-1, 3] of a Part::Plane outside the body, through a ShapeBinder or
+        linked directly. The bounded face lies on the y > 0 side only: a face that the sweep
+        crosses on both sides gives the region between the two crossings instead (the based path
+        does that too)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         if core:
             cylinder = body.newObject("PartDesign::AdditiveCylinder", "Core")
-            cylinder.Radius = 1
-            cylinder.Height = 2
+            cylinder.Radius = scale
+            cylinder.Height = 2 * scale
         sketch = body.newObject("Sketcher::SketchObject", "Profile")
         [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
         sketch.AttachmentSupport = (xz, [""])
         sketch.MapMode = "FlatFace"
         points = [
-            FreeCAD.Vector(1, 0),
-            FreeCAD.Vector(3, 0),
-            FreeCAD.Vector(3, 2),
-            FreeCAD.Vector(1, 2),
+            FreeCAD.Vector(1 * scale + offset, 0),
+            FreeCAD.Vector(3 * scale + offset, 0),
+            FreeCAD.Vector(3 * scale + offset, 2 * scale),
+            FreeCAD.Vector(1 * scale + offset, 2 * scale),
         ]
         for start, end in zip(points, points[1:] + points[:1]):
             sketch.addGeometry(Part.LineSegment(start, end), False)
-        wall = body.newObject("PartDesign::Plane", "Wall")
-        wall.MapMode = "Deactivated"
-        wall.Placement = FreeCAD.Placement(
-            FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
+        wallPlacement = FreeCAD.Placement(
+            FreeCAD.Vector(offset, 0, wallHeight), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
         )
-        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        if wall == "datum":
+            wallObject = body.newObject("PartDesign::Plane", "Wall")
+            wallObject.MapMode = "Deactivated"
+            wallObject.Placement = wallPlacement
+            upToFace = (wallObject, [""])
+        else:
+            # The plane's length runs along its local X, which the rotation turns to -Z.
+            plane = self.Doc.addObject("Part::Plane", "WallFace")
+            plane.Length = 4
+            plane.Width = 3.5
+            plane.Placement = FreeCAD.Placement(
+                FreeCAD.Vector(offset, 0.5, 3), wallPlacement.Rotation
+            )
+            if wall == "binder":
+                binder = body.newObject("PartDesign::ShapeBinder", "Wall")
+                binder.Support = [(plane, ["Face1"])]
+                upToFace = (binder, ["Face1"])
+            else:
+                upToFace = (plane, ["Face1"])
+        revolution = body.newObject("PartDesign::" + kind, kind)
         revolution.Profile = sketch
-        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        if offset:
+            axis = body.newObject("PartDesign::Line", "Axis")
+            axis.MapMode = "Deactivated"
+            axis.Placement = FreeCAD.Placement(FreeCAD.Vector(offset, 0, 0), FreeCAD.Rotation())
+            revolution.ReferenceAxis = (axis, [""])
+        else:
+            revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Reversed = reversed
         revolution.SideType = sideType
         revolution.Type = "UpToFace"
-        revolution.UpToFace = (wall, [""])
+        revolution.UpToFace = upToFace
         if sideType == "Two sides":
             revolution.Type2 = "UpToFace"
-            revolution.UpToFace2 = (wall, [""])
+            revolution.UpToFace2 = upToFace
         self.Doc.recompute()
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertEqual(len(revolution.Shape.Solids), 1)
         return revolution
+
+    def assertQuarter(self, shape, positiveY, offset=0, scale=1):
+        """One quarter of the ring: x from offset to offset + 3 * scale and z in [0, 2] * scale on
+        the given side of the profile plane y = 0. The axis runs along +Z, so a positive turn
+        carries +X to +Y; Reversed turns the other way."""
+        bounds = shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, offset, places=6)
+        self.assertAlmostEqual(bounds.XMax, offset + 3 * scale, places=6)
+        self.assertAlmostEqual(bounds.ZMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 2 * scale, places=6)
+        if positiveY:
+            self.assertAlmostEqual(bounds.YMin, 0, places=6)
+            self.assertAlmostEqual(bounds.YMax, 3 * scale, places=6)
+        else:
+            self.assertAlmostEqual(bounds.YMin, -3 * scale, places=6)
+            self.assertAlmostEqual(bounds.YMax, 0, places=6)
 
     # Pappus: a full turn of the profile sweeps 2 pi * 2 * 4 = 16 pi, so a quarter turn 4 pi and
     # a half turn 8 pi. The core cylinder adds pi * 1^2 * 2 = 2 pi.
@@ -200,6 +256,339 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToFaceTwoSidesAfterCore(self):
         revolution = self.revolveUpToWall("Two sides", core=True)
         self.assertAlmostEqual(revolution.Shape.Volume, 10 * math.pi, places=6)
+
+    def testRevolutionUpToFaceFirstSolidSide(self):
+        revolution = self.revolveUpToWall("One side", core=False)
+        self.assertQuarter(revolution.Shape, positiveY=True)
+
+    def testRevolutionUpToFaceFirstSolidReversed(self):
+        revolution = self.revolveUpToWall("One side", core=False, reversed=True)
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=False)
+
+    def testRevolutionUpToFaceFirstSolidOffAxis(self):
+        """The axis is the line x = 5: the box beyond the sweep follows the axis, not the origin."""
+        revolution = self.revolveUpToWall("One side", core=False, offset=5)
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=True, offset=5)
+
+    def testRevolutionUpToFaceFirstSolidOffAxisReversed(self):
+        revolution = self.revolveUpToWall("One side", core=False, reversed=True, offset=5)
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=False, offset=5)
+
+    def testRevolutionUpToBinderFaceFirstSolid(self):
+        """A bounded face goes to BRepFeat itself, with the box as its base."""
+        revolution = self.revolveUpToWall("One side", core=False, wall="binder")
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=True)
+
+    def testRevolutionUpToPartFaceFirstSolid(self):
+        revolution = self.revolveUpToWall("One side", core=False, wall="part")
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=True)
+
+    def testRevolutionUpToBinderFaceAfterCore(self):
+        revolution = self.revolveUpToWall("One side", core=True, wall="binder")
+        self.assertAlmostEqual(revolution.Shape.Volume, 6 * math.pi, places=6)
+
+    def testGrooveUpToFaceFirstSolid(self):
+        """A Groove with nothing to cut gives its tool as the body's first solid, as a Groove by
+        angle and a Pocket do (ops#239): the same quarter ring, 4 pi."""
+        groove = self.revolveUpToWall("One side", core=False, kind="Groove")
+        self.assertAlmostEqual(groove.Shape.Volume, 4 * math.pi, places=6)
+        self.assertQuarter(groove.Shape, positiveY=True)
+
+    # Scaled by 10 (ops#239): a full turn sweeps 2 pi * 20 * 400 = 16000 pi, a quarter 4000 pi.
+    # Without a base, BRepFeat trims the unbounded wall to a square set by the box it gets as its
+    # base; a small box near the axis made the square miss the sweep: from about 2.5 a nearly
+    # full ring for a quarter (Reversed, the second side), from about 3 a loud failure.
+
+    def testRevolutionUpToFaceFirstSolidScaled(self):
+        revolution = self.revolveUpToWall("One side", core=False, scale=10)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4000, places=4)
+        self.assertQuarter(revolution.Shape, positiveY=True, scale=10)
+
+    def testRevolutionUpToFaceFirstSolidScaledReversed(self):
+        revolution = self.revolveUpToWall("One side", core=False, reversed=True, scale=10)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4000, places=4)
+        self.assertQuarter(revolution.Shape, positiveY=False, scale=10)
+
+    def testRevolutionUpToFaceFirstSolidSmallReversed(self):
+        """At 2.5 the old box gave a nearly full ring (15.87 pi * 2.5^3) without an error."""
+        revolution = self.revolveUpToWall("One side", core=False, reversed=True, scale=2.5)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4 * 2.5**3, places=6)
+        self.assertQuarter(revolution.Shape, positiveY=False, scale=2.5)
+
+    def testRevolutionUpToFaceTwoSidesFirstSolidScaled(self):
+        revolution = self.revolveUpToWall("Two sides", core=False, scale=10)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 8000, places=4)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, 0, places=6)
+
+    def testRevolutionUpToFaceSymmetricFirstSolidScaled(self):
+        revolution = self.revolveUpToWall("Symmetric", core=False, scale=10)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 8000, places=4)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, 0, places=6)
+
+    def testRevolutionUpToFaceFirstSolidFarWallOrigin(self):
+        """The wall's origin 100000 above the profile does not matter. (Probed with and without
+        the wall origin in the box's size, ops#239: OCCT's trim of the wall doesn't sit around
+        the wall's origin, so the term is only a margin.)"""
+        revolution = self.revolveUpToWall(
+            "One side", core=False, reversed=True, scale=10, wallHeight=100000
+        )
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4000, places=4)
+        self.assertQuarter(revolution.Shape, positiveY=False, scale=10)
+
+    def testRevolutionUpToFaceScaledAfterCore(self):
+        """With a base there is no box: the core cylinder (radius 10, height 20, 2000 pi) plus the
+        quarter."""
+        revolution = self.revolveUpToWall("One side", core=True, reversed=True, scale=10)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 6000, places=4)
+
+    def testRevolutionUpToFaceNegativeAxis(self):
+        """A datum line along -X: the profile x in [0, 20], z in [10, 30] on XZ (area 400, centroid
+        20 from the axis), up to the XY plane. A positive turn about -X carries +Z to +Y."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(0, 10),
+            FreeCAD.Vector(20, 10),
+            FreeCAD.Vector(20, 30),
+            FreeCAD.Vector(0, 30),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        axis = body.newObject("PartDesign::Line", "Axis")
+        axis.MapMode = "Deactivated"
+        axis.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
+        )
+        [xy] = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (axis, [""])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (xy, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 4000, places=4)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, 0, places=6)
+        self.assertAlmostEqual(bounds.XMax, 20, places=6)
+        self.assertAlmostEqual(bounds.YMin, 0, places=6)
+        self.assertAlmostEqual(bounds.YMax, 30, places=6)
+        self.assertAlmostEqual(bounds.ZMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 30, places=6)
+
+    def testRevolutionUpToInfiniteCylinderFirstSolid(self):
+        """The up-to face is a whole cylinder surface (unbounded along its axis): radius 100, its
+        axis parallel to Z through (100, 0), so it passes through the revolution axis. The profile
+        x in [1, 3], z in [0, 2] on XZ about Z: the point at radius r meets it after the angle
+        acos(r / 200), and the volume is 2 * the integral of r * acos(r / 200) from 1 to 3. Its
+        bounding box (about 1e100) must not size the box BRepFeat gets without a base."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 100
+        cylinder.Center = FreeCAD.Vector(100, 0, 0)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(cylinder)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+
+        k = 200
+
+        def antiderivative(r):
+            # integral of r * acos(r / k) dr
+            return (
+                r**2 / 2 * math.acos(r / k)
+                + k**2 / 4 * math.asin(r / k)
+                - r / 4 * math.sqrt(k**2 - r**2)
+            )
+
+        expected = 2 * (antiderivative(3) - antiderivative(1))
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.YMin, 0, places=6)
+
+    def revolveAroundSmallCore(self, sideType, reversed=False, kind="Revolution"):
+        """A Revolution up to the YZ origin plane after a small core (ops#242): the cylinder of
+        radius 1 and height 2 at the origin, and the profile x in [0, 50], z in [0, 50] on XZ
+        about Z (area 2500, centroid 25 from the axis: a full turn is 125000 pi). BRepFeat trims
+        the unbounded plane by the size of the base it gets; the core alone made that square
+        about 20 across, and a quarter came out as a nearly full ring without an error."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        core = body.newObject("PartDesign::AdditiveCylinder", "Core")
+        core.Radius = 1
+        core.Height = 2
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(0, 0),
+            FreeCAD.Vector(50, 0),
+            FreeCAD.Vector(50, 50),
+            FreeCAD.Vector(0, 50),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Reversed = reversed
+        revolution.SideType = sideType
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (yz, [""])
+        if sideType == "Two sides":
+            revolution.Type2 = "UpToFace"
+            revolution.UpToFace2 = (yz, [""])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        return revolution
+
+    # A quarter is 125000 pi / 4 = 31250 pi; the core's part outside it adds 3/4 * 2 pi = 1.5 pi.
+    # A half is 62500 pi, and the core's other half adds pi.
+
+    def testRevolutionUpToFaceAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("One side")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMax, 50, places=6)
+
+    def testRevolutionUpToFaceAroundSmallCoreReversed(self):
+        revolution = self.revolveAroundSmallCore("One side", reversed=True)
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.YMin, -50, places=6)
+        self.assertAlmostEqual(bounds.YMax, 1, places=6)
+
+    def testRevolutionUpToFaceTwoSidesAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("Two sides")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+
+    def testRevolutionUpToFaceSymmetricAroundSmallCore(self):
+        revolution = self.revolveAroundSmallCore("Symmetric")
+        self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
+        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+
+    def testGrooveUpToFaceAroundSmallCore(self):
+        """The same quarter as a Groove: it removes a quarter of the core, leaving 3/4 * 2 pi."""
+        groove = self.revolveAroundSmallCore("One side", kind="Groove")
+        self.assertAlmostEqual(groove.Shape.Volume / math.pi, 1.5, places=6)
+        bounds = groove.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMin, -1, places=6)
+        self.assertAlmostEqual(bounds.YMax, 1, places=6)
+
+    def revolveUpToBaseFace(self, upToFirst):
+        """A bounded up-to face that belongs to the base: the box x in [-4, 0], y in [0, 4],
+        z in [0, 2], and the profile x in [1, 3], z in [0, 2] on XZ about Z, whose quarter ends
+        on the box's face x = 0. Up to that face, or Up to first. The box isn't trimmed by
+        BRepFeat, so the far box isn't added (ops#242): 32 plus the quarter, 4 pi."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 4
+        block.Height = 2
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-4, 0, 0), FreeCAD.Rotation())
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(block.Shape.Faces)
+            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
+        ]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        if upToFirst:
+            revolution.Type = "UpToFirst"
+        else:
+            revolution.Type = "UpToFace"
+            revolution.UpToFace = (block, [wall])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        self.assertAlmostEqual(revolution.Shape.Volume, 32 + 4 * math.pi, places=6)
+        bounds = revolution.Shape.BoundBox
+        self.assertAlmostEqual(bounds.XMin, -4, places=6)
+        self.assertAlmostEqual(bounds.XMax, 3, places=6)
+        self.assertAlmostEqual(bounds.YMin, 0, places=6)
+        self.assertAlmostEqual(bounds.YMax, 4, places=6)
+
+    def testRevolutionUpToBaseFace(self):
+        self.revolveUpToBaseFace(upToFirst=False)
+
+    def testRevolutionUpToFirstBaseFace(self):
+        self.revolveUpToBaseFace(upToFirst=True)
+
+    def testRevolutionUpToFaceNeverMet(self):
+        """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
+        reaches it. The feature fails with an error and gives no solid."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        wall = body.newObject("PartDesign::Plane", "Wall")
+        wall.MapMode = "Deactivated"
+        wall.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(0, 100, 0), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, [""])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("Could not revolve the sketch", revolution.getStatusString())
+        self.assertTrue(revolution.Shape.isNull())
 
     def tearDown(self):
         # closing doc

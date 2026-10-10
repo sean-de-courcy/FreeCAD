@@ -58,6 +58,30 @@
 
 FC_LOG_LEVEL_INIT("PropertyView", true, true)
 
+namespace
+{
+// FreeCAD-CH (ops#231): the property editors' "Edit" bookings, which openPropertyTransaction()
+// doesn't join (a dialog of its own, e.g. Add Property from the Variables panel, can't know them).
+// An editor erases its ID when it closes its booking; an ID no document has booked any more (its
+// transaction closed elsewhere) is forgotten at the next registration. IDs aren't reused.
+std::unordered_set<int>& editorBookings()
+{
+    static std::unordered_set<int> ids;
+    return ids;
+}
+
+void registerEditorBooking(int tid)
+{
+    auto& ids = editorBookings();
+    std::unordered_set<int> booked;
+    for (auto* doc : App::GetApplication().getDocuments()) {
+        booked.insert(doc->getBookedTransactionID());
+    }
+    std::erase_if(ids, [&booked](int id) { return !booked.contains(id); });
+    ids.insert(tid);
+}
+}  // namespace
+
 using namespace Gui::PropertyEditor;
 
 PropertyEditor::PropertyEditor(QWidget* parent)
@@ -392,6 +416,20 @@ void PropertyEditor::openEditor(const QModelIndex& index)
         FC_LOG("pending transaction");
         return;
     }
+    // FreeCAD-CH (ops#231): a booked transaction (a task dialog's, before its first change) takes
+    // the edit too: booking "Edit" replaced it, and the dialog's Cancel no longer reverted. An
+    // editor's own booking from a previous edit (this one's or another editor's) isn't one to
+    // keep. The booking checked is the one in the document "Edit" books in, the active one;
+    // closeTransaction() and revertEdit() close it there (transactionDoc), whichever is active then.
+    App::Document* editDoc = App::GetApplication().getActiveDocument();
+    if (!editDoc) {
+        return;
+    }
+    int booked = editDoc->getBookedTransactionID();
+    if (booked != 0 && booked != transactionID && !editorBookings().contains(booked)) {
+        FC_LOG("booked transaction");
+        return;
+    }
     std::ostringstream str;
     str << tr("Edit").toUtf8().constData() << ' ';
     for (auto prop : items) {
@@ -410,7 +448,12 @@ void PropertyEditor::openEditor(const QModelIndex& index)
     if (items.size() > 1) {
         str << "...";
     }
-    transactionID = Command::openActiveDocumentCommand(str.str());
+    transactionID = editDoc->openTransaction(str.str());
+    if (transactionID == 0) {
+        return;
+    }
+    transactionDoc = editDoc;
+    registerEditorBooking(transactionID);
     FC_LOG("editor transaction " << App::GetApplication().getTransactionName(transactionID));
 }
 
@@ -465,16 +508,21 @@ void PropertyEditor::recomputeDocument(App::Document* doc)
 
 void PropertyEditor::closeTransaction()
 {
-    App::Document* doc = App::GetApplication().getActiveDocument();
-    if (!doc) {
+    if (transactionID == 0) {
         return;
     }
-    if (doc->getBookedTransactionID() == transactionID) {
+    // FreeCAD-CH (ops#231): in the document the booking was made in, which needn't be the active
+    // one any more; left open there, a task opened later took it as its own.
+    App::Document* doc = transactionDoc.getDocument();
+    int tid = transactionID;
+    transactionID = 0;
+    transactionDoc = App::DocumentT();
+    editorBookings().erase(tid);
+    if (doc && doc->getBookedTransactionID() == tid) {
         if (autoupdate) {
             recomputeDocument(doc);
         }
         doc->commitTransaction();
-        transactionID = 0;
     }
 }
 
@@ -484,10 +532,12 @@ void PropertyEditor::closeTransaction()
 // the value from before the edit is written back.
 void PropertyEditor::revertEdit()
 {
-    App::Document* doc = App::GetApplication().getActiveDocument();
+    App::Document* doc = transactionDoc.getDocument();
     if (doc && transactionID != 0 && doc->getBookedTransactionID() == transactionID) {
-        doc->abortTransaction();
+        editorBookings().erase(transactionID);
         transactionID = 0;
+        transactionDoc = App::DocumentT();
+        doc->abortTransaction();
         return;
     }
     if (editingIndex.isValid() && editingValue.isValid()) {
@@ -872,7 +922,46 @@ static App::Document* propertyDocument(App::PropertyContainer* cont)
     return nullptr;
 }
 
-static void moveProperties(std::unordered_set<App::Property*>& props, QList<App::SubObjectT>& subObjects)
+int Gui::PropertyEditor::openPropertyTransaction(
+    App::PropertyContainer* container,
+    const char* name,
+    int ownBooking
+)
+{
+    App::Document* doc = propertyDocument(container);
+    if (!doc) {
+        return 0;
+    }
+    int booked = doc->getBookedTransactionID();
+    if (booked != 0 && booked != ownBooking && !editorBookings().contains(booked)) {
+        return 0;
+    }
+    return doc->openTransaction(name);
+}
+
+bool Gui::PropertyEditor::isEditorBooking(int tid)
+{
+    return tid != 0 && editorBookings().contains(tid);
+}
+
+void Gui::PropertyEditor::closePropertyTransaction(int tid, bool commit)
+{
+    if (tid == 0) {
+        return;
+    }
+    if (commit) {
+        App::GetApplication().commitTransaction(tid);
+    }
+    else {
+        App::GetApplication().abortTransaction(tid);
+    }
+}
+
+static void moveProperties(
+    std::unordered_set<App::Property*>& props,
+    QList<App::SubObjectT>& subObjects,
+    int ownBooking
+)
 {
     if (subObjects.empty() || props.empty()) {
         return;
@@ -886,22 +975,45 @@ static void moveProperties(std::unordered_set<App::Property*>& props, QList<App:
         }
     }
 
-    int tid = 0;
-    for (auto& prop : props) {
-        auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
-        if (!obj) {
-            FC_ERR(
-                "Cannot move property " << prop->getName()
-                                        << " because its container is not a DocumentObject"
-            );
-            continue;
+    // FreeCAD-CH (ops#231): one transaction per document, joining a booked one (a task dialog's);
+    // each one opened here is committed, not only the last document's. A document's second
+    // property joins the transaction opened for its first.
+    std::vector<int> tids;
+    auto closeAll = [&tids](bool commit) {
+        for (int tid : tids) {
+            closePropertyTransaction(tid, commit);
         }
-        if (App::Document* doc = propertyDocument(prop->getContainer())) {
-            tid = doc->openTransaction("Move Property");
+    };
+    // A failed move (e.g. two selected objects' properties of one name: the second is in use at
+    // the target) aborts the transactions opened here, so none stays booked; in a joined one the
+    // moves made stay, for its owner to commit or abort.
+    try {
+        for (auto& prop : props) {
+            auto* obj = freecad_cast<App::DocumentObject*>(prop->getContainer());
+            if (!obj) {
+                FC_ERR(
+                    "Cannot move property " << prop->getName()
+                                            << " because its container is not a DocumentObject"
+                );
+                continue;
+            }
+            if (int tid = openPropertyTransaction(obj, "Move Property", ownBooking)) {
+                tids.push_back(tid);
+            }
+            obj->moveDynamicProperty(prop, subObjects[0].getObject());
         }
-        obj->moveDynamicProperty(prop, subObjects[0].getObject());
     }
-    App::GetApplication().commitTransaction(tid);
+    catch (Base::Exception& e) {
+        closeAll(false);
+        e.reportException();
+        return;
+    }
+    catch (...) {
+        closeAll(false);
+        FC_ERR("Unknown exception while moving properties");
+        return;
+    }
+    closeAll(true);
 }
 
 enum MenuAction
@@ -1059,20 +1171,27 @@ std::unordered_set<App::Property*> PropertyEditor::acquireSelectedProperties() c
 
 void PropertyEditor::removeProperties(const std::unordered_set<App::Property*>& props)
 {
-    int tid = 0;
+    // FreeCAD-CH (ops#231): a transaction per property, as before, or the booked one (a task
+    // dialog's). A failed removal aborts only its own transaction: the catch aborted an ID of 0,
+    // the active document's booking, when it joined one.
     for (auto prop : props) {
+        int tid = 0;
         try {
-            if (App::Document* doc = propertyDocument(prop->getContainer())) {
-                tid = doc->openTransaction("Remove property");
-            }
+            tid = openPropertyTransaction(prop->getContainer(), "Remove property", transactionID);
             prop->getContainer()->removeDynamicProperty(prop->getName());
         }
         catch (Base::Exception& e) {
-            App::GetApplication().abortTransaction(tid);
+            closePropertyTransaction(tid, false);
             e.reportException();
+            continue;
         }
+        catch (...) {
+            closePropertyTransaction(tid, false);
+            FC_ERR("Unknown exception while removing property " << prop->getName());
+            continue;
+        }
+        closePropertyTransaction(tid);
     }
-    App::GetApplication().commitTransaction(tid);
 }
 
 static inline std::string indent(int level)
@@ -1409,14 +1528,14 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             if (!container) {
                 return;
             }
-            int tid = 0;
-            if (App::Document* doc = propertyDocument(container)) {
-                tid = doc->openTransaction("Add property");
-            }
+            // FreeCAD-CH (ops#231): the dialog opens a transaction for each property it adds, or
+            // joins a booked one (a task dialog's). The editor's own "Edit" booking is closed
+            // first, as opening a transaction here did; the dialog would join it. The transaction
+            // opened here was committed after the dialog, with an ID of 0 when it joined a booking:
+            // the active document's booking.
+            closeTransaction();
             Gui::Dialog::DlgAddProperty dlg(Gui::getMainWindow(), container);
             dlg.exec();
-
-            App::GetApplication().commitTransaction(tid);
             return;
         }
         case MA_EditPropTooltip: {
@@ -1475,28 +1594,23 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
             // takes the rename; opening one would commit it, past its dialog's Cancel. Only our own
             // is closed here: an ID of 0 would close the active document's booking. The editor's
             // own "Edit" booking (transactionID) isn't one to join: it is committed as before.
-            int tid = 0;
-            App::Document* doc = propertyDocument(prop->getContainer());
-            int booked = doc ? doc->getBookedTransactionID() : 0;
-            if (doc && (booked == 0 || booked == transactionID)) {
-                tid = doc->openTransaction("Rename property");
-            }
+            int tid = openPropertyTransaction(prop->getContainer(), "Rename property", transactionID);
 
             std::string newName = res.toUtf8().constData();
             try {
                 prop->getContainer()->renameDynamicProperty(prop, newName.c_str());
             }
             catch (Base::Exception& e) {
-                // Only our own: an ID of 0 would mean the current global transaction
-                if (tid) {
-                    App::GetApplication().abortTransaction(tid);
-                }
+                closePropertyTransaction(tid, false);
                 e.reportException();
                 break;
             }
-            if (tid) {  // FreeCAD-CH (ops#178)
-                App::GetApplication().commitTransaction(tid);
+            catch (...) {
+                // FreeCAD-CH (ops#231): our own transaction isn't left open by any throw
+                closePropertyTransaction(tid, false);
+                throw;
             }
+            closePropertyTransaction(tid);
             break;
         }
         case MA_EditPropGroup: {
@@ -1576,7 +1690,7 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
                 break;
             }
             QList<App::SubObjectT> subObjects = dlg.currentSubObjects();
-            moveProperties(props, subObjects);
+            moveProperties(props, subObjects, transactionID);
             break;
         }
         default:

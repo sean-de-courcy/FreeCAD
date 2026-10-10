@@ -79,8 +79,88 @@ TEST_F(SketchObjectTest, testDelExternalReducesCount)
     EXPECT_EQ(getObject()->ExternalGeo.getSize(), numExt - 1);
 }
 
+// A sketch with a line, a projected box edge, and three constraints: a horizontal on the line,
+// a coincidence of the line with the edge, and a constraint whose fourth element is the edge (no
+// constraint type builds one today, a group constraint would). Then the constraint list is flagged
+// invalid for its geometry (invalidGeometry: the geometry's kinds aren't the ones it was accepted
+// for, as during a restore), not for its indices.
+static void setupExternalWithInvalidConstraints(Sketcher::SketchObject* sketch)
+{
+    auto* doc = sketch->getDocument();
+    auto box {doc->addObject("Part::Box")};
+    doc->recompute();
+    sketch->addExternal(box, "Edge6");
+    Part::GeomLineSegment lineSeg;
+    lineSeg.setPoints(Base::Vector3d(1.0, 2.0, 0.0), Base::Vector3d(3.0, 4.0, 0.0));
+    int geoId = sketch->addGeometry(&lineSeg);
+    Sketcher::Constraint horizontal;
+    horizontal.Type = Sketcher::ConstraintType::Horizontal;
+    horizontal.First = geoId;
+    sketch->addConstraint(&horizontal);
+    Sketcher::Constraint coincident;  // on the projected edge
+    coincident.Type = Sketcher::ConstraintType::Coincident;
+    coincident.First = geoId;
+    coincident.FirstPos = Sketcher::PointPos::start;
+    coincident.Second = Sketcher::GeoEnum::RefExt;
+    coincident.SecondPos = Sketcher::PointPos::start;
+    sketch->addConstraint(&coincident);
+    Sketcher::Constraint group;  // the edge as its fourth element
+    group.Type = Sketcher::ConstraintType::Coincident;
+    group.First = geoId;
+    group.FirstPos = Sketcher::PointPos::start;
+    group.Second = geoId;
+    group.SecondPos = Sketcher::PointPos::end;
+    group.Third = geoId;
+    group.ThirdPos = Sketcher::PointPos::mid;
+    group.addElement(Sketcher::GeoElementId(Sketcher::GeoEnum::RefExt, Sketcher::PointPos::end));
+    sketch->addConstraint(&group);
+    doc->recompute();
+    ASSERT_EQ(sketch->Constraints.getSize(), 3);
+    ASSERT_EQ(sketch->Constraints.getValues()[2]->getElementsSize(), 4U);
+    sketch->Constraints.checkGeometry(std::vector<Part::Geometry*> {});
+    ASSERT_TRUE(sketch->Constraints.hasInvalidGeometry());
+}
+
+// delAllExternal with the constraint list flagged invalid keeps the constraints that aren't on
+// external geometry: it read the list with getValues(), empty while flagged, and wrote that back.
+// The list stays flagged until the geometry is back, and a constraint on the edge by any of its
+// elements goes (ops#140)
+TEST_F(SketchObjectTest, testDelAllExternalWithInvalidConstraintListKeepsConstraints)
+{
+    // Arrange
+    setupExternalWithInvalidConstraints(getObject());
+
+    // Act
+    int res = getObject()->delAllExternal();
+
+    // Assert (the flag itself: delAllExternal puts ExternalGeo back as it was, so the list's own
+    // check of the geometry's kinds clears it)
+    EXPECT_EQ(res, 0);
+    EXPECT_EQ(getObject()->ExternalGeometry.getSize(), 0);
+    EXPECT_EQ(getObject()->ExternalTypes.getSize(), 0);
+    ASSERT_EQ(getObject()->Constraints.getValuesForce().size(), 1);
+    EXPECT_EQ(getObject()->Constraints.getValuesForce()[0]->Type, Sketcher::ConstraintType::Horizontal);
+}
+
+// The same for delExternal: the list stays flagged invalid, and the constraints on the edge go
+// (ops#140)
+TEST_F(SketchObjectTest, testDelExternalWithInvalidConstraintListKeepsConstraints)
+{
+    // Arrange
+    setupExternalWithInvalidConstraints(getObject());
+
+    // Act
+    int res = getObject()->delExternal(0);
+
+    // Assert
+    EXPECT_TRUE(getObject()->Constraints.hasInvalidGeometry());
+    EXPECT_EQ(res, 0);
+    EXPECT_EQ(getObject()->ExternalGeometry.getSize(), 0);
+    ASSERT_EQ(getObject()->Constraints.getValuesForce().size(), 1);
+    EXPECT_EQ(getObject()->Constraints.getValuesForce()[0]->Type, Sketcher::ConstraintType::Horizontal);
+}
+
 // TODO: `delExternal` situation of constraints
-// TODO: `delExternal` situation of constraint containing more than 3 entities
 
 // TODO: `addCopy` tests
 // TODO: ensure new item(s) is/are added and of same type

@@ -241,7 +241,16 @@ names it.
 | `fix/229-rename-value-rollback` | fix | ops#229 | - | `fix/178-181-rename-move-transactions` `5d982c82f5` (fork PR 210) | `79b75b8f45` (fork PR 212), 2026-10-08 | when upstream's `TransactionObject` keeps a rename and a value change of one property apart (one entry per property ID) |
 | `fix/225-pipe-copy-followups` | fix | ops#225 | - | `integration` `144785fdd0` | `307ab9804d` (fork PR 211), 2026-10-08 | never (fork fix) |
 | `fix/191-revolution-upto-face-first-solid` | fix | ops#191 | - | `integration` `307ab9804d` | `5b08371dd1` (fork PR 217), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
-| `fix/233-makecopy-external-constraints` | fix | ops#233 | - | `integration` `800c03ab49` | (fork PR 215) | never (fork fix) |
+| `fix/233-makecopy-external-constraints` | fix | ops#233 | - | `integration` `800c03ab49` | `5169738cd5` (fork PR 215), 2026-10-08 | never (fork fix) |
+| `fix/140-sketcher-external-types` | fix | ops#140 | - | `integration` `800c03ab49` | `363bb33ea0` (fork PR 214), 2026-10-08 | when upstream keeps `ExternalTypes` parallel to `ExternalGeometry` and `breakLink` keeps shadows |
+| `fix/237-pr214-followups` | fix | ops#237 | - | `fix/140-sketcher-external-types` `1218ee0079` | `1d0e0a37c1` (fork PR 218), 2026-10-08 | with `fix/140-sketcher-external-types` |
+| `fix/231-property-editor-transactions` | fix | ops#231 | - | `integration` `800c03ab49` | `db8ad21ceb` (fork PR 213), 2026-10-08 | when upstream's `PropertyEditor` Add/Delete/Move Property and `DlgAddProperty` join a booked transaction and close only their own; `DocumentObject::renameDynamicProperty` completes a rename a handler threw after |
+| `fix/235-transaction-rename-order` | fix | ops#235 | - | `integration` `79b75b8f45` (stacked on fork PR 213) | `ecb2ada10a` (fork PR 216), 2026-10-08 | when upstream's `TransactionObject::applyChn` applies entries in a defined order with per-entry error handling |
+| `fix/239-revolution-first-solid-followups` | fix | ops#239 | - | `integration` `5169738cd5` | `6089fc009f` (fork PR 220), 2026-10-08 | with the ops#191 row: when upstream's `Revolved::tryToRevolveToFace` revolves up to a face without a base solid |
+| `fix/242-revolution-small-base-trim` | fix | ops#242 | - | `fix/239-revolution-first-solid-followups` `f52c8a07bb` (fork PR 220) | `278b805640` (fork PR 221), 2026-10-08 | when upstream's `Revolved::tryToRevolveToFace` gives BRepFeat a base large enough for its up-to face trim |
+| `fix/234-pipe-copy-step-followups` | fix | ops#234 | - | `fix/225-pipe-copy-followups` `97d11994a2` | `5206f693a5` (fork PR 219), 2026-10-08 | never (fork fix) |
+| `fix/238-transaction-move-del-gaps` | fix | ops#238 | - | `integration` `ecb2ada10a` | `d93605a352` (fork PR 222), 2026-10-08 | when upstream's `Transaction` takes back moves into and out of objects created in the transaction and `moveDynamicProperty` completes a move a handler threw from |
+| `fix/230-makecopy-recompute` | fix | ops#230 | - | `integration` `5169738cd5` | (fork PR 223) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
