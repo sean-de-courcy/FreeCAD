@@ -74,7 +74,9 @@ public:
     bool isSingleSelectionEnabled() const;
 
     /// `target` is the container the caller puts the copy into (a body or a part; null: none):
-    /// an independent copy is placed in it where the original is (PR 224 review M2).
+    /// an independent copy (a sketch, a primitive, or a shape binder holding another feature's
+    /// shape) is placed in it where the original is (PR 224 review M2, round 2). A dependent copy
+    /// isn't yet (ops#244).
     /// `recomputed`, when given, tells whether the copy got its own shape here (an independent
     /// sketch or additive primitive with no base): it then has the original's elements under the
     /// same index names, which `sameElement` checks

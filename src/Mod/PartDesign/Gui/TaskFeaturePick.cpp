@@ -451,8 +451,28 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         // An expression that names its own object (Sketch.Constraints.Len, <<Label>>...) prints
         // as .Constraints.Len, so it names the copy (PR 224 review M1, tested). One on Label isn't
         // made again: it would replace the copy's label (L4).
+        // An expression on Placement gives the original's place in its own container: where the
+        // copy's container is placed otherwise (its Placement converted above), its recompute
+        // would move the copy back there, silently (PR 224 round 2). Not made again then, with a
+        // warning.
+        const Base::Placement& copyPlacement =
+            static_cast<App::GeoFeature*>(copy)->Placement.getValue();
+        const bool movedPlacement = !copyPlacement.isSame(
+            static_cast<App::GeoFeature*>(obj)->Placement.getValue(),
+            Precision::Confusion()
+        );
         for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
             if (path.getPropertyName() == "Label") {
+                continue;
+            }
+            if (movedPlacement && path.getPropertyName() == "Placement") {
+                Base::Console().warning(
+                    "The copy '%s' of '%s' doesn't take the expression of %s: its container is "
+                    "placed otherwise\n",
+                    copy->Label.getValue(),
+                    obj->Label.getValue(),
+                    path.toString().c_str()
+                );
                 continue;
             }
             try {
@@ -619,6 +639,18 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                 entity.empty() ? featureObj->Shape.getValue()
                                : featureObj->Shape.getShape().getSubShape(entity.c_str())
             );
+            // FreeCAD-CH (PR 224 round 2, decision 40): where the original is, as for the copies
+            // above. The binder took the shape's placement, relative to the original's container:
+            // a copy into a container placed otherwise moved, silently. (A dependent binder still
+            // does, ops#244.)
+            auto* binder = static_cast<PartDesign::ShapeBinder*>(copy);
+            const Base::Placement container = App::GeoFeature::getGlobalPlacement(obj)
+                * featureObj->Placement.getValue().inverse();
+            const Base::Placement targetPlacement =
+                target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+            binder->Placement.setValue(
+                targetPlacement.inverse() * container * binder->Placement.getValue()
+            );
         }
     }
 
@@ -660,12 +692,13 @@ bool TaskFeaturePick::sameElement(
     if (sub.empty() || original == copy) {
         return true;
     }
-    // An independent copy (the original's type) keeps the original's global place, so its own
-    // Placement differs from the original's when their containers are placed differently
-    // (PR 224 review M2): both are compared without it, in their own frame. Another copy (a shape
-    // binder) in the frame of its container, which a copy in the body shares with an original
+    // An independent copy keeps the original's global place, so its own Placement differs from
+    // the original's when their containers are placed differently (PR 224 review M2, round 2):
+    // both are compared without it, in their own frame. A dependent copy (a shape binder with a
+    // support) in the frame of its container, which a copy in the body shares with an original
     // beside the body.
-    const bool placed = copy->getTypeId() != original->getTypeId();
+    auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
+    const bool placed = binder && !binder->Support.getValues().empty();
     TopoDS_Shape before = elementShape(original, sub, placed);
     TopoDS_Shape after = elementShape(copy, sub, placed);
     if (before.IsNull()) {

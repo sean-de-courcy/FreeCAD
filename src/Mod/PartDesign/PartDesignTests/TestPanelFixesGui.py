@@ -1455,37 +1455,109 @@ class TestPanelFixesGui(unittest.TestCase):
         """PR 224 review M1: as testIndependentCopyOwnsItsNamedExpressions, by label."""
         self.copyOwnsItsExpression("<<Spine label>>.Constraints.Len * 2")
 
+    def pipeOnAnOutsideEdge(self, feature, where, x, y):
+        """A Pipe in self.body (made if missing) whose spine is feature's edge with its centre of
+        mass at `where` (in feature's own frame), and whose profile is a 2 x 2 square around
+        (x, y) in the body; recomputed. The square overlaps a primitive copy, which fuses with the
+        pipe once it's in the body (ops#244 P3)."""
+        self.body = self.body if getattr(self, "body", None) else models.body(self.doc)
+        self.profile = models.sketch(
+            self.doc, "Profile", models.rectangle(x - 1, y - 1, x + 1, y + 1), self.body
+        )
+        self.doc.recompute()
+        [sub] = [
+            f"Edge{i}"
+            for i, e in enumerate(feature.Shape.Edges, 1)
+            if (e.CenterOfMass - where).Length < 1e-6
+        ]
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (feature, [sub])
+        self.doc.recompute()
+        return pipe
+
+    def assertCopiedEdgeAt(self, pipe, globalCentre):
+        """The pipe's spine is a copy in its body whose edge has its centre at globalCentre, and
+        the pipe sweeps the 2 x 2 profile 10 along it: V = 40."""
+        copy = pipe.Spine[0]
+        self.assertTrue(self.body.hasObject(copy))
+        edge = copy.getSubObject(pipe.Spine[1][0])
+        centre = self.body.getGlobalPlacement().multVec(edge.CenterOfMass)
+        self.assertLess((centre - globalCentre).Length, 1e-6, centre)
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+
     def testIndependentCopyInAPlacedBody(self):
         """PR 224 review M2 (ops#241): testPipeDependentCopyInAPlacedBody's model (the spine a
         vertical edge of a box in another body moved by (5, 0, 0)) with Make independent copy.
         The copy keeps the box's global place: its edge is the picked one, at x = 5 (the copy
-        kept the box's Placement in its own body, at the origin: the edge at x = 0, silently).
-        The pipe sweeps the 2 x 2 profile 10 up: V = 40."""
+        kept the box's Placement in its own body, at the origin: the edge at x = 0, silently)."""
         other = models.body(self.doc)
         other.Placement.Base = V(5, 0, 0)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
         box.Width = 20
-        self.body = models.body(self.doc)
-        self.profile = models.sketch(self.doc, "Profile", models.rectangle(4, -1, 6, 1), self.body)
         self.doc.recompute()
-        [sub] = [
-            f"Edge{i}"
-            for i, e in enumerate(box.Shape.Edges, 1)
-            if (e.CenterOfMass - V(0, 0, 5)).Length < 1e-6
-        ]
-        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
-        pipe.Profile = self.profile
-        pipe.Spine = (box, [sub])
-        self.doc.recompute()
+        pipe = self.pipeOnAnOutsideEdge(box, V(0, 0, 5), 5, 0)
         copy = self.copySpineIn(pipe)
-        self.assertIsNot(copy, box)
         self.assertTrue(copy.Placement.isSame(other.Placement, 1e-9), copy.Placement)
-        edge = copy.getSubObject(pipe.Spine[1][0])
-        self.assertLess((edge.CenterOfMass - V(5, 0, 5)).Length, 1e-6, edge.CenterOfMass)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+
+    def testIndependentCopyWithAPlacementExpression(self):
+        """PR 224 round 2 (verification 1): as testIndependentCopyInAPlacedBody, the box placed by
+        the expression Placement.Base.x = 1 mm: globally at x = 6. The copy's Placement is
+        converted to its body, so the expression isn't made again on it (its recompute moved the
+        copy back to x = 1, silently): its edge is at x = 6."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(5, 0, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        box.setExpression(".Placement.Base.x", "1 mm")
         self.doc.recompute()
-        self.assertTrue(pipe.isValid(), pipe.getStatusString())
-        self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+        pipe = self.pipeOnAnOutsideEdge(box, V(1, 0, 5), 6, 0)
+        copy = self.copySpineIn(pipe)
+        self.assertEqual(expressions(copy), [])
+        self.assertCopiedEdgeAt(pipe, V(6, 0, 5))
+
+    def testIndependentCopyOfAPadInAPlacedBody(self):
+        """PR 224 round 2 (verification 2, decision 40): the spine is a vertical edge of a pad in
+        another body moved by (5, 0, 0). Its independent copy is a shape binder, which kept the
+        pad's Placement in its own body: the edge at x = 0. It lands where picked, x = 5."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(5, 0, 0)
+        sketch = models.sketch(self.doc, "Base", models.rectangle(0, 0, 20, 20), other)
+        pad = other.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        pipe = self.pipeOnAnOutsideEdge(pad, V(0, 0, 5), 5, 0)
+        copy = self.copySpineIn(pipe)
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+
+    def testIndependentCopyIntoAPlacedBody(self):
+        """PR 224 round 2 (verification 4): the box's body is at the origin, the pipe's body
+        turned 90 degrees about Z and moved by (3, 0, 0). The copy's Placement is the box's in the
+        pipe's body's frame (its inverse applied): its edge is globally where picked, (20, 0, 5)."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        self.body = models.body(self.doc)
+        self.body.Placement = App.Placement(V(3, 0, 0), App.Rotation(Z, 90))
+        self.doc.recompute()
+        pipe = self.pipeOnAnOutsideEdge(box, V(20, 0, 5), 0, -17)
+        copy = self.copySpineIn(pipe)
+        self.assertTrue(
+            (self.body.Placement * copy.Placement).isSame(box.Placement, 1e-9), copy.Placement
+        )
+        copy = pipe.Spine[0]
+        edge = copy.getSubObject(pipe.Spine[1][0])
+        centre = self.body.getGlobalPlacement().multVec(edge.CenterOfMass)
+        self.assertLess((centre - V(20, 0, 5)).Length, 1e-6, centre)
 
     def testNewSketchOnACopiedBoxFromAPlacedBody(self):
         """PR 224 review M2: New Sketch on the end face x = 20 of a 20 x 10 x 10 box in another
