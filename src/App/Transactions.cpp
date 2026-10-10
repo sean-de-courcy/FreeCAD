@@ -312,6 +312,27 @@ void Transaction::apply(Document& Doc, bool forward)
             for (auto& info : index) {
                 info.second->applyChnPass(const_cast<TransactionalObject*>(info.first), pass);
             }
+            if (pass != TransactionObject::ChnPass::Renames) {
+                continue;
+            }
+            // FreeCAD-CH (ops#238): the moves back from another document left by the Moves pass,
+            // their names now freed by the renames
+            for (auto& info : index) {
+                auto* to = info.second;
+                if (to->status != TransactionObject::New && to->status != TransactionObject::Chn) {
+                    continue;
+                }
+                for (auto& [key, data] : to->_PropChangeMap) {
+                    if (data.movedEarly || !data.propertyTarget || !data.target) {
+                        continue;
+                    }
+                    data.movedEarly = true;
+                    auto* pcObj = const_cast<TransactionalObject*>(info.first);
+                    applyEntry(pcObj, data.name, [&]() {
+                        to->applyMove(pcObj, data);
+                    });
+                }
+            }
         }
     }
     catch (Base::Exception& e) {
@@ -551,6 +572,22 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
                 if (!isMove(data) || data.movedEarly) {
                     continue;
                 }
+                // FreeCAD-CH (ops#238): a move back from another document goes under its own name
+                // (no temporary one); while that name is still taken at its source (to be freed by
+                // the Renames pass), the move is left for Transaction::apply, after the renames
+                if (data.target->isAttachedToDocument()) {
+                    auto* obj = freecad_cast<DocumentObject*>(data.target);
+                    auto* source = freecad_cast<DocumentObject*>(data.source);
+                    const char* current = obj ? obj->getPropertyName(data.propertyTarget) : nullptr;
+                    if (current && source && source != obj
+                        && source->getDocument() != obj->getDocument()
+                        && source->getPropertyByName(
+                            data.nameOrig.empty() ? current : data.nameOrig.c_str())) {
+                        continue;
+                    }
+                }
+                // (marked as moved: whatever is left is applied after the renames)
+                data.movedEarly = true;
                 // This means we are undoing/redoing a move operation
                 applyEntry(pcObj, data.name, [&]() {
                     applyMove(pcObj, data);
