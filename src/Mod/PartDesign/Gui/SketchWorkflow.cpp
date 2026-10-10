@@ -358,6 +358,7 @@ private:
             selectedObject,
             sub,
             independent,
+            activeBody,
             &recomputed
         );
 

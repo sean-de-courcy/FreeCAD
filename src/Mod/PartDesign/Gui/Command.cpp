@@ -1152,12 +1152,16 @@ void prepareProfileBased(
 
         if (!dlg.radioXRef->isChecked()) {
             cmd->openCommand(QT_TRANSLATE_NOOP("Command", "Make Copy"));
+            // the container it's added to: the active body, or else the active part
+            auto oBody = PartDesignGui::getBodyFor(sketches[0], false);
+            App::DocumentObject* target = oBody ? static_cast<App::DocumentObject*>(pcActiveBody)
+                                                : pcActivePart;
             auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                 sketches[0],
                 "",
-                dlg.radioIndependent->isChecked()
+                dlg.radioIndependent->isChecked(),
+                target
             );
-            auto oBody = PartDesignGui::getBodyFor(sketches[0], false);
             if (oBody) {
                 pcActiveBody->addObject(copy);
             }

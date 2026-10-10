@@ -73,6 +73,8 @@ public:
     void showExternal(bool val);
     bool isSingleSelectionEnabled() const;
 
+    /// `target` is the container the caller puts the copy into (a body or a part; null: none):
+    /// an independent copy is placed in it where the original is (PR 224 review M2).
     /// `recomputed`, when given, tells whether the copy got its own shape here (an independent
     /// sketch or additive primitive with no base): it then has the original's elements under the
     /// same index names, which `sameElement` checks
@@ -80,6 +82,7 @@ public:
         App::DocumentObject* obj,
         std::string sub,
         bool independent,
+        App::DocumentObject* target,
         bool* recomputed = nullptr
     );
 

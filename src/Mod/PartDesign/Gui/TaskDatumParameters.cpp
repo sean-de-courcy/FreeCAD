@@ -173,7 +173,8 @@ bool TaskDlgDatumParameters::accept()
                     auto* copy = PartDesignGui::TaskFeaturePick::makeCopy(
                         obj,
                         subs[index],
-                        dlg.radioIndependent->isChecked()
+                        dlg.radioIndependent->isChecked(),
+                        pcActiveBody
                     );
                     if (copy) {
                         copyObjects.push_back(copy);

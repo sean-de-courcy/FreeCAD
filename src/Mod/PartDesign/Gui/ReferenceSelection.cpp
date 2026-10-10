@@ -355,6 +355,7 @@ bool getReferencedSelection(
                     selObj,
                     subname,
                     dlg.radioIndependent->isChecked(),
+                    body,
                     &recomputed
                 );
 
@@ -365,6 +366,9 @@ bool getReferencedSelection(
                 if (recomputed && !subname.empty()) {
                     subname = Data::oldElementName(subname.c_str());
                     if (!PartDesignGui::TaskFeaturePick::sameElement(selObj, copy, subname)) {
+                        // removed before the message box, whose event loop would otherwise run
+                        // with it (PR 224 review L5); makeCopy made it in the active document
+                        copy->getDocument()->removeObject(copy->getNameInDocument());
                         QMessageBox::warning(
                             Gui::getMainWindow(),
                             QObject::tr("Copy differs"),
@@ -378,8 +382,6 @@ bool getReferencedSelection(
                                     QString::fromUtf8(selObj->Label.getValue())
                                 )
                         );
-                        // makeCopy made it in the active document
-                        copy->getDocument()->removeObject(copy->getNameInDocument());
                         selObj = nullptr;
                         return false;
                     }

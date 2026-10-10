@@ -300,7 +300,12 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
                 // build the dependent copy or reference if wanted by the user
                 if (status == otherBody || status == otherPart || status == notInBody) {
                     if (!ui->radioXRef->isChecked()) {
-                        auto copy = makeCopy(obj, "", ui->radioIndependent->isChecked());
+                        // where it's added below
+                        App::DocumentObject* target = activeBody;
+                        if (status == otherPart && !PartDesignGui::getBodyFor(obj, false)) {
+                            target = activePart;
+                        }
+                        auto copy = makeCopy(obj, "", ui->radioIndependent->isChecked(), target);
 
                         if (status == otherBody) {
                             activeBody->addObject(copy);
@@ -358,6 +363,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
     bool independent,
+    App::DocumentObject* target,
     bool* recomputed
 )
 {
@@ -386,17 +392,12 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         for (App::Property* prop : props) {
 
-            // independent copies don't have links and are not attached
-            if (independent
-                && (prop->isDerivedFrom<App::PropertyLink>()
-                    || prop->isDerivedFrom<App::PropertyLinkList>()
-                    || prop->isDerivedFrom<App::PropertyLinkSub>()
-                    || prop->isDerivedFrom<App::PropertyLinkSubList>()
-                    || (prop->getGroup() && strcmp(prop->getGroup(), "Attachment") == 0))) {
-                continue;
-            }
-            // the expressions are made again for the copy, below
-            if (prop == &obj->ExpressionEngine) {
+            // independent copies don't have links and are not attached. Every link property,
+            // also an XLink list or container (a dynamic one would be made and pasted below,
+            // PR 224 review L2); the ExpressionEngine is one too: the expressions are made again
+            // for the copy, below
+            if (prop->isDerivedFrom<App::PropertyLinkBase>()
+                || (prop->getGroup() && strcmp(prop->getGroup(), "Attachment") == 0)) {
                 continue;
             }
 
@@ -413,6 +414,11 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     prop->getDocumentation(),
                     prop->getType()
                 );
+                // with the status bits set after it was made: Hidden, ReadOnly, ... (PR 224
+                // review L3)
+                if (cprop) {
+                    cprop->setStatusValue(prop->getStatus());
+                }
             }
             if (!cprop || cprop->getTypeId() != prop->getTypeId()) {
                 continue;
@@ -426,12 +432,15 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             cprop->Paste(*prop);
         }
 
-        // FreeCAD-CH (ops#241): a primitive keeps its place. Detached (the Attachment group isn't
-        // copied), it is placed by its Placement alone: the original's, in the same container
-        // frame as the original's shape.
-        if (auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(copy)) {
-            primitive->Placement.setValue(
-                static_cast<PartDesign::FeaturePrimitive*>(obj)->Placement.getValue()
+        // FreeCAD-CH (ops#241, PR 224 review M2): the copy keeps the original's global place.
+        // Detached (the Attachment group isn't copied), it is placed by its Placement alone, which
+        // is relative to its container: the pasted one placed it in the target container's frame
+        // as the original is in its own, so a copy into a body placed otherwise moved, silently.
+        if (auto* geoCopy = freecad_cast<App::GeoFeature*>(copy)) {
+            const Base::Placement targetPlacement =
+                target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+            geoCopy->Placement.setValue(
+                targetPlacement.inverse() * App::GeoFeature::getGlobalPlacement(obj)
             );
         }
 
@@ -439,7 +448,13 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         // expressions kept the original as their owner: they read the original's values, a
         // constraint deletion on the copy didn't renumber them, and the copy's recompute threw
         // "Invalid property owner". Made again from their text, for the copy.
+        // An expression that names its own object (Sketch.Constraints.Len, <<Label>>...) prints
+        // as .Constraints.Len, so it names the copy (PR 224 review M1, tested). One on Label isn't
+        // made again: it would replace the copy's label (L4).
         for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+            if (path.getPropertyName() == "Label") {
+                continue;
+            }
             try {
                 copy->setExpression(
                     App::ObjectIdentifier::parse(copy, path.toString()),
@@ -613,11 +628,14 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 namespace
 {
 
-// The shape of an element, or null when it can't be read
-TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
+// The shape of an element, or null when it can't be read; placed by the object's Placement when
+// `placed`
+TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub, bool placed)
 {
-    const auto options = Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-        | Part::ShapeOption::Transform;
+    const Part::ShapeOptions options = placed
+        ? Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform
+        : Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink;
     try {
         return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
     }
@@ -631,10 +649,8 @@ TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub)
 }  // namespace
 
 // The properties that tell one element from another: its type, its length, area or point, and
-// its centre of mass. Both are taken in the frame of the object's container (its own Placement
-// applied, its parents' not), which a copy in the body shares with an original beside the body.
-// The same check as the Pipe panel's copy step (ops#234), which can use this one once both are
-// on integration.
+// its centre of mass, in the frames described below. The Pipe panel's copy step uses it too
+// (ops#234).
 bool TaskFeaturePick::sameElement(
     App::DocumentObject* original,
     App::DocumentObject* copy,
@@ -644,8 +660,14 @@ bool TaskFeaturePick::sameElement(
     if (sub.empty() || original == copy) {
         return true;
     }
-    TopoDS_Shape before = elementShape(original, sub);
-    TopoDS_Shape after = elementShape(copy, sub);
+    // An independent copy (the original's type) keeps the original's global place, so its own
+    // Placement differs from the original's when their containers are placed differently
+    // (PR 224 review M2): both are compared without it, in their own frame. Another copy (a shape
+    // binder) in the frame of its container, which a copy in the body shares with an original
+    // beside the body.
+    const bool placed = copy->getTypeId() != original->getTypeId();
+    TopoDS_Shape before = elementShape(original, sub, placed);
+    TopoDS_Shape after = elementShape(copy, sub, placed);
     if (before.IsNull()) {
         // the reference is already broken on the original; on a copy that has the element it
         // would name another one, silently
