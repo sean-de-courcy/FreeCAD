@@ -760,9 +760,22 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
     }
     catch (...) {
         // FreeCAD-CH (ops#238): a move whose handler threw is completed: the property is on
-        // newTarget under the temporary name, to be named and restored by the next passes
+        // newTarget under the temporary name, to be named and restored by the next passes. One
+        // that couldn't leave its object (removal failed) is named back, and its copy on newTarget
+        // removed (after the rename, which a move entry would ignore)
         if (obj->getPropertyName(data.propertyTarget)) {
-            obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+            try {
+                obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+            }
+            catch (...) {
+            }
+            if (newTarget->getDynamicPropertyByName(tmp.c_str())) {
+                try {
+                    newTarget->removeDynamicProperty(tmp.c_str());
+                }
+                catch (...) {
+                }
+            }
         }
         else {
             data.restored = newTarget->getDynamicPropertyByName(tmp.c_str());
