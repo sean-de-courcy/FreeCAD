@@ -1577,10 +1577,17 @@ class TestPanelFixesGui(unittest.TestCase):
         picked) was lost, loudly. The copy is a shape binder of Box's shape (fused with Base), and
         stays so: the sketch is on the picked plane, valid, without a warning."""
         box, _ = self.primitivesOnABase()
+        before = len(reportText() or "")
         sketch = self.newSketchOnCopiedFace(box)
         copy = self.doc.getObject("CopyBox")
         self.assertIsNotNone(copy)
         self.assertIndependentPrimitiveCopy(copy, box)
+        # PR 261 review: said, since the user may expect the box alone
+        self.assertIn(
+            "'Box' is on 'Base': its copy 'CopyBox' is the body's solid at 'Box', 'Base' included",
+            (reportText() or "")[before:],
+        )
+        self.assertNotIn("isn't up to date", (reportText() or "")[before:])
         self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
         self.doc.recompute()
         self.assertTrue(copy.isValid(), copy.getStatusString())
@@ -1665,6 +1672,104 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 10, places=6)
         self.assertTrue(sketch.isValid(), sketch.getStatusString())
         self.assertAlmostEqual(sketch.getGlobalPlacement().Base.x, 10, places=6)
+
+    def testNewSketchOnACopiedBoxOnAStaleBaseWarns(self):
+        """PR 261 review L1: primitivesOnABase, with Base lengthened to 30 and not recomputed. Box
+        itself is unchanged, but its recompute would fuse it with the longer base: New Sketch on
+        Box's top face (z = 20), Make independent copy, says that Box isn't up to date (only Box's
+        own properties were checked)."""
+        box, _ = self.primitivesOnABase()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 20) < 1e-6)
+        box.BaseFeature.Length = 30
+        self.assertNotIn("Touched", box.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(box, top)
+        copy = self.doc.getObject("CopyBox")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
+        self.assertIn(
+            "'Box' isn't up to date: its copy 'CopyBox' takes its shape as last computed",
+            (reportText() or "")[before:],
+        )
+        self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 15, places=6)
+
+    def testNewSketchOnACopiedPadWithAStaleSketchWarns(self):
+        """PR 261 review L1 and nit: a 10 mm pad of a square sketch in another body; the sketch
+        widened to 20 and not recomputed. New Sketch on the pad's top face (z = 10), Make
+        independent copy (a shape binder of that face), says that the pad isn't up to date: the
+        warning isn't the primitives' alone, and it reads what the pad is made from."""
+        other = models.body(self.doc)
+        square = models.sketch(self.doc, "Square", models.rectangle(0, 0, 10, 10), other)
+        pad = models.pad(other, square, 10)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        top = self.boxElement(pad, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        models.moveRectangle(square, 0, 0, 20, 10)
+        self.assertNotIn("Touched", pad.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(pad, top)
+        copy = self.doc.getObject("CopyPad")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
+        self.assertIn(
+            "'Pad' isn't up to date: its copy 'CopyPad' takes its shape as last computed",
+            (reportText() or "")[before:],
+        )
+        self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 10, places=6)
+
+    def testNewSketchOnACopiedTouchedBoxDoesntWarn(self):
+        """PR 261 review L3: a box in another body only touched (no property changed, no
+        recompute enforced: touch("")): a recompute wouldn't execute it, so New Sketch on its top
+        face, Make independent copy, says nothing about it being out of date. A box without a
+        base: no note about one either."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        box.touch("")
+        self.assertIn("Touched", box.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(box, top)
+        copy = self.doc.getObject("CopyBox")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
+        self.assertNotIn("isn't up to date", (reportText() or "")[before:])
+        self.assertNotIn("'Box' is on", (reportText() or "")[before:])
+
+    def testNewSketchOnACopiedBoxAcrossPlacedParts(self):
+        """PR 261 review L4: the box's body sits in an App::Part turned 90 degrees about Z and
+        moved by (5, 0, 0), the body itself moved by (0, 2, 0); the sketch's body sits in another
+        App::Part turned 30 degrees about X and moved by (0, 0, 7), the body moved by (1, 0, 0).
+        New Sketch on the box's end face x = 20 (box coordinates), Make independent copy: the
+        copy is globally where the box is, and the sketch on the face's plane, globally."""
+        source = self.doc.addObject("App::Part", "SourcePart")
+        source.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        other = models.body(self.doc)
+        source.addObject(other)
+        other.Placement.Base = V(0, 2, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        target = self.doc.addObject("App::Part", "TargetPart")
+        target.Placement = App.Placement(V(0, 0, 7), App.Rotation(V(1, 0, 0), 30))
+        self.body = models.body(self.doc)
+        target.addObject(self.body)
+        self.body.Placement.Base = V(1, 0, 0)
+        self.doc.recompute()
+        end = self.boxElement(box, "Face", lambda p: abs(p.x - 20) < 1e-6)
+        sketch = self.newSketchOnCopiedFace(box, end)
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertIndependentPrimitiveCopy(copy, box)
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (end,))])
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        # the box's end face, globally: through the point (20, 5, 5) of the box, along its X
+        boxGlobal = box.getGlobalPlacement()
+        point = boxGlobal.multVec(V(20, 5, 5))
+        normal = boxGlobal.Rotation.multVec(V(1, 0, 0))
+        sketchGlobal = sketch.getGlobalPlacement()
+        self.assertAlmostEqual(abs(sketchGlobal.Rotation.multVec(Z).dot(normal)), 1, places=6)
+        self.assertAlmostEqual((point - sketchGlobal.Base).dot(normal), 0, places=6)
 
     def revolutionBesideABox(self):
         """A 10 mm box at the origin in another body, and in this one the Ring profile (x 1..3,

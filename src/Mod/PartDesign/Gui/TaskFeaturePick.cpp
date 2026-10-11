@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <ranges>
 
 #include <fmt/format.h>
@@ -450,9 +451,50 @@ namespace
 bool isPrimitiveCopy(const App::DocumentObject* original, const App::DocumentObject* copy)
 {
     auto* binder = freecad_cast<const PartDesign::ShapeBinder*>(copy);
-    return binder && !binder->Support.getValue()
+    return binder && binder->Support.getValues().empty() && !binder->TraceSupport.getValue()
         && original->isDerivedFrom<PartDesign::FeaturePrimitive>();
 }
+
+// Whether the object's recompute would change its shape: it must execute, or something it depends
+// on was changed (whose recompute then enforces its own). Touched alone (a recompute that wouldn't
+// execute it) doesn't count for the object itself (PR 261 review L1, L3).
+bool isStale(const App::DocumentObject* obj)
+{
+    if (obj->mustRecompute()) {
+        return true;
+    }
+    const std::vector<App::DocumentObject*> deps = obj->getOutListRecursive();
+    return std::ranges::any_of(deps, [](const App::DocumentObject* dep) {
+        return dep->isTouched() || dep->mustRecompute();
+    });
+}
+
+// A copy that fails after it was added is removed again (PR 261 review L1): the callers' cleanup
+// only knows the copies returned to them
+class RemoveOnThrow
+{
+public:
+    explicit RemoveOnThrow(App::DocumentObject*& copy)
+        : copy(copy)
+    {}
+    RemoveOnThrow(const RemoveOnThrow&) = delete;
+    RemoveOnThrow& operator=(const RemoveOnThrow&) = delete;
+    ~RemoveOnThrow()
+    {
+        if (std::uncaught_exceptions() <= exceptions || !copy || !copy->isAttachedToDocument()) {
+            return;
+        }
+        try {
+            copy->getDocument()->removeObject(copy->getNameInDocument());
+        }
+        catch (...) {  // NOLINT(bugprone-empty-catch): already unwinding
+        }
+    }
+
+private:
+    App::DocumentObject*& copy;
+    const int exceptions = std::uncaught_exceptions();
+};
 
 }  // namespace
 
@@ -485,6 +527,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     if (!doc) {
         return copy;
     }
+    const RemoveOnThrow removeOnThrow(copy);
     if (!independent && obj->getDocument() != doc) {
         return refuse(QObject::tr(
                           "'%1' is in another document, which a dependent copy can't link. Make "
@@ -787,6 +830,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         else if (obj->is<PartDesign::ShapeBinder>() || obj->isDerivedFrom<Part::Feature>()) {
 
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
+            copy = shapeBinderObj;
             if (!independent) {
                 // FreeCAD-CH (ops#244, decision 40): where the original is. Without TraceSupport
                 // the binder takes the support's place in its own container, so across containers
@@ -798,11 +842,11 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             else {
                 shapeProp = &shapeBinderObj->Shape;
             }
-            copy = shapeBinderObj;
         }
         else if (obj->isDerivedFrom<App::Plane>() || obj->isDerivedFrom<App::Line>()) {
 
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
+            copy = shapeBinderObj;
             if (!independent) {
                 shapeBinderObj->Support.setValue(obj, entity.c_str());
                 shapeBinderObj->TraceSupport.setValue(true);  // as above (ops#244)
@@ -822,7 +866,6 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     targetPlacement.inverse() * geoObj->globalPlacement()
                 );
             }
-            copy = shapeBinderObj;
         }
 
         if (independent && shapeProp) {
@@ -835,17 +878,6 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                 whole ? featureObj->Shape.getValue()
                       : featureObj->Shape.getShape().getSubShape(entity.c_str())
             );
-            // The copy takes the shape as last computed, the one shown. An original changed and
-            // not recomputed would give its new shape on its recompute, which the copy never
-            // takes: said, not silent (a primitive copy recomputed itself, which a check of the
-            // picked element then stopped)
-            if (obj->isTouched() || obj->mustExecute()) {
-                Base::Console().warning(
-                    "'%s' isn't up to date: its copy '%s' takes its shape as last computed\n",
-                    obj->Label.getValue(),
-                    copy->Label.getValue()
-                );
-            }
             // FreeCAD-CH (PR 224 round 2, decision 40): where the original is, as for the copies
             // above. The binder took the shape's placement, relative to the original's container:
             // a copy into a container placed otherwise moved, silently. (A dependent binder traces
@@ -858,6 +890,36 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             binder->Placement.setValue(
                 targetPlacement.inverse() * container * binder->Placement.getValue()
             );
+            // Said once the callers keep the copy: they remove one whose picked element differs
+            // (copiedElement, PR 261 review)
+            if (sub.empty() || copiedElement(obj, copy, sub)) {
+                // The copy takes the shape as last computed, the one shown. An original changed
+                // and not recomputed (or something it is made from) would give its new shape on
+                // its recompute, which the copy never takes: said, not silent (a primitive copy
+                // recomputed itself, which a check of the picked element then stopped)
+                if (isStale(obj)) {
+                    Base::Console().warning(
+                        "'%s' isn't up to date: its copy '%s' takes its shape as last computed\n",
+                        obj->Label.getValue(),
+                        copy->Label.getValue()
+                    );
+                }
+                // A primitive's shape is the body's solid at that feature, its base included
+                // (decided on PR 261's review, as for the copy of a pad)
+                auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(obj);
+                App::DocumentObject* base = primitive ? primitive->BaseFeature.getValue() : nullptr;
+                if (whole && base) {
+                    Base::Console().warning(
+                        "'%s' is on '%s': its copy '%s' is the body's solid at '%s', '%s' "
+                        "included\n",
+                        obj->Label.getValue(),
+                        base->Label.getValue(),
+                        copy->Label.getValue(),
+                        obj->Label.getValue(),
+                        base->Label.getValue()
+                    );
+                }
+            }
         }
     }
 
