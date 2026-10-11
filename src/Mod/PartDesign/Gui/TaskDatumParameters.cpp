@@ -41,6 +41,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Mod/Part/App/DatumFeature.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include <ui_DlgReference.h>
 
@@ -208,17 +209,16 @@ bool TaskDlgDatumParameters::accept()
                         QMessageBox::warning(
                             Gui::getMainWindow(),
                             tr("Copy differs"),
-                            tr("%1 of '%2' is another element on its copy, whose shape "
-                               "differs (or the element can't be read). Recompute '%2' and "
-                               "select the element again, or make a cross-reference instead.")
-                                .arg(
-                                    QString::fromStdString(
-                                        Data::oldElementName(subs[index].c_str())
-                                    ),
-                                    QString::fromUtf8(obj->Label.getValue())
-                                )
+                            PartDesignGui::TaskFeaturePick::copyDiffers(obj, subs[index])
                         );
                         return false;
+                    }
+                    // FreeCAD-CH (ops#244 L7): a dependent copy (a shape binder) has no shape
+                    // until it computes, and the attacher reads it on OK ("No planar face": the
+                    // panel stayed). Placed again once it's in the body (its Group change).
+                    if (auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
+                        binder && binder->TraceSupport.getValue()) {
+                        binder->recomputeFeature();
                     }
                     copyObjects.push_back(copy);
                     copies.push_back(copyObjects.back());

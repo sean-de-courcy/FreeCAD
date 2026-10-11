@@ -778,6 +778,14 @@ bool TaskPipeParameters::accept()
         };
         if (std::ranges::any_of(copies, touched)) {
             Gui::cmdAppDocument(pipe, "recompute()");
+            // after the commit: said, not undone (PR 244 verification 2, L3)
+            if (!pipe->isValid()) {
+                Base::Console().warning(
+                    "%s: fails once its copies are in the body: %s\n",
+                    pipe->Label.getValue(),
+                    pipe->getStatusString()
+                );
+            }
         }
     }
     catch (const Base::Exception& e) {

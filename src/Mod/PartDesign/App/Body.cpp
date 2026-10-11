@@ -477,8 +477,13 @@ void Body::insertObject(App::DocumentObject* feature, App::DocumentObject* targe
         );
     }
 
-    // ensure that all origin links are ok
-    relinkToOrigin(feature);
+    // ensure that all origin links are ok. Not a shape binder's that traces its support
+    // (FreeCAD-CH ops#244): it binds another container's origin feature where that one is, so
+    // the relink to this body's own made it bind another plane or axis, silently
+    auto* binder = freecad_cast<ShapeBinder*>(feature);
+    if (!binder || !binder->TraceSupport.getValue()) {
+        relinkToOrigin(feature);
+    }
 
     std::vector<App::DocumentObject*> model = Group.getValues();
     std::vector<App::DocumentObject*>::iterator insertInto;

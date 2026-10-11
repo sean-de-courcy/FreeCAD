@@ -31,6 +31,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
 
 
 #include <cmath>
@@ -439,6 +440,21 @@ void ShapeBinder::onSettingDocument()
 
 void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
 {
+    // FreeCAD-CH (ops#244, PR 244 verification 2, L2): nothing thrown out of a signal slot; a
+    // check that fails leaves the binder to its next recompute
+    try {
+        followChangedObject(Obj, Prop);
+    }
+    catch (const Base::Exception&) {
+        enforceRecompute();
+    }
+    catch (const Standard_Failure&) {
+        enforceRecompute();
+    }
+}
+
+void ShapeBinder::followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
+{
     App::Document* doc = getDocument();
     if (!doc || doc->testStatus(App::Document::Restoring)) {
         return;
@@ -460,9 +476,14 @@ void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::P
         Base::Placement sourceCS;
         Base::Placement targetCS;
         if (!traced) {
-            // not computed since it was made or opened
+            // not computed since it was made or opened: its frames are taken now when it is
+            // where it should be (PR 244 verification 2, L1: the shape was built again on every
+            // Group change after a file was opened)
             if (hasPlacementChanged()) {
                 enforceRecompute();
+            }
+            else {
+                traced = containerFrames(tracedSourceCS, tracedTargetCS);
             }
         }
         else if (containerFrames(sourceCS, targetCS)

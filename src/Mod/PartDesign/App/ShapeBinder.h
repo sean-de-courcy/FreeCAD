@@ -87,6 +87,7 @@ protected:
 
 private:
     void slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
+    void followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
     void onSettingDocument() override;
 
     using Connection = fastsignals::connection;

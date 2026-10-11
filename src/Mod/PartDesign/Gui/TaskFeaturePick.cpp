@@ -28,15 +28,20 @@
 #include <QListWidgetItem>
 #include <QTimer>
 
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <TopExp.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <ranges>
 
 #include <fmt/format.h>
@@ -383,6 +388,28 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
     return result;
 }
 
+namespace
+{
+
+// Whether two placements are the same within round-off: the position within
+// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
+// vector part of their difference, which stays exact near zero; Rotation::isSame's tolerance on
+// the quaternions' scalar product let about 0.036 degrees through: PR 227 verification)
+bool samePlace(const Base::Placement& a, const Base::Placement& b)
+{
+    if (!a.getPosition().IsEqual(b.getPosition(), Precision::Confusion())) {
+        return false;
+    }
+    double x = 0;
+    double y = 0;
+    double z = 0;
+    double w = 0;
+    (a.getRotation().inverse() * b.getRotation()).getValue(x, y, z, w);
+    return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
+}
+
+}  // namespace
+
 App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
@@ -403,13 +430,41 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     if (!obj) {
         return copy;
     }
+    const QString label = QString::fromUtf8(obj->Label.getValue());
+    // FreeCAD-CH (ops#244 P4): the copy goes into its target's document. It was made in the
+    // active document, which needn't be the target's (the target's addObject then failed). A
+    // dependent copy links the original, and these links don't reach another document.
+    App::Document* doc =
+        target ? target->getDocument() : App::GetApplication().getActiveDocument();
+    if (!doc) {
+        return copy;
+    }
+    if (!independent && obj->getDocument() != doc) {
+        return refuse(QObject::tr(
+                          "'%1' is in another document, which a dependent copy can't link. Make "
+                          "an independent copy instead."
+        )
+                          .arg(label));
+    }
+    // FreeCAD-CH (ops#244 L4): a sketch's axes and root point aren't in its shape, so a shape
+    // binder of one bound nothing (the pick became "V_Axis1", which names no element). An
+    // independent copy is a sketch, which has them.
+    if (!independent && obj->isDerivedFrom<Sketcher::SketchObject>()) {
+        const std::string element = Data::oldElementName(sub.c_str());
+        if (element == "V_Axis" || element == "H_Axis" || element == "RootPoint") {
+            return refuse(QObject::tr(
+                              "%1 of '%2' isn't part of the sketch's shape, so a dependent copy "
+                              "can't hold it. Make an independent copy instead."
+            )
+                              .arg(QString::fromStdString(element), label));
+        }
+    }
     if (independent
         && (obj->isDerivedFrom<Sketcher::SketchObject>()
             || obj->isDerivedFrom<PartDesign::FeaturePrimitive>())) {
 
         // we do know that the created instance is a document object, as obj is one. But we do not
         // know which exact type
-        auto* doc = App::GetApplication().getActiveDocument();
         const auto name = fmt::format("Copy{}", obj->getNameInDocument());
         copy = doc->addObject(obj->getTypeId().getName(), name.c_str());
 
@@ -589,7 +644,6 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         // TODO Replace it with commands (2015-09-11, Fat-Zer)
         if (obj->isDerivedFrom<Part::Datum>()) {
-            const QString label = QString::fromUtf8(obj->Label.getValue());
             // we need to reference the individual datums and make again datums. This is important
             // as datum adjust their size dependent on the part size, hence simply copying the shape
             // is not enough
@@ -617,18 +671,18 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     * static_cast<App::GeoFeature*>(obj)->Placement.getValue().inverse();
                 const Base::Placement targetPlacement =
                     target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
-                if (!container.isSame(targetPlacement, Precision::Confusion())) {
+                if (!samePlace(container, targetPlacement)) {
                     return refuse(
                         QObject::tr(
-                            "A dependent copy of '%1' would not be where '%1' is: its body is "
-                            "placed differently from this one. Make an independent copy instead."
+                            "A dependent copy of '%1' would not be where '%1' is: the container "
+                            "of '%1' is placed differently from this one. Make an independent "
+                            "copy instead."
                         )
                             .arg(label)
                     );
                 }
             }
 
-            auto* doc = App::GetApplication().getActiveDocument();
             // FreeCAD-CH (ops#244 P6): a datum of the original's type. Part::Datum is abstract:
             // addObject<Part::Datum> made nothing, and the null was dereferenced below.
             copy = doc->addObject(obj->getTypeId().getName(), name.c_str());
@@ -663,7 +717,6 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         }
         else if (obj->is<PartDesign::ShapeBinder>() || obj->isDerivedFrom<Part::Feature>()) {
 
-            auto* doc = App::GetApplication().getActiveDocument();
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
             if (!independent) {
                 // FreeCAD-CH (ops#244, decision 40): where the original is. Without TraceSupport
@@ -680,7 +733,6 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         }
         else if (obj->isDerivedFrom<App::Plane>() || obj->isDerivedFrom<App::Line>()) {
 
-            auto* doc = App::GetApplication().getActiveDocument();
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
             if (!independent) {
                 shapeBinderObj->Support.setValue(obj, entity.c_str());
@@ -810,8 +862,73 @@ bool TaskFeaturePick::sameElement(
         return false;  // not shown to be the same
     }
     const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
-    return std::abs(sizeAfter - sizeBefore) <= tolerance
-        && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
+    if (std::abs(sizeAfter - sizeBefore) > tolerance
+        || centerAfter.Distance(centerBefore) > Precision::Confusion() * 10) {
+        return false;
+    }
+    // FreeCAD-CH (ops#244 L5): where it lies too. Two elements of the same size and centre can lie
+    // otherwise: the two diagonals of a square, two equal faces turned about their centre. Their
+    // vertices (as a set: an edge may run the other way) and their bounding boxes (a closed edge
+    // has a single vertex) tell them apart.
+    auto vertices = [](const TopoDS_Shape& shape) {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(shape, TopAbs_VERTEX, map);
+        std::vector<gp_Pnt> points;
+        for (int i = 1; i <= map.Extent(); ++i) {
+            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(map(i))));
+        }
+        return points;
+    };
+    const double near = Precision::Confusion() * 10;
+    try {
+        const std::vector<gp_Pnt> pointsBefore = vertices(before);
+        const std::vector<gp_Pnt> pointsAfter = vertices(after);
+        if (pointsBefore.size() != pointsAfter.size()) {
+            return false;
+        }
+        for (const gp_Pnt& point : pointsBefore) {
+            if (std::ranges::none_of(pointsAfter, [&](const gp_Pnt& other) {
+                    return other.Distance(point) <= near;
+                })) {
+                return false;
+            }
+        }
+        Bnd_Box boxBefore;
+        Bnd_Box boxAfter;
+        BRepBndLib::AddOptimal(before, boxBefore, false, false);
+        BRepBndLib::AddOptimal(after, boxAfter, false, false);
+        if (boxBefore.IsVoid() != boxAfter.IsVoid()) {
+            return false;
+        }
+        if (!boxBefore.IsVoid()) {
+            return boxBefore.CornerMin().Distance(boxAfter.CornerMin()) <= near
+                && boxBefore.CornerMax().Distance(boxAfter.CornerMax()) <= near;
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;  // not shown to be the same
+    }
+    return true;
+}
+
+QString TaskFeaturePick::copyDiffers(App::DocumentObject* original, const std::string& sub)
+{
+    const QString label = QString::fromUtf8(original->Label.getValue());
+    const std::string index = Data::oldElementName(sub.c_str());
+    // a pick that names no element (PR 227 review L3: the message showed an empty name)
+    if (index.empty()) {
+        return QObject::tr(
+                   "The selection '%1' of '%2' names no element. Select the element again, or "
+                   "make a cross-reference instead."
+        )
+            .arg(QString::fromStdString(sub), label);
+    }
+    return QObject::tr(
+               "%1 of '%2' is another element on its copy, whose shape differs (or the element "
+               "can't be read). Recompute '%2' and select the element again, or make a "
+               "cross-reference instead."
+    )
+        .arg(QString::fromStdString(index), label);
 }
 
 std::optional<std::string> TaskFeaturePick::copiedElement(
