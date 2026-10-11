@@ -2121,24 +2121,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
         self.close(ok=False)
 
-    def testPadOfASketchCopiedIntoARotatedBody(self):
-        """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
-        (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
-        body turned 30 degrees about X. fixSketchSupport threw ("Sketch plane cannot be
-        migrated"), and the dialog's worker called front() on the empty list. The copy is
-        attached to the body's XY plane with an offset that keeps it where the sketch is
-        (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
-        is 10 x 10 x 10 on it."""
-        sketch = models.sketch(
-            self.doc,
-            "Free",
-            models.rectangle(0, 0, 10, 10),
-            None,
-            placement=App.Placement(V(2, 3, 5), App.Rotation(Z, 15)),
-        )
-        self.body = models.body(self.doc)
-        self.body.Placement.Rotation = App.Rotation(V(1, 0, 0), 30)
-        self.doc.recompute()
+    def padOfAFreeSketch(self, sketch):
+        """Pad with nothing selected, and in its pick dialog `sketch` (outside any body), Make
+        independent copy, into self.body; the pad panel closed with OK. Returns the pad and the
+        copy."""
         Gui.activateWorkbench("PartDesignWorkbench")
         App.setActiveDocument(self.doc.Name)
         Gui.setActiveDocument(self.doc.Name)
@@ -2175,7 +2161,52 @@ class TestPanelFixesGui(unittest.TestCase):
         copy = pad.Profile[0]
         self.assertIsNot(copy, sketch)
         self.assertTrue(self.body.hasObject(copy))
+        return pad, copy
+
+    def testPadOfASketchCopiedIntoARotatedBody(self):
+        """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
+        (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
+        body turned 30 degrees about X. fixSketchSupport threw ("Sketch plane cannot be
+        migrated"), and the dialog's worker called front() on the empty list. The copy is
+        attached to the body's XY plane with an offset that keeps it where the sketch is
+        (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
+        is 10 x 10 x 10 on it."""
+        sketch = models.sketch(
+            self.doc,
+            "Free",
+            models.rectangle(0, 0, 10, 10),
+            None,
+            placement=App.Placement(V(2, 3, 5), App.Rotation(Z, 15)),
+        )
+        self.body = models.body(self.doc)
+        self.body.Placement.Rotation = App.Rotation(V(1, 0, 0), 30)
+        self.doc.recompute()
+        pad, copy = self.padOfAFreeSketch(sketch)
         self.assertEqual(copy.MapMode, "FlatFace")
+        self.doc.recompute()
+        self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
+
+    def testPadOfAnXZSketchCopiedIntoABody(self):
+        """ops#244 L6: a 10 x 10 square sketch outside any body on XZ, moved by (2, 3, 5) and
+        turned in its plane, Pad through the pick dialog, Make independent copy: the copy is
+        attached to the body's XZ plane (it was XY, with a 90 degree offset), where the sketch
+        is."""
+        sketch = models.sketch(
+            self.doc,
+            "Free",
+            models.rectangle(0, 0, 10, 10),
+            None,
+            placement=App.Placement(V(2, 3, 5), XZ.Rotation * App.Rotation(Z, 15)),
+        )
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        pad, copy = self.padOfAFreeSketch(sketch)
+        self.assertEqual(copy.MapMode, "FlatFace")
+        [(plane, _)] = copy.AttachmentSupport
+        self.assertEqual(plane.Role, "XZ_Plane")
+        self.assertTrue(self.body.Origin.hasObject(plane))
         self.doc.recompute()
         self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
         self.assertTrue(pad.isValid(), pad.getStatusString())

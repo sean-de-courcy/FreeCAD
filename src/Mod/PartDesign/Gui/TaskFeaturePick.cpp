@@ -292,13 +292,28 @@ namespace
 // Placement (where the original is, decision 40) as the offset. fixSketchSupport threw for a sketch
 // plane not parallel to one of the base planes ("Sketch plane cannot be migrated", in a rotated
 // body), and dropped the sketch's offset and rotation in its plane.
+// The base plane parallel to the sketch, facing the same way, if there is one (ops#244 L6: an XZ
+// sketch read "XY + 90 degrees"); else XY.
 void attachInPlace(Sketcher::SketchObject* sketch, PartDesign::Body* body)
 {
     App::Origin* origin = body->getOrigin();
-    App::Plane* plane = origin->getXY();
-    const Base::Placement planePlacement =
-        origin->Placement.getValue() * plane->Placement.getValue();
     const Base::Placement placement = sketch->Placement.getValue();
+    const Base::Vector3d normal = placement.getRotation().multVec(Base::Vector3d(0, 0, 1));
+    App::Plane* plane = origin->getXY();
+    Base::Placement planePlacement = origin->Placement.getValue() * plane->Placement.getValue();
+    for (App::Plane* candidate : origin->planes()) {
+        const Base::Placement candidatePlacement =
+            origin->Placement.getValue() * candidate->Placement.getValue();
+        const Base::Vector3d candidateNormal =
+            candidatePlacement.getRotation().multVec(Base::Vector3d(0, 0, 1));
+        // the sine of the angle between them, exact near zero
+        if (normal.Dot(candidateNormal) > 0
+            && normal.Cross(candidateNormal).Length() <= Precision::Angular()) {
+            plane = candidate;
+            planePlacement = candidatePlacement;
+            break;
+        }
+    }
     sketch->AttachmentSupport.setValue(plane, "");
     sketch->MapReversed.setValue(false);
     sketch->AttachmentOffset.setValue(planePlacement.inverse() * placement);
@@ -311,6 +326,17 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
 {
     int index = 0;
     std::vector<App::DocumentObject*> result;
+    // the copies made so far: removed again if a later one fails (ops#244 L6), as they were added
+    // outside any transaction
+    std::vector<App::DocumentObject*> made;
+    auto removeMade = [&]() {
+        for (App::DocumentObject* copy : made) {
+            if (copy->isAttachedToDocument()) {
+                copy->getDocument()->removeObject(copy->getNameInDocument());
+            }
+        }
+        result.clear();
+    };
     try {
         auto activeBody = PartDesignGui::getBody(false);
         if (!activeBody) {
@@ -336,7 +362,22 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
                         if (status == otherPart && !PartDesignGui::getBodyFor(obj, false)) {
                             target = activePart;
                         }
-                        auto copy = makeCopy(obj, "", ui->radioIndependent->isChecked(), target);
+                        QString refusal;
+                        auto copy = makeCopy(
+                            obj,
+                            "",
+                            ui->radioIndependent->isChecked(),
+                            target,
+                            &refusal
+                        );
+                        if (!copy) {
+                            throw Base::RuntimeError(
+                                refusal.isEmpty()
+                                    ? fmt::format("'{}' can't be copied", obj->Label.getValue())
+                                    : refusal.toStdString()
+                            );
+                        }
+                        made.push_back(copy);
 
                         if (status == otherBody) {
                             activeBody->addObject(copy);
@@ -374,15 +415,18 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
     }
     catch (const Base::Exception& e) {
         e.reportException();
+        removeMade();
     }
     catch (Py::Exception& e) {
         // reported by code analyzers
         e.clear();
         Base::Console().warning("Unexpected PyCXX exception\n");
+        removeMade();
     }
     catch (const boost::exception&) {
         // reported by code analyzers
         Base::Console().warning("Unexpected boost exception\n");
+        removeMade();
     }
 
     return result;
