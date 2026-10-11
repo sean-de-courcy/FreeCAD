@@ -474,6 +474,19 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     newVals.reserve(vals.size() + svals.size());
     newcVals.reserve(cvals.size() + scvals.size());
 
+    // FreeCAD-CH (ops#283): the geometry is in this sketch's own frame, so the flip mirrors about
+    // its own axes there: x flips about the Y axis, y about the X axis. Before, it mirrored about
+    // this sketch's position and axes in the global frame, which shifted the copy (and with this
+    // sketch turned, flipped the other coordinate)
+    auto applyGeometryFlipCorrection = [xinv, yinv](Part::Geometry* geoNew) {
+        if (xinv) {
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitY);
+        }
+        if (yinv) {
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitX);
+        }
+    };
+
     std::map<int, int> extMap;
     // for a source external that copies this sketch's own geometry: the element its ref names
     // (a vertex is a point of an edge, ops#267 PR 250 review L1)
@@ -501,6 +514,10 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 }
             }
             auto copy = geo->copy();
+            // FreeCAD-CH (PR 254 review F2): the rebuild projects a linked external here again,
+            // but keeps a frozen one, one whose source is missing and one whose projection fails
+            // as copied: in the source's frame, so flipped like the internal geometry
+            applyGeometryFlipCorrection(copy);
             auto egf = ExternalGeometryFacade::getFacade(copy);
             egf->setId(++geoLastId);
             if (!egf->getRef().empty()) {
@@ -577,19 +594,6 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
         solverNeedsUpdate = true;
     }
-
-    // FreeCAD-CH (ops#283): the geometry is in this sketch's own frame, so the flip mirrors about
-    // its own axes there: x flips about the Y axis, y about the X axis. Before, it mirrored about
-    // this sketch's position and axes in the global frame, which shifted the copy (and with this
-    // sketch turned, flipped the other coordinate)
-    auto applyGeometryFlipCorrection = [xinv, yinv](Part::Geometry* geoNew) {
-        if (xinv) {
-            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitY);
-        }
-        if (yinv) {
-            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitX);
-        }
-    };
 
     for (const auto& geoOld : svals) {
         Part::Geometry* geoNew = geoOld->copy();

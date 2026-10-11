@@ -362,7 +362,8 @@ class TestCarbonCopyFlipped(unittest.TestCase):
 
     def copy(self):
         """Source solved, then copied aligned (flipped back), the document recomputed and Dest
-        solved again: Dest's geometry is Source's as Dest sees it. An arc is checked by its
+        solved again: every constraint is copied, and Dest's geometry is Source's as Dest sees
+        it. An arc is checked by its
         centre, radii, ends (which swap in a mirror) and midpoint."""
         self.assertEqual(self.source.solve(), 0)
         self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
@@ -370,6 +371,8 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self.dest.solve(), 0)
         self.assertEqual(len(self.dest.Geometry), len(self.source.Geometry))
+        # every constraint copied: none refused (PR 254 review F1)
+        self.assertEqual(len(self.dest.Constraints), len(self.source.Constraints))
         for seen, copied in zip(self.source.Geometry, self.dest.Geometry):
             if isinstance(seen, Part.LineSegment):
                 # a line keeps its start
@@ -505,6 +508,14 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         self.copy()
 
 
+    def ring(self, *angles):
+        """The circle of radius 5 about (0, 20, 5) whose axis is X, in Dest's frame (edge-on to
+        both sketches), or the arc of it between `angles` (degrees)."""
+        where = self.dest.Placement
+        return Part.makeCircle(
+            5, where.multVec(V(0, 20, 5)), where.Rotation.multVec(V(1, 0, 0)), *angles
+        )
+
     def add_edge_on(self, edge):
         """`edge` (global) as Source's external -3, and a line whose start is on the
         external's start and which is at 60 degrees to it: both hold only if the copied
@@ -518,19 +529,70 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         self.source.addConstraint(Sketcher.Constraint("Angle", -3, line, math.pi / 3))
 
     def test_flipped_copy_keeps_an_edge_on_circles_ends(self):
-        """ops#283: a circle of radius 5 about (0, 20, 5) whose axis is X, seen edge-on: a
-        sketch projects it as a line along its normal ^ the circle's axis, so in a mirrored
-        copy the copied external runs the other way. Before, a constraint on its start landed
-        on its end, and an angle with it was off by half a turn."""
+        """ops#283: a circle seen edge-on (`ring`): a sketch projects it as a line along its
+        normal ^ the circle's axis, so in a mirrored copy the copied external runs the other way.
+        Before, a constraint on its start landed on its end, and an angle with it was off by
+        half a turn."""
         self.turn_over()
-        self.add_edge_on(Part.makeCircle(5, V(0, 20, 5), V(1, 0, 0)))
+        self.add_edge_on(self.ring())
         self.copy()
 
     def test_flipped_copy_keeps_an_edge_on_arcs_ends(self):
         """As above, a quarter of that circle."""
         self.turn_over()
-        self.add_edge_on(Part.makeCircle(5, V(0, 20, 5), V(1, 0, 0), 0, 90))
+        self.add_edge_on(self.ring(0, 90))
         self.copy()
+
+    def test_flipped_copy_flips_a_frozen_external(self):
+        """PR 254 review F2: a frozen external point (a vertex at (3, 4, 0)), a line's end on it.
+        The rebuild keeps a frozen external's geometry as copied, in Source's frame, so the copy
+        must flip it like the internal geometry. Before, it stayed as the source saw it, and the
+        solve dragged the copied line's end there. Python can't set the Frozen flag on a point
+        external, so it is set in the saved file."""
+        self.turn_over()
+        post = self.doc.addObject("Part::Feature", "Post")
+        post.Shape = Part.Vertex(V(3, 4, 0))
+        self.doc.recompute()
+        self.source.addExternal(post.Name, "Vertex1")
+        line = self.add_line((8, 1), (4, 2))
+        self.source.addConstraint(Sketcher.Constraint("Coincident", line, 2, -3, 1))
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "FrozenExternal.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    # the Frozen flag (2) of Source's external at Post
+                    data, count = re.subn(
+                        rb'(Ref="Post\.[^"]*" Flags=")(\d+)"',
+                        lambda m: m.group(1) + str(int(m.group(2)) | 2).encode() + b'"',
+                        data,
+                    )
+                    self.assertEqual(count, 1)
+                archive.writestr(info, data)
+        self.doc = FreeCAD.openDocument(path)
+        self.dest = self.doc.getObject("Dest")
+        self.source = self.doc.getObject("Source")
+        self.copy()
+        point = self.dest.getPoint(-3, 1)
+        end = self.dest.Geometry[line].EndPoint
+        self.assertLess((point - end).Length, 1e-6)
+
+
+class TestCarbonCopyFlippedInATiltedSketch(TestCarbonCopyFlipped):
+    """PR 254 review F4: as TestCarbonCopyFlippedInAMovedSketch, Dest turned about a tilted
+    axis (70 degrees about (1, 1, 1)), Source turned over about Dest's Y."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest.Placement = FreeCAD.Placement(V(5, 3, 2), FreeCAD.Rotation(V(1, 1, 1), 70))
+
+    def turn_over(self):
+        self.place(FreeCAD.Rotation(V(0, 1, 0), 180), lambda p: V(-p.x, p.y, 0))
 
 class TestCarbonCopyFlippedInAMovedSketch(TestCarbonCopyFlipped):
     """ops#283: as above, with Dest off the origin and turned (at (5, 3, 2), 90 degrees about
