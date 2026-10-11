@@ -256,7 +256,8 @@ names it.
 | `fix/238-transaction-leftovers` | fix | ops#238 | - | `integration` `7801f7c453` | `618939feb7` (fork PR 225), 2026-10-10 | when upstream's `moveDynamicProperty` checks its target's document and keeps the first error, and `Transaction` orders moves back from another document after renames |
 | `fix/246-sketcher-3d-edge-geoid` | fix | ops#246 | - | `integration` `2bc636bdc4` | `e84b56e208` (fork PR 228), 2026-10-10 | never (fork fix) |
 | `fix/247-sketcher-copy-remap-elements` | fix | ops#247 | - | `integration` `2bc636bdc4` | `f2efbec84c` (fork PR 229), 2026-10-10 | never (fork fix) |
-| `fix/250-projection-on-surface-subs` | fix | ops#250 | - | `integration` `d360d8c798` | (fork PR 230) | never (fork fix) |
+| `fix/250-projection-on-surface-subs` | fix | ops#250 | - | `integration` `d360d8c798` | `63c502ff6b` (fork PR 230), 2026-10-10 | never (fork fix) |
+| `fix/244-independent-copy-picks` | fix | ops#244, ops#245 | - | `integration` `2bc636bdc4` | (fork PR 227) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
