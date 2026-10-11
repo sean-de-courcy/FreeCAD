@@ -493,6 +493,13 @@ class RegressionTests(unittest.TestCase):
                         e for e in FreeCAD.getReferenceReport(rounded) if e.get("status") == "guessed"
                     ]
                     self.assertEqual(entry["index"], [e[0] for e in edges].index(moved))
+                    # both corners rounded (PR 236 verification)
+                    cut = [
+                        c
+                        for c in ((20.5, 0), (0, 0), (20.5, 10), (0, 10))
+                        if self._cornerCut(rounded.Shape, *c, centre=(10, 5))
+                    ]
+                    self.assertEqual(cut, [(20.5, 0), (0, 0)])
                 rounded.Edges = [(moved, 0.5, 0.5)]
                 self.Doc.recompute()
                 self.assertEqual(len(guessed(rounded)), 1)
