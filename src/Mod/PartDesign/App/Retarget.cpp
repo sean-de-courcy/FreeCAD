@@ -1972,10 +1972,11 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
         }
         auto doc = owner->getDocument();
         // A copy's names end in `@<document>`, the document it was copied from (exportObjects); a
-        // saved project's (merge) don't
+        // saved project's (merge) don't. Whether that is this document goes by its UUID: the
+        // clipboard can outlive a document whose name another one takes (ops#171)
         auto at = source->name.find('@');
         const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
-        const bool sameDocument = suffix == std::string("@") + doc->getName();
+        const bool sameDocument = App::importedWithin(*source, *doc);
         // The copy of the owner's object of that name, if it is that object (id; 0 takes any)
         auto copyOf = [&](const std::string& name, long id) -> App::DocumentObject* {
             auto it = saved.find(name + suffix);

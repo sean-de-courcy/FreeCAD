@@ -1674,6 +1674,9 @@ class BodyReorderBase:
         )
         newcomer = other.getObject("Pad2")
         self.assertEqual(newcomer.Label, "Unrelated")
+        # Doc1's Pad2 stayed behind: the copied line marks it as in another document, whatever
+        # ID the newcomer has here (PR 266 review H1: copyObject exports from the destination)
+        self.assertEqual([line.split("|")[2] for line in self.parked(sketch)], ["Pad2#-1"])
         self.recompute()
         self.assertIn("projects 'Pad2'", sketch.getStatusString())
 
@@ -1713,7 +1716,9 @@ class BodyReorderBase:
             ("PartDesign::Pocket", "HoleC"),
             ("PartDesign::LinearPattern", "Pattern"),
         )
-        self.assertEqual(len(self.parked(pattern)), 1)
+        # the deleted HoleC is in no document here: its line says so, whatever ID the copy of the
+        # newcomer has (PR 266 review H1: copyObject exports from the destination)
+        self.assertEqual([line.split("|")[2] for line in self.parked(pattern)], ["HoleC#-1"])
         self.recompute()
 
         self.body.reorderObject([pattern], newcomer, True)

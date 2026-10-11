@@ -139,6 +139,10 @@ std::map<const Document*, DocumentNamingRevision> documentNamingRevisions;
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
 std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
+// The UUID of the document each running import's objects were copied from (exportObjects writes
+// it, ops#171); none for a saved project or a copy made by a build before it
+std::map<const Document*, std::string> importSourceDocuments;
+constexpr auto fcAttrSourceDocument {"SourceDocument"};
 }  // namespace
 
 std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
@@ -153,6 +157,19 @@ std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
         return {};
     }
     return jt->second;
+}
+
+bool App::importedWithin(const ImportedSource& source, const Document& doc)
+{
+    // The UUID and the document name the object was exported under must both be doc's: the UUID
+    // tells a closed document apart from a new one that took its name, and the name tells apart
+    // two open documents with one UUID (a Save As, saveCopy or file copy opened beside its
+    // original keeps the UUID; PR 266 review M1). Still alike: a file of the same name in another
+    // folder that, once the first is closed, opens under the same name (both copies of one file)
+    const auto at = source.name.find('@');
+    return !source.document.empty() && source.document == doc.Uid.getValueStr()
+        && at != std::string::npos
+        && source.name.compare(at + 1, std::string::npos, doc.getName()) == 0;
 }
 
 int App::forkNamingRevision()
@@ -1788,12 +1805,29 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
     Base::ZipWriter writer(out);
     writer.putNextEntry("Document.xml");
     writer.Stream() << "<?xml version='1.0' encoding='utf-8'?>" << '\n';
+    // Which document the objects come from: a document's name can be taken by another one once it
+    // is closed (ops#171). That is the objects' own document, which needn't be this one
+    // (copyObject, moveObject and importLinks export from the destination; PR 266 review H1), and
+    // only when they all share one: a mixed list has none, so nothing in it counts as copied
+    // within the document it is pasted into
+    const Document* source = nullptr;
+    for (auto o : obj) {
+        const Document* own = o ? o->getDocument() : nullptr;
+        if (!own || (source && own != source)) {
+            source = nullptr;
+            break;
+        }
+        source = own;
+    }
     std::ostringstream startTag;
     startTag << R"(<Document SchemaVersion="4" ProgramVersion=")"
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << R"(" FileVersion="1")"
              << " NamingRevision=\"" << namingRevisionToSave(this) << '"';  // ops#116
+    if (source) {
+        startTag << ' ' << fcAttrSourceDocument << "=\"" << source->Uid.getValueStr() << '"';
+    }
     // The exported objects' references to interned names carry their entries, as in Save()
     // (ops#6)
     Data::NameRefCollector collector;
@@ -2125,9 +2159,11 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                 // the given name may already exist
                 reader.addName(name.c_str(), obj->getNameInDocument());
                 if (testStatus(Status::Importing)) {
+                    auto from = importSourceDocuments.find(this);
                     importedSources[this][obj] = {
                         name,
-                        reader.hasAttribute("id") ? reader.getAttribute<long>("id") : 0};
+                        reader.hasAttribute("id") ? reader.getAttribute<long>("id") : 0,
+                        from != importSourceDocuments.end() ? from->second : std::string()};
                 }
 
                 // restore touch/error status flags
@@ -2230,16 +2266,36 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     Base::ObjectStatusLocker<Status, Document> restoreBit(Status::Restoring, this);
     Base::ObjectStatusLocker<Status, Document> restoreBit2(Status::Importing, this);
     ExpressionParser::ExpressionImporter expImporter(reader);
-    // The objects' saved names and IDs, known until the import ends (importedSource)
+    // The objects' saved names and IDs, known until the import ends (importedSource). An import
+    // run from inside another one into the same document puts the outer one's back when it ends
+    // (ops#171 C: it cleared them). No caller nests imports today, and an import isn't re-entrant
+    // otherwise: the inner one clears the string hashers the outer still needs, and the name
+    // remap and expression importer aren't nested. This only keeps the sources from being lost
     struct ForgetSources
     {
         const Document* doc;
+        std::map<const DocumentObject*, ImportedSource> outer;
+        std::optional<std::string> outerDocument;
         ~ForgetSources()
         {
             importedSources.erase(doc);
+            importSourceDocuments.erase(doc);
+            if (!outer.empty()) {
+                importedSources[doc] = std::move(outer);
+            }
+            if (outerDocument) {
+                importSourceDocuments[doc] = std::move(*outerDocument);
+            }
         }
-    } forgetSources {this};
-    importedSources.erase(this);
+    } forgetSources {this, {}, {}};
+    if (auto it = importedSources.find(this); it != importedSources.end()) {
+        forgetSources.outer = std::move(it->second);
+        importedSources.erase(it);
+    }
+    if (auto it = importSourceDocuments.find(this); it != importSourceDocuments.end()) {
+        forgetSources.outerDocument = std::move(it->second);
+        importSourceDocuments.erase(it);
+    }
     // Remaps the imported interned names where needed (ops#6), until the maps are read
     std::optional<Data::NameRemap> remap;
     remap.emplace();
@@ -2257,6 +2313,9 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     }
     else {
         reader.FileVersion = 0;
+    }
+    if (reader.hasAttribute(fcAttrSourceDocument)) {
+        importSourceDocuments[this] = reader.getAttribute<const char*>(fcAttrSourceDocument);
     }
 
     // Imported objects may reference strings stored in the source document's

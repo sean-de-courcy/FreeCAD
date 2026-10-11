@@ -3175,7 +3175,7 @@ static void importRetargetTarget(Base::XMLReader& reader,
             return;
         }
     }
-    if (suffix != std::string("@") + doc->getName()) {
+    if (!importedWithin(*source, *doc)) {
         record.targetId = -1;
     }
 }
