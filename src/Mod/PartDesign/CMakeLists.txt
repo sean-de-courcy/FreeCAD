@@ -187,6 +187,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/Slice.V1.txt
     PartDesignTests/NamingGolden/Slice.V2.txt
     PartDesignTests/NamingGolden/Slice.V2i-ids.txt
+    PartDesignTests/NamingGolden/TwoSidesOnePrimitive.V1.txt
+    PartDesignTests/NamingGolden/TwoSidesOnePrimitive.V2.txt
+    PartDesignTests/NamingGolden/TwoSidesOnePrimitive.V2i-ids.txt
 )
 
 set(PartDesign_GearScripts

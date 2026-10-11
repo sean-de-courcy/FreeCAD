@@ -355,6 +355,69 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
     });
 }
 
+// True if \a ancestor is in the ancestry of \a name (as NameAncestry::ancestorsOf() walks it:
+// a node's prefix, in a copy section's context, and the names embedded in its last section)
+// other than through the names a projection section embeds (PR 243 round 5). A section with the
+// PRJ flag (MAPPER_FLAG_PROJECTION) names the element an extrusion or a revolution makes at its
+// far end from a profile element: a pad's top edge is `<bottom edge>|XTR|PRJ`. That is the
+// element's partner, made at the same time, and both are in the result: never the element
+// itself, nor a later state of it. A missing start-cap edge whose far-cap partner holds its name
+// is no evidence that the partner is that edge (a two-sided pad built as one prism, then as two
+// solids: the start cap's names are gone, side 1's far cap embeds them). \a visited holds the
+// nodes walked.
+bool reachesOutsideProjections(
+    std::string_view name,
+    std::string_view ancestor,
+    std::set<std::string>& visited
+)
+{
+    if (name == ancestor) {
+        return true;
+    }
+    if (!visited.emplace(name).second) {
+        return false;
+    }
+    std::string context;
+    std::string_view node = name;
+    while (!node.empty() && node.front() == contextMark) {
+        auto end = node.find(contextMark, 1);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        context.append(node.substr(0, end + 1));
+        node.remove_prefix(end + 1);
+    }
+    auto sections = NameAncestry::splitSections(node);
+    if (sections.empty()) {
+        return false;
+    }
+    const auto& last = decodeSection(sections.back());
+    if (sections.size() > 1) {
+        auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
+        std::string prefix(node.substr(0, prefixSize));
+        if (isCopySection(last)) {
+            prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
+        }
+        if (reachesOutsideProjections(context + prefix, ancestor, visited)) {
+            return true;
+        }
+    }
+    if (!last.hasMapperFlag(MAPPER_FLAG_PROJECTION)) {
+        for (const auto& embedded : last.linkedNames) {
+            if (!embedded.empty()
+                && reachesOutsideProjections(context + embedded, ancestor, visited)) {
+                return true;
+            }
+        }
+    }
+    for (const auto& embedded : last.connectedElements) {
+        if (!embedded.empty() && reachesOutsideProjections(context + embedded, ancestor, visited)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
@@ -2891,9 +2954,15 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (rejected.count(element.index)) {
                 continue;
             }
+            // A projection partner of the old element holds its name, but is another element
+            // (reachesOutsideProjections()): it is no evidence, and not in the old name's ancestry.
             bool contains = !oldName.empty()
                 && std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
-                                return ancestry.contains(n, oldName);
+                                if (!ancestry.contains(n, oldName)) {
+                                    return false;
+                                }
+                                std::set<std::string> visited;
+                                return reachesOutsideProjections(n, oldName, visited);
                             });
             if (pool.exact.count(element.index) && !contains) {
                 continue;

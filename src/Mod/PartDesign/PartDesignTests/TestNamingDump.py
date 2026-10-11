@@ -500,6 +500,52 @@ def modelPadUpToFace(doc):
     return features
 
 
+def modelTwoSidesOnePrimitive(doc):
+    """Two sides built as one primitive, and apart (PR 243 rounds 4 and 5): a square padded Two
+    sides 5 and 5 and Symmetric by Length 10, untapered (one prism each, its start cap with the
+    profile's names, its far cap side 1's), and Two sides 5 and 5 with a start offset of 1 (two
+    prisms: side 1's start cap, the seam, marked CPY;1, side 2 CPY;2); a rectangle revolved Two
+    sides by 60 and 30 degrees and Symmetric by 90 degrees (one solid each)."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    features = []
+    for label, sides, offset in (
+        ("TwoSides", "Two sides", 0),
+        ("Symmetric", "Symmetric", 0),
+        ("TwoSidesApart", "Two sides", 1),
+    ):
+        body = models.body(doc)
+        square = models.sketch(doc, f"Square{label}", models.rectangle(-5, -5, 5, 5), body)
+        pad = body.newObject("PartDesign::Pad", f"Pad{label}")
+        pad.Profile = square
+        pad.Refine = False
+        pad.SideType = sides
+        pad.Length = 10 if sides == "Symmetric" else 5
+        pad.Length2 = 5
+        if offset:
+            pad.StartType = "Offset"
+            pad.StartOffset = offset
+        features.append(pad)
+    for label, sides, angle, angle2 in (
+        ("TwoSides", "Two sides", 60, 30),
+        ("Symmetric", "Symmetric", 90, 0),
+    ):
+        body = models.body(doc)
+        profile = models.sketch(
+            doc, f"Profile{label}", models.rectangle(10, 0, 20, 5), body, placement=xz
+        )
+        revolution = body.newObject("PartDesign::Revolution", f"Revolution{label}")
+        revolution.Profile = profile
+        revolution.ReferenceAxis = (models.originFeature(body, "Z_Axis"), [""])
+        revolution.Refine = False
+        revolution.SideType = sides
+        revolution.Angle = angle
+        if angle2:
+            revolution.Type2 = "Angle"
+            revolution.Angle2 = angle2
+        features.append(revolution)
+    return features
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -520,6 +566,7 @@ MODELS = {
     "OffsetSplitCylinder": modelOffsetSplitCylinder,
     "RevolutionUpToFace": modelRevolutionUpToFace,
     "PadUpToFace": modelPadUpToFace,
+    "TwoSidesOnePrimitive": modelTwoSidesOnePrimitive,
 }
 
 # ---------------------------------------------------------------------------------------------

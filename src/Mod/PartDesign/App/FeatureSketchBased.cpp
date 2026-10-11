@@ -957,14 +957,15 @@ TopoShape ProfileBased::moveProfileToStart(
     return result;
 }
 
-void ProfileBased::markSingleStartCap(
-    TopoShape& primitive,
+void ProfileBased::markStartCap(
+    TopoShape& solid,
     const TopoShape& profile,
+    const char* side,
     bool farCapIsSide2
 ) const
 {
-    if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || primitive.isNull()
-        || !primitive.hasElementMap() || !profile.hasElementMap()) {
+    if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || solid.isNull()
+        || !solid.hasElementMap() || !profile.hasElementMap()) {
         return;
     }
     constexpr std::array types {"Vertex", "Edge", "Face"};
@@ -979,9 +980,9 @@ void ProfileBased::markSingleStartCap(
         }
     }
     // Every element marked, for the caps' names
-    TopoShape marked(primitive);
-    marked.appendElementSection(getID(), Part::OpCodes::Copy, "0");
-    TopoShape markedSide2(primitive);
+    TopoShape marked(solid);
+    marked.appendElementSection(getID(), Part::OpCodes::Copy, side);
+    TopoShape markedSide2(solid);
     if (farCapIsSide2) {
         markedSide2.appendElementSection(getID(), Part::OpCodes::Copy, "2");
     }
@@ -994,26 +995,33 @@ void ProfileBased::markSingleStartCap(
         return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION);
     };
 
+    // Name by name: an element may have other names besides, e.g. from an up-to face, and which
+    // ones depends on the order of OCC's history maps, which differs between platforms (round
+    // 4's far cap went unmarked on macOS when only elements whose every name was a partner's
+    // were marked). appendElementSection() keeps each element's names in order.
     std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
     bool capFound = false;
     for (const char* type : types) {
-        const auto count = static_cast<int>(primitive.countSubShapes(type));
+        const auto count = static_cast<int>(solid.countSubShapes(type));
         for (int i = 1; i <= count; ++i) {
             const auto element = Data::IndexedName::fromConst(type, i);
-            auto own = primitive.getElementMappedNames(element);
-            const bool onCap = !own.empty() && std::ranges::all_of(own, [&](const auto& named) {
-                return profileNames.contains(named.first.toString());
-            });
-            const bool onFarCap = farCapIsSide2 && !onCap && !own.empty()
-                && std::ranges::all_of(own, [&](const auto& named) {
-                       return isPartner(named.first);
-                   });
-            capFound = capFound || onCap || onFarCap;
-            // In the element's order, so its first name stays first
-            for (auto& [name, sids] : onCap ? marked.getElementMappedNames(element)
-                     : onFarCap             ? markedSide2.getElementMappedNames(element)
-                                            : own) {
-                names.emplace_back(element, name, sids);
+            const auto own = solid.getElementMappedNames(element);
+            const auto onCap = marked.getElementMappedNames(element);
+            const auto onFarCap = farCapIsSide2 ? markedSide2.getElementMappedNames(element)
+                                                : decltype(own) {};
+            for (std::size_t k = 0; k < own.size(); ++k) {
+                const auto& name = own[k].first;
+                if (onCap.size() == own.size() && profileNames.contains(name.toString())) {
+                    names.emplace_back(element, onCap[k].first, onCap[k].second);
+                    capFound = true;
+                }
+                else if (onFarCap.size() == own.size() && isPartner(name)) {
+                    names.emplace_back(element, onFarCap[k].first, onFarCap[k].second);
+                    capFound = true;
+                }
+                else {
+                    names.emplace_back(element, name, own[k].second);
+                }
             }
         }
     }
@@ -1021,9 +1029,9 @@ void ProfileBased::markSingleStartCap(
         return;
     }
     // A new map, as appendElementSection() makes: the old one may be shared
-    primitive.resetElementMap(std::make_shared<Data::ElementMap>());
+    solid.resetElementMap(std::make_shared<Data::ElementMap>());
     for (const auto& [element, name, sids] : names) {
-        primitive.setElementName(element, name, primitive.Tag, &sids);
+        solid.setElementName(element, name, solid.Tag, &sids);
     }
 }
 

@@ -200,21 +200,27 @@ protected:
         double offset
     );
 
-    /** In V2, mark the start cap of a feature's two sides built as one primitive (ops#255, PR
-     * 243 round 4): the elements whose names are all the profile's, i.e. the moved profile the
-     * primitive starts from, get the section `_;_;<feature>;CPY;0;<type>;0;MOD;_`. Built as two
-     * solids, the profile's names are on the seam at the profile plane (side 2's with CPY;2), so
-     * a reference to the cap would move to the seam. Marked, it breaks instead, and so does a
-     * reference to the seam when the sides are built as one again. Index 0: no side, since the
-     * single primitive has no second side to be a copy of.
-     * With `farCapIsSide2` (a primitive from side 1's end to side 2's), the far cap, the elements
-     * mapped as the profile's partners (MAPPER_FLAG_PROJECTION), gets side 2's section (CPY;2),
-     * as side 2's far cap has it when the sides are built apart: else its names are side 1's far
-     * cap's. The other elements keep their names.
+    /** In V2, mark the start cap of a side (ops#255, PR 243 rounds 4 and 5): the names of
+     * `solid`'s elements that are the profile's, i.e. those of the moved profile it starts from,
+     * get the section `_;_;<feature>;CPY;<side>;<type>;0;MOD;_`, a copy section, which the solver
+     * and Part's name matching read as a context of its own.
+     * - Side 1 of two sides built as two solids (`side` "1"): its start cap is the seam at the
+     *   profile plane (side 2's has CPY;2). One side, or two sides built as one primitive from
+     *   one side's end, has the profile's names on its start cap, which is a cap of the result:
+     *   marked, a reference to that cap doesn't move to the seam when the sides are built apart
+     *   (a start offset, a taper, an up-to side), and a reference to the seam doesn't move to
+     *   the cap the other way. It breaks instead.
+     * - A primitive from side 1's end to side 2's (`side` "0", no side, with `farCapIsSide2`):
+     *   its start cap is side 1's end, which has no profile names when built apart. The far
+     *   cap, the names mapped as the profile's partners (MAPPER_FLAG_PROJECTION), gets side
+     *   2's section (CPY;2), as side 2's far cap has it when the sides are built apart: else its
+     *   names are side 1's far cap's.
+     * The other names stay as they are, each element's in their order.
      */
-    void markSingleStartCap(
-        TopoShape& primitive,
+    void markStartCap(
+        TopoShape& solid,
         const TopoShape& profile,
+        const char* side,
         bool farCapIsSide2 = false
     ) const;
 

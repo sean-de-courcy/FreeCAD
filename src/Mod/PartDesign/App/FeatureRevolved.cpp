@@ -455,6 +455,14 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         }
         return copy;
     };
+    // Side 1's start face, when the sides are built apart, is the seam at the profile, and has
+    // the profile's names, as the start face of one side or of two sides built as one solid
+    // has. In V2 it is marked (CPY;1), so that a reference to that face doesn't move to the
+    // seam, or the other way, when an edit switches between the builds (PR 243 round 5).
+    auto markSeam = [&](TopoShape side) {
+        markStartCap(side, sketchshape, "1");
+        return side;
+    };
 
     if (sideType == "Two sides") {
         constexpr double fullRevolution = 2.0 * std::numbers::pi;
@@ -500,16 +508,14 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 false,
                 RevolMethod::TwoAngles
             );
-            // Its start face (side 2's end, the turned profile) is marked: built as two solids,
-            // the profile's names are on the seam (PR 243 round 4).
-            markSingleStartCap(result, sketchshape);
+            // Its start face, side 2's end, has the profile's names, as one side's has
             addRevolution(std::move(result));
         }
         else {
             fuseSideResults = usesBRepFeatRevolution(method, revolMode)
                 || usesBRepFeatRevolution(method2, revolMode);
 
-            addRevolution(generateSingleRevolutionSide(
+            addRevolution(markSeam(generateSingleRevolutionSide(
                 method,
                 angle,
                 UpToFace,
@@ -520,7 +526,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 dir,
                 invObjLoc,
                 revolMode
-            ));
+            )));
 
             gp_Dir dir2 = dir;
             dir2.Reverse();
@@ -543,8 +549,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             && revolMode == Part::RevolMode::CutFromBase;
         if (method == RevolMethod::Angle || isThroughAll) {
             generateRevolution(result, sketchshape, gp_Ax1(pnt, dir), angle, 0.0, true, false, method);
-            // One solid, as Two sides by two angles: its start face is marked
-            markSingleStartCap(result, sketchshape);
+            // One solid, as Two sides by two angles
             addRevolution(std::move(result));
         }
         else {
@@ -561,7 +566,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 revolMode
             );
             if (!side.isNull() && !side.getShape().IsNull()) {
-                addRevolution(side.makeElementCopy());
+                addRevolution(markSeam(side.makeElementCopy()));
 
                 // Use the profile's actual plane. The center of its axis-aligned bounding box is
                 // not necessarily on that plane for an asymmetric tilted profile; using it as

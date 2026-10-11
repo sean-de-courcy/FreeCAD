@@ -480,11 +480,93 @@ class RevolutionSideTwoEndAfterSideOneToFace(RevolutionSideOneToFaceFillet):
     sides by angle, is one solid; the fillet is on the top edge of side 2's end face (at -60
     degrees, z = 10) instead. That face is the solid's start face, the turned profile. Side 1
     going up to the wall builds the sides apart, side 2 marked as a copy, and the profile's names
-    are on the seam at 0 degrees: with them the fillet moved there. In V2 the start face is marked
-    as the single solid's (CPY;0), which no build of the two sides has, so the name is missing,
-    and the geometric search finds the edge where it was: the fillet stays on side 2's end edge.
-    V1 keeps upstream's names."""
+    were on the seam at 0 degrees: with them the fillet moved there. In V2 the seam, side 1's start
+    face, is marked (CPY;1, PR 243 round 5), so the name is on no element of the two sides, and
+    the geometric search finds the edge where it was: the fillet stays on side 2's end edge.
+    The solver (V2s) has a structural candidate from the same sketch line whose geometry
+    disagrees, so it breaks the reference, loudly, instead of searching by geometry. V1 keeps
+    upstream's names."""
 
     REFS = ("fillet_end_top",)
     endAngle = -60
     endGone = False
+
+    def endTop(self):
+        if self.upTo and self.solver:
+            return BROKEN
+        return super().endTop()
+
+
+class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
+    """PR 243 round 5 (verification 4, finding 1): the profile x 10..20, z 5..10 revolved about
+    the Z axis, One side, 60 degrees, Refine off; a fillet (radius 1) on the top edge of the
+    start face (the profile, at 0 degrees, z = 10). The Revolution goes Symmetric by angle (one
+    solid from -30 to 30 degrees), then Two sides, 30 and 30 (one solid, the same): its start
+    face is the turned profile in each, with the profile's names, and the fillet follows to the
+    top edge at -30 degrees. Round 4 marked the single solid's start face, and the reference
+    broke; round 5 marks the seam of two sides built apart instead."""
+
+    area = "RevolutionUpToFace"
+    MULTI = True
+    REFS = ("start_top",)
+    steps = ("symmetric", "twoSides")
+    startAngle = 0
+
+    def startTop(self):
+        return edge("line", contains=ray(self.startAngle, 15, 10))
+
+    def revolve(self, doc, **properties):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(10, 5, 20, 10), body, placement=XZ)
+        revolved = body.newObject("PartDesign::Revolution", "Revolved")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
+        revolved.Refine = False
+        revolved.Type = "Angle"
+        for name, value in properties.items():
+            setattr(revolved, name, value)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (revolved, self.names(revolved, self.startTop()))
+        fillet.Radius = 1
+        self.ref("start_top", fillet, "Base", self.startTop, Filleted(1))
+
+    def build(self, doc):
+        self.revolve(doc, Angle=60)
+
+    def symmetric(self, doc):
+        doc.Revolved.SideType = "Symmetric"
+        self.startAngle = -30
+
+    def twoSides(self, doc):
+        revolved = doc.Revolved
+        revolved.SideType = "Two sides"
+        revolved.Angle = 30
+        revolved.Type2 = "Angle"
+        revolved.Angle2 = 30
+
+
+class RevolutionStartFaceOfSymmetricAngleEdit(RevolutionStartFaceOfOneSideToSymmetric):
+    """PR 243 round 5 (verification 4, L6): an angle edit within the single-solid build. The
+    profile of RevolutionStartFaceOfOneSideToSymmetric revolved Symmetric by angle, 60 degrees
+    (one solid from -30 to 30); the fillet on the start face's top edge (at -30 degrees). The
+    angle goes to 80 (start face at -40), then the Revolution goes Two sides, 40 and 50 (start
+    face, side 2's end, at -50): the fillet follows the start face's top edge."""
+
+    steps = ("wider", "twoSides")
+    startAngle = -30
+
+    def build(self, doc):
+        self.revolve(doc, SideType="Symmetric", Angle=60)
+
+    def wider(self, doc):
+        doc.Revolved.Angle = 80
+        self.startAngle = -40
+
+    def twoSides(self, doc):
+        revolved = doc.Revolved
+        revolved.SideType = "Two sides"
+        revolved.Angle = 40
+        revolved.Type2 = "Angle"
+        revolved.Angle2 = 50
+        self.startAngle = -50
