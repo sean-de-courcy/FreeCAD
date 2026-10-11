@@ -634,6 +634,48 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         self.assertAlmostEqual(abs(normal.x), 1, places=9)
         self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
 
+    def testBinderOfABodysOriginPlaneIntoAPlacedPart(self):
+        """ops#273: a traced binder of a body's XZ plane put into a placed App::Part (a tree drag
+        calls addObject). App::OriginGroupExtension::addObjects relinked it to the Part's own XZ
+        plane, so it bound another plane, silently. It keeps binding the body's plane, where that
+        one is: globally the plane y = 0 turned 90 degrees about Z, x = 5 along X."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        self.Doc.recompute()
+        part = self.Doc.addObject("App::Part", "Part")
+        part.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(7, -2, 4), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 40)
+        )
+        part.addObject(binder)
+        self.assertTrue(part.hasObject(binder))
+        self.assertEqual(binder.Support[0][0], xz)
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        [face] = binder.Shape.Faces
+        container = binder.getGlobalPlacement().multiply(binder.Placement.inverse())
+        normal = container.Rotation.multVec(face.Surface.Axis)
+        self.assertAlmostEqual(abs(normal.x), 1, places=9)
+        self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
+
+    def testUntracedLinksToABodysOriginPlaneIntoAPart(self):
+        """ops#273, the relink kept: a binder that doesn't trace its support, and an attached Part
+        plane, both on a body's XZ plane, put into an App::Part, are relinked to the Part's own XZ
+        plane as before (they are placed in the container they're in)."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Untraced")
+        binder.Support = [(xz, "")]
+        plane = self.Doc.addObject("Part::Plane", "Attached")
+        plane.AttachmentSupport = [(xz, "")]
+        plane.MapMode = "FlatFace"
+        self.Doc.recompute()
+        part = self.Doc.addObject("App::Part", "Part")
+        part.addObjects([binder, plane])
+        [partXZ] = [f for f in part.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        self.assertEqual(binder.Support[0][0], partXZ)
+        self.assertEqual(plane.AttachmentSupport[0][0], partXZ)
+
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
         sheet.set("A1", "2")
