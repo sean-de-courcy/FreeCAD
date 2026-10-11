@@ -972,8 +972,9 @@ void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vec
     // is parsed again with this sketch as its owner, as a save and reopen would, and each of its
     // references must name here what it named in orig: a reference to one of orig's constraints
     // is rewritten to name its copy (by index or by name, as it was written; ops#267), any other
-    // must name the same object, property and sub-path. When one can't, the expression isn't
-    // copied and the constraint keeps its value.
+    // must name the same object, property and sub-path (one to another property of orig names orig
+    // explicitly, with a warning). When one can't, the expression isn't copied and the constraint
+    // keeps its value.
     // The source's expressions are found by the constraint their path names: a path set from
     // Python can be ".Constraints[i]", which createPath ("Constraints[i]") doesn't find.
     auto indexOf = [&](const App::ObjectIdentifier& path) {
@@ -1060,16 +1061,27 @@ void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vec
                         checked.insert(path);
                         return;
                     }
-                    if (id.getDocumentObject() != sourceId.getDocumentObject()
-                        || id.getProperty() != sourceId.getProperty()
-                        || id.getSubPathStr() != sourceId.getSubPathStr()) {
+                    App::ObjectIdentifier kept = id;
+                    if (sourceId.getDocumentObject() == &orig && id.getDocumentObject() != &orig) {
+                        // another property of orig, written relative to it (a reference that
+                        // names its owner is stored that way): name orig explicitly
+                        kept = App::ObjectIdentifier::parse(
+                            this,
+                            std::string(orig.getNameInDocument()) + "."
+                                + sourceId.getPropertyName() + sourceId.getSubPathStr()
+                        );
+                    }
+                    if (kept.getDocumentObject() != sourceId.getDocumentObject()
+                        || kept.getProperty() != sourceId.getProperty()
+                        || kept.getSubPathStr() != sourceId.getSubPathStr()) {
                         why = named;
                         return;
                     }
                     if (sourceId.getDocumentObject() == &orig) {
-                        toSource.push_back(reference);
+                        variable.setPath(kept);
+                        toSource.push_back(kept.toString());
                     }
-                    checked.insert(id);
+                    checked.insert(kept);
                 }
                 catch (const Base::Exception&) {
                     why = named;
