@@ -450,6 +450,47 @@ def modelRevolutionUpToFace(doc):
     return features
 
 
+
+def modelPadUpToFace(doc):
+    """Pads and a Pocket up to faces of a C-shaped body (ops#255): its XZ outline padded 20
+    along -Y, a bottom arm z 0..5, a top arm z 20..25 and a back x -10..-5. The rectangle
+    x 0..10, y -15..-5 at z = 10 goes up to the top arm's lower face (One side, Symmetric), up to
+    it and the bottom arm's upper face (Two sides), or through both arms (a Pocket, Two sides).
+    A second side's names are marked."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    outline = [(-10, 0), (15, 0), (15, 5), (-5, 5), (-5, 20), (15, 20), (15, 25), (-10, 25)]
+    cases = (
+        ("Pad", "One side", ((20, -1),)),
+        ("Pad", "Symmetric", ((20, -1),)),
+        ("Pad", "Two sides", ((20, -1), (5, 1))),
+        ("Pocket", "Two sides", ((0, -1), (25, 1))),
+    )
+    features = []
+    for kind, sides, faces in cases:
+        label = kind + sides.replace(" ", "")
+        body = models.body(doc)
+        arms = models.sketch(doc, f"Arms{label}", models.polygon(outline), body, placement=xz)
+        armsPad = models.pad(body, arms, 20, f"ArmsPad{label}")
+        doc.recompute()
+        rectangle = models.rectangle(0, -15, 10, -5)
+        profile = models.sketch(doc, f"Profile{label}", rectangle, body, z=10)
+        feature = body.newObject(f"PartDesign::{kind}", f"UpTo{label}")
+        feature.Profile = profile
+        feature.Refine = False
+        feature.SideType = sides
+        upTo = [
+            (armsPad, face("plane", normal=(0, 0, n), through=(0, 0, z)).one(armsPad.Shape))
+            for z, n in faces
+        ]
+        feature.Type = "UpToFace"
+        feature.UpToFace = upTo[0]
+        if len(upTo) > 1:
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = upTo[1]
+        features.append(feature)
+    return features
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -469,6 +510,7 @@ MODELS = {
     "OffsetThickness": modelOffsetThickness,
     "OffsetSplitCylinder": modelOffsetSplitCylinder,
     "RevolutionUpToFace": modelRevolutionUpToFace,
+    "PadUpToFace": modelPadUpToFace,
 }
 
 # ---------------------------------------------------------------------------------------------

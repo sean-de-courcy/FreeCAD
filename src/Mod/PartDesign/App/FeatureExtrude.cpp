@@ -739,6 +739,17 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         double taper1 = TaperAngle.getValue();
         double offset1 = Offset.getValue();
 
+        // A second side is built from the same sketch edges as the first, so the two sides'
+        // names would differ only by the duplicate counter, which follows the order of the XOR
+        // below (ops#255). In V2 the second side's names are marked as a copy, as a Revolution's
+        // second side is (ops#240).
+        auto markSecondSide = [&](TopoShape shape) {
+            if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                shape.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+            }
+            return shape;
+        };
+
         if (Sidemethod == "One side") {
             TopoShape prism1 = generateSingleExtrusionSide(
                 startSketch,
@@ -855,7 +866,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     gp_Pnt(sketchCenter.x, sketchCenter.y, sketchCenter.z),
                     sketchNormalDir
                 );
-                TopoShape prism2 = prism1.makeElementMirror(mirrorPlane);
+                TopoShape prism2 = markSecondSide(prism1.makeElementMirror(mirrorPlane));
                 prisms.push_back(prism2);
             }
         }
@@ -961,7 +972,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
                 // Side 2
                 TopoShape prism2 = generateSingleExtrusionSide(
-                    startSketch.makeElementCopy(),
+                    markSecondSide(startSketch.makeElementCopy()),
                     method2,
                     L2,
                     taper2,

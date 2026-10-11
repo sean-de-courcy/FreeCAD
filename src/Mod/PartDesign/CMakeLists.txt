@@ -178,6 +178,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/RevolutionUpToFace.V1.txt
     PartDesignTests/NamingGolden/RevolutionUpToFace.V2.txt
     PartDesignTests/NamingGolden/RevolutionUpToFace.V2i-ids.txt
+    PartDesignTests/NamingGolden/PadUpToFace.V1.txt
+    PartDesignTests/NamingGolden/PadUpToFace.V2.txt
+    PartDesignTests/NamingGolden/PadUpToFace.V2i-ids.txt
     PartDesignTests/NamingGolden/Sketch.V1.txt
     PartDesignTests/NamingGolden/Sketch.V2.txt
     PartDesignTests/NamingGolden/Sketch.V2i-ids.txt

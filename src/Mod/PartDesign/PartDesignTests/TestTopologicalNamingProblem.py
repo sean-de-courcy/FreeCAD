@@ -745,6 +745,66 @@ class TestTopologicalNamingProblem(unittest.TestCase):
                     self.Doc.removeObject(obj.Name)
                 self.Doc.removeObject(body.Name)
 
+    def _extrudeUpToArms(self, kind, sides):
+        """ops#255: a C-shaped body, its XZ outline padded 20 along -Y: a bottom arm z 0..5, a top
+        arm z 20..25 (both x -10..15) and a back x -10..-5. The rectangle x 0..10, y -15..-5 at
+        z = 10 is padded between the arms (Two sides: up to the top arm's lower face and the
+        bottom arm's upper face; Symmetric: up to the top arm's lower face), or pocketed through
+        them (Two sides: up to the bottom arm's lower face and the top arm's upper face), with
+        Refine off. Both sides are built from the same sketch edges."""
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        body = models.body(self.Doc)
+        outline = [(-10, 0), (15, 0), (15, 5), (-5, 5), (-5, 20), (15, 20), (15, 25), (-10, 25)]
+        arms = models.sketch(self.Doc, "Arms", models.polygon(outline), body, placement=xz)
+        armsPad = models.pad(body, arms, 20, "ArmsPad")
+        self.Doc.recompute()
+        self.assertAlmostEqual(armsPad.Shape.BoundBox.YMin, -20)
+        profile = models.sketch(self.Doc, "Profile", models.rectangle(0, -15, 10, -5), body, z=10)
+        feature = body.newObject(kind, "UpToArms")
+        feature.Profile = profile
+        feature.Refine = False
+        feature.SideType = sides
+        feature.Type = "UpToFace"
+
+        def armFace(z, normal):
+            return harness.face("plane", normal=(0, 0, normal), through=(0, 0, z)).one(
+                armsPad.Shape
+            )
+
+        if kind == "PartDesign::Pad":
+            feature.UpToFace = (armsPad, armFace(20, -1))
+            if sides == "Two sides":
+                feature.Type2 = "UpToFace"
+                feature.UpToFace2 = (armsPad, armFace(5, 1))
+        else:
+            feature.UpToFace = (armsPad, armFace(0, -1))
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = (armsPad, armFace(25, 1))
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    def testPadUpToFaceSidesNamedApart(self):
+        """ops#255: the two sides of a Pad up to faces, Two sides or Symmetric, and of a Pocket
+        up to faces on two sides, are named from the same sketch edges; the second side's names
+        are marked, so no two elements share a name up to the duplicate counter."""
+        cases = (
+            ("PartDesign::Pad", "Two sides", 1500),
+            ("PartDesign::Pad", "Symmetric", 1500),
+            ("PartDesign::Pocket", "Two sides", -1000),
+        )
+        for kind, sides, added in cases:
+            with self.subTest(kind=kind, sides=sides):
+                feature = self._extrudeUpToArms(kind, sides)
+                self.assertAlmostEqual(
+                    feature.Shape.Volume - feature.BaseFeature.Shape.Volume, added
+                )
+                self.assertNamesDistinct(feature.Shape)
+                body = feature.getParentGeoFeatureGroup()
+                for obj in reversed(body.Group):
+                    self.Doc.removeObject(obj.Name)
+                self.Doc.removeObject(body.Name)
+
     def testPartDesignBinderRevolution(self):
         doc = self.Doc
         body = doc.addObject("PartDesign::Body", "Body")
