@@ -1136,9 +1136,10 @@ class TestRevolve(unittest.TestCase):
         if results["Two sides"][0]:
             self.assertSameSolid(results["Symmetric"][1], results["Two sides"][1])
 
-    def assertSymmetricFails(self, body, upTo, message="Use Two sides"):
-        """profileAcross() Symmetric up to `upTo` fails with an error that names Two sides."""
-        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+    def assertSymmetricFails(self, body, upTo, kind="Revolution"):
+        """A `kind` of profileAcross() Symmetric up to `upTo` fails with an error that names Two
+        sides."""
+        revolution = body.newObject("PartDesign::" + kind, kind)
         sketch = self.profileAcross(body)
         revolution.Profile = sketch
         revolution.ReferenceAxis = (sketch, ["V_Axis"])
@@ -1147,7 +1148,7 @@ class TestRevolve(unittest.TestCase):
         revolution.UpToFace = upTo
         self.Doc.recompute()
         self.assertFalse(revolution.isValid())
-        self.assertIn(message, revolution.getStatusString())
+        self.assertIn("Use Two sides", revolution.getStatusString())
 
     def testRevolutionUpToSplineWallAcrossSymmetric(self):
         """A Pad along Z of the region x in [-4, 0] bounded by a B-spline wall from (0, -4) to
@@ -1324,6 +1325,117 @@ class TestRevolve(unittest.TestCase):
         self.assertSameSolid(revolution.Shape, plate.Shape.fuse(self.ringSector(-110, 220)))
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertFilletAlong(fillet, 20)
+
+    def slantedWallBase(self, body, kind):
+        """A Pad of a polygon on XY with a slanted wall on the plane x - 0.5 y = -1, from
+        (-3.5, -5) to (-0.75, 0.5), across the profile plane. Revolution (height 2): the region A
+        left of the wall below y = 0.5, joined to B, x in [-5, 0.5], y in [0.5, 4] (the PR 268
+        verification's High). Groove (height 3): the region right of the wall below y = 0.5, up
+        to x = 4, which holds the profile. Returns the Pad and the wall's name."""
+        sketch = body.newObject("Sketcher::SketchObject", "BaseSketch")
+        [xy] = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        sketch.AttachmentSupport = (xy, [""])
+        sketch.MapMode = "FlatFace"
+        if kind == "Revolution":
+            corners = [(-5, -5), (-3.5, -5), (-0.75, 0.5), (0.5, 0.5), (0.5, 4), (-5, 4)]
+        else:
+            corners = [(-3.5, -5), (4, -5), (4, 0.5), (-0.75, 0.5)]
+        points = [FreeCAD.Vector(x, y, 0) for x, y in corners]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 2 if kind == "Revolution" else 3
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        normal = FreeCAD.Vector(1, -0.5, 0).normalize()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(pad.Shape.Faces)
+            if isinstance(face.Surface, Part.Plane)
+            and abs(abs(face.normalAt(0, 0).dot(normal)) - 1) < 1e-9
+        ]
+        return pad, wall
+
+    def testRevolutionUpToSlantedWallThroughBaseSymmetric(self):
+        """slantedWallBase(): the first side passes the wall's plane at y >= 0.8, inside B, and
+        meets the wall itself at about 180 to 226 degrees. The tools up to the wall and up to its
+        whole plane are the same, since what lies between is base; the second side stopped at
+        the mirror of the plane's first hit (-81 to -127 degrees), and the result lacked 7.42
+        that the mirror of the first side holds, silently (the PR 268 verification's High). It
+        fails now, naming Two sides. So does a Groove whose first side runs through empty space
+        there (the base right of the wall): its second side left material that the mirror of
+        the first side removes."""
+        for kind in ("Revolution", "Groove"):
+            with self.subTest(kind=kind):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                pad, wall = self.slantedWallBase(body, kind)
+                self.assertSymmetricFails(body, (pad, [wall]), kind=kind)
+
+    def coneToolAcross(self, sideType):
+        """The tool of profileAcross() up to the wall of a cone along Y, radius 4 at y = -5 to 6
+        at y = 5 about x = -5, z = 1 (5 at the profile plane, which its wall crosses at x = 0):
+        the Revolution minus the cone."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        cone = body.newObject("PartDesign::AdditiveCone", "Cone")
+        cone.Radius1 = 4
+        cone.Radius2 = 6
+        cone.Height = 10
+        cone.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-5, -5, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+        )
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(cone.Shape.Faces)
+            if isinstance(face.Surface, Part.Cone)
+        ]
+        revolution = self.revolveAcross(body, "Revolution", sideType, (cone, [wall]))
+        return revolution.Shape.cut(cone.Shape)
+
+    def testRevolutionUpToConeWallAcrossSymmetric(self):
+        """A cone wall across the profile plane, not symmetric about it: the second side goes up
+        to the image's whole cone. The image cone is wider on the second side than the cone
+        itself, so the tool is the first side's sweep and its mirror: symmetric about the profile
+        plane, twice One side's tool."""
+        oneSide = self.coneToolAcross("One side")
+        tool = self.coneToolAcross("Symmetric")
+        mirrored = tool.mirror(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 1, 0))
+        self.assertGreater(oneSide.Volume, 2 * math.pi)
+        self.assertAlmostEqual(tool.Volume, 2 * oneSide.Volume, places=6)
+        self.assertAlmostEqual(tool.cut(mirrored).Volume, 0, places=6)
+
+    def grooveToolInCylinder(self, sideType):
+        """The volume a Groove of profileAcross() removes from a cylinder along Y, radius 5 about
+        x = 5, z = 1, y in [-5, 4] (it holds the profile), up to its wall: longer on one side
+        of the profile plane, so the wall crosses the plane and isn't symmetric about it."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        drum = body.newObject("PartDesign::AdditiveCylinder", "Drum")
+        drum.Radius = 5
+        drum.Height = 9
+        drum.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(5, -5, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+        )
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(drum.Shape.Faces)
+            if isinstance(face.Surface, Part.Cylinder)
+        ]
+        groove = self.revolveAcross(body, "Groove", sideType, (drum, [wall]))
+        return drum.Shape.cut(groove.Shape)
+
+    def testGrooveUpToCylinderWallAcrossSymmetric(self):
+        """The Groove on the whole-cylinder route: the second side goes up to the image's whole
+        cylinder (the cylinder itself, mirrored), so the removed volume is symmetric about the
+        profile plane, twice One side's."""
+        oneSide = self.grooveToolInCylinder("One side")
+        removed = self.grooveToolInCylinder("Symmetric")
+        mirrored = removed.mirror(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 1, 0))
+        self.assertGreater(oneSide.Volume, 2 * math.pi)
+        # The booleans on the drum's curved wall leave about 7e-7 of noise.
+        self.assertAlmostEqual(removed.Volume, 2 * oneSide.Volume, delta=1e-5)
+        self.assertAlmostEqual(removed.cut(mirrored).Volume, 0, delta=1e-5)
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
