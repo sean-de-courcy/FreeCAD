@@ -1371,9 +1371,17 @@ void CmdSketcherMergeSketches::activated(int iMsg)
             for (int i = 0; i < addedConstraints; i++) {
                 int index = i + baseConstraints;
                 auto* constraint = mergeSketch->Constraints.getValues()[index];
-                if (!remapGeoId(constraint->First, extGeoIdMap)
-                    || !remapGeoId(constraint->Second, extGeoIdMap)
-                    || !remapGeoId(constraint->Third, extGeoIdMap)) {
+                // FreeCAD-CH (ops#247): every element, not only First/Second/Third (a Group or
+                // a Text holds more)
+                bool remapped = true;
+                for (size_t e = 0; remapped && e < constraint->getElementsSize(); ++e) {
+                    int geoId = constraint->getGeoId(e);
+                    remapped = remapGeoId(geoId, extGeoIdMap);
+                    if (remapped) {
+                        constraint->setGeoId(e, geoId);
+                    }
+                }
+                if (!remapped) {
                     constraintsToDelete.push_back(index);
                     QString msg = qApp->translate(
                         "CmdSketcherMergeSketches",
