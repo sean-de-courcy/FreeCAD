@@ -427,6 +427,21 @@ class Settled:
         return f"SETTLED[{self.expected}]"
 
 
+class Warned:
+    """The reference holds `expected`'s element and its owner keeps its warning: a record left on
+    purpose (e.g. a rejection, App.markReferenceBroken(), whose original came back: ops#138). A
+    plain expectation passes it silent too; this one doesn't."""
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def select(self, shape):
+        return self.expected.select(shape)
+
+    def __repr__(self):
+        return f"WARNED[{self.expected}]"
+
+
 class PartialWarned:
     """Some elements of a multi-element reference are gone and the consumer computes on the
     rest, with a warning (ops#127, Onshape's rule; reference solver documents only): the
@@ -841,6 +856,8 @@ class Result:
             return self.verdict == "partial-warned"
         if expect.startswith("GUESSED"):
             return self.verdict == "guessed"
+        if expect.startswith("WARNED"):
+            return self.verdict in ("correct", "equivalent")
         if expect.startswith("SETTLED"):
             return self.verdict in ("correct", "equivalent")
         return self.verdict in ("correct", "equivalent", "guessed")
@@ -1033,9 +1050,10 @@ class Scenario:
         # that resolve; its missing ones are expected.
         partialWarned = isinstance(expectation, PartialWarned)
         settled = isinstance(expectation, Settled)
+        warnedExpected = isinstance(expectation, Warned)
         missing = sum(1 for s in subs if s.startswith("?"))
         live = [s for s in subs if not s.startswith("?")] if partialWarned else subs
-        if partialWarned or settled or isinstance(expectation, Guessed):
+        if partialWarned or settled or warnedExpected or isinstance(expectation, Guessed):
             expectation = expectation.expected
         resolved = []
         if target is None or not live or (not partialWarned and missing):
@@ -1101,6 +1119,9 @@ class Scenario:
             if settled and result.verdict == "correct" and warned:
                 # the right element, but still warned: a record left behind
                 result.verdict, detail = "wrong", f"{owner.Name} still has a warning"
+            if warnedExpected and result.verdict == "correct" and not warned:
+                # the right element, silently: the record it should keep is gone
+                result.verdict, detail = "wrong", f"{owner.Name} has no warning"
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(solverReport)
         if "evidence" in record:

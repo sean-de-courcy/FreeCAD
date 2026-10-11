@@ -1682,7 +1682,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         before it while it had no shape, without the solver: Body.insertObject can't relink Base
         (ops#82), so BaseFeature is the pocket and Base still names the pad; the dialog can't
         move Base onto the pocket either (the broken entry resolves to nothing there). Another
-        edge picked: the broken entry keeps its mapped name and its candidates (Use)."""
+        edge picked, on the pad, the object Base links (ops#176): the broken entry keeps its
+        mapped name and its candidates (Use)."""
         pad, fillet = self.boss()
         body = pad.getParent()
         notch = models.sketch(self.doc, "Notch", models.rectangle(5, 3, 7, 5), body, z=10)
@@ -1705,14 +1706,68 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump()
 
         self.arm(field, byFocus=False)
-        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pocket.Shape)
-        self.pick(pocket, other)
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        self.pick(pad, other)
         self.assertTrue(waitFor(lambda: len(states(field)) == 2), texts(field))
         self.assertEqual(states(field), ["broken", "exact"])
         menu = openMenu(field, 0)
         self.assertIn("Use", menuActions(menu), "the broken entry lost its candidates")
         menu.close()
         pump()
+
+    def insertedPocket(self):
+        """The redrawn fillet (its corner a guess), a pocket at the block's top middle inserted
+        before it without the solver: BaseFeature is the pocket, Base still the pad (ops#82). The
+        pocket renumbers the pad's edges."""
+        pad, fillet, corner = self.redrawnFillet()
+        body = pad.getParent()
+        notch = models.sketch(self.doc, "Notch", models.rectangle(8, 3, 12, 7), body, z=10)
+        pocket = self.doc.addObject("PartDesign::Pocket", "Pocket")
+        self.doc.ReferenceSolver = False
+        body.insertObject(pocket, pad, True)
+        self.doc.ReferenceSolver = True
+        pocket.Profile = notch
+        pocket.Length = 2
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertEqual(fillet.BaseFeature, pocket)
+        self.assertEqual(fillet.Base[0], pad)
+        self.assertEqual([e.get("guess_kind") for e in App.getReferenceReport(fillet)], ["tier3"])
+        return pad, pocket, fillet
+
+    def testOpenKeepsAGuessedEntryOnBase(self):
+        """ops#176, 1: the dialog opened on a dress-up whose Base isn't its BaseFeature, with a
+        guessed entry. Moving Base onto BaseFeature with the plain setter turned the entry exact
+        and dropped its warning; Base now stays, the entry stays a guess, through OK too."""
+        pad, pocket, fillet = self.insertedPocket()
+        [field] = self.edit(fillet)
+        self.assertEqual(fillet.Base[0], pad)
+        self.assertEqual(states(field), ["guessed"])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        pump()
+        self.doc.recompute()
+        self.assertEqual(fillet.Base[0], pad)
+        self.assertEqual([e.get("guess_kind") for e in App.getReferenceReport(fillet)], ["tier3"])
+        self.assertIn("Warning", fillet.State)
+
+    def testPickWithBaseOffBaseFeatureNamesThePickedEdge(self):
+        """ops#176, 2: with Base on the pad and BaseFeature the pocket, a pick is written as a sub
+        of the pad, so it is taken from the pad's shape: an edge of the pocket (numbered another
+        way) isn't taken as the pad's edge of that number, and a pad edge names that edge."""
+        pad, pocket, fillet = self.insertedPocket()
+        far = edge("line", direction=Z, through=(0, 10, 0))
+        [onPad] = far.one(pad.Shape)
+        [onPocket] = far.one(pocket.Shape)
+        self.assertNotEqual(onPad, onPocket)  # the designed model
+        [field] = self.edit(fillet)
+        self.arm(field, byFocus=False)
+        self.pick(pocket, onPocket)
+        pump(0.2)
+        self.assertEqual(len(fillet.Base[1]), 1, fillet.Base)
+        self.pick(pad, onPad)
+        self.assertTrue(waitFor(lambda: len(fillet.Base[1]) == 2), texts(field))
+        self.assertEqual(fillet.Base[0], pad)
+        self.assertEqual(far.one(pad.Shape), [fillet.Base[1][1]])
 
     def testHiddenFieldLeavesItsRowsToThePanel(self):
         """Finding 2: the second pad's up-to-face is a guess, in its field; the pad switched to

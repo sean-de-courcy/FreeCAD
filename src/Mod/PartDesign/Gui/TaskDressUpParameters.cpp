@@ -100,7 +100,16 @@ void TaskDressUpParameters::createBaseField(QWidget* placeholder)
     ReferenceField::Options options;
     options.flags.setFlag(AllowSelection::EDGE, allowEdges);
     options.flags.setFlag(AllowSelection::FACE, allowFaces);
+    // Picks are written as subs of the object Base links, so they come from its shape. That is
+    // BaseFeature's, except after a move to it that didn't happen at dialog open (ops#176).
     options.target = [this]() -> App::DocumentObject* {
+        if (ViewProviderDressUp* view = getDressUpView()) {
+            App::DocumentObject* linked =
+                view->getObject<PartDesign::DressUp>()->Base.getValue();
+            if (linked && linked->isDerivedFrom<Part::Feature>()) {
+                return linked;
+            }
+        }
         return getBase();
     };
     if (allowEdges && allowFaces) {
@@ -265,12 +274,20 @@ namespace
 // moves there: each reference is resolved as the dress-up resolves it (its mapped name on
 // BaseFeature's shape) and replaced by that element's index. A reference without a mapped name,
 // one that resolves to nothing, or two that resolve to the same element leave Base as it is
-// (ops#84). Returns whether Base moved.
+// (ops#84). So does a reference with a record or an expansion (ops#176): the plain setter
+// would drop them, and a guessed entry would read exact, its warning gone. The panel then picks
+// on Base's object. Returns whether Base moved.
 bool moveBaseToBaseFeature(PartDesign::DressUp* dressUp)
 {
     App::DocumentObject* base = dressUp->Base.getValue();
     App::DocumentObject* baseFeature = dressUp->BaseFeature.getValue();
     if (!base || !baseFeature || base == baseFeature) {
+        return false;
+    }
+    const auto records = dressUp->Base.getElementRecords();
+    const auto froms = dressUp->Base.getExpandedFroms();
+    if (std::ranges::any_of(records, [](const auto& record) { return !record.empty(); })
+        || std::ranges::any_of(froms, [](const auto& from) { return !from.empty(); })) {
         return false;
     }
     Part::TopoShape shape = dressUp->getBaseTopoShape(/* silent = */ true);

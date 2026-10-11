@@ -440,6 +440,32 @@ AppExport bool mayBeAtPlace(
     double distance
 );
 
+/** Whether the element whose fingerprint is \a piece holds \a saved's centre (G3, N2 5.2): a
+ * line on its line within half its length, an arc within its angular half-width, a planar face
+ * in its box, each grown by ε = \a continuation × max(1, \a diagonal). False for other kinds, a
+ * missing centre or extent, or another type or kind.
+ */
+AppExport bool holdsCentre(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& piece,
+    double diagonal,
+    double continuation
+);
+
+/** Whether the element whose fingerprint is \a element covers all of \a saved's extent (ops#138,
+ * the Opus verification of fork PR 249 round 1): a line holds both ends of the saved segment on
+ * its line, within its length; an arc on the saved arc's circle holds its whole angular range;
+ * a planar face's box contains the saved box, and its area is no smaller. Each grown by ε as
+ * holdsCentre(). False for other kinds (curved faces, B-splines, vertices), a missing centre or
+ * extent, or another type or kind: such an element is never taken as the original returned.
+ */
+AppExport bool coversExtent(
+    const ElementFingerprint& saved,
+    const ElementFingerprint& element,
+    double diagonal,
+    double continuation
+);
+
 /// Where a face lies against an old face's extent (fingerprint version 3, Task 2 PR 8).
 enum class ExtentRelation
 {

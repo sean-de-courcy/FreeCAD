@@ -3849,6 +3849,153 @@ TEST(RebuildSubList, guessedPiecesCarryTheRecord)
     EXPECT_EQ(countNew, (std::vector<int> {2, 1}));
 }
 
+TEST(RebuildSubList, guessedOntoAHeldElementWritesNoSecondSub)
+{
+    // ops#138, the Opus verification of fork PR 249 round 1, finding 3: a guess whose element
+    // another reference holds already (untouched, or written before it) adds no second sub.
+    using Status = App::SolverResolution::Status;
+    std::vector<std::string> subs {"Edge3", "?Edge5", "?Edge7"};
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows {
+        shadowOf("Edge3", ";a.Edge3"),
+        shadowOf("?Edge5", ";b.Edge5"),
+        shadowOf("?Edge7", ";c.Edge7"),
+    };
+    std::vector<std::string> fingerprints {"f3", "f5", "f7"};
+    std::vector<std::string> froms {"", "", ""};
+    std::vector<App::ElementRecords> records;
+
+    //   index 1 is guessed onto Edge3, which index 0 holds; index 2 onto Edge9, new
+    auto held = resolution(Status::Guessed, 1);
+    held.sub = "Edge3";
+    held.shadow = shadowOf("Edge3", ";a.Edge3");
+    held.guess.kind = "piece";
+    held.guess.origName = "b";
+    held.guess.origIndex = "Edge5";
+    auto fresh = resolution(Status::Guessed, 2);
+    fresh.sub = "Edge9";
+    fresh.shadow = shadowOf("Edge9", ";d.Edge9");
+    fresh.guess.kind = "piece";
+    fresh.guess.origName = "c";
+    fresh.guess.origIndex = "Edge7";
+    std::vector<int> firstNew;
+    std::vector<int> countNew;
+    std::vector<App::SolverResolution> resolutions {held, fresh};
+    EXPECT_TRUE(App::rebuildSubList(resolutions,
+                                    subs,
+                                    shadows,
+                                    fingerprints,
+                                    froms,
+                                    firstNew,
+                                    countNew,
+                                    &records));
+
+    EXPECT_EQ(subs, (std::vector<std::string> {"Edge3", "Edge9"}));
+    EXPECT_EQ(countNew, (std::vector<int> {1, 0, 1}));
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_TRUE(records[0].guess.empty());
+    EXPECT_EQ(records[1].guess, fresh.guess);
+}
+
+namespace
+{
+
+Data::ElementFingerprint lineFingerprint(double x0, double x1)
+{
+    Data::ElementFingerprint fp;
+    fp.type = 'E';
+    fp.kind = "Line";
+    fp.size = x1 - x0;
+    fp.center = Base::Vector3d((x0 + x1) / 2, 0, 0);
+    fp.direction = Base::Vector3d(1, 0, 0);
+    return fp;
+}
+
+Data::ElementFingerprint planeFingerprint(double x0, double x1, double z1)
+{
+    Data::ElementFingerprint fp;
+    fp.type = 'F';
+    fp.kind = "Plane";
+    fp.size = (x1 - x0) * z1;
+    fp.center = Base::Vector3d((x0 + x1) / 2, 0, z1 / 2);
+    fp.direction = Base::Vector3d(0, -1, 0);
+    fp.extentMin = Base::Vector3d(x0, 0, 0);
+    fp.extentMax = Base::Vector3d(x1, 0, z1);
+    return fp;
+}
+
+Data::ElementFingerprint arcFingerprint(double from, double to)
+{
+    // An arc of the unit circle about the origin in z = 0, from angle \a from to \a to
+    const double mid = (from + to) / 2;
+    Data::ElementFingerprint fp;
+    fp.type = 'E';
+    fp.kind = "Circle";
+    fp.size = to - from;
+    fp.center = Base::Vector3d(std::cos(mid), std::sin(mid), 0);  // on the bisector
+    fp.direction = Base::Vector3d(0, 0, 1);
+    fp.radii = {1};
+    fp.location = Base::Vector3d(0, 0, 0);
+    return fp;
+}
+
+}  // namespace
+
+TEST(CoversExtent, aLineCoversTheSavedSegment)
+{
+    // ops#138 (PR 249 verification, finding 1): a piece holding the saved centre isn't enough
+    const auto saved = lineFingerprint(0, 20);
+    EXPECT_TRUE(Data::coversExtent(saved, lineFingerprint(0, 20), 20, 1e-7));
+    EXPECT_TRUE(Data::coversExtent(saved, lineFingerprint(-2, 26), 20, 1e-7));
+    EXPECT_TRUE(Data::holdsCentre(saved, lineFingerprint(0, 12), 20, 1e-7));
+    EXPECT_FALSE(Data::coversExtent(saved, lineFingerprint(0, 12), 20, 1e-7));
+    EXPECT_FALSE(Data::coversExtent(saved, lineFingerprint(8, 20), 20, 1e-7));
+}
+
+TEST(CoversExtent, aPlaneCoversTheSavedBoxAndArea)
+{
+    const auto saved = planeFingerprint(0, 20, 10);
+    //   the ops#138 scenario's merged face, 12 high, covers the saved 10 high
+    EXPECT_TRUE(Data::coversExtent(saved, planeFingerprint(0, 20, 12), 20, 1e-7));
+    //   the named piece x 0..12 holds the centre (x = 10) but not the extent
+    EXPECT_TRUE(Data::holdsCentre(saved, planeFingerprint(0, 12, 10), 20, 1e-7));
+    EXPECT_FALSE(Data::coversExtent(saved, planeFingerprint(0, 12, 10), 20, 1e-7));
+    //   a piece whose box spans the saved box but lost a part inside it (a U): its area
+    auto u = planeFingerprint(0, 20, 10);
+    u.size = 160;
+    EXPECT_FALSE(Data::coversExtent(saved, u, 20, 1e-7));
+}
+
+TEST(CoversExtent, anArcCoversTheSavedRange)
+{
+    const double pi = std::numbers::pi;
+    const auto saved = arcFingerprint(0, pi / 2);
+    EXPECT_TRUE(Data::coversExtent(saved, arcFingerprint(0, pi / 2), 2, 1e-7));
+    EXPECT_TRUE(Data::coversExtent(saved, arcFingerprint(-pi / 4, pi), 2, 1e-7));
+    EXPECT_TRUE(Data::holdsCentre(saved, arcFingerprint(pi / 8, pi / 2), 2, 1e-7));
+    EXPECT_FALSE(Data::coversExtent(saved, arcFingerprint(pi / 8, pi / 2), 2, 1e-7));
+    //   another circle
+    auto bigger = arcFingerprint(0, pi / 2);
+    bigger.radii = {2};
+    EXPECT_FALSE(Data::coversExtent(saved, bigger, 2, 1e-7));
+}
+
+TEST(CoversExtent, otherKindsNeverCover)
+{
+    // Curved faces, B-splines, vertices, and a saved record without a fingerprint
+    Data::ElementFingerprint cylinder;
+    cylinder.type = 'F';
+    cylinder.kind = "Cylinder";
+    cylinder.size = 10;
+    cylinder.center = Base::Vector3d(0, 0, 0);
+    EXPECT_FALSE(Data::coversExtent(cylinder, cylinder, 20, 1e-7));
+    Data::ElementFingerprint vertex;
+    vertex.type = 'V';
+    vertex.kind = "Vertex";
+    vertex.center = Base::Vector3d(0, 0, 0);
+    EXPECT_FALSE(Data::coversExtent(vertex, vertex, 20, 1e-7));
+    EXPECT_FALSE(Data::coversExtent(Data::ElementFingerprint(), lineFingerprint(0, 20), 20, 1e-7));
+}
+
 TEST(GuessRecord, attributesRoundTrip)
 {
     App::GuessRecord record;

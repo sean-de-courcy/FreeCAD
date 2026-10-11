@@ -47,6 +47,8 @@ from .harness import (
     Guessed,
     Reopens,
     Scenario,
+    Settled,
+    Warned,
     X,
     Y,
     Z,
@@ -403,6 +405,131 @@ class DraftFaceNotchOffCentreRaised(DraftFaceNotchOffCentre):
     def heighten(self, doc):
         doc.Pad.Length = 12
         self.height = 12
+
+
+class DraftFaceNotchOffCentreRaisedFilled(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch's four lines deleted and the front line put
+    back to x 0..20 (`fill`): the front face is whole again. The original's name gives it, but
+    its saved fingerprint (10 high) no longer agrees (12 high), so the probe doesn't snap back;
+    the pick's name is gone (the piece merged) and structure follows it to the same face. That
+    is the original, returned: in solver documents the reference holds it plainly, its record
+    and warning gone (ops#138). Before, it kept "Guessed Face5 for Face1" and its warning."""
+
+    steps = ("edit", "heighten", "fill")
+
+    def frontFace(self):
+        if self.stepName == "fill" and self.solver:
+            return Settled(face("plane", normal=-Y, through=(0, 0, 0)))
+        return super().frontFace()
+
+    def fill(self, doc):
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
+        self.split = False
+
+
+class DraftFaceNotchOffCentreRaisedRejectedFilled(DraftFaceNotchOffCentreRaisedFilled):
+    """DraftFaceNotchOffCentreRaisedFilled, with the guess marked broken before `fill`
+    (`reject`, solver documents): the record is a rejection, and the draft fails on the original,
+    missing. After `fill` the original's name gives the whole face again: the reference holds
+    it, and the rejection and its warning stay (ops#138's rule skips rejected records; the Opus
+    review of fork PR 249, L2)."""
+
+    steps = ("edit", "heighten", "reject", "fill")
+
+    def frontFace(self):
+        if self.stepName == "reject" and self.solver:
+            return Broken(pieces(face("plane", normal=-Y, through=(0, 0, 0))))
+        if self.stepName == "fill" and self.solver:
+            return Warned(face("plane", normal=-Y, through=(0, 0, 0)))
+        return super().frontFace()
+
+    def reject(self, doc):
+        if self.solver:
+            App.markReferenceBroken(doc.Draft, "Base", 0)
+
+
+class DraftFaceNotchOffCentreRaisedCutAway(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch run on to the right side (`cutAway`): the
+    picked rest (x 8..20) is gone, and the front face is only the piece x 0..4, which kept the
+    original's name. Its fingerprint isn't the original's, so the probe doesn't snap back; the
+    pick's name is gone. The piece doesn't hold the original's saved centre (x = 10): it isn't
+    the original returned, and holding it plainly would be the silent partial DraftFaceNotch
+    rules out. The reference breaks, or a guess onto the piece keeps its record and warning
+    (ops#138, the Opus review of fork PR 249, M1)."""
+
+    steps = ("edit", "heighten", "cutAway")
+
+    def frontFace(self):
+        if self.stepName == "cutAway":
+            return Broken(face("plane", normal=-Y, through=(0, 0, 0), contains=(2, 0, 5)))
+        return super().frontFace()
+
+    def cutAway(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(5, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {4: ((4, 0), (4, 10)), 2: ((4, 10), (0, 10))})
+        doc.Profile.delGeometry(1)  # the right side
+
+
+class DraftFaceNotchOffCentreRaisedCutBack(DraftFaceNotchOffCentreRaisedCutAway):
+    """DraftFaceNotchOffCentreRaisedCutAway, with the block cut back to x 0..12 (`cutAway`): the
+    picked rest is gone, and the front face is x 0..12, under the original's name. It holds the
+    original's saved centre (x = 10), so the centre test alone took it as the original returned
+    and held it plainly, with no warning: the silent partial (the Opus verification of fork PR
+    249 round 1, finding 1). It doesn't cover the saved extent (x 0..20): the reference breaks,
+    with it as candidate (ops#138)."""
+
+    def frontFace(self):
+        if self.stepName == "cutAway":
+            return Broken(face("plane", normal=-Y, through=(0, 0, 0), contains=(6, 0, 5)))
+        return super().frontFace()
+
+    def cutAway(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(
+            doc.Profile, {0: ((0, 0), (12, 0)), 1: ((12, 0), (12, 10)), 2: ((12, 10), (0, 10))}
+        )
+
+
+class DraftFaceNotchOffCentreRaisedRedrawn(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch drawn again at x 12..16 as new geometry
+    (`redraw`): the picked rest (x 8..20) is gone, and the front face is x 0..12, which kept the
+    original's name, and x 16..20. The named piece holds the original's saved centre (x = 10), but
+    it doesn't cover the original's saved extent (x 0..20): not the original returned (ops#138,
+    the Opus verification of fork PR 249 round 1, finding 1). No structure leads to the redrawn
+    pieces, and tier 3 chooses none: the reference breaks, with the pieces and the notch's side
+    as candidates, never held plainly."""
+
+    steps = ("edit", "heighten", "redraw")
+    notchAt = (12, 16)
+
+    def frontFace(self):
+        if self.stepName == "redraw" and self.solver:
+            return Broken(pieces(face("plane", normal=-Y, through=(0, 0, 0))))
+        return super().frontFace()
+
+    def redraw(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        left, right = self.notchAt
+        m.setLines(doc.Profile, {0: ((0, 0), (left, 0))})
+        doc.Profile.addGeometry(
+            m.polyline([(left, 0), (left, 2), (right, 2), (right, 0), (20, 0)]), False
+        )
+
+
+class DraftFaceNotchOffCentreRaisedSplitAtCentre(DraftFaceNotchOffCentreRaisedRedrawn):
+    """DraftFaceNotchOffCentreRaisedRedrawn with the notch at x 10..14: the named piece, x 0..10,
+    ends exactly at the original's saved centre, so it holds it within ε. Not the original
+    either: the reference breaks (ops#138)."""
+
+    notchAt = (10, 14)
 
 
 class DraftFaceNotchNamedPieceKept(DraftFaceNotch):

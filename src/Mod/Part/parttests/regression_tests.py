@@ -580,11 +580,9 @@ class RegressionTests(unittest.TestCase):
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 [after] = guesses(rounded)
                 self.assertEqual(after["guess_kind"], before["guess_kind"])
-                # the original is the turned copy's edge where the block's was (PR 240 review, M2)
-                self.assertEqual(
-                    centre(turned.Shape, after["original"]["index"]),
-                    centre(block.Shape, before["original"]["index"]),
-                )
+                # the original, the block's edge at (20, 0) as it was saved, has no place on the
+                # turned copy (PR 248 review, L2: not the block's edge that has its number now)
+                self.assertFalse(after["original"].get("index"))
                 # the alternatives are the turned copy's edges where the block's were
                 self.assertEqual(
                     [centre(turned.Shape, a["index"]) for a in after["alternatives"]],
@@ -593,6 +591,73 @@ class RegressionTests(unittest.TestCase):
                 rounded.touch()
                 self.Doc.recompute()
                 self.assertEqual(len(guesses(rounded)), 1)
+
+    def test_fillet_chamfer_follow_places_original(self):
+        """PR 248 review, L2: a followed guess's original is placed on the new base from its
+        saved fingerprint. The guess as in test_fillet_chamfer_follow_keeps_guess (the original
+        the block's edge at (20, 0), the guess the edge at (20.5, 0)); the new base a compound
+        of a 20 x 10 x 10 box and a 1 x 10 x 10 box at x = 20.5, which has edges at both
+        places. Before, the original went where the block's edge of its number is now: the
+        guess's own place."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        if not hasattr(self.Doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            return [
+                entry
+                for entry in FreeCAD.getReferenceReport(feature)
+                if entry.get("status") == "guessed"
+            ]
+
+        def centre(shape, index):
+            point = shape.Edges[int(index[len("Edge"):]) - 1].CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        self.Doc.ReferenceSolver = True
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 0.3, 0.3)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (0, 10)])
+                self.Doc.recompute()
+                [before] = guesses(rounded)
+                self.assertTrue(before["original"].get("index"))
+
+                boxes = self.Doc.addObject("Part::Feature", "Boxes" + feature)
+                boxes.Shape = Part.Compound(
+                    [Part.makeBox(20, 10, 10), Part.makeBox(1, 10, 10, Vector(20.5, 0, 0))]
+                )
+                self.Doc.recompute()
+                rounded.Base = boxes
+                self.assertEqual(
+                    rounded.EdgeLinks[1],
+                    ["Edge{}".format(self._verticalEdgeAt(boxes.Shape, 20.5, 0))],
+                )
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                [after] = guesses(rounded)
+                self.assertEqual(centre(boxes.Shape, after["original"]["index"]), (20, 0, 5))
 
     def test_fillet_chamfer_follow_clears_original(self):
         """PR 240 round 2 (the round 1 verification's M2 follow-up): a followed guess whose
@@ -777,7 +842,9 @@ class RegressionTests(unittest.TestCase):
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 [after] = guesses(rounded)
                 self.assertFalse(after["original"].get("name"))
-                self.assertEqual(centre(turned.Shape, after["original"]["index"]), (20.5, 10, 5))
+                # without a fingerprint the original has no place on the new base (PR 248
+                # review, L2): the old base's edge at its number is another edge
+                self.assertFalse(after["original"].get("index"))
                 # still the guess at (20.5, 0), not the edge the old name gives
                 rounded.touch()
                 self.Doc.recompute()

@@ -5,6 +5,7 @@
 namespace App
 {
 
+class Document;
 class DocumentObject;
 
 /** Drops \a feature from the element reference registry (ops#119, ops#120).
@@ -22,5 +23,12 @@ void forgetElementReferencesTo(const DocumentObject* feature);
  * (ops#120). Called by Document::restore(); defined in PropertyLinks.cpp.
  */
 void resolveReregisteredReferences();
+
+/** Adds  doc's references into other documents to those resolveReregisteredReferences()
+ * resolves: File > Revert of a document with an older naming revision, whose references take
+ * the consumer pass then, those through an App::Link too (ops#124). Called by
+ * Document::restore(); defined in PropertyLinks.cpp.
+ */
+void queueReferencesIntoOtherDocuments(const Document* doc);
 
 }  // namespace App

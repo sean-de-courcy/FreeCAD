@@ -153,7 +153,8 @@ struct AppExport SolverResolution
  * Removed drops it. Fingerprints of written references are emptied (the caller refreshes them),
  * except a Broken one's, which it keeps unless clearFingerprint is set. \a records, if given, are
  * the references' records (ops#127). Their guess record: Guessed (ops#127) replaces a reference as
- * Resolved does, or by its pieces as Expanded does, and sets it; Broken sets the resolution's
+ * Resolved does, or by its pieces as Expanded does, and sets it (skipped, as a piece is, when
+ * another reference holds its element: ops#138); Broken sets the resolution's
  * (empty, or the one it carries); every other written reference loses it. Their re-target record:
  * every resolution keeps it (each piece of an expanded reference carries it), unless
  * clearRetarget is set. Sets \a firstNew and \a countNew per old index. Returns true if anything
