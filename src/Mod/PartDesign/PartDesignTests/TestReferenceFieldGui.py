@@ -4121,7 +4121,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(feature.ReferenceAxis, self.ringSketch, ["H_Axis"])
         self.assertTrue(feature.Reversed)
         self.assertTrue(box.isChecked())
-        self.assertIn("against", Gui.getMainWindow().statusBar().currentMessage())
+        # the main window's messages go to a label in the status bar, after the pick's recompute
+        pump(0.2)
+        statusBar = Gui.getMainWindow().statusBar()
+        texts = [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+        self.assertTrue(any("against the way the axis suggests" in t for t in texts), texts)
 
     def testRevolutionAxisGuessed(self):
         """T22, B19: the axis an edge of a sketch that is drawn again: the row shows it guessed,

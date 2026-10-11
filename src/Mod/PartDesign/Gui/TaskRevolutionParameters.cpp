@@ -542,7 +542,9 @@ void TaskRevolutionParameters::writeAxis(
         // A picked axis turns the revolution the way it suggests, or the other way when the
         // user's Reversed went against the suggestion (ops#252: every pick overwrote it silently;
         // PR 245 review M1: the choice is kept relative to the suggestion, not as a value). A
-        // change, or a result against the suggestion, is said
+        // change, or a result against the suggestion, is said once the pick's recompute is done
+        // (it clears the status bar, so the message was never seen)
+        QString message;
         if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
             const bool reversed = revolved->suggestReversed() != userFlip;
             const bool changed = reversed != propReversed->getValue();
@@ -552,26 +554,26 @@ void TaskRevolutionParameters::writeAxis(
                 ui->checkBoxReversed->setChecked(reversed);
             }
             if (userFlip) {
-                Gui::getMainWindow()->showMessage(
-                    reversed ? tr("Reversed is on: the revolution turns against the way the axis "
-                                  "suggests, as you set it.")
-                             : tr("Reversed is off: the revolution turns against the way the axis "
-                                  "suggests, as you set it."),
-                    10000
-                );
+                message = reversed
+                    ? tr("Reversed is on: the revolution turns against the way the axis suggests, "
+                         "as you set it.")
+                    : tr("Reversed is off: the revolution turns against the way the axis "
+                         "suggests, as you set it.");
             }
             else if (changed) {
-                Gui::getMainWindow()->showMessage(
-                    reversed
-                        ? tr("Reversed is now on: the revolution turns the way the axis suggests.")
-                        : tr("Reversed is now off: the revolution turns the way the axis suggests."),
-                    10000
-                );
+                message = reversed
+                    ? tr("Reversed is now on: the revolution turns the way the axis suggests.")
+                    : tr("Reversed is now off: the revolution turns the way the axis suggests.");
             }
         }
 
         recomputeFeature();
         setGizmoPositions();
+        if (!message.isEmpty()) {
+            QTimer::singleShot(0, this, [message]() {
+                Gui::getMainWindow()->showMessage(message, 10000);
+            });
+        }
     }
     catch (const Base::Exception& e) {
         e.reportException();
