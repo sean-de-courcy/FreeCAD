@@ -664,24 +664,16 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
     for (const auto& constr : scvals) {
         Sketcher::Constraint* newConstr = constr->copy();
-        if (constr->First >= 0) {
-            newConstr->First += nextgeoid;
-        }
-        if (constr->Second >= 0) {
-            newConstr->Second += nextgeoid;
-        }
-        if (constr->Third >= 0) {
-            newConstr->Third += nextgeoid;
-        }
-
-        if (constr->First < -2 && constr->First != GeoEnum::GeoUndef) {
-            newConstr->First -= (nextextgeoid - 2);
-        }
-        if (constr->Second < -2 && constr->Second != GeoEnum::GeoUndef) {
-            newConstr->Second -= (nextextgeoid - 2);
-        }
-        if (constr->Third < -2 && constr->Third != GeoEnum::GeoUndef) {
-            newConstr->Third -= (nextextgeoid - 2);
+        // FreeCAD-CH (ops#247): every element, not only First/Second/Third: a Group or a Text
+        // holds more, and the later ones kept the source's GeoIds, naming other geometry here
+        for (size_t i = 0; i < newConstr->getElementsSize(); ++i) {
+            const int geoId = constr->getGeoId(i);
+            if (geoId >= 0) {
+                newConstr->setGeoId(i, geoId + nextgeoid);
+            }
+            else if (geoId < -2 && geoId != GeoEnum::GeoUndef) {
+                newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
+            }
         }
 
         if (xinv || yinv) {
