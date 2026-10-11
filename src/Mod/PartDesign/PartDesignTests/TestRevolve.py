@@ -605,6 +605,73 @@ class TestRevolve(unittest.TestCase):
     def testGrooveTwoFacesUpToFaceFails(self):
         self.revolveTwoFacesUpToFace("Groove")
 
+    def revolveUpToFaceAcross(self, kind, sideType):
+        """A face of the base that reaches across the profile plane, so that it mirrors onto
+        itself (ops#254): the box x in [-4, 0], y in [-4, 4], z in [0, 2] (Revolution: 64), or
+        x in [0, 4], y in [-4, 4], z in [0, 3] (Groove: 96, its top layer keeps it one solid), and the profile x in [1, 3], z in [0, 2] on XZ about Z, up to the box's
+        face x = 0 on both sides. The tool is the half ring from -90 to +90 degrees, 8 pi, on the
+        side x >= 0; Symmetric revolved the second side the long way round, from +90 to +270."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2 if kind == "Revolution" else 3
+        x0 = -4 if kind == "Revolution" else 0
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, -4, 0), FreeCAD.Rotation())
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(1, 0),
+            FreeCAD.Vector(3, 0),
+            FreeCAD.Vector(3, 2),
+            FreeCAD.Vector(1, 2),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(block.Shape.Faces)
+            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
+        ]
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = sideType
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [wall])
+        if sideType == "Two sides":
+            revolution.Type2 = "UpToFace"
+            revolution.UpToFace2 = (block, [wall])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        expected = 64 + 8 * math.pi if kind == "Revolution" else 96 - 8 * math.pi
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
+        if kind == "Revolution":
+            tool = revolution.Shape.cut(block.Shape)
+        else:
+            tool = block.Shape.cut(revolution.Shape)
+        self.assertAlmostEqual(tool.Volume, 8 * math.pi, places=6)
+        bounds = tool.BoundBox
+        self.assertAlmostEqual(bounds.XMin, 0, places=6)
+        self.assertAlmostEqual(bounds.XMax, 3, places=6)
+        self.assertAlmostEqual(bounds.YMin, -3, places=6)
+        self.assertAlmostEqual(bounds.YMax, 3, places=6)
+        self.assertAlmostEqual(bounds.ZMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 2, places=6)
+
+    def testRevolutionUpToFaceAcrossSymmetric(self):
+        self.revolveUpToFaceAcross("Revolution", "Symmetric")
+
+    def testRevolutionUpToFaceAcrossTwoSides(self):
+        self.revolveUpToFaceAcross("Revolution", "Two sides")
+
+    def testGrooveUpToFaceAcrossSymmetric(self):
+        self.revolveUpToFaceAcross("Groove", "Symmetric")
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error and gives no solid."""

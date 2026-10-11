@@ -478,6 +478,14 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 }
                 gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
                 TopoShape mirroredUpToFace = upToFace.makeElementMirror(mirrorPlane);
+                // An up-to face that is symmetric about the profile plane (a wall across it)
+                // mirrors onto itself. BRepFeat then revolved the second side the long way round,
+                // from the face on the first side's end to the face on its own, silently
+                // (ops#254). The face itself, which Two sides passes for both sides, gives the
+                // right sector.
+                if (!upToFace.findSubShapesWithSharedVertex(mirroredUpToFace).empty()) {
+                    mirroredUpToFace = upToFace;
+                }
                 gp_Dir dir2 = dir;
                 dir2.Reverse();
                 addRevolution(tryToRevolveToFace(
