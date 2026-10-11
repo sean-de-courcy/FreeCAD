@@ -848,8 +848,9 @@ def pickedWrongSet(stored, verdict, rows):
     (a guess rule's, a continuation, or a geometry tier's: tier2, tier3, index), is
     `guessed-wrong` whatever the consumer computes (fork PR 256 verification, M1). Only kinds in
     GUESS_KINDS make a right pick `guessed`: a geometry pick among an expected break's candidates
-    stays partial."""
-    picks = [e for e in rows if e.get("guess_kind") and e.get("status") != "broken"]
+    stays partial. A guess the policy rejected picked nothing."""
+    picks = [e for e in rows
+             if e.get("guess_kind") not in (None, "", "rejected") and e.get("status") != "broken"]
     if stored == "wrong" and picks and verdict not in ("wrong", "guessed-wrong"):
         return "guessed-wrong"
     return verdict

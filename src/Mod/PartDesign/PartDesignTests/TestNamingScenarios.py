@@ -444,7 +444,7 @@ class HarnessGuessVerdicts(unittest.TestCase):
     def testGeometryPickOfAWrongSetIsWrong(self):
         """A tier-3 pick (not a guess kind) of a wrong set with the same result (the
         verification of fork PR 256, M1)."""
-        rows = self.rows(kind="tier3")
+        rows = self.rows("resolved", "tier3")
         verdict = self.verdict(self.EDGE, "wrong", "equivalent", rows)
         self.assertEqual(verdict, "equivalent")  # guessVerdict alone doesn't see it
         verdict = harness.pickedWrongSet("wrong", verdict, rows)
@@ -455,6 +455,11 @@ class HarnessGuessVerdicts(unittest.TestCase):
         #   a record a break kept is no pick
         self.assertEqual(
             harness.pickedWrongSet("wrong", "equivalent", self.rows("broken", "tier3")),
+            "equivalent",
+        )
+        #   nor is a guess the policy rejected
+        self.assertEqual(
+            harness.pickedWrongSet("wrong", "equivalent", self.rows("resolved", "rejected")),
             "equivalent",
         )
 
