@@ -23,6 +23,8 @@
 """Dress-ups after upstream edits: a draft, a fillet and a chamfer keep their edges and faces
 when the features before them change, are inserted or are reordered."""
 
+import math
+
 from .harness import (
     BROKEN,
     Attached,
@@ -814,3 +816,49 @@ class FilletHoleCircleDeletedBesideAnother(Scenario):
     def edit(self, doc):
         doc.HoleSketch.delGeometry(0)
         self.gone = True
+
+
+class FilletSideOneEdgeOfTaperedTwoSides(Scenario):
+    """PR 243 round 2 (ops#255): a Pad of the square x, y -5..5, Two sides, 5 and 5, each side
+    tapered 10 degrees (widening), so the second side is built and named on its own; a fillet,
+    radius 0.5, on side 1's corner edge from (-5, -5, 0) up to z = 5. Side 1's taper is then set
+    to 0: that slanted edge is gone, and side 1's corner edge is vertical now. Side 2's corner edge,
+    from (-5, -5, 0) down to z = -5, is side 1's old name followed by the second side's copy
+    section: the solver took it at tier 1, "in ancestry", silently, with the fillet moved to the
+    other side. A copy section marks a twin, like a pattern instance: side 2's names share no
+    ancestry with side 1's, so the fillet breaks (the solver: no top agreement). Without the
+    solver, V2's name match still takes side 2's edge (listed under ops#7)."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("side_one_edge",)
+    untapered = False
+
+    def cornerEdge(self):
+        if self.untapered:
+            if self.solver:
+                return Broken(edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, 2)))
+            return BROKEN
+        d = 5 * math.tan(math.radians(10))
+        return edge(contains=(-5 - d / 2, -5 - d / 2, 2.5))  # the draft's edge, its midpoint
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = profile
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length = 5
+        pad.Length2 = 5
+        pad.TaperAngle = 10
+        pad.TaperAngle2 = 10
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 0.5
+        self.ref("side_one_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.TaperAngle = 0
+        self.untapered = True

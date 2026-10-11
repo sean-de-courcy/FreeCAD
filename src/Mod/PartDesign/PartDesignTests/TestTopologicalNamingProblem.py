@@ -60,6 +60,21 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         harness.assertEveryElementNamed(shape)
         harness.assertDistinctNames(shape)
 
+    def assertNoPieceOfAnother(self, shape):
+        """No element's name reads, to the reference solver, as a piece of another element's
+        name: a second side's names end in a CPY section, which marks a twin, not a split
+        (PR 243 round 2)."""
+        names = harness.elementNames(shape)
+        for a, aNames in names.items():
+            for b, bNames in names.items():
+                if a == b:
+                    continue
+                for aName in aNames:
+                    for bName in bNames:
+                        self.assertFalse(
+                            App.isPieceOf(aName, bName), f"{a} {aName!r} / {b} {bName!r}"
+                        )
+
     def sketchSection(self, sketch, referenceIDs, elementType):
         """A sketch element's V2 name, decoded: one section with the sketch's ID as its tag.
         Reference IDs are sorted, since a vertex lists its geometry points in no set order."""
@@ -806,7 +821,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         """ops#255: the two sides of a Pad or Pocket built from the same sketch edges (Two sides
         up to faces or tapered on both sides; Symmetric up to a face, through all, or tapered by
         Length) have the second side's names marked, so no two elements share a name up to the
-        duplicate counter."""
+        duplicate counter, and no side-2 name reads as a piece of a side-1 name."""
         # Each side tapered 10 degrees over 5 widens by d each way: a prismatoid on the 10 x 10
         # square, its mid-section 10 + d and its far end 10 + 2d wide.
         d = 5 * math.tan(math.radians(10))
@@ -828,6 +843,7 @@ class TestTopologicalNamingProblem(unittest.TestCase):
                 baseVolume = feature.BaseFeature.Shape.Volume if feature.BaseFeature else 0
                 self.assertAlmostEqual(feature.Shape.Volume - baseVolume, added)
                 self.assertNamesDistinct(feature.Shape)
+                self.assertNoPieceOfAnother(feature.Shape)
                 body = feature.getParentGeoFeatureGroup()
                 for obj in reversed(body.Group):
                     self.Doc.removeObject(obj.Name)

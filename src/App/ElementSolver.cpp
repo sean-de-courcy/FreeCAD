@@ -65,33 +65,50 @@ constexpr const char* patternInstanceOpCode = "TRF";
 // apart the supports from copies of one file (ops#112).
 constexpr const char* boundaryOpCode = "EXT";
 
-// A section that makes a copy of the element it ends: a pattern instance's or a boundary's.
+// The op code of a second side's section, `_;_;<feature>;CPY;2;<type>;0;MOD;_` (Part's
+// OpCodes::Copy). A two-sided or Symmetric Pad's or Pocket's second side is built from the
+// profile's edges again, and its names are the first side's with this section (ops#255); a
+// Revolution's second side has it on the profile's names inside its own (ops#240). It carries
+// the MOD flag, but the element is the first side's twin, no piece of it: like an instance, the
+// second side is a copy, and its names share no ancestry with the first side's (PR 243 round 2).
+constexpr const char* secondSideOpCode = "CPY";
+
+// The copy a section makes of the element it ends, as the context its prefix is in: k for a
+// pattern instance, EXT;i for a boundary, CPY;2 for a second side; empty for any other section.
+std::string copyIndex(const DecodedMappedSection& section)
+{
+    if (section.opCode == patternInstanceOpCode) {
+        return section.index;
+    }
+    if (section.opCode == boundaryOpCode || section.opCode == secondSideOpCode) {
+        return section.opCode + ";" + section.index;
+    }
+    return {};
+}
+
+// A section that makes a copy of the element it ends: a pattern instance's, a boundary's or a
+// second side's.
 bool isCopySection(const DecodedMappedSection& section)
 {
-    return section.opCode == patternInstanceOpCode || section.opCode == boundaryOpCode;
+    return !copyIndex(section).empty();
 }
 
 // Starts and ends a copy's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e` for a pattern
-// instance, `\x1e<tag>;EXT;<i>\x1e` for a boundary, before a name (see
-// NameAncestry::ancestorsOf()).
+// instance, `\x1e<tag>;EXT;<i>\x1e` for a boundary, `\x1e<tag>;CPY;2\x1e` for a second side,
+// before a name (see NameAncestry::ancestorsOf()).
 // A control character starts no mapped name.
 constexpr char contextMark = '\x1e';
 
-// The copies a name is in: (tag, k) of each of its top-level TRF sections, (tag, EXT;i) of each
-// of its EXT sections, in order.
+// The copies a name is in: (tag, copyIndex()) of each of its top-level copy sections (TRF, EXT,
+// CPY), in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
 {
     std::vector<std::pair<std::string, std::string>> instances;
     for (auto section : NameAncestry::splitSections(name)) {
         const auto& decoded = decodeSection(section);
-        if (decoded.opCode == patternInstanceOpCode) {
-            instances.emplace_back(decoded.iterationTag, decoded.index);
-        }
-        else if (decoded.opCode == boundaryOpCode) {
-            instances.emplace_back(
-                decoded.iterationTag,
-                std::string(boundaryOpCode) + ";" + decoded.index
-            );
+        auto index = copyIndex(decoded);
+        if (!index.empty()) {
+            instances.emplace_back(decoded.iterationTag, std::move(index));
         }
     }
     return instances;
@@ -195,20 +212,17 @@ bool hasTag(const DecodedMappedSection& section)
     return !section.iterationTag.empty() && section.iterationTag != Data::EMPTY_VALUE;
 }
 
-// The copies \a name's element is made in, in its whole lineage: its own top-level TRF and EXT
-// sections (patternInstances()) and those of every name its lineage links, at any depth, sorted.
+// The copies \a name's element is made in, in its whole lineage: its own top-level copy sections
+// (patternInstances()) and those of every name its lineage links, at any depth, sorted.
 // A later feature's element made from a copy's (a pocket slicing a Mirrored boss) carries the
 // copy only inside a linked name (ops#168 review).
 std::vector<std::pair<std::string, std::string>> copyContexts(std::string_view name)
 {
     auto contexts = patternInstances(name);
     walkLineage(name, false, [&](const DecodedMappedSection& section, bool) {
-        if (section.opCode == patternInstanceOpCode) {
-            contexts.emplace_back(section.iterationTag, section.index);
-        }
-        else if (section.opCode == boundaryOpCode) {
-            contexts.emplace_back(section.iterationTag,
-                                  std::string(boundaryOpCode) + ";" + section.index);
+        auto index = copyIndex(section);
+        if (!index.empty()) {
+            contexts.emplace_back(section.iterationTag, std::move(index));
         }
         return false;
     });
@@ -423,7 +437,8 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
     // edge of each of two instances); two names of one instance share the copies' ancestors.
     // A node in a context has the children of the name it stands for, in the same context.
     // A boundary section's prefix is the same (ops#56): `X|EXT` is X brought in through one Link
-    // or binder, so the copies through two links share no ancestry, nor do X and its copy.
+    // or binder, so the copies through two links share no ancestry, nor do X and its copy. So is
+    // a second side's (PR 243 round 2): `X|CPY` is the second side's twin of the first side's X.
     std::vector<std::string> children;
     std::vector<std::pair<std::string, std::string>> referenceIds;  // (ID, tag) of a leaf
     std::string context;  // the node's contexts, outermost first, for a node in a context
@@ -443,12 +458,9 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
             // Everything before the last top-level delimiter.
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
             std::string prefix(node.substr(0, prefixSize));
-            if (last.opCode == patternInstanceOpCode) {
-                prefix = contextMark + last.iterationTag + ";" + last.index + contextMark + prefix;
-            }
-            else if (last.opCode == boundaryOpCode) {
-                prefix = contextMark + last.iterationTag + ";" + boundaryOpCode + ";" + last.index
-                    + contextMark + prefix;
+            auto index = copyIndex(last);
+            if (!index.empty()) {
+                prefix = contextMark + last.iterationTag + ";" + index + contextMark + prefix;
             }
             children.push_back(std::move(prefix));
         }
