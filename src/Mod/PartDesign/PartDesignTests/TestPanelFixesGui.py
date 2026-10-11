@@ -1259,9 +1259,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
         self.assertAlmostEqual(revolution.Shape.Volume, 24 * math.pi, places=3)
 
-    def runNewSketchOnCopiedFace(self, feature, face):
-        """Runs New Sketch on `face` of feature (in another body) and answers Make independent
-        copy, and any message box; the answers go to self.modals."""
+    def runNewSketchOnCopiedFace(self, feature, face, choice="radioIndependent"):
+        """Runs New Sketch on `face` of feature (in another body) and answers the copy dialog with
+        `choice` (Make independent copy), and any message box; the answers go to self.modals."""
         # the command is active only in its workbench (an earlier unit can leave another one)
         Gui.activateWorkbench("PartDesignWorkbench")
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -1278,7 +1278,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(
             QtWidgets.QApplication.queryKeyboardModifiers(), QtCore.Qt.KeyboardModifier.NoModifier
         )
-        self.answerModals()
+        self.answerModals(choice)
         Gui.runCommand("PartDesign_NewSketch")
 
     def newSketchOnCopiedFace(self, feature, face="Face1"):
@@ -1583,14 +1583,18 @@ class TestPanelFixesGui(unittest.TestCase):
         """PR 224 review M1: as testIndependentCopyOwnsItsNamedExpressions, by label."""
         self.copyOwnsItsExpression("<<Spine label>>.Constraints.Len * 2")
 
-    def pipeOnAnOutsideEdge(self, feature, where, x, y):
+    def pipeOnAnOutsideEdge(self, feature, where, x, y, placement=None):
         """A Pipe in self.body (made if missing) whose spine is feature's edge with its centre of
-        mass at `where` (in feature's own frame), and whose profile is a 2 x 2 square around
-        (x, y) in the body; recomputed. The square overlaps a primitive copy, which fuses with the
+        mass at `where` (in its container's frame: feature.Shape is placed), and whose profile is a 2 x 2 square around
+        (x, y) in the body (on its XY plane, or at `placement`); recomputed. The square overlaps a primitive copy, which fuses with the
         pipe once it's in the body (ops#244 P3)."""
         self.body = self.body if getattr(self, "body", None) else models.body(self.doc)
         self.profile = models.sketch(
-            self.doc, "Profile", models.rectangle(x - 1, y - 1, x + 1, y + 1), self.body
+            self.doc,
+            "Profile",
+            models.rectangle(x - 1, y - 1, x + 1, y + 1),
+            self.body,
+            placement=placement,
         )
         self.doc.recompute()
         [sub] = [
@@ -1667,25 +1671,55 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
     def testIndependentCopyIntoAPlacedBody(self):
-        """PR 224 round 2 (verification 4): the box's body is at the origin, the pipe's body
-        turned 90 degrees about Z and moved by (3, 0, 0). The copy's Placement is the box's in the
-        pipe's body's frame (its inverse applied): its edge is globally where picked, (20, 0, 5)."""
+        """PR 224 round 2 (verification 4): the box's body is turned 90 degrees about X and moved
+        by (0, 0, 7), the pipe's body turned 90 degrees about Z and moved by (3, 0, 0). The copy's
+        Placement is the box's global one in the pipe's body's frame (T^-1 * G; G * T^-1, the
+        wrong order, passed with the box's body at the origin): its edge is globally where
+        picked. The box's edge x = 20, y = 0 along Z (centre (20, 0, 5)) is globally along -Y,
+        centre (20, -5, 7)."""
         other = models.body(self.doc)
+        other.Placement = App.Placement(V(0, 0, 7), App.Rotation(V(1, 0, 0), 90))
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
         box.Width = 20
         self.body = models.body(self.doc)
         self.body.Placement = App.Placement(V(3, 0, 0), App.Rotation(Z, 90))
         self.doc.recompute()
-        pipe = self.pipeOnAnOutsideEdge(box, V(20, 0, 5), 0, -17)
+        self.assertLess((other.Placement.multVec(V(20, 0, 5)) - V(20, -5, 7)).Length, 1e-9)
+        # the profile across the edge at its start, (20, 0, 7) globally, in the pipe's body
+        profile = self.body.Placement.inverse() * App.Placement(
+            V(20, 0, 7), App.Rotation(V(1, 0, 0), 90)
+        )
+        pipe = self.pipeOnAnOutsideEdge(box, V(20, 0, 5), 0, 0, profile)
         copy = self.copySpineIn(pipe)
         self.assertTrue(
-            (self.body.Placement * copy.Placement).isSame(box.Placement, 1e-9), copy.Placement
+            (self.body.Placement * copy.Placement).isSame(
+                other.Placement * box.Placement, 1e-9
+            ),
+            copy.Placement,
         )
-        copy = pipe.Spine[0]
-        edge = copy.getSubObject(pipe.Spine[1][0])
-        centre = self.body.getGlobalPlacement().multVec(edge.CenterOfMass)
-        self.assertLess((centre - V(20, 0, 5)).Length, 1e-6, centre)
+        self.assertCopiedEdgeAt(pipe, V(20, -5, 7))
+
+    def testIndependentCopyOfAPadIntoARotatedBody(self):
+        """PR 224 round 2 (verification 4): testIndependentCopyOfAPadInAPlacedBody with the
+        pipe's body turned 90 degrees about Z and moved by (3, 0, 0): the shape binder's
+        Placement takes the target's inverse (its T^-1 was never run with a target at the
+        origin). The pad's edge (0, 0, 0..10) of its body at (5, 0, 0) is globally at x = 5."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(5, 0, 0)
+        sketch = models.sketch(self.doc, "Base", models.rectangle(0, 0, 20, 20), other)
+        pad = other.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        self.body = models.body(self.doc)
+        self.body.Placement = App.Placement(V(3, 0, 0), App.Rotation(Z, 90))
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        start = self.body.Placement.inverse().multVec(V(5, 0, 0))
+        pipe = self.pipeOnAnOutsideEdge(pad, V(0, 0, 5), start.x, start.y)
+        copy = self.copySpineIn(pipe)
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
     def testNewSketchOnACopiedBoxFromAPlacedBody(self):
         """PR 224 review M2: New Sketch on the end face x = 20 of a 20 x 10 x 10 box in another
@@ -1753,6 +1787,333 @@ class TestPanelFixesGui(unittest.TestCase):
         edge = copy.getSubObject(pipe.Spine[1][0])
         self.assertLess((edge.CenterOfMass - V(5, 5, 15)).Length, 1e-6)
         self.assertAlmostEqual(edge.Length, 10, places=6)
+
+    # -- ops#244, ops#245: copies of a datum, of a sketch outside any body, picked elements -----
+
+    def attachDatumAcross(self, datumType, support, mode, choice="radioIndependent"):
+        """A datum of datumType in self.body attached to `support` (a list of (object, sub)) in
+        another body by `mode`, then OK on its panel answered with `choice`: the support is copied
+        into the body (TaskDatumParameters' accept). Returns the datum."""
+        datum = self.body.newObject(datumType, "Datum")
+        datum.AttachmentSupport = support
+        datum.MapMode = mode
+        self.doc.recompute()
+        self.edit(datum)
+        self.answerModals(choice)
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        return datum
+
+    def datumPointAcross(self, choice, placed=True):
+        """ops#244 P6: a datum point in this body (at (0, 0, 10) if placed) attached to a datum
+        point at (1, 2, 3) in another body (if placed, turned 90 degrees about Z and moved by
+        (5, 0, 0): globally (3, 1, 3)). makeCopy's datum branch made an abstract Part::Datum
+        (nothing) and dereferenced it. The copy is a datum point in this body, and the datum is
+        where the point is."""
+        other = models.body(self.doc)
+        point = other.newObject("PartDesign::Point", "Point")
+        point.Placement.Base = V(1, 2, 3)
+        self.body = models.body(self.doc)
+        where = V(1, 2, 3)
+        if placed:
+            other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+            self.body.Placement.Base = V(0, 0, 10)
+            where = V(3, 1, 3)
+        self.doc.recompute()
+        self.assertLess((point.getGlobalPlacement().Base - where).Length, 1e-9)
+        datum = self.attachDatumAcross("PartDesign::Point", [(point, "")], "Vertex", choice)
+        copy = self.doc.getObject("CopyPoint" if choice == "radioIndependent" else "ReferencePoint")
+        self.assertIsNotNone(copy)
+        self.assertEqual(copy.TypeId, "PartDesign::Point")
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertEqual(datum.AttachmentSupport, [(copy, ("",))])
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        self.assertLess((copy.getGlobalPlacement().Base - where).Length, 1e-6)
+        self.assertLess((datum.getGlobalPlacement().Base - where).Length, 1e-6)
+        return copy, point
+
+    def testDatumOnAnIndependentCopyOfADatumPoint(self):
+        """ops#244 P6, Make independent copy: the copy isn't attached."""
+        copy, _ = self.datumPointAcross("radioIndependent")
+        self.assertEqual(copy.MapMode, "Deactivated")
+
+    def testDatumOnADependentCopyOfADatumPoint(self):
+        """ops#244 P6, Make dependent copy: the copy is attached to the point. With the bodies at
+        the origin: attached across bodies, a dependent copy takes the point's place in its own
+        body as its place in this one, as the dependent shape binder does (listed on ops#244)."""
+        copy, point = self.datumPointAcross("radioDependent", placed=False)
+        self.assertEqual(copy.AttachmentSupport, [(point, ("",))])
+
+    def testDatumOnACopiedOriginPlane(self):
+        """ops#244 P6: a datum plane in this body attached to the XZ plane of another body's
+        origin (the body turned 90 degrees about Z and moved by (5, 0, 0): globally the plane
+        x = 5, normal along X), Make independent copy. The copy, a shape binder, was built from
+        itself (empty), so the datum had nothing to attach to. It holds the plane where it is."""
+        other = models.body(self.doc)
+        other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        xz = models.originFeature(other, "XZ_Plane")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        datum = self.attachDatumAcross("PartDesign::Plane", [(xz, "")], "FlatFace")
+        copy = datum.AttachmentSupport[0][0]
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertEqual(len(copy.Shape.Faces), 1)
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        placement = datum.getGlobalPlacement()
+        self.assertAlmostEqual(abs(placement.Rotation.multVec(Z).x), 1, places=6)
+        self.assertAlmostEqual(placement.Base.x, 5, places=6)
+
+    def testDatumOnAFaceOfACopiedBox(self):
+        """ops#244 P2: a datum plane attached to the top face (z = 10, not Face1) of a 10 mm box
+        in another body, Make independent copy. The datum's sub on the copy was empty: it lost
+        the picked face. It is the picked face on the copy."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        datum = self.attachDatumAcross("PartDesign::Plane", [(box, top)], "FlatFace")
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertEqual(datum.AttachmentSupport, [(copy, (top,))])
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        placement = datum.getGlobalPlacement()
+        self.assertAlmostEqual(abs(placement.Rotation.multVec(Z).z), 1, places=6)
+        self.assertAlmostEqual(placement.Base.z, 10, places=6)
+
+    def testDatumOnAFaceOfACopiedPad(self):
+        """ops#244 P2: as testDatumOnAFaceOfACopiedBox on the top face of a 20 x 20 x 10 pad,
+        whose copy is a shape binder of that face alone: the datum is on its Face1."""
+        other = models.body(self.doc)
+        sketch = models.sketch(self.doc, "Base", models.rectangle(0, 0, 20, 20), other)
+        pad = other.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 10
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        [top] = [
+            f"Face{i}"
+            for i, f in enumerate(pad.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 10) < 1e-6
+        ]
+        datum = self.attachDatumAcross("PartDesign::Plane", [(pad, top)], "FlatFace")
+        copy = datum.AttachmentSupport[0][0]
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertEqual(datum.AttachmentSupport, [(copy, ("Face1",))])
+        self.doc.recompute()
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 10, places=6)
+
+    def testDatumOnAStaleCopiedBoxStops(self):
+        """ops#244 P2, the check: the box was lengthened to 20 and not recomputed, so the picked
+        face (the end x = 10) is at x = 20 on its recomputed copy. OK stops with a message, the
+        panel stays, and no copy is left."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        end = self.boxElement(box, "Face", lambda p: abs(p.x - 10) < 1e-6)
+        datum = self.body.newObject("PartDesign::Plane", "Datum")
+        datum.AttachmentSupport = [(box, end)]
+        datum.MapMode = "FlatFace"
+        self.doc.recompute()
+        box.Length = 20
+        self.edit(datum)
+        self.answerModals()
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: " + end), self.modals)
+        self.assertIsNotNone(Gui.Control.activeDialog())
+        self.assertEqual([o.Name for o in self.doc.Objects if o.Name.startswith("CopyBox")], [])
+        self.assertEqual(datum.AttachmentSupport, [(box, (end,))])
+
+    def testNewSketchOnTheTopFaceOfACopiedPrimitiveOnABase(self):
+        """ops#244 P1: New Sketch on Box's top face (z = 20, not Face1) in primitivesOnABase,
+        Make independent copy. The copy keeps its pasted shape (not recomputed: a primitive on a
+        base), and the sketch went on its Face1 (the base's side, x = -5) whatever face was
+        picked. It links the picked face, the same index on the copy; the command's recompute
+        then makes the copy the bare box (ops#244 P5), whose top face is the same plane."""
+        box, _ = self.primitivesOnABase()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 20) < 1e-6)
+        sketch = self.newSketchOnCopiedFace(box, top)
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertEqual(sketch.AttachmentSupport[0][0], copy)
+        self.doc.recompute()
+        normal = sketch.getGlobalPlacement().Rotation.multVec(Z)
+        self.assertAlmostEqual(abs(normal.z), 1, places=6)
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 20, places=6)
+
+    def testRevolutionAxisOnAnEdgeOfACopiedPrimitiveOnABase(self):
+        """ops#244 P1 (getReferencedSelection): the Revolution's axis picked on Box's edge
+        x = 10, y = 0 along Z (not Edge1) in primitivesOnABase, Make independent copy. The axis
+        went to the copy's Edge1 whatever edge was picked; it is the picked edge, the same line on
+        the copy (checked at the pick: ops#244 P3)."""
+        box, _ = self.primitivesOnABase()
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        self.doc.recompute()
+        edge = self.boxElement(
+            box, "Edge", lambda p: abs(p.x - 10) < 1e-6 and abs(p.y) < 1e-6 and p.z > 10
+        )
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+        self.edit(revolution)
+        self.armAxisField()
+        self.answerModals()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.assertTrue(waitFor(lambda: self.modals), "no copy dialog")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertEqual(revolution.ReferenceAxis, (copy, [edge]))
+        picked = copy.Shape.getElement(edge)
+        self.assertAlmostEqual(picked.CenterOfMass.x, 10, places=6)
+        self.assertAlmostEqual(picked.CenterOfMass.y, 0, places=6)
+        self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
+        self.close(ok=False)
+
+    def testPadOfASketchCopiedIntoARotatedBody(self):
+        """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
+        (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
+        body turned 30 degrees about X. fixSketchSupport threw ("Sketch plane cannot be
+        migrated"), and the dialog's worker called front() on the empty list. The copy is
+        attached to the body's XY plane with an offset that keeps it where the sketch is
+        (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
+        is 10 x 10 x 10 on it."""
+        sketch = models.sketch(
+            self.doc,
+            "Free",
+            models.rectangle(0, 0, 10, 10),
+            None,
+            placement=App.Placement(V(2, 3, 5), App.Rotation(Z, 15)),
+        )
+        self.body = models.body(self.doc)
+        self.body.Placement.Rotation = App.Rotation(V(1, 0, 0), 30)
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no pick dialog")
+        pump(0.3)
+        Gui.Control.showTaskView()
+        self.widget(QtWidgets.QCheckBox, "checkOtherPart").setChecked(True)
+        listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
+        [item] = [
+            listWidget.item(i)
+            for i in range(listWidget.count())
+            if listWidget.item(i).text().startswith("Free ")
+        ]
+        self.assertFalse(item.isHidden())
+        item.setSelected(True)
+        self.assertTrue(self.widget(QtWidgets.QRadioButton, "radioIndependent").isChecked())
+        self.answerModals()
+        ok = QtWidgets.QDialogButtonBox.Ok
+        self.assertTrue(waitFor(lambda: taskButton(ok) is not None, 5.0), "no OK")
+        taskButton(ok).click()
+        self.assertTrue(
+            waitFor(lambda: self.doc.getObject("Pad") is not None, 5.0),
+            f"no pad; modals {self.modals}",
+        )
+        pad = self.doc.getObject("Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no pad panel")
+        pump(0.3)
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        copy = pad.Profile[0]
+        self.assertIsNot(copy, sketch)
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertEqual(copy.MapMode, "FlatFace")
+        self.doc.recompute()
+        self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
+
+    def testDatumOnADependentCopyAcrossPlacedBodiesStops(self):
+        """PR 227 review M1: datumPointAcross's placed bodies, Make dependent copy. Attached to
+        the point, the copy would take the point's place in its own body, (1, 2, 3), in this
+        body: globally (1, 2, 13), not (3, 1, 3), silently. OK stops with a message pointing to
+        the independent copy; the panel stays, no copy is left, the support is as it was."""
+        other = models.body(self.doc)
+        other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        point = other.newObject("PartDesign::Point", "Point")
+        point.Placement.Base = V(1, 2, 3)
+        self.body = models.body(self.doc)
+        self.body.Placement.Base = V(0, 0, 10)
+        datum = self.body.newObject("PartDesign::Point", "Datum")
+        datum.AttachmentSupport = [(point, "")]
+        datum.MapMode = "Vertex"
+        self.doc.recompute()
+        self.edit(datum)
+        self.answerModals("radioDependent")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: A dependent copy"), self.modals)
+        self.assertIsNotNone(Gui.Control.activeDialog())
+        self.assertIsNone(self.doc.getObject("ReferencePoint"))
+        self.assertEqual(datum.AttachmentSupport, [(point, ("",))])
+
+    def datumPlaneInAPlacedBody(self):
+        """A datum plane at z = 4 in another body moved by (0, 0, 6): globally the plane z = 10;
+        this body at the origin."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(0, 0, 6)
+        plane = other.newObject("PartDesign::Plane", "DatumPlane")
+        plane.Placement.Base = V(0, 0, 4)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        return plane
+
+    def testNewSketchOnAnIndependentCopyOfADatumPlane(self):
+        """PR 227 review L7 (ops#244 P6 through New Sketch): New Sketch on a datum plane's face in
+        another, placed body (the whole plane is matched in the active body only), Make
+        independent copy: the copy is a datum plane where the plane is, and the sketch is on it,
+        globally z = 10."""
+        plane = self.datumPlaneInAPlacedBody()
+        sketch = self.newSketchOnCopiedFace(plane, "Face1")
+        copy = self.doc.getObject("CopyDatumPlane")
+        self.assertIsNotNone(copy)
+        self.assertEqual(copy.TypeId, "PartDesign::Plane")
+        self.assertEqual(sketch.AttachmentSupport[0][0], copy)
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 10, places=6)
+
+    def testNewSketchOnADependentCopyOfADatumPlaneStops(self):
+        """PR 227 review M1 (New Sketch): as testNewSketchOnAnIndependentCopyOfADatumPlane with
+        Make dependent copy. Attached to the plane, the copy would sit at z = 4 in this body, not
+        z = 10, silently. New Sketch stops with a message and leaves no copy and no sketch."""
+        plane = self.datumPlaneInAPlacedBody()
+        self.runNewSketchOnCopiedFace(plane, "Face1", "radioDependent")
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: A dependent copy"), self.modals)
+        pump(0.3)
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertIsNone(self.doc.getObject("ReferenceDatumPlane"))
+        self.assertEqual(
+            [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
+        )
 
     # -- ops#251: the ShapeBinder panel and command bind no more and no less than picked ---------
     #

@@ -91,6 +91,7 @@ struct MissingPlanesException
 struct CopyMismatchException
 {
     QString message;
+    QString title = QObject::tr("Copy differs");
 };
 
 class SupportFaceValidator
@@ -353,22 +354,35 @@ private:
         if (faceFilter.match()) {
             sub = faceFilter.Result[0][0].getSubNames()[0];
         }
-        bool recomputed = false;
+        QString refusal;
         auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
             selectedObject,
             sub,
             independent,
             activeBody,
-            &recomputed
+            &refusal
         );
+        // nothing to attach to (PR 227 review L2: the null went into the body)
+        if (!copy) {
+            throw CopyMismatchException {
+                refusal.isEmpty()
+                    ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
+                          .arg(QString::fromUtf8(selectedObject->Label.getValue()))
+                    : refusal,
+                QObject::tr("No copy")
+            };
+        }
 
-        // A copy recomputed in makeCopy has its own element names, the original's indices: the
-        // support is the picked face, once it's shown to be the same face on the copy (PR 223
-        // review N1). Other copies keep Face1, resolved by geometry when it's another face.
+        // The picked face on the copy (ops#244 P1: Face1, whatever face was picked, on a copy of
+        // a primitive on a base, which keeps the original's elements): the same index on a copy
+        // that has the original's elements, once it's shown to be the same face (PR 223 review N1),
+        // or Face1 of a shape binder of that face
         copiedFace = "Face1";
-        if (recomputed && !sub.empty()) {
-            copiedFace = Data::oldElementName(sub.c_str());
-            if (!PartDesignGui::TaskFeaturePick::sameElement(selectedObject, copy, copiedFace)) {
+        if (!sub.empty()) {
+            const std::optional<std::string> element =
+                PartDesignGui::TaskFeaturePick::copiedElement(selectedObject, copy, sub);
+            if (!element) {
+                const std::string index = Data::oldElementName(sub.c_str());
                 // removed here too, not left to the command's abort (PR 223 verification L2)
                 copy->getDocument()->removeObject(copy->getNameInDocument());
                 const QString label = QString::fromUtf8(selectedObject->Label.getValue());
@@ -378,8 +392,11 @@ private:
                         "face can't be read). Recompute '%2' and select the face again, or make "
                         "a cross-reference instead."
                     )
-                        .arg(QString::fromStdString(copiedFace), label)
+                        .arg(QString::fromStdString(index), label)
                 };
+            }
+            if (!element->empty()) {
+                copiedFace = *element;
             }
         }
 
@@ -396,7 +413,8 @@ private:
         }
         else {
             // it is ensured that only a single face is selected, hence it is Face1 of a
-            // shapebinder, or the picked face of a recomputed copy (makeCopy above)
+            // shapebinder, or the picked face of a copy with the original's elements (makeCopy
+            // above)
             const std::string end = ",'" + copiedFace + "')";
             supportString = Gui::Command::getObjectCmd(copy, "(", end.c_str());
         }
@@ -911,11 +929,7 @@ void SketchWorkflow::createSketch()
         );
     }
     catch (const CopyMismatchException& e) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Copy differs"),
-            e.message
-        );
+        QMessageBox::warning(Gui::getMainWindow(), e.title, e.message);
     }
 }
 

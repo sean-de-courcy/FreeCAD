@@ -126,6 +126,105 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
         self.assertEqual(projection.SupportFace[0], sketch)
         self.assertEqual(projection.SupportFace[1], ["InternalFace1"])
 
+    def _openDialogInAddWireMode(self):
+        FreeCADGui.activateWorkbench("PartWorkbench")
+        FreeCADGui.updateGui()
+        FreeCADGui.runCommand("Part_ProjectionOnSurface")
+        FreeCADGui.updateGui()
+        taskDialog = FreeCADGui.Control.activeTaskDialog()
+        self.assertIsNotNone(taskDialog)
+        wireButton = None
+        for widget in taskDialog.getDialogContent():
+            wireButton = widget.findChild(QtWidgets.QPushButton, "pushButtonAddWire")
+            if wireButton:
+                break
+        self.assertIsNotNone(wireButton)
+        wireButton.click()
+        projection = self.Doc.getObject("Projection")
+        self.assertIsNotNone(projection)
+        return projection
+
+    def _statusBarTexts(self):
+        statusBar = FreeCADGui.getMainWindow().statusBar()
+        return [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+
+    @staticmethod
+    def _wiresContaining(shape, edge):
+        return [i for i, wire in enumerate(shape.Wires, 1) if any(edge.isSame(e) for e in wire.Edges)]
+
+    def testAddWireRefusesEdgeOnTwoWires(self):
+        """An edge shared by two faces' wires names no single wire: nothing is added (ops#250)"""
+        box = self.Doc.addObject("Part::Box", "Box")
+        self.Doc.recompute()
+        # Every edge of a closed box bounds two faces, so it lies on two wires.
+        self.assertEqual(len(self._wiresContaining(box.Shape, box.Shape.Edge1)), 2)
+
+        projection = self._openDialogInAddWireMode()
+        FreeCADGui.Selection.addSelection(box, "Edge1")
+        FreeCADGui.updateGui()
+
+        self.assertEqual(projection.Projection, [])
+        self.assertTrue(
+            any("Edge1" in text and "2 wires" in text for text in self._statusBarTexts()),
+            self._statusBarTexts(),
+        )
+
+    def testAddWireRefusesEdgeOutsideAnyWire(self):
+        """A lone edge lies on no wire: nothing is added, and the dialog says so (ops#250)"""
+        line = self.Doc.addObject("Part::Feature", "Line")
+        line.Shape = Part.makeLine(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(10, 0, 0))
+        self.Doc.recompute()
+        self.assertEqual(len(line.Shape.Wires), 0)
+
+        projection = self._openDialogInAddWireMode()
+        FreeCADGui.Selection.addSelection(line, "Edge1")
+        FreeCADGui.updateGui()
+
+        self.assertEqual(projection.Projection, [])
+        self.assertTrue(
+            any("Edge1" in text and "no wire" in text for text in self._statusBarTexts()),
+            self._statusBarTexts(),
+        )
+
+    def testAddWireAddsTheOnlyWire(self):
+        """An edge on exactly one wire adds that wire, the one whose edges contain it (ops#250)"""
+
+        def square(x0):
+            points = [
+                FreeCAD.Vector(x0, 0, 0),
+                FreeCAD.Vector(x0 + 10, 0, 0),
+                FreeCAD.Vector(x0 + 10, 10, 0),
+                FreeCAD.Vector(x0, 10, 0),
+                FreeCAD.Vector(x0, 0, 0),
+            ]
+            return Part.makePolygon(points)
+
+        wires = self.Doc.addObject("Part::Feature", "Wires")
+        wires.Shape = Part.Compound([square(0), square(20)])
+        self.Doc.recompute()
+        # The picked edge: the one of the square at x = 20..30 that runs along y = 10.
+        edgeIndex = next(
+            i
+            for i, e in enumerate(wires.Shape.Edges, 1)
+            if e.BoundBox.XMin > 15 and abs(e.BoundBox.YMin - 10) < 1e-7
+        )
+        edge = wires.Shape.Edges[edgeIndex - 1]
+        self.assertEqual(len(self._wiresContaining(wires.Shape, edge)), 1)
+
+        projection = self._openDialogInAddWireMode()
+        FreeCADGui.Selection.addSelection(wires, "Edge{}".format(edgeIndex))
+        FreeCADGui.updateGui()
+
+        self.assertEqual(len(projection.Projection), 1)
+        obj, subs = projection.Projection[0]
+        self.assertEqual(obj, wires)
+        self.assertEqual(len(subs), 1)
+        added = wires.Shape.getElement(subs[0])
+        self.assertEqual(added.ShapeType, "Wire")
+        self.assertTrue(any(edge.isSame(e) for e in added.Edges))
+        self.assertAlmostEqual(added.BoundBox.XMin, 20.0)
+        self.assertAlmostEqual(added.BoundBox.XMax, 30.0)
+
     def tearDown(self):
         FreeCADGui.Selection.clearSelection()
         guiDocument = FreeCADGui.getDocument("ProjectionOnSurface")

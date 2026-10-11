@@ -1310,3 +1310,157 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         """D34 (ops#205): Diameter chosen and 14 typed, then Cancel: nothing changes."""
         self.edit_radius_in_dialog(reference=False, text="14 mm", ok=False)
         self.assert_unchanged()
+
+    # D35-D36: a pick on a 3D edge (ops#246) ---------------------------------------------------
+
+    def add_boxes(self, link_edge=False):
+        """Box A (6 x 6 x 2) at the origin and box B beside it (x 10 to 16); the sketch links
+        A's top face first, which gives four external geometries. Returns the name of B's top
+        edge along y = 0, from (10, 0, 2) to (16, 0, 2). link_edge: the sketch links that edge
+        too."""
+        a = self.doc.addObject("Part::Box", "BoxA")
+        b = self.doc.addObject("Part::Box", "BoxB")
+        for box in (a, b):
+            box.Length = 6
+            box.Width = 6
+            box.Height = 2
+        b.Placement.Base = V(10, 0, 0)
+        self.doc.recompute()
+        top = next(
+            i + 1 for i, f in enumerate(a.Shape.Faces) if abs(f.CenterOfMass.z - 2) < 1e-9
+        )
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(b.Shape.Edges)
+            if all(abs(v.Z - 2) < 1e-9 and abs(v.Y) < 1e-9 for v in e.Vertexes)
+        )
+        self.sketch.addExternal(a.Name, "Face%d" % top)
+        if link_edge:
+            self.sketch.addExternal(b.Name, edge)
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeo), 2 + 4 + (1 if link_edge else 0))
+        return edge
+
+    def assert_dimension_on_the_edge(self, edge):
+        """The Dimension tool, then B's edge picked in the 3D view: the new constraint is on the
+        external geometry that projects that edge, (10, 0) to (16, 0)."""
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Dimension")
+        self.flush_gui(100)
+        count = len(self.sketch.Constraints)
+        FreeCADGui.Selection.addSelection(self.doc.Name, "BoxB", edge)
+        self.flush_gui(150)
+        self.assertEqual(len(self.sketch.Constraints), count + 1)
+        new = self.sketch.Constraints[-1]
+        self.assertLess(new.First, -2, "Expected an external geometry")
+        geometry = self.sketch.ExternalGeo[-new.First - 1]
+        ends = sorted((p.x, p.y) for p in (geometry.StartPoint, geometry.EndPoint))
+        self.assertEqual(len(ends), 2)
+        self.assert_point(V(*ends[0], 0), 10, 0)
+        self.assert_point(V(*ends[1], 0), 16, 0)
+
+    def test_d35_dimension_on_a_3d_edge_after_a_face_link(self):
+        """D35 (ops#246): A's face link gives four geometries; the Dimension tool picks B's edge,
+        which adds a link. The constraint goes on that edge's projection: the link's index (1)
+        taken as a GeoId named A's second edge."""
+        self.assert_dimension_on_the_edge(self.add_boxes())
+
+    def test_d36_dimension_on_a_linked_3d_edge_after_a_face_link(self):
+        """D36 (ops#246): as D35, with B's edge linked already: the existing link's geometry."""
+        self.assert_dimension_on_the_edge(self.add_boxes(link_edge=True))
+
+    def test_d37_dimension_on_a_3d_edge_whose_link_gives_two_geometries(self):
+        """D37 (ops#246): box C crosses the sketch plane (z -1 to 1); the sketch links A's top
+        face, then C's vertical edge at (20, 0) as projection and intersection (two geometries,
+        both points). Picking that edge has no one geometry: no constraint and no new link (the
+        old code took the link's index 1 as a GeoId: one of A's edges)."""
+        self.add_boxes()
+        c = self.doc.addObject("Part::Box", "BoxC")
+        c.Length = 6
+        c.Width = 6
+        c.Height = 2
+        c.Placement.Base = V(20, 0, -1)
+        self.doc.recompute()
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(c.Shape.Edges)
+            if all(abs(v.X - 20) < 1e-9 and abs(v.Y) < 1e-9 for v in e.Vertexes)
+        )
+        self.sketch.addExternal(c.Name, edge, False, True)
+        self.sketch.addExternal(c.Name, edge, False, False)
+        self.doc.recompute()
+        geometries = len(self.sketch.ExternalGeo)
+        self.assertEqual(geometries, 2 + 4 + 2)
+        links = len(self.sketch.ExternalGeometry)
+
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Dimension")
+        self.flush_gui(100)
+        count = len(self.sketch.Constraints)
+        FreeCADGui.Selection.addSelection(self.doc.Name, c.Name, edge)
+        self.flush_gui(150)
+        self.assert_refused(count, links, geometries)
+
+    def assert_refused(self, count, links, geometries, types=None):
+        """The pick was refused: no constraint, no link or geometry added, the link types as
+        before, and the 3D pick no longer selected (an exception out of the selection observer
+        left it selected, PR 228 review M1)."""
+        self.assertEqual(len(self.sketch.Constraints), count)
+        self.assertEqual(len(self.sketch.ExternalGeometry), links)
+        self.assertEqual(len(self.sketch.ExternalGeo), geometries)
+        if types is not None:
+            self.assertEqual(list(self.sketch.ExternalTypes), types)
+        self.assertEqual(FreeCADGui.Selection.getSelectionEx(), [])
+
+    def test_d38_dimension_on_an_intersection_link_that_crosses_twice(self):
+        """D38 (PR 228 review M1): a circle crossing the sketch plane twice, linked as an
+        intersection only (two points). Picking it is refused and the link stays as it was (it
+        was added again as a projection: its type became Both, with a projection more)."""
+        cylinder = self.doc.addObject("Part::Cylinder", "Cylinder")
+        cylinder.Radius = 2
+        cylinder.Height = 4
+        # axis along y, so its end circles lie in the planes y = 0 and y = 4, centred on z = 0
+        cylinder.Placement = FreeCAD.Placement(V(20, 0, 0), FreeCAD.Rotation(V(1, 0, 0), -90))
+        self.doc.recompute()
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(cylinder.Shape.Edges)
+            if isinstance(e.Curve, Part.Circle) and abs(e.CenterOfMass.y) < 1e-6
+        )
+        self.sketch.addExternal(cylinder.Name, edge, False, True)
+        self.doc.recompute()
+        geometries = len(self.sketch.ExternalGeo)
+        self.assertEqual(geometries, 2 + 2)
+        links = len(self.sketch.ExternalGeometry)
+        types = list(self.sketch.ExternalTypes)
+
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        FreeCADGui.runCommand("Sketcher_Dimension")
+        self.flush_gui(100)
+        count = len(self.sketch.Constraints)
+        FreeCADGui.Selection.addSelection(self.doc.Name, cylinder.Name, edge)
+        self.flush_gui(150)
+        self.assert_refused(count, links, geometries, types)
+
+    def test_d39_distance_tool_on_a_3d_edge_after_a_face_link(self):
+        """D39 (PR 228 review): as D35 with the Distance tool (the generic constraint tool's
+        path): the new Distance is on B's edge's projection."""
+        edge = self.add_boxes()
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.answer_fields([{"key": QtCore.Qt.Key_Return}])
+        FreeCADGui.runCommand("Sketcher_ConstrainDistance")
+        self.flush_gui(100)
+        count = len(self.sketch.Constraints)
+        FreeCADGui.Selection.addSelection(self.doc.Name, "BoxB", edge)
+        self.flush_gui(300)
+        self.assertEqual(len(self.sketch.Constraints), count + 1)
+        new = self.sketch.Constraints[-1]
+        self.assertLess(new.First, -2, "Expected an external geometry")
+        geometry = self.sketch.ExternalGeo[-new.First - 1]
+        ends = sorted((p.x, p.y) for p in (geometry.StartPoint, geometry.EndPoint))
+        self.assert_point(V(*ends[0], 0), 10, 0)
+        self.assert_point(V(*ends[1], 0), 16, 0)

@@ -11,6 +11,7 @@ from SketcherTests.TestSketchEditCameraGui import TestSketchEditCameraGui
 from SketcherTests.TestDimensionInPlaceGui import TestDimensionInPlaceGui
 from SketcherTests.TestSketchCameraOnEditGui import TestSketchCameraOnEditGui
 from SketcherTests.TestAutoConstraintsGui import TestAutoConstraintsGui
+from SketcherTests.TestSketchCopyElementsGui import TestSketchCopyElementsGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -27,5 +28,6 @@ from SketcherTests.TestAutoConstraintsGui import TestAutoConstraintsGui
     and TestDimensionInPlaceGui
     and TestSketchCameraOnEditGui
     and TestAutoConstraintsGui
+    and TestSketchCopyElementsGui
     else False
 )
