@@ -441,6 +441,23 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertEqual(verdict, "guessed-wrong")
         self.assertFalse(self.passing(self.EDGE, verdict))
 
+    def testGeometryPickOfAWrongSetIsWrong(self):
+        """A tier-3 pick (not a guess kind) of a wrong set with the same result (the
+        verification of fork PR 256, M1)."""
+        rows = self.rows(kind="tier3")
+        verdict = self.verdict(self.EDGE, "wrong", "equivalent", rows)
+        self.assertEqual(verdict, "equivalent")  # guessVerdict alone doesn't see it
+        verdict = harness.pickedWrongSet("wrong", verdict, rows)
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(self.EDGE, verdict))
+        #   the expected element picked by geometry stays correct
+        self.assertEqual(harness.pickedWrongSet("correct", "correct", rows), "correct")
+        #   a record a break kept is no pick
+        self.assertEqual(
+            harness.pickedWrongSet("wrong", "equivalent", self.rows("broken", "tier3")),
+            "equivalent",
+        )
+
     def testExpansionToTheExpectedPiecesPasses(self):
         verdict = self.verdict(self.EDGE, "correct", "correct", self.rows(kind="expanded"))
         self.assertEqual(verdict, "guessed")

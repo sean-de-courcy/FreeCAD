@@ -283,6 +283,9 @@ class Spec:
         # a plan with the reorder edits: every reference is judged on the spec's object, and an
         # insert at the bar re-chains (the review of fork PR 256, Medium 4)
         self.strict = False
+        # {reference: the object it stays on without the solver}: an insert at the bar leaves
+        # the next dress-up's link on the old object until a re-pick (N1 2.2)
+        self.kept = {}
 
     def copy(self):
         return copy.deepcopy(self)
@@ -589,15 +592,21 @@ class Spec:
         """The index in `features` right after the solid `name`."""
         return 0 if name == "Pad" else self.features.index(self.byName(name)) + 1
 
-    def rechain(self):
+    def rechain(self, insert=False):
         """A dress-up's Base follows its base feature (the reroute, N1 2.2): each dress-up's
-        target is the solid before it."""
+        target is the solid before it. After an insert at the bar a link without the solver
+        stays on its old object (`kept`); any other change of its target ends that."""
         for f in self.features:
             if f.kind in DRESS:
                 base = self.previousSolid(f.name)
                 if f.target != base:
+                    name = f"F{f.fid}.base"
+                    if insert:
+                        self.kept.setdefault(name, f.target)
+                    else:
+                        self.kept.pop(name, None)
                     f.target = base
-                    self.pinned.add(f"F{f.fid}.base")
+                    self.pinned.add(name)
 
     def retarget(self):
         """The re-target rule (N1 3.2) for the sketch supports: a support on a solid at or after
@@ -631,7 +640,9 @@ class Spec:
             after = self.nextSolid(feature.name)
             if after is not None and after.kind in DRESS and after.target == feature.name:
                 after.target = self.previousSolid(feature.name)
+                self.kept.pop(f"F{after.fid}.base", None)
         self.features.remove(feature)
+        self.kept = {n: o for n, o in self.kept.items() if o != feature.name}
 
     def repaired(self):
         """The spec with the broken consumers deleted, last first, or None when one of them
@@ -1009,7 +1020,7 @@ class AddFeature(Edit):
         if self.insert and (spec.strict or spec.pinned):
             # a dress-up next follows the inserted feature (N1 2.3); judged on it only in a
             # plan with the reorder edits, so the older seeds' records stay as they were
-            spec.rechain()
+            spec.rechain(insert=True)
 
     def apply(self, doc, body, before, after):
         f = after.byId(self.feature.fid)
@@ -1079,7 +1090,7 @@ class RollbackInsert(Edit):
         f = copy.deepcopy(self.feature)
         spec.features.insert(spec.after(self.at), f)
         spec.nextId = max(spec.nextId, f.fid + 1)
-        spec.rechain()
+        spec.rechain(insert=True)
 
     def apply(self, doc, body, before, after):
         body.rollTo(doc.getObject(self.at))
@@ -1392,6 +1403,8 @@ def makeRef(spec, name, sequence=None):
     if isinstance(expectation, RedrawnElement):
         expectation = sequence.redrawnExpectation(name, expectation.predicate, target)
     outcome = None if isinstance(expectation, Broken) else spec.outcome(consumer, f)
+    if sequence is not None and not sequence.solver and name in spec.kept:
+        target = spec.kept[name]  # N1 2.2 without the solver: until a re-pick
     on = (lambda: target) if spec.strict or name in spec.pinned else None
     return Ref(name, owner, prop, lambda: expectation, outcome, on)
 
@@ -1687,6 +1700,9 @@ class RandomSequence(Scenario):
         names = [o.Name for o in solids]
         if names != spec.chain():
             raise ScenarioError(f"{when}: the body's solids are {names}, the plan's {spec.chain()}")
+        first = solids[0].BaseFeature
+        if first is not None and first != getattr(body, "BaseFeature", None):
+            raise ScenarioError(f"{when}: {solids[0].Name} builds on {first.Name}")
         for a, b in zip(solids, solids[1:]):
             if b.BaseFeature != a:
                 base = b.BaseFeature.Name if b.BaseFeature else None
@@ -1696,7 +1712,8 @@ class RandomSequence(Scenario):
         """A step the replay couldn't run as planned (an element the edit needs isn't there, or
         the body's order or Tip isn't the plan's): a wrong record `edit@k`, and the sequence
         stops, since the live model differs from the spec from here on."""
-        result = self.diverged(f"edit{k}", str(k), e)
+        why = e if isinstance(e, ScenarioError) else f"{type(e).__name__}: {e}"
+        result = self.diverged(f"edit{k}", str(k), why)
         result.scenario, result.ref = f"Random{self.plan.seed:04d}", f"edit@{k}"
         result.record.update(
             scenario=result.scenario,
@@ -1755,7 +1772,7 @@ class RandomSequence(Scenario):
                             f"{body.Tip.Name if body.Tip else None}, the plan's {step.tip}"
                         )
                     self.checkOrder(body, step.after, f"step {k}")
-                except ScenarioError as e:
+                except Exception as e:  # e.g. a refused reorderObject (ValueError)
                     results.append(self.stopped(k, step, e))
                     break
                 if step.repaired is None:

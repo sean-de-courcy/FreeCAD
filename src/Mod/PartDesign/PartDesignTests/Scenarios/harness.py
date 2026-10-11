@@ -843,6 +843,18 @@ def guessVerdict(expectation, stored, verdict, rows):
     return "guessed" if right else "guessed-wrong"
 
 
+def pickedWrongSet(stored, verdict, rows):
+    """A stored set that isn't the expected one, held by any warned pick the report records
+    (a guess rule's, a continuation, or a geometry tier's: tier2, tier3, index), is
+    `guessed-wrong` whatever the consumer computes (fork PR 256 verification, M1). Only kinds in
+    GUESS_KINDS make a right pick `guessed`: a geometry pick among an expected break's candidates
+    stays partial."""
+    picks = [e for e in rows if e.get("guess_kind") and e.get("status") != "broken"]
+    if stored == "wrong" and picks and verdict not in ("wrong", "guessed-wrong"):
+        return "guessed-wrong"
+    return verdict
+
+
 class Result:
     def __init__(self, scenario, ref, config, step):
         self.scenario, self.ref, self.config, self.step = scenario, ref, config, step
@@ -1093,7 +1105,13 @@ class Scenario:
         misplaced = None
         if onName:
             record["expected_target"] = onName
-            if target is not None and stored != "broken" and target.Name != onName:
+            # an expected break's link on another object too: its candidates are that
+            # object's (the verification of fork PR 256, L3)
+            if (
+                target is not None
+                and (stored != "broken" or isinstance(expectation, Broken))
+                and target.Name != onName
+            ):
                 misplaced = target.Name
                 stored = "wrong"
 
@@ -1121,6 +1139,7 @@ class Scenario:
         if not partialWarned:
             # A guess rule's pick (ops#127, N2 7.2)
             result.verdict = guessVerdict(expectation, stored, result.verdict, rows)
+            result.verdict = pickedWrongSet(stored, result.verdict, rows)
             if settled and result.verdict == "correct" and warned:
                 # the right element, but still warned: a record left behind
                 result.verdict, detail = "wrong", f"{owner.Name} still has a warning"
