@@ -247,26 +247,33 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
         self.assert_width_copied_last()
 
-    def test_mirrored_copy_refuses_a_locked_perpendicular_at_a_self_referenced_line(self):
-        """A line keeps its start when mirrored back, but a perpendicularity of the source
-        line's end with a line external at Dest.Edge2, locked when added (+-90 degrees), says
-        which side the line turns to, and the mirror turns it to the other: it isn't copied,
-        with a warning. A perpendicularity of the two edges (no point, no locked value) is, on
-        Edge2, and so is the width. Before (PR 253 review M1), the locked one was copied as it
-        was."""
+    def test_mirrored_copy_corrects_a_locked_perpendicular_at_a_self_referenced_line(self):
+        """A line keeps its start when mirrored back, and a perpendicularity of the source
+        line's end with a line external at Dest.Edge2, locked when added (+-90 degrees, which
+        side the line turns to), is corrected like one between two of the source's own lines
+        (ops#281): it is copied onto Edge2, and the solve leaves the copied line where Dest sees
+        the source's, the image of it with y the other way. So is the width. Before, it was
+        copied as it was (PR 253 review M1), and the solve turned the copied line."""
         self.turn_source_over()
         self.dest.setAllowUnaligned(False)
         self.add_self_reference(Part.LineSegment(V(10, 0, 0), V(10, -10, 0)), "Dest.Edge2")
-        self.source.addConstraint(Sketcher.Constraint("Perpendicular", 0, -3))
         locked = self.source.addConstraint(Sketcher.Constraint("Perpendicular", 0, 2, -3))
         self.assertNotEqual(self.source.Constraints[locked].Value, 0)
         self.add_width()
+        self.assertEqual(self.source.solve(), 0)
+        seen = self.source.Geometry[0]
         self.dest.carbonCopy("Source", False)
         self.assertEqual(len(self.dest.ExternalGeo), 2)
-        self.assertEqual([c.Type for c in self.dest.Constraints], ["Perpendicular", "Distance"])
-        perpendicular = self.dest.Constraints[0]
-        self.assertEqual((perpendicular.First, perpendicular.Second), (2, 1))
+        self.assertEqual(
+            [(c.Type, c.First, c.Second) for c in self.dest.Constraints],
+            [("Perpendicular", 2, 1), ("Distance", 2, GEO_UNDEF)],
+        )
         self.assert_width_copied_last()
+        self.assertEqual(self.dest.solve(), 0)
+        copied = self.dest.Geometry[2]
+        image = lambda p: V(p.x, -p.y, 0)
+        self.assertLess((copied.StartPoint - image(seen.StartPoint)).Length, 1e-6)
+        self.assertLess((copied.EndPoint - image(seen.EndPoint)).Length, 1e-6)
 
     def add_orphaned_self_reference(self):
         """A line external of Source whose ref names Dest.Edge9, which Dest (two edges) doesn't
@@ -314,6 +321,127 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         self.assertEqual(len(self.dest.ExternalGeo), 2)
         self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
         self.assert_width_copied_last()
+
+
+class TestCarbonCopyFlipped(unittest.TestCase):
+    """ops#281: a carbon copy from a source turned over (or round) and copied aligned is flipped
+    back here: each copied geometry is the source's as Dest sees it, and each copied constraint
+    must hold there as it held in the source, so the solve after the copy moves nothing.
+    Designed geometry: Source's Edge1 is a quarter of the circle of radius 10 about the origin,
+    from (10, 0) to (0, 10); each test adds lines and constraints."""
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("TestCarbonCopyFlipped")
+        self.dest = self.doc.addObject("Sketcher::SketchObject", "Dest")
+        self.source = self.doc.addObject("Sketcher::SketchObject", "Source")
+        circle = Part.Circle(V(0, 0, 0), V(0, 0, 1), 10)
+        self.source.addGeometry(Part.ArcOfCircle(circle, 0, math.pi / 2), False)
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def turn_over(self):
+        """Source turned over, 180 degrees about X: Dest sees it with y the other way."""
+        self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(1, 0, 0), 180))
+        self.image = lambda p: V(p.x, -p.y, 0)
+
+    def turn_round(self):
+        """Source turned round, 180 degrees about Z: Dest sees it turned half a turn."""
+        self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(0, 0, 1), 180))
+        self.image = lambda p: V(-p.x, -p.y, 0)
+
+    def add_line(self, start, end):
+        return self.source.addGeometry(Part.LineSegment(V(*start, 0), V(*end, 0)), False)
+
+    def copy(self):
+        """Source solved, then copied aligned (flipped back), the document recomputed and Dest
+        solved again: Dest's geometry is Source's as Dest sees it."""
+        self.assertEqual(self.source.solve(), 0)
+        self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
+        self.dest.carbonCopy("Source", False)
+        self.doc.recompute()
+        self.assertEqual(self.dest.solve(), 0)
+        self.assertEqual(len(self.dest.Geometry), len(self.source.Geometry))
+        for seen, copied in zip(self.source.Geometry, self.dest.Geometry):
+            if isinstance(seen, Part.LineSegment):
+                # a line keeps its start
+                self.assertLess((copied.StartPoint - self.image(seen.StartPoint)).Length, 1e-6)
+                self.assertLess((copied.EndPoint - self.image(seen.EndPoint)).Length, 1e-6)
+            else:
+                self.assertLess((copied.Center - self.image(seen.Center)).Length, 1e-6)
+                self.assertAlmostEqual(copied.Radius, seen.Radius, delta=1e-6)
+                ends = [self.image(seen.StartPoint), self.image(seen.EndPoint)]
+                for point in (copied.StartPoint, copied.EndPoint):
+                    self.assertLess(min((point - end).Length for end in ends), 1e-6)
+
+    def add_sweep(self):
+        """The arc's sweep (an Angle on it alone), 90 degrees by an expression."""
+        sweep = self.source.addConstraint(Sketcher.Constraint("Angle", 0, math.pi / 2))
+        self.source.setExpression(".Constraints[%d]" % sweep, "45 deg + 45 deg")
+        self.doc.recompute()
+
+    def test_mirrored_copy_keeps_an_arcs_sweep(self):
+        """The sweep isn't an angle to an axis: it stays 90 degrees. Before, it was "corrected"
+        to -90 degrees (value and expression), and Dest's arc driven to another sweep."""
+        self.turn_over()
+        self.add_sweep()
+        self.copy()
+        (sweep,) = self.dest.Constraints
+        self.assertAlmostEqual(sweep.Value, math.pi / 2, delta=1e-9)
+
+    def test_turned_copy_keeps_an_arcs_sweep(self):
+        """As above, Source turned round: before, the sweep became 270 degrees."""
+        self.turn_round()
+        self.add_sweep()
+        self.copy()
+        (sweep,) = self.dest.Constraints
+        self.assertAlmostEqual(sweep.Value, math.pi / 2, delta=1e-9)
+
+    def test_mirrored_copy_keeps_a_point_on_an_arcs_end(self):
+        """A line from (10, 0) to (20, 0), its start on the arc's start. A mirrored arc runs the
+        other way (a sketch's arcs run counterclockwise), so the copy's start is the image of
+        the source's end: the copied constraint must name the copied arc's end. Before, it named
+        its start, and the solve pulled the line onto the other end."""
+        self.turn_over()
+        line = self.add_line((10, 0), (20, 0))
+        self.source.addConstraint(Sketcher.Constraint("Coincident", line, 1, 0, 1))
+        self.copy()
+
+    def test_mirrored_copy_keeps_a_locked_tangency_at_an_arcs_end(self):
+        """A line from the arc's end (0, 10) to (-10, 10), tangent to the arc there (end to
+        end, locked when added: the line goes on the way the arc goes). Mirrored, the arc runs
+        the other way: the locked value must turn by 180 degrees. Before, it didn't (and named
+        the arc's other end): the solve turned the line round."""
+        self.turn_over()
+        line = self.add_line((0, 10), (-10, 10))
+        tangent = self.source.addConstraint(Sketcher.Constraint("Tangent", line, 1, 0, 2))
+        self.assertNotEqual(self.source.Constraints[tangent].Value, 0)
+        self.copy()
+
+    def test_mirrored_copy_keeps_a_locked_perpendicularity_of_two_lines(self):
+        """Two lines, (10, 0)-(20, 0) and (20, 0)-(20, 5), perpendicular end to end (locked:
+        the second turns left). Mirrored, it turns right: the locked value must change sign.
+        Before, it didn't: the solve turned the second line to the other side."""
+        self.turn_over()
+        first = self.add_line((10, 0), (20, 0))
+        second = self.add_line((20, 0), (20, 5))
+        perpendicular = self.source.addConstraint(
+            Sketcher.Constraint("Perpendicular", second, 1, first, 2)
+        )
+        self.assertNotEqual(self.source.Constraints[perpendicular].Value, 0)
+        self.copy()
+
+    def test_mirrored_copy_keeps_an_angle_via_a_point_with_an_arc(self):
+        """A line from (10, 0) at 30 degrees, at 60 degrees to the arc there (an angle via its
+        start). Mirrored, the angle changes sign and, the arc running the other way, turns by
+        180 degrees. Before, it only changed sign: the solve turned the line."""
+        self.turn_over()
+        end = V(10 + 10 * math.cos(math.pi / 6), 10 * math.sin(math.pi / 6), 0)
+        line = self.add_line((10, 0), (end.x, end.y))
+        self.source.addConstraint(
+            Sketcher.Constraint("AngleViaPoint", 0, line, line, 1, math.pi / 3)
+        )
+        self.copy()
 
 
 if __name__ == "__main__":

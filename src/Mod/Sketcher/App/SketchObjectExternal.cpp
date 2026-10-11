@@ -609,7 +609,76 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         newVals.push_back(geoNew);
     }
 
-    auto applyConstraintFlipCorrection = [xinv, yinv](Sketcher::Constraint* newConstr) {
+    // FreeCAD-CH (ops#281): flipped back, each geometry's direction (the way its tangent runs,
+    // which an angle at a point is measured by) is the image of the source's, or that turned
+    // half a turn. One flip is a mirror: a line keeps its start and a B-spline its direction,
+    // but a conic runs the other way (a sketch's conics run counterclockwise), and an arc's
+    // ends swap. Two flips are a half turn, which keeps every geometry's ends and direction.
+    // The axes are this sketch's own: the horizontal one runs the other way when x flips, the
+    // vertical one when y flips.
+    const bool mirrored = xinv != yinv;
+    auto turnsRound = [&](int geoId) {  // a source GeoId
+        if (geoId == GeoEnum::HAxis) {
+            return xinv;
+        }
+        if (geoId == GeoEnum::VAxis) {
+            return yinv;
+        }
+        if (!mirrored || geoId == GeoEnum::GeoUndef) {
+            return false;
+        }
+        const Part::Geometry* geo = psObj->getGeometry(geoId);
+        return geo
+            && (geo->isDerivedFrom<Part::GeomConic>()
+                || geo->isDerivedFrom<Part::GeomArcOfConic>());
+    };
+    auto swapsEnds = [&](int geoId) {  // a source GeoId
+        if (!mirrored || geoId == GeoEnum::GeoUndef) {
+            return false;
+        }
+        const Part::Geometry* geo = psObj->getGeometry(geoId);
+        return geo && geo->isDerivedFrom<Part::GeomArcOfConic>();
+    };
+
+    // how the flip changes the angle a source constraint's value is: negated, and turned half a
+    // turn; none for one that it leaves alone
+    struct AngleFlip
+    {
+        bool negated;
+        bool halfTurn;
+    };
+    auto angleFlip = [&](const Sketcher::Constraint* constr) -> std::optional<AngleFlip> {
+        if (!xinv && !yinv) {
+            return std::nullopt;
+        }
+        if (constr->Type == Sketcher::Angle) {
+            if (constr->Second == GeoEnum::GeoUndef) {
+                const Part::Geometry* geo = psObj->getGeometry(constr->First);
+                if (!geo || !geo->is<Part::GeomLineSegment>()) {
+                    // an arc's sweep: the same, however the arc turns
+                    return std::nullopt;
+                }
+                // a line's direction, from the horizontal axis
+                const bool halfTurn = turnsRound(constr->First) != turnsRound(GeoEnum::HAxis);
+                return AngleFlip {mirrored, halfTurn};
+            }
+            // from the first's direction to the second's (at a point, or of two lines)
+            return AngleFlip {mirrored, turnsRound(constr->First) != turnsRound(constr->Second)};
+        }
+        if ((constr->Type == Sketcher::Tangent || constr->Type == Sketcher::Perpendicular)
+            && constr->getValue() != 0.0) {
+            // a locked tangency or perpendicularity: the angle between the two at a point, a
+            // tangency's offset by -90 degrees, which adds a half turn when it is negated
+            // (AutoLockTangencyAndPerpty)
+            const bool halfTurn = turnsRound(constr->First) != turnsRound(constr->Second);
+            const bool offset = mirrored && constr->Type == Sketcher::Tangent;
+            return AngleFlip {mirrored, halfTurn != offset};
+        }
+        return std::nullopt;
+    };
+
+    auto applyConstraintFlipCorrection = [&](const Sketcher::Constraint* constr,
+                                             Sketcher::Constraint* newConstr) {
         if (!xinv && !yinv) {
             return;
         }
@@ -625,50 +694,26 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             }
         }
 
-        // Angle
-        if (newConstr->Type == Sketcher::Angle) {
-            auto normalizeAngle = [](double angleDeg) {
-                while (angleDeg > pi) {
-                    angleDeg -= pi * 2.0;
-                }
-                while (angleDeg <= -pi) {
-                    angleDeg += pi * 2.0;
-                }
-                return angleDeg;
-            };
-
-            if (xinv && yinv) {  // rotation 180 degrees around normal axis
-                if (newConstr->First == -1 || newConstr->Second == -1 || newConstr->First == -2
-                    || newConstr->Second == -2 || newConstr->Second == GeoEnum::GeoUndef) {
-                    // angle to horizontal or vertical axis
-                    newConstr->setValue(normalizeAngle(newConstr->getValue() + pi));
-                }
-                else {
-                    // angle between two sketch entities
-                    // do nothing
-                }
+        // Angle, and a locked Tangent or Perpendicular
+        if (auto flip = angleFlip(constr)) {
+            double angle = newConstr->getValue();
+            if (flip->negated) {
+                angle = -angle;
             }
-            else if (xinv) {  // rotation 180 degrees around vertical axis
-                if (newConstr->First == -1 || newConstr->Second == -1
-                    || newConstr->Second == GeoEnum::GeoUndef) {
-                    // angle to horizontal axis
-                    newConstr->setValue(normalizeAngle(pi - newConstr->getValue()));
-                }
-                else {
-                    // angle between two sketch entities or angle to vertical axis
-                    newConstr->setValue(normalizeAngle(-newConstr->getValue()));
-                }
+            if (flip->halfTurn) {
+                angle += pi;
             }
-            else if (yinv) {  // rotation 180 degrees around horizontal axis
-                if (newConstr->First == -2 || newConstr->Second == -2) {
-                    // angle to vertical axis
-                    newConstr->setValue(normalizeAngle(pi - newConstr->getValue()));
-                }
-                else {
-                    // angle between two sketch entities or angle to horizontal axis
-                    newConstr->setValue(normalizeAngle(-newConstr->getValue()));
-                }
+            while (angle > pi) {
+                angle -= pi * 2.0;
             }
+            while (angle <= -pi) {
+                angle += pi * 2.0;
+            }
+            if (newConstr->Type == Sketcher::Perpendicular && angle < 0) {
+                // 90 or 270 degrees, as AutoLockTangencyAndPerpty writes it
+                angle += pi * 2.0;
+            }
+            newConstr->setValue(angle);
         }
     };
 
@@ -683,6 +728,11 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         // holds more, and the later ones kept the source's GeoIds, naming other geometry here
         for (size_t i = 0; i < newConstr->getElementsSize() && refused.empty(); ++i) {
             const int geoId = constr->getGeoId(i);
+            const PointPos pos = constr->getPosId(i);
+            if ((pos == PointPos::start || pos == PointPos::end) && swapsEnds(geoId)) {
+                // FreeCAD-CH (ops#281): a mirrored arc's start is the image of the source's end
+                newConstr->setPosId(i, pos == PointPos::start ? PointPos::end : PointPos::start);
+            }
             if (geoId >= 0) {
                 newConstr->setGeoId(i, geoId + nextgeoid);
             }
@@ -714,32 +764,17 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                               "and the copy isn't flipped back here";
                         break;
                     }
-                    if ((xinv || yinv) && posId == PointPos::none) {
+                    if ((xinv || yinv) && posId == PointPos::none
+                        && !vals[mapped->second]->is<Part::GeomLineSegment>()) {
                         // the copy is flipped back. An edge that is a line maps with its points
-                        // (projected or mirrored, a line keeps its start) and the values are
-                        // flip-corrected; a vertex is a point. But a mirrored arc runs the other
-                        // way (a sketch's arcs run counterclockwise): its ends swap, and an
-                        // angle at it (its sweep, a locked tangency) changes in a way the value
-                        // corrections don't know. Other curves aren't known to keep their
-                        // direction. A 180-degree turn (both flips) keeps an arc's ends, but
-                        // the value corrections don't know arcs there either (PR 253 review M1)
-                        if (!vals[mapped->second]->is<Part::GeomLineSegment>()) {
-                            refused = "it is on " + external
-                                + ", which isn't a line, and the copy is flipped here, so its "
-                                  "ends and the angles at it aren't known to carry over";
-                            break;
-                        }
-                        if ((constr->Type == Tangent || constr->Type == Perpendicular)
-                            && (constr->Third != GeoEnum::GeoUndef || constr->getValue() != 0.0)) {
-                            // a locked tangency or perpendicularity is an angle at a point,
-                            // which the value corrections don't flip
-                            refused = std::string("it is a ")
-                                + (constr->Type == Tangent ? "tangency" : "perpendicularity")
-                                + " at a point with " + external
-                                + ", and the copy is flipped here, so which side it turns to "
-                                  "isn't known";
-                            break;
-                        }
+                        // (projected or mirrored, a line keeps its start), and the values are
+                        // flip-corrected (ops#281); a vertex is a point. Which end of another
+                        // curve, and which way it runs, the source's projection of it names
+                        // isn't checked: a mirrored arc's ends swap (PR 253 review M1)
+                        refused = "it is on " + external
+                            + ", which isn't a line, and the copy is flipped here, so its "
+                              "ends and the angles at it aren't known to carry over";
+                        break;
                     }
                     if (posId != PointPos::none) {
                         // a vertex: the source's external is a point, named by its start; here
@@ -777,7 +812,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
         if (xinv || yinv) {
             // corrections for flipped constraints
-            applyConstraintFlipCorrection(newConstr.get());
+            applyConstraintFlipCorrection(constr, newConstr.get());
         }
 
         copiedIndex.push_back(static_cast<int>(newcVals.size()));
@@ -796,7 +831,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     Geometry.touch();
 
     auto makeCorrectedExpressionString =
-        [xinv, yinv](const Sketcher::Constraint* constr, const std::string expr) -> std::string {
+        [&](const Sketcher::Constraint* constr, const std::string expr) -> std::string {
         if (!xinv && !yinv) {
             return expr;
         }
@@ -812,41 +847,16 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             }
         }
 
-        // Angle
+        // Angle, as applyConstraintFlipCorrection changes its value (ops#281)
         if (constr->Type == Sketcher::Angle) {
-            if (xinv && yinv) {  // rotation 180 degrees around normal axis
-                if (constr->First == -1 || constr->Second == -1 || constr->First == -2
-                    || constr->Second == -2 || constr->Second == GeoEnum::GeoUndef) {
-                    // angle to horizontal or vertical axis
-                    return "(" + expr + ") + 180 deg";
-                }
-                else {
-                    // angle between two sketch entities
-                    // do nothing
-                    return expr;
-                }
+            auto flip = angleFlip(constr);
+            if (!flip) {
+                return expr;
             }
-            else if (xinv) {  // rotation 180 degrees around vertical axis
-                if (constr->First == -1 || constr->Second == -1
-                    || constr->Second == GeoEnum::GeoUndef) {
-                    // angle to horizontal axis
-                    return "180 deg - (" + expr + ")";
-                }
-                else {
-                    // angle between two sketch entities or angle to vertical axis
-                    return "-(" + expr + ")";
-                }
+            if (flip->negated) {
+                return flip->halfTurn ? "180 deg - (" + expr + ")" : "-(" + expr + ")";
             }
-            else if (yinv) {  // rotation 180 degrees around horizontal axis
-                if (constr->First == -2 || constr->Second == -2) {
-                    // angle to vertical axis
-                    return "180 deg - (" + expr + ")";
-                }
-                else {
-                    // angle between two sketch entities or angle to horizontal axis
-                    return "-(" + expr + ")";
-                }
-            }
+            return flip->halfTurn ? "(" + expr + ") + 180 deg" : expr;
         }
         return expr;
     };
