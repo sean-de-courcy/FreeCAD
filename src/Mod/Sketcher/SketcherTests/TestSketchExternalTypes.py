@@ -700,6 +700,54 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(len(sketch.Constraints), 2)
         self.assertPointConstraintsKept(sketch)
 
+    def testLegacyBothLinkGetsItsKindsOnOpen(self):
+        """ops#269 (PR 241 review M1): a file saved before ops#264 (no kinds) with the ring Both,
+        a constraint on its projection. The open records the kinds the saved type gives, so the
+        ring written to intersection before any recompute drops the projection with its
+        constraint, and the points keep theirs (by position, the first point took the
+        projection's Id and the second point's constraint went, silently)."""
+        self.addRingProjectionWithAConstraint()
+        path = self.tempPath("LegacyBothOpen.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])  # the rail's line, the ring's
+        self.assertFalse(self.doc.isTouched())
+        # saved, the kinds are in the file: the next open finds them, and touches nothing either
+        sketch = self.saveAndReopen("LegacyBothSaved")
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])
+        self.assertFalse(self.doc.isTouched())
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(self.ringProjections(sketch), [])
+        self.assertEqual(len(sketch.Constraints), 2)
+        self.assertPointConstraintsKept(sketch)
+
+    def testLegacyBothLinkInAStaleTypeListGetsTypeAndKindsOnOpen(self):
+        """PR 251 review L3: a file saved before ops#140 and ops#264, a stale type in front of the
+        rail and the ring Both, its geometry without kinds. One open gives each link its type
+        back and the ring its kinds, so the ring written to intersection keeps the points'
+        constraints."""
+        self.addRingProjectionWithAConstraint()
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, BOTH]
+        path = self.tempPath("LegacyStaleTypes.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, BOTH])
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(self.ringProjections(sketch), [])
+        self.assertEqual(len(sketch.Constraints), 2)
+        self.assertPointConstraintsKept(sketch)
+
     def lineKinds(self, sketch=None):
         """The kind flags of each external line after the axes, as "P" (Projection), "I"
         (Intersection), "" (none) or "PI" (both). Lines only: a Part.Point read from ExternalGeo
@@ -879,12 +927,54 @@ class TestSketchExternalTypesGui(unittest.TestCase):
     constrainedExternals = TestSketchExternalTypes.constrainedExternals
     addRingProjectionWithAConstraint = TestSketchExternalTypes.addRingProjectionWithAConstraint
     clearKindsInFile = staticmethod(TestSketchExternalTypes.clearKindsInFile)
+    tiltedFace = staticmethod(TestSketchExternalTypes.tiltedFace)
+    SQUARE = TestSketchExternalTypes.SQUARE
+    PENTAGON = TestSketchExternalTypes.PENTAGON
+    lineKinds = TestSketchExternalTypes.lineKinds
+    sectionAndProjections = staticmethod(TestSketchExternalTypes.sectionAndProjections)
+    # an arrowhead, its notch at (0, 1): the line v = 0 crosses its two arms apart
+    DART = [(-5, -5), (0, 5), (5, -5), (0, 1)]
 
-    def testTypeWrittenBeforeTheFirstRebuildOfLegacyGeometryWarns(self):
-        """PR 241 review M1: a file saved before ops#264 (no kinds) with the ring Both (its
-        projection line and two points); the ring written to intersection before any recompute.
-        The rebuild can only give the Ids by position, across the kinds, and says so: the link
-        gives 2 geometries instead of 3."""
+    def testLegacyBothLinkWhoseSplitMovedWarnsInsteadOfGivingKinds(self):
+        """PR 251 review M1: a file saved before ops#264 (no kinds) with the tilted pentagon face
+        linked Both: five projected lines and one section line. The face made the dart before the
+        save, without the sketch's rebuild: four projected lines and two section lines, six lines
+        as well. The same types in the same order don't say which saved line is which kind: the
+        open compares the shapes, warns, and gives no kinds (by type, the fifth projection
+        would have been read as a section, and its Id handed to one)."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.PENTAGON)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        sketch.addExternal(face.Name, "Face1", False, True)
+        self.doc.recompute()
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 5)
+        face.Shape = self.tiltedFace(self.DART)
+        path = self.tempPath("LegacySplit.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Face")
+        before = len(reportText())
+        self.doc = App.openDocument(path)
+        new = reportText()[before:]
+        self.assertIn("its type no longer gives the same geometries", new)
+        sketch = self.doc.getObject("TiltedSketch")
+        self.assertEqual(self.lineKinds(sketch), [""] * 6)
+        # the case is the one meant: the dart gives six lines, two of them sections
+        sketch.touch()
+        self.doc.recompute()
+        section, projections = self.sectionAndProjections(sketch)
+        self.assertEqual((len(section), len(projections)), (2, 4))
+
+    def testTypeWrittenBeforeTheFirstRebuildOfLegacyGeometryNamesTheDeletedConstraint(self):
+        """PR 241 review M1 and L2: a file saved before ops#264 (no kinds) with the ring Both (its
+        projection line and two points, a constraint on the line); the ring written to
+        intersection before any recompute. The open recorded the kinds (ops#269), so the rebuild
+        drops the projection and says which constraint went with it: Constraint3."""
         if not App.GuiUp:
             self.skipTest("the Report view")
         self.addRingProjectionWithAConstraint()
@@ -899,5 +989,41 @@ class TestSketchExternalTypesGui(unittest.TestCase):
         before = len(reportText())
         self.doc.recompute()
         new = reportText()[before:]
-        self.assertIn("gives 2 geometries instead of 3", new)
-        self.assertIn("doesn't record which were projected", new)
+        self.assertIn("no longer gives are deleted (Constraint3)", new)
+        self.assertNotIn("instead of", new)
+        self.assertEqual(len(sketch.Constraints), 2)
+
+    def testLegacyLinkWhoseTypeNoLongerGivesItsGeometryWarns(self):
+        """ops#269: a file saved before ops#264 (no kinds) with a projection of the tilted square
+        face (four lines), the face made a pentagon before the save, without the sketch's
+        rebuild. The open can't tell the saved geometry's kinds from a build (five lines), and
+        says the Ids will go by position; the rebuild then says they did, without the text about
+        projections and intersections, which a link of one kind doesn't need."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.SQUARE)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        self.doc.recompute()
+        self.assertEqual(len(sketch.ExternalGeo), 6)
+        face.Shape = self.tiltedFace(self.PENTAGON)
+        path = self.tempPath("LegacyStale.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Face")
+        before = len(reportText())
+        self.doc = App.openDocument(path)
+        new = reportText()[before:]
+        self.assertIn("its type no longer gives the same geometries", new)
+        sketch = self.doc.getObject("TiltedSketch")
+        self.assertEqual(len(sketch.ExternalGeo), 6)
+        sketch.touch()
+        before = len(reportText())
+        self.doc.recompute()
+        new = reportText()[before:]
+        self.assertIn("gives 5 geometries instead of 4, and they took its Ids by position", new)
+        self.assertNotIn("doesn't record", new)
+        self.assertEqual(len(sketch.ExternalGeo), 7)

@@ -2722,9 +2722,21 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     // gives. An open of a list that ends in the mark an earlier open left repairs only the links
     // that are still undecided (missing or without saved geometry), not the ones decided then.
     const bool openRepair = typesOnly && Types.size() > linkCount;
-    if (typesOnly && !openRepair) {
+    // On open (typesOnly) a link whose geometry was saved before ops#264 also gets its kinds
+    // (below, ops#269)
+    const bool kindless = std::any_of(ExternalGeo.getValues().begin(),
+                                      ExternalGeo.getValues().end(),
+                                      [](const Part::Geometry* geo) {
+                                          return !ExternalGeometryFacade::getFacade(geo)
+                                                      ->getRef()
+                                                      .empty()
+                                              && !kindOf(geo);
+                                      });
+    if (typesOnly && !openRepair && !kindless) {
         return;
     }
+    // the kinds found on open for saved geometry without them, by index in ExternalGeo
+    std::map<std::size_t, bool> savedKinds;
     const bool laterOpen = openRepair
         && std::find(Types.begin() + static_cast<std::ptrdiff_t>(linkCount), Types.end(),
                      pendingTypeRepairMark)
@@ -3196,6 +3208,66 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             refSet.insert(key);
             continue;
         }
+        if (typesOnly && hasSource) {
+            // FreeCAD-CH (ops#269): geometry saved before ops#264 has no kinds, and its first
+            // rebuild would give its Ids by position across them: a Both link whose projection
+            // and intersection change in number at an equal total, or a type changed before that
+            // rebuild, would move constraints silently. The saved type, built now, tells them
+            // when it gives the saved geometry's number and types, in the Ids' order.
+            std::vector<std::size_t> savedIndices;
+            bool noKinds = true;
+            for (long id : externalGeoRefMap[key]) {
+                auto it = externalGeoMap.find(id);
+                if (it != externalGeoMap.end()) {
+                    savedIndices.push_back(static_cast<std::size_t>(it->second));
+                    noKinds = noKinds && !kindOf(ExternalGeo[it->second]);
+                }
+            }
+            if (!savedIndices.empty() && noKinds) {
+                geos.clear();
+                bool same = false;
+                try {
+                    build();
+                    same = std::equal(geos.begin(), geos.end(), savedIndices.begin(),
+                                      savedIndices.end(),
+                                      [&](const auto& geo, std::size_t index) {
+                                          return geo->getTypeId()
+                                              == ExternalGeo[static_cast<int>(index)]->getTypeId();
+                                      });
+                    // A Both link's split between the kinds can move at the same types (a
+                    // stale saved shape: two projections and a section saved, one and two
+                    // built), so each built geometry must be its saved one too (PR 251 review
+                    // M1). A link of one kind has its kind whatever the shapes.
+                    if (same && projection && intersection) {
+                        const double tolerance =
+                            std::max(Precision::Confusion(), ArcFitTolerance.getValue());
+                        for (std::size_t k = 0; k < geos.size() && same; ++k) {
+                            const auto* saved = ExternalGeo[static_cast<int>(savedIndices[k])];
+                            same = geos[k]->isSame(*saved,
+                                                   Precision::Confusion(),
+                                                   Precision::Angular())
+                                || distanceFromSaved(geos[k].get(), saved) <= tolerance;
+                        }
+                    }
+                }
+                catch (...) {
+                    same = false;
+                }
+                if (same) {
+                    for (std::size_t k = 0; k < savedIndices.size(); ++k) {
+                        savedKinds[savedIndices[k]] = k < projSize;
+                    }
+                }
+                else {
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": its geometry was saved without recording which was projected "
+                               "and which intersections, and its type no longer gives the same "
+                               "geometries; at its next rebuild the Ids go by position: check "
+                               "the constraints on it");
+                }
+                geos.clear();
+            }
+        }
         if (!hasSource || typesOnly) {
             continue;
         }
@@ -3243,12 +3315,22 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     }
 
     if (typesOnly) {
-        Types.resize(linkCount);
-        externalTypeRepairPending = undecided;
-        if (undecided) {
-            Types.push_back(pendingTypeRepairMark);
+        if (openRepair) {
+            Types.resize(linkCount);
+            externalTypeRepairPending = undecided;
+            if (undecided) {
+                Types.push_back(pendingTypeRepairMark);
+            }
+            ExternalTypes.setValues(Types);
         }
-        ExternalTypes.setValues(Types);
+        if (!savedKinds.empty()) {
+            std::vector<Part::Geometry*> geos(ExternalGeo.getValues());
+            for (const auto& [index, projection] : savedKinds) {
+                geos[index] = geos[index]->clone();
+                setKind(geos[index], projection);
+            }
+            ExternalGeo.setValues(std::move(geos));
+        }
         return;
     }
 
@@ -3340,12 +3422,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 addedProjections[n] = 0;  // a new link: its geometries are appended in build order
                 // Whatever the link's type now: a type written before the first rebuild of
                 // geometry saved without kinds (Both to Intersection) isn't seen here, and the
-                // Ids go by position across the kinds (PR 241 review M1)
+                // Ids go by position across the kinds (PR 241 review M1). Such geometry gets its
+                // kinds on open (ops#269), so this is one whose saved type no longer gave it
+                // there (with a warning), or one frozen or without its source then.
+                // a link of one kind (ops#269) only says that its Ids went by position
                 if (oldCount != 0 && oldCount != geos.size()) {
                     FC_WARN("External link " << key << " in " << getFullName() << " gives "
                             << geos.size() << " geometries instead of " << oldCount
-                            << ", and its saved geometry doesn't record which were projected and "
-                               "which intersections: check the constraints on it");
+                            << (projCount == 0 || projCount == geos.size()
+                                    ? ", and they took its Ids by position"
+                                    : ", and its saved geometry doesn't record which were "
+                                      "projected and which intersections")
+                            << ": check the constraints on it");
                 }
             }
             while(refs.size() < geos.size())

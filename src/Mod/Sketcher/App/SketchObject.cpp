@@ -1634,6 +1634,18 @@ void SketchObject::onSketchRestore()
                     failed("unknown exception");
                 }
             }
+            else {
+                // geometry saved before ops#264 gets its kinds (ops#269); the same pass does it
+                // with the repair above
+                try {
+                    rebuildExternalGeometry(std::nullopt, true);
+                }
+                catch (...) {
+                    FC_WARN("Failed to record which external geometry of " << getFullName()
+                            << " is projected and which intersections; at its next rebuild "
+                            << "the Ids of geometry saved without it go by position");
+                }
+            }
         }
 
         // Must run after the external geometry above: the orientations are derived from the
