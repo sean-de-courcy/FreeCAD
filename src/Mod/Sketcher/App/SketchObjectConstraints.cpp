@@ -954,9 +954,6 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
         }
     }
     for (const auto& [j, sourceExpression] : sourceExpressions) {
-        if (!(origvals[j]->isDriving && origvals[j]->isDimensional())) {
-            continue;
-        }
         const std::string text = sourceExpression->toString(true);
         auto warn = [&](const std::string& why) {
             Base::Console().warning(
@@ -969,6 +966,10 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
                 why.c_str()
             );
         };
+        if (!(origvals[j]->isDriving && origvals[j]->isDimensional())) {
+            warn("the constraint isn't a driving dimension");
+            continue;
+        }
         std::shared_ptr<App::Expression> expr;
         try {
             expr = App::Expression::parse(this, text);
@@ -977,44 +978,59 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
             warn(e.what());
             continue;
         }
-        // Each reference must name here what it named in the source: the same object and
-        // property, or, for one of the source's constraints, that constraint's copy
+        // Each reference must name here what it named in the source: the same object, property
+        // and sub-path, or, for one of the source's constraints, that constraint's copy. Each is
+        // parsed again on its own, as the expression's parse resolves it here.
         const auto& copies = this->Constraints.getValuesForce();
-        auto sourceIds = sourceExpression->getIdentifiers();
-        auto ids = expr->getIdentifiers();
-        std::string moved;  // a reference that names something else here
-        if (sourceIds.size() != ids.size()) {
-            moved = text;
-        }
-        for (auto s = sourceIds.begin(), d = ids.begin(); moved.empty() && s != sourceIds.end();
-             ++s, ++d) {
-            const auto& sourceId = s->first;
-            const auto& id = d->first;
-            if (id.getDocumentObject() == sourceId.getDocumentObject()
-                && id.getProperty() == sourceId.getProperty()) {
-                continue;
-            }
-            bool same = false;
-            if (sourceId.getProperty() == &orig.Constraints && id.getProperty() == &this->Constraints) {
-                try {
-                    auto source = std::find(origvals.begin(), origvals.end(),
-                                            orig.Constraints.getConstraint(sourceId));
-                    auto copy = std::find(copies.begin(), copies.end(),
-                                          this->Constraints.getConstraint(id));
-                    same = source != origvals.end() && copy != copies.end()
-                        && copy - copies.begin()
-                            == static_cast<std::ptrdiff_t>(first) + (source - origvals.begin());
+        std::string why;  // why a reference isn't kept
+        for (const auto& identifier : sourceExpression->getIdentifiers()) {
+            const auto& sourceId = identifier.first;
+            const std::string reference = sourceId.toString();
+            const std::string named =
+                "its reference '" + reference + "' would name something else there";
+            auto check = [&]() -> std::string {
+                App::ObjectIdentifier id = App::ObjectIdentifier::parse(this, reference);
+                if (id.getDocumentObject() == sourceId.getDocumentObject()
+                    && id.getProperty() == sourceId.getProperty()
+                    && id.getSubPathStr() == sourceId.getSubPathStr()) {
+                    return {};
                 }
-                catch (const Base::Exception&) {
-                    same = false;
+                if (sourceId.getProperty() != &orig.Constraints
+                    || id.getProperty() != &this->Constraints) {
+                    return named;
                 }
+                // An index isn't kept even when it lands on the copy: Merge Sketches then deletes
+                // the constraints it skips, and delConstraint renames an index only for an
+                // unnamed constraint that moved, so the reference would silently follow another
+                // constraint (ops#261)
+                if (sourceId.numSubComponents() == 2 && sourceId.getPropertyComponent(1).isArray()) {
+                    return "its reference '" + reference
+                        + "' names a constraint by its index, which merging can change; name the "
+                          "constraint and refer to it by name";
+                }
+                auto source = std::find(origvals.begin(), origvals.end(),
+                                        orig.Constraints.getConstraint(sourceId));
+                auto copy = std::find(copies.begin(), copies.end(),
+                                      this->Constraints.getConstraint(id));
+                if (source == origvals.end() || copy == copies.end()
+                    || copy - copies.begin()
+                        != static_cast<std::ptrdiff_t>(first) + (source - origvals.begin())) {
+                    return named;
+                }
+                return {};
+            };
+            try {
+                why = check();
             }
-            if (!same) {
-                moved = sourceId.toString();
+            catch (const Base::Exception&) {
+                why = named;
+            }
+            if (!why.empty()) {
+                break;
             }
         }
-        if (!moved.empty()) {
-            warn("its reference '" + moved + "' would name something else there");
+        if (!why.empty()) {
+            warn(why);
             continue;
         }
         try {

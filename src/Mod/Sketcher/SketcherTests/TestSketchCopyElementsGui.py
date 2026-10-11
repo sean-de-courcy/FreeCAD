@@ -142,6 +142,42 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         self.assertEqual(self.expressions(merged), {".Constraints.a": "5 + 5"})
         self.assertAlmostEqual(merged.getDatum("b").Value, 10, delta=1e-7)
 
+    def test_merge_refuses_an_index_reference_in_the_first_sketch(self):
+        """PR 237 review M1: in the first sketch an index lands on the same index in the merged
+        one, but Merge then deletes the constraints it skips, and the deletion leaves a reference
+        to the deleted index alone. Dest (in a Body) has constraint 0, a horizontal distance to an
+        edge of the Body's box, which Merge can't import (out of scope for the merged sketch);
+        constraint 1, a length of 10; and constraint 2, a length driven by Constraints[0]. Kept,
+        after constraint 0's deletion the expression would follow constraint 1 instead. It isn't
+        copied (with a warning), and constraint 2 keeps its value."""
+        import PartDesign  # noqa: F401  (registers the PartDesign types)
+
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        box = body.newObject("PartDesign::AdditiveBox", "Box")
+        self.doc.recompute()
+        body.addObject(self.dest)
+        # the box's edge on the x axis, (0, 0, 0) to (10, 0, 0)
+        (edge,) = [
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(box.Shape.Edges)
+            if all(abs(v.Point.y) < TOL and abs(v.Point.z) < TOL for v in e.Vertexes)
+        ]
+        self.dest.addExternal(box.Name, edge)
+        for y in (5, 10):
+            self.dest.addGeometry(Part.LineSegment(V(20, y, 0), V(30, y, 0)), False)
+        # from the edge's start to Dest's first line: 20 or 10, whichever end the edge starts at
+        distance = 20 - self.dest.getPoint(-3, 1).x
+        self.dest.addConstraint(Sketcher.Constraint("DistanceX", -3, 1, 0, 1, distance))
+        self.add_length(self.dest, 1)
+        self.assertEqual(self.add_length(self.dest, 2, expression="Constraints[0]"), 2)
+        self.doc.recompute()
+        self.assertEqual(self.expressions(self.dest), {"Constraints[2]": "Constraints[0]"})
+        self.assertAlmostEqual(self.line_length(self.dest, 2), distance, delta=1e-7)
+        merged = self.merge_dest_and_source()
+        self.assertEqual([c.Type for c in merged.Constraints][:2], ["Distance"] * 2)
+        self.assertEqual(self.expressions(merged), {})
+        self.assertAlmostEqual(merged.Constraints[1].Value, distance, delta=1e-7)
+
     def test_carbon_copy_remaps_every_element(self):
         """Carbon copy of the Source into Dest: the Group's four elements name the copied lines
         (the old code left the fourth on GeoId 3, the third copied line)."""
