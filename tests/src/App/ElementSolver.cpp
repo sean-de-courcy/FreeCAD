@@ -1695,6 +1695,34 @@ TEST(SolveOwner, connectedElementIsNotAncestry)
 
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
     EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge32"});
+
+    //   nor when the top sections agree: the old edge, then FUS;MOD, and the block's piece with
+    //   that neighbour among its connected elements (PR 243 round 7, Fable review 7)
+    input.pool["Edge"] = {element("Edge32", {piece(sketchEdge(4, 11), 16, "FUS", 0, 'E', {lineFace})})};
+    input.entries = {missing(piece(startCapEdge, 15, "FUS", 0, 'E'), "Edge")};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge32"});
+}
+
+TEST(SolveOwner, partnersOfOneProfileElementRelate)
+{
+    // PR 243 round 7 (Fable review 7): relating names only outside projections still relates
+    // two partners of the same profile element. A far cap edge's piece (its PRJ name of the
+    // profile's line 4, then FUS;MOD) is gone, and the far cap edge after the edit holds the
+    // line's partner under another index: same profile element, same projection.
+    const auto startCapEdge = sketchEdge(4, 13);
+    const auto oldPartner = section({}, {startCapEdge}, 14, "XTR", 0, 'E', {"PRJ"});
+    const auto newPartner = section({}, {startCapEdge}, 14, "XTR", 1, 'E', {"PRJ"});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge28", {piece(newPartner, 16, "FUS", 0, 'E')})};
+    input.entries = {missing(piece(oldPartner, 15, "FUS", 0, 'E'), "Edge")};
+
+    const auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Edge28");
+    EXPECT_EQ(outcomes[0].tier, 1);
 }
 
 TEST(SolveOwner, patternSiblingNeverResolves)

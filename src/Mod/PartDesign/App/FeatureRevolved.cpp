@@ -523,8 +523,12 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // the profile's names, as the start face of one side or of two sides built as one solid
     // has. In V2 it is marked (CPY;1), so that a reference to that face doesn't move to the
     // seam, or the other way, when an edit switches between the builds (PR 243 round 5).
+    // Unlike a Pad's, no far cap is marked here (farCapIsSide2 is false): a revolution's PRJ
+    // sections take the revolved shape's tag, possibly the sketch's, not this feature's ID, and
+    // markStartCap's partner test requires this feature's ID. Reusing it for a revolution would
+    // reject every partner; check where the tag comes from first (PR 243 follow-up F3).
     auto markSeam = [&](TopoShape side) {
-        markStartCap(side, sketchshape, "1");
+        markStartCap(side, sketchshape, "1", false, true);
         return side;
     };
 

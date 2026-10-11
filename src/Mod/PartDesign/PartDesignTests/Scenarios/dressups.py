@@ -1436,11 +1436,12 @@ class FilletStartCapEdgeOfOneSideToUpToOverhangingBlockApart(
     __doc__ = (
         FilletStartCapEdgeOfOneSideToUpToBlockApart.__doc__
         + "\n\nPR 243 round 7 (Fable review 6, M1): the block overhangs in y (y -8..8). Side 1's far "
-        + "left edge is the middle piece of the block's bottom left edge (FUS;MOD), whose "
-        + "connected elements, per end vertex, are a Pad face holding it, possibly the profile's "
-        + "left line's GEN face (it runs along that face). Through that neighbour the old name "
-        + "was in the piece's ancestry outside a projection, and the reference resolved there, "
-        + "8 mm away, at tier 1. The reference breaks."
+        + "left edge (y -5..5, z = 8) has its PRJ name, which links the old name, and the middle "
+        + "piece's name of the block's bottom left edge (the block sketch's line 4, then FUS;MOD). "
+        + "The pieces beyond it (y -8..-5, 5..8) list the block's own faces as connected elements, "
+        + "not the profile's (names observed in round 7). So the edit doesn't take the "
+        + "connected-elements path of the review's M1: the gtest connectedElementIsNotAncestry "
+        + "does. The reference breaks."
     )
 
     blockY = 8
@@ -1462,11 +1463,13 @@ class StartCapOnPedestalToUpToBlockApart(Scenario):
     """PR 243 round 7 (Fable review 6, M2): a pedestal (x, y -10..10, z -5..0) with a pillar
     (x 7..10, y -5..5, z 0..8) under a block (x -5..10, y -5..5, z 8..10); a Pad of the square
     x, y -5..5 on the pedestal's top, One side, 5 (z 0..5), Refine off. Its start cap lies in the
-    pedestal's top: the start cap's edges are FUS;MOD names that split the pedestal's top face.
+    pedestal's top; its left edge keeps the profile's plain name (line 4).
     Then Two sides: side 1 up to the block's bottom face (z = 8), side 2 0.5 long, with a start
     offset of 1, so the sides are built apart (z 1..8 and 0.5..1) and lifted off the pedestal.
-    Side 1's far cap lies on the block, flush with its left side, so its left edge and corners
-    merge with the block's: FUS;MOD names over the PRJ names, which link the profile's names."""
+    Side 1's far cap lies on the block, flush with its left side, so its left edge merges with
+    the block's: it holds its PRJ name, which links the profile's line 4, and the block sketch's
+    plain line 4 (names observed in round 7). The review's M2 case, both names topped by FUS;MOD,
+    is the gtest sharedTopThroughAProjectionIsNoEvidence."""
 
     abstract = True
     area = "dress-ups"
@@ -1505,8 +1508,8 @@ class FilletStartCapEdgeOnPedestalToUpToBlockApart(StartCapOnPedestalToUpToBlock
     __doc__ = (
         StartCapOnPedestalToUpToBlockApart.__doc__
         + "\n\nA fillet, radius 0.5, on the start cap's left edge (x = -5, z = 0), concave on the "
-        + "pedestal. Side 1's far left edge (z = 8) shares the old name's profile name through "
-        + "its PRJ linked name, and both are topped by FUS;MOD. The reference breaks."
+        + "pedestal. Side 1's far left edge (z = 8) links the old name through its PRJ name only. "
+        + "The reference breaks."
     )
 
     REFS = ("left_edge",)

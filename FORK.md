@@ -292,7 +292,8 @@ names it.
 | `fix/237-externals-followups` | fix | ops#237 | - | `fix/283-carbon-copy-followups` `af6dd58324` (stacked on fork PR 260) | `0ee3ee9a56` (fork PR 262), 2026-10-11 | never (fork fix) |
 | `fix/244-independent-primitive-copy` | fix | ops#244, ops#282 | - | `integration` `0f634bd007` | `e9571e3de2` (fork PR 261), 2026-10-11 | never (fork fix) |
 | `fix/166-parked-deleted-mark` | fix | ops#166 | - | `integration` `551ce8b8a7` | `8a87fd8596` (fork PR 265), 2026-10-11 | never (fork fix) |
-| `fix/171-parked-paste-source-doc` | fix | ops#171 | - | `fix/166-parked-deleted-mark` `cd1606625c` (fork PR 265) | (fork PR 266) | never (fork fix) |
+| `fix/171-parked-paste-source-doc` | fix | ops#171 | - | `fix/166-parked-deleted-mark` `cd1606625c` (fork PR 265) | `04564f6846` (fork PR 266), 2026-10-11 | never (fork fix) |
+| `fix/255-followups` | fix | ops#255 | - | `integration` `d9a3826388` | (fork PR 264) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
