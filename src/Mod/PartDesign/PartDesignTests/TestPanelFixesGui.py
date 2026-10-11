@@ -1071,44 +1071,71 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
 
-    def testPipeCopyOfAnotherShapeStops(self):
-        """ops#234 round (PR 219 review F1): the spine is an edge of a box in another body that
-        is fused with a base box. The independent copy takes no BaseFeature, so its shape is the
-        box alone, where that index is another edge (or none): written by index, the spine moved
-        silently. OK now stops and names the reference. Model: a base box 20 x 20 x 10 and a box
-        10 x 10 x 20, both at the origin; the spine is the fused shape's vertical edge at
-        x = 20, y = 0 (z 0..10), which the box alone hasn't; the profile is a 2 x 2 square around
-        its foot."""
+    def testPipeCopyOfAPrimitiveOnABase(self):
+        """ops#234 round (PR 219 review F1), ops#244 P5: the spine is an edge of a box in another
+        body that is fused with a base box. A primitive copy took no BaseFeature, so its shape was
+        the box alone, where that index is another edge (or none), and OK stopped. The copy is a
+        shape binder of the fused shape, which has the edge under its index: OK copies it, and
+        the pipe sweeps along it. Model: a base box 20 x 20 x 10 and a box 10 x 10 x 20, both at
+        the origin; the spine is the fused shape's vertical edge at x = 20, y = 0 (z 0..10), which
+        the box alone hasn't; the profile is a 2 x 2 square around its foot."""
         other = models.body(self.doc)
         base = other.newObject("PartDesign::AdditiveBox", "Base")
         base.Length = 20
         base.Width = 20
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Height = 20
-        self.body = models.body(self.doc)
-        self.profile = models.sketch(
-            self.doc, "Profile", models.rectangle(19, -1, 21, 1), self.body
-        )
         self.doc.recompute()
         self.assertTrue(box.isValid(), box.getStatusString())
-        # the base's vertical edge at x = 20, y = 0, by geometry
-        [sub] = [
-            f"Edge{i}"
-            for i, e in enumerate(box.Shape.Edges, 1)
-            if (e.CenterOfMass - V(20, 0, 5)).Length < 1e-6
-        ]
-        alone = Part.makeBox(10, 10, 20)
-        index = int(sub[4:])
-        if index <= len(alone.Edges):
-            self.assertGreater((alone.Edges[index - 1].CenterOfMass - V(20, 0, 5)).Length, 1)
-        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
-        pipe.Profile = self.profile
-        pipe.Spine = (box, [sub])
-        self.doc.recompute()
+        pipe = self.pipeOnAnOutsideEdge(box, V(20, 0, 5), 20, 0)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
-        self.assertOkStops(pipe, f"Pipe: Spine '{sub}' of 'Box' would name another element")
+        copy = self.copySpineIn(pipe)
+        self.assertIndependentPrimitiveCopy(copy, box)
+        self.assertCopiedEdgeAt(pipe, V(20, 0, 5))
+
+    def testIndependentCopyOfAPrimitiveStaysAsCopied(self):
+        """ops#244 P3, P5 (the user's answer, 2026-10-11): the spine is a vertical edge of a box
+        in another body turned 90 degrees about Z and moved by (5, 0, 0), Make independent copy.
+        The copy is a shape binder of the box's shape where the box is, without a link back; one
+        undo takes it back with the pipe's change, one redo puts it back; the box lengthened
+        afterwards leaves the copy and the pipe as they were. The box's edge x = 0, y = 0 along Z
+        is globally at (5, 0, 5)."""
+        other = models.body(self.doc)
+        other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        self.doc.recompute()
+        pipe = self.pipeOnAnOutsideEdge(box, V(0, 0, 5), 5, 0)
+        before = self.body.Group
+        copy = self.copySpineIn(pipe)
+        self.assertIndependentPrimitiveCopy(copy, box)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject("CopyBox"))
         self.assertIs(pipe.Spine[0], box)
-        self.assertEqual(pipe.Spine[1], [sub])
+        self.assertEqual(self.body.Group, before)
+        self.doc.redo()
+        self.doc.recompute()
+        copy = self.doc.getObject("CopyBox")
+        self.assertIs(pipe.Spine[0], copy)
+        self.assertIndependentPrimitiveCopy(copy, box)
+
+        volume = copy.Shape.Volume
+        bounds = copy.Shape.BoundBox
+        box.Length = 30
+        self.doc.recompute()
+        self.assertAlmostEqual(box.Shape.Volume, 30 * 20 * 10, places=6)
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertAlmostEqual(copy.Shape.Volume, volume, places=6)
+        for bound in ["XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"]:
+            self.assertAlmostEqual(
+                getattr(copy.Shape.BoundBox, bound), getattr(bounds, bound), places=6
+            )
+        self.assertNotIn(box, copy.OutListRecursive)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
     def testPipeCopyKeepsAnOutsideSectionsGuess(self):
         """ops#234 round (PR 219 review, test gap): the section is the top face of a pad in
@@ -1512,30 +1539,82 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(box.Shape.Faces[0].CenterOfMass.x, -5, places=6)
         return box, cut
 
+    def assertSameShape(self, copy, original):
+        """copy's shape is original's, globally: the same volume, faces and bounding box."""
+        def placed(obj):
+            shape = obj.Shape.copy()
+            shape.Placement = obj.getGlobalPlacement()
+            return shape
+
+        shape, expected = placed(copy), placed(original)
+        self.assertAlmostEqual(shape.Volume, expected.Volume, places=6)
+        self.assertEqual(len(shape.Faces), len(expected.Faces))
+        box, expectedBox = shape.BoundBox, expected.BoundBox
+        for bound in ["XMin", "YMin", "ZMin", "XMax", "YMax", "ZMax"]:
+            self.assertAlmostEqual(
+                getattr(box, bound), getattr(expectedBox, bound), places=6, msg=(box, expectedBox)
+            )
+
+    def assertIndependentPrimitiveCopy(self, copy, primitive):
+        """ops#244 P3, P5 (the user's answer, 2026-10-11): an independent copy of a primitive is a
+        shape binder of its shape, without a support or a link back, out of the body's solid
+        chain, where the primitive is."""
+        self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
+        self.assertEqual(copy.Support, [])
+        self.assertNotIn(primitive, copy.OutListRecursive)
+        self.assertNotIn(copy, primitive.InListRecursive)
+        self.assertIsNot(self.body.Tip, copy)
+        self.assertTrue(
+            copy.getGlobalPlacement().isSame(primitive.getGlobalPlacement(), 1e-9),
+            (copy.getGlobalPlacement(), primitive.getGlobalPlacement()),
+        )
+        self.assertSameShape(copy, primitive)
+
     def testNewSketchOnACopiedPrimitiveOnABase(self):
-        """PR 223 review M1: as testNewSketchOnAFaceCopiedFromAnotherBody, on Box, which sits on
-        Base. Its copy has no BaseFeature, so a recompute in makeCopy made it the bare box before
-        the sketch linked its Face1, and the sketch went on the bare box's Face1 (x = 0), another
-        plane than the Face1 picked (x = -5), silently. The copy keeps its pasted shape until the
-        command's recompute (which still makes it the bare box, ops#244 P5): the sketch is on the
-        picked plane, or flagged; never valid elsewhere without a warning."""
+        """PR 223 review M1, ops#244 P5: as testNewSketchOnAFaceCopiedFromAnotherBody, on Box,
+        which sits on Base. A primitive copy took the body's Tip as its BaseFeature (none here),
+        so the command's recompute made it the bare box, and the sketch's Face1 (the plane x = -5
+        picked) was lost, loudly. The copy is a shape binder of Box's shape (fused with Base), and
+        stays so: the sketch is on the picked plane, valid, without a warning."""
         box, _ = self.primitivesOnABase()
+        before = len(reportText() or "")
         sketch = self.newSketchOnCopiedFace(box)
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertIndependentPrimitiveCopy(copy, box)
+        # PR 261 review: said, since the user may expect the box alone
+        self.assertIn(
+            "The copy 'CopyBox' of 'Box' is the body's solid at 'Box' (on 'Base'), not 'Box' alone",
+            (reportText() or "")[before:],
+        )
+        self.assertNotIn("isn't up to date", (reportText() or "")[before:])
+        self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
         self.doc.recompute()
-        onPicked = abs(sketch.Placement.Base.x + 5) < 1e-6
-        flagged = "Warning" in sketch.State or not sketch.isValid()
-        self.assertTrue(onPicked or flagged, (sketch.Placement, sketch.State))
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertSameShape(copy, box)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertNotIn("Warning", sketch.State)
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.x, -5, places=6)
 
     def testNewSketchOnACopiedSubtractivePrimitive(self):
-        """PR 223 review M2: New Sketch on a face of Cut (a subtractive box on Box), Make
-        independent copy. Recomputed without a base, the copy failed ("Cannot subtract primitive
-        feature without base feature") and makeCopy reported it. It keeps its pasted shape (the
-        command's own recompute then fails it in the body, as before ops#230: ops#244 P5)."""
+        """PR 223 review M2, ops#244 P5: New Sketch on a face of Cut (a subtractive box on Box),
+        Make independent copy. A primitive copy failed in the body without a base ("Cannot
+        subtract primitive feature without base feature"). The copy is a shape binder of Cut's
+        shape and recomputes."""
         _, cut = self.primitivesOnABase()
         before = len(reportText() or "")
         self.newSketchOnCopiedFace(cut)
-        self.assertIsNotNone(self.doc.getObject("CopyCut"))
+        copy = self.doc.getObject("CopyCut")
+        self.assertIsNotNone(copy)
+        self.assertIndependentPrimitiveCopy(copy, cut)
+        self.doc.recompute()
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertSameShape(copy, cut)
         self.assertNotIn("doesn't recompute", (reportText() or "")[before:])
+        self.assertIn(
+            "The copy 'CopyCut' of 'Cut' is the body's solid at 'Cut' (on 'Box'), not 'Cut' alone",
+            (reportText() or "")[before:],
+        )
 
     def boxElement(self, box, kind, where):
         """The index name of the box's element of `kind` ("Face" or "Edge") whose centre of mass
@@ -1572,30 +1651,129 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(abs(normal.z), 1, places=6)
         self.assertAlmostEqual(sketch.Placement.Base.z, 10, places=6)
 
-    def testNewSketchOnAStaleCopiedBoxStops(self):
-        """PR 223 review N1, the check: the box was lengthened and not recomputed, so its copy,
-        recomputed in makeCopy, is longer, and the picked face (the end x = 10) is another face
-        there. New Sketch stops with a message and leaves no copy and no sketch."""
-        self.newSketchOnAStaleCopiedBox()
-
-    def newSketchOnAStaleCopiedBox(self):
+    def testNewSketchOnAStaleCopiedBoxWarns(self):
+        """PR 223 review N1, ops#244 P5: the box was lengthened to 20 and not recomputed. A
+        primitive copy recomputed itself in makeCopy, and New Sketch stopped, since the picked
+        face (the end x = 10) was another face on it. The copy, a shape binder, takes the box's
+        shape as shown (x 0..10): the sketch is on the picked face, and the Report view says that
+        the box isn't up to date. The box's recompute leaves the copy as it is."""
         other = models.body(self.doc)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
         end = self.boxElement(box, "Face", lambda p: abs(p.x - 10) < 1e-6)
         box.Length = 20
-        self.runNewSketchOnCopiedFace(box, end)
-        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
-        self.answering = False
-        self.assertEqual(self.modals[0], "DlgReference")
-        self.assertTrue(self.modals[1].startswith("QMessageBox: " + end), self.modals)
-        pump(0.3)
-        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
-        self.assertIsNone(self.doc.getObject("CopyBox"))
-        self.assertEqual(
-            [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(box, end)
+        self.assertIn(
+            "'Box' isn't up to date: its copy 'CopyBox' takes its shape as last computed",
+            (reportText() or "")[before:],
         )
+        copy = self.doc.getObject("CopyBox")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (end,))])
+        self.doc.recompute()
+        self.assertAlmostEqual(box.Shape.BoundBox.XMax, 20, places=6)
+        self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 10, places=6)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.x, 10, places=6)
+
+    def testNewSketchOnACopiedBoxOnAStaleBaseWarns(self):
+        """PR 261 review L1: primitivesOnABase, with Base lengthened to 30 and not recomputed. Box
+        itself is unchanged, but its recompute would fuse it with the longer base: New Sketch on
+        Box's top face (z = 20), Make independent copy, says that Box isn't up to date (only Box's
+        own properties were checked)."""
+        box, _ = self.primitivesOnABase()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 20) < 1e-6)
+        box.BaseFeature.Length = 30
+        self.assertNotIn("Touched", box.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(box, top)
+        copy = self.doc.getObject("CopyBox")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
+        self.assertIn(
+            "'Box' isn't up to date: its copy 'CopyBox' takes its shape as last computed",
+            (reportText() or "")[before:],
+        )
+        self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 15, places=6)
+
+    def testNewSketchOnACopiedPadWithAStaleSketchWarns(self):
+        """PR 261 review L1 and nit: a 10 mm pad of a square sketch in another body; the sketch
+        widened to 20 and not recomputed. New Sketch on the pad's top face (z = 10), Make
+        independent copy (a shape binder of that face), says that the pad isn't up to date: the
+        warning isn't the primitives' alone, and it reads what the pad is made from."""
+        other = models.body(self.doc)
+        square = models.sketch(self.doc, "Square", models.rectangle(0, 0, 10, 10), other)
+        pad = models.pad(other, square, 10)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        top = self.boxElement(pad, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        models.moveRectangle(square, 0, 0, 20, 10)
+        self.assertNotIn("Touched", pad.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(pad, top)
+        copy = self.doc.getObject("CopyPad")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, ("Face1",))])
+        self.assertIn(
+            "'Pad' isn't up to date: its copy 'CopyPad' takes its shape as last computed",
+            (reportText() or "")[before:],
+        )
+        self.assertAlmostEqual(copy.Shape.BoundBox.XMax, 10, places=6)
+
+    def testNewSketchOnACopiedTouchedBoxDoesntWarn(self):
+        """PR 261 review L3: a box in another body only touched (no property changed, no
+        recompute enforced: touch("")): a recompute wouldn't execute it, so New Sketch on its top
+        face, Make independent copy, says nothing about it being out of date. A box without a
+        base: no note about one either."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        box.touch("")
+        self.assertIn("Touched", box.State)
+        before = len(reportText() or "")
+        sketch = self.newSketchOnCopiedFace(box, top)
+        copy = self.doc.getObject("CopyBox")
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
+        self.assertNotIn("isn't up to date", (reportText() or "")[before:])
+        self.assertNotIn("is the body's solid", (reportText() or "")[before:])
+
+    def testNewSketchOnACopiedBoxAcrossPlacedParts(self):
+        """PR 261 review L4: the box's body sits in an App::Part turned 90 degrees about Z and
+        moved by (5, 0, 0), the body itself moved by (0, 2, 0); the sketch's body sits in another
+        App::Part turned 30 degrees about X and moved by (0, 0, 7), the body moved by (1, 0, 0).
+        New Sketch on the box's end face x = 20 (box coordinates), Make independent copy: the
+        copy is globally where the box is, and the sketch on the face's plane, globally."""
+        source = self.doc.addObject("App::Part", "SourcePart")
+        source.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        other = models.body(self.doc)
+        source.addObject(other)
+        other.Placement.Base = V(0, 2, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        target = self.doc.addObject("App::Part", "TargetPart")
+        target.Placement = App.Placement(V(0, 0, 7), App.Rotation(V(1, 0, 0), 30))
+        self.body = models.body(self.doc)
+        target.addObject(self.body)
+        self.body.Placement.Base = V(1, 0, 0)
+        self.doc.recompute()
+        end = self.boxElement(box, "Face", lambda p: abs(p.x - 20) < 1e-6)
+        sketch = self.newSketchOnCopiedFace(box, end)
+        copy = self.doc.getObject("CopyBox")
+        self.assertIsNotNone(copy)
+        self.assertTrue(self.body.hasObject(copy))
+        self.assertIndependentPrimitiveCopy(copy, box)
+        self.assertEqual(sketch.AttachmentSupport, [(copy, (end,))])
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        # the box's end face, globally: through the point (20, 5, 5) of the box, along its X
+        boxGlobal = box.getGlobalPlacement()
+        point = boxGlobal.multVec(V(20, 5, 5))
+        normal = boxGlobal.Rotation.multVec(V(1, 0, 0))
+        sketchGlobal = sketch.getGlobalPlacement()
+        self.assertAlmostEqual(abs(sketchGlobal.Rotation.multVec(Z).dot(normal)), 1, places=6)
+        self.assertAlmostEqual((point - sketchGlobal.Base).dot(normal), 0, places=6)
 
     def revolutionBesideABox(self):
         """A 10 mm box at the origin in another body, and in this one the Ring profile (x 1..3,
@@ -1627,9 +1805,10 @@ class TestPanelFixesGui(unittest.TestCase):
     def testRevolutionAxisOnAnEdgeOfACopiedBox(self):
         """PR 223 review N1 (getReferencedSelection): the Revolution's axis picked on an edge of
         a box in another body (no base), Make independent copy. The axis went to the copy's
-        Edge1 whatever edge was picked; it is the picked edge, the same line on the copy. Checked
-        at the pick: once the panel closes, the copy sits after the Revolution in the body with
-        the Revolution as its BaseFeature, a cycle that breaks the axis, loudly (ops#244 P3).
+        Edge1 whatever edge was picked; it is the picked edge, the same line on the copy.
+        ops#244 P3: a primitive copy went after the Revolution in the body with the Revolution as
+        its BaseFeature, a cycle that broke the axis, loudly. The copy is a shape binder, out of
+        the solid chain: OK keeps the axis, and the revolution recomputes.
         Model: a 10 mm box at the origin; the axis is its edge x = 10, y = 0 along Z."""
         box, revolution, edge = self.revolutionBesideABox()
         self.edit(revolution)
@@ -1643,31 +1822,57 @@ class TestPanelFixesGui(unittest.TestCase):
 
         copy = self.doc.getObject("CopyBox")
         self.assertIsNotNone(copy)
+        self.assertIndependentPrimitiveCopy(copy, box)
         self.assertEqual(revolution.ReferenceAxis, (copy, [edge]))
         picked = copy.Shape.getElement(edge)
         self.assertAlmostEqual(picked.CenterOfMass.distanceToPoint(V(10, 0, 5)), 0, places=6)
         self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
-        self.close(ok=False)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertIs(self.body.Tip, revolution)
+        self.assertEqual(revolution.ReferenceAxis, (copy, [edge]))
+        self.assertTrue(copy.isValid(), copy.getStatusString())
+        self.assertNotIn("Touched", copy.State)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(App.getReferenceReport(revolution), [])
+        # the ring (x 1..3, z 0..2) turned about the line x = 10: radii 7..9, height 2
+        self.assertAlmostEqual(revolution.Shape.Volume, math.pi * (81 - 49) * 2, places=3)
 
-    def testRevolutionAxisOnAStaleCopiedBoxStops(self):
-        """PR 223 verification L3 (getReferencedSelection's check): as
-        testRevolutionAxisOnAnEdgeOfACopiedBox, with the box lengthened to 20 and not
-        recomputed, so the picked edge (x = 10) is at x = 20 on the copy. The pick stops with a
-        message, leaves no copy and the axis as it was, and the field stays armed: once the box
-        is recomputed, the same pick links the copy's edge."""
-        box, revolution, edge = self.revolutionBesideABox()
-        box.Length = 20
+    def revolutionBesideAnAxisSketch(self):
+        """revolutionBesideABox with a sketch in the other body instead of the box: Axis, the
+        line x = 10, z 0..10 (on XZ). Returns the sketch and the revolution."""
+        other = models.body(self.doc)
+        axis = models.sketch(self.doc, "Axis", [line(10, 0, 10, 10)], other, placement=XZ)
+        self.body = models.body(self.doc)
+        ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
+        revolution = self.body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = ring
+        revolution.ReferenceAxis = (ring, ["V_Axis"])
+        revolution.Angle = 360
+        self.doc.recompute()
+        return axis, revolution
+
+    def testRevolutionAxisOnAStaleCopiedSketchStops(self):
+        """PR 223 verification L3 (getReferencedSelection's check): the axis picked on Edge1 of
+        a sketch in another body, Make independent copy, the sketch's line moved from x = 10 to
+        x = 20 and not recomputed: its copy, recomputed in makeCopy, has the line at x = 20, so
+        the picked edge would be another line there. The pick stops with a message, leaves no
+        copy and the axis as it was, and the field stays armed: once the sketch is recomputed,
+        the same pick links the copy's edge. (A stale box no longer stops: its copy is a shape
+        binder of the shape shown, ops#244 P3.)"""
+        axis, revolution = self.revolutionBesideAnAxisSketch()
+        axis.Geometry = [line(20, 0, 20, 10)]
         self.edit(revolution)
         self.armAxisField()
         self.answerModals()
-        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        Gui.Selection.addSelection(self.doc.Name, axis.Name, "Edge1")
         self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
         pump(0.3)
         self.answering = False
         self.assertEqual(self.modals[0], "DlgReference")
-        self.assertTrue(self.modals[1].startswith("QMessageBox: " + edge), self.modals)
+        self.assertTrue(self.modals[1].startswith("QMessageBox: Edge1"), self.modals)
         self.assertEqual(
-            [o.Name for o in self.doc.Objects if o.Name.startswith("CopyBox")], []
+            [o.Name for o in self.doc.Objects if o.Name.startswith("CopyAxis")], []
         )
         self.assertEqual(revolution.ReferenceAxis[1], ["V_Axis"])
 
@@ -1675,14 +1880,14 @@ class TestPanelFixesGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         self.modals = []
         self.answerModals()
-        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        Gui.Selection.addSelection(self.doc.Name, axis.Name, "Edge1")
         self.assertTrue(waitFor(lambda: self.modals), "the field isn't armed")
         pump(0.3)
         self.answering = False
         self.assertEqual(self.modals, ["DlgReference"])
         copy = revolution.ReferenceAxis[0]
-        self.assertTrue(copy.Name.startswith("CopyBox"), copy.Name)
-        self.assertEqual(revolution.ReferenceAxis[1], [edge])
+        self.assertTrue(copy.Name.startswith("CopyAxis"), copy.Name)
+        self.assertEqual(revolution.ReferenceAxis[1], ["Edge1"])
         self.close(ok=False)
 
     # -- ops#236, ops#241: makeCopy's independent copy -------------------------------------------
@@ -1755,8 +1960,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def pipeOnAnOutsideEdge(self, feature, where, x, y, placement=None):
         """A Pipe in self.body (made if missing) whose spine is feature's edge with its centre of
         mass at `where` (in its container's frame: feature.Shape is placed), and whose profile is a 2 x 2 square around
-        (x, y) in the body (on its XY plane, or at `placement`); recomputed. The square overlaps a primitive copy, which fuses with the
-        pipe once it's in the body (ops#244 P3)."""
+        (x, y) in the body (on its XY plane, or at `placement`); recomputed."""
         self.body = self.body if getattr(self, "body", None) else models.body(self.doc)
         self.profile = models.sketch(
             self.doc,
@@ -2004,7 +2208,8 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         copy = self.copySpineIn(pipe)
         self.assertIsNot(copy, box)
-        self.assertEqual(copy.MapMode, "Deactivated")
+        # a shape binder since ops#244 P3, P5, unattached
+        self.assertIndependentPrimitiveCopy(copy, box)
         self.assertTrue(copy.Placement.isSame(box.Placement, 1e-9), copy.Placement)
         edge = copy.getSubObject(pipe.Spine[1][0])
         self.assertLess((edge.CenterOfMass - V(5, 5, 15)).Length, 1e-6)
@@ -2131,20 +2336,21 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(datum.isValid(), datum.getStatusString())
         self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 10, places=6)
 
-    def testDatumOnAStaleCopiedBoxStops(self):
-        """ops#244 P2, the check: the box was lengthened to 20 and not recomputed, so the picked
-        face (the end x = 10) is at x = 20 on its recomputed copy. OK stops with a message, the
-        panel stays, and no copy is left."""
+    def testDatumOnAStaleCopiedSketchStops(self):
+        """ops#244 P2, the check: a datum plane normal to Edge1 of a sketch in another body (the
+        line x = 10, z 0..10 on XZ), the line moved to x = 20 and not recomputed, so the picked
+        edge is another line on the sketch's copy, recomputed in makeCopy. OK stops with a
+        message, the panel stays, and no copy is left. (A stale box no longer stops: its copy is
+        a shape binder of the shape shown, ops#244 P5.)"""
         other = models.body(self.doc)
-        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        axis = models.sketch(self.doc, "Axis", [line(10, 0, 10, 10)], other, placement=XZ)
         self.body = models.body(self.doc)
-        self.doc.recompute()
-        end = self.boxElement(box, "Face", lambda p: abs(p.x - 10) < 1e-6)
         datum = self.body.newObject("PartDesign::Plane", "Datum")
-        datum.AttachmentSupport = [(box, end)]
-        datum.MapMode = "FlatFace"
+        datum.AttachmentSupport = [(axis, "Edge1")]
+        datum.MapMode = "NormalToEdge"
         self.doc.recompute()
-        box.Length = 20
+        self.assertTrue(datum.isValid(), datum.getStatusString())
+        axis.Geometry = [line(20, 0, 20, 10)]
         self.edit(datum)
         self.answerModals()
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
@@ -2152,17 +2358,16 @@ class TestPanelFixesGui(unittest.TestCase):
         pump(0.3)
         self.answering = False
         self.assertEqual(self.modals[0], "DlgReference")
-        self.assertTrue(self.modals[1].startswith("QMessageBox: " + end), self.modals)
+        self.assertTrue(self.modals[1].startswith("QMessageBox: Edge1"), self.modals)
         self.assertIsNotNone(Gui.Control.activeDialog())
-        self.assertEqual([o.Name for o in self.doc.Objects if o.Name.startswith("CopyBox")], [])
-        self.assertEqual(datum.AttachmentSupport, [(box, (end,))])
+        self.assertEqual([o.Name for o in self.doc.Objects if o.Name.startswith("CopyAxis")], [])
+        self.assertEqual(datum.AttachmentSupport, [(axis, ("Edge1",))])
 
     def testNewSketchOnTheTopFaceOfACopiedPrimitiveOnABase(self):
         """ops#244 P1: New Sketch on Box's top face (z = 20, not Face1) in primitivesOnABase,
-        Make independent copy. The copy keeps its pasted shape (not recomputed: a primitive on a
-        base), and the sketch went on its Face1 (the base's side, x = -5) whatever face was
-        picked. It links the picked face, the same index on the copy; the command's recompute
-        then makes the copy the bare box (ops#244 P5), whose top face is the same plane."""
+        Make independent copy. The sketch went on the copy's Face1 (the base's side, x = -5)
+        whatever face was picked. It links the picked face, the same index on the copy (a shape
+        binder of Box's shape since ops#244 P5)."""
         box, _ = self.primitivesOnABase()
         top = self.boxElement(box, "Face", lambda p: abs(p.z - 20) < 1e-6)
         sketch = self.newSketchOnCopiedFace(box, top)
@@ -2178,7 +2383,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """ops#244 P1 (getReferencedSelection): the Revolution's axis picked on Box's edge
         x = 10, y = 0 along Z (not Edge1) in primitivesOnABase, Make independent copy. The axis
         went to the copy's Edge1 whatever edge was picked; it is the picked edge, the same line on
-        the copy (checked at the pick: ops#244 P3)."""
+        the copy, also once OK closes the panel (a shape binder since ops#244 P3)."""
         box, _ = self.primitivesOnABase()
         ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
         self.doc.recompute()
@@ -2205,7 +2410,11 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(picked.CenterOfMass.x, 10, places=6)
         self.assertAlmostEqual(picked.CenterOfMass.y, 0, places=6)
         self.assertAlmostEqual(abs(picked.Curve.Direction.z), 1, places=6)
-        self.close(ok=False)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertEqual(revolution.ReferenceAxis, (copy, [edge]))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(App.getReferenceReport(revolution), [])
 
     def padOfAFreeSketch(self, sketch):
         """Pad with nothing selected, and in its pick dialog `sketch` (outside any body), Make
@@ -2985,3 +3194,36 @@ class TestPanelFixesGui(unittest.TestCase):
         )
         self.assertTrue(targets[1].hasObject(box))
         self.assertFalse(targets[0].hasObject(box))
+
+    def testMoveFeatureToSaysATracedOriginBinderKeepsItsPlane(self):
+        """ops#244 (PR 246 verification): a traced binder of its own body's XZ plane moved to
+        another body with Move Object To keeps binding that plane, where it is (PR 246 review L2),
+        which showed only in its Support. The Report view says so, naming the binder, the target,
+        the plane and the source body."""
+        source = models.body(self.doc)
+        source.Label = "Source"
+        [xz] = [f for f in source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        source.addObject(binder)
+        target = models.body(self.doc)
+        target.Label = "Target"
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.Selection.addSelection(self.doc.Name, binder.Name)
+        before = len(reportText() or "")
+        self.chooseInListDialog(0)
+        Gui.runCommand("PartDesign_MoveFeature")
+        self.assertTrue(waitFor(lambda: self.modals, 5.0), "no list dialog")
+        self.answering = False
+        pump(0.2)
+        self.assertTrue(target.hasObject(binder))
+        self.assertEqual(binder.Support[0][0], xz)
+        self.assertIn(
+            f"'{binder.Label}' moved to 'Target' still binds '{xz.Label}' of 'Source', where it was",
+            (reportText() or "")[before:],
+        )

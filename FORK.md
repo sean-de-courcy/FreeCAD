@@ -289,7 +289,8 @@ names it.
 | `fix/263-multiface-upto-revolve` | fix | ops#263 | - | `integration` `d9a3826388` | `7205d63e11` (fork PR 259), 2026-10-11 | never (fork fix) |
 | `fix/283-carbon-copy-followups` | fix | ops#283 | - | `integration` `0f634bd007` | `5a16b71918` (fork PR 260), 2026-10-11 | never (fork fix) |
 | `fix/279-collide-one-distinct-ids` | fix | ops#279 | - | `integration` `551ce8b8a7` | `b14000077f` (fork PR 263), 2026-10-11 | never (fork fix) |
-| `fix/237-externals-followups` | fix | ops#237 | - | `fix/283-carbon-copy-followups` `af6dd58324` (stacked on fork PR 260) | (fork PR 262) | never (fork fix) |
+| `fix/237-externals-followups` | fix | ops#237 | - | `fix/283-carbon-copy-followups` `af6dd58324` (stacked on fork PR 260) | `0ee3ee9a56` (fork PR 262), 2026-10-11 | never (fork fix) |
+| `fix/244-independent-primitive-copy` | fix | ops#244, ops#282 | - | `integration` `0f634bd007` | (fork PR 261) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
