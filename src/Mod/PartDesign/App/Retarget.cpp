@@ -2077,7 +2077,13 @@ void registerParkedReferenceProvider()
             if (item && item->extgeo
                 && std::find(item->ids.begin(), item->ids.end(), id) != item->ids.end()) {
                 std::string element = parkedElement(*item);
-                return element.empty() ? item->target : item->target + "." + element;
+                std::string text = element.empty() ? item->target : item->target + "." + element;
+                // the target gone (or its name taken by a new object), it can't be moved back
+                // to: say so (ops#166 item 4)
+                if (!parkedTarget(sketch.getDocument(), *item)) {
+                    text += item->targetId == -1 ? ", in another document" : ", deleted";
+                }
+                return text;
             }
         }
         return std::string();
