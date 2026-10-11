@@ -745,7 +745,6 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
     if (obj == nullptr) {
         return;
     }
-    auto* newTarget = freecad_cast<DocumentObject*>(data.source);
 
     // FreeCAD-CH (ops#235): the moved property itself, before anything uses the pointer;
     // getPropertyName() is safe with a property that no longer exists
@@ -754,6 +753,7 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
         FC_WARN("moved property " << obj->getFullName() << '.' << data.name << " not found");
         return;
     }
+    auto* newTarget = freecad_cast<DocumentObject*>(data.source);
 
     if (data.propertyTarget->getFullName() == "?") {
         // This is an entry we should ignore because it was

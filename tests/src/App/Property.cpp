@@ -1922,10 +1922,9 @@ TEST_F(MoveProperty, otherDocNameTakenAtSourceBothRecording)
         EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>()) << step;
     };
     {
-        const bool doc1First = true;  // (see above)
-        const std::string order = doc1First ? "doc1 first: " : "doc2 first: ";
+        const std::string order = "doc1 first: ";
         auto both = [&](bool undo) {
-            for (auto* doc : doc1First ? std::vector {doc1, doc2} : std::vector {doc2, doc1}) {
+            for (auto* doc : {doc1, doc2}) {
                 EXPECT_TRUE(undo ? doc->undo() : doc->redo()) << order << doc->getName();
             }
         };
@@ -1953,4 +1952,42 @@ TEST_F(MoveProperty, otherDocNameTakenAtSourceBothRecording)
     EXPECT_EQ(errors.errors, std::vector<std::string>());
     doc1->clearUndos();
     doc2->clearUndos();
+}
+
+// Tests whether a property added to an object created under a global transaction and moved to
+// another document goes back into that object when both documents are undone, source first,
+// and returns with redo (ops#238 round 2: undoing the target document moves it into the object
+// the source document already removed; refusing detached targets had left it on the target)
+TEST_F(MoveProperty, otherDocIntoCreatedObjectBothRecording)
+{
+    ErrorCollector errors;
+    int tid = App::GetApplication().openGlobalTransaction({.name = "Move Property"});
+    auto* source = doc1->addObject("App::VarSet", "Source");
+    auto* added = freecad_cast<App::PropertyInteger*>(
+        source->addDynamicProperty("App::PropertyInteger", "Extra", "Variables")
+    );
+    added->setValue(7);
+    ASSERT_NE(source->moveDynamicProperty(added, varSetDoc2), nullptr);
+    App::GetApplication().commitTransaction(tid);
+    EXPECT_TRUE(doc1->undo());
+    EXPECT_TRUE(doc2->undo());
+    EXPECT_EQ(doc1->getObject("Source"), nullptr);
+    EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>());
+    EXPECT_EQ(dynamicNames(source), std::vector<std::string>({"Extra"}));
+    EXPECT_TRUE(doc1->redo());
+    EXPECT_TRUE(doc2->redo());
+    ASSERT_EQ(doc1->getObject("Source"), source);
+    EXPECT_EQ(dynamicNames(source), std::vector<std::string>());
+    EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>({"Extra"}));
+    EXPECT_EQ(intValue(varSetDoc2, "Extra"), 7);
+    // (moving into the detached object, a handler rewriting references to it reports it as an
+    // invalid object, as before the refusal; the move is completed)
+    ASSERT_EQ(errors.errors.size(), 1U);
+    EXPECT_NE(errors.errors.front().find("invalid object"), std::string::npos)
+        << errors.errors.front();
+    doc1->clearUndos();
+    doc2->clearUndos();
+    for (const auto& name : dynamicNames(varSetDoc2)) {
+        varSetDoc2->removeDynamicProperty(name.c_str());
+    }
 }

@@ -1054,9 +1054,10 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
 
     // FreeCAD-CH (ops#238): the target's document is used throughout (an object never added to a
     // document has none), and a target not in its document (removed, or its creation undone) is
-    // held by a transaction that recording the move can free (the redo stack is cleared)
+    // held by a transaction that recording the move can free (the redo stack is cleared). Undo and
+    // redo may move into one: from another document, into an object its own document removed
     if (!targetObj->_pDoc || targetObj->testStatus(ObjectStatus::Destroy)
-        || !targetObj->isAttachedToDocument()) {
+        || (!targetObj->isAttachedToDocument() && !_pDoc->isPerformingTransaction())) {
         FC_THROWM(Base::RuntimeError,
                   "Target container of property " << propertyName
                                                   << " is not in a document or is being destroyed");
