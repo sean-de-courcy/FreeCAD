@@ -290,6 +290,41 @@ class GrooveUpToFaceAngle(SwitchToAngle, GrooveUpToFaceEdit):
     __doc__ = GrooveUpToFaceEdit.__doc__ + "\n\n" + SwitchToAngle.__doc__
 
 
+class GrooveUpToDatumEdit(GrooveUpToFaceEdit):
+    """The Groove of GrooveUpToFaceEdit up to the origin YZ plane instead of the pit's wall: an
+    unbounded up-to face, which BRepFeat trims to the box the feature adds beside the base
+    (ops#239, ops#242). References: the sketch, fillet and binder of GrooveUpToFaceEdit."""
+
+    abstract = True
+    area = "GrooveUpToDatum"
+    REFS = ("sketch_top", "fillet_outer_arc", "binder_outer")
+
+    def revolve(self, doc, body, target, profileGeometry):
+        profile = m.sketch(doc, "Profile", profileGeometry, body, placement=XZ)
+        revolved = body.newObject(self.FEATURE, "Revolved")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
+        revolved.Type = "UpToFace"
+        revolved.UpToFace = (m.originFeature(body, "YZ_Plane"), [""])
+        return revolved
+
+
+class GrooveUpToDatumChamfer(GrooveChamferProfile, GrooveUpToDatumEdit):
+    __doc__ = GrooveUpToDatumEdit.__doc__ + "\n\n" + GrooveChamferProfile.__doc__
+
+
+class GrooveUpToDatumHole(EarlierHole, GrooveUpToDatumEdit):
+    __doc__ = GrooveUpToDatumEdit.__doc__ + "\n\n" + EarlierHole.__doc__
+    holeZ = 10
+
+    def beforeRevolved(self, doc):
+        return doc.PitPocket
+
+
+class GrooveUpToDatumAngle(SwitchToAngle, GrooveUpToDatumEdit):
+    __doc__ = GrooveUpToDatumEdit.__doc__ + "\n\n" + SwitchToAngle.__doc__
+
+
 class RevolutionUpToFaceTwoSided(ChamferProfile, Scenario):
     """The plate of RevolvedUpToFaceEdit with its wall (`slab(90, 5)`), or a wall across it
     (x -5..0, y -30..30) when both sides go up to it. The profile x 10..20, z 5..10 is revolved

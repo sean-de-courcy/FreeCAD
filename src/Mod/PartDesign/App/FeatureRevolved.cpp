@@ -567,6 +567,19 @@ TopoShape Revolved::tryToRevolveToFace(
     Part::RevolMode revolMode
 ) const
 {
+    // A profile of several separate faces would build, but only its last face's elements would be
+    // named from the profile: BRepFeat's later per-face steps rebuild the earlier faces' edges, so
+    // references to those faces could move to other faces silently (ops#263). Until then such a
+    // profile fails loudly, as it did before ops#240 (in every naming version). The faces are
+    // counted: a one-face profile in a compound still builds.
+    if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Up to face, first or last can't revolve a profile of several separate faces yet. "
+            "Revolve each face in its own feature, or by an angle."
+        ));
+    }
+
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
         supportface = TopoDS_Face();
