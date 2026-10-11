@@ -3163,6 +3163,48 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [bump.Name])
         self.assertIn("No feature", self.statusText(field))
 
+    def testPatternOriginalsPickOfALoftAndAPadDownFromItsSectionOnOneFace(self):
+        """Fork PR 267 round 1 verification: as in ...PadAndALoftThroughItsSketchOnOneFace, with
+        the loft first and then the pad down from its section. The loft's top has [bump, loft] in
+        its history, its sides [bump, loft, sketch]: the pad, on what the loft uses as a section,
+        made them too. A pick of either says no feature made it, rather than adding the loft."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        models.pad(self.body, profile, 5)
+        self.doc.recompute()
+        section = models.sketch(self.doc, "Section", models.rectangle(2, 2, 5, 5), self.body, z=9)
+        loftProfile = models.sketch(
+            self.doc, "LoftProfile", models.rectangle(2, 2, 5, 5), self.body, z=5
+        )
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = loftProfile
+        loft.Sections = [section]
+        loft.Refine = False
+        self.doc.recompute()
+        down = models.pad(self.body, section, 4, "Down")
+        down.Reversed = True
+        down.Refine = False
+        self.doc.recompute()
+        self.assertTrue(loft.isValid() and down.isValid())
+        bump = self.bumpOn(7, 7, 5)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertAlmostEqual(bump.Shape.Volume, 500 + 36 + 1, places=6)
+        [top] = face(contains=(3.5, 3.5, 9)).one(bump.Shape)
+        [side] = face(contains=(3.5, 2, 7)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, top), [bump.Name, loft.Name])
+        self.assertEqual(self.historyNames(bump, side), [bump.Name, loft.Name, section.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, top)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.pick(bump, side)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+
     def padOnTopOfAPad(self, onAFace):
         """A pad 10 high on a sketch and a pad 5 high on its top face: through a SubShapeBinder of
         the face, or with the face as its profile. A bump on top."""
