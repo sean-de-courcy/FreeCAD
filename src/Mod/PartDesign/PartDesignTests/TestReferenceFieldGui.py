@@ -4051,6 +4051,82 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testGroovePickedAxis(self):
         self.pickedAxis(groove=True)
 
+    def testRevolutionAxisKeepsTheUsersReversed(self):
+        """ops#252: the line at x = -1 chosen as the axis sets Reversed as the axis suggests.
+        The user then sets Reversed the other way, chooses the V axis and the line again: Reversed
+        stays as the user set it (each axis choice overwrote it, silently)."""
+        feature = self.revolutionAsSuggested()
+        self.edit(feature, count=0)
+        combo = self.axisCombo()
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        suggested = feature.Reversed
+        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
+        box.click()
+        pump(0.2)
+        self.assertEqual(feature.Reversed, not suggested)
+        [vAxis] = [i for i in range(combo.count()) if combo.itemText(i) == "Vertical sketch axis"]
+        self.choose(combo, vAxis)
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertEqual(feature.Reversed, not suggested)
+        self.assertEqual(box.isChecked(), not suggested)
+
+    def revolutionAsSuggested(self):
+        """The revolution with Reversed as its V axis suggests, as PartDesign_Revolution sets it.
+        The Ring lies in the XZ plane (normal -y), the profile's centre at x = 2: about an axis
+        along +z its turn (axis x centre direction, +y) is against the normal, so a revolution
+        suggests Reversed. About the H axis (+x, centre direction +z: -y) it suggests not."""
+        feature = self.revolution()
+        feature.Reversed = True
+        self.doc.recompute()
+        return feature
+
+    def chooseAxis(self, text):
+        combo = self.axisCombo()
+        [index] = [i for i in range(combo.count()) if combo.itemText(i) == text]
+        self.choose(combo, index)
+
+    def testRevolutionReversedToggledTwiceFollowsTheAxis(self):
+        """PR 245 review M1: Reversed toggled twice is back to the suggestion, so the H axis
+        chosen then sets it as the H axis suggests (off); a one-way "set by the user" mark kept
+        it on."""
+        feature = self.revolutionAsSuggested()
+        self.edit(feature, count=0)
+        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
+        box.click()
+        pump(0.2)
+        box.click()
+        pump(0.2)
+        self.assertTrue(feature.Reversed)
+        self.chooseAxis("Horizontal sketch axis")
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["H_Axis"])
+        self.assertFalse(feature.Reversed)
+        self.assertFalse(box.isChecked())
+
+    def testRevolutionReversedAgainstTheSuggestionStaysAgainstIt(self):
+        """PR 245 review M1: the user turns Reversed off, against the V axis's suggestion. The H
+        axis suggests off, so the choice kept against it is on (keeping off would turn the way
+        the new axis suggests: the other side), and the status bar says so."""
+        feature = self.revolutionAsSuggested()
+        self.edit(feature, count=0)
+        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
+        box.click()
+        pump(0.2)
+        self.assertFalse(feature.Reversed)
+        self.chooseAxis("Horizontal sketch axis")
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["H_Axis"])
+        self.assertTrue(feature.Reversed)
+        self.assertTrue(box.isChecked())
+        # the main window's messages go to a label in the status bar, after the pick's recompute
+        pump(0.2)
+        statusBar = Gui.getMainWindow().statusBar()
+        texts = [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+        self.assertTrue(any("against the way the axis suggests" in t for t in texts), texts)
+
     def testRevolutionAxisGuessed(self):
         """T22, B19: the axis an edge of a sketch that is drawn again: the row shows it guessed,
         no "?" entry in the combo; Accept guess makes it exact."""

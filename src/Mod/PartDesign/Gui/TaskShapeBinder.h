@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include <fastsignals/connection.h>
+
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/DocumentObserver.h>
@@ -32,11 +34,13 @@
 #include "ViewProviderShapeBinder.h"
 
 class Ui_TaskShapeBinder;
+class QLabel;
 class QListWidget;
 
 namespace App
 {
 class Property;
+class PropertyLinkSubList;
 }
 
 namespace Gui
@@ -63,6 +67,10 @@ public:
 
     void accept();
 
+    /// What a binder on  support would leave out of it, translated and by labels, or empty
+    /// when it binds all of it (ops#266)
+    static QString droppedText(const App::PropertyLinkSubList* support);
+
 protected:
     enum selectionModes
     {
@@ -88,14 +96,18 @@ private:
     void deleteItem();
     void refuseRemovingTheLastElement() const;
     void exitSelectionMode();
+    void updateDroppedNote();
 
     bool supportShow = false;
 
 private:
     QWidget* proxy;
+    QLabel* droppedNote = nullptr;
     std::unique_ptr<Ui_TaskShapeBinder> ui;
     Gui::ButtonGroup* buttonGroup;
     Gui::WeakPtrT<ViewProviderShapeBinder> vp;
+    /// refreshes the note when Support changes elsewhere: undo, redo, Python (PR 245 review L4)
+    fastsignals::scoped_connection supportConnection;
 };
 
 

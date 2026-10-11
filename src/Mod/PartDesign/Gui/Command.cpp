@@ -68,6 +68,7 @@
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
 #include "TaskFeaturePick.h"
+#include "TaskShapeBinder.h"
 #include "Utils.h"
 #include "WorkflowManager.h"
 #include "ViewProvider.h"
@@ -376,14 +377,10 @@ void CmdPartDesignShapeBinder::activated(int iMsg)
         support.removeValue(pcActiveBody);
 
         // A selection the binder would bind only part of (two objects, or an object both whole
-        // and by its elements) makes no binder (ops#251)
-        const std::string dropped = PartDesign::ShapeBinder::droppedReferences(&support);
-        if (!dropped.empty()) {
-            QMessageBox::warning(
-                Gui::getMainWindow(),
-                QObject::tr("Shape Binder"),
-                QString::fromStdString(dropped)
-            );
+        // and by its elements) makes no binder (ops#251); by labels, translated (ops#266)
+        const QString dropped = PartDesignGui::TaskShapeBinder::droppedText(&support);
+        if (!dropped.isEmpty()) {
+            QMessageBox::warning(Gui::getMainWindow(), QObject::tr("Shape Binder"), dropped);
             return;
         }
 
@@ -2001,6 +1998,24 @@ bool dressupGetSelected(
     return true;
 }
 
+// The picks a dress-up doesn't take, named in the status bar: they are left out (ops#252).
+// `which` is marked QT_TRANSLATE_NOOP("QObject", ...): it is translated here, in that context
+static void reportDroppedPicks(const char* which, const QString& takes, const std::vector<std::string>& dropped)
+{
+    if (dropped.empty()) {
+        return;
+    }
+    QStringList names;
+    for (const auto& sub : dropped) {
+        names << (sub.empty() ? QObject::tr("the whole object") : QString::fromStdString(sub));
+    }
+    Gui::getMainWindow()->showMessage(
+        QObject::tr("%1 takes %2 only; left out of the selection: %3")
+            .arg(QObject::tr(which), takes, names.join(QStringLiteral(", "))),
+        10000
+    );
+}
+
 void finishDressupFeature(
     Gui::Command* cmd,
     const std::string& which,
@@ -2242,6 +2257,7 @@ void CmdPartDesignDraft::activated(int iMsg)
 
     Part::Feature* base;
     std::vector<std::string> SubNames;
+    std::vector<std::string> dropped;
     if (noSelection) {
         base = static_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
     }
@@ -2251,30 +2267,31 @@ void CmdPartDesignDraft::activated(int iMsg)
 
         const Part::TopoShape& TopShape = base->Shape.getShape();
 
-        // filter out the edges
-        size_t i = 0;
-        while (i < SubNames.size()) {
-            std::string aSubName = SubNames.at(i);
-
+        // filter out the edges, each one (the erase in the loop skipped the pick after it,
+        // ops#252)
+        std::erase_if(SubNames, [&](const std::string& aSubName) {
+            bool keep = false;
             if (aSubName.compare(0, 4, "Face") == 0) {
                 // Check for valid face types
                 TopoDS_Face face = TopoDS::Face(TopShape.getSubShape(aSubName.c_str()));
                 BRepAdaptor_Surface sf(face);
-                if ((sf.GetType() != GeomAbs_Plane) && (sf.GetType() != GeomAbs_Cylinder)
-                    && (sf.GetType() != GeomAbs_Cone)) {
-                    SubNames.erase(SubNames.begin() + i);
-                }
+                keep = sf.GetType() == GeomAbs_Plane || sf.GetType() == GeomAbs_Cylinder
+                    || sf.GetType() == GeomAbs_Cone;
             }
-            else {
-                // empty name or any other sub-element
-                SubNames.erase(SubNames.begin() + i);
+            if (!keep) {
+                dropped.push_back(aSubName);
             }
-
-            i++;
-        }
+            return !keep;
+        });
     }
 
     finishDressupFeature(this, "Draft", base, SubNames, useAllEdges);
+    // after the panel opens, which would replace the message
+    reportDroppedPicks(
+        QT_TRANSLATE_NOOP("QObject", "Draft"),
+        QObject::tr("planar, cylindrical and conical faces"),
+        dropped
+    );
 }
 
 bool CmdPartDesignDraft::isActive()
@@ -2313,6 +2330,7 @@ void CmdPartDesignThickness::activated(int iMsg)
 
     Part::Feature* base;
     std::vector<std::string> SubNames;
+    std::vector<std::string> dropped;
     if (noSelection) {
         base = static_cast<Part::Feature*>(PartDesignGui::getBody(true)->Tip.getValue());
     }
@@ -2320,20 +2338,18 @@ void CmdPartDesignThickness::activated(int iMsg)
         base = static_cast<Part::Feature*>(selected.getObject());
         SubNames = std::vector<std::string>(selected.getSubNames());
 
-        // filter out the edges
-        size_t i = 0;
-        while (i < SubNames.size()) {
-            std::string aSubName = SubNames.at(i);
-
-            if (aSubName.compare(0, 4, "Face") != 0) {
-                // empty name or any other sub-element
-                SubNames.erase(SubNames.begin() + i);
+        // filter out the edges, each one (ops#252, as Draft)
+        std::erase_if(SubNames, [&](const std::string& aSubName) {
+            const bool keep = aSubName.compare(0, 4, "Face") == 0;
+            if (!keep) {
+                dropped.push_back(aSubName);
             }
-            i++;
-        }
+            return !keep;
+        });
     }
 
     finishDressupFeature(this, "Thickness", base, SubNames, useAllEdges);
+    reportDroppedPicks(QT_TRANSLATE_NOOP("QObject", "Thickness"), QObject::tr("faces"), dropped);
 }
 
 bool CmdPartDesignThickness::isActive()

@@ -59,10 +59,32 @@ public:
         App::GeoFeature*& object,
         std::vector<std::string>& subobjects
     );
+    /// What getFilteredReferences would leave out of prop's references, by objects' labels
+    /// (ops#251, ops#266)
+    struct Dropped
+    {
+        enum class Kind
+        {
+            None,           ///< it keeps them all
+            NoPartFeature,  ///< no Part feature or datum: `names` are the objects linked
+            OtherObjects,   ///< `object` is kept; `names` are the other objects
+            Mixed,          ///< `object` whole and by its elements, `names`
+            DatumElements   ///< `object` is a datum, bound whole; `names` are its elements
+        };
+        Kind kind = Kind::None;
+        std::string object;
+        std::vector<std::string> names;
+        /// The English text; the GUI translates its own
+        std::string message() const;
+    };
+    static Dropped findDroppedReferences(const App::PropertyLinkSubList* prop);
     /// Why getFilteredReferences would leave some of prop's references out (more than one
     /// object, or an object both whole and by its elements), or empty when it keeps them all
     /// (ops#251)
-    static std::string droppedReferences(const App::PropertyLinkSubList* prop);
+    static std::string droppedReferences(const App::PropertyLinkSubList* prop)
+    {
+        return findDroppedReferences(prop).message();
+    }
     static Part::TopoShape buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs);
     /// Whether two placements are the same within round-off: the position within
     /// Precision::Confusion, the angle between the rotations within Precision::Angular (from the

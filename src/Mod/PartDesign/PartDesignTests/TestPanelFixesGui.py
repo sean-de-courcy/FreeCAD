@@ -869,6 +869,92 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(self.doc.UndoCount, self.undos)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
+    def visible(self, obj):
+        return obj.ViewObject.Visibility
+
+    def testPipeRecomputeFailureWithoutCopyKeepsTheEdit(self):
+        """ops#253 (PR 226 review L1 and test gap): the Rod (all in the body), its spine and
+        profile hidden, as after the pipe's creation; in the edit the profile is opened, so OK
+        fails on the pipe with no copy step: the message says the edit is still open (no word
+        of a copy), the panel and the edit's transaction stay open, and the spine and profile are
+        still shown (they went back to hidden under the open panel). Cancel restores the closed
+        profile and hides them again, with nothing to undo."""
+        pipe = self.rod()
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.spine.ViewObject.Visibility = False
+        self.profile.ViewObject.Visibility = False
+        undos = self.doc.UndoCount
+        self.edit(pipe)
+        self.assertTrue(self.visible(self.spine))
+        self.assertTrue(self.visible(self.profile))
+        self.openProfile()
+        self.answerModals()
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 1, 5.0), self.modals)
+        self.answering = False
+        pump(0.2)
+        self.assertEqual(len(self.modals), 1, self.modals)
+        self.assertIn("Wire is not closed.", self.modals[0])
+        self.assertIn("The edit is still open.", self.modals[0])
+        self.assertNotIn("copy", self.modals[0])
+        self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
+        self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
+        self.assertTrue(self.visible(self.spine), "the spine went back to hidden")
+        self.assertTrue(self.visible(self.profile), "the profile went back to hidden")
+        self.close(ok=False)
+        self.doc.recompute()
+        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertFalse(self.visible(self.spine))
+        self.assertFalse(self.visible(self.profile))
+        self.assertEqual(self.doc.UndoCount, undos)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+
+    def testPipeCopyStopShowsTheSpine(self):
+        """ops#253 (PR 226 review L1): as failAfterTheCopy with the Rod's spine and profile
+        hidden: after the stop the picked spine and the profile are shown."""
+        pipe = self.rod()
+        self.doc.recompute()
+        outer = self.outerSpine()
+        self.spine.ViewObject.Visibility = False
+        self.profile.ViewObject.Visibility = False
+        outer.ViewObject.Visibility = False
+        self.edit(pipe)
+        pipe.Spine = (outer, ["Edge1", "Edge2"])
+        self.openProfile()
+        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
+        self.assertIs(pipe.Spine[0], outer)
+        self.assertTrue(self.visible(outer), "the spine is hidden under the open panel")
+        self.assertTrue(self.visible(self.profile), "the profile is hidden under the open panel")
+
+    def testPipeRecomputeFailureRestoresTheSpinesGuess(self):
+        """ops#253 (PR 226 review test gap): the spine outside the body is found again by
+        geometry (testPipeCopyKeepsTheSpinesGuess), and the profile is opened in the edit. OK
+        copies the spine, then fails on the pipe: the restored spine is the original with its
+        guess. With the profile closed again the pipe recomputes with the same warning and
+        report entries."""
+        pipe = self.rod(spineInBody=False)
+        self.doc.recompute()
+        self.spine.deleteAllGeometry()
+        self.spine.addGeometry([line(0, 10, 0, 30), line(0, 0, 0, 10)], False)
+        self.doc.recompute()
+        self.assertIn("Warning", pipe.State)
+        subs = pipe.Spine[1]
+        report = [(r["property"], r["index"]) for r in App.getReferenceReport(pipe)]
+        self.assertEqual({prop for prop, _ in report}, {"Spine"})
+        self.edit(pipe)
+        self.openProfile()
+        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
+        self.assertIs(pipe.Spine[0], self.spine)
+        self.assertEqual(pipe.Spine[1], subs)
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
+        self.closeProfile()
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
+        self.assertIn("Warning", pipe.State)
+        self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], report)
+
     def testPipeCopyOfALostElementStops(self):
         """ops#243 L4: the spine is Edge2 of a sketch beside the body, valid when picked; the
         sketch then loses its second line and is recomputed. Neither the original nor its copy
@@ -2603,6 +2689,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """PartDesign_ShapeBinder on faces of both boxes makes no binder (it would bind Box's face
         only) and says why in a message box."""
         box, other, binder, names = self.binderModel()
+        other.Label = "Right box"
         self.doc.removeObject(binder.Name)
         self.doc.recompute()
         Gui.activateWorkbench("PartDesignWorkbench")
@@ -2620,7 +2707,189 @@ class TestPanelFixesGui(unittest.TestCase):
         binders = [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::ShapeBinder")]
         self.assertEqual(binders, [])
         self.assertEqual(len(self.modals), 1, self.modals)
-        self.assertIn(other.Name, self.modals[0])
+        # by its label, not its name (PR 232 review L3, ops#266)
+        self.assertIn("'Right box'", self.modals[0])
+        self.assertNotIn(other.Name, self.modals[0])
         # the refusal comes before the command's transaction (PR 232 review L5)
         self.assertIsNone(App.getActiveTransaction())
         self.assertFalse(self.doc.HasPendingTransaction)
+
+    def testShapeBinderNonPartPickSaysWhy(self):
+        """Object on an origin plane (not a Part feature) binds nothing, and the status bar says
+        why instead of ignoring the click (PR 232 review L1, ops#266)."""
+        box, _, binder, names = self.binderModel()
+        [plane] = [f for f in self.body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonBase").click()
+        Gui.Selection.addSelection(self.doc.Name, plane.Name)
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertTrue(
+            any(plane.Label in t and "isn't a Part feature" in t for t in self.statusTexts()),
+            self.statusTexts(),
+        )
+
+    def testShapeBinderPanelNamesAFailingSupport(self):
+        """A binder whose Support (set from Python) holds Box's top face and a face of the other
+        box fails. Its panel says so when it opens, by labels: it showed only Box's face, and an
+        edit then set Support to it without a word. After an edit (Add Box's side face) Support
+        is Box's two faces, the binder recomputes, and the note is gone (PR 232 review L2,
+        ops#266)."""
+        box, other, binder, names = self.binderModel()
+        other.Label = "Right box"
+        binder.Support = [(box, names["top"]), (other, self.faceAt(other, V(25, 5, 10)))]
+        self.doc.recompute()
+        self.assertFalse(binder.isValid())
+        self.edit(binder)
+        note = self.widget(QtWidgets.QLabel, "droppedNote")
+        self.assertTrue(note.isVisible())
+        self.assertIn("'Right box'", note.text())
+        self.assertIn("an edit here sets Support", note.text())
+        self.widget(QtWidgets.QToolButton, "buttonRefAdd").click()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, names["side"])
+        pump(0.2)
+        self.assertEqual(self.support(binder), [(box.Name, (names["top"], names["side"]))])
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertFalse(note.isVisible())
+
+    def testShapeBinderPanelNoteFollowsSupportSetElsewhere(self):
+        """PR 245 review L4: with the panel open on a good binder, Support set from Python to a
+        failing one (Box's top face and two faces of the other box) shows the note, naming the
+        other box once; set back to Box's top face, the note is gone. It changed only after an
+        edit in the panel."""
+        box, other, binder, names = self.binderModel()
+        other.Label = "Right box"
+        self.edit(binder)
+        note = self.widget(QtWidgets.QLabel, "droppedNote")
+        self.assertFalse(note.isVisible())
+        binder.Support = [
+            (box, names["top"]),
+            (other, (self.faceAt(other, V(25, 5, 10)), self.faceAt(other, V(25, 5, 0)))),
+        ]
+        pump(0.2)
+        self.assertTrue(note.isVisible())
+        self.assertEqual(note.text().count("'Right box'"), 1, note.text())
+        binder.Support = [(box, names["top"])]
+        pump(0.2)
+        self.assertFalse(note.isVisible())
+
+    def testShapeBinderPanelHasNoNoteOnAGoodSupport(self):
+        """The panel on a binder that binds its Support shows no note (ops#266)."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        self.assertFalse(self.widget(QtWidgets.QLabel, "droppedNote").isVisible())
+
+    # -- ops#252: Draft and Thickness leave out every pick they don't take -----------------------
+
+    def dressUpOnEdgesAndAFace(self, command, typeId):
+        """A 10 mm box in a body; Edge1, Edge2 and its top face picked, then `command`: the
+        feature's Base is the face alone, and the status bar names both edges. The erase in the
+        command's loop skipped the pick after each one it left out, so Edge2 stayed."""
+        self.body = models.body(self.doc)
+        box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        self.doc.recompute()
+        top = self.faceAt(box, V(5, 5, 10))
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        for sub in ("Edge1", "Edge2", top):
+            Gui.Selection.addSelection(self.doc.Name, box.Name, sub)
+        Gui.runCommand(command)
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        [feature] = [o for o in self.doc.Objects if o.TypeId == typeId]
+        self.assertIs(feature.Base[0], box)
+        self.assertEqual(list(feature.Base[1]), [top])
+        self.assertTrue(
+            any("Edge1" in t and "Edge2" in t for t in self.statusTexts()), self.statusTexts()
+        )
+
+    def testDraftLeavesOutEveryEdge(self):
+        self.dressUpOnEdgesAndAFace("PartDesign_Draft", "PartDesign::Draft")
+
+    def testThicknessLeavesOutEveryEdge(self):
+        self.dressUpOnEdgesAndAFace("PartDesign_Thickness", "PartDesign::Thickness")
+
+    # -- ops#252: Move Feature To / After take the row chosen, not the first with its text -------
+
+    def chooseInListDialog(self, row):
+        """Until self.answering is False: chooses `row` in the next list dialog (QInputDialog)
+        and accepts it; records its items in self.modals."""
+        self.answering = True
+
+        def poll():
+            if not self.answering:
+                return
+            widget = QtWidgets.QApplication.activeModalWidget()
+            if isinstance(widget, QtWidgets.QInputDialog):
+                combo = widget.findChild(QtWidgets.QComboBox)
+                self.modals.append([combo.itemText(i) for i in range(combo.count())])
+                combo.setCurrentIndex(row)
+                widget.accept()
+                return
+            QtCore.QTimer.singleShot(50, poll)
+
+        QtCore.QTimer.singleShot(50, poll)
+
+    def testMoveFeatureAfterAFeatureLabelledLikeTheBeginning(self):
+        """Three boxes in a body, the first labelled "Beginning of the body". Move Feature After
+        on the third, with the first chosen (row 1): the third goes after it. It went to the
+        beginning: the row was looked up by its text, which row 0 has too. The first's row shows
+        its name, so the two rows differ."""
+        self.body = models.body(self.doc)
+        boxes = []
+        for i in range(3):
+            box = self.body.newObject("PartDesign::AdditiveBox", f"Box{i}")
+            box.Placement.Base = V(20 * i, 0, 0)
+            boxes.append(box)
+        self.doc.recompute()
+        boxes[0].Label = "Beginning of the body"
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.addSelection(self.doc.Name, boxes[2].Name)
+        self.chooseInListDialog(1)
+        Gui.runCommand("PartDesign_MoveFeatureInTree")
+        self.assertTrue(waitFor(lambda: self.modals, 5.0), "no list dialog")
+        self.answering = False
+        pump(0.2)
+        # the feature's row has its name too (PR 245 review L2: two identical rows)
+        self.assertEqual(
+            self.modals[0][:2], ["Beginning of the body", "Beginning of the body (Box0)"]
+        )
+        self.assertEqual(
+            [o.Name for o in self.body.Group if o in boxes], ["Box0", "Box2", "Box1"]
+        )
+
+    def testMoveFeatureToShowsRepeatedLabelsWithTheirNames(self):
+        """Two other bodies labelled alike: Move Feature To lists them with their names, and the
+        second chosen gets the feature (the first with its text got it)."""
+        source = models.body(self.doc)
+        box = source.newObject("PartDesign::AdditiveBox", "Box")
+        targets = [models.body(self.doc) for _ in range(2)]
+        self.doc.recompute()
+        App.ParamGet("User parameter:BaseApp/Preferences/Document").SetBool("DuplicateLabels", True)
+        try:
+            for target in targets:
+                target.Label = "Target"
+        finally:
+            App.ParamGet("User parameter:BaseApp/Preferences/Document").RemBool("DuplicateLabels")
+        self.assertEqual([t.Label for t in targets], ["Target", "Target"])
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.Selection.addSelection(self.doc.Name, box.Name)
+        self.chooseInListDialog(1)
+        Gui.runCommand("PartDesign_MoveFeature")
+        self.assertTrue(waitFor(lambda: self.modals, 5.0), "no list dialog")
+        self.answering = False
+        pump(0.2)
+        self.assertEqual(
+            self.modals[0], [f"Target ({targets[0].Name})", f"Target ({targets[1].Name})"]
+        )
+        self.assertTrue(targets[1].hasObject(box))
+        self.assertFalse(targets[0].hasObject(box))

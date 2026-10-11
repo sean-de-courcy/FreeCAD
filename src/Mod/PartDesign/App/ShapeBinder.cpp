@@ -282,7 +282,7 @@ void ShapeBinder::getFilteredReferences(
     }
 }
 
-std::string ShapeBinder::droppedReferences(const App::PropertyLinkSubList* prop)
+ShapeBinder::Dropped ShapeBinder::findDroppedReferences(const App::PropertyLinkSubList* prop)
 {
     App::GeoFeature* obj = nullptr;
     std::vector<std::string> subs;
@@ -290,29 +290,35 @@ std::string ShapeBinder::droppedReferences(const App::PropertyLinkSubList* prop)
 
     const auto& objs = prop->getValues();
     const auto& allSubs = prop->getSubValues();
-    auto join = [](const std::vector<std::string>& names) {
-        std::string text;
-        for (const auto& name : names) {
-            text += (text.empty() ? "" : ", ") + name;
-        }
-        return text;
+    // labels, as the user knows the objects (PR 232 review L3, ops#266)
+    auto label = [](const App::DocumentObject* it) -> std::string {
+        return it->isAttachedToDocument() ? it->Label.getStrValue() : "?";
     };
 
     // The objects left out, and obj's entries left out: its elements when the whole object is
-    // kept, or the whole object when its elements are
+    // kept, or the whole object when its elements are. A datum is always bound whole, so any
+    // element of it is left out (PR 232 review L6: it was called "both as a whole and by its
+    // elements")
+    const bool datum = obj && !obj->isDerivedFrom<Part::Feature>();
     std::vector<std::string> others;
+    std::vector<const App::DocumentObject*> othersSeen;  // by object: two can share a label
     bool mixed = false;
     std::vector<std::string> elements = subs;
+    std::vector<std::string> datumElements;
     for (std::size_t i = 0; i < objs.size() && i < allSubs.size(); ++i) {
         const App::DocumentObject* it = objs[i];
         if (!it) {
             continue;
         }
         if (it != obj) {
-            const char* name = it->getNameInDocument();
-            std::string text = name ? name : "?";
-            if (std::ranges::find(others, text) == others.end()) {
-                others.push_back(text);
+            if (std::ranges::find(othersSeen, it) == othersSeen.end()) {
+                othersSeen.push_back(it);
+                others.push_back(label(it));
+            }
+        }
+        else if (datum) {
+            if (!allSubs[i].empty()) {
+                datumElements.push_back(allSubs[i]);
             }
         }
         else if (subs.empty() != allSubs[i].empty()) {
@@ -323,21 +329,52 @@ std::string ShapeBinder::droppedReferences(const App::PropertyLinkSubList* prop)
         }
     }
 
+    Dropped dropped;
     if (!obj) {
-        if (others.empty()) {
-            return {};
+        if (!others.empty()) {
+            dropped.kind = Dropped::Kind::NoPartFeature;
+            dropped.names = std::move(others);
         }
-        return "A shape binder binds a Part feature or a datum; Support links none, only "
-            + join(others);
+        return dropped;
     }
-    const std::string objName = obj->getNameInDocument() ? obj->getNameInDocument() : "?";
+    dropped.object = label(obj);
     if (!others.empty()) {
-        return "A shape binder binds one object: Support links " + objName + " and also "
-            + join(others) + ". Use a sub-shape binder to bind several objects.";
+        dropped.kind = Dropped::Kind::OtherObjects;
+        dropped.names = std::move(others);
     }
-    if (mixed) {
-        return "Support links " + objName + " both as a whole and by its elements ("
-            + join(elements) + "); link either the object or its elements.";
+    else if (!datumElements.empty()) {
+        dropped.kind = Dropped::Kind::DatumElements;
+        dropped.names = std::move(datumElements);
+    }
+    else if (mixed) {
+        dropped.kind = Dropped::Kind::Mixed;
+        dropped.names = std::move(elements);
+    }
+    return dropped;
+}
+
+std::string ShapeBinder::Dropped::message() const
+{
+    std::string list;
+    for (const auto& name : names) {
+        list += (list.empty() ? "'" : ", '") + name + "'";
+    }
+    const std::string quoted = "'" + object + "'";
+    switch (kind) {
+        case Kind::None:
+            return {};
+        case Kind::NoPartFeature:
+            return "A shape binder binds a Part feature or a datum; Support links none, only "
+                + list + ".";
+        case Kind::OtherObjects:
+            return "A shape binder binds one object: Support links " + quoted + " and also " + list
+                + ". Use a sub-shape binder to bind several objects.";
+        case Kind::Mixed:
+            return "Support links " + quoted + " both as a whole and by its elements (" + list
+                + "); link either the object or its elements.";
+        case Kind::DatumElements:
+            return "Support links the datum " + quoted + " by its elements (" + list
+                + "); a datum is bound as a whole: link it without elements.";
     }
     return {};
 }

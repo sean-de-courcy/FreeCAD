@@ -99,6 +99,37 @@ class TestShapeBinder(unittest.TestCase):
         """The same with the face first, which bound the face alone (PR 232 review L4)."""
         self._assertMixedSupportFails(["Face6", ""])
 
+    def testFailureNamesObjectsByLabel(self):
+        """The failure names the objects by their labels, as the user knows them (PR 232 review
+        L3, ops#266)."""
+        box, other, binder = self._twoBoxesAndBinder()
+        box.Label = "Left box"
+        other.Label = "Right box"
+        binder.Support = [(box, "Face6"), (other, "Face6")]
+        self.Doc.recompute()
+        self.assertFalse(binder.isValid())
+        status = binder.getStatusString()
+        self.assertIn("'Left box'", status)
+        self.assertIn("'Right box'", status)
+        self.assertNotIn("Box001", status)
+
+    def testSupportOnADatumsElementFails(self):
+        """An origin plane is bound as a whole, so (XY_Plane, "X") fails, and says so: it read
+        "both as a whole and by its elements" (PR 232 review L6, ops#266)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        [plane] = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        binder = body.newObject("PartDesign::ShapeBinder", "ShapeBinder")
+        binder.Support = [(plane, "X")]
+        self.Doc.recompute()
+        self.assertFalse(binder.isValid())
+        status = binder.getStatusString()
+        self.assertIn("datum '" + plane.Label + "' by its elements ('X')", status)
+        self.assertNotIn("both as a whole", status)
+        binder.Support = [(plane, "")]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(len(binder.Shape.Faces), 1)
+
     def testSupportOnOneObjectBindsItsFaces(self):
         """Two faces of one box still bind: the 10 x 10 faces at z = 0 and z = 10 (ops#251)."""
         box, _, binder = self._twoBoxesAndBinder()

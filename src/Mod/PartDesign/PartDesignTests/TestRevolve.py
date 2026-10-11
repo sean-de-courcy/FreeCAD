@@ -472,10 +472,18 @@ class TestRevolve(unittest.TestCase):
     # A quarter is 125000 pi / 4 = 31250 pi; the core's part outside it adds 3/4 * 2 pi = 1.5 pi.
     # A half is 62500 pi, and the core's other half adds pi.
 
+    @staticmethod
+    def exactBounds(shape):
+        """The shape's bounding box from its geometry (ops#259). Shape.BoundBox reads the
+        triangulation when the shape has one: in the GUI process the view providers mesh the
+        shapes, and the core's extreme at x = -1 then read -0.9966 (a mesh node inside the
+        circle)."""
+        return shape.optimalBoundingBox(False, False)
+
     def testRevolutionUpToFaceAroundSmallCore(self):
         revolution = self.revolveAroundSmallCore("One side")
         self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
-        bounds = revolution.Shape.BoundBox
+        bounds = self.exactBounds(revolution.Shape)
         self.assertAlmostEqual(bounds.XMin, -1, places=6)
         self.assertAlmostEqual(bounds.YMin, -1, places=6)
         self.assertAlmostEqual(bounds.YMax, 50, places=6)
@@ -483,25 +491,25 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToFaceAroundSmallCoreReversed(self):
         revolution = self.revolveAroundSmallCore("One side", reversed=True)
         self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 31251.5, places=3)
-        bounds = revolution.Shape.BoundBox
+        bounds = self.exactBounds(revolution.Shape)
         self.assertAlmostEqual(bounds.YMin, -50, places=6)
         self.assertAlmostEqual(bounds.YMax, 1, places=6)
 
     def testRevolutionUpToFaceTwoSidesAroundSmallCore(self):
         revolution = self.revolveAroundSmallCore("Two sides")
         self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
-        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+        self.assertAlmostEqual(self.exactBounds(revolution.Shape).XMin, -1, places=6)
 
     def testRevolutionUpToFaceSymmetricAroundSmallCore(self):
         revolution = self.revolveAroundSmallCore("Symmetric")
         self.assertAlmostEqual(revolution.Shape.Volume / math.pi, 62501, places=3)
-        self.assertAlmostEqual(revolution.Shape.BoundBox.XMin, -1, places=6)
+        self.assertAlmostEqual(self.exactBounds(revolution.Shape).XMin, -1, places=6)
 
     def testGrooveUpToFaceAroundSmallCore(self):
         """The same quarter as a Groove: it removes a quarter of the core, leaving 3/4 * 2 pi."""
         groove = self.revolveAroundSmallCore("One side", kind="Groove")
         self.assertAlmostEqual(groove.Shape.Volume / math.pi, 1.5, places=6)
-        bounds = groove.Shape.BoundBox
+        bounds = self.exactBounds(groove.Shape)
         self.assertAlmostEqual(bounds.XMin, -1, places=6)
         self.assertAlmostEqual(bounds.YMin, -1, places=6)
         self.assertAlmostEqual(bounds.YMax, 1, places=6)
