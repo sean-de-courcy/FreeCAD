@@ -662,6 +662,59 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         const double apart =
             (psObj->Placement.getValue().getPosition() - this->Placement.getValue().getPosition())
                 .Length();
+        // the size compared: the farthest point from the origin, or the sketches' distance. A
+        // projected point far below the planes can be seen off by more: refused, not guessed
+        // (PR 260 review L3)
+        auto toleranceFor = [&](std::initializer_list<Base::Vector3d> points) {
+            double scale = apart;
+            for (const auto& point : points) {
+                scale = std::max(scale, std::hypot(point.x, point.y));
+            }
+            return std::max(1e-6, 4 * tilt * scale);
+        };
+        // an arc's point half way along its parameters: its ends alone don't tell it from the
+        // rest of its circle drawn the other way round (PR 260 review L2)
+        auto middleOf = [](const Part::Geometry* geo) -> std::optional<Base::Vector3d> {
+            if (auto arc = dynamic_cast<const Part::GeomArcOfConic*>(geo)) {
+                return arc->pointAtParameter(
+                    (arc->getFirstParameter() + arc->getLastParameter()) / 2);
+            }
+            return std::nullopt;
+        };
+        // whether a whole conic (or a point) here is the image of the source's: centre and size
+        // (PR 260 review L1: a stale self-reference to a circle)
+        auto sameShape = [&](const Part::Geometry* here, const Part::Geometry* seen) {
+            if (!here || !seen || here->getTypeId() != seen->getTypeId()) {
+                return false;
+            }
+            if (auto point = dynamic_cast<const Part::GeomPoint*>(here)) {
+                const auto other = static_cast<const Part::GeomPoint*>(seen)->getPoint();
+                return offBy(point->getPoint(), other) <= toleranceFor({point->getPoint(), other});
+            }
+            auto conic = dynamic_cast<const Part::GeomConic*>(here);
+            if (!conic) {
+                return false;
+            }
+            const auto centre = conic->getCenter();
+            const auto other = static_cast<const Part::GeomConic*>(seen)->getCenter();
+            const double tolerance = toleranceFor({centre, other});
+            if (offBy(centre, other) > tolerance) {
+                return false;
+            }
+            if (auto circle = dynamic_cast<const Part::GeomCircle*>(here)) {
+                return std::abs(circle->getRadius()
+                                - static_cast<const Part::GeomCircle*>(seen)->getRadius())
+                    <= tolerance;
+            }
+            if (auto ellipse = dynamic_cast<const Part::GeomEllipse*>(here)) {
+                auto seenEllipse = static_cast<const Part::GeomEllipse*>(seen);
+                return std::abs(ellipse->getMajorRadius() - seenEllipse->getMajorRadius())
+                    <= tolerance
+                    && std::abs(ellipse->getMinorRadius() - seenEllipse->getMinorRadius())
+                    <= tolerance;
+            }
+            return true;
+        };
         for (const auto& [sourceId, id] : extMap) {
             const Part::Geometry* copied = nullptr;
             if (id < 0) {
@@ -675,29 +728,47 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             else {
                 continue;  // a vertex of this sketch (a point), or an edge it doesn't have
             }
-            const auto seen = endsOf(psObj->getGeometry(sourceId));
+            const Part::Geometry* source = psObj->getGeometry(sourceId);
+            const auto seen = endsOf(source);
             const auto here = endsOf(copied);
             if (!seen && !here) {
+                // a whole conic goes by its type. One of this sketch's own must still be what
+                // the source saw (a copied external was projected again, so it is)
+                if (id >= 0 && !sameShape(copied, source)) {
+                    externalEnds[sourceId] = Ends::Unknown;
+                }
                 continue;
             }
             Ends ends = Ends::Unknown;
             if (seen && here) {
-                // the clearly nearer pairing. A closed curve, or one shorter than the tolerance,
-                // has neither: refused, never guessed
+                // the clearly nearer pairing: one within half the tolerance, the other beyond it
+                // (PR 260 review nit 6). A closed curve, or one shorter than the tolerance, has
+                // neither: refused, never guessed. The whole edge is compared, even for a
+                // constraint on an end that didn't move (PR 260 review L5)
                 const double kept =
                     std::max(offBy(here->first, seen->first), offBy(here->second, seen->second));
                 const double swapped =
                     std::max(offBy(here->first, seen->second), offBy(here->second, seen->first));
-                double scale = apart;
-                for (const auto& point : {here->first, here->second, seen->first, seen->second}) {
-                    scale = std::max(scale, std::hypot(point.x, point.y));
-                }
-                const double tolerance = std::max(1e-6, 4 * tilt * scale);
-                if (kept <= tolerance && swapped > tolerance) {
+                const auto hereMiddle = middleOf(copied);
+                const auto seenMiddle = middleOf(source);
+                const double tolerance = toleranceFor(
+                    {here->first,
+                     here->second,
+                     seen->first,
+                     seen->second,
+                     hereMiddle.value_or(Base::Vector3d()),
+                     seenMiddle.value_or(Base::Vector3d())});
+                if (kept <= tolerance / 2 && swapped > tolerance) {
                     ends = Ends::Kept;
                 }
-                else if (swapped <= tolerance && kept > tolerance) {
+                else if (swapped <= tolerance / 2 && kept > tolerance) {
                     ends = Ends::Swapped;
+                }
+                // an arc: the same middle, so not the rest of its circle
+                if (ends != Ends::Unknown && (hereMiddle || seenMiddle)
+                    && !(hereMiddle && seenMiddle
+                         && offBy(*hereMiddle, *seenMiddle) <= tolerance / 2)) {
+                    ends = Ends::Unknown;
                 }
             }
             externalEnds[sourceId] = ends;
@@ -847,12 +918,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 if (copiedEnds(geoId) == Ends::Unknown) {
                     const auto self = selfRefs.find(geoId);
                     const std::string copy = self == selfRefs.end()
-                        ? "those of its copy here"
-                        : "those of '" + std::string(this->Label.getValue()) + "' "
+                        ? "its copy here"
+                        : "'" + std::string(this->Label.getValue()) + "' "
                             + self->second.first + ", which it copies";
                     refused = "it is on its ExternalEdge"
-                        + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", whose ends don't match "
-                        + copy + ", and the copy is flipped here";
+                        + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", which doesn't match "
+                        + copy + " (its ends, its middle or its size), and the copy is flipped "
+                          "here";
                     break;
                 }
                 if (mapped->second >= 0) {
