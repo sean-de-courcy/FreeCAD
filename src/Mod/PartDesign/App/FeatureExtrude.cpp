@@ -755,7 +755,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         // prism has. In V2 it is marked (CPY;1), so that a reference to that cap doesn't move to
         // the seam, or the other way, when an edit switches between the builds (PR 243 round 5).
         auto markSeam = [&](TopoShape shape) {
-            markStartCap(shape, startSketch, "1");
+            const bool untapered = std::fabs(taper1) < Precision::Angular();
+            markStartCap(shape, startSketch, "1", false, untapered);
             return shape;
         };
 

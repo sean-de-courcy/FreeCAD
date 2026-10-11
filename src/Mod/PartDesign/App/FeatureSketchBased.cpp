@@ -961,7 +961,8 @@ void ProfileBased::markStartCap(
     TopoShape& solid,
     const TopoShape& profile,
     const char* side,
-    bool farCapIsSide2
+    bool farCapIsSide2,
+    bool startCapNamed
 ) const
 {
     if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || solid.isNull()
@@ -1067,6 +1068,12 @@ void ProfileBased::markStartCap(
                 previous && *previous ? std::string(previous) + "\n" + text : text
             );
         }
+    }
+    // Unmarked, side 1's start cap can't be told from the seam of two sides built apart, and a
+    // reference may move between them (PR 264 review L1). A tapered side's start cap is named by
+    // the draft, so only an untapered side's is expected to have the profile's names.
+    if (startCapNamed && capNames.empty()) {
+        FC_WARN(getFullName() << ": no start cap element has the profile's names");
     }
     if (capNames.empty() && partnerNames.empty()) {
         return;

@@ -216,12 +216,15 @@ protected:
      *   2's section (CPY;2), as side 2's far cap has it when the sides are built apart: else its
      *   names are side 1's far cap's.
      * The other names stay as they are, each element's in their order.
+     * `startCapNamed`: the start cap must have the profile's names (an untapered side 1); a
+     * warning in the report view if it has none, since the cap then isn't marked.
      */
     void markStartCap(
         TopoShape& solid,
         const TopoShape& profile,
         const char* side,
-        bool farCapIsSide2 = false
+        bool farCapIsSide2 = false,
+        bool startCapNamed = false
     ) const;
 
     /// Create a shape with shapes and faces from a given LinkSubList

@@ -476,15 +476,31 @@ class TestPad(unittest.TestCase):
         """PR 243 follow-up F2: side 1 by length, side 2 up to a face is one prism from side 1's
         end, whose far cap (side 2's end) is marked as side 2's (CPY;2). The Pad warns only when
         the start cap has the profile's names and no far cap name was marked; a far cap up to a
-        face wider than the profile, or to a plane off to the side, gets no warning."""
+        face wider than the profile, to a plane off to the side, or to a face tilted by 10 degrees
+        about the X axis through (0, 0, -10), gets no warning (PR 264 review L2: the tilted far
+        cap's names come from the up-to face only, without the PRJ name)."""
         below = self.Doc.addObject("Part::Box", "Below")
         below.Placement.Base = FreeCAD.Vector(-5, -5, -15)
         wall = self.Doc.addObject("Part::Box", "Wall")
         wall.Placement.Base = FreeCAD.Vector(30, 0, -15)
         below.Length, below.Width, below.Height = 10, 10, 5
         wall.Length, wall.Width, wall.Height = 5, 5, 5
+        tilt = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 10)
+        tilted = self.Doc.addObject("Part::Feature", "Tilted")
+        tiltedBox = Part.makeBox(10, 10, 5, FreeCAD.Vector(-5, -5, -15))
+        tiltedBox.rotate(FreeCAD.Vector(0, 0, -10), FreeCAD.Vector(1, 0, 0), 10)
+        tilted.Shape = tiltedBox
         self.Doc.recompute()
-        cases = (("wider face", (below, "Face6")), ("plane off to the side", (wall, "Face6")))
+        [tiltedTop] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(tilted.Shape.Faces)
+            if face.normalAt(0, 0).isEqual(tilt.multVec(FreeCAD.Vector(0, 0, 1)), 1e-9)
+        ]
+        cases = (
+            ("wider face", (below, "Face6")),
+            ("plane off to the side", (wall, "Face6")),
+            ("tilted face", (tilted, tiltedTop)),
+        )
         for name, upTo in cases:
             with self.subTest(name):
                 pad = self._twoSidedUpToPad(("Length", 5.0), ("UpToFace", upTo))
@@ -492,11 +508,14 @@ class TestPad(unittest.TestCase):
                 self.assertAlmostEqual(pad.Shape.Volume, 25 * 15, places=4)
                 self.assertNotIn("Warning", pad.State)
                 reverse = pad.Shape.ElementReverseMap
-                [farCap] = [
+                # Its centre is at z = -10 in every case, the tilted one included
+                farCaps = [
                     "Face%d" % (i + 1)
                     for i, face in enumerate(pad.Shape.Faces)
-                    if abs(face.BoundBox.ZMax + 10) < 1e-7 and abs(face.BoundBox.ZMin + 10) < 1e-7
+                    if abs(face.CenterOfMass.z + 10) < 1e-7 and abs(face.normalAt(0, 0).z) > 0.9
                 ]
+                self.assertEqual(len(farCaps), 1, farCaps)
+                [farCap] = farCaps
                 names = reverse.get(farCap)
                 names = [names] if isinstance(names, str) else list(names or [])
                 marked = f";{pad.ID};CPY;2;"

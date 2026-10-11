@@ -464,7 +464,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // markStartCap's partner test requires this feature's ID. Reusing it for a revolution would
     // reject every partner; check where the tag comes from first (PR 243 follow-up F3).
     auto markSeam = [&](TopoShape side) {
-        markStartCap(side, sketchshape, "1");
+        markStartCap(side, sketchshape, "1", false, true);
         return side;
     };
 
