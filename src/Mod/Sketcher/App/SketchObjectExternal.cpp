@@ -620,7 +620,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     // runs can depend on the plane's normal (a circle seen edge-on becomes a line along the
     // normal ^ its axis, which runs the other way in a mirrored copy). So whether its ends are
     // the images of the source's or swapped is read from the two; when neither, its constraints
-    // aren't copied. One without ends (a point, a whole conic) goes by its type
+    // aren't copied. One without ends (a point, a whole conic) goes by its type. So does a source
+    // external that names an edge of this sketch, whose copy is that edge itself (PR 253
+    // verification finding 4: a stale one, or an arc in a mirrored copy)
     enum class Ends
     {
         Kept,
@@ -640,27 +642,61 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             }
             return std::nullopt;
         };
-        // whether `here` is where this sketch sees the source's `seen`
-        auto sameAs = [xinv, yinv](const Base::Vector3d& here, const Base::Vector3d& seen) {
+        // how far `here` is from where this sketch sees the source's `seen`
+        auto offBy = [xinv, yinv](const Base::Vector3d& here, const Base::Vector3d& seen) {
             const double x = xinv ? -seen.x : seen.x;
             const double y = yinv ? -seen.y : seen.y;
-            return std::hypot(here.x - x, here.y - y) < 1e-6;
+            return std::hypot(here.x - x, here.y - y);
         };
+        // FreeCAD-CH (ops#283 F3): isCarbonCopyAllowed lets the two frames be off by a small
+        // angle (up to about 4.5e-4 rad), and then a point a distance r away is seen off by
+        // about that angle times r. So the tolerance scales with the frames' actual angle and
+        // the size of what is compared; exactly parallel frames keep 1e-6
+        const Base::Rotation& srot = psObj->Placement.getValue().getRotation();
+        const Base::Rotation& lrot = this->Placement.getValue().getRotation();
+        double tilt = 0;  // the sine of the largest angle between an axis and its counterpart
+        for (const auto& axis :
+             {Base::Vector3d::UnitX, Base::Vector3d::UnitY, Base::Vector3d::UnitZ}) {
+            tilt = std::max(tilt, (srot.multVec(axis) % lrot.multVec(axis)).Length());
+        }
+        const double apart =
+            (psObj->Placement.getValue().getPosition() - this->Placement.getValue().getPosition())
+                .Length();
         for (const auto& [sourceId, id] : extMap) {
-            if (id >= 0) {
-                continue;  // a self-reference: this sketch's own geometry
+            const Part::Geometry* copied = nullptr;
+            if (id < 0) {
+                copied = this->getGeometry(id);
+            }
+            else if (selfRefs.at(sourceId).second == PointPos::none
+                     && id < static_cast<int>(vals.size())) {
+                // a source external that names this sketch's edge: its copy is that edge
+                copied = vals[id];
+            }
+            else {
+                continue;  // a vertex of this sketch (a point), or an edge it doesn't have
             }
             const auto seen = endsOf(psObj->getGeometry(sourceId));
-            const auto here = endsOf(this->getGeometry(id));
+            const auto here = endsOf(copied);
             if (!seen && !here) {
                 continue;
             }
             Ends ends = Ends::Unknown;
             if (seen && here) {
-                if (sameAs(here->first, seen->first) && sameAs(here->second, seen->second)) {
+                // the clearly nearer pairing. A closed curve, or one shorter than the tolerance,
+                // has neither: refused, never guessed
+                const double kept =
+                    std::max(offBy(here->first, seen->first), offBy(here->second, seen->second));
+                const double swapped =
+                    std::max(offBy(here->first, seen->second), offBy(here->second, seen->first));
+                double scale = apart;
+                for (const auto& point : {here->first, here->second, seen->first, seen->second}) {
+                    scale = std::max(scale, std::hypot(point.x, point.y));
+                }
+                const double tolerance = std::max(1e-6, 4 * tilt * scale);
+                if (kept <= tolerance && swapped > tolerance) {
                     ends = Ends::Kept;
                 }
-                else if (sameAs(here->first, seen->second) && sameAs(here->second, seen->first)) {
+                else if (swapped <= tolerance && kept > tolerance) {
                     ends = Ends::Swapped;
                 }
             }
@@ -808,6 +844,17 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                     newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
                     continue;
                 }
+                if (copiedEnds(geoId) == Ends::Unknown) {
+                    const auto self = selfRefs.find(geoId);
+                    const std::string copy = self == selfRefs.end()
+                        ? "those of its copy here"
+                        : "those of '" + std::string(this->Label.getValue()) + "' "
+                            + self->second.first + ", which it copies";
+                    refused = "it is on its ExternalEdge"
+                        + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", whose ends don't match "
+                        + copy + ", and the copy is flipped here";
+                    break;
+                }
                 if (mapped->second >= 0) {
                     const auto& [element, posId] = selfRefs.at(geoId);
                     const std::string external = "ExternalEdge"
@@ -828,18 +875,10 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                               "and the copy isn't flipped back here";
                         break;
                     }
-                    if ((xinv || yinv) && posId == PointPos::none
-                        && !vals[mapped->second]->is<Part::GeomLineSegment>()) {
-                        // the copy is flipped back. An edge that is a line maps with its points
-                        // (projected or mirrored, a line keeps its start), and the values are
-                        // flip-corrected (ops#281); a vertex is a point. Which end of another
-                        // curve, and which way it runs, the source's projection of it names
-                        // isn't checked: a mirrored arc's ends swap (PR 253 review M1)
-                        refused = "it is on " + external
-                            + ", which isn't a line, and the copy is flipped here, so its "
-                              "ends and the angles at it aren't known to carry over";
-                        break;
-                    }
+                    // flipped back, an edge's ends and the way it runs were read from the
+                    // source's external of it (externalEnds), so the ends swap and the angles are
+                    // corrected as for a copied external (PR 253 review M1, verification finding
+                    // 4); a vertex is a point
                     if (posId != PointPos::none) {
                         // a vertex: the source's external is a point, named by its start; here
                         // it is that point of the edge
@@ -858,13 +897,6 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                         external.c_str(),
                         own.c_str()
                     );
-                }
-                if (copiedEnds(geoId) == Ends::Unknown) {
-                    refused = "it is on its ExternalEdge"
-                        + std::to_string(GeoEnum::RefExt + 1 - geoId)
-                        + ", whose ends don't match those of its copy here, and the copy is "
-                          "flipped here";
-                    break;
                 }
                 newConstr->setGeoId(i, mapped->second);
             }
