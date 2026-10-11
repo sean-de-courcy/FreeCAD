@@ -718,7 +718,7 @@ TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub, bool
 
 // The properties that tell one element from another: its type, its length, area or point, and
 // its centre of mass, in the frames described below. The Pipe panel's copy step uses it too
-// (ops#234).
+// (ops#234, ops#243).
 bool TaskFeaturePick::sameElement(
     App::DocumentObject* original,
     App::DocumentObject* copy,
@@ -737,12 +737,10 @@ bool TaskFeaturePick::sameElement(
     const bool placed = binder && !binder->Support.getValues().empty();
     TopoDS_Shape before = elementShape(original, sub, placed);
     TopoDS_Shape after = elementShape(copy, sub, placed);
-    if (before.IsNull()) {
-        // the reference is already broken on the original; on a copy that has the element it
-        // would name another one, silently
-        return after.IsNull();
-    }
-    if (after.IsNull() || after.ShapeType() != before.ShapeType()) {
+    // The reference is already broken on the original: on a copy that has the element it would
+    // name another one, silently; and where neither has it (?Edge3 after a recompute of the
+    // original lost it), the copy would carry the broken reference on (ops#243 L4)
+    if (before.IsNull() || after.IsNull() || after.ShapeType() != before.ShapeType()) {
         return false;
     }
     auto measure = [](const TopoDS_Shape& shape, double& size, gp_Pnt& center) {
