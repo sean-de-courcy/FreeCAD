@@ -1053,6 +1053,16 @@ class BodyReorderBase:
         return facade.Id, "P" if facade.testFlag("Projection") else "I"
 
     def testBothProjectionDeletedWhileParked(self):
+        self.checkBothProjectionDeletedWhileParked()
+
+    def testBothProjectionDeletedWhileParkedFromALineWithoutKinds(self):
+        """ops#269: the same from a parked line written before PR 241's round 1, without the
+        kind letters: the placeholders' kinds aren't known, so the entry's geometries lose
+        theirs and the rebuild gives the Ids by position, which is right here (ExternalGeo
+        holds the entry in build order): the constraint stays on the section."""
+        self.checkBothProjectionDeletedWhileParked(withoutKinds=True)
+
+    def checkBothProjectionDeletedWhileParked(self, withoutKinds=False):
         """PR 241 review H1 (ops#264): Ramp, a 10 x 10 pad on the block's top at (5, 5) to
         (15, 15), 5 high along (0, 1, 1): its front face slants. The sketch at z = 12 links that
         face as both projection and intersection: four projected lines (y = 5, y = 10, and x = 5,
@@ -1098,6 +1108,14 @@ class BodyReorderBase:
         self.assertEqual(sketch.ExternalGeometry, [])
         [line] = self.parked(sketch)
         self.assertIn(f",{sectionId}i", line + ",")  # the kinds are in the parked line
+        if withoutKinds:
+            ids = [str(id) for id in projectionIds + [sectionId]]
+            old = line
+            line, count = re.subn(
+                r"(?<=[|,])(" + "|".join(ids) + r")[pi](?=[,|]|$)", r"\1", line
+            )
+            self.assertEqual(count, 5, old)
+            sketch.ParkedReferences = [line]
         sketch.delExternals([i - 2 for i in range(2, 7) if i != section])
         self.assertEqual(len(sketch.ExternalGeo), 3)
         self.assertEqual(len(sketch.Constraints), 1)
