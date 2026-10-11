@@ -4182,6 +4182,66 @@ class TestReferenceFieldGui(unittest.TestCase):
         texts = [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
         self.assertTrue(any("against the way the axis suggests" in t for t in texts), texts)
 
+    def quarterRevolutionBesideABlock(self, reversed):
+        """The Ring model with a block first (x -5..5, y 0..5, z 0..2, 100) and a 90 deg
+        revolution about the V axis, Reversed as given. Its turn about an axis along +z sweeps the
+        profile (x 1..3, z 0..2, on the block's y = 0 face) into +y, inside the block (Reversed
+        off), or into -y, free (on): the volume tells the sides apart. Both the V axis and the line at x = -1 suggest
+        Reversed (revolutionAsSuggested)."""
+        self.ring()
+        block = self.body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length, block.Width, block.Height = 10, 5, 2
+        block.Placement.Base = App.Vector(-5, 0, 0)
+        feature = self.body.newObject("PartDesign::Revolution", "Revolution")
+        feature.Profile = self.ringSketch
+        feature.ReferenceAxis = (self.ringSketch, ["V_Axis"])
+        feature.Angle = 90
+        feature.Reversed = reversed
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    # the quarter turn about the line at x = -1 (radii 2..4, height 2) is 6 pi
+    QUARTER_FREE = 100 + 6 * math.pi  # Reversed on: into -y
+    QUARTER_INSIDE = 100.0  # Reversed off: into +y, inside the block
+
+    def testRevolutionAgainstTheSuggestionKeepsItsSideOnANewAxis(self):
+        """ops#276: an existing quarter revolution with Reversed off, against the V axis's
+        suggestion, opened: the line at x = -1 picked keeps Reversed off (against the line's
+        suggestion too), the status bar says so, and the profile sweeps the same side."""
+        feature = self.quarterRevolutionBesideABlock(reversed=False)
+        self.edit(feature, count=0)
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertFalse(feature.Reversed)
+        # the message is read before assertVolume's recompute, which clears the status bar
+        pump(0.2)
+        statusBar = Gui.getMainWindow().statusBar()
+        texts = [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+        self.assertTrue(any("as you set it" in t for t in texts), texts)
+        self.assertVolume(feature, self.QUARTER_INSIDE)
+
+    def testRevolutionWithoutASuggestionTakesTheAxissWay(self):
+        """ops#276: a revolution without an axis (no suggestion can be computed) with Reversed
+        on, opened: the line at x = -1 picked turns it the way the line suggests (on) without an
+        "as you set it". With Reversed's own value taken as the user's choice against a
+        suggestion of off, the pick turned it off and said "as you set it"."""
+        feature = self.quarterRevolutionBesideABlock(reversed=True)
+        feature.ReferenceAxis = None
+        self.doc.recompute()
+        self.edit(feature, count=0)
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertTrue(feature.Reversed)
+        # the message is read before assertVolume's recompute, which clears the status bar
+        pump(0.2)
+        statusBar = Gui.getMainWindow().statusBar()
+        texts = [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+        self.assertFalse(any("as you set it" in t for t in texts), texts)
+        self.assertVolume(feature, self.QUARTER_FREE)
+
     def testRevolutionAxisGuessed(self):
         """T22, B19: the axis an edge of a sketch that is drawn again: the row shows it guessed,
         no "?" entry in the combo; Accept guess makes it exact."""

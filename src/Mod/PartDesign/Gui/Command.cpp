@@ -2461,7 +2461,7 @@ void prepareTransformed(
     // made a "Whole shape" transform without a word)
     QStringList dropped;
     for (const auto& sel : cmd->getSelection().getSelectionEx()) {
-        App::DocumentObject* obj = sel.getObject();
+        const App::DocumentObject* obj = sel.getObject();
         if (obj && !obj->isDerivedFrom<PartDesign::Feature>()) {
             dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
         }

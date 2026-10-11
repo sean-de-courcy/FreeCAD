@@ -914,6 +914,10 @@ bool Revolved::suggestReversed()
 
 std::optional<bool> Revolved::suggestedReversed()
 {
+    // without an axis, getAxis leaves a null direction, and the angle reads 0: no suggestion
+    if (!ReferenceAxis.getValue()) {
+        return std::nullopt;
+    }
     try {
         updateAxis();
     }
@@ -923,7 +927,9 @@ std::optional<bool> Revolved::suggestedReversed()
 
     bool computed = false;
     double angle = ProfileBased::getReversedAngle(Base.getValue(), Axis.getValue(), &computed);
-    if (!computed) {
+    // an angle of 0 (the profile's centre on the axis, or the axis along its normal) suggests
+    // neither way
+    if (!computed || std::fabs(angle) < Precision::Confusion()) {
         return std::nullopt;
     }
     return suggestReversedAngle(angle);
