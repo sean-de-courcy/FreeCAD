@@ -390,17 +390,19 @@ class ChamferBesideFilletEnd(SplitModel):
 
 
 class ChamferBesideFilletEndRedrawn(ChamferBesideFilletEnd):
-    """ChamferBesideFilletEnd, with the back line deleted and drawn again at y = 11.5 (a new
-    geometry ID), as in seed 57: the fillet's edge is guessed in place of the old one, and the
-    chamfer still keeps the rim edge alone."""
+    """ChamferBesideFilletEnd, with the back line drawn again at y = 11.5 and the old one deleted
+    (a new geometry ID), as in seed 57: the fillet's edge is guessed in place of the old one, and
+    the chamfer still keeps the rim edge alone. Without the solver (V1, V2, V2multi) the fillet
+    breaks (listed); in V2 and V2multi the chamfer's references then pass against the invalid
+    fillet's last shape, so only V2s and V2si judge the chamfer here."""
 
     def edit(self, doc):
         self.back = self.y1 - 0.5
         x0, y0, x1, back = self.x0, self.y0, self.x1, self.back
         profile = doc.PocketProfile
         m.setLines(profile, {1: ((x1, y0), (x1, back)), 3: ((x0, back), (x0, y0))})
-        profile.delGeometry(2)
         profile.addGeometry(m.polyline([(x1, back), (x0, back)]), False)
+        profile.delGeometry(2)
 
 
 class DraftFaceNotch(SplitModel):

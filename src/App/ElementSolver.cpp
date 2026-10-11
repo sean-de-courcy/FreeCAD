@@ -15,10 +15,13 @@
 #include <tuple>
 #include <utility>
 
+#include <Base/Console.h>
 #include <Base/Exception.h>
 
 #include "ElementNamingUtils.h"
 #include "MappedName.h"
+
+FC_LOG_LEVEL_INIT("PropertyLinks", true, true)
 
 namespace Data
 {
@@ -2559,7 +2562,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             const auto& hitFaces = facesOf(hit);
             // A piece is the old element's maker's own edge (ops#284): another feature's edge on
             // the old edge's line, such as a fillet's end on the face the edge bounds, is no piece
-            // of it, though that face puts the maker in its lineage.
+            // of it, though that face puts the maker in its lineage. Such an edge within the old
+            // extent is traced, and named in a taken continuation's evidence: a piece another
+            // feature failed to report as modified would show there.
             const std::string maker = input.sameMaker ? NameAncestry::makerTag(entry.exactName)
                                                       : std::string();
             auto otherMaker = [&](const SolveInput::Element& element) {
@@ -2574,6 +2579,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             };
             std::vector<std::pair<int, std::pair<double, double>>> continued;  // position, range
             std::vector<int> pastEnd;
+            std::vector<int> skipped;  // another maker's, within the old extent, on a shared face
             std::string sharedFace;
             for (std::size_t k = 0; k < pool.elements.size(); ++k) {
                 const auto& index = pool.elements[k].index;
@@ -2588,14 +2594,22 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 if (!within && extent->overlap(*range) <= eps) {
                     continue;  // beyond the old ends, at most touching one
                 }
-                if (otherMaker(pool.elements[k])) {
-                    continue;
-                }
                 const auto& faces = facesOf(index);
                 auto shared = std::find_if(faces.begin(), faces.end(), [&](const auto& face) {
                     return hitFaces.count(face) > 0;
                 });
                 if (shared == faces.end()) {
+                    continue;
+                }
+                if (otherMaker(pool.elements[k])) {
+                    if (within) {
+                        skipped.push_back(static_cast<int>(k));
+                        FC_LOG(
+                            "continuation of " << hit << " (" << entry.exactName << "): " << index
+                                               << " lies within the old edge but "
+                                               << "has another maker, not taken"
+                        );
+                    }
                     continue;
                 }
                 if (within) {
@@ -2664,6 +2678,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     + (extent->circle ? " (arc" : " (line") + (continued.size() > 1 ? "s" : "")
                     + " within the old edge, shares "
                     + sharedFace + ")";
+                for (int k : skipped) {
+                    outcome.evidence += ", skipped " + pool.elements[k].index + " (another maker)";
+                }
                 for (const auto& [k, range] : continued) {
                     taken.push_back(k);
                 }
