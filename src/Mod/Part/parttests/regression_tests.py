@@ -329,10 +329,11 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(rounded.Edges, edges)
 
     @staticmethod
-    def _cornerCut(shape, x, y):
+    def _cornerCut(shape, x, y, centre=(5, 5)):
         """Whether the solid lacks its corner at (x, y), half way up: a point 0.1 mm inside
-        both faces of the corner lies outside a fillet or chamfer of radius 1."""
-        inward = Vector(0.1 if x < 5 else -0.1, 0.1 if y < 5 else -0.1, 0)
+        both faces of the corner (towards the cube's centre) lies outside a fillet or chamfer of
+        radius 1."""
+        inward = Vector(0.1 if x < centre[0] else -0.1, 0.1 if y < centre[1] else -0.1, 0)
         return not shape.isInside(Vector(x, y, 5) + inward, 1e-7, True)
 
     @staticmethod
@@ -395,6 +396,18 @@ class RegressionTests(unittest.TestCase):
                 self.Doc.recompute()
                 self.assertFalse(rounded.isValid())
                 self.assertIn("Missing edge", rounded.getStatusString())
+
+                # The same index written again is a new pick on C (PR 236 review, H1): the
+                # feature rounds C's edge with that index.
+                stored = rounded.Edges[0][0]
+                rounded.Edges = rounded.Edges
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(stored)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                corner = cubes["C"].Shape.Edges[stored - 1].Vertexes[0].Point
+                cCorners = [(20, 0), (30, 0), (30, 10), (20, 10)]
+                cut = [c for c in cCorners if self._cornerCut(rounded.Shape, *c, centre=(25, 5))]
+                self.assertEqual(cut, [(round(corner.x), round(corner.y))])
 
     def test_fillet_chamfer_keep_guess(self):
         """ops#258: a Part::Fillet or Part::Chamfer edge that the reference solver guessed stays
@@ -465,6 +478,23 @@ class RegressionTests(unittest.TestCase):
                 rounded.Edges = [(moved, 0.5, 0.5)]
                 self.Doc.recompute()
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(len(guessed(rounded)), 1)
+
+                # Another edge added, before and after it (PR 236 review, M2 and L6): the guess
+                # stays with its edge.
+                other = self._verticalEdgeAt(block.Shape, 0, 0)
+                for edges in ([(moved, 0.5, 0.5), (other, 0.5, 0.5)],
+                              [(other, 0.5, 0.5), (moved, 0.5, 0.5)]):
+                    rounded.Edges = edges
+                    self.Doc.recompute()
+                    self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                    self.assertEqual(len(guessed(rounded)), 1, edges)
+                    [entry] = [
+                        e for e in FreeCAD.getReferenceReport(rounded) if e.get("status") == "guessed"
+                    ]
+                    self.assertEqual(entry["index"], [e[0] for e in edges].index(moved))
+                rounded.Edges = [(moved, 0.5, 0.5)]
+                self.Doc.recompute()
                 self.assertEqual(len(guessed(rounded)), 1)
 
                 # The redraw undone, the original edge returns: the guess snaps back to it.

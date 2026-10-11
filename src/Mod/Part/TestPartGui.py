@@ -297,6 +297,18 @@ class FilletEdgesEditTestCases(unittest.TestCase):
                 ticked.append(index.data(QtCore.Qt.UserRole))
         return ticked
 
+    @staticmethod
+    def _tick(tree, edge):
+        from PySide import QtCore
+
+        model = tree.model()
+        for row in range(model.rowCount()):
+            index = model.index(row, 0)
+            if index.data(QtCore.Qt.UserRole) == edge:
+                model.setData(index, QtCore.Qt.Checked, QtCore.Qt.CheckStateRole)
+                return
+        raise AssertionError("Edge{} isn't listed".format(edge))
+
     def _moveToolTo(self, x, y):
         self.tool.Placement.Base = FreeCAD.Vector(x, y, -5)
         self.Doc.recompute()
@@ -397,6 +409,42 @@ class FilletEdgesEditTestCases(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual([e[0] for e in fillet.Edges], moved)
         self.assertEqual(len(guesses(fillet)), 1)
+
+        # OK with another edge ticked too (PR 236 review, M2): the guess stays with its edge.
+        other = verticalAt(block.Shape, FreeCAD.Vector(0, 0, 5))
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self._tick(tree, other[0])
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(sorted(e[0] for e in fillet.Edges), sorted(moved + other))
+        [entry] = guesses(fillet)
+        self.assertEqual(fillet.Edges[entry["index"]][0], moved[0])
+
+    def testEditRepicksMissingEdge(self):
+        """The fillet's Base set to a moved copy of the cut: no edge is where the old one was, so
+        the link goes missing and the dialog lists it (ops#257). Ticking the copy's edge with the
+        same index and OK makes it the fillet's edge (PR 236 review, H1)."""
+        fillet = self._makeFeature("Part::Fillet")
+        stored = fillet.Edges[0][0]
+        copy = self.Doc.addObject("Part::Feature", "Copy")
+        copy.Shape = self.cut.Shape
+        copy.Placement.Base = FreeCAD.Vector(30, 0, 0)
+        self.Doc.recompute()
+        fillet.Base = copy
+        self.assertTrue(fillet.EdgeLinks[1][0].startswith("?"), fillet.EdgeLinks)
+        self.Doc.recompute()
+        self.assertFalse(fillet.isValid())
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self.assertEqual(self._tickedEdges(tree), [])
+        self._tick(tree, stored)
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.EdgeLinks[1], ["Edge{}".format(stored)])
+        # rounded at the copy's corner (40, 10): a point just inside it is outside the solid
+        self.assertFalse(fillet.Shape.isInside(FreeCAD.Vector(39.9, 9.9, 5), 1e-7, True))
 
 
 class PartMirrorGuiTestCases(unittest.TestCase):

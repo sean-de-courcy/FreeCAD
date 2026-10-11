@@ -2949,24 +2949,33 @@ int linkedEdgeId(const std::string& sub, const App::PropertyLinkBase::ShadowSub&
     return Data::indexOfElement(name, "Edge");
 }
 
-// Whether EdgeLinks names Base's edges by the ids of Edges, in their order: then a sync would
-// change nothing but end the links' records, a solver guess's among them (ops#258).
-bool edgeLinksMatch(const FilletBase& fillet)
+// For each entry of Edges, the EdgeLinks entry that already links its edge on Base, or -1: one
+// with the same edge id that isn't missing, each used once, in any position. Those keep their
+// links and records, a solver guess's among them (ops#258); a missing link written again is a
+// new pick (PR 236 review, H1).
+std::vector<int> linkedSources(const FilletBase& fillet)
 {
     const auto& values = fillet.Edges.getValues();
+    std::vector<int> sources(values.size(), -1);
+    if (fillet.EdgeLinks.getValue() != fillet.Base.getValue()) {
+        return sources;
+    }
     const auto& subs = fillet.EdgeLinks.getSubValues();
     const auto& shadows = fillet.EdgeLinks.getShadowSubs();
-    if (fillet.EdgeLinks.getValue() != fillet.Base.getValue() || subs.size() != values.size()
-        || shadows.size() != subs.size()) {
-        return false;
-    }
-    for (std::size_t i = 0; i < subs.size(); ++i) {
+    std::vector<int> ids(subs.size(), 0);
+    for (std::size_t j = 0; j < subs.size() && j < shadows.size(); ++j) {
         bool missing = false;
-        if (linkedEdgeId(subs[i], shadows[i], missing) != values[i].edgeid) {
-            return false;
+        int id = linkedEdgeId(subs[j], shadows[j], missing);
+        ids[j] = missing ? 0 : id;
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        auto it = std::ranges::find(ids, values[i].edgeid);
+        if (values[i].edgeid > 0 && it != ids.end()) {
+            sources[i] = static_cast<int>(it - ids.begin());
+            *it = 0;  // used
         }
     }
-    return true;
+    return sources;
 }
 
 // The fingerprint of edge `id` of `shape` where it lies, with the shape's placement: the copy
@@ -3056,10 +3065,11 @@ bool followBase(FilletBase& fillet)
         else {
             values[i].edgeid = oldId;
             newSubs.push_back(Data::MISSING_PREFIX + oldName);
-            FC_WARN(fillet.getFullName() << ": " << newBase->getFullName() << " has "
-                                         << (places.empty() ? "no edge" : "several edges")
-                                         << " where " << oldName << " of "
-                                         << oldBase->getFullName()
+            const char* why = newShape.isNull() ? " has no shape (not computed yet?), so no edge"
+                : places.empty()                ? " has no edge"
+                                                : " has several edges";
+            FC_WARN(fillet.getFullName() << ": " << newBase->getFullName() << why << " where "
+                                         << oldName << " of " << oldBase->getFullName()
                                          << " was; the edge link is missing");
         }
     }
@@ -3099,15 +3109,52 @@ void FilletBase::syncEdgeLink()
         EdgeLinks.setValue(0);
         return;
     }
-    if (edgeLinksMatch(*this)) {
+    // Entry by entry: an edge EdgeLinks already links keeps its link with its records; the
+    // others are linked anew by their index.
+    const auto sources = linkedSources(*this);
+    const auto& oldSubs = EdgeLinks.getSubValues();
+    bool unchanged = sources.size() == oldSubs.size();
+    for (std::size_t i = 0; unchanged && i < sources.size(); ++i) {
+        unchanged = sources[i] == static_cast<int>(i);
+    }
+    if (unchanged) {
         return;
     }
+    const auto oldShadows = EdgeLinks.getShadowSubs();
+    const auto oldRecords = EdgeLinks.getElementRecords();
+    const auto oldFroms = EdgeLinks.getExpandedFroms();
     std::vector<std::string> subs;
-    std::string sub("Edge");
-    for (auto& info : Edges.getValues()) {
-        subs.emplace_back(sub + std::to_string(info.edgeid));
+    std::vector<App::PropertyLinkBase::ShadowSub> shadows;
+    std::vector<App::ElementRecords> records;
+    std::vector<std::string> froms;
+    bool kept = false;
+    const auto& values = Edges.getValues();
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const int j = sources[i];
+        if (j >= 0 && static_cast<std::size_t>(j) < oldShadows.size()) {
+            subs.push_back(oldSubs[j]);
+            shadows.push_back(oldShadows[j]);
+            records.push_back(j < static_cast<int>(oldRecords.size()) ? oldRecords[j]
+                                                                       : App::ElementRecords());
+            froms.push_back(j < static_cast<int>(oldFroms.size()) ? oldFroms[j] : std::string());
+            kept = true;
+        }
+        else {
+            subs.push_back("Edge" + std::to_string(values[i].edgeid));
+            shadows.emplace_back();
+            records.emplace_back();
+            froms.emplace_back();
+        }
     }
-    EdgeLinks.setValue(Base.getValue(), subs);
+    if (!kept) {
+        EdgeLinks.setValue(Base.getValue(), subs);
+        return;
+    }
+    // The setter keeps records and `from` only position by position: put them where their
+    // links went.
+    EdgeLinks.setValue(Base.getValue(), subs, std::move(shadows));
+    EdgeLinks.setElementRecords(std::move(records));
+    EdgeLinks.setExpandedFroms(std::move(froms));
 }
 
 void FilletBase::onUpdateElementReference(const App::Property* prop)
