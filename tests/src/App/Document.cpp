@@ -4,6 +4,7 @@
 #include <gmock/gmock.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -441,6 +442,72 @@ TEST_F(DocumentTest, nestedImportKeepsTheOuterImportsSources)
     ASSERT_TRUE(after.has_value());
     EXPECT_EQ(after->name.substr(0, after->name.find('@')), "Outer");
     EXPECT_TRUE(App::importedWithin(*after, *doc()));
+}
+
+// The source of a copy is the objects' own document, not the one that exports them: copyObject
+// exports from the destination (PR 266 review H1). Objects of several documents have none, so
+// none of them counts as copied within the document they are pasted into
+TEST_F(DocumentTest, importedWithinGoesByTheObjectsDocument)
+{
+    auto& app = App::GetApplication();
+    const std::string name = app.getUniqueDocumentName("CopyTarget");
+    App::Document* other = app.newDocument(name.c_str(), "testUser");
+    auto* copied = doc()->addObject("App::DocumentObjectGroup", "Copied");
+    auto* local = other->addObject("App::DocumentObjectGroup", "Local");
+    {
+        WithinRecorder recorder(other);
+        other->copyObject({copied});
+        EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+    }
+
+    std::stringstream exported;
+    other->exportObjects({copied}, exported);
+    EXPECT_NE(documentXml(exported).find("SourceDocument=\"" + doc()->Uid.getValueStr() + "\""),
+              std::string::npos);
+
+    std::stringstream mixed;
+    other->exportObjects({local, copied}, mixed);
+    EXPECT_EQ(documentXml(mixed).find("SourceDocument="), std::string::npos);
+    {
+        // the first object, Local, is other's own
+        WithinRecorder recorder(other);
+        mixed.clear();
+        mixed.seekg(0);
+        App::MergeDocuments(other).importObjects(mixed);
+        EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+    }
+    app.closeDocument(name.c_str());
+}
+
+// Two open documents can share a UUID (a Save As, saveCopy or file copy opened beside its
+// original): a copy from one isn't from the other (PR 266 review M1)
+TEST_F(DocumentTest, importedWithinTellsDocumentsWithOneUuidApart)
+{
+    auto& app = App::GetApplication();
+    const std::string name = app.getUniqueDocumentName("Twin");
+    App::Document* twin = app.newDocument(name.c_str(), "testUser");
+    // the transient directory goes by the UUID and the file name: with the same file name the
+    // document would take another UUID
+    twin->FileName.setValue((std::filesystem::temp_directory_path() / (name + ".FCStd")).string());
+    twin->Uid.setValue(doc()->Uid.getValue());
+    ASSERT_EQ(twin->Uid.getValueStr(), doc()->Uid.getValueStr());
+
+    doc()->addObject("App::DocumentObjectGroup", "Copied");
+    std::stringstream copied;
+    doc()->exportObjects({doc()->getObject("Copied")}, copied);
+    {
+        WithinRecorder recorder(twin);
+        App::MergeDocuments(twin).importObjects(copied);
+        EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+    }
+    {
+        WithinRecorder recorder(doc());
+        copied.clear();
+        copied.seekg(0);
+        App::MergeDocuments(doc()).importObjects(copied);
+        EXPECT_EQ(recorder.within, std::vector<bool>({true}));
+    }
+    app.closeDocument(name.c_str());
 }
 
 class RecomputeContinuationTest: public DocumentTest
