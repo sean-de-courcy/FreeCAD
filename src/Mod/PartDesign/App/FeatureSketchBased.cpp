@@ -1049,16 +1049,24 @@ void ProfileBased::markStartCap(
             }
         }
     }
-    // Unmarked, a cap's names are another cap's when the sides are built apart, and references
-    // follow them there: never quietly
-    if (capNames.empty()) {
-        FC_WARN(getFullName() << ": no start cap element has the profile's names");
-    }
-    if (farCapIsSide2 && partnerNames.size() != capNames.size()) {
-        FC_WARN(
-            getFullName() << ": " << partnerNames.size() << " far cap names for "
-                          << capNames.size() << " start cap names"
-        );
+    // Unmarked, the far cap's names are side 1's far cap's when the sides are built apart, and
+    // references follow them there: never quietly. One check (PR 243 follow-up F2): the start cap
+    // has the profile's names and no far cap name was marked, as on macOS before round 7, when
+    // every partner was missed. Counting partners per profile name warned for far caps up to a
+    // shape of several faces (more partners) or trimmed ones (fewer). The warning shows in the
+    // tree, after any warning the reference report set before execute().
+    if (farCapIsSide2 && !capNames.empty() && partnerNames.empty()) {
+        const std::string text = "No far cap element was marked as side 2's: a reference to the "
+                                 "far cap may move to side 1's far cap when the sides are built "
+                                 "apart";
+        FC_WARN(getFullName() << ": " << text);
+        if (auto doc = getDocument()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(
+                const_cast<ProfileBased*>(this),
+                previous && *previous ? std::string(previous) + "\n" + text : text
+            );
+        }
     }
     if (capNames.empty() && partnerNames.empty()) {
         return;
