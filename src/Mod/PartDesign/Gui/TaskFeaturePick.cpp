@@ -386,11 +386,18 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
     bool independent,
-    App::DocumentObject* target
+    App::DocumentObject* target,
+    QString* refusal
 )
 {
 
     App::DocumentObject* copy = nullptr;
+    auto refuse = [&](const QString& why) -> App::DocumentObject* {
+        if (refusal) {
+            *refusal = why;
+        }
+        return nullptr;
+    };
     // Check for null to avoid segfault
     if (!obj) {
         return copy;
@@ -581,20 +588,11 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         // TODO Replace it with commands (2015-09-11, Fat-Zer)
         if (obj->isDerivedFrom<Part::Datum>()) {
-            auto* doc = App::GetApplication().getActiveDocument();
-            // FreeCAD-CH (ops#244 P6): a datum of the original's type. Part::Datum is abstract:
-            // addObject<Part::Datum> made nothing, and the null was dereferenced below.
-            copy = doc->addObject(obj->getTypeId().getName(), name.c_str());
-            if (!copy) {
-                return copy;
-            }
-
+            const QString label = QString::fromUtf8(obj->Label.getValue());
             // we need to reference the individual datums and make again datums. This is important
             // as datum adjust their size dependent on the part size, hence simply copying the shape
             // is not enough
             long int mode = mmDeactivated;
-            Part::Datum* datumCopy = static_cast<Part::Datum*>(copy);
-
             if (obj->is<PartDesign::Point>()) {
                 mode = mm0Vertex;
             }
@@ -605,8 +603,38 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                 mode = mmFlatFace;
             }
             else {
-                return copy;
+                // a legacy coordinate system: its copy came unattached at the origin, without the
+                // picked axis or plane (PR 227 review L1)
+                return refuse(QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
+                                  .arg(label));
             }
+            // A dependent copy is attached to the original, and the attacher reads the original's
+            // placement in its own body: in a body placed otherwise, the copy would sit elsewhere,
+            // silently (PR 227 review M1)
+            if (!independent) {
+                const Base::Placement container = App::GeoFeature::getGlobalPlacement(obj)
+                    * static_cast<App::GeoFeature*>(obj)->Placement.getValue().inverse();
+                const Base::Placement targetPlacement =
+                    target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+                if (!container.isSame(targetPlacement, Precision::Confusion())) {
+                    return refuse(
+                        QObject::tr(
+                            "A dependent copy of '%1' would not be where '%1' is: its body is "
+                            "placed differently from this one. Make an independent copy instead."
+                        )
+                            .arg(label)
+                    );
+                }
+            }
+
+            auto* doc = App::GetApplication().getActiveDocument();
+            // FreeCAD-CH (ops#244 P6): a datum of the original's type. Part::Datum is abstract:
+            // addObject<Part::Datum> made nothing, and the null was dereferenced below.
+            copy = doc->addObject(obj->getTypeId().getName(), name.c_str());
+            if (!copy) {
+                return refuse(QObject::tr("'%1' can't be copied.").arg(label));
+            }
+            Part::Datum* datumCopy = static_cast<Part::Datum*>(copy);
 
             // TODO Recheck this. This looks strange in case of independent copy (2015-10-31,
             // Fat-Zer)
@@ -784,8 +812,12 @@ std::optional<std::string> TaskFeaturePick::copiedElement(
 )
 {
     const std::string index = Data::oldElementName(sub.c_str());
-    if (!copy || index.empty() || original == copy || PartDesign::Feature::isDatum(copy)) {
+    if (!copy || sub.empty() || original == copy || PartDesign::Feature::isDatum(copy)) {
         return std::string();
+    }
+    // a sub that names no element (PR 227 review L3)
+    if (index.empty()) {
+        return std::nullopt;
     }
     // An independent sketch or primitive copy has the original's elements under the same index
     // names, whether makeCopy recomputed it or it keeps the pasted shape

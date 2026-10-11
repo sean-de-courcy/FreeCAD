@@ -79,11 +79,15 @@ public:
     /// shape) is placed in it where the original is (PR 224 review M2, round 2). A dependent copy
     /// isn't yet (ops#244).
     /// A datum (point, line, plane) is copied as a datum of its own type.
+    /// Null when the object can't be copied; `refusal`, when given, then tells why (a legacy
+    /// coordinate system, or a dependent datum copy across differently placed bodies), or stays
+    /// empty when the object's type isn't copied at all.
     static App::DocumentObject* makeCopy(
         App::DocumentObject* obj,
         std::string sub,
         bool independent,
-        App::DocumentObject* target
+        App::DocumentObject* target,
+        QString* refusal = nullptr
     );
 
     /// The name on `copy` (made by makeCopy from `original`) of the element `sub` of the

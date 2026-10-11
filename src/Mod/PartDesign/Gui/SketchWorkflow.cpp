@@ -91,6 +91,7 @@ struct MissingPlanesException
 struct CopyMismatchException
 {
     QString message;
+    QString title = QObject::tr("Copy differs");
 };
 
 class SupportFaceValidator
@@ -353,12 +354,24 @@ private:
         if (faceFilter.match()) {
             sub = faceFilter.Result[0][0].getSubNames()[0];
         }
+        QString refusal;
         auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
             selectedObject,
             sub,
             independent,
-            activeBody
+            activeBody,
+            &refusal
         );
+        // nothing to attach to (PR 227 review L2: the null went into the body)
+        if (!copy) {
+            throw CopyMismatchException {
+                refusal.isEmpty()
+                    ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
+                          .arg(QString::fromUtf8(selectedObject->Label.getValue()))
+                    : refusal,
+                QObject::tr("No copy")
+            };
+        }
 
         // The picked face on the copy (ops#244 P1: Face1, whatever face was picked, on a copy of
         // a primitive on a base, which keeps the original's elements): the same index on a copy
@@ -916,11 +929,7 @@ void SketchWorkflow::createSketch()
         );
     }
     catch (const CopyMismatchException& e) {
-        QMessageBox::warning(
-            Gui::getMainWindow(),
-            QObject::tr("Copy differs"),
-            e.message
-        );
+        QMessageBox::warning(Gui::getMainWindow(), e.title, e.message);
     }
 }
 

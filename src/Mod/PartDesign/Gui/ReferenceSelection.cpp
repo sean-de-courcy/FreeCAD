@@ -350,12 +350,27 @@ bool getReferencedSelection(
             if (!dlg.radioXRef->isChecked()) {
                 App::Document* document = thisObj->getDocument();
                 document->openTransaction("Make copy");
+                QString refusal;
                 auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                     selObj,
                     subname,
                     dlg.radioIndependent->isChecked(),
-                    body
+                    body,
+                    &refusal
                 );
+                // nothing to link (PR 227 review L2: the null went into the body)
+                if (!copy) {
+                    QMessageBox::warning(
+                        Gui::getMainWindow(),
+                        QObject::tr("No copy"),
+                        refusal.isEmpty()
+                            ? QObject::tr("'%1' can't be copied. Make a cross-reference instead.")
+                                  .arg(QString::fromUtf8(selObj->Label.getValue()))
+                            : refusal
+                    );
+                    selObj = nullptr;
+                    return false;
+                }
 
                 // The picked element on the copy (ops#244 P1: the first one of its kind,
                 // whatever was picked, on a copy that keeps the original's elements, such as a

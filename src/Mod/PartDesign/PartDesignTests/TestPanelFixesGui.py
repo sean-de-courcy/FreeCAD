@@ -1259,9 +1259,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
         self.assertAlmostEqual(revolution.Shape.Volume, 24 * math.pi, places=3)
 
-    def runNewSketchOnCopiedFace(self, feature, face):
-        """Runs New Sketch on `face` of feature (in another body) and answers Make independent
-        copy, and any message box; the answers go to self.modals."""
+    def runNewSketchOnCopiedFace(self, feature, face, choice="radioIndependent"):
+        """Runs New Sketch on `face` of feature (in another body) and answers the copy dialog with
+        `choice` (Make independent copy), and any message box; the answers go to self.modals."""
         # the command is active only in its workbench (an earlier unit can leave another one)
         Gui.activateWorkbench("PartDesignWorkbench")
         guiDoc = Gui.getDocument(self.doc.Name)
@@ -1278,7 +1278,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(
             QtWidgets.QApplication.queryKeyboardModifiers(), QtCore.Qt.KeyboardModifier.NoModifier
         )
-        self.answerModals()
+        self.answerModals(choice)
         Gui.runCommand("PartDesign_NewSketch")
 
     def newSketchOnCopiedFace(self, feature, face="Face1"):
@@ -2044,3 +2044,73 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
+
+    def testDatumOnADependentCopyAcrossPlacedBodiesStops(self):
+        """PR 227 review M1: datumPointAcross's placed bodies, Make dependent copy. Attached to
+        the point, the copy would take the point's place in its own body, (1, 2, 3), in this
+        body: globally (1, 2, 13), not (3, 1, 3), silently. OK stops with a message pointing to
+        the independent copy; the panel stays, no copy is left, the support is as it was."""
+        other = models.body(self.doc)
+        other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        point = other.newObject("PartDesign::Point", "Point")
+        point.Placement.Base = V(1, 2, 3)
+        self.body = models.body(self.doc)
+        self.body.Placement.Base = V(0, 0, 10)
+        datum = self.body.newObject("PartDesign::Point", "Datum")
+        datum.AttachmentSupport = [(point, "")]
+        datum.MapMode = "Vertex"
+        self.doc.recompute()
+        self.edit(datum)
+        self.answerModals("radioDependent")
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: A dependent copy"), self.modals)
+        self.assertIsNotNone(Gui.Control.activeDialog())
+        self.assertIsNone(self.doc.getObject("ReferencePoint"))
+        self.assertEqual(datum.AttachmentSupport, [(point, ("",))])
+
+    def datumPlaneInAPlacedBody(self):
+        """A datum plane at z = 4 in another body moved by (0, 0, 6): globally the plane z = 10;
+        this body at the origin."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(0, 0, 6)
+        plane = other.newObject("PartDesign::Plane", "DatumPlane")
+        plane.Placement.Base = V(0, 0, 4)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        return plane
+
+    def testNewSketchOnAnIndependentCopyOfADatumPlane(self):
+        """PR 227 review L7 (ops#244 P6 through New Sketch): New Sketch on a datum plane's face in
+        another, placed body (the whole plane is matched in the active body only), Make
+        independent copy: the copy is a datum plane where the plane is, and the sketch is on it,
+        globally z = 10."""
+        plane = self.datumPlaneInAPlacedBody()
+        sketch = self.newSketchOnCopiedFace(plane, "Face1")
+        copy = self.doc.getObject("CopyDatumPlane")
+        self.assertIsNotNone(copy)
+        self.assertEqual(copy.TypeId, "PartDesign::Plane")
+        self.assertEqual(sketch.AttachmentSupport[0][0], copy)
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 10, places=6)
+
+    def testNewSketchOnADependentCopyOfADatumPlaneStops(self):
+        """PR 227 review M1 (New Sketch): as testNewSketchOnAnIndependentCopyOfADatumPlane with
+        Make dependent copy. Attached to the plane, the copy would sit at z = 4 in this body, not
+        z = 10, silently. New Sketch stops with a message and leaves no copy and no sketch."""
+        plane = self.datumPlaneInAPlacedBody()
+        self.runNewSketchOnCopiedFace(plane, "Face1", "radioDependent")
+        self.assertTrue(waitFor(lambda: len(self.modals) >= 2), f"modals {self.modals}")
+        self.answering = False
+        self.assertEqual(self.modals[0], "DlgReference")
+        self.assertTrue(self.modals[1].startswith("QMessageBox: A dependent copy"), self.modals)
+        pump(0.3)
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit())
+        self.assertIsNone(self.doc.getObject("ReferenceDatumPlane"))
+        self.assertEqual(
+            [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
+        )

@@ -172,42 +172,57 @@ bool TaskDlgDatumParameters::accept()
             for (App::DocumentObject* obj : pcDatum->AttachmentSupport.getValues()) {
                 if (pcActiveBody && !pcActiveBody->hasObject(obj)
                     && !pcActiveBody->getOrigin()->hasObject(obj)) {
+                    QString refusal;
                     auto* copy = PartDesignGui::TaskFeaturePick::makeCopy(
                         obj,
                         subs[index],
                         dlg.radioIndependent->isChecked(),
-                        pcActiveBody
+                        pcActiveBody,
+                        &refusal
                     );
-                    if (copy) {
-                        // FreeCAD-CH (ops#244 P2): the picked element on the copy. The sub was
-                        // left empty: the datum attached to the whole copy, and the element was
-                        // lost
-                        const std::optional<std::string> element =
-                            PartDesignGui::TaskFeaturePick::copiedElement(obj, copy, subs[index]);
-                        if (!element) {
-                            copies.push_back(copy);
-                            for (App::DocumentObject* made : copies) {
-                                made->getDocument()->removeObject(made->getNameInDocument());
-                            }
-                            QMessageBox::warning(
-                                Gui::getMainWindow(),
-                                tr("Copy differs"),
-                                tr("%1 of '%2' is another element on its copy, whose shape "
-                                   "differs (or the element can't be read). Recompute '%2' and "
-                                   "select the element again, or make a cross-reference instead.")
-                                    .arg(
-                                        QString::fromStdString(
-                                            Data::oldElementName(subs[index].c_str())
-                                        ),
-                                        QString::fromUtf8(obj->Label.getValue())
-                                    )
-                            );
-                            return false;
+                    // the reference was dropped silently (PR 227 review L2)
+                    if (!copy) {
+                        for (App::DocumentObject* made : copies) {
+                            made->getDocument()->removeObject(made->getNameInDocument());
                         }
-                        copyObjects.push_back(copy);
-                        copies.push_back(copyObjects.back());
-                        copySubValues.push_back(*element);
+                        QMessageBox::warning(
+                            Gui::getMainWindow(),
+                            tr("No copy"),
+                            refusal.isEmpty()
+                                ? tr("'%1' can't be copied. Make a cross-reference instead.")
+                                      .arg(QString::fromUtf8(obj->Label.getValue()))
+                                : refusal
+                        );
+                        return false;
                     }
+                    // FreeCAD-CH (ops#244 P2): the picked element on the copy. The sub was
+                    // left empty: the datum attached to the whole copy, and the element was
+                    // lost
+                    const std::optional<std::string> element =
+                        PartDesignGui::TaskFeaturePick::copiedElement(obj, copy, subs[index]);
+                    if (!element) {
+                        copies.push_back(copy);
+                        for (App::DocumentObject* made : copies) {
+                            made->getDocument()->removeObject(made->getNameInDocument());
+                        }
+                        QMessageBox::warning(
+                            Gui::getMainWindow(),
+                            tr("Copy differs"),
+                            tr("%1 of '%2' is another element on its copy, whose shape "
+                               "differs (or the element can't be read). Recompute '%2' and "
+                               "select the element again, or make a cross-reference instead.")
+                                .arg(
+                                    QString::fromStdString(
+                                        Data::oldElementName(subs[index].c_str())
+                                    ),
+                                    QString::fromUtf8(obj->Label.getValue())
+                                )
+                        );
+                        return false;
+                    }
+                    copyObjects.push_back(copy);
+                    copies.push_back(copyObjects.back());
+                    copySubValues.push_back(*element);
                 }
                 else {
                     copyObjects.push_back(obj);
