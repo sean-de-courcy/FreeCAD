@@ -573,6 +573,11 @@ class RegressionTests(unittest.TestCase):
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 [after] = guesses(rounded)
                 self.assertEqual(after["guess_kind"], before["guess_kind"])
+                # the original is the turned copy's edge where the block's was (PR 240 review, M2)
+                self.assertEqual(
+                    centre(turned.Shape, after["original"]["index"]),
+                    centre(block.Shape, before["original"]["index"]),
+                )
                 # the alternatives are the turned copy's edges where the block's were
                 self.assertEqual(
                     [centre(turned.Shape, a["index"]) for a in after["alternatives"]],
@@ -581,6 +586,38 @@ class RegressionTests(unittest.TestCase):
                 rounded.touch()
                 self.Doc.recompute()
                 self.assertEqual(len(guesses(rounded)), 1)
+
+    def test_fillet_chamfer_base_then_links_by_hand(self):
+        """PR 240 review, M1: after a Base change by hand and a recompute, EdgeLinks written by
+        hand with the old base's subs on the new base is the user's pick: it stays.
+
+        Cubes A and B (B turned 90 degrees about its z axis), the feature on A's vertical edge at
+        (10, 0)."""
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                cubes = {}
+                for name in ("A", "B"):
+                    cube = self.Doc.addObject("Part::Box", name + feature)
+                    cube.Length = cube.Width = cube.Height = 10
+                    cubes[name] = cube
+                cubes["B"].Placement = Base.Placement(
+                    Vector(10, 0, 0), Base.Rotation(Vector(0, 0, 1), 90)
+                )
+                self.Doc.recompute()
+                onA = self._verticalEdgeAt(cubes["A"].Shape, 10, 0)
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = cubes["A"]
+                rounded.Edges = [(onA, 1.0, 1.0)]
+                self.Doc.recompute()
+                subs = rounded.EdgeLinks[1]
+                rounded.Base = cubes["B"]
+                self.Doc.recompute()
+                self.assertNotEqual(rounded.EdgeLinks[1], subs)
+                rounded.setPropertyStatus("EdgeLinks", "-ReadOnly")
+                rounded.EdgeLinks = (cubes["B"], subs)
+                self.assertEqual(rounded.EdgeLinks[1], subs)
+                self.Doc.recompute()
+                self.assertEqual(rounded.EdgeLinks[1], subs)
 
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""

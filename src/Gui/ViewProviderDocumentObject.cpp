@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <QAction>
 #include <QMenu>
 #include <Inventor/SoFullPath.h>
@@ -653,11 +654,34 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
         }
     }
 
-    for (auto& v : propChanges) {
-        auto prop = v.first.getProperty();
-        if (prop) {
-            prop->Paste(*v.second.get());
+    // What each property links as the copies are made. A paste can make an owner change another
+    // of its links (a Part Fillet's Base change moves its edge links to the new base, ops#265):
+    // a property that a paste before it changed and that no longer links oldObj keeps that
+    // change, and its stale copy isn't pasted. Every other copy is pasted as it was made.
+    auto linksOf = [](const App::Property* prop) {
+        std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>> links;
+        if (auto linkProp = freecad_cast<const App::PropertyLinkBase*>(prop)) {
+            linkProp->getLinks(links.first, true, &links.second, false);
         }
+        return links;
+    };
+    std::vector<std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>>> copiedLinks;
+    copiedLinks.reserve(propChanges.size());
+    for (auto& v : propChanges) {
+        copiedLinks.push_back(linksOf(v.first.getProperty()));
+    }
+
+    for (std::size_t i = 0; i < propChanges.size(); ++i) {
+        auto& v = propChanges[i];
+        auto prop = v.first.getProperty();
+        if (!prop) {
+            continue;
+        }
+        auto links = linksOf(prop);
+        if (links != copiedLinks[i] && std::ranges::find(links.first, oldObj) == links.first.end()) {
+            continue;
+        }
+        prop->Paste(*v.second.get());
     }
     return 1;
 }

@@ -517,22 +517,93 @@ class FilletReplaceBaseTestCases(unittest.TestCase):
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
 
-                # Undone, the feature is on A's edge again.
+                # Undone, the feature is on A's edge again; redone, on B's.
                 self.Doc.undo()
                 self.assertEqual(rounded.Base, cubes["A"])
                 self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onA)])
                 self.Doc.recompute()
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
+                self.Doc.redo()
+                self.assertEqual(rounded.Base, cubes["B"])
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onB)])
+                self.Doc.recompute()
+                self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
 
                 # C has no edge there: the link goes missing, and the recompute fails.
-                rounded.ViewObject.replaceObject(cubes["A"], cubes["C"])
+                rounded.ViewObject.replaceObject(cubes["B"], cubes["C"])
                 self.assertEqual(rounded.Base, cubes["C"])
                 [link] = rounded.EdgeLinks[1]
                 self.assertTrue(link.startswith("?"), link)
                 self.Doc.recompute()
                 self.assertFalse(rounded.isValid())
                 self.assertIn("Missing edge", rounded.getStatusString())
+
+    def testReplaceKeepsGuess(self):
+        """A guessed edge stays a guess through the replace (PR 240 review, M3): the replace no
+        longer pastes the edge links over what Base's change made of them, records included.
+
+        A 20 x 10 x 10 block from a sketch, the feature on the vertical edge at (20, 0); the
+        sketch's right side redrawn 0.5 mm over makes the edge at (20.5, 0) a guess. The block is
+        replaced by a copy of its shape turned 180 degrees about its centre."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        import Sketcher
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(*a, 0), FreeCAD.Vector(*b, 0)), False
+                )
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            report = FreeCAD.getReferenceReport(feature)
+            return [entry for entry in report if entry.get("status") == "guessed"]
+
+        self.Doc.ReferenceSolver = True
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = FreeCAD.Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 1.0, 1.0)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (0, 10)])
+                self.Doc.recompute()
+                self.assertEqual(len(guesses(rounded)), 1, rounded.getStatusString())
+
+                turned = self.Doc.addObject("Part::Feature", "Turned" + feature)
+                turned.Shape = block.Shape.copy()
+                turned.Placement = FreeCAD.Placement(
+                    FreeCAD.Vector(20.5, 10, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 180)
+                )
+                self.Doc.recompute()
+                onTurned = self._verticalEdgeAt(turned.Shape, 20.5, 0)
+                self.assertNotEqual(onTurned, rounded.Edges[0][0])  # the designed model
+                self.assertEqual(rounded.ViewObject.replaceObject(block, turned), 1)
+                self.assertEqual(rounded.Base, turned)
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onTurned)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(len(guesses(rounded)), 1)
+                # rounded at (20.5, 0), not at the turned copy's other corners
+                inside = [
+                    rounded.Shape.isInside(FreeCAD.Vector(*p, 5), 1e-7, True)
+                    for p in ((20.4, 0.1), (0.1, 0.1), (20.4, 9.9), (0.1, 9.9))
+                ]
+                self.assertEqual(inside, [False, True, True, True])
 
 
 class PartMirrorGuiTestCases(unittest.TestCase):
