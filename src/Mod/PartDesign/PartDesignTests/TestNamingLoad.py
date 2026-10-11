@@ -151,12 +151,14 @@ def withoutEntry(ids, id):
     return rewrite
 
 
-def chooseEntry(table):
-    """An entry other entries refer to (so the IDs above it are affected too), else the first."""
-    for id in sorted(table):
+def chooseEntry(table, avoid=()):
+    """An entry other entries refer to (so the IDs above it are affected too), else the first;
+    one outside `avoid` if the table has one."""
+    ids = [id for id in sorted(table) if id not in avoid] or sorted(table)
+    for id in ids:
         if any(f"~{id}" in content for other, content in table.items() if other != id):
             return id
-    return sorted(table)[0]
+    return ids[0]
 
 
 def chooseUnknown(table, raw):
@@ -822,13 +824,20 @@ def _derive(folder, manifest):
     manifest["unknown"] = {}
     manifest["newer"] = {}
     collideAll = set()
+    tables = {
+        model: save.nameTable(save.fileEntries(info["path"]))[1]
+        for model, info in manifest["models"].items()
+    }
     for model, info in manifest["models"].items():
-        entries = save.fileEntries(info["path"])
-        _, table = save.nameTable(entries)
+        table = tables[model]
         if not table:
             continue
         collideAll |= set(table)
-        id = chooseEntry(table)
+        # One child forces every model's collision, so each takes an entry no other file holds:
+        # models with the same content share its ID (the tags start at a random 1000..5000 per
+        # document), and the second insert would find it taken (ops#279).
+        others = set().union(*(set(t) for other, t in tables.items() if other != model))
+        id = chooseEntry(table, others)
         manifest["collideOne"][model] = {"id": id, "above": sorted(refsAbove(table, id))}
         unknown = os.path.join(folder, f"{model}-unknown.FCStd")
         id = chooseUnknown(table, info["raw"])
@@ -1014,7 +1023,7 @@ class TestNamingLoadCollision(unittest.TestCase):
         info = saved()["models"][model]
         collision = saved()["collideOne"][model]
         result = checked(self, child(self, "collideOne")[model])
-        self.assertTrue(result["forced"], "the collision wasn't forced")
+        self.assertTrue(result["forced"], f"the collision wasn't forced ({collision['id']})")
         self.checkModel(result, info, {collision["id"]})
         self.assertIn("collide with this session's", saved()["logs"]["collideOne"])
 
