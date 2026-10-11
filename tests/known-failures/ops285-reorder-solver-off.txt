@@ -11,3 +11,5 @@ issue: ops#285
 reason: seed 2 step 6 (reorder F7Fillet down 2, after F4Hole): without the solver the fillet's Base stays on F2Hole instead of following to F4Hole
 cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2
 cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2multi
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2i
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V1
