@@ -784,21 +784,49 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.assertTrue(feature.isValid(), feature.getStatusString())
         return feature
 
+    def _extrudeSquare(self, kind, sides, base=False, **properties):
+        """ops#255: the square x, y -5..5 at z = 10, padded or pocketed with Refine off, on its
+        own or (base) on the block x, y -20..20, z 0..20."""
+        body = models.body(self.Doc)
+        if base:
+            block = models.sketch(self.Doc, "Block", models.rectangle(-20, -20, 20, 20), body)
+            models.pad(body, block, 20, "Block")
+        square = models.sketch(self.Doc, "Square", models.rectangle(-5, -5, 5, 5), body, z=10)
+        feature = body.newObject(kind, "Square" + kind.split(":")[-1])
+        feature.Profile = square
+        feature.Refine = False
+        feature.SideType = sides
+        for name, value in properties.items():
+            setattr(feature, name, value)
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
     def testPadUpToFaceSidesNamedApart(self):
-        """ops#255: the two sides of a Pad up to faces, Two sides or Symmetric, and of a Pocket
-        up to faces on two sides, are named from the same sketch edges; the second side's names
-        are marked, so no two elements share a name up to the duplicate counter."""
+        """ops#255: the two sides of a Pad or Pocket built from the same sketch edges (Two sides
+        up to faces or tapered on both sides; Symmetric up to a face, through all, or tapered by
+        Length) have the second side's names marked, so no two elements share a name up to the
+        duplicate counter."""
+        # Each side tapered 10 degrees over 5 widens by d each way: a prismatoid on the 10 x 10
+        # square, its mid-section 10 + d and its far end 10 + 2d wide.
+        d = 5 * math.tan(math.radians(10))
+        twoTapered = 2 * 5 / 6 * (10**2 + 4 * (10 + d) ** 2 + (10 + 2 * d) ** 2)
+        tapered = {"Length": 10, "TaperAngle": 10}
+        bothTapered = {"Length": 5, "Length2": 5, "TaperAngle": 10, "TaperAngle2": 10}
+        throughAll = {"base": True, "Type": "ThroughAll"}
         cases = (
-            ("PartDesign::Pad", "Two sides", 1500),
-            ("PartDesign::Pad", "Symmetric", 1500),
-            ("PartDesign::Pocket", "Two sides", -1000),
+            (self._extrudeUpToArms, "PartDesign::Pad", "Two sides", {}, 1500),
+            (self._extrudeUpToArms, "PartDesign::Pad", "Symmetric", {}, 1500),
+            (self._extrudeUpToArms, "PartDesign::Pocket", "Two sides", {}, -1000),
+            (self._extrudeSquare, "PartDesign::Pad", "Symmetric", tapered, twoTapered),
+            (self._extrudeSquare, "PartDesign::Pad", "Two sides", bothTapered, twoTapered),
+            (self._extrudeSquare, "PartDesign::Pocket", "Symmetric", throughAll, -2000),
         )
-        for kind, sides, added in cases:
-            with self.subTest(kind=kind, sides=sides):
-                feature = self._extrudeUpToArms(kind, sides)
-                self.assertAlmostEqual(
-                    feature.Shape.Volume - feature.BaseFeature.Shape.Volume, added
-                )
+        for build, kind, sides, properties, added in cases:
+            with self.subTest(kind=kind, sides=sides, **properties):
+                feature = build(kind, sides, **properties)
+                baseVolume = feature.BaseFeature.Shape.Volume if feature.BaseFeature else 0
+                self.assertAlmostEqual(feature.Shape.Volume - baseVolume, added)
                 self.assertNamesDistinct(feature.Shape)
                 body = feature.getParentGeoFeatureGroup()
                 for obj in reversed(body.Group):

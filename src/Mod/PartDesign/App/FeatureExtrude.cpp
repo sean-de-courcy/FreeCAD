@@ -741,8 +741,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
         // A second side is built from the same sketch edges as the first, so the two sides'
         // names would differ only by the duplicate counter, which follows the order of the XOR
-        // below (ops#255). In V2 the second side's names are marked as a copy, as a Revolution's
-        // second side is (ops#240).
+        // below (ops#255). In V2 the second side's prism is marked as a copy, as a Revolution's
+        // second side is (ops#240): the prism, not its profile, since a tapered side's caps are
+        // named by the draft, not from the profile's names.
         auto markSecondSide = [&](TopoShape shape) {
             if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
                 shape.appendElementSection(getID(), Part::OpCodes::Copy, "2");
@@ -794,7 +795,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
                     gp_Dir dir2 = dir;
                     dir2.Reverse();
-                    TopoShape prism2 = generateSingleExtrusionSide(
+                    TopoShape prism2 = markSecondSide(generateSingleExtrusionSide(
                         startSketch.makeElementCopy(),
                         method,
                         L,
@@ -806,7 +807,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         makeface,
                         base,
                         invObjLoc
-                    );
+                    ));
                     if (!prism2.isNull() && !prism2.getShape().IsNull()) {
                         prisms.push_back(prism2);
                     }
@@ -971,8 +972,8 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 }
 
                 // Side 2
-                TopoShape prism2 = generateSingleExtrusionSide(
-                    markSecondSide(startSketch.makeElementCopy()),
+                TopoShape prism2 = markSecondSide(generateSingleExtrusionSide(
+                    startSketch.makeElementCopy(),
                     method2,
                     L2,
                     taper2,
@@ -983,7 +984,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     makeface,
                     base,
                     invObjLoc
-                );
+                ));
                 if (!method2LengthBased && reversed(prism2, startSketch, dir2)) {
                     return new App::DocumentObjectExecReturn(side2Reversed);
                 }

@@ -450,13 +450,13 @@ def modelRevolutionUpToFace(doc):
     return features
 
 
-
 def modelPadUpToFace(doc):
     """Pads and a Pocket up to faces of a C-shaped body (ops#255): its XZ outline padded 20
     along -Y, a bottom arm z 0..5, a top arm z 20..25 and a back x -10..-5. The rectangle
     x 0..10, y -15..-5 at z = 10 goes up to the top arm's lower face (One side, Symmetric), up to
     it and the bottom arm's upper face (Two sides), or through both arms (a Pocket, Two sides).
-    A second side's names are marked."""
+    And a square padded Symmetric by Length 10, tapered 10 degrees: two prisms. A second side's
+    names are marked."""
     xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
     outline = [(-10, 0), (15, 0), (15, 5), (-5, 5), (-5, 20), (15, 20), (15, 25), (-10, 25)]
     cases = (
@@ -488,6 +488,15 @@ def modelPadUpToFace(doc):
             feature.Type2 = "UpToFace"
             feature.UpToFace2 = upTo[1]
         features.append(feature)
+    body = models.body(doc)
+    square = models.sketch(doc, "Square", models.rectangle(-5, -5, 5, 5), body)
+    tapered = body.newObject("PartDesign::Pad", "SymmetricTapered")
+    tapered.Profile = square
+    tapered.Refine = False
+    tapered.SideType = "Symmetric"
+    tapered.Length = 10
+    tapered.TaperAngle = 10
+    features.append(tapered)
     return features
 
 
