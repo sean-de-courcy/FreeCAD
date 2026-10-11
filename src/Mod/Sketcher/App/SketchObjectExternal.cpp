@@ -474,10 +474,18 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     newVals.reserve(vals.size() + svals.size());
     newcVals.reserve(cvals.size() + scvals.size());
 
-    const Base::Vector3d& origin = this->Placement.getValue().getPosition();
-    const Base::Rotation& rotation = this->Placement.getValue().getRotation();
-    const Base::Vector3d axisH = rotation.multVec(Base::Vector3d::UnitX);
-    const Base::Vector3d axisV = rotation.multVec(Base::Vector3d::UnitY);
+    // FreeCAD-CH (ops#283): the geometry is in this sketch's own frame, so the flip mirrors about
+    // its own axes there: x flips about the Y axis, y about the X axis. Before, it mirrored about
+    // this sketch's position and axes in the global frame, which shifted the copy (and with this
+    // sketch turned, flipped the other coordinate)
+    auto applyGeometryFlipCorrection = [xinv, yinv](Part::Geometry* geoNew) {
+        if (xinv) {
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitY);
+        }
+        if (yinv) {
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitX);
+        }
+    };
 
     std::map<int, int> extMap;
     // for a source external that copies this sketch's own geometry: the element its ref names
@@ -506,6 +514,10 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 }
             }
             auto copy = geo->copy();
+            // FreeCAD-CH (PR 254 review F2): the rebuild projects a linked external here again,
+            // but keeps a frozen one, one whose source is missing and one whose projection fails
+            // as copied: in the source's frame, so flipped like the internal geometry
+            applyGeometryFlipCorrection(copy);
             auto egf = ExternalGeometryFacade::getFacade(copy);
             egf->setId(++geoLastId);
             if (!egf->getRef().empty()) {
@@ -583,19 +595,6 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         solverNeedsUpdate = true;
     }
 
-    auto applyGeometryFlipCorrection = [xinv, yinv, origin, axisV, axisH](Part::Geometry* geoNew) {
-        if (!xinv && !yinv) {
-            return;
-        }
-
-        if (xinv) {
-            geoNew->mirror(origin, axisV);
-        }
-        if (yinv) {
-            geoNew->mirror(origin, axisH);
-        }
-    };
-
     for (const auto& geoOld : svals) {
         Part::Geometry* geoNew = geoOld->copy();
         if (xinv || yinv) {
@@ -617,12 +616,74 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     // The axes are this sketch's own: the horizontal one runs the other way when x flips, the
     // vertical one when y flips.
     const bool mirrored = xinv != yinv;
+    // FreeCAD-CH (ops#283): a copied external is projected here again, and which way a projection
+    // runs can depend on the plane's normal (a circle seen edge-on becomes a line along the
+    // normal ^ its axis, which runs the other way in a mirrored copy). So whether its ends are
+    // the images of the source's or swapped is read from the two; when neither, its constraints
+    // aren't copied. One without ends (a point, a whole conic) goes by its type
+    enum class Ends
+    {
+        Kept,
+        Swapped,
+        Unknown
+    };
+    std::map<int, Ends> externalEnds;  // by source GeoId
+    if (xinv || yinv) {
+        using EndPoints = std::pair<Base::Vector3d, Base::Vector3d>;
+        auto endsOf = [](const Part::Geometry* geo) -> std::optional<EndPoints> {
+            if (auto arc = dynamic_cast<const Part::GeomArcOfConic*>(geo)) {
+                // as the solver reads them (Sketch::addArc)
+                return EndPoints {arc->getStartPoint(true), arc->getEndPoint(true)};
+            }
+            if (auto curve = dynamic_cast<const Part::GeomBoundedCurve*>(geo)) {
+                return EndPoints {curve->getStartPoint(), curve->getEndPoint()};
+            }
+            return std::nullopt;
+        };
+        // whether `here` is where this sketch sees the source's `seen`
+        auto sameAs = [xinv, yinv](const Base::Vector3d& here, const Base::Vector3d& seen) {
+            const double x = xinv ? -seen.x : seen.x;
+            const double y = yinv ? -seen.y : seen.y;
+            return std::hypot(here.x - x, here.y - y) < 1e-6;
+        };
+        for (const auto& [sourceId, id] : extMap) {
+            if (id >= 0) {
+                continue;  // a self-reference: this sketch's own geometry
+            }
+            const auto seen = endsOf(psObj->getGeometry(sourceId));
+            const auto here = endsOf(this->getGeometry(id));
+            if (!seen && !here) {
+                continue;
+            }
+            Ends ends = Ends::Unknown;
+            if (seen && here) {
+                if (sameAs(here->first, seen->first) && sameAs(here->second, seen->second)) {
+                    ends = Ends::Kept;
+                }
+                else if (sameAs(here->first, seen->second) && sameAs(here->second, seen->first)) {
+                    ends = Ends::Swapped;
+                }
+            }
+            externalEnds[sourceId] = ends;
+        }
+    }
+    auto copiedEnds = [&](int geoId) -> std::optional<Ends> {
+        auto found = externalEnds.find(geoId);
+        if (found == externalEnds.end()) {
+            return std::nullopt;
+        }
+        return found->second;
+    };
+
     auto turnsRound = [&](int geoId) {  // a source GeoId
         if (geoId == GeoEnum::HAxis) {
             return xinv;
         }
         if (geoId == GeoEnum::VAxis) {
             return yinv;
+        }
+        if (auto ends = copiedEnds(geoId)) {
+            return *ends == Ends::Swapped;
         }
         if (!mirrored || geoId == GeoEnum::GeoUndef) {
             return false;
@@ -633,6 +694,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 || geo->isDerivedFrom<Part::GeomArcOfConic>());
     };
     auto swapsEnds = [&](int geoId) {  // a source GeoId
+        if (auto ends = copiedEnds(geoId)) {
+            return *ends == Ends::Swapped;
+        }
         if (!mirrored || geoId == GeoEnum::GeoUndef) {
             return false;
         }
@@ -794,6 +858,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                         external.c_str(),
                         own.c_str()
                     );
+                }
+                if (copiedEnds(geoId) == Ends::Unknown) {
+                    refused = "it is on its ExternalEdge"
+                        + std::to_string(GeoEnum::RefExt + 1 - geoId)
+                        + ", whose ends don't match those of its copy here, and the copy is "
+                          "flipped here";
+                    break;
                 }
                 newConstr->setGeoId(i, mapped->second);
             }

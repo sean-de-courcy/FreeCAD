@@ -42,6 +42,8 @@ from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
 from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopySelfReference
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlipped
+from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInAMovedSketch
+from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInATiltedSketch
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

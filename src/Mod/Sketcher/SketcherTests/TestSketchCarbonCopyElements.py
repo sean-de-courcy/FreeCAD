@@ -340,39 +340,59 @@ class TestCarbonCopyFlipped(unittest.TestCase):
     def tearDown(self):
         FreeCAD.closeDocument(self.doc.Name)
 
+    def place(self, turn, image):
+        """Source 10 above Dest along Dest's normal, turned by `turn` in Dest's frame; `image`
+        maps a point of Source's to where Dest sees it."""
+        where = self.dest.Placement
+        self.source.Placement = FreeCAD.Placement(
+            where.Base + where.Rotation.multVec(V(0, 0, 10)), where.Rotation.multiply(turn)
+        )
+        self.image = image
+
     def turn_over(self):
         """Source turned over, 180 degrees about X: Dest sees it with y the other way."""
-        self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(1, 0, 0), 180))
-        self.image = lambda p: V(p.x, -p.y, 0)
+        self.place(FreeCAD.Rotation(V(1, 0, 0), 180), lambda p: V(p.x, -p.y, 0))
 
     def turn_round(self):
         """Source turned round, 180 degrees about Z: Dest sees it turned half a turn."""
-        self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(0, 0, 1), 180))
-        self.image = lambda p: V(-p.x, -p.y, 0)
+        self.place(FreeCAD.Rotation(V(0, 0, 1), 180), lambda p: V(-p.x, -p.y, 0))
 
     def add_line(self, start, end):
         return self.source.addGeometry(Part.LineSegment(V(*start, 0), V(*end, 0)), False)
 
     def copy(self):
         """Source solved, then copied aligned (flipped back), the document recomputed and Dest
-        solved again: Dest's geometry is Source's as Dest sees it."""
+        solved again: every constraint is copied, and Dest's geometry is Source's as Dest sees
+        it. An arc is checked by its
+        centre, radii, ends (which swap in a mirror) and midpoint."""
         self.assertEqual(self.source.solve(), 0)
         self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
         self.dest.carbonCopy("Source", False)
         self.doc.recompute()
         self.assertEqual(self.dest.solve(), 0)
         self.assertEqual(len(self.dest.Geometry), len(self.source.Geometry))
+        # every constraint copied: none refused (PR 254 review F1)
+        self.assertEqual(len(self.dest.Constraints), len(self.source.Constraints))
         for seen, copied in zip(self.source.Geometry, self.dest.Geometry):
             if isinstance(seen, Part.LineSegment):
                 # a line keeps its start
                 self.assertLess((copied.StartPoint - self.image(seen.StartPoint)).Length, 1e-6)
                 self.assertLess((copied.EndPoint - self.image(seen.EndPoint)).Length, 1e-6)
-            else:
-                self.assertLess((copied.Center - self.image(seen.Center)).Length, 1e-6)
+                continue
+            self.assertLess((copied.Center - self.image(seen.Center)).Length, 1e-6)
+            if isinstance(seen, Part.ArcOfCircle):
                 self.assertAlmostEqual(copied.Radius, seen.Radius, delta=1e-6)
-                ends = [self.image(seen.StartPoint), self.image(seen.EndPoint)]
-                for point in (copied.StartPoint, copied.EndPoint):
-                    self.assertLess(min((point - end).Length for end in ends), 1e-6)
+            else:
+                self.assertAlmostEqual(copied.MajorRadius, seen.MajorRadius, delta=1e-6)
+                self.assertAlmostEqual(copied.MinorRadius, seen.MinorRadius, delta=1e-6)
+            ends = [self.image(seen.StartPoint), self.image(seen.EndPoint)]
+            for point in (copied.StartPoint, copied.EndPoint):
+                self.assertLess(min((point - end).Length for end in ends), 1e-6)
+
+            def middle(arc):
+                return arc.value((arc.FirstParameter + arc.LastParameter) / 2)
+
+            self.assertLess((middle(copied) - self.image(middle(seen))).Length, 1e-6)
 
     def add_sweep(self):
         """The arc's sweep (an Angle on it alone), 90 degrees by an expression."""
@@ -443,6 +463,150 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         )
         self.copy()
 
+
+    def test_flipped_copy_keeps_a_lines_angle(self):
+        """A line from (12, 0) to (20, 4), its direction locked by an Angle on it alone (to the
+        horizontal axis): in a mirror the angle is negated, and turns half a turn when the
+        horizontal axis runs the other way (x flipped)."""
+        self.turn_over()
+        line = self.add_line((12, 0), (20, 4))
+        self.source.addConstraint(Sketcher.Constraint("Angle", line, math.atan2(4, 8)))
+        self.copy()
+
+    def test_flipped_copy_keeps_an_angle_to_the_vertical_axis(self):
+        """The same line at an angle from the vertical axis (Angle of the two): it turns half a
+        turn when the vertical axis runs the other way (y flipped)."""
+        self.turn_over()
+        line = self.add_line((12, 0), (20, 4))
+        self.source.addConstraint(
+            Sketcher.Constraint("Angle", -2, line, math.atan2(4, 8) - math.pi / 2)
+        )
+        self.copy()
+
+    def test_flipped_copy_keeps_a_locked_tangency_with_the_horizontal_axis(self):
+        """A second arc, of the circle of radius 10 about (0, 10), from (0, 0) to (10, 10),
+        tangent to the horizontal axis at its start (end to edge, locked when added)."""
+        self.turn_over()
+        circle = Part.Circle(V(0, 10, 0), V(0, 0, 1), 10)
+        arc = self.source.addGeometry(
+            Part.ArcOfCircle(circle, 1.5 * math.pi, 2 * math.pi), False
+        )
+        tangent = self.source.addConstraint(Sketcher.Constraint("Tangent", arc, 1, -1))
+        self.assertNotEqual(self.source.Constraints[tangent].Value, 0)
+        self.copy()
+
+    def test_flipped_copy_keeps_a_locked_tangency_at_an_arc_of_ellipses_end(self):
+        """An arc of the ellipse about (0, -20) with radii 12 (along x) and 6, from (12, -20) to
+        (0, -14), and a line from its end to (-10, -14), tangent there (end to end, locked). A
+        mirrored arc of ellipse runs the other way as an arc of circle does."""
+        self.turn_over()
+        ellipse = Part.Ellipse(V(0, -20, 0), 12, 6)
+        arc = self.source.addGeometry(Part.ArcOfEllipse(ellipse, 0, math.pi / 2), False)
+        line = self.add_line((0, -14), (-10, -14))
+        tangent = self.source.addConstraint(Sketcher.Constraint("Tangent", line, 1, arc, 2))
+        self.assertNotEqual(self.source.Constraints[tangent].Value, 0)
+        self.copy()
+
+
+    def ring(self, *angles):
+        """The circle of radius 5 about (0, 20, 5) whose axis is X, in Dest's frame (edge-on to
+        both sketches), or the arc of it between `angles` (degrees)."""
+        where = self.dest.Placement
+        return Part.makeCircle(
+            5, where.multVec(V(0, 20, 5)), where.Rotation.multVec(V(1, 0, 0)), *angles
+        )
+
+    def add_edge_on(self, edge):
+        """`edge` (global) as Source's external -3, and a line whose start is on the
+        external's start and which is at 60 degrees to it: both hold only if the copied
+        external runs as the image of the source's."""
+        ring = self.doc.addObject("Part::Feature", "Ring")
+        ring.Shape = edge
+        self.doc.recompute()
+        self.source.addExternal(ring.Name, "Edge1")
+        line = self.add_line((3, 3), (8, 6))
+        self.source.addConstraint(Sketcher.Constraint("Coincident", line, 1, -3, 1))
+        self.source.addConstraint(Sketcher.Constraint("Angle", -3, line, math.pi / 3))
+
+    def test_flipped_copy_keeps_an_edge_on_circles_ends(self):
+        """ops#283: a circle seen edge-on (`ring`): a sketch projects it as a line along its
+        normal ^ the circle's axis, so in a mirrored copy the copied external runs the other way.
+        Before, a constraint on its start landed on its end, and an angle with it was off by
+        half a turn."""
+        self.turn_over()
+        self.add_edge_on(self.ring())
+        self.copy()
+
+    def test_flipped_copy_keeps_an_edge_on_arcs_ends(self):
+        """As above, a quarter of that circle."""
+        self.turn_over()
+        self.add_edge_on(self.ring(0, 90))
+        self.copy()
+
+    def test_flipped_copy_flips_a_frozen_external(self):
+        """PR 254 review F2: a frozen external point (a vertex at (3, 4, 0)), a line's end on it.
+        The rebuild keeps a frozen external's geometry as copied, in Source's frame, so the copy
+        must flip it like the internal geometry. Before, it stayed as the source saw it, and the
+        solve dragged the copied line's end there. Python can't set the Frozen flag on a point
+        external, so it is set in the saved file."""
+        self.turn_over()
+        post = self.doc.addObject("Part::Feature", "Post")
+        post.Shape = Part.Vertex(V(3, 4, 0))
+        self.doc.recompute()
+        self.source.addExternal(post.Name, "Vertex1")
+        line = self.add_line((8, 1), (4, 2))
+        self.source.addConstraint(Sketcher.Constraint("Coincident", line, 2, -3, 1))
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "FrozenExternal.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    # the Frozen flag (2) of Source's external at Post
+                    data, count = re.subn(
+                        rb'(Ref="Post\.[^"]*" Flags=")(\d+)"',
+                        lambda m: m.group(1) + str(int(m.group(2)) | 2).encode() + b'"',
+                        data,
+                    )
+                    self.assertEqual(count, 1)
+                archive.writestr(info, data)
+        self.doc = FreeCAD.openDocument(path)
+        self.dest = self.doc.getObject("Dest")
+        self.source = self.doc.getObject("Source")
+        self.copy()
+        point = self.dest.getPoint(-3, 1)
+        end = self.dest.Geometry[line].EndPoint
+        self.assertLess((point - end).Length, 1e-6)
+
+
+class TestCarbonCopyFlippedInATiltedSketch(TestCarbonCopyFlipped):
+    """PR 254 review F4: as TestCarbonCopyFlippedInAMovedSketch, Dest turned about a tilted
+    axis (70 degrees about (1, 1, 1)), Source turned over about Dest's Y."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest.Placement = FreeCAD.Placement(V(5, 3, 2), FreeCAD.Rotation(V(1, 1, 1), 70))
+
+    def turn_over(self):
+        self.place(FreeCAD.Rotation(V(0, 1, 0), 180), lambda p: V(-p.x, p.y, 0))
+
+class TestCarbonCopyFlippedInAMovedSketch(TestCarbonCopyFlipped):
+    """ops#283: as above, with Dest off the origin and turned (at (5, 3, 2), 90 degrees about
+    Z), and Source turned over about Dest's Y axis, so x flips. The flip is a mirror in Dest's
+    own frame. Before, it mirrored about Dest's position and its axes taken in the global frame:
+    the copy was shifted, and with Dest turned, y flipped instead of x."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest.Placement = FreeCAD.Placement(V(5, 3, 2), FreeCAD.Rotation(V(0, 0, 1), 90))
+
+    def turn_over(self):
+        """Source turned over, 180 degrees about Dest's Y: Dest sees it with x the other way."""
+        self.place(FreeCAD.Rotation(V(0, 1, 0), 180), lambda p: V(-p.x, p.y, 0))
 
 if __name__ == "__main__":
     unittest.main()
