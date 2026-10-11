@@ -3105,12 +3105,24 @@ bool followBase(FilletBase& fillet)
         else {
             values[i].edgeid = oldId;
             newSubs.push_back(Data::MISSING_PREFIX + oldName);
-            const char* why = newShape.isNull() ? " has no shape (not computed yet?), so no edge"
-                : places.empty()                ? " has no edge"
-                                                : " has several edges";
-            FC_WARN(fillet.getFullName() << ": " << newBase->getFullName() << why << " where "
-                                         << oldName << " of " << oldBase->getFullName()
-                                         << " was; the edge link is missing");
+            std::ostringstream why;
+            Data::ElementFingerprint unused;
+            if (missing) {
+                why << oldName << " of " << oldBase->getFullName() << " was missing already";
+            }
+            else if (!placedEdgeFingerprint(oldShape, oldId, unused)) {
+                why << oldBase->getFullName()
+                    << (oldShape.isNull() ? " has no shape (not computed yet?)" : " has no " + oldName)
+                    << ", so where " << oldName << " was is unknown";
+            }
+            else {
+                why << newBase->getFullName()
+                    << (newShape.isNull() ? " has no shape (not computed yet?), so no edge"
+                            : places.empty() ? " has no edge"
+                                             : " has several edges")
+                    << " where " << oldName << " of " << oldBase->getFullName() << " was";
+            }
+            FC_WARN(fillet.getFullName() << ": " << why.str() << "; the edge link is missing");
         }
     }
     fillet.Edges.setStatus(App::Property::User3, true);

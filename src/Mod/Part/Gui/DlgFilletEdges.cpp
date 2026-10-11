@@ -26,6 +26,7 @@
 #include <climits>
 #include <cstring>
 #include <sstream>
+#include <QFont>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QItemDelegate>
@@ -223,6 +224,7 @@ public:
     FilletType filletType;
     std::vector<int> edge_ids;
     QLabel* missingEdges;
+    bool baseNotListed = false;
     TopTools_IndexedMapOfShape all_edges;
     TopTools_IndexedMapOfShape all_faces;
     using Connection = fastsignals::connection;
@@ -672,12 +674,27 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
     App::DocumentObject* base = d->fillet->Base.getValue();
     const std::vector<Part::FilletElement>& e = d->fillet->Edges.getValues();
     const auto& subs = d->fillet->EdgeLinks.getShadowSubs();
-    if (subs.size() != e.size()) {
-        FC_ERR("edge link size mismatch");
+    auto it = std::ranges::find(objs, base);
+    if (subs.size() != e.size() || it == objs.end()) {
+        // Base isn't a shape the box lists (an App::Link, say), or its links don't match the
+        // edges: no shape and the box locked, so that OK can't write another shape's edge
+        // numbers against Base (ops#262). accept() refuses.
+        if (subs.size() != e.size()) {
+            FC_ERR("edge link size mismatch");
+        }
+        ui->shapeObject->setCurrentIndex(0);
+        onShapeObjectActivated(0);
+        ui->shapeObject->setEnabled(false);
+        d->baseNotListed = true;
+        d->missingEdges->setText(
+            tr("The edges of %1 can't be edited here: its base isn't a shape this dialog lists.")
+                .arg(QString::fromUtf8(d->fillet->Label.getValue()))
+        );
+        d->missingEdges->show();
         return;
     }
 
-    if (auto it = std::ranges::find(objs, base); it != objs.end()) {
+    {
         // toggle visibility
         Gui::ViewProvider* vp;
         vp = Gui::Application::Instance->getViewProvider(d->fillet);
@@ -706,10 +723,15 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
             Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
         );
         // Tick each stored edge where its link finds it in the base now, never at a stored id
-        // the link can't confirm, and never a guess (ops#249). What can't be ticked is listed
-        // in the dialog; OK replaces it with the ticked edges.
+        // the link can't confirm (ops#249). A link the solver guessed is ticked where the guess
+        // is, and marked (ops#262). What can't be ticked is listed in the dialog; OK replaces
+        // it with the ticked edges.
+        const auto guesses = d->fillet->EdgeLinks.getElementGuesses();
         QStringList missing;
         QStringList unlisted;
+        QStringList guessed;
+        QStringList duplicates;
+        std::vector<int> ticked;
         for (size_t i = 0; i < e.size(); ++i) {
             const auto& et = e[i];
             int edgeIndex = linkedEdgeIndex(baseShape, subs[i]);
@@ -727,6 +749,25 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
             }
             else {
                 int index = it2 - d->edge_ids.begin();
+                const QString edgeName = QStringLiteral("Edge%1").arg(edgeIndex);
+                // Two entries on one edge: OK keeps one row, so one entry's radii go.
+                if (std::ranges::find(ticked, edgeIndex) != ticked.end()) {
+                    if (!duplicates.contains(edgeName)) {
+                        duplicates << edgeName;
+                    }
+                }
+                ticked.push_back(edgeIndex);
+                if (i < guesses.size() && !guesses[i].empty()) {
+                    guessed << edgeName;
+                    model->setData(
+                        model->index(index, 0),
+                        tr("The reference solver guessed this edge for the stored one"),
+                        Qt::ToolTipRole
+                    );
+                    QFont font = ui->treeView->font();
+                    font.setItalic(true);
+                    model->setData(model->index(index, 0), font, Qt::FontRole);
+                }
                 model->setData(model->index(index, 0), Qt::Checked, Qt::CheckStateRole);
                 // model->setData(model->index(index, 1),
                 // QVariant(QLocale().toString(et->radius1,'f',Base::UnitsApi::getDecimals())));
@@ -762,11 +803,22 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
                              .arg(baseLabel, missing.join(QStringLiteral(", ")));
         }
         if (!unlisted.isEmpty()) {
-            notTicked << tr("%1 is not in the list (not an edge between two faces): not ticked.")
+            notTicked << tr("%1 is not in the list (not a sharp edge between two faces): not "
+                            "ticked.")
                              .arg(unlisted.join(QStringLiteral(", ")));
         }
         if (!notTicked.isEmpty()) {
             notTicked << tr("OK keeps only the ticked edges.");
+        }
+        if (!duplicates.isEmpty()) {
+            notTicked << tr("%1 is stored more than once: OK keeps it once, with the radii shown.")
+                             .arg(duplicates.join(QStringLiteral(", ")));
+        }
+        if (!guessed.isEmpty()) {
+            notTicked << tr("%1 is the reference solver's guess (in italics): check it.")
+                             .arg(guessed.join(QStringLiteral(", ")));
+        }
+        if (!notTicked.isEmpty()) {
             QString text = notTicked.join(QLatin1Char('\n'));
             d->missingEdges->setText(text);
             d->missingEdges->show();
@@ -1071,6 +1123,9 @@ const char* DlgFilletEdges::getFilletType() const
 
 bool DlgFilletEdges::accept()
 {
+    if (d->baseNotListed) {
+        return false;  // the label says why (ops#262)
+    }
     if (!d->object) {
         QMessageBox::warning(
             this,
