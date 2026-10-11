@@ -21,6 +21,7 @@
  **************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -1028,9 +1029,6 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     if (!origin) {
         return nullptr;
     }
-    if (usable(origin)) {
-        return origin;
-    }
     // A sketch: the feature it is the profile of, also through binders: the side faces of a pad
     // on a ShapeBinder or SubShapeBinder come from the binder's source (a sketch, a face, an inner
     // binder). A binder counts by what it binds (its Support), not by its other links.
@@ -1083,6 +1081,36 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         Part::TopoShape tool = based->AddSubShape.getShape();
         return liesOn(element, tool.moved(based->getLocation()).getShape());
     };
+    // An origin that is a feature made the element, unless the tool of another feature on its
+    // profile, or on a binder of what its profile binds, has it in its boundary too: nothing tells
+    // them apart (a pad's bottom imprinted by a pocket below it, on a binder of the pad's binder,
+    // is named by the pocket alone; ops#224)
+    if (usable(origin)) {
+        auto based = freecad_cast<PartDesign::ProfileBased*>(origin);
+        App::DocumentObject* root = based ? based->Profile.getValue() : nullptr;
+        // up the binders to the object they bind
+        std::vector<App::DocumentObject*> bound;
+        while (root && std::ranges::find(bound, root) == bound.end()) {
+            bound.push_back(root);
+            std::vector<App::DocumentObject*> supports;
+            if (auto binder = freecad_cast<PartDesign::ShapeBinder*>(root)) {
+                supports = binder->Support.getValues();
+            }
+            else if (auto binder = freecad_cast<PartDesign::SubShapeBinder*>(root)) {
+                supports = binder->Support.getValues();
+            }
+            if (supports.size() != 1) {
+                break;
+            }
+            root = supports.front();
+        }
+        if (root && std::ranges::any_of(profiledBy(root).second, [&](auto other) {
+                return other != origin && touches(other);
+            })) {
+            return nullptr;
+        }
+        return origin;
+    }
     // In the history, from the shape towards the origin: the first item that uses the next one
     // (nearer the origin) as its profile. A pad and a pocket on one sketch: the one whose wall it
     // is. A pad on a binder of a face of a pad: the pad on the binder, not the pad below it (its
@@ -1091,9 +1119,10 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // must have the element in its tool's boundary, or the search goes on. Another candidate whose
     // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch): nothing tells them
     // apart.
-    // Once a candidate's tool didn't have the element (a draft of the pad on the binder tilted its
-    // side: [draft, pad, pad below, sketch]), the element may have been changed by something its
-    // history doesn't tell: every later candidate, also a plain one, needs it too.
+    // Once a candidate's tool didn't have the element (a fillet on the pad on the binder rounded
+    // its edge down into the pad below: [fillet, pad, pad below, sketch]), the element may have
+    // been changed by something its history doesn't tell: every later candidate, also a plain one,
+    // needs it too.
     bool failed = false;
     for (auto item = history.begin(); item != history.end(); ++item) {
         auto next = std::next(item);
@@ -1137,13 +1166,44 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // base, a box cut into it, another body's feature) made the element itself: a pad on a binder
     // of its face left that face as it was. So did an object between the origin and the shape
     // that isn't a feature of the body (another body's pad of the sketch a binder binds, an
-    // extrusion of it as the base), and a feature of the body that uses the origin otherwise than
-    // the candidates do (a loft through it as a section, a pipe along it as its spine).
+    // extrusion of it as the base), and a feature of the body that makes elements from the origin
+    // otherwise than the candidates do (a loft through it as a section, a pipe along it as its
+    // spine, a pad up to it), also through a binder of it.
     auto feature = freecad_cast<PartDesign::Feature*>(owner());
     PartDesign::Body* body = feature ? feature->getFeatureBody() : nullptr;
     if (!body || body->BaseFeature.getValue() == origin) {
         return nullptr;
     }
+    // The roles in which a feature makes elements from what it links (ops#224): not its other
+    // links, such as an attachment, a pattern's direction along the sketch's axis, or an
+    // expression (a fillet's radius from the sketch's placement)
+    static constexpr std::array roles {
+        "Sections",
+        "Spine",
+        "AuxiliarySpine",
+        "UpToFace",
+        "UpToFace2",
+        "UpToShape",
+        "UpToShape2",
+        "StartReference",
+    };
+    auto makesFrom = [&profiles, origin](App::DocumentObject* obj) {
+        // a profile that only the candidates have: the origin itself, as in the history's chain
+        auto based = freecad_cast<PartDesign::ProfileBased*>(obj);
+        if (based && based->Profile.getValue() == origin) {
+            return true;
+        }
+        return std::ranges::any_of(roles, [&](const char* role) {
+            auto link = freecad_cast<App::PropertyLinkBase*>(obj->getPropertyByName(role));
+            std::vector<App::DocumentObject*> linked;
+            if (link) {
+                link->getLinks(linked, true);
+            }
+            return std::ranges::any_of(linked, [&](App::DocumentObject* used) {
+                return std::ranges::find(profiles, used) != profiles.end();
+            });
+        });
+    };
     for (const Data::HistoryItem& item : history) {
         if (item.obj == origin) {
             continue;
@@ -1151,14 +1211,7 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj)) {
             return nullptr;
         }
-        // Not through an expression (a fillet's radius from the sketch's placement). getOutList()
-        // keeps those even with OutListNoExpression (the engine is a link property too).
-        const std::vector<App::DepEdge> links =
-            item.obj->getOutListProp(App::DocumentObject::OutListNoExpression);
-        const bool linked = std::ranges::any_of(links, [origin](const App::DepEdge& link) {
-            return link.toObj == origin;
-        });
-        if (linked && std::ranges::find(profiles, item.obj) == profiles.end()) {
+        if (makesFrom(item.obj)) {
             return nullptr;
         }
     }
