@@ -312,11 +312,17 @@ bool relinkAsMissing(
     // solves the references, since a missing reference is solved on every update of its target
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
     if (newFeature && !newFeature->Shape.getShape().isNull()) {
-        if (solver) {
-            App::solveElementReferences(newBase, {&link}, false, true);
+        // A throw would leave a reorder half-written (fork PR 270 review, L4), as in Rule::solve
+        try {
+            if (solver) {
+                App::solveElementReferences(newBase, {&link}, false, true);
+            }
+            else {
+                link.updateElementReference(newBase, false, true);
+            }
         }
-        else {
-            link.updateElementReference(newBase, false, true);
+        catch (Base::Exception& e) {
+            FC_ERR(link.getFullName() << ": " << e.what());
         }
     }
     return true;
@@ -435,36 +441,49 @@ bool Feature::relinkToMatchingSubelements(
     App::DocumentObject* newBase
 )
 {
-    if (!oldBase || !newBase || link.getValue() != oldBase) {
+    if (!oldBase || link.getValue() != oldBase) {
         return false;
-    }
-
-    auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
-    auto newFeature = freecad_cast<Part::Feature*>(newBase);
-    if (!oldFeature || !newFeature) {
-        return false;
-    }
-
-    const auto& oldShape = oldFeature->Shape.getShape();
-    if (oldShape.isNull()) {
-        return false;
-    }
-    if (link.inSolverDocument()) {
-        // Also onto a new base without a shape yet (ops#127, N1 2.2)
-        return relinkAsMissing(link, oldShape, newBase, true);
-    }
-    if (relinkByName(link, oldFeature, newFeature)) {
-        return true;
     }
     // A reorder that moved the old base below the owner (ops#285): left there, the link would
     // make a dependency cycle, which the reorder's cycle check doesn't see because it plans this
-    // link on the new base (N1 3.5). It moves there with its references missing, so the owner
-    // fails until they are re-picked. A link left on an earlier object (insert at the bar, N1 2.2)
+    // link on the new base (N1 3.5). A link left on an earlier object (insert at the bar, N1 2.2)
     // stays as it is.
-    if (comesAfterOwner(link, oldBase)) {
-        return relinkAsMissing(link, oldShape, newBase, false);
+    const bool cycle = comesAfterOwner(link, oldBase);
+
+    auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
+    auto newFeature = freecad_cast<Part::Feature*>(newBase);
+    const Part::TopoShape oldShape = oldFeature ? oldFeature->Shape.getShape() : Part::TopoShape();
+    if (newFeature && !oldShape.isNull()) {
+        if (link.inSolverDocument()) {
+            // Also onto a new base without a shape yet (ops#127, N1 2.2)
+            if (relinkAsMissing(link, oldShape, newBase, true)) {
+                return true;
+            }
+        }
+        else if (relinkByName(link, oldFeature, newFeature)) {
+            return true;
+        }
+        else if (cycle && relinkAsMissing(link, oldShape, newBase, false)) {
+            // with its references missing, so the owner fails until they are re-picked
+            return true;
+        }
     }
-    return false;
+    if (!cycle) {
+        return false;
+    }
+    // No new base (the owner is now the first solid), an old base that never computed, or a
+    // reference without a name to carry: the link is cleared, so the owner fails until it is
+    // re-picked (fork PR 270 review, M1 and L3)
+    std::string subs;
+    for (const auto& sub : link.getSubValues()) {
+        subs += (subs.empty() ? "" : ", ") + sub;
+    }
+    FC_WARN(
+        link.getFullName() << ": cleared its link to " << oldBase->getFullName() << " (" << subs
+                           << "), which a reorder moved below it"
+    );
+    link.setValue(nullptr);
+    return true;
 }
 
 void Feature::onChanged(const App::Property* prop)
