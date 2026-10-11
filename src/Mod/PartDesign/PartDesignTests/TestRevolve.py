@@ -27,6 +27,7 @@ import unittest
 import FreeCAD
 import Part
 import Sketcher
+from PartDesignTests.Scenarios import harness
 
 
 class TestRevolve(unittest.TestCase):
@@ -567,11 +568,14 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToFirstBaseFace(self):
         self.revolveUpToBaseFace(upToFirst=True)
 
-    def revolveTwoFacesUpToFace(self, kind):
+    def revolveTwoFaces(self, kind, sideType="One side", upToType="UpToFace"):
         """A profile of two separate rectangles, x in [1, 2] and [3, 4], z in [0, 2] on XZ about Z,
         up to the face x = 0 of a box (x in [-6, 0] for a Revolution, [0, 6] for a Groove,
-        y in [-6, 6], z in [0, 3]). Only the last face's elements would be named from the profile
-        (ops#263), so the feature fails with an error, as before ops#240."""
+        y in [-6, 6], z in [0, 3]: 216), or up to the first face. Each face is revolved on its own
+        up to its face and the tools are fused (ops#263): a quarter ring per face, 5 pi in all, or
+        a half ring per face for Symmetric, 10 pi. Refine is off: each ring's two cylinders are
+        faces of their own (two per side for Symmetric), named from the profile's lines, and no
+        two elements share a name."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = 6
@@ -593,25 +597,125 @@ class TestRevolve(unittest.TestCase):
             for start, end in zip(points, points[1:] + points[:1]):
                 sketch.addGeometry(Part.LineSegment(start, end), False)
         self.Doc.recompute()
-        [wall] = [
-            "Face%d" % (i + 1)
-            for i, face in enumerate(block.Shape.Faces)
-            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
-        ]
         revolution = body.newObject("PartDesign::" + kind, kind)
         revolution.Profile = sketch
         revolution.ReferenceAxis = (sketch, ["V_Axis"])
-        revolution.Type = "UpToFace"
-        revolution.UpToFace = (block, [wall])
+        revolution.Refine = False
+        revolution.SideType = sideType
+        revolution.Type = upToType
+        if upToType == "UpToFace":
+            revolution.UpToFace = (block, [self.wallAtXZero(block)])
         self.Doc.recompute()
-        self.assertFalse(revolution.isValid())
-        self.assertIn("several separate faces", revolution.getStatusString())
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
 
-    def testRevolutionTwoFacesUpToFaceFails(self):
-        self.revolveTwoFacesUpToFace("Revolution")
+        sides = 2 if sideType == "Symmetric" else 1
+        rings = sides * math.pi / 4 * ((2**2 - 1**2) + (4**2 - 3**2)) * 2
+        if kind == "Revolution":
+            self.assertAlmostEqual(revolution.Shape.Volume, 216 + rings, places=6)
+            tool = revolution.Shape.cut(block.Shape)
+        else:
+            self.assertAlmostEqual(revolution.Shape.Volume, 216 - rings, places=6)
+            tool = block.Shape.cut(revolution.Shape)
+        self.assertAlmostEqual(tool.Volume, rings, places=6)
+        bounds = tool.BoundBox
+        self.assertAlmostEqual(bounds.XMin, 0, places=6)
+        self.assertAlmostEqual(bounds.XMax, 4, places=6)
+        self.assertAlmostEqual(bounds.YMax - bounds.YMin, 4 * sides, places=6)
+        self.assertAlmostEqual(bounds.ZMin, 0, places=6)
+        self.assertAlmostEqual(bounds.ZMax, 2, places=6)
 
-    def testGrooveTwoFacesUpToFaceFails(self):
-        self.revolveTwoFacesUpToFace("Groove")
+        reverse = revolution.Shape.ElementReverseMap
+        for radius in (1, 2, 3, 4):
+            cylinders = [
+                "Face%d" % (i + 1)
+                for i, face in enumerate(revolution.Shape.Faces)
+                if isinstance(face.Surface, Part.Cylinder)
+                and abs(face.Surface.Radius - radius) < 1e-6
+            ]
+            self.assertEqual(len(cylinders), sides, radius)
+            for name in cylinders:
+                mapped = reverse.get(name)
+                mapped = [mapped] if isinstance(mapped, str) else list(mapped or [])
+                self.assertTrue(mapped, name)
+                for each in mapped:
+                    self.assertIn(f";{sketch.ID}^;SKT^;", FreeCAD.expandMappedName(each), name)
+        harness.assertEveryElementNamed(revolution.Shape)
+        harness.assertDistinctNames(revolution.Shape)
+
+    def testRevolutionTwoFacesUpToFace(self):
+        self.revolveTwoFaces("Revolution")
+
+    def testGrooveTwoFacesUpToFace(self):
+        self.revolveTwoFaces("Groove")
+
+    def testRevolutionTwoFacesUpToFirst(self):
+        """Up to first for each face on its own: each face's first face is the box's x = 0
+        (ops#263; before, the first face was looked for once, for the whole profile)."""
+        self.revolveTwoFaces("Revolution", upToType="UpToFirst")
+
+    def testGrooveTwoFacesUpToFirst(self):
+        self.revolveTwoFaces("Groove", upToType="UpToFirst")
+
+    def testRevolutionTwoFacesSymmetric(self):
+        self.revolveTwoFaces("Revolution", sideType="Symmetric")
+
+    def testGrooveTwoFacesSymmetric(self):
+        self.revolveTwoFaces("Groove", sideType="Symmetric")
+
+    def testRevolutionTwoFacesAcrossTheAxis(self):
+        """Faces on opposite sides of the axis whose sweeps overlap give the union of the sweeps
+        (ops#263, decision 44). The profile on XZ: A, x in [10, 14], and B, x in [-16, -12],
+        z in [0, 2], revolved about the origin's Z axis up to the face x = 0 of a wall x in
+        [-1, 0], y in [0, 30], z in [0, 3] (90). A sweeps 90 degrees, from 0 to the wall;
+        B sweeps 270, from 180 through 270 and 0 to the wall, across A's quarter at radii 12..14.
+        The tools are fused: A + B - their overlap."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        wall = body.newObject("PartDesign::AdditiveBox", "Wall")
+        wall.Length = 1
+        wall.Width = 30
+        wall.Height = 3
+        wall.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, 0, 0), FreeCAD.Rotation())
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        for x0, x1 in ((10, 14), (-16, -12)):
+            points = [
+                FreeCAD.Vector(x0, 0),
+                FreeCAD.Vector(x1, 0),
+                FreeCAD.Vector(x1, 2),
+                FreeCAD.Vector(x0, 2),
+            ]
+            for start, end in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(start, end), False)
+        self.Doc.recompute()
+        [zAxis] = [f for f in body.Origin.OriginFeatures if f.Role == "Z_Axis"]
+        [face] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(wall.Shape.Faces)
+            if abs(f.BoundBox.XMin) < 1e-9 and abs(f.BoundBox.XMax) < 1e-9
+        ]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (zAxis, [""])
+        revolution.Refine = False
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, [face])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(len(revolution.Shape.Solids), 1)
+        a = math.pi / 4 * (14**2 - 10**2) * 2
+        b = 3 * math.pi / 4 * (16**2 - 12**2) * 2
+        overlap = math.pi / 4 * (14**2 - 12**2) * 2
+        tool = revolution.Shape.cut(wall.Shape)
+        self.assertAlmostEqual(tool.Volume, a + b - overlap, places=6)
+        self.assertAlmostEqual(revolution.Shape.Volume, 90 + a + b - overlap, places=6)
+        # B's quarter from 180 to 270 is there, and nothing from 90 to 180 (only the wall)
+        self.assertTrue(revolution.Shape.isInside(FreeCAD.Vector(-10, -10, 1), 1e-7, True))
+        self.assertFalse(revolution.Shape.isInside(FreeCAD.Vector(-10, 10, 1), 1e-7, True))
+        harness.assertEveryElementNamed(revolution.Shape)
+        harness.assertDistinctNames(revolution.Shape)
 
     def profileAcross(self, body):
         """The profile x in [1, 3], z in [0, 2] on XZ, revolved about Z (its V axis) in the tests
