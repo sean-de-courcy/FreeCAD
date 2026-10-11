@@ -49,6 +49,10 @@ cli  PartDesignTests.TestNamingScenarios.SolverNotchThenFill.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SolverNotchRedrawn.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.SolverNotchRedrawn.test_fillet_edge_V2multi
 
+reason: a fillet on an edge whose sketch line was deleted and drawn again (a new geometry ID) breaks without the solver (V2 and V2multi; V2s guesses it in place, ops#284)
+cli  PartDesignTests.TestNamingScenarios.ChamferBesideFilletEndRedrawn.test_fillet_edge_V2
+cli  PartDesignTests.TestNamingScenarios.ChamferBesideFilletEndRedrawn.test_fillet_edge_V2multi
+
 reason: a dress-up on an edge that a notch splits while the side's rest runs past the edge's old end keeps the shortened line's piece; the scenario expects broken with both edges as candidates, since the rest is partly new (V2 and V2multi; V2s breaks it, ops#7 Task 2 PR 7)
 cli  PartDesignTests.TestNamingScenarios.NotchAndExtend.test_fillet_edge_V2
 cli  PartDesignTests.TestNamingScenarios.NotchAndExtend.test_fillet_edge_V2multi

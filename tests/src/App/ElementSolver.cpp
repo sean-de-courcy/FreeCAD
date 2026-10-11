@@ -3175,6 +3175,48 @@ TEST(Continuation, overlappingPiecesBreak)
               (std::vector<std::string> {"Edge1", "Edge2", "Edge3"}));
 }
 
+// ops#284: a fillet (tag 9) on the edge beyond the old edge's end leaves a line on the top face,
+// collinear with the old edge; when the old edge shortens, that line lies on its old place. It is
+// the fillet's edge, made from the top face and the side face, and the side face puts the old
+// edge's maker (tag 7) in its lineage: no piece. Another feature's MOD piece of the old edge
+// keeps its maker and is one.
+TEST(Continuation, anotherMakersEdgeIsNoPiece)
+{
+    Notch notch;
+    const std::string topFace = generated({sketchEdge(4)}, 7, "Extrude", 'F', 1);
+    const std::string sideFace = generated({sketchEdge(1)}, 7, "Extrude", 'F', 2);
+    const std::string filletEnd = upper({topFace, sideFace}, 9, "FLT");
+    ASSERT_EQ(NameAncestry::makerTag(filletEnd), "9");
+    ASSERT_TRUE(NameAncestry::hasLineageTag(filletEnd, "7"));
+    const std::string kept = "exact Edge1 0 [] ";
+    for (auto policy :
+         {Data::SolvePolicy::Expand, Data::SolvePolicy::One, Data::SolvePolicy::Equivalent}) {
+        auto input = notch.input(policy);
+        input.pool["Edge"][1].names = {filletEnd};
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]), kept) << static_cast<int>(policy);
+
+        //   past the old end too: no run-past break
+        auto fps = notch.fingerprints;
+        fps["Edge2"] = lineX(12, 26);
+        measure(input, fps, nullptr);
+        EXPECT_EQ(describe(Data::solveOwner(input)[0]), kept) << static_cast<int>(policy);
+    }
+
+    //   a later feature's piece of the old edge (MOD) keeps its maker
+    auto input = notch.input(Data::SolvePolicy::Expand);
+    input.pool["Edge"][1].names = {piece(notch.hitName, 9, "FLT", 1, 'E')};
+    EXPECT_EQ(Data::solveOwner(input)[0].elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+
+    //   one of its names with the maker is enough
+    input.pool["Edge"][1].names = {filletEnd, notch.pieceName};
+    EXPECT_EQ(Data::solveOwner(input)[0].elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+
+    //   without sameMaker, as before
+    input.pool["Edge"][1].names = {filletEnd};
+    input.sameMaker = false;
+    EXPECT_EQ(Data::solveOwner(input)[0].elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+}
+
 TEST(Continuation, piecesLeaveOtherPools)
 {
     // A missing reference whose only candidate (a name match) is the piece taken: broken, unless
@@ -3188,7 +3230,8 @@ TEST(Continuation, piecesLeaveOtherPools)
     EXPECT_EQ(outcomes[0].tier, 4);
     EXPECT_EQ(outcomes[1].status, SolveStatus::Broken) << describe(outcomes[1]);
 
-    notch.pieceName = generated({old}, 9, "FUS", 'E');
+    //   (made by the hit's maker: another feature's edge is no piece of the hit, ops#284)
+    notch.pieceName = generated({old}, 7, "FUS", 'E');
     input = notch.input(Data::SolvePolicy::Expand);
     input.entries.push_back(missing(old, "Edge", {notch.pieceName}));
     outcomes = Data::solveOwner(input);

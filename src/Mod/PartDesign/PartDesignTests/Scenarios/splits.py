@@ -333,6 +333,76 @@ class NotchAndExtend(SplitFilletNotch):
         self.split = True
 
 
+class ChamferBesideFilletEnd(SplitModel):
+    """A pocket, rectangle (10, 5)-(18, 12) 3 deep, in a block 30 x 20 x 10; a fillet, radius
+    0.5, on the pocket's back rim edge, and a chamfer, 0.25, on its right rim edge, built on the
+    fillet. The fillet's end leaves a 0.5 mm line on the top face collinear with the right rim
+    edge, beyond its end (y 12..12.5). The back line then moves in to y = 11.5 (the right, back
+    and left lines moved, their geometry IDs kept): the right rim edge ends at y = 11.5, and the
+    fillet's end line now lies on the old rim edge's place (y 11.5..12). It is the fillet's edge,
+    not a piece of the rim: the chamfer keeps the rim edge alone. Found by the randomized
+    sequences (ops#284, seed 57, with a redraw: ChamferBesideFilletEndRedrawn). The chamfer's
+    result is the same with the extra line, so `chamfer_set` judges the stored set alone."""
+
+    REFS = ("fillet_edge", "chamfer_edge", "chamfer_set")
+    width, depth, height = 30, 20, 10
+    x0, y0, x1, y1 = 10, 5, 18, 12
+    radius, size = 0.5, 0.25
+    back = y1
+
+    def backRimEdge(self):
+        return edge("line", direction=X, contains=((self.x0 + self.x1) / 2, self.back, self.height))
+
+    def rightRimEdge(self):
+        return edge("line", direction=Y, contains=(self.x1, self.y0 + 1, self.height))
+
+    def build(self, doc):
+        body = self.block(doc)
+        profile = m.sketch(
+            doc,
+            "PocketProfile",
+            m.rectangle(self.x0, self.y0, self.x1, self.y1),
+            body,
+            z=self.height,
+        )
+        pocket = m.pocket(body, profile, 3)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pocket, self.names(pocket, self.backRimEdge()))
+        fillet.Radius = self.radius
+        doc.recompute()
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (fillet, self.names(fillet, self.rightRimEdge()))
+        chamfer.Size = self.size
+        self.ref("fillet_edge", fillet, "Base", self.backRimEdge, Filleted(self.radius))
+        self.ref("chamfer_edge", chamfer, "Base", self.rightRimEdge, Chamfered(self.size))
+        self.ref("chamfer_set", chamfer, "Base", self.rightRimEdge)
+
+    def edit(self, doc):
+        self.back = self.y1 - 0.5
+        x0, y0, x1, back = self.x0, self.y0, self.x1, self.back
+        lines = {
+            1: ((x1, y0), (x1, back)),
+            2: ((x1, back), (x0, back)),
+            3: ((x0, back), (x0, y0)),
+        }
+        m.setLines(doc.PocketProfile, lines)
+
+
+class ChamferBesideFilletEndRedrawn(ChamferBesideFilletEnd):
+    """ChamferBesideFilletEnd, with the back line deleted and drawn again at y = 11.5 (a new
+    geometry ID), as in seed 57: the fillet's edge is guessed in place of the old one, and the
+    chamfer still keeps the rim edge alone."""
+
+    def edit(self, doc):
+        self.back = self.y1 - 0.5
+        x0, y0, x1, back = self.x0, self.y0, self.x1, self.back
+        profile = doc.PocketProfile
+        m.setLines(profile, {1: ((x1, y0), (x1, back)), 3: ((x0, back), (x0, y0))})
+        profile.delGeometry(2)
+        profile.addGeometry(m.polyline([(x1, back), (x0, back)]), False)
+
+
 class DraftFaceNotch(SplitModel):
     """A draft, 5 degrees, of the block's front face (y = 0) on the bottom face; a notch (x 8..12,
     2 deep) is then cut into the front side of the block's sketch, as in SplitFilletNotch. The

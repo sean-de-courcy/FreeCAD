@@ -2557,6 +2557,21 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             auto extent = OldExtent::of(entry.fingerprint, eps, input.tolerances, &now);
             auto hitRange = extent->interval(now);
             const auto& hitFaces = facesOf(hit);
+            // A piece is the old element's maker's own edge (ops#284): another feature's edge on
+            // the old edge's line, such as a fillet's end on the face the edge bounds, is no piece
+            // of it, though that face puts the maker in its lineage.
+            const std::string maker = input.sameMaker ? NameAncestry::makerTag(entry.exactName)
+                                                      : std::string();
+            auto otherMaker = [&](const SolveInput::Element& element) {
+                return !maker.empty()
+                    && std::none_of(
+                        element.names.begin(),
+                        element.names.end(),
+                        [&](const std::string& name) {
+                            return NameAncestry::makerTag(name) == maker;
+                        }
+                    );
+            };
             std::vector<std::pair<int, std::pair<double, double>>> continued;  // position, range
             std::vector<int> pastEnd;
             std::string sharedFace;
@@ -2572,6 +2587,9 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                 bool within = extent->within(*range);
                 if (!within && extent->overlap(*range) <= eps) {
                     continue;  // beyond the old ends, at most touching one
+                }
+                if (otherMaker(pool.elements[k])) {
+                    continue;
                 }
                 const auto& faces = facesOf(index);
                 auto shared = std::find_if(faces.begin(), faces.end(), [&](const auto& face) {
