@@ -1089,6 +1089,7 @@ void prepareProfileBased(
             const std::size_t used = loft ? selection.size()
                                           : (pipe && selection.size() == 2 ? 2 : 1);
             QStringList dropped;
+            QString spineNote;
             for (std::size_t index = 1; index < selection.size(); ++index) {
                 App::DocumentObject* obj = selection[index].getObject();
                 if (!obj) {
@@ -1100,21 +1101,34 @@ void prepareProfileBased(
                     continue;
                 }
                 if (pipe) {
-                    for (const auto& sub : selection[index].getSubNames()) {
+                    const auto& subs = selection[index].getSubNames();
+                    bool edge = false;
+                    for (const auto& sub : subs) {
                         if (sub.find("Edge") == std::string::npos) {
                             dropped << QStringLiteral("'%1' %2").arg(label, QString::fromStdString(sub));
                         }
+                        else {
+                            edge = true;
+                        }
+                    }
+                    if (!subs.empty() && !edge) {
+                        // with no edge left, the spine is the whole object (PR 255 review L3)
+                        spineNote = QObject::tr(" The whole of '%1' is the spine.").arg(label);
                     }
                 }
             }
             App::DocumentObject* profile = selection.front().getObject();
-            const QString profileLabel = QString::fromUtf8(profile->Label.getValue());
+            const QString profileLabel =
+                profile ? QString::fromUtf8(profile->Label.getValue()) : QString();
             base_worker(profile, selection.front().getSubNames());
-            if (!dropped.isEmpty()) {
+            // only when base_worker made a feature: it makes none on another object, such as an
+            // origin plane (PR 255 review L2)
+            if (!dropped.isEmpty() && profile && profile->isDerivedFrom<Part::Feature>()) {
                 Gui::getMainWindow()->showMessage(
                     QObject::tr("The profile is '%1': a feature takes the elements of one object. "
                                 "Left out of the selection: %2.")
-                        .arg(profileLabel, dropped.join(QStringLiteral(", "))),
+                            .arg(profileLabel, dropped.join(QStringLiteral(", ")))
+                        + spineNote,
                     10000
                 );
             }

@@ -676,7 +676,7 @@ void CmdPartDesignMigrate::activated(int iMsg)
                 feature->getNameInDocument()
             );
 
-            PartDesignGui::relinkToBody(feature);
+            PartDesignGui::relinkToBody(feature, feature == chainIt->back());
         }
     }
 

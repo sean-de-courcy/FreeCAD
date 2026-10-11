@@ -110,8 +110,10 @@ void fixSketchSupport(Sketcher::SketchObject* sketch);
  */
 bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups = false);
 
-/// Relink all nonPartDesign features to the body instead of the given partDesign Feature
-void relinkToBody(PartDesign::Feature* feature);
+/// Relink all nonPartDesign features to the body instead of the given partDesign Feature. An
+/// element of the feature is relinked only when it is the chain's last ( last): the body's
+/// shape is the last feature's, so another feature's Face3 would be another face of the body
+void relinkToBody(PartDesign::Feature* feature, bool last);
 
 /// Check if feature is dependent on anything except movable sketches and datums
 bool isFeatureMovable(App::DocumentObject* feature);
