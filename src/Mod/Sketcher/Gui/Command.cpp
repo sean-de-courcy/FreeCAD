@@ -33,6 +33,7 @@
 #include <QSignalBlocker>
 #include <QWidgetAction>
 
+#include <iterator>
 #include <set>
 
 #include <Precision.hxx>
@@ -1082,10 +1083,11 @@ namespace {
     //     GeoUndef
     //   - A link keeps its type (projection, intersection or both); links of several sources to
     //     the same element give one link with every type they ask for
-    //   - A source geometry maps to the dstSketch geometry with the same reference and the same
-    //     shape, never by position: a projection doesn't stand in for an intersection, and a
-    //     source in another plane finds nothing. No match maps to GeoUndef, and the constraints
-    //     on it are skipped
+    //   - A source geometry maps to a dstSketch geometry of the same link and the same kind (a
+    //     projection to one the projection gave, an intersection to one the intersection gave)
+    //     with the same shape, never by position. No match maps to GeoUndef, and the constraints
+    //     on it are skipped. Shapes are compared in sketch coordinates: a source in another
+    //     plane finds no match for a geometry that lands elsewhere there
     //   - All links are added before any mapping is made, so that no later addition changes a
     //     geometry an earlier mapping uses
     //
@@ -1131,6 +1133,16 @@ namespace {
             return newSubs;
         };
 
+        // helper: the Ids of dstSketch's external geometries (not the axes)
+        auto dstGeometryIds = [&]() {
+            std::set<long> ids;
+            const auto& geos = dstSketch->getExternalGeometry();
+            for (size_t k = 2; k < geos.size(); ++k) {
+                ids.insert(Sketcher::GeometryFacade::getId(geos[k]));
+            }
+            return ids;
+        };
+
         // --- 1) the links to add, in the order the sources give them, and their types ---
 
         struct Link
@@ -1139,10 +1151,13 @@ namespace {
             std::string sub;
             bool projection;
             bool intersection;
+            // the Ids of the dst geometries that each add gave
+            std::set<long> projectionIds;
+            std::set<long> intersectionIds;
         };
         std::vector<Link> links;
-        // per source: the refNames of its out-of-scope links
-        std::vector<std::set<std::string>> outOfScope(srcSketches.size());
+        // per source, per ExternalGeometry entry: its index in links, or -1 (out of scope)
+        std::vector<std::vector<int>> entryLinks(srcSketches.size());
 
         for (size_t s = 0; s < srcSketches.size(); ++s) {
             const auto* srcSketch = srcSketches[s];
@@ -1153,15 +1168,15 @@ namespace {
             for (size_t i = 0; i < srcExtObjs.size() && i < srcExtSubs.size(); ++i) {
                 auto* srcExtObj = srcExtObjs[i];
                 const auto& srcExtSub = srcExtSubs[i];
-                std::string objName = srcExtObj->getNameInDocument();
 
                 if (!isExternalObjectInScope(srcExtObj)) {
                     QString msg = qApp->translate(
                         "CmdSketcherMergeSketches",
                         "External geometry '%1' is out of scope:\n")
-                        .arg(QString::fromStdString(objName + "." + srcOldSubs[i]));
+                        .arg(QString::fromStdString(
+                            std::string(srcExtObj->getNameInDocument()) + "." + srcOldSubs[i]));
                     Base::Console().message(msg.toUtf8().constData());
-                    outOfScope[s].insert(objName + "." + srcExtSub);
+                    entryLinks[s].push_back(-1);
                     continue;
                 }
 
@@ -1172,59 +1187,98 @@ namespace {
                     return link.obj == srcExtObj && link.sub == srcExtSub;
                 });
                 if (it == links.end()) {
-                    links.push_back({srcExtObj, srcExtSub, projection, intersection});
+                    links.push_back({srcExtObj, srcExtSub, false, false, {}, {}});
+                    it = std::prev(links.end());
                 }
-                else {
-                    it->projection = it->projection || projection;
-                    it->intersection = it->intersection || intersection;
-                }
+                it->projection = it->projection || projection;
+                it->intersection = it->intersection || intersection;
+                entryLinks[s].push_back(static_cast<int>(it - links.begin()));
             }
         }
 
-        // --- 2) add them to dst; a failure leaves its geometries without a match ---
+        // --- 2) add them to dst, and note which geometries each add gave; a failed add gives
+        //        none, so its source geometries find no match ---
 
-        for (const auto& link : links) {
+        // the Ids an add gave: the new ones (the projection is added first, so an intersection
+        // added to it keeps the projection's Ids on the projection's geometries)
+        auto addAndCollect = [&](const Link& link, bool intersection, std::set<long>& ids) {
+            auto before = dstGeometryIds();
+            if (dstSketch->addExternal(link.obj, link.sub.c_str(), false, intersection) < 0) {
+                return;
+            }
+            for (long id : dstGeometryIds()) {
+                if (!before.count(id)) {
+                    ids.insert(id);
+                }
+            }
+        };
+        for (auto& link : links) {
             if (link.projection) {
-                dstSketch->addExternal(link.obj, link.sub.c_str(), false, false);
+                addAndCollect(link, false, link.projectionIds);
             }
             if (link.intersection) {
-                dstSketch->addExternal(link.obj, link.sub.c_str(), false, true);
+                addAndCollect(link, true, link.intersectionIds);
             }
         }
 
-        // --- 3) map each source's geometries to dst's by reference and shape ---
+        // --- 3) map each source geometry to a dst geometry of its link and kind, by shape ---
 
         const auto& dstGeos = dstSketch->getExternalGeometry();
         std::vector<std::map<int, int>> maps(srcSketches.size());
         for (size_t s = 0; s < srcSketches.size(); ++s) {
+            const auto* srcSketch = srcSketches[s];
             auto& extGeoIdMap = maps[s];
+
+            // the candidates for each source geometry Id: the Ids its link's add of its kind gave
+            std::map<long, const std::set<long>*> candidatesOf;
+            std::map<long, std::set<long>> both;
+            for (size_t i = 0; i < entryLinks[s].size(); ++i) {
+                if (entryLinks[s][i] < 0) {
+                    continue;
+                }
+                const auto& link = links[entryLinks[s][i]];
+                int type = srcSketch->externalType(static_cast<int>(i));
+                const std::set<long>* candidates = &link.projectionIds;
+                if (type == static_cast<int>(Sketcher::ExtType::Intersection)) {
+                    candidates = &link.intersectionIds;
+                }
+                else if (type == static_cast<int>(Sketcher::ExtType::Both)) {
+                    auto& ids = both[static_cast<long>(i)];
+                    ids = link.projectionIds;
+                    ids.insert(link.intersectionIds.begin(), link.intersectionIds.end());
+                    candidates = &ids;
+                }
+                for (long id : srcSketch->externalGeometryIds(static_cast<int>(i))) {
+                    candidatesOf[id] = candidates;
+                }
+            }
+
             std::set<int> taken;
             int srcGeoId = 0;
-            for (const auto* geo : srcSketches[s]->getExternalGeometry()) {
+            for (const auto* geo : srcSketch->getExternalGeometry()) {
                 --srcGeoId;
                 if (srcGeoId > Sketcher::GeoEnum::RefExt) {
                     extGeoIdMap[srcGeoId] = srcGeoId; // the H/V axes
                     continue;
                 }
                 extGeoIdMap[srcGeoId] = Sketcher::GeoEnum::GeoUndef;
-                const auto& ref = Sketcher::ExternalGeometryFacade::getFacade(geo)->getRef();
-                if (ref.empty() || outOfScope[s].count(ref)) {
-                    printSkipped(geo);
-                    continue;
-                }
-                int dstGeoId = 0;
-                for (const auto* dstGeo : dstGeos) {
-                    --dstGeoId;
-                    if (dstGeoId > Sketcher::GeoEnum::RefExt || taken.count(dstGeoId)
-                        || Sketcher::ExternalGeometryFacade::getFacade(dstGeo)->getRef() != ref) {
-                        continue;
-                    }
-                    // equal candidates (a projection and an intersection that coincide) are
-                    // the same geometry: the first is taken
-                    if (geo->isSame(*dstGeo, Precision::Confusion(), Precision::Angular())) {
-                        extGeoIdMap[srcGeoId] = dstGeoId;
-                        taken.insert(dstGeoId);
-                        break;
+                auto candidates = candidatesOf.find(Sketcher::GeometryFacade::getId(geo));
+                if (candidates != candidatesOf.end()) {
+                    int dstGeoId = 0;
+                    for (const auto* dstGeo : dstGeos) {
+                        --dstGeoId;
+                        if (dstGeoId > Sketcher::GeoEnum::RefExt || taken.count(dstGeoId)
+                            || !candidates->second->count(
+                                Sketcher::GeometryFacade::getId(dstGeo))) {
+                            continue;
+                        }
+                        // within one kind, equal candidates are the same geometry: the first
+                        // is taken
+                        if (geo->isSame(*dstGeo, Precision::Confusion(), Precision::Angular())) {
+                            extGeoIdMap[srcGeoId] = dstGeoId;
+                            taken.insert(dstGeoId);
+                            break;
+                        }
                     }
                 }
                 if (extGeoIdMap[srcGeoId] == Sketcher::GeoEnum::GeoUndef) {

@@ -173,3 +173,52 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
         merged = self.merge(s3, s1)
         self.assertEqual(merged.Placement.Base.z, 6)
         self.assertEqual([c for c in merged.Constraints if c.Type == "PointOnObject"], [])
+
+    def test_merge_pairs_an_intersection_with_the_intersection_not_an_equal_projection(self):
+        """PR 233 review M1: F' is the face y = 0 of an untilted box, perpendicular to the
+        plane z = 5. Its projection there collapses onto the same line as its section, in the
+        same direction (for the faces x = const the two run opposite ways). SA links F' as a
+        projection, SB as an intersection with a constraint on the section. Merging SA then SB:
+        SB's constraint names a geometry of the merged link's intersection (the slots after the
+        projection's), not the equal projected line."""
+        box = self.doc.addObject("Part::Box", "Upright")
+        box.Placement = FreeCAD.Placement(V(20, 0, 0), FreeCAD.Rotation())
+        self.doc.recompute()
+        face = next(
+            "Face%d" % (i + 1)
+            for i, f in enumerate(box.Shape.Faces)
+            if (f.CenterOfMass - V(25, 0, 5)).Length < 1e-6
+        )
+        sa = self.make_sketch("SA", 5)
+        sa.addExternal(box.Name, face)
+        sa.addGeometry(Part.LineSegment(V(40, 0, 0), V(50, 0, 0)), False)
+        self.doc.recompute()
+        projected = len(sa.ExternalGeo) - 2
+        self.assertGreater(projected, 0)
+        sb = self.make_sketch("SB", 5)
+        sb.addExternal(box.Name, face, False, True)
+        sb.addGeometry(Part.LineSegment(V(25, 0, 0), V(25, 5, 0)), False)
+        self.doc.recompute()
+        self.assertEqual(len(sb.ExternalGeo), 2 + 1)
+        section = sb.ExternalGeo[2]
+        # the section shares its shape with a projected line: the case M1 is about
+        self.assertTrue(
+            any(
+                isinstance(g, Part.LineSegment)
+                and (g.StartPoint - section.StartPoint).Length < 1e-7
+                and (g.EndPoint - section.EndPoint).Length < 1e-7
+                for g in sa.ExternalGeo[2:]
+            )
+        )
+        sb.addConstraint(Sketcher.Constraint("PointOnObject", 0, 1, -3))
+        self.doc.recompute()
+
+        merged = self.merge(sa, sb)
+        self.assertEqual(list(merged.ExternalTypes), [2])
+        on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
+        self.assertEqual(len(on_object), 1)
+        slot = -on_object[0].Second - 1
+        self.assertGreaterEqual(slot, 2 + projected, (slot, projected))
+        geo = merged.ExternalGeo[slot]
+        self.assertLess((geo.StartPoint - section.StartPoint).Length, 1e-7)
+        self.assertLess((geo.EndPoint - section.EndPoint).Length, 1e-7)
