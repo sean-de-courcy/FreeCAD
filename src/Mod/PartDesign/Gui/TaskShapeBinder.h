@@ -86,6 +86,7 @@ private:
     void supportChanged(const QString&);
     void clearButtons();
     void deleteItem();
+    void refuseRemovingTheLastElement() const;
     void exitSelectionMode();
 
     bool supportShow = false;

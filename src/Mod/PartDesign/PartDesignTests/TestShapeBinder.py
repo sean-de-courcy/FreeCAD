@@ -50,6 +50,43 @@ class TestShapeBinder(unittest.TestCase):
         self.assertIn("Box", self.ShapeBinder.OutList[0].Label)
         self.assertIn("Body001", self.ShapeBinder.InList[0].Label)
 
+    def _twoBoxesAndBinder(self):
+        """Two 10 mm Part boxes, the second at x = 20, and a ShapeBinder in a body."""
+        box = self.Doc.addObject("Part::Box", "Box")
+        other = self.Doc.addObject("Part::Box", "Box001")
+        other.Placement.Base = FreeCAD.Vector(20, 0, 0)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        binder = body.newObject("PartDesign::ShapeBinder", "ShapeBinder")
+        return box, other, binder
+
+    def testSupportOnTwoObjectsFails(self):
+        """A binder binds one object: a Support on two fails its recompute and names the one
+        it would drop, instead of binding the first object's face alone (ops#251)."""
+        box, other, binder = self._twoBoxesAndBinder()
+        binder.Support = [(box, "Face6"), (other, "Face6")]
+        self.Doc.recompute()
+        self.assertFalse(binder.isValid())
+        self.assertIn("Box001", binder.getStatusString())
+
+    def testSupportWithWholeObjectAndElementsFails(self):
+        """The whole box and one of its faces: neither reading is the user's, so the recompute
+        fails instead of binding the whole box (ops#251)."""
+        box, _, binder = self._twoBoxesAndBinder()
+        binder.Support = [(box, ""), (box, "Face6")]
+        self.Doc.recompute()
+        self.assertFalse(binder.isValid())
+        self.assertIn("Face6", binder.getStatusString())
+
+    def testSupportOnOneObjectBindsItsFaces(self):
+        """Two faces of one box still bind: the 10 x 10 faces at z = 0 and z = 10 (ops#251)."""
+        box, _, binder = self._twoBoxesAndBinder()
+        binder.Support = [(box, ("Face5", "Face6"))]
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(len(binder.Shape.Faces), 2)
+        self.assertAlmostEqual(binder.Shape.Area, 200, places=6)
+        self.assertEqual(sorted(round(f.CenterOfMass.z, 6) for f in binder.Shape.Faces), [0, 10])
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestShapeBinder")

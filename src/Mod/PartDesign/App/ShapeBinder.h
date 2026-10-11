@@ -59,6 +59,10 @@ public:
         App::GeoFeature*& object,
         std::vector<std::string>& subobjects
     );
+    /// Why getFilteredReferences would leave some of prop's references out (more than one
+    /// object, or an object both whole and by its elements), or empty when it keeps them all
+    /// (ops#251)
+    static std::string droppedReferences(const App::PropertyLinkSubList* prop);
     static Part::TopoShape buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs);
 
     const char* getViewProviderName() const override
