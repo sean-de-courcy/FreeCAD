@@ -55,7 +55,6 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Selection/SelectionObject.h>
-#include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
@@ -1281,30 +1280,46 @@ private:
     App::DocumentObject* sketch;
 };
 
+// FreeCAD-CH (ops#246): the GeoIds of the external geometries that ExternalGeometry's entry
+// `index` gives. A link can give several (a face's edges, an intersection), so the entry's index
+// isn't a GeoId: taken as one, an earlier multi-geometry link shifted a pick onto another
+// geometry, silently.
+std::vector<int> externalGeoIdsOfLink(Sketcher::SketchObject* sketch, int index)
+{
+    std::vector<int> geoIds;
+    const auto& geos = sketch->getExternalGeometry();
+    for (long id : sketch->externalGeometryIds(index)) {
+        for (size_t geo = 0; geo < geos.size(); ++geo) {
+            if (GeometryFacade::getId(geos[geo]) == id) {
+                // ExternalGeo[k] has GeoId -1 - k (the axes are -1 and -2)
+                geoIds.push_back(-1 - static_cast<int>(geo));
+                break;
+            }
+        }
+    }
+    return geoIds;
+}
+
+// The GeoId of the one external geometry the link to source's subName gives. GeoUndef when there
+// is no such link, or (linked set to true) when the link gives none or several: the caller then
+// refuses the pick with a message and doesn't add the link again (PR 228 review M1).
 int findExternalReference(Sketcher::SketchObject* sketch,
                           App::DocumentObject* source,
-                          const std::string& subName)
+                          const std::string& subName,
+                          bool* linked = nullptr)
 {
+    if (linked) {
+        *linked = false;
+    }
     const auto sourceReferences = sketch->ExternalGeometry.getValues();
     const auto subReferences = sketch->ExternalGeometry.getSubValues();
     for (size_t index = 0; index < sourceReferences.size(); ++index) {
         if (sourceReferences[index] == source && subReferences[index] == subName) {
-            // FreeCAD-CH (ops#246): the link's index isn't a GeoId. A link can give several
-            // external geometries (a face's edges, an intersection), so an earlier one shifted
-            // the result onto another geometry, silently. Take the one geometry this link gave;
-            // none or several: GeoUndef, and the caller reports the failure.
-            const std::vector<long> ids = sketch->externalGeometryIds(static_cast<int>(index));
-            if (ids.size() != 1) {
-                return GeoEnum::GeoUndef;
+            if (linked) {
+                *linked = true;
             }
-            const auto& geos = sketch->getExternalGeometry();
-            for (size_t geo = 0; geo < geos.size(); ++geo) {
-                if (ExternalGeometryFacade::getFacade(geos[geo])->getId() == ids.front()) {
-                    // ExternalGeo[k] has GeoId -1 - k (the axes are -1 and -2)
-                    return -1 - static_cast<int>(geo);
-                }
-            }
-            return GeoEnum::GeoUndef;
+            const std::vector<int> geoIds = externalGeoIdsOfLink(sketch, static_cast<int>(index));
+            return geoIds.size() == 1 ? geoIds.front() : GeoEnum::GeoUndef;
         }
     }
 
@@ -2012,27 +2027,29 @@ protected:
 
     int materializeExternalReference(App::DocumentObject* source, const std::string& subName)
     {
+        bool linked = false;
         const int existingGeoId =
-            findExternalReference(sketchgui->getSketchObject(), source, subName);
+            findExternalReference(sketchgui->getSketchObject(), source, subName, &linked);
         if (existingGeoId != GeoEnum::GeoUndef) {
             return existingGeoId;
         }
 
-        try {
-            openCommand(QT_TRANSLATE_NOOP("Command", "Add external geometry"));
-            const int externalGeoId =
-                addProjectedExternalReference(sketchgui->getSketchObject(), source, subName);
-            commitCommand();
-            if (externalGeoId != GeoEnum::GeoUndef) {
-                return externalGeoId;
+        // FreeCAD-CH (PR 228 review): a link that gives none or several geometries is refused,
+        // not added again (that changed its type); a new link that does is undone
+        if (!linked) {
+            try {
+                openCommand(QT_TRANSLATE_NOOP("Command", "Add external geometry"));
+                const int externalGeoId =
+                    addProjectedExternalReference(sketchgui->getSketchObject(), source, subName);
+                if (externalGeoId != GeoEnum::GeoUndef) {
+                    commitCommand();
+                    return externalGeoId;
+                }
+                abortCommand();
             }
-        }
-        catch (const Base::Exception&) {
-            Gui::NotifyError(sketchgui,
-                             QT_TRANSLATE_NOOP("Notifications", "Error"),
-                             QT_TRANSLATE_NOOP("Notifications", "Failed to add external geometry"));
-            abortCommand();
-            return GeoEnum::GeoUndef;
+            catch (const Base::Exception&) {
+                abortCommand();
+            }
         }
 
         Gui::NotifyError(sketchgui,
@@ -3941,12 +3958,31 @@ protected:
 
     int materializeExternalReference(App::DocumentObject* source, const std::string& subName)
     {
-        const int existingGeoId = findExternalReference(Obj, source, subName);
+        bool linked = false;
+        const int existingGeoId = findExternalReference(Obj, source, subName, &linked);
         if (existingGeoId != GeoEnum::GeoUndef) {
             return existingGeoId;
         }
 
-        const int externalGeoId = addProjectedExternalReference(Obj, source, subName);
+        // FreeCAD-CH (PR 228 review): a link that gives none or several geometries is refused,
+        // not added again (that changed its type, or threw out of the selection observer); a new
+        // link that does is removed again
+        int externalGeoId = GeoEnum::GeoUndef;
+        if (!linked) {
+            const int links = Obj->ExternalGeometry.getSize();
+            try {
+                externalGeoId = addProjectedExternalReference(Obj, source, subName);
+            }
+            catch (const Base::Exception&) {
+                externalGeoId = GeoEnum::GeoUndef;
+            }
+            if (externalGeoId == GeoEnum::GeoUndef && Obj->ExternalGeometry.getSize() > links) {
+                const std::vector<int> geoIds = externalGeoIdsOfLink(Obj, links);
+                if (!geoIds.empty()) {
+                    Obj->delExternal(geoIds);
+                }
+            }
+        }
         if (externalGeoId == GeoEnum::GeoUndef) {
             Gui::NotifyError(
                 sketchgui,
@@ -3963,9 +3999,15 @@ protected:
     {
         bool restored = false;
         for (auto& reference : externalReferences) {
-            const int geoId = findExternalReference(Obj, reference.source, reference.subName);
+            bool linked = false;
+            const int geoId =
+                findExternalReference(Obj, reference.source, reference.subName, &linked);
             if (geoId != GeoEnum::GeoUndef) {
                 reference.geoId = geoId;
+                continue;
+            }
+            if (linked) {
+                // none or several geometries: not added again (PR 228 review M1)
                 continue;
             }
 
