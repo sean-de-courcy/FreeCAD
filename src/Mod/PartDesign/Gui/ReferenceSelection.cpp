@@ -379,22 +379,13 @@ bool getReferencedSelection(
                 const std::optional<std::string> element =
                     PartDesignGui::TaskFeaturePick::copiedElement(selObj, copy, subname);
                 if (!element) {
-                    subname = Data::oldElementName(subname.c_str());
                     // removed before the message box, whose event loop would otherwise run
-                    // with it (PR 224 review L5); makeCopy made it in the active document
+                    // with it (PR 224 review L5)
                     copy->getDocument()->removeObject(copy->getNameInDocument());
                     QMessageBox::warning(
                         Gui::getMainWindow(),
                         QObject::tr("Copy differs"),
-                        QObject::tr(
-                            "%1 of '%2' is another element on its copy, whose shape differs "
-                            "(or the element can't be read). Recompute '%2' and select the "
-                            "element again, or make a cross-reference instead."
-                        )
-                            .arg(
-                                QString::fromStdString(subname),
-                                QString::fromUtf8(selObj->Label.getValue())
-                            )
+                        PartDesignGui::TaskFeaturePick::copyDiffers(selObj, subname)
                     );
                     selObj = nullptr;
                     return false;

@@ -23,6 +23,8 @@
 
 import unittest
 import math
+import os
+import tempfile
 
 import FreeCAD
 from FreeCAD import Base
@@ -522,6 +524,84 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         self.assertWhereTheTopIs(binder, "the box's body in the Part")
         part.removeObject(self.Source)
         self.assertWhereTheTopIs(binder, "the box's body out of the Part")
+
+    def testInNestedPlacedParts(self):
+        """PR 244 verification 2 (optional test): the binder's body in a placed Part inside
+        another placed Part; the inner Part is dragged out of the outer one, then the body out of
+        the inner one."""
+        inner = self.placedPart(self.Target)
+        outer = self.Doc.addObject("App::Part", "Outer")
+        outer.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-3, 4, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 70)
+        )
+        outer.addObject(inner)
+        binder = self.tracedBinder(self.Target)
+        self.assertWhereTheTopIs(binder, "in two Parts")
+        outer.removeObject(inner)
+        self.assertWhereTheTopIs(binder, "the inner Part out of the outer one")
+        inner.removeObject(self.Target)
+        self.assertWhereTheTopIs(binder, "the body out of the inner Part")
+
+    def testGroupChangeAfterReopening(self):
+        """PR 244 verification 2 (optional test, L1): saved and opened again, the binder has no
+        frames from a recompute; its body is then put into a placed Part. It follows. (L1 itself,
+        that the shape isn't built again on each Group change after the open, saves work only:
+        this test passes without it, PR 246 review L8.)"""
+        binder = self.tracedBinder(self.Target)
+        self.assertWhereTheTopIs(binder, "made")
+        path = os.path.join(tempfile.mkdtemp(), "traced.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        self.Source = self.Doc.getObject("Source")
+        self.Target = self.Doc.getObject("Target")
+        self.Box = self.Doc.getObject("Box")
+        binder = self.Doc.getObject("Reference")
+        self.assertWhereTheTopIs(binder, "opened")
+        self.placedPart(self.Target)
+        self.assertWhereTheTopIs(binder, "the body put into a Part")
+
+    def testBinderOfAnotherBodysOriginPlane(self):
+        """ops#244 L7: a traced binder of another body's XZ plane (as Make dependent copy makes
+        it: Support set, then added to the body). Body::addObject relinked it to this body's own
+        XZ plane, so it bound another plane, silently. It binds the other body's plane, where
+        that one is: globally the plane y = 0 turned 90 degrees about Z, x = 5 along X."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        self.Target.addObject(binder)
+        self.assertEqual(binder.Support[0][0], xz)
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        [face] = binder.Shape.Faces
+        container = self.Target.getGlobalPlacement()
+        normal = container.Rotation.multVec(face.Surface.Axis)
+        self.assertAlmostEqual(abs(normal.x), 1, places=9)
+        self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
+
+    def testBinderOfItsOwnBodysOriginPlaneMovedToAnotherBody(self):
+        """PR 246 review L2: a traced binder of its own body's XZ plane, moved to another body as
+        PartDesign_MoveFeature moves it (removeObjects, then addObjects), keeps binding that
+        plane, where it is: globally the plane y = 0 turned 90 degrees about Z, x = 5 along X.
+        It isn't relinked to the new body's plane, which would move it, silently."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        self.Source.addObject(binder)
+        self.Doc.recompute()
+        self.Source.removeObjects([binder])
+        self.Target.addObjects([binder])
+        self.assertTrue(self.Target.hasObject(binder))
+        self.assertEqual(binder.Support[0][0], xz)
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        [face] = binder.Shape.Faces
+        container = self.Target.getGlobalPlacement()
+        normal = container.Rotation.multVec(face.Surface.Axis)
+        self.assertAlmostEqual(abs(normal.x), 1, places=9)
+        self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
 
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")

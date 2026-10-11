@@ -64,6 +64,12 @@ public:
     /// (ops#251)
     static std::string droppedReferences(const App::PropertyLinkSubList* prop);
     static Part::TopoShape buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs);
+    /// Whether two placements are the same within round-off: the position within
+    /// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
+    /// vector part of their difference, the sine of half the angle, which stays exact near zero;
+    /// Rotation::isSame's tolerance on the quaternions' scalar product let about 0.036 degrees
+    /// through: PR 227 verification)
+    static bool samePlace(const Base::Placement& a, const Base::Placement& b);
 
     const char* getViewProviderName() const override
     {
@@ -87,6 +93,7 @@ protected:
 
 private:
     void slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
+    void followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
     void onSettingDocument() override;
 
     using Connection = fastsignals::connection;

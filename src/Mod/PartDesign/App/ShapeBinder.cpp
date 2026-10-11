@@ -31,6 +31,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <Precision.hxx>
+#include <Standard_Failure.hxx>
 
 
 #include <cmath>
@@ -116,10 +117,9 @@ Base::Placement datumPlacement(const App::GeoFeature* obj)
     return placement;
 }
 
-// Whether two placements are the same within round-off: the position within
-// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
-// vector part of their difference, the sine of half the angle, which stays exact near zero)
-bool samePlace(const Base::Placement& a, const Base::Placement& b)
+}  // namespace
+
+bool ShapeBinder::samePlace(const Base::Placement& a, const Base::Placement& b)
 {
     if (!a.getPosition().IsEqual(b.getPosition(), Precision::Confusion())) {
         return false;
@@ -131,8 +131,6 @@ bool samePlace(const Base::Placement& a, const Base::Placement& b)
     (a.getRotation().inverse() * b.getRotation()).getValue(x, y, z, w);
     return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
 }
-
-}  // namespace
 
 bool ShapeBinder::containerFrames(Base::Placement& sourceCS, Base::Placement& targetCS) const
 {
@@ -439,6 +437,27 @@ void ShapeBinder::onSettingDocument()
 
 void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
 {
+    // FreeCAD-CH (ops#244, PR 244 verification 2, L2): nothing thrown out of a signal slot; a
+    // check that fails leaves the binder to its next recompute
+    try {
+        followChangedObject(Obj, Prop);
+    }
+    catch (const Base::Exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
+        enforceRecompute();
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.GetMessageString());
+        enforceRecompute();
+    }
+    catch (const std::exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
+        enforceRecompute();
+    }
+}
+
+void ShapeBinder::followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
+{
     App::Document* doc = getDocument();
     if (!doc || doc->testStatus(App::Document::Restoring)) {
         return;
@@ -460,9 +479,14 @@ void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::P
         Base::Placement sourceCS;
         Base::Placement targetCS;
         if (!traced) {
-            // not computed since it was made or opened
+            // not computed since it was made or opened: its frames are taken now when it is
+            // where it should be (PR 244 verification 2, L1: the shape was built again on every
+            // Group change after a file was opened)
             if (hasPlacementChanged()) {
                 enforceRecompute();
+            }
+            else {
+                traced = containerFrames(tracedSourceCS, tracedTargetCS);
             }
         }
         else if (containerFrames(sourceCS, targetCS)
