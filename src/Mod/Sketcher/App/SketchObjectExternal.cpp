@@ -1450,17 +1450,24 @@ static void setKind(Part::Geometry* geo, bool projection)
 }
 
 // the kind setKind gave a geometry: true for a projection, false for an intersection, none for
-// geometry saved before ops#264
+// geometry saved before ops#264, or with both flags set (from Python: no kind to trust, PR 241
+// review)
 static std::optional<bool> kindOf(const Part::Geometry* geo)
 {
     auto egf = ExternalGeometryFacade::getFacade(geo);
-    if (egf->testFlag(ExternalGeometryExtension::Projection)) {
-        return true;
+    const bool projection = egf->testFlag(ExternalGeometryExtension::Projection);
+    const bool intersection = egf->testFlag(ExternalGeometryExtension::Intersection);
+    if (projection == intersection) {
+        return std::nullopt;
     }
-    if (egf->testFlag(ExternalGeometryExtension::Intersection)) {
-        return false;
-    }
-    return std::nullopt;
+    return projection;
+}
+
+static void clearKind(Part::Geometry* geo)
+{
+    auto egf = ExternalGeometryFacade::getFacade(geo);
+    egf->setFlag(ExternalGeometryExtension::Projection, false);
+    egf->setFlag(ExternalGeometryExtension::Intersection, false);
 }
 
 void SketchObject::validateExternalLinks()
@@ -3185,7 +3192,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         return;
     }
 
-    // How many constraints are on the geometries with these Ids, which the rebuild deletes
+    // The constraints on the geometries with these Ids, which the rebuild deletes, as the
+    // constraint list names them (its name, or ConstraintN; PR 241 review L2)
     auto constraintsOn = [&](const std::set<long>& ids) {
         std::set<int> geoIds;
         for (long id : ids) {
@@ -3194,16 +3202,19 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 geoIds.insert(-static_cast<int>(it->second) - 1);
             }
         }
-        int count = 0;
-        for (const auto* constraint : Constraints.getValuesForce()) {
-            for (int e = 0; constraint->hasElement(e); ++e) {
-                if (geoIds.count(constraint->getGeoId(e)) != 0) {
-                    ++count;
+        std::vector<std::string> names;
+        const auto& constraints = Constraints.getValuesForce();
+        for (std::size_t i = 0; i < constraints.size(); ++i) {
+            for (int e = 0; constraints[i]->hasElement(e); ++e) {
+                if (geoIds.count(constraints[i]->getGeoId(e)) != 0) {
+                    names.push_back(constraints[i]->Name.empty()
+                                        ? "Constraint" + std::to_string(i + 1)
+                                        : constraints[i]->Name);
                     break;
                 }
             }
         }
-        return count;
+        return names;
     };
 
     // allocate unique geometry id
@@ -3267,8 +3278,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             }
             else {
                 addedProjections[n] = 0;  // a new link: its geometries are appended in build order
-                if (oldCount != 0 && oldCount != geos.size() && projCount > 0
-                    && projCount < geos.size()) {
+                // Whatever the link's type now: a type written before the first rebuild of
+                // geometry saved without kinds (Both to Intersection) isn't seen here, and the
+                // Ids go by position across the kinds (PR 241 review M1)
+                if (oldCount != 0 && oldCount != geos.size()) {
                     FC_WARN("External link " << key << " in " << getFullName() << " gives "
                             << geos.size() << " geometries instead of " << oldCount
                             << ", and its saved geometry doesn't record which were projected and "
@@ -3289,10 +3302,14 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
         // A link that gives fewer geometries than before deletes the others with their
         // constraints, which isn't silent any more (ops#264)
-        if (int count = constraintsOn(geoIds)) {
+        if (const auto names = constraintsOn(geoIds); !names.empty()) {
+            std::string list;
+            for (const auto& name : names) {
+                list += (list.empty() ? "" : ", ") + name;
+            }
             FC_WARN("External link " << key << " in " << getFullName() << " gives fewer geometries "
-                    "than before: " << count << " constraint(s) on the geometry it no longer "
-                    "gives are deleted");
+                    "than before: " << names.size() << " constraint(s) on the geometry it no "
+                    "longer gives are deleted (" << list << ")");
         }
         delExternalPrivate(geoIds,false);
     }
@@ -3654,6 +3671,16 @@ std::vector<long> SketchObject::externalGeometryIds(int entry) const
     return it->second;
 }
 
+int SketchObject::externalGeometryKind(long id) const
+{
+    auto it = externalGeoMap.find(id);
+    if (it == externalGeoMap.end() || it->second < 0 || it->second >= ExternalGeo.getSize()) {
+        return -1;
+    }
+    const auto kind = kindOf(ExternalGeo[it->second]);
+    return kind ? static_cast<int>(*kind) : -1;
+}
+
 int SketchObject::externalType(int entry) const
 {
     // ExternalTypes is parallel to the links by index (ops#140; a file saved before can hold a
@@ -3733,7 +3760,8 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
                                          const std::string& sub,
                                          App::PropertyLinkBase::ShadowSub&& shadow,
                                          int type,
-                                         const std::vector<long>& ids)
+                                         const std::vector<long>& ids,
+                                         const std::vector<int>& kinds)
 {
     auto objs = ExternalGeometry.getValues();
     auto subs = ExternalGeometry.getSubValues();
@@ -3807,6 +3835,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
         }
     }
     std::vector<int> inserted;  // the ExternalGeo indexes the placeholders took, in turn
+    bool unknownKind = false;   // a placeholder whose kind wasn't recorded
     if (replaced > 0 && replaced < static_cast<int>(ids.size()) && !frozen) {
         auto indexOf = [&geos](long id) {
             for (std::size_t i = 0; i < geos.size(); ++i) {
@@ -3841,9 +3870,38 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             egf->setFlag(ExternalGeometryExtension::Sync, false);
             egf->setFlag(ExternalGeometryExtension::Missing, false);
             egf->setFlag(ExternalGeometryExtension::Detached, false);
+            // and the kind its Id had when the entry was parked, not its model's: the rebuild
+            // hands the Ids out per kind, so a placeholder of the other kind would take that
+            // kind's Id, and the constraints would move to another geometry (PR 241 review H1)
+            const int kind = n < kinds.size() ? kinds[n] : -1;
+            if (kind >= 0) {
+                setKind(placeholder, kind == 1);
+            }
+            else {
+                clearKind(placeholder);
+                unknownKind = true;
+            }
             geos.insert(geos.begin() + at, placeholder);
             inserted.push_back(at);
             previous = at;
+        }
+    }
+
+    // A kind not recorded (a parked line written before PR 241's round 1): the entry's geometries
+    // lose their kinds, so the rebuild gives the Ids by position, as before ops#264. Parked
+    // geometry has no reference, so no rebuild gave it a kind since it was parked: from such a
+    // line it has none, and ExternalGeo holds it in build order already
+    if (unknownKind) {
+        for (std::size_t n = 0; n < refs.size(); ++n) {
+            if (!kept[n]) {
+                continue;
+            }
+            for (auto& geo : geos) {
+                if (GeometryFacade::getId(geo) == refs[n]) {
+                    clearKind(geo);
+                    break;
+                }
+            }
         }
     }
 

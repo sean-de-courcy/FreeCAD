@@ -700,6 +700,72 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(len(sketch.Constraints), 2)
         self.assertPointConstraintsKept(sketch)
 
+    def lineKinds(self, sketch=None):
+        """The kind flags of each external line after the axes, as "P" (Projection), "I"
+        (Intersection), "" (none) or "PI" (both). Lines only: a Part.Point read from ExternalGeo
+        loses its extensions (a facade on it has a new Id and no flags)."""
+        sketch = sketch or self.sketch
+        out = []
+        for geo in list(sketch.ExternalGeo)[2:]:
+            if isinstance(geo, Part.Point):
+                continue
+            facade = Sketcher.ExternalGeometryFacade(geo)
+            out.append(
+                ("P" if facade.testFlag("Projection") else "")
+                + ("I" if facade.testFlag("Intersection") else "")
+            )
+        return out
+
+    def testKindsSurviveSaveAndReopen(self):
+        """PR 241 review L4: the ring Both, with a constraint on its projection, saved and
+        reopened: the kinds are still there, and used. Written back to intersection, the
+        projection goes with its constraint and the points keep theirs (by position, the first
+        point would take the projection's Id and the second point's constraint would go)."""
+        self.addRingProjectionWithAConstraint()
+        self.assertEqual(self.lineKinds(), ["P", "P"])  # the rail's line, the ring's
+        sketch = self.saveAndReopen("Kinds")
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(self.ringProjections(sketch), [])
+        self.assertEqual(len(sketch.Constraints), 2)
+        self.assertPointConstraintsKept(sketch)
+
+    def testBothKindFlagsSetCountsAsNone(self):
+        """PR 241 review (Sonnet 4): a geometry with both kind flags (set from Python) has no
+        kind to trust. The tilted square face linked Both, a constraint on its section line; the
+        section line flagged both: the link gets its Ids by position, as a file saved before
+        ops#264, so the same count keeps the constraint on the section, and the rebuild gives the
+        section its one kind again. Read as a projection, the section took a fifth projection's
+        place, and its constraint went."""
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.SQUARE)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        sketch.addExternal(face.Name, "Face1", False, True)
+        self.doc.recompute()
+        [(index, _)], projections = self.sectionAndProjections(sketch)
+        self.assertEqual(len(projections), 4)
+        line = sketch.addGeometry(Part.LineSegment(V(-4, 1, 0), V(4, 2, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Coincident", line, 1, -index - 1, 1))
+        self.doc.recompute()
+        geos = list(sketch.ExternalGeo)
+        facade = Sketcher.ExternalGeometryFacade(geos[index])
+        self.assertTrue(facade.testFlag("Intersection"))
+        facade.setFlag("Projection", True)
+        geos[index] = facade.Geometry
+        sketch.ExternalGeo = geos
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["P", "P", "P", "P", "PI"])
+        sketch.touch()
+        self.doc.recompute()
+        self.assertEqual(len(sketch.Constraints), 1)
+        [(index, section)], projections = self.sectionAndProjections(sketch)
+        self.assertEqual(len(projections), 4)
+        self.assertEqual(-sketch.Constraints[0].Second - 1, index)
+        self.assertLess((sketch.Geometry[line].StartPoint - section.StartPoint).Length, TOL)
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["I", "P", "P", "P", "P"])
+
     @staticmethod
     def clearKindsInFile(path, obj):
         """Clears the kind flags (Projection, bit 5; Intersection, bit 6) of the external
@@ -773,8 +839,8 @@ class TestSketchExternalTypes(unittest.TestCase):
         section, projections = self.sectionAndProjections(sketch)
         self.assertEqual((len(section), len(projections)), (1, 5))
         assertOnTheSection()
-        # the edge that came with the fifth vertex: the last projected geometry (Ids within a
-        # kind still go by position, so a smaller face drops the last one)
+        # the last projected geometry, whichever edge of the face it is: Ids within a kind still
+        # go by position, so a face with one edge fewer drops the last one
         tip = max(i for i, _ in projections)
         end = 1
         sketch.addConstraint(Sketcher.Constraint("Coincident", line, 2, -tip - 1, end))
@@ -786,3 +852,52 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual((len(section), len(projections)), (1, 4))
         self.assertEqual(len(sketch.Constraints), 1)
         assertOnTheSection()
+
+
+def reportText():
+    """The Report view's text (GUI only), where FC_WARN's warnings go."""
+    import FreeCADGui
+    from PySide import QtWidgets
+
+    QtWidgets.QApplication.processEvents()
+    for edit in FreeCADGui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+        if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+            return edit.toPlainText()
+    return ""
+
+
+class TestSketchExternalTypesGui(unittest.TestCase):
+    """The warnings of TestSketchExternalTypes's cases, read in the Report view: in
+    TestSketcherGui."""
+
+    setUp = TestSketchExternalTypes.setUp
+    tearDown = TestSketchExternalTypes.tearDown
+    tempPath = TestSketchExternalTypes.tempPath
+    addEdge = TestSketchExternalTypes.addEdge
+    externalPoints = TestSketchExternalTypes.externalPoints
+    assertRingPoints = TestSketchExternalTypes.assertRingPoints
+    constrainedExternals = TestSketchExternalTypes.constrainedExternals
+    addRingProjectionWithAConstraint = TestSketchExternalTypes.addRingProjectionWithAConstraint
+    clearKindsInFile = staticmethod(TestSketchExternalTypes.clearKindsInFile)
+
+    def testTypeWrittenBeforeTheFirstRebuildOfLegacyGeometryWarns(self):
+        """PR 241 review M1: a file saved before ops#264 (no kinds) with the ring Both (its
+        projection line and two points); the ring written to intersection before any recompute.
+        The rebuild can only give the Ids by position, across the kinds, and says so: the link
+        gives 2 geometries instead of 3."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        self.addRingProjectionWithAConstraint()
+        path = self.tempPath("LegacyBoth.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        before = len(reportText())
+        self.doc.recompute()
+        new = reportText()[before:]
+        self.assertIn("gives 2 geometries instead of 3", new)
+        self.assertIn("doesn't record which were projected", new)
