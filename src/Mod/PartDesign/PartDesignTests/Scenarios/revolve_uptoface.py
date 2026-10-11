@@ -33,6 +33,7 @@ import math
 import FreeCAD as App
 
 from .harness import (
+    BROKEN,
     Attached,
     Bound,
     Filleted,
@@ -420,3 +421,51 @@ class RevolutionUpToFaceBothUpTo(RevolutionUpToFaceTwoSided):
         revolved.Type2 = "UpToFace"
         otherHalf = face("plane", normal=(1, 0, 0), contains=(0, -15, 10))
         revolved.UpToFace2 = (wall, self.names(wall, otherHalf))
+
+
+class RevolutionSideOneToFaceFillet(Scenario):
+    """PR 243 round 3 (ops#255): the plate of RevolvedUpToFaceEdit with its wall (`slab(90, 5)`),
+    and the profile x 10..20, z 5..10 revolved Two sides by angle, 60 and 60 degrees, with Refine
+    off; a fillet (radius 1) on the top edge of side 1's end face (at 60 degrees, z = 10). Side 1
+    is then revolved up to the wall's face instead: its end face lies on the wall, and the edge
+    is gone. Side 2's end face at -60 degrees is its twin, named from the profile's second-side
+    copy (CPY on the profile's names inside its own): the name matcher took its edge, and the
+    solver resolved it at tier 1 ("names"), silently. The fillet breaks."""
+
+    area = "RevolutionUpToFace"
+    MULTI = True
+    REFS = ("fillet_end_top",)
+    upTo = False
+
+    def endTop(self):
+        if self.upTo:
+            return BROKEN
+        return edge("line", contains=ray(60, 15, 10))
+
+    def build(self, doc):
+        body = m.body(doc)
+        plate = m.sketch(doc, "Plate", m.rectangle(-30, -30, 30, 30), body)
+        m.pad(body, plate, 5, name="PlatePad")
+        wallSketch = m.sketch(doc, "Wall", m.polygon(slab(90, 5)), body, z=5)
+        self.wall = m.pad(body, wallSketch, 10, "WallPad")
+        profile = m.sketch(doc, "Profile", m.rectangle(10, 5, 20, 10), body, placement=XZ)
+        revolved = body.newObject("PartDesign::Revolution", "Revolved")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
+        revolved.Refine = False
+        revolved.SideType = "Two sides"
+        revolved.Type = "Angle"
+        revolved.Angle = 60
+        revolved.Type2 = "Angle"
+        revolved.Angle2 = 60
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (revolved, self.names(revolved, self.endTop()))
+        fillet.Radius = 1
+        self.ref("fillet_end_top", fillet, "Base", self.endTop, Filleted(1))
+
+    def edit(self, doc):
+        revolved = doc.Revolved
+        revolved.Type = "UpToFace"
+        revolved.UpToFace = (self.wall, self.names(self.wall, wallFace(90, 10)))
+        self.upTo = True

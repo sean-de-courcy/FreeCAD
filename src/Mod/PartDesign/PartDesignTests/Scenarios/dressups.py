@@ -25,6 +25,8 @@ when the features before them change, are inserted or are reordered."""
 
 import math
 
+import FreeCAD as App
+
 from .harness import (
     BROKEN,
     Attached,
@@ -35,6 +37,7 @@ from .harness import (
     Filleted,
     PartialWarned,
     Scenario,
+    V,
     X,
     Y,
     Z,
@@ -827,38 +830,123 @@ class FilletSideOneEdgeOfTaperedTwoSides(Scenario):
     section: the solver took it at tier 1, "in ancestry", silently, with the fillet moved to the
     other side. A copy section marks a twin, like a pattern instance: side 2's names share no
     ancestry with side 1's, so the fillet breaks (the solver: no top agreement). Without the
-    solver, V2's name match still takes side 2's edge (listed under ops#7)."""
+    solver, V2's name match took side 2's edge too, until the matcher compared the copy sections
+    (PR 243 round 3)."""
 
     area = "dress-ups"
     MULTI = True
     REFS = ("side_one_edge",)
     untapered = False
+    sideOne = 1  # the direction of side 1 along Z
 
     def cornerEdge(self):
+        s = self.sideOne
         if self.untapered:
             if self.solver:
-                return Broken(edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, 2)))
+                return Broken(
+                    edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, 3 * s))
+                )
             return BROKEN
         d = 5 * math.tan(math.radians(10))
-        return edge(contains=(-5 - d / 2, -5 - d / 2, 2.5))  # the draft's edge, its midpoint
+        return edge(contains=(-5 - 0.6 * d, -5 - 0.6 * d, 3 * s))  # the draft's edge at |z| = 3
+
+    def twoSided(self, doc, body, feature):
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        twoSided = body.newObject(feature, "TwoSided")
+        twoSided.Profile = profile
+        twoSided.Refine = False
+        twoSided.SideType = "Two sides"
+        twoSided.Length = 5
+        twoSided.Length2 = 5
+        twoSided.TaperAngle = 10
+        twoSided.TaperAngle2 = 10
+        return twoSided
+
+    def solid(self, doc, body):
+        return self.twoSided(doc, body, "PartDesign::Pad")
 
     def build(self, doc):
         body = m.body(doc)
-        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
-        pad = body.newObject("PartDesign::Pad", "Pad")
-        pad.Profile = profile
-        pad.Refine = False
-        pad.SideType = "Two sides"
-        pad.Length = 5
-        pad.Length2 = 5
-        pad.TaperAngle = 10
-        pad.TaperAngle2 = 10
+        base = self.solid(doc, body)
         doc.recompute()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
-        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Base = (base, self.names(base, self.cornerEdge()))
         fillet.Radius = 0.5
         self.ref("side_one_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
 
     def edit(self, doc):
-        doc.Pad.TaperAngle = 0
+        doc.TwoSided.TaperAngle = 0
         self.untapered = True
+
+
+class PointOnSideOneEdgeOfTaperedTwoSidedPocket(FilletSideOneEdgeOfTaperedTwoSides):
+    """The Pocket variant (PR 243 round 3): a block -15..15 x -15..15 x -10..10 and a Pocket of
+    the square x, y -5..5 at z = 0, Two sides, 5 and 5, each tapered 10 degrees (widening); side 1
+    goes down. A datum point at the centre of side 1's corner edge of the pocket, from (-5, -5, 0)
+    down to z = -5 (a fillet there, a concave edge ending in the sides' crease, differs from
+    Part's makeFillet); side 1's taper is set to 0: it breaks, and doesn't move to side 2's
+    edge."""
+
+    sideOne = -1
+
+    def solid(self, doc, body):
+        block = m.sketch(doc, "Block", m.rectangle(-15, -15, 15, 15), body, z=-10)
+        m.pad(body, block, 20, name="BlockPad")
+        return self.twoSided(doc, body, "PartDesign::Pocket")
+
+    def build(self, doc):
+        body = m.body(doc)
+        base = self.solid(doc, body)
+        doc.recompute()
+        point = body.newObject("PartDesign::Point", "OnEdge")
+        point.AttachmentSupport = [(base, self.names(base, self.cornerEdge())[0])]
+        point.MapMode = "CenterOfMass"
+        self.ref("side_one_edge", point, "AttachmentSupport", self.cornerEdge, Attached())
+
+
+class FilletMergedEdgeOfSymmetricToOneSide(Scenario):
+    """PR 243 round 3 (Sonnet M2): a Pad of the square x, y -5..5, Symmetric, 10 long, with
+    Refine on, so each corner edge is one edge from z = -5 to 5, merged from the two sides'
+    edges (side 2's named with the copy section); a fillet, radius 0.5, on the corner edge at
+    (-5, -5). The Pad is switched to One side: the corner edge runs from z = 0 to 10, and the
+    fillet follows it."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("merged_edge",)
+    oneSide = False
+
+    def cornerEdge(self):
+        z = 5 if self.oneSide else 0
+        return edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, z))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = True
+        pad.SideType = "Symmetric"
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 0.5
+        self.ref("merged_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.SideType = "One side"
+        self.oneSide = True
+
+
+class FilletSideOneEdgeOfTaperedTwoSidesClipped(FilletSideOneEdgeOfTaperedTwoSides):
+    """The Pad of FilletSideOneEdgeOfTaperedTwoSides, then a slot through all along Y at
+    x -6..-4, z -1..1 (a Pocket from a sketch at y = 20): it cuts the middle out of both sides'
+    corner edges at (-5, -5), so the top section of each is the slot's split (PR 243 round 3,
+    verification M1: top agreement then passes for side 2's edge). The fillet is on side 1's
+    piece, z 1..5; side 1's taper is set to 0: it breaks."""
+
+    def solid(self, doc, body):
+        pad = self.twoSided(doc, body, "PartDesign::Pad")
+        # sketch (u, v) at (u, 20, -v), the normal +Y: the slot goes down -Y
+        facingY = App.Placement(V(0, 20, 0), App.Rotation(V(1, 0, 0), -90))
+        slot = m.sketch(doc, "Slot", m.rectangle(-6, -1, -4, 1), body, placement=facingY)
+        return m.pocketThroughAll(body, slot, "SlotPocket")

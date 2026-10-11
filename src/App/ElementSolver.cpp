@@ -74,7 +74,8 @@ constexpr const char* boundaryOpCode = "EXT";
 constexpr const char* secondSideOpCode = "CPY";
 
 // The copy a section makes of the element it ends, as the context its prefix is in: k for a
-// pattern instance, EXT;i for a boundary, CPY;2 for a second side; empty for any other section.
+// pattern instance, EXT;i for a boundary, CPY;2 for a second side; empty for any other section
+// (and for a pattern instance without a number, still a copy section: isCopySection()).
 std::string copyIndex(const DecodedMappedSection& section)
 {
     if (section.opCode == patternInstanceOpCode) {
@@ -90,7 +91,8 @@ std::string copyIndex(const DecodedMappedSection& section)
 // second side's.
 bool isCopySection(const DecodedMappedSection& section)
 {
-    return !copyIndex(section).empty();
+    return section.opCode == patternInstanceOpCode || section.opCode == boundaryOpCode
+        || section.opCode == secondSideOpCode;
 }
 
 // Starts and ends a copy's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e` for a pattern
@@ -106,9 +108,8 @@ std::vector<std::pair<std::string, std::string>> patternInstances(std::string_vi
     std::vector<std::pair<std::string, std::string>> instances;
     for (auto section : NameAncestry::splitSections(name)) {
         const auto& decoded = decodeSection(section);
-        auto index = copyIndex(decoded);
-        if (!index.empty()) {
-            instances.emplace_back(decoded.iterationTag, std::move(index));
+        if (isCopySection(decoded)) {
+            instances.emplace_back(decoded.iterationTag, copyIndex(decoded));
         }
     }
     return instances;
@@ -220,9 +221,8 @@ std::vector<std::pair<std::string, std::string>> copyContexts(std::string_view n
 {
     auto contexts = patternInstances(name);
     walkLineage(name, false, [&](const DecodedMappedSection& section, bool) {
-        auto index = copyIndex(section);
-        if (!index.empty()) {
-            contexts.emplace_back(section.iterationTag, std::move(index));
+        if (isCopySection(section)) {
+            contexts.emplace_back(section.iterationTag, copyIndex(section));
         }
         return false;
     });
@@ -458,9 +458,9 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
             // Everything before the last top-level delimiter.
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
             std::string prefix(node.substr(0, prefixSize));
-            auto index = copyIndex(last);
-            if (!index.empty()) {
-                prefix = contextMark + last.iterationTag + ";" + index + contextMark + prefix;
+            if (isCopySection(last)) {
+                prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark
+                    + prefix;
             }
             children.push_back(std::move(prefix));
         }
@@ -2926,9 +2926,14 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         if (input.source != Tier1Source::Overlap) {
             for (int member : members) {
+                // A name match made in other copies than the old name's is another element,
+                // whatever the matcher made of the copy sections deep in its lineage (PR 243
+                // round 3).
+                const auto oldCopies = copyContexts(input.entries[member].oldName);
                 for (const auto& name : input.entries[member].nameMatches) {
                     auto it = pool.byName.find(name);
-                    if (it != pool.byName.end() && allowed[it->second]) {
+                    if (it != pool.byName.end() && allowed[it->second]
+                        && copyContexts(name) == oldCopies) {
                         state.fromNames.insert(it->second);
                     }
                 }

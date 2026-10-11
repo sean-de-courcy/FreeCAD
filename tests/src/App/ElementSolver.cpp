@@ -625,6 +625,58 @@ TEST(NameAncestry, linkCopiesHaveTheirOwnAncestry)
     EXPECT_GT(weighted.overlap(through(oldTop, 7), through(newTop, 7)), 0.0);
 }
 
+TEST(NameAncestry, secondSidesAreCopies)
+{
+    // ops#255, PR 243 round 2: a two-sided Pad's second side is built from the profile again,
+    // and its names are the first side's, X, followed by `_;_;<pad>;CPY;2;<type>;0;MOD;_`. The
+    // MOD flag makes no piece: the second side is a copy, with X's history in its own context.
+    NameAncestry ancestry;
+    const auto x = generated({sketchEdge(1)}, 7, "XTR", 'E');
+    const auto sideTwo = piece(x, 7, "CPY", 2, 'E');
+
+    EXPECT_FALSE(NameAncestry::isPieceOf(sideTwo, x));
+    EXPECT_FALSE(NameAncestry::isPieceOf(x, sideTwo));
+    //   a split before the copy (the tapered side's draft) is a piece of the second side only
+    const auto splitThenCopy = piece(piece(x, 7, "DFT", 0, 'E'), 7, "CPY", 2, 'E');
+    EXPECT_TRUE(NameAncestry::isPieceOf(splitThenCopy, sideTwo));
+    EXPECT_FALSE(NameAncestry::isPieceOf(splitThenCopy, x));
+    //   and a split after it too
+    EXPECT_TRUE(NameAncestry::isPieceOf(piece(sideTwo, 9, "CUT", 0, 'E'), sideTwo));
+    EXPECT_FALSE(NameAncestry::isPieceOf(piece(sideTwo, 9, "CUT", 0, 'E'), x));
+    //   the two sides share no ancestor
+    EXPECT_EQ(ancestry.overlap(x, sideTwo), 0.0);
+    EXPECT_FALSE(ancestry.contains(sideTwo, x));
+    //   tier 1 keeps neither side for the other
+    EXPECT_EQ(ancestry.structuralSurvivors(x, {sideTwo}, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(sideTwo, {x}, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(x, {sideTwo, x}, 1.0), std::vector<int> {1});
+    //   a Revolution's second side: the CPY is on the profile's edge inside the face's name
+    const auto faceOne = generated({sketchEdge(1)}, 7, "RVL", 'F');
+    const auto faceTwo = generated({piece(sketchEdge(1), 7, "CPY", 2, 'E')}, 7, "RVL", 'F');
+    EXPECT_EQ(ancestry.overlap(faceOne, faceTwo), 0.0);
+    EXPECT_EQ(ancestry.structuralSurvivors(faceOne, {faceTwo}, 1.0), std::vector<int> {});
+}
+
+TEST(NameAncestry, patternInstanceWithoutNumberIsACopy)
+{
+    // PR 243 round 3 (Sonnet L1): a TRF section is a copy section by its op code, even with an
+    // empty instance number, as before round 2.
+    const auto x = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    const auto unnumbered = x + "|"
+        + Data::MappedName::makeEncodedSection(
+                            std::vector<std::string> {},
+                            std::vector<std::string> {},
+                            "9",
+                            "TRF",
+                            "",
+                            'F',
+                            "0",
+                            {"MOD"},
+                            std::vector<std::string> {}
+        );
+    EXPECT_FALSE(NameAncestry::isPieceOf(unnumbered, x));
+}
+
 TEST(NameAncestry, binderSupportsFromTwinFilesHaveTheirOwnAncestry)
 {
     // ops#112: a binder's supports from copies of one file (equal IDs, so equal names) end in
@@ -1483,6 +1535,32 @@ TEST(SolveOwner, unionOfSourcesOnlyAddsCandidates)
     EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
     EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Face1"});
     EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+}
+
+TEST(SolveOwner, nameMatchOnTheOtherSideIsNotTaken)
+{
+    // PR 243 round 3: a Two-sides Revolution's side 1 changed from Angle to Up to face, so its
+    // end face's edge under a fillet is gone. Side 2's edge agrees on the top section and the
+    // name matcher returned it (the CPY is on the profile's name inside it): another element.
+    const auto profileEdge = sketchEdge(1);
+    const auto sideOne = generated({profileEdge}, 7, "RVL", 'E');
+    const auto sideTwo = generated({piece(profileEdge, 7, "CPY", 2, 'E')}, 7, "RVL", 'E');
+    SolveInput input;
+    input.source = Data::Tier1Source::Names;
+    input.pool["Edge"] = {element("Edge4", {sideTwo})};
+    input.entries = {missing(sideOne, "Edge", {sideTwo})};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_NE(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+
+    //   a name match on the same side is still taken
+    const auto sideOneAgain = generated({profileEdge}, 7, "RVL", 'E', 1);
+    input.pool["Edge"] = {element("Edge4", {sideTwo}), element("Edge5", {sideOneAgain})};
+    input.entries = {missing(sideOne, "Edge", {sideTwo, sideOneAgain})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Edge5");
 }
 
 TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
