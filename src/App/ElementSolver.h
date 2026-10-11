@@ -586,7 +586,10 @@ struct AppExport SolveInput
     /// isn't in the old name's ancestry needs the old name's maker (NameAncestry::makerTag())
     /// in the lineage of one of its names (NameAncestry::hasLineageTag()), and so does G2's
     /// pick. Without it, another feature's element that embeds the same face (another hole's
-    /// edge on the face both cut) survives tier 1. Off for comparison runs only.
+    /// edge on the face both cut) survives tier 1. A continuation's piece (tier 4) needs the
+    /// maker as its own, the first section's tag of one of its names (ops#284): there the
+    /// lineage isn't enough, since a fillet's end on the old edge's line embeds the face the old
+    /// edge bounds. Off for comparison runs only.
     bool sameMaker = true;
     /// Tier 1 keeps only candidates that kept the old element's sources (ops#173): a candidate
     /// that isn't in the old name's ancestry, a piece of it or from its IDX source, and lost one

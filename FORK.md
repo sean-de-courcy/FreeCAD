@@ -283,7 +283,8 @@ names it.
 | `fix/283-carbon-copy-local-mirror` | fix | ops#283 | - | `fix/sketcher-minors-237-277-278-280` `7baf19f5f7` (stacked on fork PR 253) | `000f6639bd` (fork PR 254), 2026-10-11 | never (fork fix) |
 | `fix/276-partdesign-gui-minors` | fix | ops#276, ops#252, ops#253 | - | `integration` `000f6639bd` | `0f634bd007` (fork PR 255), 2026-10-11 | never (fork fix) |
 | `fix/255-pad-twosided-names` | fix | ops#255 | - | `fix/254-symmetric-upto-sector` `ea7b468173` (stacked on fork PR 239) | `d9a3826388` (fork PR 243), 2026-10-11 | never (fork fix) |
-| `fix/134-random-reorder-edits` | fix | ops#134, ops#286 | - | `integration` `000f6639bd` | (fork PR 256) | never (fork tests) |
+| `fix/134-random-reorder-edits` | fix | ops#134, ops#286 | - | `integration` `000f6639bd` | `e5d14c301b` (fork PR 256), 2026-10-11 | never (fork tests) |
+| `fix/284-continuation-collinear` | fix | ops#284 | - | `integration` `000f6639bd` | (fork PR 257) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
