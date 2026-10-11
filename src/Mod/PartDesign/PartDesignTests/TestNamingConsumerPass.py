@@ -388,6 +388,52 @@ class ConsumerPassTestBase(NamingGateTestBase):
         [subs] = [s for obj, s in b.getObject("Both").Ref if obj.Document == a2]
         self.assertEqual(list(subs), [faceC] if b.ReferenceSolver else ["?" + faceC])
 
+    def twoLinks(self, config):
+        """twoProducers through two App::Links in B: a plain LinkSubList, [(LinkA, FaceC),
+        (LinkA2, FaceC)]. B opened while A2's file is missing: the references through LinkA take
+        the pass at the open. A2 opened later: LinkA2's references register again and take it
+        too, not the update by name (ops#124 L4, the Opus review of fork PR 249, M3: the pass
+        was kept per property)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        pathA2 = os.path.join(self.folder, "A2.FCStd")
+        shutil.copy(pathA, pathA2)
+        a, a2, b = self.open(pathA), self.open(pathA2), self.open(pathB)
+        links = []
+        for name, producer in (("LinkA", a), ("LinkA2", a2)):
+            link = b.addObject("App::Link", name)
+            link.LinkedObject = producer.getObject("Pad2")
+            links.append(link)
+        both = b.addObject("App::FeaturePython", "Both")
+        both.addProperty("App::PropertyLinkSubList", "Ref")
+        both.Ref = [(links[0], [faceC]), (links[1], [faceC])]
+        b.recompute()
+        b.save()
+        for doc in (b, a2, a):
+            App.closeDocument(doc.Name)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        files = readFile(pathA2)
+        xml = withoutRevision(ageStamps(files["Document.xml"].decode("utf-8")))
+        files["Document.xml"] = xml.encode("utf-8")
+        mapText = files["Pad2.Shape.Map.txt"].decode("utf-8")
+        files["Pad2.Shape.Map.txt"] = swapNames(mapText, "Face", faceC, faceD).encode("utf-8")
+        writeFile(pathA2, files)
+        self.openAlone(pathA)
+        self.openAlone(pathA2)
+        away = os.path.join(self.folder, "away.FCStd")
+        os.rename(pathA2, away)
+        b = self.open(pathB)
+        self.assertPassed(b, faceC, faceD)
+        os.rename(away, pathA2)
+
+        # Act
+        self.open(pathA2)
+
+        # Assert
+        subs = [s for obj, s in b.getObject("Both").Ref if obj.Name == "LinkA2"]
+        subs = [s for group in subs for s in ((group,) if isinstance(group, str) else group)]
+        self.assertEqual(subs, [faceC] if b.ReferenceSolver else ["?" + faceC])
+
     def chain(self, config):
         """C references B's binder, B references A: opening C loads B and A; B's references into
         A (migrated alone) take the pass, and C's into B, whose names didn't move, are kept."""
@@ -657,6 +703,7 @@ def _addConfigTests():
         "throughLinkSavedAtItsPath",
         "consumerReverted",
         "twoProducers",
+        "twoLinks",
         "chain",
         "consumerFirst",
         "shapeLessConsumer",
