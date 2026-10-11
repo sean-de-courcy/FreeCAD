@@ -263,7 +263,16 @@ names it.
 | `fix/251-shapebinder-silent-whole` | fix | ops#251 | - | `integration` `618939feb7` | `e2c6bc263d` (fork PR 232), 2026-10-10 | never (fork fix) |
 | `fix/248-merge-external-pairing` | fix | ops#248 | - | `integration` `63c502ff6b` | `cf1c5b7b81` (fork PR 233), 2026-10-10 | never (fork fix) |
 | `fix/257-part-fillet-edge-links` | fix | ops#257, ops#258 | - | `integration` `83a7885ab1` | `37e8bda261` (fork PR 236), 2026-10-10 | never (fork fix) |
-| `fix/261-merge-external-flags` | fix | ops#261 | - | `fix/248-merge-external-pairing` `0dcb49ef80` (stacked on fork PR 233) | (fork PR 238) | never (fork fix) |
+| `fix/261-merge-external-flags` | fix | ops#261 | - | `fix/248-merge-external-pairing` `0dcb49ef80` (stacked on fork PR 233) | `42d9b6e641` (fork PR 238), 2026-10-10 | never (fork fix) |
+| `fix/261-merge-expressions` | fix | ops#261 | - | `integration` `161adb82e9` | `e672115cd6` (fork PR 237), 2026-10-10 | never (fork fix) |
+| `fix/240-upto-revolution-naming` | fix | ops#240 | - | `integration` `d360d8c798` | `0d49331cf0` (fork PR 235), 2026-10-11 | never (fork fix) |
+| `fix/265-fillet-replace-object` | fix | ops#265 | - | `fix/257-part-fillet-edge-links` `614b36a033` (stacked on fork PR 236) | `8b3b308c48` (fork PR 240), 2026-10-11 | never (fork fix) |
+| `fix/264-external-ids-per-kind` | fix | ops#264 | - | `integration` `cf1c5b7b81` | `911e04b577` (fork PR 241), 2026-10-11 | never (fork fix) |
+| `fix/262-fillet-dialog-followups` | fix | ops#262 | - | `fix/265-fillet-replace-object` `ea656ad7b2` (stacked on fork PR 240) | `957d5e6bc0` (fork PR 242), 2026-10-11 | never (fork fix) |
+| `fix/254-symmetric-upto-sector` | fix | ops#254 | - | `fix/240-upto-revolution-naming` `d6547787b9` (fork PR 235) | `23a45e0cf8` (fork PR 239), 2026-10-11 | never (fork fix) |
+| `fix/244-binder-global-position` | fix | ops#244 | - | `integration` `e672115cd6` | `1e53a9110f` (fork PR 244), 2026-10-11 | never (fork fix) |
+| `fix/244-copy-followups` | fix | ops#244 | - | `fix/244-binder-global-position` `09ebf571d3` (stacked on fork PR 244) | `c95e01f4a5` (fork PR 246), 2026-10-11 | never (fork fix) |
+| `fix/268-replace-followups` | fix | ops#268 | - | `integration` `23a45e0cf8` | (fork PR 247) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

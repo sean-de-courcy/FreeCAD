@@ -404,7 +404,7 @@ class ConsumerPassTestBase(NamingGateTestBase):
         b.save()
         App.closeDocument(b.Name)
         App.closeDocument(a.Name)
-        self.assertEqual(namingRevision(pathB), 0)
+        self.assertEqual(namingRevision(pathB), currentRevision() - 1)
         self.openAlone(pathA)
 
         # Act

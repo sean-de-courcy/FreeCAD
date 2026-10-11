@@ -30,8 +30,11 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
 
 
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,6 +42,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Datums.h>
@@ -112,7 +116,42 @@ Base::Placement datumPlacement(const App::GeoFeature* obj)
     }
     return placement;
 }
+
 }  // namespace
+
+bool ShapeBinder::samePlace(const Base::Placement& a, const Base::Placement& b)
+{
+    if (!a.getPosition().IsEqual(b.getPosition(), Precision::Confusion())) {
+        return false;
+    }
+    double x = 0;
+    double y = 0;
+    double z = 0;
+    double w = 0;
+    (a.getRotation().inverse() * b.getRotation()).getValue(x, y, z, w);
+    return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
+}
+
+bool ShapeBinder::containerFrames(Base::Placement& sourceCS, Base::Placement& targetCS) const
+{
+    App::GeoFeature* obj = nullptr;
+    std::vector<std::string> subs;
+    ShapeBinder::getFilteredReferences(&Support, obj, subs);
+    if (!obj) {
+        return false;
+    }
+    // full placement of container of obj; a datum element's is its coordinate system's
+    // container, as its global placement goes through the coordinate system (ops#210)
+    sourceCS = obj->globalPlacement() * datumPlacement(obj).inverse();
+    // full placement of container of this shapebinder: the container's own (PR 244
+    // verification), not globalPlacement() * Placement^-1, which drifted in the last bits as
+    // the binder's Placement changed
+    auto* container = freecad_cast<App::GeoFeature*>(
+        App::GeoFeatureGroupExtension::getGroupOfObject(this)
+    );
+    targetCS = container ? container->globalPlacement() : Base::Placement();
+    return true;
+}
 
 Part::TopoShape ShapeBinder::updatedShape() const
 {
@@ -134,11 +173,9 @@ Part::TopoShape ShapeBinder::updatedShape() const
 
         if (TraceSupport.getValue()) {
             // compute the transform, and apply it to the shape.
-            // full placement of container of obj; a datum element's is its coordinate system's
-            // container, as its global placement goes through the coordinate system (ops#210)
-            Base::Placement sourceCS = obj->globalPlacement() * datumPlacement(obj).inverse();
-            Base::Placement targetCS =  // full placement of container of this shapebinder
-                this->globalPlacement() * this->Placement.getValue().inverse();
+            Base::Placement sourceCS;
+            Base::Placement targetCS;
+            containerFrames(sourceCS, targetCS);
             Base::Placement transform = targetCS.inverse() * sourceCS;
             shape.setPlacement(transform * shape.getPlacement());
         }
@@ -151,7 +188,10 @@ bool ShapeBinder::hasPlacementChanged() const
 {
     Part::TopoShape shape(updatedShape());
     Base::Placement placement(shape.getTransform());
-    return this->Placement.getValue() != placement;
+    // FreeCAD-CH (ops#244, PR 244 review M2): within round-off. Compared exactly, a container's
+    // Placement set again to the same value (by its expression, in the next pass of a
+    // recompute) touched the binder once more, and it was left touched, a recompute behind
+    return !samePlace(this->Placement.getValue(), placement);
 }
 
 App::DocumentObjectExecReturn* ShapeBinder::execute()
@@ -168,6 +208,7 @@ App::DocumentObjectExecReturn* ShapeBinder::execute()
             this->Placement.setValue(shape.getTransform());
             this->Shape.setValue(shape);
         }
+        traced = TraceSupport.getValue() && containerFrames(tracedSourceCS, tracedTargetCS);
     }
 
     return Part::Feature::execute();
@@ -433,6 +474,27 @@ void ShapeBinder::onSettingDocument()
 
 void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
 {
+    // FreeCAD-CH (ops#244, PR 244 verification 2, L2): nothing thrown out of a signal slot; a
+    // check that fails leaves the binder to its next recompute
+    try {
+        followChangedObject(Obj, Prop);
+    }
+    catch (const Base::Exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
+        enforceRecompute();
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.GetMessageString());
+        enforceRecompute();
+    }
+    catch (const std::exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
+        enforceRecompute();
+    }
+}
+
+void ShapeBinder::followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop)
+{
     App::Document* doc = getDocument();
     if (!doc || doc->testStatus(App::Document::Restoring)) {
         return;
@@ -440,7 +502,35 @@ void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::P
     if (this == &Obj) {
         return;
     }
-    if (!TraceSupport.getValue()) {
+    if (!TraceSupport.getValue() || testStatus(App::ObjectStatus::Remove)) {
+        return;
+    }
+    // FreeCAD-CH (ops#244, PR 244 review H1, M1, verification 2): the binder's place depends on
+    // both containers' places, which change when the binder, the support or a container above
+    // either enters or leaves a container (a copy added to its body after its first recompute at
+    // the root, PartDesign_MoveFeature, a drag in the tree) with no Placement changed: it kept
+    // its old place, silently. So on any such Group change, both frames are compared with those
+    // of its last execute.
+    auto* group = Obj.getExtensionByType<App::GeoFeatureGroupExtension>(true);
+    if (group && &Prop == &group->Group) {
+        Base::Placement sourceCS;
+        Base::Placement targetCS;
+        if (!traced) {
+            // not computed since it was made or opened: its frames are taken now when it is
+            // where it should be (PR 244 verification 2, L1: the shape was built again on every
+            // Group change after a file was opened)
+            if (hasPlacementChanged()) {
+                enforceRecompute();
+            }
+            else {
+                traced = containerFrames(tracedSourceCS, tracedTargetCS);
+            }
+        }
+        else if (containerFrames(sourceCS, targetCS)
+                 && (!samePlace(sourceCS, tracedSourceCS)
+                     || !samePlace(targetCS, tracedTargetCS))) {
+            enforceRecompute();
+        }
         return;
     }
     if (!Prop.isDerivedFrom<App::PropertyPlacement>()) {

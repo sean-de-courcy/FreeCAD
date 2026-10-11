@@ -1123,6 +1123,17 @@ void prepareProfileBased(
         // FreeCAD-CH (ops#245): the pick dialog's copy failed (reported in the Report view);
         // front() of the empty list was undefined behaviour
         if (features.empty()) {
+            // the pick dialog copies nothing without an active body (ops#244 L6: the message said
+            // the copy had failed)
+            if (!PartDesignGui::getBody(false)) {
+                QMessageBox::warning(
+                    Gui::getMainWindow(),
+                    QObject::tr("No active body"),
+                    QObject::tr("There is no active body to copy the sketch into. Activate a "
+                                "body and try again.")
+                );
+                return;
+            }
             QMessageBox::warning(
                 Gui::getMainWindow(),
                 QObject::tr("No sketch"),

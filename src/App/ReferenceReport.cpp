@@ -332,14 +332,20 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     std::ostringstream ss;
     const std::string element = elementOfSub(slot.sub);
     const std::string type = typeOf(element);
+    const GuessRecord& guess = slot.guess;
     if (entry && !entry->headline.empty()) {
         ss << entry->headline;
+    }
+    else if (guess.kind == "rejected" && guess.origIndex.empty()) {
+        // Mark broken on a record that lost its original (ops#268): the missing link holds the
+        // rejected pick, and "Missing edge reference: Edge3, rejected: Edge3" read as a
+        // contradiction
+        ss << "Missing " << (type.empty() ? "element" : type) << " reference (original unknown)";
     }
     else {
         ss << "Missing " << (type.empty() ? "element" : type) << " reference: " << element;
     }
     // A reference with a record (ops#127): the pick that broke, or the picks the user rejected
-    const GuessRecord& guess = slot.guess;
     if (guess.kind == "rejected") {
         std::string picks;
         for (const auto& alternative : guess.alternatives) {
@@ -397,19 +403,23 @@ std::string guessedText(const ReferenceReport::Slot& slot,
     const std::string original = guess.origIndex;
     const std::string type = typeOf(original.empty() ? elements : original);
     const std::string typeName = type.empty() ? "element" : type;
+    // A record can lose its original: a Part Fillet/Chamfer whose Base was replaced by one with
+    // no single edge where the original was (followBase, ops#265).
+    const std::string forOriginal =
+        original.empty() ? std::string(", original unknown") : " for " + original;
     std::ostringstream ss;
     if (guess.kind == "index") {
         ss << "Index reference: " << elements << " kept by its place after a naming migration";
     }
     else if (guess.kind == "tier2" || guess.kind == "tier3") {
-        ss << capitalized(typeName) << " reference resolved by geometry: " << elements << " for "
-           << original;
+        ss << capitalized(typeName) << " reference resolved by geometry: " << elements
+           << forOriginal;
     }
     else if (guess.kind == "continued") {
-        ss << capitalized(typeName) << " reference continued: " << elements << " for " << original;
+        ss << capitalized(typeName) << " reference continued: " << elements << forOriginal;
     }
     else if (guess.kind == "expanded") {
-        ss << capitalized(typeName) << " reference split: " << elements << " for " << original;
+        ss << capitalized(typeName) << " reference split: " << elements << forOriginal;
     }
     else if (guess.kind == "piece" && elements == original) {
         // The pick is the piece that kept the original's name (G3; the Fable review of fork
@@ -417,7 +427,7 @@ std::string guessedText(const ReferenceReport::Slot& slot,
         ss << "Guessed " << typeName << " reference: kept " << original;
     }
     else {
-        ss << "Guessed " << typeName << " reference: " << elements << " for " << original;
+        ss << "Guessed " << typeName << " reference: " << elements << forOriginal;
     }
     ss << " (" << where;
     // From the record, which outlives the solver's report (a reopened file), so the text is the

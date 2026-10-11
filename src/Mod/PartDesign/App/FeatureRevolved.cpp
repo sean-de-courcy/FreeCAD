@@ -31,8 +31,12 @@
 #include <utility>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
@@ -140,6 +144,91 @@ std::optional<double> getPlanarStartReferenceAngle(
     const double phase = std::atan2(sineCoefficient, cosineCoefficient);
     const double delta = std::acos(std::clamp(solution, -1.0, 1.0));
     return std::min(normalizeAngleRadians(phase + delta), normalizeAngleRadians(phase - delta));
+}
+
+// A face without a wire (a datum or origin plane) or with an infinite bounding box: BRepFeat
+// trims it (BRepFeat::FaceUntil), and a boolean can't measure it.
+bool isUnboundedFace(const TopoShape& face)
+{
+    if (face.isNull()) {
+        return false;
+    }
+    if (!TopExp_Explorer(face.getShape(), TopAbs_WIRE).More()) {
+        return true;
+    }
+    Base::BoundBox3d faceBox = face.getBoundBox();
+    return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
+}
+
+double faceArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+// Whether two faces lie on the same plane.
+bool onSamePlane(const TopoDS_Face& face, const TopoDS_Face& other)
+{
+    BRepAdaptor_Surface surface(face);
+    BRepAdaptor_Surface otherSurface(other);
+    if (surface.GetType() != GeomAbs_Plane || otherSurface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    const gp_Pln plane = surface.Plane();
+    const gp_Pln otherPlane = otherSurface.Plane();
+    return plane.Axis().IsParallel(otherPlane.Axis(), Precision::Angular())
+        && otherPlane.Distance(plane.Location()) <= Precision::Confusion();
+}
+
+// Whether two bounded faces cover the same points: the area they share is the area of each.
+// Holes count, and so do curved faces and faces whose seams differ (a disk and its mirror image).
+bool coversSamePoints(const TopoShape& face, const TopoShape& other)
+{
+    try {
+        const double area = faceArea(face.getShape());
+        const double otherArea = faceArea(other.getShape());
+        BRepAlgoAPI_Common common(face.getShape(), other.getShape());
+        if (!common.IsDone() || area <= Precision::Confusion()) {
+            return false;
+        }
+        const double shared = faceArea(common.Shape());
+        const double tolerance = area * 1e-6;
+        return std::fabs(shared - area) <= tolerance && std::fabs(shared - otherArea) <= tolerance;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// The up-to face of Symmetric's second side, given the first side's face and its mirror image in
+// the profile plane. A face across the profile plane has an image on its own plane or surface:
+// BRepFeat then revolved the second side the long way round, from the face at the first side's
+// end to the image at its own, silently (ops#254).
+// - An image that covers the face's points (a wall or a disk across the plane, an unbounded
+//   plane through it) gives way to the face itself, which Two sides passes for both sides.
+// - An image that only shares the face's plane (a hole on one side of a wall across it) gives way
+//   to the unbounded plane: the second side meets it first where the image lies.
+// - Any other image stays.
+TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrored)
+{
+    if (upToFace.isNull() || mirrored.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE
+        || mirrored.getShape().ShapeType() != TopAbs_FACE) {
+        return mirrored;
+    }
+    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
+    const TopoDS_Face& image = TopoDS::Face(mirrored.getShape());
+    const bool samePlane = onSamePlane(face, image);
+    if (isUnboundedFace(upToFace) || isUnboundedFace(mirrored)) {
+        return samePlane ? upToFace : mirrored;
+    }
+    if (coversSamePoints(upToFace, mirrored)) {
+        return upToFace;
+    }
+    if (samePlane) {
+        return TopoShape(BRepBuilderAPI_MakeFace(BRepAdaptor_Surface(image).Plane()).Face());
+    }
+    return mirrored;
 }
 
 }  // namespace
@@ -354,6 +443,19 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
 
     bool fuseSideResults = false;
 
+    // Both sides are named from the same profile edges under the feature's tag, so in V2 the
+    // second side revolves a copy whose names are marked: a section with this feature's ID, CPY
+    // and side 2 appended to every name. Otherwise the two sides' elements share names, told apart
+    // only by the duplicate counter in the order of the final fuse (ops#240). The copy's op alone
+    // doesn't mark them: V2 copies a child's names as they are. V1 keeps upstream's names.
+    auto secondSideProfile = [&]() {
+        TopoShape copy = sketchshape.makeElementCopy();
+        if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            copy.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+        }
+        return copy;
+    };
+
     if (sideType == "Two sides") {
         constexpr double fullRevolution = 2.0 * std::numbers::pi;
         const double combinedAngle = angle + angle2;
@@ -423,7 +525,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 method2,
                 angle2,
                 UpToFace2,
-                sketchshape.makeElementCopy(),
+                secondSideProfile(),
                 base,
                 supportface,
                 pnt,
@@ -464,7 +566,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     throw Base::RuntimeError("Could not determine the sketch plane!");
                 }
                 gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
-                TopoShape mirroredUpToFace = upToFace.makeElementMirror(mirrorPlane);
+                TopoShape mirroredUpToFace
+                    = secondSideUpToFace(upToFace, upToFace.makeElementMirror(mirrorPlane));
                 gp_Dir dir2 = dir;
                 dir2.Reverse();
                 addRevolution(tryToRevolveToFace(
@@ -472,7 +575,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     gp_Ax1(pnt, dir2),
                     base,
                     supportface,
-                    sketchshape.makeElementCopy(),
+                    secondSideProfile(),
                     revolMode
                 ));
             }
@@ -554,6 +657,19 @@ TopoShape Revolved::tryToRevolveToFace(
     Part::RevolMode revolMode
 ) const
 {
+    // A profile of several separate faces would build, but only its last face's elements would be
+    // named from the profile: BRepFeat's later per-face steps rebuild the earlier faces' edges, so
+    // references to those faces could move to other faces silently (ops#263). Until then such a
+    // profile fails loudly, as it did before ops#240 (in every naming version). The faces are
+    // counted: a one-face profile in a compound still builds.
+    if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Up to face, first or last can't revolve a profile of several separate faces yet. "
+            "Revolve each face in its own feature, or by an angle."
+        ));
+    }
+
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
         supportface = TopoDS_Face();
@@ -579,18 +695,8 @@ TopoShape Revolved::tryToRevolveToFace(
     // clears the base as well. A bounded up-to face isn't trimmed and keeps the base alone.
     // A Groove without a base gets the same box: makeRemovedVolume() then fails and the tool
     // itself becomes the result, as for a Groove by angle or a Pocket as the first feature.
-    auto isUnbounded = [](const TopoShape& face) {
-        if (face.isNull()) {
-            return false;
-        }
-        if (!TopExp_Explorer(face.getShape(), TopAbs_WIRE).More()) {
-            return true;
-        }
-        Base::BoundBox3d faceBox = face.getBoundBox();
-        return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
-    };
     TopoShape featureBase = base;
-    if (base.isNull() || isUnbounded(upToFace)) {
+    if (base.isNull() || isUnboundedFace(upToFace)) {
         Base::BoundBox3d bounds = sketchshape.getBoundBox();
         if (!base.isNull()) {
             bounds.Add(base.getBoundBox());
@@ -632,9 +738,9 @@ TopoShape Revolved::tryToRevolveToFace(
         TopoShape revolution = makeTopoShape();
         revolution.makeElementRevolution(
             featureBase,
-            TopoDS::Face(sketchshape.getShape()),
+            sketchshape,
             axis,
-            TopoDS::Face(supportface.getShape()),
+            supportface,
             TopoDS::Face(upToFace.getShape()),
             nullptr,
             mode,
@@ -962,39 +1068,6 @@ void Revolved::generateRevolution(
         revol = from;
         revol = revol.makeElementRevolve(revolAx, angleTotal);
         revol.Tag = -getID();
-    }
-    else {
-        throw Base::RuntimeError(
-            "ProfileBased: Internal error: Unknown method for generateRevolution()"
-        );
-    }
-}
-
-void Revolved::generateRevolution(
-    TopoShape& revol,
-    const TopoShape& baseshape,
-    const TopoDS_Shape& profileshape,
-    const TopoDS_Face& supportface,
-    const TopoDS_Face& uptoface,
-    const gp_Ax1& axis,
-    RevolMethod method,
-    Part::RevolMode Mode,
-    Standard_Boolean Modify
-)
-{
-    if (method == RevolMethod::ToFirst || method == RevolMethod::ToFace
-        || method == RevolMethod::ToLast) {
-        revol = revol.makeElementRevolution(
-            baseshape,
-            profileshape,
-            axis,
-            supportface,
-            uptoface,
-            nullptr,
-            Mode,
-            Modify,
-            nullptr
-        );
     }
     else {
         throw Base::RuntimeError(

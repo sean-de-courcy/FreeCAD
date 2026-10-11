@@ -103,12 +103,16 @@ public:
     );
 
     /// Whether `sub` (an index name) names the same element on `copy` as on `original`: its
-    /// type, size and centre of mass, in each object's own frame
+    /// type, size, centre of mass, vertices and bounding box, in each object's own frame (or
+    /// globally, for a shape binder that traces its support)
     static bool sameElement(
         App::DocumentObject* original,
         App::DocumentObject* copy,
         const std::string& sub
     );
+
+    /// The message for a pick `sub` of `original` that copiedElement doesn't find on its copy
+    static QString copyDiffers(App::DocumentObject* original, const std::string& sub);
 
 protected Q_SLOTS:
     void onUpdate(bool);

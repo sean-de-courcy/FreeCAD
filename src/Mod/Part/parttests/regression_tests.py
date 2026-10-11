@@ -493,6 +493,13 @@ class RegressionTests(unittest.TestCase):
                         e for e in FreeCAD.getReferenceReport(rounded) if e.get("status") == "guessed"
                     ]
                     self.assertEqual(entry["index"], [e[0] for e in edges].index(moved))
+                    # both corners rounded (PR 236 verification)
+                    cut = [
+                        c
+                        for c in ((20.5, 0), (0, 0), (20.5, 10), (0, 10))
+                        if self._cornerCut(rounded.Shape, *c, centre=(10, 5))
+                    ]
+                    self.assertEqual(cut, [(20.5, 0), (0, 0)])
                 rounded.Edges = [(moved, 0.5, 0.5)]
                 self.Doc.recompute()
                 self.assertEqual(len(guessed(rounded)), 1)
@@ -505,6 +512,202 @@ class RegressionTests(unittest.TestCase):
                 self.assertEqual(
                     [e[0] for e in rounded.Edges], [self._verticalEdgeAt(block.Shape, 20, 0)]
                 )
+
+    def test_fillet_chamfer_follow_keeps_guess(self):
+        """ops#265 (PR 236 verification): a guessed edge of a Part::Fillet or Part::Chamfer stays
+        a guess when the feature's Base is set to another object with the edge at the same
+        place (policy D). The follow used to make the link anew, without its guess record.
+
+        The guess as in test_fillet_chamfer_keep_guess: a 20 x 10 x 10 block from a sketch whose
+        right side is redrawn 0.5 mm over. The new base is a copy of the block's shape turned
+        180 degrees about the block's centre, so each edge is in place with another number."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        if not hasattr(self.Doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            return [
+                entry
+                for entry in FreeCAD.getReferenceReport(feature)
+                if entry.get("status") == "guessed"
+            ]
+
+        def centre(shape, index):
+            point = shape.Edges[int(index[len("Edge"):]) - 1].CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        self.Doc.ReferenceSolver = True
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 1.0, 1.0)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (0, 10)])
+                self.Doc.recompute()
+                [before] = guesses(rounded)
+                self.assertTrue(before["alternatives"])
+
+                turned = self.Doc.addObject("Part::Feature", "Turned" + feature)
+                turned.Shape = block.Shape.copy()
+                turned.Placement = Base.Placement(
+                    Vector(20.5, 10, 0), Base.Rotation(Vector(0, 0, 1), 180)
+                )
+                self.Doc.recompute()
+                onTurned = self._verticalEdgeAt(turned.Shape, 20.5, 0)
+                self.assertNotEqual(onTurned, rounded.Edges[0][0])  # the designed model
+                rounded.Base = turned
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onTurned)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                [after] = guesses(rounded)
+                self.assertEqual(after["guess_kind"], before["guess_kind"])
+                # the original is the turned copy's edge where the block's was (PR 240 review, M2)
+                self.assertEqual(
+                    centre(turned.Shape, after["original"]["index"]),
+                    centre(block.Shape, before["original"]["index"]),
+                )
+                # the alternatives are the turned copy's edges where the block's were
+                self.assertEqual(
+                    [centre(turned.Shape, a["index"]) for a in after["alternatives"]],
+                    [centre(block.Shape, a["index"]) for a in before["alternatives"]],
+                )
+                rounded.touch()
+                self.Doc.recompute()
+                self.assertEqual(len(guesses(rounded)), 1)
+
+    def test_fillet_chamfer_follow_clears_original(self):
+        """PR 240 round 2 (the round 1 verification's M2 follow-up): a followed guess whose
+        original has no edge at its place on the new base keeps no original. The report then
+        names none, and Mark broken names the link by the edge it held, not a bare "?".
+
+        A 20 x 10 x 10 block from a sketch, the feature on the vertical edge at (20, 0). The
+        sketch redrawn 0.5 mm over in x with a fifth corner on its top side renumbers the edges:
+        the guess is the edge at (20.5, 0), its original's number the edge at (20.5, 10) now.
+        The new base is the redrawn block with the corner at (20.5, 10) cut off."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        if not hasattr(self.Doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            return [
+                entry
+                for entry in FreeCAD.getReferenceReport(feature)
+                if entry.get("status") == "guessed"
+            ]
+
+        def centre(shape, index):
+            point = shape.Edges[int(index[len("Edge"):]) - 1].CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        self.Doc.ReferenceSolver = True
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 1.0, 1.0)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (10, 10), (0, 10)])
+                self.Doc.recompute()
+                [before] = guesses(rounded)
+                # the designed model: the original's number is the edge at (20.5, 10)
+                self.assertEqual(centre(block.Shape, before["original"]["index"]), (20.5, 10, 5))
+
+                corners = [(0, 0), (20.5, 0), (20.5, 9), (19.5, 10), (0, 10), (0, 0)]
+                face = Part.Face(Part.makePolygon([Vector(x, y, 0) for x, y in corners]))
+                cut = self.Doc.addObject("Part::Feature", "Cut" + feature)
+                cut.Shape = face.extrude(Vector(0, 0, 10))
+                self.Doc.recompute()
+                onCut = self._verticalEdgeAt(cut.Shape, 20.5, 0)
+                rounded.Base = cut
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onCut)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                [after] = guesses(rounded)
+                self.assertEqual(after["guess_kind"], before["guess_kind"])
+                self.assertFalse(after["original"].get("index"))
+                self.assertIn("Edge{}, original unknown (".format(onCut), after["warning"])
+                self.assertNotIn(" for ", after["warning"])
+
+                # Mark broken: the link goes missing under the edge it held
+                FreeCAD.markReferenceBroken(rounded, "EdgeLinks", 0)
+                self.Doc.recompute()
+                self.assertFalse(rounded.isValid())
+                self.assertEqual(rounded.EdgeLinks[1], ["?Edge{}".format(onCut)])
+                # ops#268: not "Missing edge reference: EdgeN, rejected: EdgeN"
+                status = rounded.getStatusString()
+                self.assertIn(
+                    "Missing edge reference (original unknown), rejected: Edge{}".format(onCut),
+                    status,
+                )
+
+    def test_fillet_chamfer_base_then_links_by_hand(self):
+        """PR 240 review, M1: after a Base change by hand and a recompute, EdgeLinks written by
+        hand with the old base's subs on the new base is the user's pick: it stays.
+
+        Cubes A and B (B turned 90 degrees about its z axis), the feature on A's vertical edge at
+        (10, 0)."""
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                cubes = {}
+                for name in ("A", "B"):
+                    cube = self.Doc.addObject("Part::Box", name + feature)
+                    cube.Length = cube.Width = cube.Height = 10
+                    cubes[name] = cube
+                cubes["B"].Placement = Base.Placement(
+                    Vector(10, 0, 0), Base.Rotation(Vector(0, 0, 1), 90)
+                )
+                self.Doc.recompute()
+                onA = self._verticalEdgeAt(cubes["A"].Shape, 10, 0)
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = cubes["A"]
+                rounded.Edges = [(onA, 1.0, 1.0)]
+                self.Doc.recompute()
+                subs = rounded.EdgeLinks[1]
+                rounded.Base = cubes["B"]
+                self.Doc.recompute()
+                self.assertNotEqual(rounded.EdgeLinks[1], subs)
+                rounded.setPropertyStatus("EdgeLinks", "-ReadOnly")
+                rounded.EdgeLinks = (cubes["B"], subs)
+                self.assertEqual(rounded.EdgeLinks[1], subs)
+                self.Doc.recompute()
+                self.assertEqual(rounded.EdgeLinks[1], subs)
 
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""

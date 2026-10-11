@@ -86,6 +86,12 @@ public:
         return findDroppedReferences(prop).message();
     }
     static Part::TopoShape buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs);
+    /// Whether two placements are the same within round-off: the position within
+    /// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
+    /// vector part of their difference, the sine of half the angle, which stays exact near zero;
+    /// Rotation::isSame's tolerance on the quaternions' scalar product let about 0.036 degrees
+    /// through: PR 227 verification)
+    static bool samePlace(const Base::Placement& a, const Base::Placement& b);
 
     const char* getViewProviderName() const override
     {
@@ -95,6 +101,9 @@ public:
 protected:
     Part::TopoShape updatedShape() const;
     bool hasPlacementChanged() const;
+    /// The global placements of the support's container and of this binder's (identity at the
+    /// root), which TraceSupport maps between; false without a support
+    bool containerFrames(Base::Placement& sourceCS, Base::Placement& targetCS) const;
     void handleChangedPropertyType(
         Base::XMLReader& reader,
         const char* TypeName,
@@ -106,10 +115,15 @@ protected:
 
 private:
     void slotChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
+    void followChangedObject(const App::DocumentObject& Obj, const App::Property& Prop);
     void onSettingDocument() override;
 
     using Connection = fastsignals::connection;
     Connection connectDocumentChangedObject;
+    // the container frames of the last traced execute (FreeCAD-CH ops#244), not saved
+    Base::Placement tracedSourceCS;
+    Base::Placement tracedTargetCS;
+    bool traced = false;
 };
 
 class PartDesignExport SubShapeBinder: public Part::Feature

@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <QAction>
 #include <QMenu>
 #include <Inventor/SoFullPath.h>
@@ -653,11 +654,53 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
         }
     }
 
-    for (auto& v : propChanges) {
-        auto prop = v.first.getProperty();
-        if (prop) {
-            prop->Paste(*v.second.get());
+    // What each property links as the copies are made. A paste can make an owner change another
+    // of its links (a Part Fillet's Base change moves its edge links to the new base, ops#265).
+    // A property that a paste before it moved to the object its copy links, off the object the
+    // copy replaces (oldObj -> newObj, or newObj -> oldObj for a swap copy), keeps that change,
+    // and its stale copy isn't pasted. Every other copy is pasted as it was made: one that a
+    // paste cleared or set to something else, too (PR 240 round 2).
+    // Limit: a copy that replaces oldObj inside a sub-object path (the global search's links to
+    // obj or a parent) links neither object directly, so it is always pasted, over any change
+    // an earlier paste made to it.
+    auto linksOf = [](const App::Property* prop) {
+        std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>> links;
+        if (auto linkProp = freecad_cast<const App::PropertyLinkBase*>(prop)) {
+            linkProp->getLinks(links.first, true, &links.second, false);
         }
+        return links;
+    };
+    std::vector<std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>>> copiedLinks;
+    copiedLinks.reserve(propChanges.size());
+    for (auto& v : propChanges) {
+        copiedLinks.push_back(linksOf(v.first.getProperty()));
+    }
+
+    for (std::size_t i = 0; i < propChanges.size(); ++i) {
+        auto& v = propChanges[i];
+        auto prop = v.first.getProperty();
+        if (!prop) {
+            continue;
+        }
+        const auto& before = copiedLinks[i].first;
+        auto has = [](const std::vector<App::DocumentObject*>& objs, const App::DocumentObject* o) {
+            return std::ranges::find(objs, o) != objs.end();
+        };
+        App::DocumentObject* replaced = has(before, oldObj) ? oldObj
+            : has(before, newObj)                         ? newObj
+                                                          : nullptr;
+        if (replaced) {
+            App::DocumentObject* target = replaced == oldObj ? newObj : oldObj;
+            auto links = linksOf(prop);
+            // "Now contains the target, no longer the replaced object" is taken as proof that an
+            // earlier paste moved this property itself (ops#268). For a list it's weaker: an owner
+            // that rewrote [A, C] to [B] would lose C here, as its copy [B, C] isn't pasted. No
+            // owner in the tree does that today.
+            if (links != copiedLinks[i] && has(links.first, target) && !has(links.first, replaced)) {
+                continue;
+            }
+        }
+        prop->Paste(*v.second.get());
     }
     return 1;
 }

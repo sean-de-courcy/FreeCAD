@@ -2941,6 +2941,115 @@ TEST_F(TopoShapeExpansionTest, makeElementPrismUntil)
     EXPECT_EQ(result.countSubElements("Vertex"), 8);
 }
 
+namespace
+{
+// The profile of the makeElementRevolution tests: the rectangle x 1..2, z 0.25..0.75 in the XZ
+// plane
+TopoDS_Face revolutionProfile()
+{
+    BRepBuilderAPI_MakePolygon outline(
+        gp_Pnt(1, 0, 0.25),
+        gp_Pnt(2, 0, 0.25),
+        gp_Pnt(2, 0, 0.75),
+        gp_Pnt(1, 0, 0.75),
+        Standard_True
+    );
+    return BRepBuilderAPI_MakeFace(outline.Wire()).Face();
+}
+}  // namespace
+
+TEST_F(TopoShapeExpansionTest, makeElementRevolution)
+{
+    // Arrange
+    //   a wall x -3..0, y 0..3, z 0..1 (tag 1), and a profile face x 1..2, z 0.25..0.75 in the XZ
+    //   plane (tag 2), revolved about the Z axis up to the wall's face x = 0: a quarter ring
+    TopoShape wall {BRepPrimAPI_MakeBox(gp_Pnt(-3, 0, 0), 3, 3, 1).Shape(), 1L};
+    TopoShape profile {revolutionProfile(), 2L};
+    auto upTo = wall.getSubTopoShape(elementAt(wall, "Face", Base::Vector3d(0, 1.5, 0.5)).c_str());
+    gp_Ax1 axis {gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)};
+    TopoShape result {3L};
+    // Act
+    result.makeElementRevolution(
+        wall,
+        profile,
+        axis,
+        TopoShape(),
+        TopoDS::Face(upTo.getShape()),
+        nullptr,
+        Part::RevolMode::None,
+        Standard_False
+    );
+    // Assert shape is correct: the quarter ring alone (in RevolMode::None BRepFeat returns the
+    // revolved solid; PartDesign fuses it with the base afterwards)
+    EXPECT_NEAR(getVolume(result.getShape()), 3 * std::numbers::pi / 8, 1e-6);
+    // Assert elementMap is correct (ops#240)
+    //   as a Pad up to a face: named from the profile (tag 2), which has no element map here, so
+    //   its elements' names are their indexes. The profile face is kept as the start face; each of
+    //   its edges sweeps a face, and each of its vertices an arc edge, which the result names under
+    //   its own tag (3) as generated (GEN)
+    auto nameOf = [](const std::string& element) {
+        return unmappedName(element, 2, "RVL");
+    };
+    auto startFace = "Face" + std::to_string(result.findShape(profile.getShape()));
+    EXPECT_TRUE(elementHasNames(result, startFace.c_str(), {unmappedName("Face1", 2, "MKR")}));
+    auto sweptBy = [&](const char* type, const std::string& element) {
+        auto shape = profile.getSubShape(element.c_str());
+        std::string swept;
+        for (int index = 1; index <= static_cast<int>(result.countSubElements(type)); ++index) {
+            auto candidate = type + std::to_string(index);
+            if (candidate != startFace && liesOn(shape, result.getSubShape(candidate.c_str()))
+                && !liesOn(result.getSubShape(candidate.c_str()), profile.getShape())) {
+                EXPECT_TRUE(swept.empty()) << element << " on " << swept << " and " << candidate;
+                swept = candidate;
+            }
+        }
+        return swept;
+    };
+    for (int index = 1; index <= 4; ++index) {
+        auto edge = "Edge" + std::to_string(index);
+        EXPECT_TRUE(elementHasNames(
+            result,
+            sweptBy("Face", edge).c_str(),
+            {linkingName({nameOf(edge)}, 3, "RVL", 'F', MAPPER_FLAG_GENERATED)}
+        ));
+        auto vertex = "Vertex" + std::to_string(index);
+        EXPECT_TRUE(elementHasNames(
+            result,
+            sweptBy("Edge", vertex).c_str(),
+            {linkingName({nameOf(vertex)}, 3, "RVL", 'E', MAPPER_FLAG_GENERATED)}
+        ));
+    }
+    //   no element is named by its index in BRepFeat's result: the only unmapped names are the
+    //   profile's, on the profile's own elements (the wall's faces, not sources here, get their
+    //   names in the boolean that follows in PartDesign)
+    EXPECT_TRUE(unmappedNamesNameTheirElements(result, {{2L, profile}}));
+}
+
+TEST_F(TopoShapeExpansionTest, makeElementRevolutionV1)
+{
+    // Arrange: makeElementRevolution's model in V1
+    auto box = BRepPrimAPI_MakeBox(gp_Pnt(-3, 0, 0), 3, 3, 1).Shape();
+    TopoShape wall {App::HistoryAlgorithm::V1, box, 1L};
+    TopoShape profile {App::HistoryAlgorithm::V1, revolutionProfile(), 2L};
+    auto upTo = wall.getSubTopoShape(elementAt(wall, "Face", Base::Vector3d(0, 1.5, 0.5)).c_str());
+    TopoShape result {App::HistoryAlgorithm::V1, 3L};
+    // Act
+    result.makeElementRevolution(
+        wall,
+        profile,
+        gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+        TopoShape(),
+        TopoDS::Face(upTo.getShape()),
+        nullptr,
+        Part::RevolMode::None,
+        Standard_False
+    );
+    // Assert: the same shape, and upstream's names, which ops#240 leaves alone: BRepFeat's result,
+    // without a tag, is the only source, so the result has no element map
+    EXPECT_NEAR(getVolume(result.getShape()), 3 * std::numbers::pi / 8, 1e-6);
+    EXPECT_EQ(result.getElementMapSize(), 0);
+}
+
 TEST_F(TopoShapeExpansionTest, makeElementFilledFace)
 {
     // Arrange

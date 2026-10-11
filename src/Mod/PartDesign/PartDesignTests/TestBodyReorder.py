@@ -1046,6 +1046,78 @@ class BodyReorderBase:
         parked."""
         self.checkFaceProjectionPartlyDeleted(2)
 
+    def kindOf(self, sketch, index):
+        """The Id and kind ("P", "I") of the external line at index (a Part.Point read from
+        Python has no extensions, so lines only)."""
+        facade = Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[index])
+        return facade.Id, "P" if facade.testFlag("Projection") else "I"
+
+    def testBothProjectionDeletedWhileParked(self):
+        """PR 241 review H1 (ops#264): Ramp, a 10 x 10 pad on the block's top at (5, 5) to
+        (15, 15), 5 high along (0, 1, 1): its front face slants. The sketch at z = 12 links that
+        face as both projection and intersection: four projected lines (y = 5, y = 10, and x = 5,
+        x = 15 between them) and the section line y = 7. A DistanceY from the section's start to
+        the circle's centre. Parked, the four projected lines are deleted; moved back, they come
+        back on new Ids and the constraint stays on the section, on its Id. The placeholders for
+        the projections copied the section's kind, so they took the section's place and the
+        section went, with the constraint."""
+        self.block()
+        sketch = models.sketch(
+            self.doc, "RampSketch", models.rectangle(5, 5, 15, 15), self.body, z=10
+        )
+        ramp = models.pad(self.body, sketch, 5, "Ramp")
+        ramp.UseCustomVector = True
+        ramp.Direction = V(0, 1, 1)
+        self.recompute()
+        self.assertValid(ramp)
+        [face] = [
+            f"Face{i}"
+            for i, f in enumerate(ramp.Shape.Faces, 1)
+            if (f.CenterOfMass - V(10, 7.5, 12.5)).Length < 1e-6
+        ]
+        sketch = models.sketch(self.doc, "Projecting", [models.circle(10, 10, 1)], self.body, z=12)
+        sketch.addExternal(ramp.Name, face, False, False)
+        sketch.addExternal(ramp.Name, face, False, True)
+        self.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [2])
+        self.assertEqual(len(sketch.ExternalGeo), 7)
+        kinds = [self.kindOf(sketch, i) for i in range(2, 7)]
+        self.assertEqual(sorted(kind for _, kind in kinds), ["I", "P", "P", "P", "P"])
+        [section] = [i for i in range(2, 7) if self.kindOf(sketch, i)[1] == "I"]
+        geo = sketch.ExternalGeo[section]
+        self.assertLess(abs(geo.StartPoint.y - 7) + abs(geo.EndPoint.y - 7), TOL)
+        sectionId = self.kindOf(sketch, section)[0]
+        projectionIds = [id for id, kind in kinds if kind == "P"]
+        sketch.addConstraint(Sketcher.Constraint("DistanceY", -section - 1, 1, 0, 3, 3))
+        boss = models.pad(self.body, sketch, 5, "ProjectedBoss")
+        self.recompute()
+        self.assertValid(sketch, boss)
+
+        self.body.reorderObject([boss], None, True)
+        self.recompute()
+        self.assertEqual(sketch.ExternalGeometry, [])
+        [line] = self.parked(sketch)
+        self.assertIn(f",{sectionId}i", line + ",")  # the kinds are in the parked line
+        sketch.delExternals([i - 2 for i in range(2, 7) if i != section])
+        self.assertEqual(len(sketch.ExternalGeo), 3)
+        self.assertEqual(len(sketch.Constraints), 1)
+
+        self.body.reorderObject([boss], ramp, True)
+        self.assertEqual(self.parked(sketch), [])
+        self.recompute()
+        self.assertValid(sketch, boss)
+        self.assertEqual(list(sketch.ExternalTypes), [2])
+        self.assertEqual(len(sketch.ExternalGeo), 7)
+        self.assertEqual(len(sketch.Constraints), 1)
+        index = -sketch.Constraints[0].First - 1
+        self.assertEqual(self.kindOf(sketch, index), (sectionId, "I"))
+        geo = sketch.ExternalGeo[index]
+        self.assertLess(abs(geo.StartPoint.y - 7) + abs(geo.EndPoint.y - 7), TOL)
+        now = [self.kindOf(sketch, i) for i in range(2, 7) if i != index]
+        self.assertEqual([kind for _, kind in now], ["P"] * 4)
+        self.assertFalse({id for id, _ in now} & set(projectionIds))
+        self.assertCircleAt(sketch, 10, 10)
+
     def testStayAboveNotRestored(self):
         """RO11k: from the top to just below Block, still above Pad2: the projection stays parked
         and nothing is re-targeted; moved below Pad2, RO11c."""

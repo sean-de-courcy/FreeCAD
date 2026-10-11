@@ -117,8 +117,9 @@ namespace
 // representation, solver changes or geometry fixes that keep the names.
 // PartDesignTests/NamingGolden/REVISION records it with a digest of the V2 golden dumps
 // (TestNamingDump.TestNamingRevision). 1: ops#56's boundary section (was `.X1`), and every
-// naming fix before it.
-constexpr int ForkNamingRevision = 1;
+// naming fix before it. 2: ops#240, a Revolution's or Groove's faces up to a face named from the
+// profile, and a two-sided Revolution's second side marked.
+constexpr int ForkNamingRevision = 2;
 
 // The naming revision of each document's references (ops#116, NamingRevision.h): read from the
 // file, or written by its last save. `older` until the pass at the end of the open has run.
