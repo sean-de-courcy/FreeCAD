@@ -1607,6 +1607,48 @@ TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
     EXPECT_EQ(outcomes[0].element, "Edge7");
 }
 
+TEST(SolveOwner, topAgreementOfAnUnrelatedNameIsNoEvidence)
+{
+    // PR 243 round 6: a Pad's start cap edge (the profile's line 4, sketch 13) is gone. Side 1's
+    // far cap edge holds it through its PRJ name, and lies on a base block's edge, so it also
+    // holds the block sketch's line 4 (sketch 11), plain: that name's top section agrees with
+    // the old name's (SKT), but it shares nothing with it. Tier 1 resolved the reference there,
+    // 8 mm away, with no warning.
+    const auto oldEdge = sketchEdge(4, 13);
+    const auto farCapEdge = section({}, {oldEdge}, 14, "XTR", 0, 'E', {"PRJ"});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge28", {farCapEdge, sketchEdge(4, 11)})};
+    input.entries = {missing(oldEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge28"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+
+    //   a name that agrees on the top section and shares an ancestor with the old one is still
+    //   evidence
+    const auto oldSide = generated({sketchEdge(1), sketchEdge(2)}, 7, "XTR", 'F');
+    const auto newSide = generated({sketchEdge(1), sketchEdge(3)}, 7, "XTR", 'F');
+    input.pool.clear();
+    input.pool["Face"] = {element("Face3", {newSide})};
+    input.entries = {missing(oldSide, "Face")};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Face3");
+
+    //   and so is the name the name match returned, though it shares none (overlap 0, sources
+    //   names: random sequence 9, a boss's vertical edge after its back line is redrawn)
+    const auto oldGenerated = generated({sketchVertex({"g2v2", "g3v1"})}, 7, "XTR", 'E');
+    const auto renamed = generated({sketchVertex({"g2v2", "g5v1"})}, 7, "XTR", 'E');
+    input.pool.clear();
+    input.pool["Edge"] = {element("Edge20", {renamed})};
+    input.entries = {missing(oldGenerated, "Edge", {renamed})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Edge20");
+}
+
 TEST(SolveOwner, patternSiblingNeverResolves)
 {
     // A pattern of two: the referenced instance's top face is gone and the other instance's copy

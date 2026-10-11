@@ -39,6 +39,7 @@ from .harness import (
     Filleted,
     ReachesFace,
     Scenario,
+    Settled,
     V,
     Z,
     edge,
@@ -497,6 +498,21 @@ class RevolutionSideTwoEndAfterSideOneToFace(RevolutionSideOneToFaceFillet):
         return super().endTop()
 
 
+class RevolutionSideTwoOuterEdgeAfterSideOneToFace(RevolutionSideTwoEndAfterSideOneToFace):
+    """PR 243 round 6 (Fable review 5, M1), a guard for the connected elements' path: the
+    Revolution of RevolutionSideTwoEndAfterSideOneToFace, the fillet on the outer edge of side 2's
+    end face (the start face, at -60 degrees, radius 20, z 5..10). After side 1 goes up to the
+    wall, the wall's bottom edge (x = 0, y 20..30, z = 5) lists the outer face (the profile's
+    outer line, GEN) among its connected elements, so the old name is in its ancestry; tier 2
+    drops it (it runs along Y, the old edge along Z), and side 1's far outer edge holds the
+    name through PRJ only. The solver breaks the reference; V2 finds the edge where it was."""
+
+    def endTop(self):
+        if self.upTo and self.solver:
+            return BROKEN
+        return edge("line", contains=ray(self.endAngle, 20, 7.5))
+
+
 class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
     """PR 243 round 5 (verification 4, finding 1): the profile x 10..20, z 5..10 revolved about
     the Z axis, One side, 60 degrees, Refine off; a fillet (radius 1) on the top edge of the
@@ -515,6 +531,11 @@ class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
     def startTop(self):
         return edge("line", contains=ray(self.startAngle, 15, 10))
 
+    def followedStartTop(self):
+        """The edge, held plainly in V2: a warned guess doesn't pass (verification 5, L3)."""
+        expected = self.startTop()
+        return Settled(expected) if self.mode == "V2" else expected
+
     def revolve(self, doc, **properties):
         body = m.body(doc)
         profile = m.sketch(doc, "Profile", m.rectangle(10, 5, 20, 10), body, placement=XZ)
@@ -529,7 +550,7 @@ class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (revolved, self.names(revolved, self.startTop()))
         fillet.Radius = 1
-        self.ref("start_top", fillet, "Base", self.startTop, Filleted(1))
+        self.ref("start_top", fillet, "Base", self.followedStartTop, Filleted(1))
 
     def build(self, doc):
         self.revolve(doc, Angle=60)

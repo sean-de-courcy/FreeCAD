@@ -979,13 +979,27 @@ void ProfileBased::markStartCap(
             }
         }
     }
-    // Every element marked, for the caps' names
-    TopoShape marked(solid);
-    marked.appendElementSection(getID(), Part::OpCodes::Copy, side);
-    TopoShape markedSide2(solid);
-    if (farCapIsSide2) {
-        markedSide2.appendElementSection(getID(), Part::OpCodes::Copy, "2");
-    }
+    // The copy section appendElementSection() appends, per element type
+    const std::vector<Data::MappedName> noNames;
+    auto copySection = [&](const char* index, char elementType) {
+        return Data::NAME_SECTION_DELIMINATOR
+            + Data::MappedName::makeEncodedSection(
+                   {},
+                   noNames,
+                   std::to_string(getID()),
+                   Part::OpCodes::Copy,
+                   std::string(index),
+                   elementType,
+                   std::string("0"),
+                   {Data::MAPPER_FLAG_MODIFIED},
+                   noNames
+            );
+    };
+    auto marked = [&](const Data::MappedName& name, const std::string& section) {
+        Data::MappedName result(name);
+        result.append(section.c_str());
+        return result;
+    };
     auto isPartner = [](const Data::MappedName& name) {
         const auto sections = Data::NameAncestry::splitSections(name.toString());
         if (sections.empty()) {
@@ -995,37 +1009,44 @@ void ProfileBased::markStartCap(
         return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION);
     };
 
-    // Name by name: an element may have other names besides, e.g. from an up-to face, and which
-    // ones depends on the order of OCC's history maps, which differs between platforms (round
-    // 4's far cap went unmarked on macOS when only elements whose every name was a partner's
-    // were marked). appendElementSection() keeps each element's names in order.
+    // Name by name, each marked name made from the name itself: an element may have other names
+    // besides, e.g. from an up-to face, and which ones, and their order, depend on OCC's history
+    // maps, which differ between platforms. Round 4 marked only elements whose every name was a
+    // partner's, and round 5 paired each name with a copy of the shape marked whole by position;
+    // but the map keeps an element's later names after its head in another order
+    // (MappedNameRef::append), so the pairs could miss: on macOS (CI run 38126049631) the far
+    // cap's PRJ name stayed unmarked, and a reference followed it to side 1's far cap.
     std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
     bool capFound = false;
+    bool partnerFound = false;
     for (const char* type : types) {
+        const std::string capSection = copySection(side, type[0]);
+        const std::string farCapSection = copySection("2", type[0]);
         const auto count = static_cast<int>(solid.countSubShapes(type));
         for (int i = 1; i <= count; ++i) {
             const auto element = Data::IndexedName::fromConst(type, i);
-            const auto own = solid.getElementMappedNames(element);
-            const auto onCap = marked.getElementMappedNames(element);
-            const auto onFarCap = farCapIsSide2 ? markedSide2.getElementMappedNames(element)
-                                                : decltype(own) {};
-            for (std::size_t k = 0; k < own.size(); ++k) {
-                const auto& name = own[k].first;
-                if (onCap.size() == own.size() && profileNames.contains(name.toString())) {
-                    names.emplace_back(element, onCap[k].first, onCap[k].second);
+            for (const auto& [name, sids] : solid.getElementMappedNames(element)) {
+                if (profileNames.contains(name.toString())) {
+                    names.emplace_back(element, marked(name, capSection), sids);
                     capFound = true;
                 }
-                else if (onFarCap.size() == own.size() && isPartner(name)) {
-                    names.emplace_back(element, onFarCap[k].first, onFarCap[k].second);
-                    capFound = true;
+                else if (farCapIsSide2 && isPartner(name)) {
+                    names.emplace_back(element, marked(name, farCapSection), sids);
+                    partnerFound = true;
                 }
                 else {
-                    names.emplace_back(element, name, own[k].second);
+                    names.emplace_back(element, name, sids);
                 }
             }
         }
     }
     if (!capFound) {
+        FC_LOG(getFullName() << ": no start cap element has the profile's names");
+    }
+    if (farCapIsSide2 && !partnerFound) {
+        FC_LOG(getFullName() << ": no far cap element has a profile partner's name");
+    }
+    if (!capFound && !partnerFound) {
         return;
     }
     // A new map, as appendElementSection() makes: the old one may be shared

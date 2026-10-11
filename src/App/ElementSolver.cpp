@@ -2728,6 +2728,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::vector<int> candidates;  // positions in the pool, in index order
         std::set<int> fromOverlap;
         std::set<int> fromNames;
+        std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
         // Tier 1's candidates that T1 dropped, made by another maker (ops#167), and that T1'
         // dropped, which lost one of the old element's sources (ops#173): for the evidence, and
@@ -3004,6 +3005,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     if (it != pool.byName.end() && allowed[it->second]
                         && copyContexts(name) == oldCopies) {
                         state.fromNames.insert(it->second);
+                        state.matchedNames.insert(name);
                     }
                 }
             }
@@ -3418,7 +3420,12 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // edge that many elements embed through a face) doesn't show it is the same element.
             // A partner that only geometry found passed both geometric tiers. The IDX source and
             // the old element's pieces (an IDX element's pieces under another op code don't hold
-            // the old name) are evidence of their own.
+            // the old name) are evidence of their own. The name that agrees on the top section
+            // must be one tier 1 found the partner by: one the name match returned, or one that
+            // shares an ancestor with the old name. A partner found through one name (a far
+            // cap's PRJ name, which embeds the old start cap's) that holds another, unrelated name
+            // with the same top op code (another sketch's plain name, where the far cap meets a
+            // base element) has no evidence (PR 243 round 6).
             bool evidenced = k >= 0
                 && (state.geometric || state.inAncestry.count(k) > 0
                     || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
@@ -3426,7 +3433,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     || std::any_of(
                         state.pool->elements[k].names.begin(),
                         state.pool->elements[k].names.end(),
-                        [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
+                        [&](const auto& n) {
+                            return NameAncestry::topAgrees(state.oldName, n)
+                                && (state.matchedNames.count(n) > 0
+                                    || ancestry.overlap(state.oldName, n) > 0.0);
+                        }
                     ));
             // A partner that tier 1 alone found must not contradict the saved geometry (ops#87:
             // a thread's B-spline edge resolved to a circle with which it shares sources). The

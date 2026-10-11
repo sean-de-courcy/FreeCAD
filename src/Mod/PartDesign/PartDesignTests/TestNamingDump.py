@@ -504,8 +504,10 @@ def modelTwoSidesOnePrimitive(doc):
     """Two sides built as one primitive, and apart (PR 243 rounds 4 and 5): a square padded Two
     sides 5 and 5 and Symmetric by Length 10, untapered (one prism each, its start cap with the
     profile's names, its far cap side 1's), and Two sides 5 and 5 with a start offset of 1 (two
-    prisms: side 1's start cap, the seam, marked CPY;1, side 2 CPY;2); a rectangle revolved Two
-    sides by 60 and 30 degrees and Symmetric by 90 degrees (one solid each)."""
+    prisms: side 1's start cap, the seam, marked CPY;1, side 2 CPY;2), and Two sides, side 1 5
+    long, side 2 up to a datum plane at z = -5 (one prism from side 1's end: its start cap CPY;0,
+    its far cap side 2's, CPY;2; PR 243 round 6); a rectangle revolved Two sides by 60 and 30
+    degrees and Symmetric by 90 degrees (one solid each)."""
     xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
     features = []
     for label, sides, offset in (
@@ -525,6 +527,18 @@ def modelTwoSidesOnePrimitive(doc):
             pad.StartType = "Offset"
             pad.StartOffset = offset
         features.append(pad)
+    body = models.body(doc)
+    plane = body.newObject("PartDesign::Plane", "AtMinusFive")
+    plane.Placement = App.Placement(V(0, 0, -5), App.Rotation())
+    square = models.sketch(doc, "SquareUpToFace", models.rectangle(-5, -5, 5, 5), body)
+    pad = body.newObject("PartDesign::Pad", "PadUpToFace")
+    pad.Profile = square
+    pad.Refine = False
+    pad.SideType = "Two sides"
+    pad.Length = 5
+    pad.Type2 = "UpToFace"
+    pad.UpToFace2 = (plane, [""])
+    features.append(pad)
     for label, sides, angle, angle2 in (
         ("TwoSides", "Two sides", 60, 30),
         ("Symmetric", "Symmetric", 90, 0),

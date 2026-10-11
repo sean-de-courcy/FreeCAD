@@ -104,6 +104,37 @@ Vertex c=(5.0000,-5.0000,6.0000) m=0.0000 : <<<g1v2;SKT>;:H{SquareTwoSidesApart}
 Vertex c=(5.0000,5.0000,-4.0000) m=0.0000 : <<<g2v2;SKT>;:H{SquareTwoSidesApart},V>;:G;XTR;:H{SquareTwoSidesApart}:L,E>:1f;:U;XTR;:H{SquareTwoSidesApart}:L,V
 Vertex c=(5.0000,5.0000,1.0000) m=0.0000 : <<g2v2;SKT>;:H{SquareTwoSidesApart},V>;:M;FUS;:H{SquareTwoSidesApart}:L,V
 Vertex c=(5.0000,5.0000,6.0000) m=0.0000 : <<<g2v2;SKT>;:H{SquareTwoSidesApart},V>:;:G;XTR;:H{SquareTwoSidesApart}:L,E>:6;:U;XTR;:H{SquareTwoSidesApart}:L,V
+[PadUpToFace PartDesign::Pad] faces=6 edges=12 vertexes=8 names=30
+Edge c=(-5.0000,-5.0000,0.0000) m=10.0000 : <<g1v1;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v1;SKT>;:H{SquareUpToFace},V>:2;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E
+Edge c=(-5.0000,0.0000,-5.0000) m=10.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:4;:G;PSM;:H{SquareUpToFace}:L,E
+Edge c=(-5.0000,0.0000,5.0000) m=10.0000 : <g;SKT>:4;:H{SquareUpToFace},E
+Edge c=(-5.0000,5.0000,0.0000) m=10.0000 : <<g3v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g3v2;SKT>;:H{SquareUpToFace},V>:8;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E
+Edge c=(0.0000,-5.0000,-5.0000) m=10.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:1;:G;PSM;:H{SquareUpToFace}:L,E
+Edge c=(0.0000,-5.0000,5.0000) m=10.0000 : <g;SKT>:1;:H{SquareUpToFace},E
+Edge c=(0.0000,5.0000,-5.0000) m=10.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:3;:G;PSM;:H{SquareUpToFace}:L,E
+Edge c=(0.0000,5.0000,5.0000) m=10.0000 : <g;SKT>:3;:H{SquareUpToFace},E
+Edge c=(5.0000,-5.0000,0.0000) m=10.0000 : <<g1v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v2;SKT>;:H{SquareUpToFace},V>:4;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E
+Edge c=(5.0000,0.0000,-5.0000) m=10.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:2;:G;PSM;:H{SquareUpToFace}:L,E
+Edge c=(5.0000,0.0000,5.0000) m=10.0000 : <g;SKT>:2;:H{SquareUpToFace},E
+Edge c=(5.0000,5.0000,0.0000) m=10.0000 : <<g2v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g2v2;SKT>;:H{SquareUpToFace},V>:6;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E
+Face c=(-5.0000,0.0000,0.0000) m=100.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:4;:L<(<<g;SKT>:;:H{SquareUpToFace},E>:4;:G;PSM;:H{SquareUpToFace}:L,E|<<g1v1;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v1;SKT>;:H{SquareUpToFace},V>:2;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E|<<g3v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g3v2;SKT>;:H{SquareUpToFace},V>:8;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E)>;PSM;:H{SquareUpToFace}:L,F
+Face c=(0.0000,-5.0000,0.0000) m=100.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:1;:L<(<<g;SKT>:;:H{SquareUpToFace},E>:1;:G;PSM;:H{SquareUpToFace}:L,E|<<g1v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v2;SKT>;:H{SquareUpToFace},V>:4;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E|<<g1v1;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v1;SKT>;:H{SquareUpToFace},V>:2;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E)>;PSM;:H{SquareUpToFace}:L,F
+Face c=(0.0000,0.0000,-5.0000) m=100.0000 : <<<g;SKT>:;:H{SquareUpToFace},E>:;:G;PSM;:H{SquareUpToFace}:L,E>:1;:L<(<<g;SKT>:;:H{SquareUpToFace},E>:2;:G;PSM;:H{SquareUpToFace}:L,E|<<g;SKT>:;:H{SquareUpToFace},E>:3;:G;PSM;:H{SquareUpToFace}:L,E|<<g;SKT>:;:H{SquareUpToFace},E>:4;:G;PSM;:H{SquareUpToFace}:L,E)>;PSM;:H{SquareUpToFace}:L,F
+Face c=(0.0000,0.0000,5.0000) m=100.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:1;FAC;:H{SquareUpToFace}:L,F
+Face c=(0.0000,5.0000,0.0000) m=100.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:3;:L<(<<g;SKT>:;:H{SquareUpToFace},E>:3;:G;PSM;:H{SquareUpToFace}:L,E|<<g2v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g2v2;SKT>;:H{SquareUpToFace},V>:6;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E|<<g3v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g3v2;SKT>;:H{SquareUpToFace},V>:8;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E)>;PSM;:H{SquareUpToFace}:L,F
+Face c=(5.0000,0.0000,0.0000) m=100.0000 : <<g;SKT>:;:H{SquareUpToFace},E>:2;:L<(<<g;SKT>:;:H{SquareUpToFace},E>:2;:G;PSM;:H{SquareUpToFace}:L,E|<<g1v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g1v2;SKT>;:H{SquareUpToFace},V>:4;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E|<<g2v2;SKT>;:H{SquareUpToFace},V>;:L<(<<g2v2;SKT>;:H{SquareUpToFace},V>:6;:G;PSM;:H{SquareUpToFace}:L,V)>;PSM;:H{SquareUpToFace}:L,E)>;PSM;:H{SquareUpToFace}:L,F
+Vertex c=(-5.0000,-5.0000,-5.0000) m=0.0000 : <<g1v1;SKT>;:H{SquareUpToFace},V>:2;:G;PSM;:H{SquareUpToFace}:L,V
+Vertex c=(-5.0000,-5.0000,5.0000) m=0.0000 : <g1v1;SKT>;:H{SquareUpToFace},V
+Vertex c=(-5.0000,-5.0000,5.0000) m=0.0000 : <g4v2;SKT>;:H{SquareUpToFace},V
+Vertex c=(-5.0000,5.0000,-5.0000) m=0.0000 : <<g3v2;SKT>;:H{SquareUpToFace},V>:8;:G;PSM;:H{SquareUpToFace}:L,V
+Vertex c=(-5.0000,5.0000,5.0000) m=0.0000 : <g3v2;SKT>;:H{SquareUpToFace},V
+Vertex c=(-5.0000,5.0000,5.0000) m=0.0000 : <g4v1;SKT>;:H{SquareUpToFace},V
+Vertex c=(5.0000,-5.0000,-5.0000) m=0.0000 : <<g1v2;SKT>;:H{SquareUpToFace},V>:4;:G;PSM;:H{SquareUpToFace}:L,V
+Vertex c=(5.0000,-5.0000,5.0000) m=0.0000 : <g1v2;SKT>;:H{SquareUpToFace},V
+Vertex c=(5.0000,-5.0000,5.0000) m=0.0000 : <g2v1;SKT>;:H{SquareUpToFace},V
+Vertex c=(5.0000,5.0000,-5.0000) m=0.0000 : <<g2v2;SKT>;:H{SquareUpToFace},V>:6;:G;PSM;:H{SquareUpToFace}:L,V
+Vertex c=(5.0000,5.0000,5.0000) m=0.0000 : <g2v2;SKT>;:H{SquareUpToFace},V
+Vertex c=(5.0000,5.0000,5.0000) m=0.0000 : <g3v1;SKT>;:H{SquareUpToFace},V
 [RevolutionTwoSides PartDesign::Revolution] faces=6 edges=12 vertexes=8 names=26
 Edge c=(10.0000,17.3205,2.5000) m=5.0000 : <<<g;SKT>:;:H{ProfileTwoSides},E>:;:G;RVL;:H{ProfileTwoSides}:L,F>:2;:U;RVL;:H{ProfileTwoSides}:L,E;:H{-RevolutionTwoSides},E
 Edge c=(12.9904,-7.5000,0.0000) m=10.0000 : <g;SKT>:1;:H{ProfileTwoSides},E;:H{-RevolutionTwoSides},E
