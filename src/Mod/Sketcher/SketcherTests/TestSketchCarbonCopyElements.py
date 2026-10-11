@@ -505,6 +505,33 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         self.copy()
 
 
+    def add_edge_on(self, edge):
+        """`edge` (global) as Source's external -3, and a line whose start is on the
+        external's start and which is at 60 degrees to it: both hold only if the copied
+        external runs as the image of the source's."""
+        ring = self.doc.addObject("Part::Feature", "Ring")
+        ring.Shape = edge
+        self.doc.recompute()
+        self.source.addExternal(ring.Name, "Edge1")
+        line = self.add_line((3, 3), (8, 6))
+        self.source.addConstraint(Sketcher.Constraint("Coincident", line, 1, -3, 1))
+        self.source.addConstraint(Sketcher.Constraint("Angle", -3, line, math.pi / 3))
+
+    def test_flipped_copy_keeps_an_edge_on_circles_ends(self):
+        """ops#283: a circle of radius 5 about (0, 20, 5) whose axis is X, seen edge-on: a
+        sketch projects it as a line along its normal ^ the circle's axis, so in a mirrored
+        copy the copied external runs the other way. Before, a constraint on its start landed
+        on its end, and an angle with it was off by half a turn."""
+        self.turn_over()
+        self.add_edge_on(Part.makeCircle(5, V(0, 20, 5), V(1, 0, 0)))
+        self.copy()
+
+    def test_flipped_copy_keeps_an_edge_on_arcs_ends(self):
+        """As above, a quarter of that circle."""
+        self.turn_over()
+        self.add_edge_on(Part.makeCircle(5, V(0, 20, 5), V(1, 0, 0), 0, 90))
+        self.copy()
+
 class TestCarbonCopyFlippedInAMovedSketch(TestCarbonCopyFlipped):
     """ops#283: as above, with Dest off the origin and turned (at (5, 3, 2), 90 degrees about
     Z), and Source turned over about Dest's Y axis, so x flips. The flip is a mirror in Dest's
