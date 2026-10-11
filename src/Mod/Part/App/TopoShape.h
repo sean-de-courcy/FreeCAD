@@ -1295,7 +1295,8 @@ public:
     /** Make revolved shell around a basis shape
      *
      * @param base: the basis shape (solid)
-     * @param profile: the shape to be revolved
+     * @param profile: the shape to be revolved; in V2, its names and the support face's name
+     *                 the revolved elements, so pass the shape whose faces are revolved
      * @param axis: the revolving axis
      * @param face_maker: optional type name of the maker used to make a
      *                    face from basis shape
@@ -1310,60 +1311,15 @@ public:
      */
     TopoShape& makeElementRevolution(
         const TopoShape& _base,
-        const TopoDS_Shape& profile,
+        const TopoShape& profile,
         const gp_Ax1& axis,
-        const TopoDS_Face& supportface,
+        const TopoShape& supportface,
         const TopoDS_Face& uptoface,
         const char* face_maker = nullptr,
         RevolMode Mode = RevolMode::None,
         Standard_Boolean Modify = Standard_True,
         const char* op = nullptr
     );
-
-    /** Make revolved shell around a basis shape
-     *
-     * @param axis: the revolving axis
-     * @param face_maker: optional type name of the maker used to make a
-     *                    face from basis shape
-     * @param supportface:  the bottom face for the revolution, or null
-     * @param uptoface:  the upper limit face for the revolution, or null
-     * @param Mode: the opencascade defined modes
-     * @param Modify: if opencascade should modify existing shapes
-     * @param op: optional string to be encoded into topo naming for indicating
-     *            the operation
-     *
-     * @return Return the generated new shape. The TopoShape itself is not modified.
-     */
-    TopoShape& makeElementRevolution(
-        const gp_Ax1& axis,
-        const TopoDS_Shape& profile,
-        const TopoDS_Face& supportface,
-        const TopoDS_Face& uptoface,
-        const char* face_maker = nullptr,
-        RevolMode Mode = RevolMode::None,
-        Standard_Boolean Modify = Standard_True,
-        const char* op = nullptr
-    ) const
-    {
-        const App::HistoryAlgorithm& selectedHistoryVersion = getHistoryAlgorithm();
-        TopoShape newShape {0, Hasher, selectedHistoryVersion};
-
-        if (selectedHistoryVersion == App::HistoryAlgorithm::V2) {
-            newShape.Tag = Tag;
-        }
-
-        return newShape.makeElementRevolution(
-            *this,
-            profile,
-            axis,
-            supportface,
-            uptoface,
-            face_maker,
-            Mode,
-            Modify,
-            op
-        );
-    }
 
     /** Make a prism that is a linear sweep of a basis shape
      *
@@ -3184,7 +3140,8 @@ public:
         return newShape.makeElementShape(mkShape, *this, op, elementMapPolicy);
     }
 
-    /** Specialized shape making for BRepBuilderAPI_MakePrism with mapped element name
+    /** Specialized shape making for the BRepFeat makers up to a face (BRepFeat_MakePrism,
+     *  BRepFeat_MakeRevol) with mapped element name
      *
      * @param mkShape: OCCT shape maker.
      * @param sources: list of source shapes.
@@ -3198,7 +3155,7 @@ public:
      *         same line of code.
      */
     TopoShape& makeElementShape(
-        BRepFeat_MakePrism& mkShape,
+        BRepFeat_Form& mkShape,
         const std::vector<TopoShape>& sources,
         const TopoShape& uptoface,
         const char* op

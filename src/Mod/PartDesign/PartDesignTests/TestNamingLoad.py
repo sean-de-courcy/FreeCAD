@@ -183,13 +183,13 @@ def entryUsedOutsideTheTable(entries):
 
 def linksToInterned(path):
     """The objects of a saved file with an element reference to an interned name (a link's
-    shadow holds one)."""
+    shadow holds one, or a `PropertyLinkSub`'s `<Sub>`, e.g. an up-to face)."""
     xml = save.fileEntries(path)["Document.xml"]
     objects = xml[xml.index("<ObjectData") :].split('<Object name="')[1:]
     return {
         block.split('"', 1)[0]
         for block in objects
-        if re.search(r'<X?Link [^>]*\bshadow(ed)?="[^"]*~', block)
+        if re.search(r'<(?:X?Link|Sub) [^>]*\bshadow(ed)?="[^"]*~', block)
     }
 
 

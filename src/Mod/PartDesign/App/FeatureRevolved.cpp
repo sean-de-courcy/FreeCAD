@@ -354,6 +354,19 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
 
     bool fuseSideResults = false;
 
+    // Both sides are named from the same profile edges under the feature's tag, so in V2 the
+    // second side revolves a copy whose names are marked: a section with this feature's ID, CPY
+    // and side 2 appended to every name. Otherwise the two sides' elements share names, told apart
+    // only by the duplicate counter in the order of the final fuse (ops#240). The copy's op alone
+    // doesn't mark them: V2 copies a child's names as they are. V1 keeps upstream's names.
+    auto secondSideProfile = [&]() {
+        TopoShape copy = sketchshape.makeElementCopy();
+        if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            copy.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+        }
+        return copy;
+    };
+
     if (sideType == "Two sides") {
         constexpr double fullRevolution = 2.0 * std::numbers::pi;
         const double combinedAngle = angle + angle2;
@@ -423,7 +436,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 method2,
                 angle2,
                 UpToFace2,
-                sketchshape.makeElementCopy(),
+                secondSideProfile(),
                 base,
                 supportface,
                 pnt,
@@ -472,7 +485,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     gp_Ax1(pnt, dir2),
                     base,
                     supportface,
-                    sketchshape.makeElementCopy(),
+                    secondSideProfile(),
                     revolMode
                 ));
             }
@@ -554,6 +567,19 @@ TopoShape Revolved::tryToRevolveToFace(
     Part::RevolMode revolMode
 ) const
 {
+    // A profile of several separate faces would build, but only its last face's elements would be
+    // named from the profile: BRepFeat's later per-face steps rebuild the earlier faces' edges, so
+    // references to those faces could move to other faces silently (ops#263). Until then such a
+    // profile fails loudly, as it did before ops#240 (in every naming version). The faces are
+    // counted: a one-face profile in a compound still builds.
+    if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Up to face, first or last can't revolve a profile of several separate faces yet. "
+            "Revolve each face in its own feature, or by an angle."
+        ));
+    }
+
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
         supportface = TopoDS_Face();
@@ -632,9 +658,9 @@ TopoShape Revolved::tryToRevolveToFace(
         TopoShape revolution = makeTopoShape();
         revolution.makeElementRevolution(
             featureBase,
-            TopoDS::Face(sketchshape.getShape()),
+            sketchshape,
             axis,
-            TopoDS::Face(supportface.getShape()),
+            supportface,
             TopoDS::Face(upToFace.getShape()),
             nullptr,
             mode,
@@ -962,39 +988,6 @@ void Revolved::generateRevolution(
         revol = from;
         revol = revol.makeElementRevolve(revolAx, angleTotal);
         revol.Tag = -getID();
-    }
-    else {
-        throw Base::RuntimeError(
-            "ProfileBased: Internal error: Unknown method for generateRevolution()"
-        );
-    }
-}
-
-void Revolved::generateRevolution(
-    TopoShape& revol,
-    const TopoShape& baseshape,
-    const TopoDS_Shape& profileshape,
-    const TopoDS_Face& supportface,
-    const TopoDS_Face& uptoface,
-    const gp_Ax1& axis,
-    RevolMethod method,
-    Part::RevolMode Mode,
-    Standard_Boolean Modify
-)
-{
-    if (method == RevolMethod::ToFirst || method == RevolMethod::ToFace
-        || method == RevolMethod::ToLast) {
-        revol = revol.makeElementRevolution(
-            baseshape,
-            profileshape,
-            axis,
-            supportface,
-            uptoface,
-            nullptr,
-            Mode,
-            Modify,
-            nullptr
-        );
     }
     else {
         throw Base::RuntimeError(

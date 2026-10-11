@@ -24,6 +24,7 @@
 """Tests related to the Topological Naming Problem"""
 
 import os
+import re
 import math
 import unittest
 import tempfile
@@ -677,6 +678,72 @@ class TestTopologicalNamingProblem(unittest.TestCase):
 
     def testPartDesignElementMapRevolutionWithDefaultFuseOrder(self):
         self._testPartDesignElementMapRevolution("BaseFirst")
+
+    def _revolutionUpToWall(self, kind, sides, wallAcross):
+        """A plate -30..30 x -30..30 x 0..5 and a wall on it, x -5..0 and y 0..30 (or -30..30 with
+        `wallAcross`), 10 high. The rectangle x 10..20, z 5..10 in the XZ plane is revolved about
+        the Z axis up to the wall's face x = 0, with Refine off, so that every face is its own."""
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        body = models.body(self.Doc)
+        plate = models.sketch(self.Doc, "Plate", models.rectangle(-30, -30, 30, 30), body)
+        models.pad(body, plate, 5)
+        wallGeometry = models.rectangle(-5, -30 if wallAcross else 0, 0, 30)
+        wallSketch = models.sketch(self.Doc, "Wall", wallGeometry, body, z=5)
+        wall = models.pad(body, wallSketch, 10, "Wall")
+        self.Doc.recompute()
+        rectangle = models.rectangle(10, 5, 20, 10)
+        profile = models.sketch(self.Doc, "Profile", rectangle, body, placement=xz)
+        revolved = body.newObject(kind, "Revolved")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (models.originFeature(body, "Z_Axis"), [""])
+        revolved.Refine = False
+        revolved.Type = "UpToFace"
+        upTo = harness.face("plane", normal=(1, 0, 0), contains=(0, 15, 10)).one(wall.Shape)
+        revolved.UpToFace = (wall, upTo)
+        revolved.SideType = sides
+        if sides == "Two sides":
+            revolved.Type2 = "UpToFace"
+            revolved.UpToFace2 = (wall, upTo)
+        self.Doc.recompute()
+        self.assertTrue(revolved.isValid(), revolved.State)
+        return revolved
+
+    def testRevolutionUpToFaceNamedFromProfile(self):
+        """ops#240: a Revolution up to a face names each revolved face from the profile edge that
+        sweeps it, as by angle, not by its index in BRepFeat's result."""
+        revolved = self._revolutionUpToWall("PartDesign::Revolution", "One side", False)
+        added = revolved.Shape.Volume - revolved.BaseFeature.Shape.Volume
+        self.assertAlmostEqual(added, math.pi * 300 * 5 / 4)
+        self.assertNamesDistinct(revolved.Shape)
+        shape = revolved.Shape
+        ring = [
+            i
+            for i, f in enumerate(shape.Faces, 1)
+            if f.CenterOfMass.x > 1 and f.CenterOfMass.y > -1e-6 and f.CenterOfMass.z > 5 + 1e-6
+        ]
+        self.assertEqual(len(ring), 4)  # the inner and outer cylinders, the start face and the top
+        for i in ring:
+            names = shape.ElementReverseMap[f"Face{i}"]
+            for name in names if isinstance(names, list) else [names]:
+                self.assertFalse(name.startswith("Face"), f"Face{i} is named by an index: {name}")
+                history = revolved.getElementHistory(name, recursive=True)
+                self.assertIn("Profile", [item[0].Name for item in history], f"Face{i}: {name}")
+
+    def testRevolutionUpToFaceSidesNamedApart(self):
+        """ops#240: the two sides of a Revolution up to a face, Symmetric or Two sides, are named
+        from the same profile edges; the second side's names are marked, so no two elements share
+        a name up to the duplicate counter."""
+        for sides, wallAcross in (("Symmetric", False), ("Two sides", True)):
+            with self.subTest(sides=sides):
+                revolved = self._revolutionUpToWall("PartDesign::Revolution", sides, wallAcross)
+                self.assertAlmostEqual(
+                    revolved.Shape.Volume - revolved.BaseFeature.Shape.Volume, math.pi * 300 * 5 / 2
+                )
+                self.assertNamesDistinct(revolved.Shape)
+                body = revolved.getParentGeoFeatureGroup()
+                for obj in reversed(body.Group):
+                    self.Doc.removeObject(obj.Name)
+                self.Doc.removeObject(body.Name)
 
     def testPartDesignBinderRevolution(self):
         doc = self.Doc
