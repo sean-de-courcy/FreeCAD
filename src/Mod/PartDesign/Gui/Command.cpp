@@ -1111,6 +1111,17 @@ void prepareProfileBased(
     };
 
     auto sketch_worker = [&, base_worker](std::vector<App::DocumentObject*> features) {
+        // FreeCAD-CH (ops#245): the pick dialog's copy failed (reported in the Report view);
+        // front() of the empty list was undefined behaviour
+        if (features.empty()) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("No sketch"),
+                QObject::tr("The selected sketch couldn't be copied into the body. See the Report "
+                            "view.")
+            );
+            return;
+        }
         base_worker(features.front(), {});
     };
 

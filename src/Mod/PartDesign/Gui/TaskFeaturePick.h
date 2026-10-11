@@ -25,6 +25,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <QListWidgetItem>
 
 #include <App/DocumentObject.h>
@@ -77,15 +78,24 @@ public:
     /// an independent copy (a sketch, a primitive, or a shape binder holding another feature's
     /// shape) is placed in it where the original is (PR 224 review M2, round 2). A dependent copy
     /// isn't yet (ops#244).
-    /// `recomputed`, when given, tells whether the copy got its own shape here (an independent
-    /// sketch or additive primitive with no base): it then has the original's elements under the
-    /// same index names, which `sameElement` checks
+    /// A datum (point, line, plane) is copied as a datum of its own type.
     static App::DocumentObject* makeCopy(
         App::DocumentObject* obj,
         std::string sub,
         bool independent,
-        App::DocumentObject* target,
-        bool* recomputed = nullptr
+        App::DocumentObject* target
+    );
+
+    /// The name on `copy` (made by makeCopy from `original`) of the element `sub` of the
+    /// original: the same index on a copy of the original's own type (a sketch or primitive,
+    /// which has the original's elements, recomputed or not), once `sameElement` shows it's the
+    /// same one; the first element of its kind on a shape binder of that element alone; none on a
+    /// datum or for a whole object. Empty when the element differs on the copy (ops#244 P1, P2:
+    /// the callers linked Face1/Edge1, or nothing, whatever was picked).
+    static std::optional<std::string> copiedElement(
+        App::DocumentObject* original,
+        App::DocumentObject* copy,
+        const std::string& sub
     );
 
     /// Whether `sub` (an index name) names the same element on `copy` as on `original`: its

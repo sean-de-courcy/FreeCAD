@@ -350,49 +350,41 @@ bool getReferencedSelection(
             if (!dlg.radioXRef->isChecked()) {
                 App::Document* document = thisObj->getDocument();
                 document->openTransaction("Make copy");
-                bool recomputed = false;
                 auto copy = PartDesignGui::TaskFeaturePick::makeCopy(
                     selObj,
                     subname,
                     dlg.radioIndependent->isChecked(),
-                    body,
-                    &recomputed
+                    body
                 );
 
-                // A copy recomputed in makeCopy has its own element names, the original's
-                // indices: the reference is the picked element, once it's shown to be the same
-                // one on the copy (PR 223 review N1). Other copies keep their first element,
-                // resolved by geometry when it's another one.
-                if (recomputed && !subname.empty()) {
+                // The picked element on the copy (ops#244 P1: the first one of its kind,
+                // whatever was picked, on a copy that keeps the original's elements, such as a
+                // primitive on a base): the same index, once it's shown to be the same one (PR
+                // 223 review N1), or the first one of a shape binder of that element
+                const std::optional<std::string> element =
+                    PartDesignGui::TaskFeaturePick::copiedElement(selObj, copy, subname);
+                if (!element) {
                     subname = Data::oldElementName(subname.c_str());
-                    if (!PartDesignGui::TaskFeaturePick::sameElement(selObj, copy, subname)) {
-                        // removed before the message box, whose event loop would otherwise run
-                        // with it (PR 224 review L5); makeCopy made it in the active document
-                        copy->getDocument()->removeObject(copy->getNameInDocument());
-                        QMessageBox::warning(
-                            Gui::getMainWindow(),
-                            QObject::tr("Copy differs"),
-                            QObject::tr(
-                                "%1 of '%2' is another element on its copy, whose shape differs "
-                                "(or the element can't be read). Recompute '%2' and select the "
-                                "element again, or make a cross-reference instead."
+                    // removed before the message box, whose event loop would otherwise run
+                    // with it (PR 224 review L5); makeCopy made it in the active document
+                    copy->getDocument()->removeObject(copy->getNameInDocument());
+                    QMessageBox::warning(
+                        Gui::getMainWindow(),
+                        QObject::tr("Copy differs"),
+                        QObject::tr(
+                            "%1 of '%2' is another element on its copy, whose shape differs "
+                            "(or the element can't be read). Recompute '%2' and select the "
+                            "element again, or make a cross-reference instead."
+                        )
+                            .arg(
+                                QString::fromStdString(subname),
+                                QString::fromUtf8(selObj->Label.getValue())
                             )
-                                .arg(
-                                    QString::fromStdString(subname),
-                                    QString::fromUtf8(selObj->Label.getValue())
-                                )
-                        );
-                        selObj = nullptr;
-                        return false;
-                    }
-                }
-                else {
-                    subname.erase(
-                        std::remove_if(subname.begin(), subname.end(), &isdigit),
-                        subname.end()
                     );
-                    subname.append("1");
+                    selObj = nullptr;
+                    return false;
                 }
+                subname = *element;
                 body->addObject(copy);
 
                 selObj = copy;

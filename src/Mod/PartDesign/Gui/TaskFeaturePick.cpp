@@ -34,11 +34,14 @@
 #include <Precision.hxx>
 #include <TopoDS.hxx>
 
+#include <algorithm>
+#include <cctype>
 #include <ranges>
 
 #include <fmt/format.h>
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Origin.h>
@@ -276,6 +279,28 @@ std::vector<App::DocumentObject*> TaskFeaturePick::getFeatures()
     return result;
 }
 
+namespace
+{
+
+// FreeCAD-CH (ops#245): a sketch copied into the body is attached to the body's XY plane, with its
+// Placement (where the original is, decision 40) as the offset. fixSketchSupport threw for a sketch
+// plane not parallel to one of the base planes ("Sketch plane cannot be migrated", in a rotated
+// body), and dropped the sketch's offset and rotation in its plane.
+void attachInPlace(Sketcher::SketchObject* sketch, PartDesign::Body* body)
+{
+    App::Origin* origin = body->getOrigin();
+    App::Plane* plane = origin->getXY();
+    const Base::Placement planePlacement =
+        origin->Placement.getValue() * plane->Placement.getValue();
+    const Base::Placement placement = sketch->Placement.getValue();
+    sketch->AttachmentSupport.setValue(plane, "");
+    sketch->MapReversed.setValue(false);
+    sketch->AttachmentOffset.setValue(planePlacement.inverse() * placement);
+    sketch->MapMode.setValue(Attacher::mmFlatFace);
+}
+
+}  // namespace
+
 std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
 {
     int index = 0;
@@ -323,10 +348,8 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
                             activeBody->addObject(copy);
                             // doesn't supposed to get here anything but sketch but to be on the
                             // safe side better to check
-                            if (copy->isDerivedFrom<Sketcher::SketchObject>()) {
-                                Sketcher::SketchObject* sketch
-                                    = static_cast<Sketcher::SketchObject*>(copy);
-                                PartDesignGui::fixSketchSupport(sketch);
+                            if (auto* sketch = freecad_cast<Sketcher::SketchObject*>(copy)) {
+                                attachInPlace(sketch, activeBody);
                             }
                         }
                         result.push_back(copy);
@@ -363,15 +386,11 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
     bool independent,
-    App::DocumentObject* target,
-    bool* recomputed
+    App::DocumentObject* target
 )
 {
 
     App::DocumentObject* copy = nullptr;
-    if (recomputed) {
-        *recomputed = false;
-    }
     // Check for null to avoid segfault
     if (!obj) {
         return copy;
@@ -540,14 +559,9 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         };
         // A recomputed copy has its own element names, so a caller's Face1/Edge1 would no longer
         // be flagged when it names another element than the one picked (PR 223 review N1): the
-        // callers link the picked element instead, once sameElement shows it's the same one.
+        // callers link the picked element instead (copiedElement).
         if (keepsShape()) {
-            if (copy->recomputeFeature()) {
-                if (recomputed) {
-                    *recomputed = true;
-                }
-            }
-            else {
+            if (!copy->recomputeFeature()) {
                 Base::Console().warning(
                     "The copy '%s' of '%s' doesn't recompute: %s\n",
                     copy->Label.getValue(),
@@ -568,7 +582,12 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         // TODO Replace it with commands (2015-09-11, Fat-Zer)
         if (obj->isDerivedFrom<Part::Datum>()) {
             auto* doc = App::GetApplication().getActiveDocument();
-            copy = doc->addObject<Part::Datum>(name.c_str());
+            // FreeCAD-CH (ops#244 P6): a datum of the original's type. Part::Datum is abstract:
+            // addObject<Part::Datum> made nothing, and the null was dereferenced below.
+            copy = doc->addObject(obj->getTypeId().getName(), name.c_str());
+            if (!copy) {
+                return copy;
+            }
 
             // we need to reference the individual datums and make again datums. This is important
             // as datum adjust their size dependent on the part size, hence simply copying the shape
@@ -595,13 +614,22 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                 datumCopy->AttachmentSupport.setValue(obj, entity.c_str());
                 datumCopy->MapMode.setValue(mode);
             }
-            else if (!entity.empty()) {
-                datumCopy->Shape.setValue(
-                    static_cast<Part::Datum*>(obj)->Shape.getShape().getSubShape(entity.c_str())
-                );
-            }
             else {
-                datumCopy->Shape.setValue(static_cast<Part::Datum*>(obj)->Shape.getValue());
+                // A datum's shape is made from its Placement (setting the Shape set the Placement
+                // the original has in its own container): where the original is, as for the
+                // copies above (decision 40), with the original's size
+                for (const char* sizeName : {"ResizeMode", "Length", "Width"}) {
+                    App::Property* size = obj->getPropertyByName(sizeName);
+                    App::Property* copySize = copy->getPropertyByName(sizeName);
+                    if (size && copySize && size->getTypeId() == copySize->getTypeId()) {
+                        copySize->Paste(*size);
+                    }
+                }
+                const Base::Placement targetPlacement =
+                    target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+                datumCopy->Placement.setValue(
+                    targetPlacement.inverse() * App::GeoFeature::getGlobalPlacement(obj)
+                );
             }
         }
         else if (obj->is<PartDesign::ShapeBinder>() || obj->isDerivedFrom<Part::Feature>()) {
@@ -626,9 +654,17 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             else {
                 std::vector<std::string> subvalues;
                 subvalues.push_back(entity);
-                Part::TopoShape shape
-                    = PartDesign::ShapeBinder::buildShapeFromReferences(shapeBinderObj, subvalues);
+                // FreeCAD-CH (ops#244 P6): from the original (the new binder is empty), where the
+                // original is (decision 40): its shape is placed in the original's body
+                auto* geoObj = static_cast<App::GeoFeature*>(obj);
+                Part::TopoShape shape =
+                    PartDesign::ShapeBinder::buildShapeFromReferences(geoObj, subvalues);
                 shapeBinderObj->Shape.setValue(shape);
+                const Base::Placement targetPlacement =
+                    target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
+                shapeBinderObj->Placement.setValue(
+                    targetPlacement.inverse() * geoObj->globalPlacement()
+                );
             }
             copy = shapeBinderObj;
         }
@@ -741,6 +777,32 @@ bool TaskFeaturePick::sameElement(
     const double tolerance = Precision::Confusion() * std::max(1.0, std::abs(sizeBefore));
     return std::abs(sizeAfter - sizeBefore) <= tolerance
         && centerAfter.Distance(centerBefore) <= Precision::Confusion() * 10;
+}
+
+std::optional<std::string> TaskFeaturePick::copiedElement(
+    App::DocumentObject* original,
+    App::DocumentObject* copy,
+    const std::string& sub
+)
+{
+    const std::string index = Data::oldElementName(sub.c_str());
+    if (!copy || index.empty() || original == copy || PartDesign::Feature::isDatum(copy)) {
+        return std::string();
+    }
+    // An independent sketch or primitive copy has the original's elements under the same index
+    // names, whether makeCopy recomputed it or it keeps the pasted shape
+    if (copy->getTypeId() == original->getTypeId()
+        && (copy->isDerivedFrom<Sketcher::SketchObject>()
+            || copy->isDerivedFrom<PartDesign::FeaturePrimitive>())) {
+        if (!sameElement(original, copy, index)) {
+            return std::nullopt;
+        }
+        return index;
+    }
+    // a shape binder of that element alone
+    std::string kind = index;
+    kind.erase(std::remove_if(kind.begin(), kind.end(), &isdigit), kind.end());
+    return kind + "1";
 }
 
 bool TaskFeaturePick::isSingleSelectionEnabled() const
