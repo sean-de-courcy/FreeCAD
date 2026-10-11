@@ -581,27 +581,27 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
 
     def testBinderOfItsOwnBodysOriginPlaneMovedToAnotherBody(self):
-        """PR 246 review L2: a traced binder of its own body's XZ plane, moved to another body,
-        binds that body's XZ plane, as before ops#244; a traced binder of a third body's plane
-        moved the same way keeps it."""
-        [own] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
-        [targets] = [f for f in self.Target.Origin.OriginFeatures if f.Role == "XZ_Plane"]
-        third = self.Doc.addObject("PartDesign::Body", "Third")
-        [thirds] = [f for f in third.Origin.OriginFeatures if f.Role == "XZ_Plane"]
-        binders = []
-        for name, plane in (("Own", own), ("Thirds", thirds)):
-            binder = self.Doc.addObject("PartDesign::ShapeBinder", name)
-            binder.Support = [(plane, "")]
-            binder.TraceSupport = True
-            self.Source.addObject(binder)
-            self.assertEqual(binder.Support[0][0], plane)
-            binders.append(binder)
+        """PR 246 review L2: a traced binder of its own body's XZ plane, moved to another body as
+        PartDesign_MoveFeature moves it (removeObjects, then addObjects), keeps binding that
+        plane, where it is: globally the plane y = 0 turned 90 degrees about Z, x = 5 along X.
+        It isn't relinked to the new body's plane, which would move it, silently."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        self.Source.addObject(binder)
         self.Doc.recompute()
-        for binder in binders:
-            self.Target.addObject(binder)
-            self.assertTrue(self.Target.hasObject(binder))
-        self.assertEqual(binders[0].Support[0][0], targets)
-        self.assertEqual(binders[1].Support[0][0], thirds)
+        self.Source.removeObjects([binder])
+        self.Target.addObjects([binder])
+        self.assertTrue(self.Target.hasObject(binder))
+        self.assertEqual(binder.Support[0][0], xz)
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        [face] = binder.Shape.Faces
+        container = self.Target.getGlobalPlacement()
+        normal = container.Rotation.multVec(face.Surface.Axis)
+        self.assertAlmostEqual(abs(normal.x), 1, places=9)
+        self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
 
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")

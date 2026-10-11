@@ -27,12 +27,10 @@
 #include <functional>
 #include <map>
 
-#include <App/Datums.h>
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/VarSet.h>
 #include <App/Origin.h>
-#include <App/OriginGroupExtension.h>
 #include <Base/Placement.h>
 
 #include "Body.h"
@@ -45,26 +43,6 @@
 #include "ShapeBinder.h"
 
 using namespace PartDesign;
-
-namespace
-{
-// FreeCAD-CH (PR 246 review L2): whether a shape binder that traces its support binds an origin
-// feature of `container`
-bool bindsOriginOf(const ShapeBinder* binder, const App::DocumentObject* container)
-{
-    if (!container) {
-        return false;
-    }
-    for (App::DocumentObject* obj : binder->Support.getValues()) {
-        auto* element = freecad_cast<App::DatumElement*>(obj);
-        if (element && element->isOriginFeature()
-            && App::OriginGroupExtension::getGroupOfObject(element->getLCS()) == container) {
-            return true;
-        }
-    }
-    return false;
-}
-}  // namespace
 
 
 PROPERTY_SOURCE(PartDesign::Body, Part::BodyBase)
@@ -448,7 +426,6 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
     auto* group = App::GroupExtension::getGroupOfObject(feature);
     if (group && group != getExtendedObject()) {
         group->getExtensionByType<GroupExtension>()->removeObject(feature);
-        leaving = group;
     }
 
 
@@ -462,14 +439,7 @@ std::vector<App::DocumentObject*> Body::addObject(App::DocumentObject* feature)
         auto it = std::find_if(features.begin(), features.end(), isSolidFeature);
         next = it == features.end() ? nullptr : *it;
     }
-    try {
-        insertObject(feature, next, /*after = */ false);
-    }
-    catch (...) {
-        leaving = nullptr;
-        throw;
-    }
-    leaving = nullptr;
+    insertObject(feature, next, /*after = */ false);
     // Move the Tip if we added a solid
     if (isSolidFeature(feature)) {
         Tip.setValue(feature);
@@ -509,12 +479,12 @@ void Body::insertObject(App::DocumentObject* feature, App::DocumentObject* targe
 
     // ensure that all origin links are ok. Not a shape binder's that traces its support
     // (FreeCAD-CH ops#244): it binds another container's origin feature where that one is, so
-    // the relink to this body's own made it bind another plane or axis, silently. Unless that
-    // container is the one it leaves (PR 246 review L2): a binder of its own body's plane moved
-    // to another body binds that body's plane, as before
+    // the relink to this body's own made it bind another plane or axis, silently. Also one of its
+    // own body's plane moved to another body (PR 246 review L2): it keeps binding that plane, where
+    // it is (PartDesign_MoveFeature takes it out of its body first, so the body it leaves isn't
+    // known here)
     auto* binder = freecad_cast<ShapeBinder*>(feature);
-    App::DocumentObject* left = leaving ? leaving : App::GroupExtension::getGroupOfObject(feature);
-    if (!binder || !binder->TraceSupport.getValue() || bindsOriginOf(binder, left)) {
+    if (!binder || !binder->TraceSupport.getValue()) {
         relinkToOrigin(feature);
     }
 

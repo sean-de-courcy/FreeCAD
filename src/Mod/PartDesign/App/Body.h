@@ -213,8 +213,6 @@ private:
     bool showTip = false;
     /// The edit roll-back point (ops#127): transient, not saved, not undone
     App::DocumentObject* editRollPoint = nullptr;
-    /// The container addObject() took the feature out of, while it inserts it (PR 246 review L2)
-    App::DocumentObject* leaving = nullptr;
     /// The Tip's shape that execute() last copied, before the placement bake (ops#127, R7): a
     /// Tip whose shape is the same doesn't rewrite Shape
     Part::TopoShape lastTipShape;
