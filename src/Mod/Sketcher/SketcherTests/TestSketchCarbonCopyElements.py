@@ -71,6 +71,34 @@ class TestSketchCarbonCopyElements(unittest.TestCase):
         for geo_id in range(4):
             self.assert_same_line(self.dest.Geometry[geo_id + 1], self.source.Geometry[geo_id])
 
+    def flag(self, sketch):
+        """Flags `sketch`'s constraint list invalid: a constraint on Edge100, which it doesn't
+        have, written straight into the property: the sketch reports "invalid constraint
+        indices", and in C++ the list reads as empty until it is repaired (Python reads the
+        list as it is)."""
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sketch.Constraints = list(sketch.Constraints) + [
+            Sketcher.Constraint("Coincident", 0, 1, 99, 1)
+        ]
+
+    def assert_copy_refused(self):
+        """The copy raises, and Dest keeps its one line."""
+        with self.assertRaises(ValueError):
+            self.dest.carbonCopy(self.source.Name, False)
+        self.assertEqual(len(self.dest.Geometry), 1)
+
+    def test_copy_from_a_sketch_with_flagged_constraints_is_refused(self):
+        """ops#237 (PR 218 review): before, the copy read the source's flagged list as empty and
+        copied its geometry without a single constraint, silently."""
+        self.flag(self.source)
+        self.assert_copy_refused()
+
+    def test_copy_into_a_sketch_with_flagged_constraints_is_refused(self):
+        """ops#237 (PR 218 review): before, the copy read Dest's flagged list as empty and wrote
+        back the source's constraints alone: Dest's own were gone, silently."""
+        self.flag(self.dest)
+        self.assert_copy_refused()
+
     def test_external_elements_after_the_destinations_externals(self):
         """External elements name the copies of the source's external geometry, which come after
         Dest's own: Dest links one edge of a box, Source two others, and Source's Group names

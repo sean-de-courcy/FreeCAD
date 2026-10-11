@@ -448,6 +448,27 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
     auto* psObj = static_cast<SketchObject*>(pObj);
 
+    // FreeCAD-CH (ops#237, PR 218 review): a constraint list flagged invalid (indices beyond the
+    // geometry, or geometry it wasn't checked against) reads as empty. Copied from, the copy got
+    // no constraints; copied into, the write below replaced this sketch's own with the source's
+    // alone. Both silently: refuse instead, before anything changes
+    for (const SketchObject* sketch : {static_cast<const SketchObject*>(this),
+                                       static_cast<const SketchObject*>(psObj)}) {
+        // (an empty list is flagged too, in a sketch that hasn't had geometry or a recompute
+        // yet: nothing to lose)
+        if (&sketch->Constraints.getValues() != &sketch->Constraints.getValuesForce()
+            && !sketch->Constraints.getValuesForce().empty()) {
+            Base::Console().error(
+                "Carbon copy of '%s' into '%s' refused: the constraints of '%s' are flagged "
+                "invalid (they don't match its geometry). Repair that sketch first.\n",
+                psObj->Label.getValue(),
+                this->Label.getValue(),
+                sketch->Label.getValue()
+            );
+            return -1;
+        }
+    }
+
     // FreeCAD-CH (ops#280): an unaligned copy isn't flipped (xinv and yinv stay false), but a
     // source whose plane faces the other way still sees this sketch's own geometry mirrored
     const bool reversed = !xinv && !yinv
@@ -4193,9 +4214,11 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     subs.push_back(sub);
     shadows.push_back(std::move(shadow));
     {
+        // the types first, as in setExternalLinksAndTypes: setting the links signals that the
+        // elements changed, and an observer then reads the new link's type (ops#237)
         Base::StateLocker lock(externalLinksWithTypes, true);
-        ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
         ExternalTypes.setValues(types);
+        ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
     }
     if (externalGeoRef.size() != ExternalGeometry.getValues().size()) {
         throw Base::RuntimeError("unparkExternalGeometry: the link was not added");

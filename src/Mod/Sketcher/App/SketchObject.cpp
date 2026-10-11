@@ -1614,8 +1614,14 @@ void SketchObject::onSketchRestore()
         if(ExternalGeo.getSize()<=2) {
             // no saved geometry to repair a type list saved before ops#140 from: each link reads
             // the type at its index
-            if (ExternalTypes.getSize() > ExternalGeometry.getSize()
-                && ExternalGeometry.getSize() > 0) {
+            // (ops#237, PR 218 review: not for a list that holds past the links only the mark of
+            // a pending repair, pendingTypeRepairMark, -1, which no type has)
+            const auto& types = ExternalTypes.getValues();
+            const auto links = static_cast<std::size_t>(ExternalGeometry.getSize());
+            if (links > 0 && types.size() > links
+                && std::any_of(types.begin() + static_cast<std::ptrdiff_t>(links),
+                               types.end(),
+                               [](long type) { return type != -1; })) {
                 FC_WARN("External link types of " << getFullName() << " were saved before "
                         << "ops#140 without their geometry; they are read by index");
             }
