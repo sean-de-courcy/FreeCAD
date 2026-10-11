@@ -265,7 +265,8 @@ names it.
 | `fix/257-part-fillet-edge-links` | fix | ops#257, ops#258 | - | `integration` `83a7885ab1` | `37e8bda261` (fork PR 236), 2026-10-10 | never (fork fix) |
 | `fix/261-merge-external-flags` | fix | ops#261 | - | `fix/248-merge-external-pairing` `0dcb49ef80` (stacked on fork PR 233) | `42d9b6e641` (fork PR 238), 2026-10-10 | never (fork fix) |
 | `fix/261-merge-expressions` | fix | ops#261 | - | `integration` `161adb82e9` | `e672115cd6` (fork PR 237), 2026-10-10 | never (fork fix) |
-| `fix/240-upto-revolution-naming` | fix | ops#240 | - | `integration` `d360d8c798` | (fork PR 235) | never (fork fix) |
+| `fix/240-upto-revolution-naming` | fix | ops#240 | - | `integration` `d360d8c798` | `0d49331cf0` (fork PR 235), 2026-10-11 | never (fork fix) |
+| `fix/265-fillet-replace-object` | fix | ops#265 | - | `fix/257-part-fillet-edge-links` `614b36a033` (stacked on fork PR 236) | (fork PR 240) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
