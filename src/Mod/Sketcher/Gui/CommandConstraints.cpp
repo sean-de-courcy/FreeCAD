@@ -55,6 +55,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionFilter.h>
 #include <Gui/Selection/SelectionObject.h>
+#include <Mod/Sketcher/App/ExternalGeometryFacade.h>
 #include <Mod/Sketcher/App/GeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 #include <Mod/Sketcher/App/SolverGeometryExtension.h>
@@ -1288,7 +1289,22 @@ int findExternalReference(Sketcher::SketchObject* sketch,
     const auto subReferences = sketch->ExternalGeometry.getSubValues();
     for (size_t index = 0; index < sourceReferences.size(); ++index) {
         if (sourceReferences[index] == source && subReferences[index] == subName) {
-            return GeoEnum::RefExt - static_cast<int>(index);
+            // FreeCAD-CH (ops#246): the link's index isn't a GeoId. A link can give several
+            // external geometries (a face's edges, an intersection), so an earlier one shifted
+            // the result onto another geometry, silently. Take the one geometry this link gave;
+            // none or several: GeoUndef, and the caller reports the failure.
+            const std::vector<long> ids = sketch->externalGeometryIds(static_cast<int>(index));
+            if (ids.size() != 1) {
+                return GeoEnum::GeoUndef;
+            }
+            const auto& geos = sketch->getExternalGeometry();
+            for (size_t geo = 0; geo < geos.size(); ++geo) {
+                if (ExternalGeometryFacade::getFacade(geos[geo])->getId() == ids.front()) {
+                    // ExternalGeo[k] has GeoId -1 - k (the axes are -1 and -2)
+                    return -1 - static_cast<int>(geo);
+                }
+            }
+            return GeoEnum::GeoUndef;
         }
     }
 
