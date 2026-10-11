@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <map>
 #include <sstream>
 #include <QFont>
 #include <QGridLayout>
@@ -674,23 +675,44 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
     App::DocumentObject* base = d->fillet->Base.getValue();
     const std::vector<Part::FilletElement>& e = d->fillet->Edges.getValues();
     const auto& subs = d->fillet->EdgeLinks.getShadowSubs();
+    App::DocumentObject* linked = d->fillet->EdgeLinks.getValue();
     auto it = std::ranges::find(objs, base);
-    if (subs.size() != e.size() || it == objs.end()) {
-        // Base isn't a shape the box lists (an App::Link, say), or its links don't match the
-        // edges: no shape and the box locked, so that OK can't write another shape's edge
-        // numbers against Base (ops#262). accept() refuses.
-        if (subs.size() != e.size()) {
-            FC_ERR("edge link size mismatch");
+    const bool otherObject = linked && linked != base;
+    if (subs.size() != e.size() || otherObject || it == objs.end()) {
+        // Base isn't a shape the box lists (an App::Link, say), its edge links are on another
+        // object, or they don't match the edges: no shape and the box locked, so that OK can't
+        // write another shape's edge numbers against Base (ops#262). accept() refuses.
+        const QString label = QString::fromUtf8(d->fillet->Label.getValue());
+        QString why;
+        if (it == objs.end()) {
+            why = tr("The edges of %1 can't be edited here: its base isn't a shape this dialog "
+                     "lists.")
+                      .arg(label);
+        }
+        else if (otherObject) {
+            why = tr("The edges of %1 can't be edited here: its edge links are on %2, not on its "
+                     "base %3.")
+                      .arg(label,
+                           QString::fromUtf8(linked->Label.getValue()),
+                           QString::fromUtf8(base->Label.getValue()));
+        }
+        else {
+            why = tr("The edges of %1 can't be edited here: it stores %2 edge links for %3 edges.")
+                      .arg(label)
+                      .arg(subs.size())
+                      .arg(e.size());
         }
         ui->shapeObject->setCurrentIndex(0);
         onShapeObjectActivated(0);
         ui->shapeObject->setEnabled(false);
         d->baseNotListed = true;
-        d->missingEdges->setText(
-            tr("The edges of %1 can't be edited here: its base isn't a shape this dialog lists.")
-                .arg(QString::fromUtf8(d->fillet->Label.getValue()))
-        );
+        d->missingEdges->setText(why);
         d->missingEdges->show();
+        Base::Console().warning(
+            "%s: %s\n",
+            d->fillet->getFullName().c_str(),
+            why.toUtf8().constData()
+        );
         return;
     }
 
@@ -732,6 +754,31 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
         QStringList guessed;
         QStringList duplicates;
         std::vector<int> ticked;
+        // Each ticked edge's entries' radii, for the duplicates' line (PR 242 review, L4)
+        std::map<int, QStringList> radiiOf;
+        auto radiiText = [](const Part::FilletElement& entry) {
+            const QLocale locale;
+            return entry.radius1 == entry.radius2
+                ? locale.toString(entry.radius1)
+                : tr("%1 to %2").arg(locale.toString(entry.radius1), locale.toString(entry.radius2));
+        };
+        // How the solver came to a linked edge, by its record's kind, as the reference report
+        // words it (App ReferenceReport.cpp, guessedText; PR 242 review, L3)
+        auto guessTip = [](const std::string& kind) {
+            if (kind == "index") {
+                return tr("This edge was kept by its place after a naming migration");
+            }
+            if (kind == "tier2" || kind == "tier3") {
+                return tr("The reference solver found this edge by its geometry for the stored one");
+            }
+            if (kind == "continued") {
+                return tr("The reference solver continued the stored edge to this one");
+            }
+            if (kind == "expanded" || kind == "piece") {
+                return tr("The stored edge was split: the reference solver took this piece of it");
+            }
+            return tr("The reference solver guessed this edge for the stored one");
+        };
         for (size_t i = 0; i < e.size(); ++i) {
             const auto& et = e[i];
             int edgeIndex = linkedEdgeIndex(baseShape, subs[i]);
@@ -740,12 +787,16 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
                 if (Data::hasMissingElement(name.c_str())) {
                     name.erase(name.rfind(Data::MISSING_PREFIX), std::strlen(Data::MISSING_PREFIX));
                 }
-                missing << QString::fromStdString(name);
+                if (!missing.contains(QString::fromStdString(name))) {
+                    missing << QString::fromStdString(name);
+                }
                 continue;
             }
             auto it2 = std::ranges::find(d->edge_ids, edgeIndex);
             if (it2 == d->edge_ids.end()) {
-                unlisted << QStringLiteral("Edge%1").arg(edgeIndex);
+                if (!unlisted.contains(QStringLiteral("Edge%1").arg(edgeIndex))) {
+                    unlisted << QStringLiteral("Edge%1").arg(edgeIndex);
+                }
             }
             else {
                 int index = it2 - d->edge_ids.begin();
@@ -757,11 +808,14 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
                     }
                 }
                 ticked.push_back(edgeIndex);
+                radiiOf[edgeIndex] << radiiText(et);
                 if (i < guesses.size() && !guesses[i].empty()) {
-                    guessed << edgeName;
+                    if (!guessed.contains(edgeName)) {
+                        guessed << edgeName;
+                    }
                     model->setData(
                         model->index(index, 0),
-                        tr("The reference solver guessed this edge for the stored one"),
+                        guessTip(guesses[i].kind),
                         Qt::ToolTipRole
                     );
                     QFont font = ui->treeView->font();
@@ -810,12 +864,15 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
         if (!notTicked.isEmpty()) {
             notTicked << tr("OK keeps only the ticked edges.");
         }
-        if (!duplicates.isEmpty()) {
-            notTicked << tr("%1 is stored more than once: OK keeps it once, with the radii shown.")
-                             .arg(duplicates.join(QStringLiteral(", ")));
+        for (const QString& duplicate : duplicates) {
+            const int edgeIndex = duplicate.mid(4).toInt();
+            notTicked << tr("%1 is stored more than once, with radii %2: OK keeps it once, with "
+                            "the radii shown.")
+                             .arg(duplicate, radiiOf[edgeIndex].join(QStringLiteral(", ")));
         }
         if (!guessed.isEmpty()) {
-            notTicked << tr("%1 is the reference solver's guess (in italics): check it.")
+            notTicked << tr("%1 is not the stored edge but the reference solver's pick (in "
+                            "italics; its tooltip says how): check it.")
                              .arg(guessed.join(QStringLiteral(", ")));
         }
         if (!notTicked.isEmpty()) {
@@ -1124,7 +1181,13 @@ const char* DlgFilletEdges::getFilletType() const
 bool DlgFilletEdges::accept()
 {
     if (d->baseNotListed) {
-        return false;  // the label says why (ops#262)
+        // the label says why (ops#262); the Report view too (PR 242 review, L2)
+        Base::Console().warning(
+            "%s: OK changes nothing: %s\n",
+            d->fillet->getFullName().c_str(),
+            d->missingEdges->text().toUtf8().constData()
+        );
+        return false;
     }
     if (!d->object) {
         QMessageBox::warning(

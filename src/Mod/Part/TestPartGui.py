@@ -422,10 +422,19 @@ class FilletEdgesEditTestCases(unittest.TestCase):
         row = [i for i in range(model.rowCount())
                if model.index(i, 0).data(QtCore.Qt.UserRole) == moved[0]][0]
         self.assertTrue(model.index(row, 0).data(QtCore.Qt.FontRole).italic())
-        self.assertIn("guess", model.index(row, 0).data(QtCore.Qt.ToolTipRole))
+        self.assertIn("guessed", model.index(row, 0).data(QtCore.Qt.ToolTipRole))
+        # no other row is marked (PR 242 review, L5)
+        for other in range(model.rowCount()):
+            if other != row:
+                font = model.index(other, 0).data(QtCore.Qt.FontRole)
+                self.assertFalse(font is not None and font.italic(), other)
+                self.assertFalse(model.index(other, 0).data(QtCore.Qt.ToolTipRole), other)
         label = widget.findChild(QtWidgets.QLabel, "labelMissingEdges")
         self.assertFalse(label.isHidden())
-        self.assertIn("Edge{} is the reference solver's guess".format(moved[0]), label.text())
+        self.assertIn(
+            "Edge{} is not the stored edge but the reference solver's pick".format(moved[0]),
+            label.text(),
+        )
         taskDialog.accept()
         FreeCADGui.updateGui()
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
@@ -509,16 +518,53 @@ class FilletEdgesEditTestCases(unittest.TestCase):
         self.assertTrue(self._cornerRounded(fillet.Shape, 0, 10, (5, 5)))
 
     def testEditListsDuplicateEntries(self):
-        """Two stored entries on the same edge: the dialog ticks the edge once and says that OK
-        keeps it once (ops#262)."""
+        """Two stored entries on the same edge: the dialog ticks the edge once, shows the later
+        entry's radius, and says that OK keeps it once, listing both entries' radii (ops#262).
+        OK keeps one entry with the radius shown (PR 242 review, L4 and L5)."""
+        from PySide import QtCore
+
         fillet = self._makeFeature("Part::Fillet")
         edge = fillet.Edges[0][0]
         fillet.Edges = [(edge, 1.0, 1.0), (edge, 0.5, 0.5)]
         taskDialog, widget, tree = self._openEdit(fillet)
         self.assertEqual(self._tickedEdges(tree), [edge])
+        model = tree.model()
+        row = [i for i in range(model.rowCount())
+               if model.index(i, 0).data(QtCore.Qt.UserRole) == edge][0]
+        self.assertAlmostEqual(model.index(row, 1).data(QtCore.Qt.EditRole).Value, 0.5)
         label = widget.findChild(QtWidgets.QLabel, "labelMissingEdges")
         self.assertFalse(label.isHidden())
-        self.assertIn("Edge{} is stored more than once".format(edge), label.text())
+        self.assertIn("Edge{} is stored more than once, with radii 1, 0.5".format(edge), label.text())
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertEqual(
+            [(e[0], round(e[1], 6), round(e[2], 6)) for e in fillet.Edges], [(edge, 0.5, 0.5)]
+        )
+        self.Doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertTrue(self._cornerRounded(fillet.Shape, 10, 10, (5, 5)))
+
+    def testEditLinksOnOtherObjectRefusesOk(self):
+        """The fillet's edge links on another object than its Base: the box is locked with no
+        shape, the label says where the links are, and OK changes nothing (PR 242 review, L1)."""
+        fillet = self._makeFeature("Part::Fillet")
+        fillet.EdgeLinks = (self.tool, ["Edge1"])
+        self.assertEqual(fillet.Base, self.cut)
+        self.assertEqual(fillet.EdgeLinks[0], self.tool)
+        edges = fillet.Edges
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        box = widget.findChild(QtWidgets.QComboBox, "shapeObject")
+        self.assertFalse(box.isEnabled())
+        self.assertEqual(box.currentIndex(), 0)
+        self.assertEqual(tree.model().rowCount(), 0)
+        label = widget.findChild(QtWidgets.QLabel, "labelMissingEdges")
+        self.assertFalse(label.isHidden())
+        self.assertIn("its edge links are on Tool, not on its base Cut", label.text())
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertEqual(fillet.Edges, edges)
+        self.assertEqual(fillet.EdgeLinks[0], self.tool)
 
     def testEditUnlistedBaseRefusesOk(self):
         """The fillet's Base is an App::Link, which the shape box doesn't list: the box is locked
