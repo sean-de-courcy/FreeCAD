@@ -3082,6 +3082,8 @@ bool followBase(FilletBase& fillet)
                 else {
                     guess.origIndex.clear();
                     guess.origName.clear();
+                    // the old base's: Mark broken copied it into the rejection (ops#268)
+                    guess.origFingerprint.clear();
                 }
                 std::vector<App::GuessRecord::Alternative> alternatives;
                 for (auto alternative : guess.alternatives) {

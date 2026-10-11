@@ -684,6 +684,37 @@ class FilletReplaceBaseTestCases(unittest.TestCase):
                 self.assertFalse(rounded.isValid())
                 self.assertIn("Missing edge", rounded.getStatusString())
 
+    def testReplaceSwapFollowsEdges(self):
+        """ops#268: the swap on a real feature. The feature is on B's edge at (10, 0), and the
+        replace is A -> B: its Base swaps to A, and its edge goes to A's edge at the same place
+        (Base's change moved EdgeLinks to A; their swap copy, still on B's numbers, isn't
+        pasted over it)."""
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                cubes = {}
+                for name in ("A", "B"):
+                    cube = self.Doc.addObject("Part::Box", name + feature)
+                    cube.Length = cube.Width = cube.Height = 10
+                    cubes[name] = cube
+                cubes["B"].Placement = FreeCAD.Placement(
+                    FreeCAD.Vector(10, 0, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 90)
+                )
+                self.Doc.recompute()
+                onA = self._verticalEdgeAt(cubes["A"].Shape, 10, 0)
+                onB = self._verticalEdgeAt(cubes["B"].Shape, 10, 0)
+                self.assertNotEqual(onA, onB)  # the designed model
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = cubes["B"]
+                rounded.Edges = [(onB, 1.0, 1.0)]
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(rounded.ViewObject.replaceObject(cubes["A"], cubes["B"]), 1)
+                self.assertEqual(rounded.Base, cubes["A"])
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onA)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
+
     def testReplaceKeepsGuess(self):
         """A guessed edge stays a guess through the replace (PR 240 review, M3): the replace no
         longer pastes the edge links over what Base's change made of them, records included.
@@ -843,6 +874,17 @@ class ReplaceObjectOwnerChangeTestCases(unittest.TestCase):
         owner = self._owner((self.boxes["B"], ["Edge2"]), toA)
         self._replace(owner)
         self.assertEqual(owner.Dep, (self.boxes["A"], ["Edge5"]))
+
+    def testListLinkingBothSwaps(self):
+        """ops#268: a list property that links both the old and the new object (a compound of A
+        and B), replace A -> B: its copy swaps them, and nothing changed the list before its
+        paste, so the copy is pasted."""
+        A, B = self.boxes["A"], self.boxes["B"]
+        compound = self.Doc.addObject("Part::Compound", "Compound")
+        compound.Links = [A, B]
+        self.Doc.recompute()
+        self.assertEqual(compound.ViewObject.replaceObject(A, B), 1)
+        self.assertEqual(compound.Links, [B, A])
 
 
 class PartMirrorGuiTestCases(unittest.TestCase):

@@ -670,6 +670,12 @@ class RegressionTests(unittest.TestCase):
                 self.Doc.recompute()
                 self.assertFalse(rounded.isValid())
                 self.assertEqual(rounded.EdgeLinks[1], ["?Edge{}".format(onCut)])
+                # ops#268: not "Missing edge reference: EdgeN, rejected: EdgeN"
+                status = rounded.getStatusString()
+                self.assertIn(
+                    "Missing edge reference (original unknown), rejected: Edge{}".format(onCut),
+                    status,
+                )
 
     def test_fillet_chamfer_base_then_links_by_hand(self):
         """PR 240 review, M1: after a Base change by hand and a recompute, EdgeLinks written by

@@ -332,14 +332,20 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     std::ostringstream ss;
     const std::string element = elementOfSub(slot.sub);
     const std::string type = typeOf(element);
+    const GuessRecord& guess = slot.guess;
     if (entry && !entry->headline.empty()) {
         ss << entry->headline;
+    }
+    else if (guess.kind == "rejected" && guess.origIndex.empty()) {
+        // Mark broken on a record that lost its original (ops#268): the missing link holds the
+        // rejected pick, and "Missing edge reference: Edge3, rejected: Edge3" read as a
+        // contradiction
+        ss << "Missing " << (type.empty() ? "element" : type) << " reference (original unknown)";
     }
     else {
         ss << "Missing " << (type.empty() ? "element" : type) << " reference: " << element;
     }
     // A reference with a record (ops#127): the pick that broke, or the picks the user rejected
-    const GuessRecord& guess = slot.guess;
     if (guess.kind == "rejected") {
         std::string picks;
         for (const auto& alternative : guess.alternatives) {
