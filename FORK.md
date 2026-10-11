@@ -275,6 +275,7 @@ names it.
 | `fix/268-replace-followups` | fix | ops#268 | - | `integration` `23a45e0cf8` | `ecd1e20a39` (fork PR 247), 2026-10-11 | never (fork fix) |
 | `fix/part-minors-256-275` | fix | ops#268 ops#275 ops#256 | - | `fix/268-replace-followups` `75fb4ef8e1` (stacked on fork PR 247) | `7ed101a873` (fork PR 248), 2026-10-11 | never (fork fix) |
 | `fix/pd-gui-minors-253-266` | fix | ops#253, ops#266, ops#252, ops#259 | - | `integration` `42d9b6e641` | (fork PR 245) | never (fork fix) |
+| `fix/273-part-binder-relink` | fix | ops#273 | - | `integration` `d47bd4ee85` | (fork PR 252) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

@@ -295,6 +295,14 @@ std::vector<DocumentObject*> OriginGroupExtension::addObjects(std::vector<Docume
 {
 
     for (auto obj : objs) {
+        // Not a shape binder that traces its support (FreeCAD-CH ops#273, as
+        // PartDesign::Body::insertObject since ops#244): it binds another container's origin
+        // feature where that one is, so the relink to this container's own made it bind another
+        // plane or axis, silently. App doesn't know PartDesign::ShapeBinder: its property names it.
+        auto trace = freecad_cast<PropertyBool*>(obj->getPropertyByName("TraceSupport"));
+        if (trace && trace->getValue()) {
+            continue;
+        }
         relinkToOrigin(obj);
     }
 
