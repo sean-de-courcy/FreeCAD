@@ -147,7 +147,7 @@ std::string unescapeField(const std::string& text)
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
 /// <position>`, then `|<guess>|<orig>|<alt>[|<orig fp>]` when it has a guess record), a sketch's
 /// projection parked in place (`extgeo|`, the same fields, then `|<type>|<ids>` before the guess
-/// fields, ops#131) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
+/// fields, ops#131; each Id followed by its kind, `p` or `i`, when it has one, ops#264) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
 /// since ops#158, its ID: `Pad2#17` (object names have no `#`; a line without the ID still reads)
 struct ParkedItem
 {
@@ -167,6 +167,7 @@ struct ParkedItem
     App::GuessRecord guess;  // the entry's guess record (ops#127, N1 3.2), put back with it
     int type = 0;            // extgeo: the projection's type (ExternalTypes)
     std::vector<long> ids;   // extgeo: the Ids of its geometries, in projection order
+    std::vector<int> kinds;  // extgeo: each Id's kind (1 projection, 0 intersection, -1 none)
 
     std::string line() const
     {
@@ -184,6 +185,11 @@ struct ParkedItem
                 ss << '|' << type << '|';
                 for (std::size_t i = 0; i < ids.size(); ++i) {
                     ss << (i ? "," : "") << ids[i];
+                    // a build before reads the number and stops at the letter
+                    const int kind = i < kinds.size() ? kinds[i] : -1;
+                    if (kind >= 0) {
+                        ss << (kind == 1 ? 'p' : 'i');
+                    }
                 }
             }
             if (!guess.empty()) {
@@ -272,7 +278,11 @@ struct ParkedItem
                     std::size_t start = 0;
                     while (start < fields[9].size()) {
                         auto comma = fields[9].find(',', start);
-                        item.ids.push_back(std::stol(fields[9].substr(start, comma - start)));
+                        const std::string field = fields[9].substr(start, comma - start);
+                        std::size_t used = 0;
+                        item.ids.push_back(std::stol(field, &used));
+                        const std::string kind = field.substr(used);
+                        item.kinds.push_back(kind == "p" ? 1 : kind == "i" ? 0 : -1);
                         start = comma == std::string::npos ? fields[9].size() : comma + 1;
                     }
                 }
@@ -388,6 +398,7 @@ struct Unit
     bool dropped = false;  // parked, or a duplicate of a restored or re-targeted piece
     // A sketch's projection (ops#131): the Ids of its geometries in projection order, and its type
     std::vector<long> ids;
+    std::vector<int> kinds;  // each Id's kind when it was read (ops#264, PR 241 review H1)
     int type = 0;
 
     /// Every sub carries a re-target record to the same object
@@ -508,6 +519,9 @@ std::optional<PropertyState> readState(App::DocumentObject* owner, App::Property
         readList(sketch->ExternalGeometry, state.units);
         for (auto& unit : state.units) {
             unit.ids = sketch->externalGeometryIds(unit.origin);
+            for (long id : unit.ids) {
+                unit.kinds.push_back(sketch->externalGeometryKind(id));
+            }
             unit.type = sketch->externalType(unit.origin);
         }
     }
@@ -1038,6 +1052,7 @@ private:
             item.extgeo = true;
             item.type = unit.type;
             item.ids = unit.ids;
+            item.kinds = unit.kinds;
         }
         if (unit.subs.empty()) {
             item.setTarget(unit.obj);
@@ -1104,6 +1119,7 @@ private:
             // A parked projection goes back onto its geometries (ops#131). If every one of them
             // has a reference again (re-attached from Python), they have a new use: the item ends.
             unit.ids = item.ids;
+            unit.kinds = item.kinds;
             unit.type = item.type;
             auto sketch = static_cast<const Sketcher::SketchObject*>(state.owner);
             if (!item.ids.empty()
@@ -1435,7 +1451,7 @@ private:
             ShadowSub shadow = u.subs.front().shadow;
             int replaced =
                 sketch->unparkExternalGeometry(u.obj, u.subs.front().sub, std::move(shadow), u.type,
-                                               u.ids);
+                                               u.ids, u.kinds);
             if (replaced > 0) {
                 Base::Console().warning(
                     "%s: %d geometr%s projected from '%s' had been deleted while the projection "

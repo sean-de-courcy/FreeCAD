@@ -260,6 +260,9 @@ public:
     /// The Ids of the geometries ExternalGeometry's entry `entry` gives, in projection order
     /// (ops#131: a reorder records them when it parks the entry)
     std::vector<long> externalGeometryIds(int entry) const;
+    /// The kind of the external geometry with Id `id` (ops#264): 1 a projection, 0 an
+    /// intersection, -1 none recorded (saved before ops#264, or both flags set)
+    int externalGeometryKind(long id) const;
     /// The type of ExternalGeometry's entry `entry` as the projection uses it (0 projection,
     /// 1 intersection, 2 both)
     int externalType(int entry) const;
@@ -277,14 +280,16 @@ public:
      * the next rebuild projects the element onto the same geometries and their constraints hold.
      * An Id that is no longer free (deleted, or given a reference since) is replaced by a new
      * one: that projection comes back as new geometry, at its place in the projection order
-     * among the kept ones (the external constraints' GeoIds move with it). Returns how many were
-     * replaced.
+     * among the kept ones (the external constraints' GeoIds move with it), with its kind from
+     * `kinds` (parallel to `ids`, as externalGeometryKind gave them; ops#264). Returns how many
+     * were replaced.
      */
     int unparkExternalGeometry(App::DocumentObject* obj,
                                const std::string& sub,
                                App::PropertyLinkBase::ShadowSub&& shadow,
                                int type,
-                               const std::vector<long>& ids);
+                               const std::vector<long>& ids,
+                               const std::vector<int>& kinds = {});
     /** Gives the parked geometries `ids` (those still without a reference) the reference `ref`
      * of a link that no longer exists (ops#131: the projected object was deleted while parked),
      * so the next rebuild flags them missing and names the reference, as for a live projection

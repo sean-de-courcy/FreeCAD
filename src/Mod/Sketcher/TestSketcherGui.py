@@ -13,6 +13,7 @@ from SketcherTests.TestSketchCameraOnEditGui import TestSketchCameraOnEditGui
 from SketcherTests.TestAutoConstraintsGui import TestAutoConstraintsGui
 from SketcherTests.TestSketchCopyElementsGui import TestSketchCopyElementsGui
 from SketcherTests.TestSketchCopyElementsGui import TestMergeExternalPairingGui
+from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
