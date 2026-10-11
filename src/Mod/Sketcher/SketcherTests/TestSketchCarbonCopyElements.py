@@ -149,6 +149,34 @@ class TestSketchCarbonCopyElements(unittest.TestCase):
             )
 
 
+    def test_copy_of_a_link_the_destination_has_is_refused_before_any_change(self):
+        """ops#252: Dest links an edge of a box, and Source links another and that one. The copy
+        is refused, and Dest's external geometry is as it was: the source's two geometries were
+        written to it before the duplicate link was found, and stayed there without links."""
+        box = self.doc.addObject("Part::Box", "Box")
+        box.Placement = FreeCAD.Placement(V(50, 50, 0), FreeCAD.Rotation())
+        self.doc.recompute()
+        bottom = [
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(box.Shape.Edges)
+            if all(abs(v.Point.z) < TOL for v in e.Vertexes)
+        ]
+        self.dest.addExternal(box.Name, bottom[0])
+        self.source.addExternal(box.Name, bottom[1])
+        self.source.addExternal(box.Name, bottom[0])
+        self.doc.recompute()
+        links = self.dest.ExternalGeometry
+        geometries = [(g.StartPoint, g.EndPoint) for g in self.dest.ExternalGeo[2:]]
+        self.assertEqual(len(geometries), 1)
+        with self.assertRaises(ValueError):
+            self.dest.carbonCopy(self.source.Name, False)
+        self.assertEqual(self.dest.ExternalGeometry, links)
+        self.assertEqual([(g.StartPoint, g.EndPoint) for g in self.dest.ExternalGeo[2:]], geometries)
+        self.assertEqual(len(self.dest.Geometry), 1)
+        self.doc.recompute()
+        self.assertEqual(len(self.dest.ExternalGeo), 3)
+
+
 class TestCarbonCopySelfReference(unittest.TestCase):
     """PR 250 review L1: a source external whose ref names the destination's own geometry isn't
     copied, and a constraint on it goes to that geometry. Such a ref has no live link (one would

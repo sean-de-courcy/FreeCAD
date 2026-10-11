@@ -4021,21 +4021,27 @@ protected:
             return;
         }
 
+        // FreeCAD-CH (ops#252, PR 228 review L6): every remap is applied in one pass. One after
+        // another, a selection moved by one could be moved again by the next (old -3 to -4, then
+        // -4 to -5)
+        std::map<int, int> remap;
         for (auto& reference : externalReferences) {
             const int restoredGeoId = findExternalReference(Obj, reference.source, reference.subName);
             if (restoredGeoId != GeoEnum::GeoUndef) {
-                updateExternalReferenceGeoId(reference.geoId, restoredGeoId);
+                remap[reference.geoId] = restoredGeoId;
                 reference.geoId = restoredGeoId;
             }
         }
+        updateExternalReferenceGeoIds(remap);
     }
 
-    void updateExternalReferenceGeoId(int oldGeoId, int newGeoId)
+    void updateExternalReferenceGeoIds(const std::map<int, int>& remap)
     {
-        auto updateGeoId = [oldGeoId, newGeoId](std::vector<SelIdPair>& selections) {
+        auto updateGeoId = [&remap](std::vector<SelIdPair>& selections) {
             for (auto& selection : selections) {
-                if (selection.GeoId == oldGeoId) {
-                    selection.GeoId = newGeoId;
+                auto it = remap.find(selection.GeoId);
+                if (it != remap.end()) {
+                    selection.GeoId = it->second;
                 }
             }
         };

@@ -24,6 +24,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QGridLayout>
 #include <QVBoxLayout>
 #include <QInputDialog>
@@ -35,6 +36,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <map>
 #include <set>
 
 #include <Precision.hxx>
@@ -532,6 +534,10 @@ void CmdSketcherReorientSketch::activated(int iMsg)
     Q_UNUSED(iMsg);
     Sketcher::SketchObject* sketch =
         Gui::Selection().getObjectsOfType<Sketcher::SketchObject>().front();
+    // FreeCAD-CH (ops#252): detached with the new placement, in its transaction, once the
+    // orientation is chosen. Before, the support was cleared here, outside any transaction, so a
+    // cancel left the sketch detached and an undo didn't attach it again
+    bool detach = false;
     if (sketch->AttachmentSupport.getValue()) {
         int ret = QMessageBox::question(
             Gui::getMainWindow(),
@@ -542,7 +548,7 @@ void CmdSketcherReorientSketch::activated(int iMsg)
             QMessageBox::Yes | QMessageBox::No);
         if (ret == QMessageBox::No)
             return;
-        sketch->AttachmentSupport.setValue(nullptr);
+        detach = true;
     }
 
     // ask user for orientation
@@ -631,6 +637,9 @@ void CmdSketcherReorientSketch::activated(int iMsg)
     }
 
     openCommand(QT_TRANSLATE_NOOP("Command", "Reorient sketch"));
+    if (detach) {
+        Gui::cmdAppObjectArgs(sketch, "AttachmentSupport = None");
+    }
     Gui::cmdAppObjectArgs(
         sketch,
         "Placement = App.Placement(App.Vector(%f, %f, %f), App.Rotation(%f, %f, %f, %f))",
@@ -649,6 +658,44 @@ bool CmdSketcherReorientSketch::isActive()
 {
     return Gui::Selection().countObjectsOfType<Sketcher::SketchObject>() == 1;
 }
+
+namespace
+{
+/// The objects' labels for a list to choose from; a label that more than one has gets the
+/// object's name too, so the user can tell them apart (ops#252, as PartDesign's Move Feature)
+QStringList labelsToChoose(const std::vector<App::DocumentObject*>& objs)
+{
+    std::map<std::string, int> count;
+    for (auto obj : objs) {
+        ++count[obj->Label.getStrValue()];
+    }
+    QStringList items;
+    for (auto obj : objs) {
+        QString text = QString::fromUtf8(obj->Label.getValue());
+        if (count[obj->Label.getStrValue()] > 1) {
+            text += QStringLiteral(" (%1)").arg(QString::fromLatin1(obj->getNameInDocument()));
+        }
+        items.push_back(text);
+    }
+    return items;
+}
+
+/// The row the user chose in a list dialog, or -1 when cancelled: by its row, not by its text,
+/// which another row can have too (ops#252)
+int chooseItem(const QString& title, const QString& label, const QStringList& items)
+{
+    QInputDialog dialog(Gui::getMainWindow(), Qt::MSWindowsFixedSizeDialogHint);
+    dialog.setWindowTitle(title);
+    dialog.setLabelText(label);
+    dialog.setComboBoxItems(items);
+    dialog.setComboBoxEditable(false);
+    if (dialog.exec() != QDialog::Accepted) {
+        return -1;
+    }
+    auto combo = dialog.findChild<QComboBox*>();
+    return combo ? combo->currentIndex() : -1;
+}
+}  // namespace
 
 DEF_STD_CMD_A(CmdSketcherMapSketch)
 
@@ -714,27 +761,17 @@ void CmdSketcherMapSketch::activated(int iMsg)
             return QString::fromUtf8(a->Label.getValue()) < QString::fromUtf8(b->Label.getValue());
         });
 
-        bool ok;
-        QStringList items;
-        for (std::vector<App::DocumentObject*>::iterator it = sketches.begin();
-             it != sketches.end();
-             ++it)
-            items.push_back(QString::fromUtf8((*it)->Label.getValue()));
-        QString text = QInputDialog::getItem(
-            Gui::getMainWindow(),
+        // FreeCAD-CH (ops#252): the sketch goes by the chosen row; by the label's text, the first
+        // of two sketches with one label was taken
+        int index = chooseItem(
             qApp->translate("Sketcher_MapSketch", "Select Sketch"),
             sketchInSelection
             ? qApp->translate("Sketcher_MapSketch",
                 "Select a sketch (some sketches not shown to prevent a circular dependency)")
             : qApp->translate("Sketcher_MapSketch", "Select a sketch from the list"),
-            items,
-            0,
-            false,
-            &ok,
-            Qt::MSWindowsFixedSizeDialogHint);
-        if (!ok)
+            labelsToChoose(sketches));
+        if (index < 0 || index >= static_cast<int>(sketches.size()))
             return;
-        int index = items.indexOf(text);
         Part2DObject* sketch = static_cast<Part2DObject*>(sketches[index]);
 
         // check circular dependency
@@ -775,9 +812,8 @@ void CmdSketcherMapSketch::activated(int iMsg)
         validModes.insert(validModes.begin(), Attacher::mmDeactivated);
         if (bCurIncompatible)
             validModes.push_back(curMapMode);
-        // bool ok; //already defined
-        // QStringList items; //already defined
-        items.clear();
+        bool ok;
+        QStringList items;
         items.push_back(QObject::tr("Do not attach"));
         int iSugg = 0;// index of the auto-suggested mode in the list of valid modes
         int iCurr = 0;// index of current mode in the list of valid modes
@@ -805,7 +841,7 @@ void CmdSketcherMapSketch::activated(int iMsg)
             }
         }
         // * execute the dialog
-        text = QInputDialog::getItem(
+        QString text = QInputDialog::getItem(
             Gui::getMainWindow(),
             qApp->translate("Sketcher_MapSketch", "Sketch Attachment"),
             bCurIncompatible
@@ -1039,25 +1075,16 @@ void CmdSketcherMirrorSketch::activated(int iMsg)
         std::vector<Sketcher::Constraint*> mirrorconstr(tempconstr.begin() + (addedConstraints + 1),
                                                         tempconstr.end());
 
-        for (std::vector<Sketcher::Constraint*>::const_iterator itc = mirrorconstr.begin();
-             itc != mirrorconstr.end();
-             ++itc) {
-
-            if ((*itc)->First != Sketcher::GeoEnum::GeoUndef
-                || (*itc)->First == Sketcher::GeoEnum::HAxis
-                || (*itc)->First == Sketcher::GeoEnum::VAxis)
-                // not x, y axes or origin
-                (*itc)->First -= (addedGeometries + 1);
-            if ((*itc)->Second != Sketcher::GeoEnum::GeoUndef
-                || (*itc)->Second == Sketcher::GeoEnum::HAxis
-                || (*itc)->Second == Sketcher::GeoEnum::VAxis)
-                // not x, y axes or origin
-                (*itc)->Second -= (addedGeometries + 1);
-            if ((*itc)->Third != Sketcher::GeoEnum::GeoUndef
-                || (*itc)->Third == Sketcher::GeoEnum::HAxis
-                || (*itc)->Third == Sketcher::GeoEnum::VAxis)
-                // not x, y axes or origin
-                (*itc)->Third -= (addedGeometries + 1);
+        // FreeCAD-CH (ops#252): only the mirrored geometry's GeoIds move, in every element; the
+        // test was `||` (any GeoId but GeoUndef, the axes too) and read First to Third only.
+        // addSymmetric names only the mirrored geometry, so this changes no result today
+        for (auto* constr : mirrorconstr) {
+            for (size_t i = 0; i < constr->getElementsSize(); ++i) {
+                const int geoId = constr->getGeoId(i);
+                if (geoId >= 0) {
+                    constr->setGeoId(i, geoId - (addedGeometries + 1));
+                }
+            }
         }
 
         mirrorsketch->addGeometry(mirrorgeo);
@@ -1593,6 +1620,19 @@ void CmdSketcherMergeSketches::activated(int iMsg)
     std::vector<const Sketcher::SketchObject*> srcSketches;
     for (const auto& sel : selection) {
         srcSketches.push_back(static_cast<const Sketcher::SketchObject*>(sel.getObject()));
+    }
+    // FreeCAD-CH (ops#252): each sketch's geometry keeps its sketch coordinates, so a sketch
+    // placed elsewhere lands in the first one's plane, somewhere other than where it is: say so
+    for (const auto* srcSketch : srcSketches) {
+        if (!srcSketch->Placement.getValue().isSame(srcSketches.front()->Placement.getValue(),
+                                                    Precision::Confusion())) {
+            Base::Console().warning(
+                "Merge Sketches: '%s' is placed differently from '%s'. Its geometry is merged at "
+                "the same sketch coordinates in the placement of '%s', not where it is.\n",
+                srcSketch->Label.getValue(),
+                srcSketches.front()->Label.getValue(),
+                srcSketches.front()->Label.getValue());
+        }
     }
     auto extGeoIdMaps = importExternalGeometry(srcSketches, mergeSketch);
 

@@ -544,6 +544,7 @@ int SketchAnalysis::detectMissingPointOnPointConstraints(double precision, bool 
     for (auto& coincidence : missingCoincidences) {
         this->vertexConstraints.push_back(coincidence);
     }
+    vertexConstraintsGeometry = geometryTags();
 
     // Return number of missing constraints
     return int(this->vertexConstraints.size());
@@ -665,13 +666,45 @@ void SketchAnalysis::makeConstraintsOneByOne(std::vector<ConstraintIds>& ids, co
     ids.clear();
 }
 
+std::vector<boost::uuids::uuid> SketchAnalysis::geometryTags() const
+{
+    std::vector<boost::uuids::uuid> tags;
+    for (const auto* geo : sketch->getInternalGeometry()) {
+        tags.push_back(geo ? geo->getTag() : boost::uuids::uuid {});
+    }
+    return tags;
+}
+
+bool SketchAnalysis::vertexConstraintsStillApply()
+{
+    // FreeCAD-CH (ops#252): the coincidences name GeoIds of the geometry they were found on. If
+    // geometry was added, deleted or reordered since (e.g. between Detect and Fix in the
+    // validation panel), they would join other points: none is made
+    if (vertexConstraints.empty() || vertexConstraintsGeometry == geometryTags()) {
+        return true;
+    }
+    Base::Console().warning(
+        "'%s': the missing coincidences found before weren't added: the sketch's geometry has "
+        "changed since. Detect them again.\n",
+        sketch->Label.getValue()
+    );
+    vertexConstraints.clear();
+    return false;
+}
+
 void SketchAnalysis::makeMissingPointOnPointCoincident()
 {
+    if (!vertexConstraintsStillApply()) {
+        return;
+    }
     makeConstraints(vertexConstraints);
 }
 
 void SketchAnalysis::makeMissingPointOnPointCoincidentOneByOne()
 {
+    if (!vertexConstraintsStillApply()) {
+        return;
+    }
     makeConstraintsOneByOne(
         vertexConstraints,
         QT_TRANSLATE_NOOP(

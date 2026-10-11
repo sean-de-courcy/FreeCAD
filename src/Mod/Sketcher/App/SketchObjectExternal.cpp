@@ -492,6 +492,35 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         }
     }
 
+    // FreeCAD-CH (ops#252): a source link this sketch has already refuses the copy before
+    // anything changes. It was checked after the source's external geometries were written to
+    // ExternalGeo, which the refusal left there without their links
+    {
+        const auto& objects = ExternalGeometry.getValues();
+        const auto& subs = ExternalGeometry.getSubValues();
+        const auto& sObjects = psObj->ExternalGeometry.getValues();
+        const auto& sSubs = psObj->ExternalGeometry.getSubValues();
+        if (objects.size() != subs.size() || sObjects.size() != sSubs.size()) {
+            assert(0 /*counts of objects and subelements in external geometry links do not match*/);
+            Base::Console().error(
+                "Internal error: counts of objects and subelements in external "
+                "geometry links do not match\n"
+            );
+            return -1;
+        }
+        for (size_t si = 0; si < sObjects.size(); ++si) {
+            for (size_t i = 0; i < objects.size(); ++i) {
+                if (objects[i] == sObjects[si] && subs[i] == sSubs[si]) {
+                    Base::Console().error(
+                        "Link to %s already exists in this sketch. Delete the link and try again\n",
+                        sSubs[si].c_str()
+                    );
+                    return -1;
+                }
+            }
+        }
+    }
+
     // FreeCAD-CH (ops#280): an unaligned copy isn't flipped (xinv and yinv stay false), but a
     // source whose plane faces the other way still sees this sketch's own geometry mirrored
     const bool reversed = !xinv && !yinv
@@ -592,30 +621,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         std::vector<DocumentObject*> sObjects = psObj->ExternalGeometry.getValues();
         std::vector<std::string> sSubElements = psObj->ExternalGeometry.getSubValues();
 
-        if (Objects.size() != SubElements.size() || sObjects.size() != sSubElements.size()) {
-            assert(0 /*counts of objects and subelements in external geometry links do not match*/);
-            Base::Console().error(
-                "Internal error: counts of objects and subelements in external "
-                "geometry links do not match\n"
-            );
-            return -1;
-        }
-
+        // (the counts and the duplicate links were checked above, before anything changed)
         int si = 0;
         for (auto& sobj : sObjects) {
-            int i = 0;
-            for (auto& obj : Objects) {
-                if (obj == sobj && SubElements[i] == sSubElements[si]) {
-                    Base::Console().error(
-                        "Link to %s already exists in this sketch. Delete the link and try again\n",
-                        sSubElements[si].c_str()
-                    );
-                    return -1;
-                }
-
-                i++;
-            }
-
             Objects.push_back(sobj);
             SubElements.push_back(sSubElements[si]);
             // the copied link keeps its type
@@ -1231,10 +1239,13 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     }
 
     bool add = true;
+    // the geometries the link gives before (none for a new link)
+    std::size_t idsBefore = 0;
     for (size_t i = 0; i < Objects.size(); ++i) {
         if (!(Objects[i] == Obj && std::string(SubName) == SubElements[i])) {
             continue;
         }
+        idsBefore = externalGeometryIds(static_cast<int>(i)).size();
         if (Types[i] == static_cast<int>(ExtType::Both)
             || (Types[i] == static_cast<int>(ExtType::Projection) && !intersection)
             || (Types[i] == static_cast<int>(ExtType::Intersection) && intersection)) {
@@ -1289,6 +1300,34 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         // revert to original values
         setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
         return -1;
+    }
+
+    // FreeCAD-CH (ops#252): a link (or the kind added to one) that gives no geometry is a
+    // failure. A new one was dropped by the rebuild, and the index returned was another link's,
+    // so the GUI committed an empty command with no message
+    {
+        std::size_t idsAfter = 0;
+        const auto& objects = ExternalGeometry.getValues();
+        const auto& subs = ExternalGeometry.getSubValues();
+        for (size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
+            if (objects[i] == Obj && subs[i] == SubName) {
+                idsAfter = externalGeometryIds(static_cast<int>(i)).size();
+                break;
+            }
+        }
+        if (idsAfter <= idsBefore) {
+            Base::Console().error(
+                "Link to %s gives no %s geometry in this sketch.\n",
+                SubName,
+                intersection ? "intersection" : "projection"
+            );
+            if (ExternalGeometry.getValues() != originalObjects
+                || ExternalGeometry.getSubValues() != originalSubElements
+                || ExternalTypes.getValues() != originalTypes) {
+                setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
+            }
+            return -1;
+        }
     }
 
     acceptGeometry();  // This may need to be refactored into onChanged for ExternalGeometry

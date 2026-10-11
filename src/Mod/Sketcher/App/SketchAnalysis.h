@@ -32,6 +32,8 @@
 
 #include <Base/Vector3D.h>
 
+#include <boost/uuid/uuid.hpp>
+
 #include "Analyse.h"
 
 
@@ -107,6 +109,7 @@ public:
     void setMissingPointOnPointConstraints(std::vector<ConstraintIds>& cl)
     {
         vertexConstraints = cl;
+        vertexConstraintsGeometry = geometryTags();
     }
     /// Point on Point constraint simple routine Make step (see constructor)
     void makeMissingPointOnPointCoincident();
@@ -191,11 +194,16 @@ private:
     Sketcher::SketchObject* sketch;
 
     std::vector<ConstraintIds> vertexConstraints;
+    /// The tags of the sketch's geometry when vertexConstraints was detected or set: its GeoIds
+    /// name that geometry, so Make refuses once the geometry list has changed (ops#252)
+    std::vector<boost::uuids::uuid> vertexConstraintsGeometry;
     std::vector<ConstraintIds> verthorizConstraints;
     std::vector<ConstraintIds> lineequalityConstraints;
     std::vector<ConstraintIds> radiusequalityConstraints;
 
 private:
+    std::vector<boost::uuids::uuid> geometryTags() const;
+    bool vertexConstraintsStillApply();
     void autoDeleteAllConstraints();
     void autoHorizontalVerticalConstraints();
     void autoPointOnPointCoincident();

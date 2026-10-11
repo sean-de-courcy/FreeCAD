@@ -214,6 +214,40 @@ class TestSketchValidateCoincidents(unittest.TestCase):
                 len(doc.Sketch001.ExternalGeo), 3
             )  # Two axis, plus one the reference to deleted geometry
 
+    def testMissingCoincidenceAfterTheGeometryChanged(self):
+        """ops#252: a coincidence found between line 0's end and line 1's start isn't made once
+        line 0 is deleted: its GeoIds would then join line 1's end (10, 10) and line 2's start
+        (20, 20), and the solver would pull them together. Nothing is added, with a warning."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(20, 20, 0), Vector(30, 30, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.delGeometry(0)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 0)
+        self.assertEqual(sketch.Geometry[1].StartPoint, Vector(20, 20, 0))
+        # detected again on the geometry as it is: nothing missing
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 0)
+
+    def testMissingCoincidenceAfterARecompute(self):
+        """ops#252: a recompute between Detect and Make (the solver moves nothing here, and keeps
+        each geometry's tag) doesn't stop the coincidence from being made."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.touch()
+        self.Doc.recompute()
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 1)
+        c = sketch.Constraints[0]
+        self.assertEqual((c.Type, c.First, c.FirstPos, c.Second, c.SecondPos), ("Coincident", 0, 2, 1, 1))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument(self.Doc.Name)

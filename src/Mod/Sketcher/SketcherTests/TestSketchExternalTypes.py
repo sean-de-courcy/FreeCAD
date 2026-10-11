@@ -645,6 +645,40 @@ class TestSketchExternalTypes(unittest.TestCase):
         )
         self.assertEqual(self.externalPoints(sketch), [-10, 10])
 
+    def testLinkThatGivesNoGeometryIsRefused(self):
+        """ops#252: an edge 5 above the sketch plane has no intersection with it. Linked as an
+        intersection it gives no geometry: the add raises and the sketch is as it was. Before,
+        the rebuild dropped the new link and the add returned the previous link's index, so
+        nothing said it failed (the GUI committed an empty command)."""
+        self.addEdge("Above", Part.makeLine(V(-20, 0, 5), V(20, 0, 5)))
+        self.doc.recompute()
+        links = self.sketch.ExternalGeometry
+        count = len(self.sketch.ExternalGeo)
+        with self.assertRaises(ValueError):
+            self.sketch.addExternal("Above", "Edge1", False, True)
+        self.assertEqual(self.sketch.ExternalGeometry, links)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.assertEqual(len(self.sketch.ExternalGeo), count)
+        self.doc.recompute()
+        self.assertRingPoints()
+
+    def testIntersectionThatGivesNoGeometryAddedToAProjectionLinkIsRefused(self):
+        """ops#252: the same edge linked as a projection (a line); adding its intersection, which
+        gives nothing, raises and leaves the link a projection. Before, it became Both with no
+        intersection geometry, silently."""
+        self.addEdge("Above", Part.makeLine(V(-20, 0, 5), V(20, 0, 5)))
+        self.doc.recompute()
+        self.sketch.addExternal("Above", "Edge1", False, False)
+        self.doc.recompute()
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION])
+        count = len(self.sketch.ExternalGeo)
+        with self.assertRaises(ValueError):
+            self.sketch.addExternal("Above", "Edge1", False, True)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION])
+        self.assertEqual(len(self.sketch.ExternalGeo), count)
+        self.doc.recompute()
+        self.assertRingPoints()
+
     def testProjectionAddedToAFrozenIntersectionLinkIsRefused(self):
         """A frozen link isn't rebuilt, so the projection added to it would have no geometry
         until the link thaws, and then take the points' slots. The add is refused, loudly."""
