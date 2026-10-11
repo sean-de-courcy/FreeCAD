@@ -460,8 +460,6 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
     int nextextgeoid = getExternalGeometryCount();
 
-    int nextcid = cvals.size();
-
     const std::vector<Part::Geometry*>& svals = psObj->getInternalGeometry();
 
     const std::vector<Sketcher::Constraint*>& scvals = psObj->Constraints.getValues();
@@ -475,6 +473,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     const Base::Vector3d axisV = rotation.multVec(Base::Vector3d::UnitY);
 
     std::map<int, int> extMap;
+    // for a source external that copies this sketch's own geometry: the element its ref names
+    // (a vertex is a point of an edge, ops#267 PR 250 review L1)
+    std::map<int, std::pair<std::string, PointPos>> selfRefs;
     if (psObj->ExternalGeo.getSize() > 1) {
         int i = -1;
         auto geos = this->ExternalGeo.getValues();
@@ -492,6 +493,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                     PointPos posId;
                     if (this->geoIdFromShapeType(ref.c_str() + myName.size(), geoId, posId)) {
                         extMap[-i - 1] = geoId;
+                        selfRefs[-i - 1] = {ref.substr(myName.size()), posId};
                         continue;
                     }
                 }
@@ -663,26 +665,82 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         }
     };
 
+    // each source constraint's index here, -1 for one that isn't copied
+    std::vector<int> copiedIndex;
+    copiedIndex.reserve(scvals.size());
     for (const auto& constr : scvals) {
-        Sketcher::Constraint* newConstr = constr->copy();
+        std::unique_ptr<Sketcher::Constraint> newConstr(constr->copy());
+        const int number = static_cast<int>(&constr - scvals.data()) + 1;
+        std::string refused;  // why the constraint isn't copied
         // FreeCAD-CH (ops#247): every element, not only First/Second/Third: a Group or a Text
         // holds more, and the later ones kept the source's GeoIds, naming other geometry here
-        for (size_t i = 0; i < newConstr->getElementsSize(); ++i) {
+        for (size_t i = 0; i < newConstr->getElementsSize() && refused.empty(); ++i) {
             const int geoId = constr->getGeoId(i);
             if (geoId >= 0) {
                 newConstr->setGeoId(i, geoId + nextgeoid);
             }
             else if (geoId < -2 && geoId != GeoEnum::GeoUndef) {
-                newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
+                // FreeCAD-CH (ops#267): through extMap, not a linear shift: a source external that
+                // copies this sketch's own edge isn't appended, so the ones after it move up
+                auto mapped = extMap.find(geoId);
+                if (mapped == extMap.end()) {
+                    newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
+                    continue;
+                }
+                if (mapped->second >= 0) {
+                    const auto& [element, posId] = selfRefs.at(geoId);
+                    const std::string external = "ExternalEdge"
+                        + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", a copy of '"
+                        + this->Label.getValue() + "' " + element;
+                    if (xinv || yinv) {
+                        // the copy is mirrored, the sketch's own geometry isn't: which of its
+                        // points the constraint's position names isn't known (an arc's ends swap)
+                        refused = "it is on " + external
+                            + ", and the copy is mirrored here, so which point of it the "
+                              "constraint names isn't known";
+                        break;
+                    }
+                    if (posId != PointPos::none) {
+                        // a vertex: the source's external is a point, named by its start; here
+                        // it is that point of the edge
+                        if (constr->getPosId(i) != PointPos::start) {
+                            refused = "it is on " + external + " other than by its point";
+                            break;
+                        }
+                        newConstr->setPosId(i, posId);
+                    }
+                    const std::string own = (posId != PointPos::none ? "vertex of Edge" : "Edge")
+                        + std::to_string(mapped->second + 1);
+                    Base::Console().warning(
+                        "Constraint %d of '%s' is on %s: its copy here is on that %s itself.\n",
+                        number,
+                        psObj->Label.getValue(),
+                        external.c_str(),
+                        own.c_str()
+                    );
+                }
+                newConstr->setGeoId(i, mapped->second);
             }
+        }
+        if (!refused.empty()) {
+            Base::Console().warning(
+                "Constraint %d of '%s' isn't copied to '%s': %s.\n",
+                number,
+                psObj->Label.getValue(),
+                this->Label.getValue(),
+                refused.c_str()
+            );
+            copiedIndex.push_back(-1);
+            continue;
         }
 
         if (xinv || yinv) {
             // corrections for flipped constraints
-            applyConstraintFlipCorrection(newConstr);
+            applyConstraintFlipCorrection(newConstr.get());
         }
 
-        newcVals.push_back(newConstr);
+        copiedIndex.push_back(static_cast<int>(newcVals.size()));
+        newcVals.push_back(newConstr.release());
     }
 
     // Block acceptGeometry in OnChanged to avoid unnecessary checks and updates
@@ -753,8 +811,10 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     };
 
     int sourceid = 0;
-    for (auto it = scvals.cbegin(); it != scvals.cend(); ++it, ++nextcid, ++sourceid) {
-        if (!((*it)->isDimensional() && (*it)->isDriving)) {
+    for (auto it = scvals.cbegin(); it != scvals.cend(); ++it, ++sourceid) {
+        // a constraint that isn't copied leaves no gap: the ones after it moved up
+        const int copied = copiedIndex[sourceid];
+        if (copied < 0 || !((*it)->isDimensional() && (*it)->isDriving)) {
             continue;
         }
 
@@ -776,7 +836,7 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             sref = makeCorrectedExpressionString((*it), sref);
         }
         expr = std::shared_ptr<App::Expression>(App::Expression::parse(this, sref));
-        setExpression(Constraints.createPath(nextcid), std::move(expr));
+        setExpression(Constraints.createPath(copied), std::move(expr));
     }
 
     // Solve even if `noRecomputes==false`, because recompute may fail, and leave the

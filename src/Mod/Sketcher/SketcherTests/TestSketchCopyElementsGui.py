@@ -59,11 +59,11 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
             self.assertLess((line.StartPoint - V(*start, 0)).Length, TOL, (ids, geo_id))
             self.assertLess((line.EndPoint - V(*end, 0)).Length, TOL, (ids, geo_id))
 
-    def merge_dest_and_source(self):
-        """Merge Sketches of Dest then Source; the merged sketch."""
+    def merge(self, *sketches):
+        """Merge Sketches of `sketches` in this order; the merged sketch."""
         FreeCADGui.Selection.clearSelection()
-        FreeCADGui.Selection.addSelection(self.doc.Name, self.dest.Name)
-        FreeCADGui.Selection.addSelection(self.doc.Name, self.source.Name)
+        for sketch in sketches:
+            FreeCADGui.Selection.addSelection(self.doc.Name, sketch.Name)
         before = set(o.Name for o in self.doc.Objects)
         FreeCADGui.runCommand("Sketcher_MergeSketches")
         self.doc.recompute()
@@ -71,11 +71,28 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         self.assertEqual(len(merged), 1, [o.Name for o in merged])
         return merged[0]
 
-    def add_length(self, sketch, geo_id, name="", expression=None, path="Constraints[%d]"):
+    def merge_dest_and_source(self):
+        """Merge Sketches of Dest then Source; the merged sketch."""
+        return self.merge(self.dest, self.source)
+
+    def add_line(self, sketch, y):
+        """A line 10 long at height y, right of the square; its GeoId"""
+        return sketch.addGeometry(Part.LineSegment(V(20, y, 0), V(30, y, 0)), False)
+
+    def free_source_lines(self, count):
+        """`count` lines added to Source, at heights 5, 10, ...; their GeoIds (4, 5, ...). The
+        solver leaves the square's lines 1 to 3 out (Group elements after its frame), so a length
+        on them isn't enforced: tests that drive lengths use these. In the merged sketch after
+        Dest's line they are geometry 5, 6, ..."""
+        return [self.add_line(self.source, 5 * (i + 1)) for i in range(count)]
+
+    def add_length(
+        self, sketch, geo_id, name="", expression=None, path="Constraints[%d]", value=10
+    ):
         """A driving distance on the line `geo_id` (each line here is 10 long), named and driven
         by `expression` when given; its index. An unnamed one's expression is bound by `path`:
         "Constraints[%d]" as the dimension dialog does, ".Constraints[%d]" as Python can."""
-        index = sketch.addConstraint(Sketcher.Constraint("Distance", geo_id, 10))
+        index = sketch.addConstraint(Sketcher.Constraint("Distance", geo_id, value))
         if name:
             sketch.renameConstraint(index, name)
         if expression:
@@ -121,40 +138,69 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         """Source's b is driven by its own a (Constraints.a). In the merged sketch b follows the
         merged a, not Source's: a set to 14 there makes both merged lines 14 long, and Source's
         stay 10."""
-        self.add_length(self.source, 0, "a")
-        self.add_length(self.source, 1, "b", "Constraints.a")
+        first, second = self.free_source_lines(2)
+        self.add_length(self.source, first, "a")
+        self.add_length(self.source, second, "b", "Constraints.a")
         self.doc.recompute()
         merged = self.merge_dest_and_source()
         self.assertEqual(self.expressions(merged), {".Constraints.b": ".Constraints.a"})
         merged.setDatum("a", FreeCAD.Units.Quantity("14 mm"))
         self.doc.recompute()
-        # Dest's line is merged geometry 0, Source's lines 1 to 4
-        self.assertAlmostEqual(self.line_length(merged, 1), 14, delta=1e-7)
-        self.assertAlmostEqual(self.line_length(merged, 2), 14, delta=1e-7)
-        self.assertAlmostEqual(self.line_length(self.source, 0), 10, delta=1e-7)
-        self.assertAlmostEqual(self.line_length(self.source, 1), 10, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 5), 14, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 6), 14, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(self.source, first), 10, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(self.source, second), 10, delta=1e-7)
 
-    def test_merge_skips_an_expression_whose_reference_would_move(self):
+    def test_merge_rewrites_a_reference_to_a_renamed_constraint(self):
         """Dest has a length named a too, so Source's a is renamed a2: Source's b, driven by
-        Constraints.a, would follow Dest's a in the merged sketch. Its expression isn't copied
-        (with a warning), and b keeps its value, 10."""
+        Constraints.a, is driven by Constraints.a2 in the merged sketch, not by Dest's a (ops#267;
+        before, its expression wasn't copied). a2 set to 14 makes b's line 14 long."""
+        first, second = self.free_source_lines(2)
         self.add_length(self.dest, 0, "a", "5 + 5")
-        self.add_length(self.source, 0, "a")
-        self.add_length(self.source, 1, "b", "Constraints.a")
+        self.add_length(self.source, first, "a")
+        self.add_length(self.source, second, "b", "Constraints.a")
         self.doc.recompute()
         merged = self.merge_dest_and_source()
         self.assertEqual([c.Name for c in merged.Constraints], ["a", "", "a2", "b"])
-        self.assertEqual(self.expressions(merged), {".Constraints.a": "5 + 5"})
-        self.assertAlmostEqual(merged.getDatum("b").Value, 10, delta=1e-7)
+        self.assertEqual(
+            self.expressions(merged),
+            {".Constraints.a": "5 + 5", ".Constraints.b": ".Constraints.a2"},
+        )
+        merged.setDatum("a2", FreeCAD.Units.Quantity("14 mm"))
+        self.doc.recompute()
+        self.assertAlmostEqual(self.line_length(merged, 6), 14, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 0), 10, delta=1e-7)
 
-    def test_merge_refuses_an_index_reference_in_the_first_sketch(self):
-        """PR 237 review M1: in the first sketch an index lands on the same index in the merged
-        one, but Merge then deletes the constraints it skips, and the deletion leaves a reference
-        to the deleted index alone. Dest (in a Body) has constraint 0, a horizontal distance to an
-        edge of the Body's box, which Merge can't import (out of scope for the merged sketch);
-        constraint 1, a length of 10; and constraint 2, a length driven by Constraints[0]. Kept,
-        after constraint 0's deletion the expression would follow constraint 1 instead. It isn't
-        copied (with a warning), and constraint 2 keeps its value."""
+    def test_merge_renames_clear_of_the_sources_later_names(self):
+        """PR 237 review L2: Dest has a; Source has a and a2. Source's a is renamed a3, not a2,
+        which Source's own a2 keeps, and each reference follows its constraint: b (Constraints.a2)
+        the merged a2, c (Constraints.a) the merged a3."""
+        lines = self.free_source_lines(4)
+        self.add_length(self.dest, 0, "a", "5 + 5")
+        self.add_length(self.source, lines[0], "a", value=6)
+        self.add_length(self.source, lines[1], "a2", value=7)
+        self.add_length(self.source, lines[2], "b", "Constraints.a2")
+        self.add_length(self.source, lines[3], "c", "Constraints.a")
+        self.doc.recompute()
+        merged = self.merge_dest_and_source()
+        self.assertEqual([c.Name for c in merged.Constraints], ["a", "", "a3", "a2", "b", "c"])
+        self.assertEqual(
+            self.expressions(merged),
+            {
+                ".Constraints.a": "5 + 5",
+                ".Constraints.b": ".Constraints.a2",
+                ".Constraints.c": ".Constraints.a3",
+            },
+        )
+        # a, a2, then b = a2 and c = a
+        self.assertEqual(
+            [round(self.line_length(merged, g), 6) for g in range(5, 9)], [6, 7, 7, 6]
+        )
+
+    def body_dest_with_a_skipped_constraint(self):
+        """Puts Dest in a Body with a box, and gives it constraint 0: a horizontal distance from
+        the box's edge on the x axis to Dest's line 0. Merge can't import the edge (out of scope
+        for a merged sketch outside the Body), so it skips constraint 0. The distance."""
         import PartDesign  # noqa: F401  (registers the PartDesign types)
 
         body = self.doc.addObject("PartDesign::Body", "Body")
@@ -168,20 +214,106 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
             if all(abs(v.Point.y) < TOL and abs(v.Point.z) < TOL for v in e.Vertexes)
         ]
         self.dest.addExternal(box.Name, edge)
-        for y in (5, 10):
-            self.dest.addGeometry(Part.LineSegment(V(20, y, 0), V(30, y, 0)), False)
         # from the edge's start to Dest's first line: 20 or 10, whichever end the edge starts at
         distance = 20 - self.dest.getPoint(-3, 1).x
-        self.dest.addConstraint(Sketcher.Constraint("DistanceX", -3, 1, 0, 1, distance))
-        self.add_length(self.dest, 1)
+        self.assertEqual(
+            self.dest.addConstraint(Sketcher.Constraint("DistanceX", -3, 1, 0, 1, distance)), 0
+        )
+        return distance
+
+    def test_merge_index_references_after_a_skipped_constraint(self):
+        """PR 237 review M1 and ops#267 F1: Merge deletes the constraints it skips, and the
+        deletion renamed a reference to an index only partly. Dest's constraint 0 is skipped
+        (body_dest_with_a_skipped_constraint); constraint 1 is a length of 7; constraint 2 a
+        length driven by Constraints[0]; constraint 3 a length driven by Constraints[1] * 2.
+        Constraint 2's reference names a constraint that isn't copied: its expression isn't
+        copied (with a warning), and it keeps its value. Constraint 3's names constraint 1, which
+        is merged constraint 0: its expression is Constraints[0] * 2, and its line 14 long."""
+        distance = self.body_dest_with_a_skipped_constraint()
+        for y in (5, 10, 15):
+            self.add_line(self.dest, y)
+        self.assertEqual(self.add_length(self.dest, 1, value=7), 1)
         self.assertEqual(self.add_length(self.dest, 2, expression="Constraints[0]"), 2)
+        self.assertEqual(self.add_length(self.dest, 3, expression="Constraints[1] * 2"), 3)
         self.doc.recompute()
-        self.assertEqual(self.expressions(self.dest), {"Constraints[2]": "Constraints[0]"})
         self.assertAlmostEqual(self.line_length(self.dest, 2), distance, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(self.dest, 3), 14, delta=1e-7)
         merged = self.merge_dest_and_source()
-        self.assertEqual([c.Type for c in merged.Constraints][:2], ["Distance"] * 2)
-        self.assertEqual(self.expressions(merged), {})
+        self.assertEqual([c.Type for c in merged.Constraints][:3], ["Distance"] * 3)
+        self.assertEqual(self.expressions(merged), {"Constraints[2]": "Constraints[0] * 2"})
         self.assertAlmostEqual(merged.Constraints[1].Value, distance, delta=1e-7)
+        # Dest's lines are merged geometry 0 to 3
+        self.assertAlmostEqual(self.line_length(merged, 1), 7, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 2), distance, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 3), 14, delta=1e-7)
+
+    def test_merge_rewrites_index_references_of_each_sketch(self):
+        """ops#267 F1: an unnamed constraint can be referenced only by its index, and each
+        sketch's constraints move by the ones merged before them. Dest: constraint 0 a length of
+        10, constraint 1 driven by Constraints[0] + 1 mm. Source (after its Group): constraint 1 a
+        length of 6, constraint 2 driven by Constraints[1] * 2. Third: constraint 0 a length of
+        3, constraint 1 driven by Constraints[0]. In the merged sketch (Dest's 2, Source's 3,
+        Third's 2) each names its own sketch's copy, and the lines are 10, 11, 6, 12, 3, 3."""
+        self.add_line(self.dest, 5)
+        self.add_length(self.dest, 0)
+        self.add_length(self.dest, 1, expression="Constraints[0] + 1 mm")
+        first, second = self.free_source_lines(2)
+        self.add_length(self.source, first, value=6)
+        self.add_length(self.source, second, expression="Constraints[1] * 2")
+        third = self.doc.addObject("Sketcher::SketchObject", "Third")
+        self.add_line(third, 40)
+        self.add_line(third, 45)
+        self.add_length(third, 0, value=3)
+        self.add_length(third, 1, expression="Constraints[0]")
+        self.doc.recompute()
+        merged = self.merge(self.dest, self.source, third)
+        self.assertEqual(
+            self.expressions(merged),
+            {
+                "Constraints[1]": "Constraints[0] + 1 mm",
+                "Constraints[4]": "Constraints[3] * 2",
+                "Constraints[6]": "Constraints[5]",
+            },
+        )
+        # Dest's lines are merged geometry 0 and 1, Source's 2 to 7 (its free lines 6 and 7),
+        # Third's 8 and 9
+        lengths = [round(self.line_length(merged, g), 6) for g in (0, 1, 6, 7, 8, 9)]
+        self.assertEqual(lengths, [10, 11, 6, 12, 3, 3])
+
+    def test_merge_maps_an_explicit_reference_to_the_source(self):
+        """PR 237 review L3: Source's b is driven by Source.Constraints.a, which names Source
+        itself. In the merged sketch it names the merged a, as Constraints.a would (a set to 14
+        there makes b's line 14 long, and Source's stay 10). Source's c is driven by
+        Source.Placement.Base.x + 4 mm: it still names Source (with a warning), and is 4."""
+        lines = self.free_source_lines(3)
+        self.add_length(self.source, lines[0], "a")
+        self.add_length(self.source, lines[1], "b", "Source.Constraints.a")
+        self.add_length(self.source, lines[2], "c", "Source.Placement.Base.x + 4 mm")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.line_length(self.source, lines[2]), 4, delta=1e-7)
+        merged = self.merge_dest_and_source()
+        expressions = self.expressions(merged)
+        self.assertEqual(set(expressions), {".Constraints.b", ".Constraints.c"})
+        self.assertNotIn("Source", expressions[".Constraints.b"])
+        self.assertIn("Source", expressions[".Constraints.c"])
+        merged.setDatum("a", FreeCAD.Units.Quantity("14 mm"))
+        self.doc.recompute()
+        self.assertAlmostEqual(self.line_length(merged, 6), 14, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(merged, 7), 4, delta=1e-7)
+        self.assertAlmostEqual(self.line_length(self.source, lines[1]), 10, delta=1e-7)
+
+    def test_merge_keeps_a_reference_to_another_object(self):
+        """A reference to a spreadsheet cell names the same cell in the merged sketch: Source's
+        length driven by Sheet.A1 (8) is driven by it there too."""
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "8")
+        self.add_length(self.source, 0, "a", "Sheet.A1")
+        self.doc.recompute()
+        merged = self.merge_dest_and_source()
+        self.assertEqual(self.expressions(merged), {".Constraints.a": "Sheet.A1"})
+        sheet.set("A1", "9")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.line_length(merged, 1), 9, delta=1e-7)
 
     def test_carbon_copy_remaps_every_element(self):
         """Carbon copy of the Source into Dest: the Group's four elements name the copied lines
@@ -204,6 +336,22 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         self.assertEqual(len(merged), 1, [o.Name for o in merged])
         self.assertEqual(len(merged[0].Geometry), 5)
         self.assert_group_on_the_square(merged[0])
+
+    def test_merge_skips_a_group_whose_fourth_element_is_unmerged(self):
+        """PR 229 review L2: only a Group's fourth element names geometry Merge can't import
+        (Dest's external, out of scope). The whole Group is skipped (with a message naming the
+        element), not kept with that element on other geometry; Source's Group is merged."""
+        self.body_dest_with_a_skipped_constraint()
+        for y in (5, 10):
+            self.add_line(self.dest, y)
+        self.dest.addConstraint(Sketcher.Constraint("Group", [0, 0, 1, 0, 2, 0, -3, 1]))
+        self.doc.recompute()
+        merged = self.merge_dest_and_source()
+        self.assertEqual(len(merged.Geometry), 3 + 4)
+        groups = [c for c in merged.Constraints if c.Type == "Group"]
+        self.assertEqual(len(groups), 1)
+        # Source's lines are merged geometry 3 to 6
+        self.assertEqual(element_geo_ids(groups[0]), [3, 4, 5, 6])
 
 
 # the slant of the box in TestMergeExternalPairingGui, about the x axis
@@ -301,6 +449,74 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
         merged = self.merge(s3, s1)
         self.assertEqual(merged.Placement.Base.z, 6)
         self.assertEqual([c for c in merged.Constraints if c.Type == "PointOnObject"], [])
+        # the merged link gives F's section in z = 6 (PR 233 review L4)
+        self.assertEqual(len(merged.ExternalGeo), 2 + 1)
+        section = merged.ExternalGeo[2]
+        y6 = -6 * math.tan(math.radians(SLANT))
+        self.assertAlmostEqual(section.StartPoint.y, y6, places=6)
+        self.assertAlmostEqual(section.EndPoint.y, y6, places=6)
+
+    def test_merge_in_the_other_order(self):
+        """PR 233 review L4: S1 (the intersection) merged before S2 (the projection): S1's
+        constraint still names the section, and S2's constraint on a projected edge names that
+        edge's merged copy."""
+        s1 = self.make_section_sketch()
+        s2 = self.make_sketch("S2", 5)
+        s2.addExternal(self.box.Name, self.face)
+        s2.addGeometry(Part.LineSegment(V(20, 0, 0), V(30, 0, 0)), False)
+        s2.addConstraint(Sketcher.Constraint("Parallel", 0, -4))
+        self.doc.recompute()
+        merged = self.merge(s1, s2)
+        on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
+        self.assertEqual(len(on_object), 1)
+        self.assert_is_section(merged.ExternalGeo[-on_object[0].Second - 1])
+        parallel = [c for c in merged.Constraints if c.Type == "Parallel"]
+        self.assertEqual(len(parallel), 1)
+        self.assert_same_line(
+            merged.ExternalGeo[-parallel[0].Second - 1], s2.ExternalGeo[-(-4) - 1]
+        )
+
+    def assert_same_line(self, a, b):
+        self.assertLess((a.StartPoint - b.StartPoint).Length, 1e-7)
+        self.assertLess((a.EndPoint - b.EndPoint).Length, 1e-7)
+
+    def test_merge_keeps_constraints_on_a_projection_and_the_axes(self):
+        """PR 233 review L4: S2 (merged second) links F as a projection only, after S5's link to
+        another object; S2's line is on its projected edge 2 and horizontal to the H axis, and
+        S2's other line is perpendicular to the V axis. In the merged sketch the first names the
+        merged copy of that edge, and the axis constraints the axes."""
+        post = self.doc.addObject("Part::Box", "Post")
+        post.Placement = FreeCAD.Placement(V(40, 0, 0), FreeCAD.Rotation())
+        self.doc.recompute()
+        s5 = self.make_sketch("S5", 5)
+        s5.addExternal(post.Name, self.post_edge(post))
+        self.doc.recompute()
+        s2 = self.make_sketch("S2", 5)
+        s2.addExternal(self.box.Name, self.face)
+        self.doc.recompute()
+        edge = s2.ExternalGeo[3]
+        s2.addGeometry(Part.LineSegment(edge.StartPoint, edge.EndPoint), False)
+        s2.addGeometry(Part.LineSegment(V(20, 0, 0), V(20, 10, 0)), False)
+        s2.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -4, 1))
+        s2.addConstraint(Sketcher.Constraint("PointOnObject", 1, 1, -1))
+        s2.addConstraint(Sketcher.Constraint("Parallel", 1, -2))
+        self.doc.recompute()
+        merged = self.merge(s5, s2)
+        by_type = {c.Type: c for c in merged.Constraints}
+        coincident = by_type["Coincident"]
+        self.assertLessEqual(coincident.Second, -4)  # after S5's external
+        self.assert_same_line(merged.ExternalGeo[-coincident.Second - 1], edge)
+        self.assertEqual(by_type["PointOnObject"].Second, -1)
+        self.assertEqual(by_type["Parallel"].Second, -2)
+
+    @staticmethod
+    def post_edge(post):
+        """The Post's bottom edge x = 40 (along y), which projects onto a line of its own"""
+        return next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(post.Shape.Edges)
+            if all(abs(v.Point.x - 40) < 1e-6 and abs(v.Point.z) < 1e-6 for v in e.Vertexes)
+        )
 
     def test_merge_pairs_an_intersection_with_the_intersection_not_an_equal_projection(self):
         """PR 233 review M1: F' is the face y = 0 of an untilted box, perpendicular to the
@@ -422,7 +638,8 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
 
     def test_merge_keeps_a_frozen_link_frozen(self):
         """S1's link is frozen. After the merge, the box tilted to 45 degrees moves neither S1's
-        section nor the merged one (the merge made it live); S1's constraint is on it."""
+        section nor the merged one (before ops#261 the merge made it live); S1's constraint is
+        on it."""
         self.make_section_sketch()
         self.make_plain_sketch()
         s1 = self.reopen_with_frozen_externals("S1")
@@ -431,6 +648,54 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
         self.assert_is_section(s1.ExternalGeo[2])
         on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
         self.assertEqual(len(on_object), 1)
+        self.assert_is_section(merged.ExternalGeo[-on_object[0].Second - 1])
+
+    def test_merge_keeps_a_frozen_link_frozen_after_other_externals(self):
+        """PR 238 review L1: the first sketch S6 has its own external (an edge of the Post), so
+        S1's frozen section moves to another GeoId in the merged sketch; S7 links the Post's face
+        y = 0 as a live intersection. Tilting the box to 45 degrees moves neither S1's section nor
+        its merged copy, which S1's constraint names; moving the Post moves the merged section of
+        S7's live link."""
+        post = self.doc.addObject("Part::Box", "Post")
+        post.Placement = FreeCAD.Placement(V(40, 0, 0), FreeCAD.Rotation())
+        self.doc.recompute()
+        post_face = next(
+            "Face%d" % (i + 1)
+            for i, f in enumerate(post.Shape.Faces)
+            if (f.CenterOfMass - V(45, 0, 5)).Length < 1e-6
+        )
+        self.make_section_sketch()
+        s6 = self.make_sketch("S6", 5)
+        s6.addExternal(post.Name, self.post_edge(post))
+        s7 = self.make_sketch("S7", 5)
+        s7.addExternal(post.Name, post_face, False, True)
+        self.doc.recompute()
+        self.assertEqual(len(s7.ExternalGeo), 2 + 1)
+        s1 = self.reopen_with_frozen_externals("S1")
+        post = self.doc.getObject("Post")
+        merged = self.merge(self.doc.getObject("S6"), s1, self.doc.getObject("S7"))
+        self.tilt_box(45)
+        self.assert_is_section(s1.ExternalGeo[2])
+        on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
+        self.assertEqual(len(on_object), 1)
+        self.assertLessEqual(on_object[0].Second, -4)
+        self.assert_is_section(merged.ExternalGeo[-on_object[0].Second - 1])
+        # S7's section: the line y = 0 from x = 40 to 50; moved to y = 3 with the Post
+        def post_sections(y):
+            return [
+                g
+                for g in merged.ExternalGeo[2:]
+                if isinstance(g, Part.LineSegment)
+                and abs(g.StartPoint.y - y) < 1e-6
+                and abs(g.EndPoint.y - y) < 1e-6
+                and min(g.StartPoint.x, g.EndPoint.x) > 39
+            ]
+        self.assertEqual(len(post_sections(0)), 1)
+        post.Placement = FreeCAD.Placement(V(40, 3, 0), FreeCAD.Rotation())
+        for obj in self.doc.Objects:
+            obj.touch()
+        self.doc.recompute()
+        self.assertEqual(len(post_sections(3)), 1)
         self.assert_is_section(merged.ExternalGeo[-on_object[0].Second - 1])
 
     def test_merge_of_a_link_frozen_in_one_source_only_follows_the_model(self):

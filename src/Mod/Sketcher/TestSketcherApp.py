@@ -39,6 +39,8 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchMissingExternalReturnsSolver,
 )
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
+from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements
+from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopySelfReference
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py
