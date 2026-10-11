@@ -2218,6 +2218,21 @@ class TestPanelFixesGui(unittest.TestCase):
             any(other.Label in t and box.Label in t for t in self.statusTexts()), self.statusTexts()
         )
 
+    def testShapeBinderAddModeRefusesTheWholeObject(self):
+        """Add Geometry on the bound object itself (a tree click: no element) beside its face is
+        refused: it wrote Support [(Box, Face6), (Box, "")], which fails (PR 232 review M1)."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonRefAdd").click()
+        Gui.Selection.addSelection(self.doc.Name, box.Name)
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertTrue(
+            any("Use Object" in t and box.Label in t for t in self.statusTexts()),
+            self.statusTexts(),
+        )
+
     def testShapeBinderCommandRefusesTwoObjects(self):
         """PartDesign_ShapeBinder on faces of both boxes makes no binder (it would bind Box's face
         only) and says why in a message box."""
@@ -2240,3 +2255,6 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(binders, [])
         self.assertEqual(len(self.modals), 1, self.modals)
         self.assertIn(other.Name, self.modals[0])
+        # the refusal comes before the command's transaction (PR 232 review L5)
+        self.assertIsNone(App.getActiveTransaction())
+        self.assertFalse(self.doc.HasPendingTransaction)

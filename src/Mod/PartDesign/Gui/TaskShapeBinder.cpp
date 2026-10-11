@@ -241,7 +241,8 @@ void TaskShapeBinder::refuseRemovingTheLastElement() const
     }
     Gui::getMainWindow()->showMessage(
         tr("The binder's last element is kept: without it the binder would hold the whole of %1. "
-           "Use Object to bind the whole object, or clear the object field to empty the binder.")
+           "Use Object to bind the whole object. Clearing the object field unlinks the binder: it "
+           "then keeps its current shape and no longer follows %1.")
             .arg(label),
         10000
     );
@@ -370,6 +371,17 @@ bool TaskShapeBinder::referenceSelected(const SelectionChanges& msg) const
             const auto f = std::ranges::find(refs, subName);
 
             if (selectionMode == refAdd) {
+                if (subName.empty() && !refs.empty()) {
+                    // The whole object beside its elements is a Support the binder can't bind
+                    // (PR 232 review M1)
+                    Gui::getMainWindow()->showMessage(
+                        tr("The binder holds elements of %1, not the whole object. Use Object to "
+                           "bind the whole object.")
+                            .arg(QString::fromStdString(obj->Label.getStrValue())),
+                        10000
+                    );
+                    return false;
+                }
                 if (f == refs.end()) {
                     refs.push_back(subName);
                 }
