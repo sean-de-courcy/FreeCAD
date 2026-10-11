@@ -8,7 +8,11 @@ has those indices in the destination. Designed geometry: a Group of four lines; 
 element must name a geometry equal to its source line."""
 
 import math
+import os
 import re
+import shutil
+import tempfile
+import zipfile
 
 import FreeCAD
 import Part
@@ -222,3 +226,132 @@ class TestMergeExternalPairingGui(SketcherGuiTestCase):
         geo = merged.ExternalGeo[slot]
         self.assertLess((geo.StartPoint - section.StartPoint).Length, 1e-7)
         self.assertLess((geo.EndPoint - section.EndPoint).Length, 1e-7)
+
+    # --- ops#261: Merge carries the Defining and Frozen states over ---
+
+    def make_plain_sketch(self):
+        """S2: a sketch in z = 5 with one line and no externals, merged first"""
+        s2 = self.make_sketch("S2", 5)
+        s2.addGeometry(Part.LineSegment(V(20, 0, 0), V(30, 0, 0)), False)
+        self.doc.recompute()
+        return s2
+
+    def section_edges(self, sketch, y):
+        """The edges of the sketch's Shape that are F's section at y (in the plane z = 5)"""
+        ends = [(V(0, y, 5), V(10, y, 5)), (V(10, y, 5), V(0, y, 5))]
+        return [
+            e
+            for e in sketch.Shape.Edges
+            if any(
+                (e.Vertexes[0].Point - a).Length < 1e-6
+                and (e.Vertexes[-1].Point - b).Length < 1e-6
+                for a, b in ends
+            )
+        ]
+
+    def tilt_box(self, degrees):
+        """Tilts the box to `degrees`; F's section in z = 5 is then at y = -5 tan(degrees)"""
+        self.box.Placement = FreeCAD.Placement(V(0, 0, 0), FreeCAD.Rotation(V(1, 0, 0), degrees))
+        for obj in self.doc.Objects:
+            obj.touch()
+        self.doc.recompute()
+        return -5 * math.tan(math.radians(degrees))
+
+    def reopen_with_frozen_externals(self, sketch_name):
+        """Saves the document, sets the Frozen flag of `sketch_name`'s external geometries in the
+        file (there is no command for it here; files from other builds can have it), and opens
+        it again. Python's copies of external geometry don't carry the flag."""
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "Frozen.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    data = freeze_externals(data, sketch_name)
+                archive.writestr(info, data)
+        self.doc = FreeCAD.openDocument(path)
+        self.box = self.doc.getObject("Box")
+        return self.doc.getObject(sketch_name)
+
+    def test_merge_keeps_a_defining_external_defining(self):
+        """S1 links F as a defining intersection: its Shape holds the section. Merged after S2,
+        the merged Shape holds it too (the merge added every link non-defining)."""
+        s1 = self.make_sketch("S1", 5)
+        s1.addExternal(self.box.Name, self.face, True, True)
+        s1.addGeometry(Part.LineSegment(V(5, 0, 0), V(5, 5, 0)), False)
+        self.doc.recompute()
+        self.assertEqual(len(self.section_edges(s1, self.section_y)), 1)
+        merged = self.merge(self.make_plain_sketch(), s1)
+        self.assertEqual(len(self.section_edges(merged, self.section_y)), 1)
+        # S2's line, S1's line, the section
+        self.assertEqual(len(merged.Shape.Edges), 3)
+
+    def test_merge_keeps_a_non_defining_external_out_of_the_shape(self):
+        """The guard: S1's section is construction, so the merged Shape doesn't hold it."""
+        s1 = self.make_section_sketch()
+        merged = self.merge(self.make_plain_sketch(), s1)
+        self.assertEqual(self.section_edges(merged, self.section_y), [])
+
+    def test_merge_keeps_a_frozen_link_frozen(self):
+        """S1's link is frozen. After the merge, the box tilted to 45 degrees moves neither S1's
+        section nor the merged one (the merge made it live); S1's constraint is on it."""
+        self.make_section_sketch()
+        self.make_plain_sketch()
+        s1 = self.reopen_with_frozen_externals("S1")
+        merged = self.merge(self.doc.getObject("S2"), s1)
+        self.tilt_box(45)
+        self.assert_is_section(s1.ExternalGeo[2])
+        on_object = [c for c in merged.Constraints if c.Type == "PointOnObject"]
+        self.assertEqual(len(on_object), 1)
+        self.assert_is_section(merged.ExternalGeo[-on_object[0].Second - 1])
+
+    def test_merge_of_a_link_frozen_in_one_source_only_follows_the_model(self):
+        """S1 has F's intersection frozen, S4 has it live: the merged link can't be both, and
+        follows the model (with a message). Tilted to 45 degrees, its section is at y = -5."""
+        self.make_section_sketch()
+        s4 = self.make_sketch("S4", 5)
+        s4.addExternal(self.box.Name, self.face, False, True)
+        self.doc.recompute()
+        s1 = self.reopen_with_frozen_externals("S1")
+        merged = self.merge(s1, self.doc.getObject("S4"))
+        y = self.tilt_box(45)
+        self.assert_is_section(s1.ExternalGeo[2])
+        self.assertEqual(len(merged.ExternalGeo), 2 + 1)
+        self.assertAlmostEqual(merged.ExternalGeo[2].StartPoint.y, y, places=6)
+
+    def test_merge_of_a_frozen_link_whose_source_moved(self):
+        """S1's link is frozen and the box is then tilted to 45 degrees: S1 keeps the old
+        section, which the merged link (at y = -5) no longer gives. S1's constraint is skipped,
+        not moved, and the merged link follows the model."""
+        self.make_section_sketch()
+        self.make_plain_sketch()
+        s1 = self.reopen_with_frozen_externals("S1")
+        y = self.tilt_box(45)
+        self.assert_is_section(s1.ExternalGeo[2])
+        merged = self.merge(self.doc.getObject("S2"), s1)
+        self.assertEqual([c for c in merged.Constraints if c.Type == "PointOnObject"], [])
+        self.assertAlmostEqual(merged.ExternalGeo[2].StartPoint.y, y, places=6)
+        self.tilt_box(60)
+        self.assertAlmostEqual(
+            merged.ExternalGeo[2].StartPoint.y, -5 * math.tan(math.radians(60)), places=6
+        )
+
+
+def freeze_externals(document_xml, sketch_name):
+    """Sets the Frozen flag (2) of every external geometry of the object `sketch_name` in a
+    Document.xml"""
+    data = document_xml.index(b"<ObjectData")
+    start = document_xml.index(b'<Object name="' + sketch_name.encode() + b'"', data)
+    end = document_xml.find(b"<Object name=", start + 1)
+    end = len(document_xml) if end < 0 else end
+    part, count = re.subn(
+        rb'(Ref="[^"]+" Flags=")(\d+)"',
+        lambda m: m.group(1) + str(int(m.group(2)) | 2).encode() + b'"',
+        document_xml[start:end],
+    )
+    assert count > 0, "no external geometry of %s in the file" % sketch_name
+    return document_xml[:start] + part + document_xml[end:]

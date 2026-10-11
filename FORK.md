@@ -262,7 +262,8 @@ names it.
 | `fix/260-external-both-ids` | fix | ops#260 | - | `integration` `161adb82e9` | `7532fd2eec` (fork PR 234), 2026-10-10 | never (fork fix) |
 | `fix/251-shapebinder-silent-whole` | fix | ops#251 | - | `integration` `618939feb7` | `e2c6bc263d` (fork PR 232), 2026-10-10 | never (fork fix) |
 | `fix/248-merge-external-pairing` | fix | ops#248 | - | `integration` `63c502ff6b` | `cf1c5b7b81` (fork PR 233), 2026-10-10 | never (fork fix) |
-| `fix/257-part-fillet-edge-links` | fix | ops#257, ops#258 | - | `integration` `83a7885ab1` | (fork PR 236) | never (fork fix) |
+| `fix/257-part-fillet-edge-links` | fix | ops#257, ops#258 | - | `integration` `83a7885ab1` | `37e8bda261` (fork PR 236), 2026-10-10 | never (fork fix) |
+| `fix/261-merge-external-flags` | fix | ops#261 | - | `fix/248-merge-external-pairing` `0dcb49ef80` (stacked on fork PR 233) | (fork PR 238) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
