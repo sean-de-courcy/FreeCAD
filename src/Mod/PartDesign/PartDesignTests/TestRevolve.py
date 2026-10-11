@@ -1136,6 +1136,195 @@ class TestRevolve(unittest.TestCase):
         if results["Two sides"][0]:
             self.assertSameSolid(results["Symmetric"][1], results["Two sides"][1])
 
+    def assertSymmetricFails(self, body, upTo, message="Use Two sides"):
+        """profileAcross() Symmetric up to `upTo` fails with an error that names Two sides."""
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        sketch = self.profileAcross(body)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = "Symmetric"
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = upTo
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn(message, revolution.getStatusString())
+
+    def testRevolutionUpToSplineWallAcrossSymmetric(self):
+        """A Pad along Z of the region x in [-4, 0] bounded by a B-spline wall from (0, -4) to
+        (0, 4) that winds across x = 0 (through (0.3, -2), (0, 0.5), (-0.3, 2)): the wall crosses
+        the profile plane, and its surface (an extrusion of the spline) ends where the face ends,
+        so it can't stop the second side at the wall's image. The feature fails, naming Two sides
+        (the PR 268 review's High; before, "Could not revolve the sketch")."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "WallSketch")
+        [xy] = [f for f in body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+        sketch.AttachmentSupport = (xy, [""])
+        sketch.MapMode = "FlatFace"
+        spline = Part.BSplineCurve()
+        spline.interpolate(
+            [
+                FreeCAD.Vector(0, -4, 0),
+                FreeCAD.Vector(0.3, -2, 0),
+                FreeCAD.Vector(0, 0.5, 0),
+                FreeCAD.Vector(-0.3, 2, 0),
+                FreeCAD.Vector(0, 4, 0),
+            ]
+        )
+        sketch.addGeometry(spline, False)
+        corners = [
+            FreeCAD.Vector(0, 4, 0),
+            FreeCAD.Vector(-4, 4, 0),
+            FreeCAD.Vector(-4, -4, 0),
+            FreeCAD.Vector(0, -4, 0),
+        ]
+        for start, end in zip(corners, corners[1:]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Length = 2
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(pad.Shape.Faces)
+            if not isinstance(face.Surface, Part.Plane)
+        ]
+        self.assertSymmetricFails(body, (pad, [wall]))
+
+    def testRevolutionUpToSphereAcrossSymmetric(self):
+        """A sphere of radius 5 about (-4.5, 1, 1), across the profile plane, not symmetric about
+        it: its whole surface as the second side's face gave less than the mirror of the first
+        side (tool 14.71 instead of 22.43), silently (the PR 268 review's High, sphere probed).
+        The feature fails, naming Two sides."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        ball = body.newObject("PartDesign::AdditiveSphere", "Ball")
+        ball.Radius = 5
+        ball.Placement = FreeCAD.Placement(FreeCAD.Vector(-4.5, 1, 1), FreeCAD.Rotation())
+        self.Doc.recompute()
+        self.assertSymmetricFails(body, (ball, ["Face1"]))
+
+    def testRevolutionUpToNotchedWallAcrossSymmetric(self):
+        """The box of revolveUpToFaceAcross() with a small window through it at y in [1.7, 1.95],
+        z in [0.75, 0.95], on the first side's half of its face x = 0: the first side's sweep
+        passes through it, so the face's whole plane would not stop the second side where the
+        first one's mirror ends. The feature was valid with the two sides unequal, silently (the
+        PR 268 review's M2: the old check sampled points the window missed). It fails now,
+        naming Two sides."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-4, -4, 0), FreeCAD.Rotation())
+        window = body.newObject("PartDesign::SubtractiveBox", "Window")
+        window.Length = 6
+        window.Width = 0.25
+        window.Height = 0.2
+        window.Placement = FreeCAD.Placement(FreeCAD.Vector(-5, 1.7, 0.75), FreeCAD.Rotation())
+        self.Doc.recompute()
+        self.assertSymmetricFails(body, (window, [self.wallAtXZero(window)]))
+
+    def trimmedTubeWall(self, trimmed):
+        """The part of the tube of radius 2 about the vertical line x = -1, y = 1.5 from 60 to
+        300 degrees about it, z in [-1, 3], as a face of a Part::Feature, on a trimmed cylinder
+        (Geom_RectangularTrimmedSurface, as STEP files can give) or on the cylinder itself. The
+        BREP text gets the trimmed surface: FreeCAD's Python makes faces on the basis surface."""
+        cylinder = Part.Cylinder()
+        cylinder.Center = FreeCAD.Vector(-1, 1.5, -1)
+        cylinder.Radius = 2
+        first, last = math.radians(60), math.radians(300)
+        text = cylinder.toShape(first, last, 0, 4).exportBrepToString()
+        record = "2 -1 1.5 -1 0 0 1 1 0 0 0 1 0 2"
+        self.assertEqual(text.count(record), 1)
+        if trimmed:
+            # 10: Geom_RectangularTrimmedSurface, its bounds, then its basis surface.
+            text = text.replace(record, "10 %.17g %.17g 0 4\n%s" % (first, last, record))
+        shape = Part.Shape()
+        shape.importBrepFromString(text)
+        self.assertEqual("\n10 " in shape.exportBrepToString(), trimmed)
+        wall = self.Doc.addObject("Part::Feature", "TubeWall")
+        wall.Shape = shape.Faces[0]
+        return wall
+
+    def testRevolutionUpToTrimmedCylinderAcrossSymmetric(self):
+        """trimmedTubeWall(): the profile's path first crosses the tube outside the face (at
+        about 6 to 48 degrees about the tube's line, or 334 at radius 1), then meets the face; the
+        face crosses the profile plane (at x = -2.32). The whole tube would stop the second side
+        at the first crossing's mirror, short of the first side's. The old check intersected
+        the trimmed surface, which ends where the face does, so it missed the first crossing: the
+        two sides were unequal, silently (the PR 268 review's M1). Both faces fail, naming Two
+        sides."""
+        for trimmed in (False, True):
+            with self.subTest(trimmed=trimmed):
+                wall = self.trimmedTubeWall(trimmed)
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self.assertSymmetricFails(body, (wall, ["Face1"]))
+
+    def secondCapTopEdge(self, shape, degrees):
+        """The top edge (z = 2) of the second side's end cap, on the ray at -(90 + degrees)."""
+        angle = math.radians(-90 - degrees)
+        ray = FreeCAD.Vector(math.cos(angle), math.sin(angle), 0)
+        [edge] = [
+            "Edge%d" % (i + 1)
+            for i, edge in enumerate(shape.Edges)
+            if isinstance(edge.Curve, Part.Line)
+            and (edge.CenterOfMass - ray * 2 - FreeCAD.Vector(0, 0, 2)).Length < 1e-6
+        ]
+        return edge
+
+    def assertFilletAlong(self, fillet, degrees):
+        """The fillet's round face runs along the ray at -(90 + degrees)."""
+        angle = math.radians(-90 - degrees)
+        ray = FreeCAD.Vector(math.cos(angle), math.sin(angle), 0)
+        rounds = [
+            face
+            for face in fillet.Shape.Faces
+            if isinstance(face.Surface, Part.Cylinder) and abs(face.Surface.Radius - 0.1) < 1e-6
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertAlmostEqual(abs(rounds[0].Surface.Axis.dot(ray)), 1, places=6)
+
+    def testRevolutionUpToTurnedWallSecondCapFillet(self):
+        """A plate x in [-0.1, 0], y in [-4, 4], z in [0, 2] turned 10 degrees about Z; Symmetric
+        up to its face through the axis: the second side goes up to the image's whole plane and
+        ends at -100 degrees, outside the plate, in an end cap. A fillet on the top edge of that
+        cap follows it when the plate turns to 20 degrees (-110): the cap keeps its names from
+        the profile on the whole-plane route (the PR 268 review's L3)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        plate = body.newObject("PartDesign::AdditiveBox", "Plate")
+        plate.Length = 0.1
+        plate.Width = 8
+        plate.Height = 2
+
+        def turn(degrees):
+            rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), degrees)
+            plate.Placement = FreeCAD.Placement(
+                rotation.multVec(FreeCAD.Vector(-0.1, -4, 0)), rotation
+            )
+            self.Doc.recompute()
+            normal = rotation.multVec(FreeCAD.Vector(1, 0, 0))
+            [wall] = [
+                "Face%d" % (i + 1)
+                for i, face in enumerate(plate.Shape.Faces)
+                if abs(abs(face.normalAt(0, 0).dot(normal)) - 1) < 1e-9
+                and abs(face.CenterOfMass.dot(normal)) < 1e-6
+            ]
+            return wall
+
+        revolution = self.revolveAcross(body, "Revolution", "Symmetric", (plate, [turn(10)]))
+        self.assertSameSolid(revolution.Shape, plate.Shape.fuse(self.ringSector(-100, 200)))
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (revolution, [self.secondCapTopEdge(revolution.Shape, 10)])
+        fillet.Radius = 0.1
+        self.Doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertFilletAlong(fillet, 10)
+        self.assertEqual(turn(20), revolution.UpToFace[1][0])
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertSameSolid(revolution.Shape, plate.Shape.fuse(self.ringSector(-110, 220)))
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertFilletAlong(fillet, 20)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error and gives no solid."""
