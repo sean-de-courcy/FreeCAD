@@ -354,6 +354,15 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
 
     bool fuseSideResults = false;
 
+    // Both sides are named from the same profile edges under the feature's tag, so in V2 the
+    // second side revolves a copy whose names are marked (CPY): otherwise the two sides' elements
+    // share names, told apart only by the duplicate counter in the order of the final fuse
+    // (ops#240). V1 keeps upstream's names.
+    auto secondSideProfile = [&]() {
+        const bool marked = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+        return sketchshape.makeElementCopy(marked ? Part::OpCodes::Copy : nullptr);
+    };
+
     if (sideType == "Two sides") {
         constexpr double fullRevolution = 2.0 * std::numbers::pi;
         const double combinedAngle = angle + angle2;
@@ -423,7 +432,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 method2,
                 angle2,
                 UpToFace2,
-                sketchshape.makeElementCopy(),
+                secondSideProfile(),
                 base,
                 supportface,
                 pnt,
@@ -472,7 +481,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     gp_Ax1(pnt, dir2),
                     base,
                     supportface,
-                    sketchshape.makeElementCopy(),
+                    secondSideProfile(),
                     revolMode
                 ));
             }
@@ -632,9 +641,9 @@ TopoShape Revolved::tryToRevolveToFace(
         TopoShape revolution = makeTopoShape();
         revolution.makeElementRevolution(
             featureBase,
-            TopoDS::Face(sketchshape.getShape()),
+            sketchshape,
             axis,
-            TopoDS::Face(supportface.getShape()),
+            supportface,
             TopoDS::Face(upToFace.getShape()),
             nullptr,
             mode,
@@ -962,39 +971,6 @@ void Revolved::generateRevolution(
         revol = from;
         revol = revol.makeElementRevolve(revolAx, angleTotal);
         revol.Tag = -getID();
-    }
-    else {
-        throw Base::RuntimeError(
-            "ProfileBased: Internal error: Unknown method for generateRevolution()"
-        );
-    }
-}
-
-void Revolved::generateRevolution(
-    TopoShape& revol,
-    const TopoShape& baseshape,
-    const TopoDS_Shape& profileshape,
-    const TopoDS_Face& supportface,
-    const TopoDS_Face& uptoface,
-    const gp_Ax1& axis,
-    RevolMethod method,
-    Part::RevolMode Mode,
-    Standard_Boolean Modify
-)
-{
-    if (method == RevolMethod::ToFirst || method == RevolMethod::ToFace
-        || method == RevolMethod::ToLast) {
-        revol = revol.makeElementRevolution(
-            baseshape,
-            profileshape,
-            axis,
-            supportface,
-            uptoface,
-            nullptr,
-            Mode,
-            Modify,
-            nullptr
-        );
     }
     else {
         throw Base::RuntimeError(

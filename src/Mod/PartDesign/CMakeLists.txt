@@ -120,6 +120,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/patterns.py
     PartDesignTests/Scenarios/randomized.py
     PartDesignTests/Scenarios/reorder.py
+    PartDesignTests/Scenarios/revolve_uptoface.py
     PartDesignTests/Scenarios/rlist.py
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/splits.py

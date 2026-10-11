@@ -5144,6 +5144,9 @@ struct MapperThruSections: MapperMaker
     }
 };
 
+// The mapper of the BRepFeat makers' up-to results: a Pad's up-to-face (BRepFeat_MakePrism) and,
+// since ops#240, a Revolution's or Groove's (BRepFeat_MakeRevol). The V2 mapper works from shape
+// identity alone: the sources' edges and vertices that are still the same shapes in the result.
 struct MapperPrism: MapperMaker
 {
     App::HistoryAlgorithm historyAlgorithm = App::HistoryAlgorithm::V2;
@@ -5159,7 +5162,7 @@ struct MapperPrism: MapperMaker
         generatedElements;
 
     MapperPrism(
-        BRepFeat_MakePrism& maker,
+        BRepFeat_Form& maker,
         const TopoShape& upTo,
         const std::vector<TopoShape>& sourceTopoShapes,
         const App::HistoryAlgorithm& historyVersion
@@ -6172,7 +6175,7 @@ TopoShape& TopoShape::makeElementShape(
 }
 
 TopoShape& TopoShape::makeElementShape(
-    BRepFeat_MakePrism& mkShape,
+    BRepFeat_Form& mkShape,
     const std::vector<TopoShape>& sources,
     const TopoShape& upTo,
     const char* op
@@ -6576,9 +6579,9 @@ TopoShape& TopoShape::makeElementRevolve(
 
 TopoShape& TopoShape::makeElementRevolution(
     const TopoShape& _base,
-    const TopoDS_Shape& profile,
+    const TopoShape& profile,
     const gp_Ax1& axis,
-    const TopoDS_Face& supportface,
+    const TopoShape& supportface,
     const TopoDS_Face& uptoface,
     const char* face_maker,
     RevolMode Mode,
@@ -6603,20 +6606,60 @@ TopoShape& TopoShape::makeElementRevolution(
         base = base.makeElementFace(nullptr, face_maker, nullptr);
     }
 
+    const TopoDS_Face& support = TopoDS::Face(supportface.getShape());
     auto mode = Mode;
     BRepFeat_MakeRevol mkRevol;
-    for (TopExp_Explorer xp(profile, TopAbs_FACE); xp.More(); xp.Next()) {
-        mkRevol.Init(base.getShape(), xp.Current(), supportface, axis, static_cast<int>(mode), Modify);
+    if (getHistoryAlgorithm() == App::HistoryAlgorithm::V1) {
+        for (TopExp_Explorer xp(profile.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            mkRevol.Init(
+                base.getShape(),
+                xp.Current(),
+                support,
+                axis,
+                static_cast<int>(mode),
+                Modify
+            );
+            mkRevol.Perform(uptoface);
+            if (!mkRevol.IsDone()) {
+                throw Base::RuntimeError("Revolution: Up to face: Could not revolve the sketch!");
+            }
+            base = mkRevol.Shape();
+            if (Mode == RevolMode::None) {
+                mode = RevolMode::FuseWithBase;
+            }
+        }
+        return makeElementShape(mkRevol, base, op);
+    }
+
+    // V2 names the result as makeElementPrismUntil() names a Pad's up to a face (ops#240): the
+    // profile and the support face are the sources, so each revolved face is named from the profile
+    // edge that sweeps it. Not the up-to face, whose history BRepFeat reports for every end face,
+    // nor the base or the running result: the base's faces get their names back in the boolean that
+    // follows, where the base is a source.
+    const TopoShape upTo(uptoface);
+    TopoDS_Shape result = base.getShape();
+    bool revolved = false;
+    for (const auto& face : profile.getSubTopoShapes(TopAbs_FACE)) {
+        std::vector<TopoShape> sources {profile};
+        if (!supportface.isNull() && !TopoShape(result).findShape(supportface.getShape())) {
+            sources.push_back(supportface);
+        }
+        mkRevol.Init(result, face.getShape(), support, axis, static_cast<int>(mode), Modify);
         mkRevol.Perform(uptoface);
         if (!mkRevol.IsDone()) {
             throw Base::RuntimeError("Revolution: Up to face: Could not revolve the sketch!");
         }
-        base = mkRevol.Shape();
+        result = mkRevol.Shape();
+        makeElementShape(mkRevol, sources, upTo, op);
+        revolved = true;
         if (Mode == RevolMode::None) {
             mode = RevolMode::FuseWithBase;
         }
     }
-    return makeElementShape(mkRevol, base, op);
+    if (!revolved) {
+        throw Base::RuntimeError("Revolution: Up to face: Could not revolve the sketch!");
+    }
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementDraft(

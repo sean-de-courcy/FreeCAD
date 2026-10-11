@@ -77,7 +77,7 @@ import FreeCAD as App
 import Part
 
 from PartDesignTests.Scenarios import models
-from PartDesignTests.Scenarios.harness import Masker
+from PartDesignTests.Scenarios.harness import Masker, face
 
 V = App.Vector
 
@@ -391,6 +391,65 @@ def modelOffsetSplitCylinder(doc):
     return [offset]
 
 
+def modelRevolutionUpToFace(doc):
+    """A Revolution and a Groove up to a face, one side each, and a Revolution up to a face on
+    both sides (ops#240): the revolved faces are named from the profile's edges, and the second
+    side's from its marked copy."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    features = []
+    for kind, body in (("Revolution", models.body(doc)), ("Groove", models.body(doc))):
+        block = models.sketch(doc, f"Block{kind}", models.rectangle(-30, -30, 30, 30), body)
+        base = body.newObject("PartDesign::Pad", f"Base{kind}")
+        base.Profile = block
+        base.Length = 5 if kind == "Revolution" else 10
+        slab = models.polygon([(0, 0), (0, 30), (-5, 30), (-5, 0)])
+        if kind == "Revolution":
+            wall = body.newObject("PartDesign::Pad", "Wall")
+            wall.Profile = models.sketch(doc, "WallSketch", slab, body, z=5)
+            wall.Length = 10
+            normal, at, low, high = (1, 0, 0), 10, 5, 10
+        else:
+            pit = models.sketch(doc, "PitSketch", slab, body, z=10)
+            wall = models.pocketThroughAll(body, pit, "Pit")
+            normal, at, low, high = (-1, 0, 0), 3, 6, 10
+        doc.recompute()
+        upTo = face("plane", normal=normal, contains=(0, 15, at)).one(wall.Shape)
+        profile = models.sketch(
+            doc, f"Profile{kind}", models.rectangle(10, low, 20, high), body, placement=xz
+        )
+        revolved = body.newObject(f"PartDesign::{kind}", f"UpTo{kind}")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (models.originFeature(body, "Z_Axis"), [""])
+        revolved.Type = "UpToFace"
+        revolved.UpToFace = (wall, upTo)
+        revolved.Refine = False
+        features.append(revolved)
+    body = models.body(doc)
+    plate = models.sketch(doc, "PlateTwoSided", models.rectangle(-30, -30, 30, 30), body)
+    base = body.newObject("PartDesign::Pad", "BaseTwoSided")
+    base.Profile = plate
+    base.Length = 5
+    wall = body.newObject("PartDesign::Pad", "WallTwoSided")
+    wall.Profile = models.sketch(doc, "WallAcross", models.rectangle(-5, -30, 0, 30), body, z=5)
+    wall.Length = 10
+    doc.recompute()
+    upTo = face("plane", normal=(1, 0, 0), contains=(0, 15, 10)).one(wall.Shape)
+    profile = models.sketch(
+        doc, "ProfileTwoSided", models.rectangle(10, 5, 20, 10), body, placement=xz
+    )
+    twoSided = body.newObject("PartDesign::Revolution", "UpToBothSides")
+    twoSided.Profile = profile
+    twoSided.ReferenceAxis = (models.originFeature(body, "Z_Axis"), [""])
+    twoSided.SideType = "Two sides"
+    twoSided.Type = "UpToFace"
+    twoSided.UpToFace = (wall, upTo)
+    twoSided.Type2 = "UpToFace"
+    twoSided.UpToFace2 = (wall, upTo)
+    twoSided.Refine = False
+    features.append(twoSided)
+    return features
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -409,6 +468,7 @@ MODELS = {
     "PatternSteps": modelPatternSteps,
     "OffsetThickness": modelOffsetThickness,
     "OffsetSplitCylinder": modelOffsetSplitCylinder,
+    "RevolutionUpToFace": modelRevolutionUpToFace,
 }
 
 # ---------------------------------------------------------------------------------------------

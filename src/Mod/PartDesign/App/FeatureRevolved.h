@@ -159,22 +159,6 @@ private:
     );
 
     /**
-     * Generates a revolution of the input \a profileshape.
-     * It will be a stand-alone solid created with BRepFeat_MakeRevol.
-     */
-    void generateRevolution(
-        TopoShape& revol,
-        const TopoShape& baseshape,
-        const TopoDS_Shape& profileshape,
-        const TopoDS_Face& supportface,
-        const TopoDS_Face& uptoface,
-        const gp_Ax1& ax1,
-        RevolMethod method,
-        Part::RevolMode Mode,
-        Standard_Boolean Modify
-    );
-
-    /**
      * Disables settings that are not valid for the current method
      */
     void updateProperties();
