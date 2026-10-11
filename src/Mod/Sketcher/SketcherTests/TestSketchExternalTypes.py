@@ -716,6 +716,32 @@ class TestSketchExternalTypes(unittest.TestCase):
         sketch = self.doc.getObject("Sketch")
         self.assertEqual(self.lineKinds(sketch), ["P", "P"])  # the rail's line, the ring's
         self.assertFalse(self.doc.isTouched())
+        # saved, the kinds are in the file: the next open finds them, and touches nothing either
+        sketch = self.saveAndReopen("LegacyBothSaved")
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])
+        self.assertFalse(self.doc.isTouched())
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(self.ringProjections(sketch), [])
+        self.assertEqual(len(sketch.Constraints), 2)
+        self.assertPointConstraintsKept(sketch)
+
+    def testLegacyBothLinkInAStaleTypeListGetsTypeAndKindsOnOpen(self):
+        """PR 251 review L3: a file saved before ops#140 and ops#264, a stale type in front of the
+        rail and the ring Both, its geometry without kinds. One open gives each link its type
+        back and the ring its kinds, so the ring written to intersection keeps the points'
+        constraints."""
+        self.addRingProjectionWithAConstraint()
+        self.sketch.ExternalTypes = [PROJECTION, PROJECTION, BOTH]
+        path = self.tempPath("LegacyStaleTypes.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, BOTH])
+        self.assertEqual(self.lineKinds(sketch), ["P", "P"])
         sketch.ExternalTypes = [PROJECTION, INTERSECTION]
         self.doc.recompute()
         self.assertEqual(self.ringProjections(sketch), [])
@@ -904,6 +930,45 @@ class TestSketchExternalTypesGui(unittest.TestCase):
     tiltedFace = staticmethod(TestSketchExternalTypes.tiltedFace)
     SQUARE = TestSketchExternalTypes.SQUARE
     PENTAGON = TestSketchExternalTypes.PENTAGON
+    lineKinds = TestSketchExternalTypes.lineKinds
+    sectionAndProjections = staticmethod(TestSketchExternalTypes.sectionAndProjections)
+    # an arrowhead, its notch at (0, 1): the line v = 0 crosses its two arms apart
+    DART = [(-5, -5), (0, 5), (5, -5), (0, 1)]
+
+    def testLegacyBothLinkWhoseSplitMovedWarnsInsteadOfGivingKinds(self):
+        """PR 251 review M1: a file saved before ops#264 (no kinds) with the tilted pentagon face
+        linked Both: five projected lines and one section line. The face made the dart before the
+        save, without the sketch's rebuild: four projected lines and two section lines, six lines
+        as well. The same types in the same order don't say which saved line is which kind: the
+        open compares the shapes, warns, and gives no kinds (by type, the fifth projection
+        would have been read as a section, and its Id handed to one)."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.PENTAGON)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        sketch.addExternal(face.Name, "Face1", False, True)
+        self.doc.recompute()
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 5)
+        face.Shape = self.tiltedFace(self.DART)
+        path = self.tempPath("LegacySplit.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Face")
+        before = len(reportText())
+        self.doc = App.openDocument(path)
+        new = reportText()[before:]
+        self.assertIn("its type no longer gives the same geometries", new)
+        sketch = self.doc.getObject("TiltedSketch")
+        self.assertEqual(self.lineKinds(sketch), [""] * 6)
+        # the case is the one meant: the dart gives six lines, two of them sections
+        sketch.touch()
+        self.doc.recompute()
+        section, projections = self.sectionAndProjections(sketch)
+        self.assertEqual((len(section), len(projections)), (2, 4))
 
     def testTypeWrittenBeforeTheFirstRebuildOfLegacyGeometryNamesTheDeletedConstraint(self):
         """PR 241 review M1 and L2: a file saved before ops#264 (no kinds) with the ring Both (its

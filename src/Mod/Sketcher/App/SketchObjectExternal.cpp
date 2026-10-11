@@ -3234,6 +3234,21 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                                           return geo->getTypeId()
                                               == ExternalGeo[static_cast<int>(index)]->getTypeId();
                                       });
+                    // A Both link's split between the kinds can move at the same types (a
+                    // stale saved shape: two projections and a section saved, one and two
+                    // built), so each built geometry must be its saved one too (PR 251 review
+                    // M1). A link of one kind has its kind whatever the shapes.
+                    if (same && projection && intersection) {
+                        const double tolerance =
+                            std::max(Precision::Confusion(), ArcFitTolerance.getValue());
+                        for (std::size_t k = 0; k < geos.size() && same; ++k) {
+                            const auto* saved = ExternalGeo[static_cast<int>(savedIndices[k])];
+                            same = geos[k]->isSame(*saved,
+                                                   Precision::Confusion(),
+                                                   Precision::Angular())
+                                || distanceFromSaved(geos[k].get(), saved) <= tolerance;
+                        }
+                    }
                 }
                 catch (...) {
                     same = false;
