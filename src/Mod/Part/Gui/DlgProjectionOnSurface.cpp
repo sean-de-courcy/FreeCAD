@@ -452,7 +452,7 @@ void PartGui::DlgProjectionOnSurface::store_current_selected_parts(
                 }
                 if (!it->getSubNames().empty()) {
                     auto parentShape = currentShapeStore.inputShape;
-                    for (const auto& itName : selObj.front().getSubNames()) {
+                    for (const auto& itName : it->getSubNames()) {
                         auto currentShape = Part::Feature::getShape(
                             aPart,
                             Part::ShapeOption::NeedSubElement,
@@ -1510,17 +1510,31 @@ void DlgProjectOnSurface::addWire(const Gui::SelectionChanges& msg)
         return;
     }
 
-    int index = 1;
-    const TopoDS_Shape& shape = part.getShape();
-    for (TopExp_Explorer xp(shape, TopAbs_WIRE); xp.More(); xp.Next()) {
-        if (isEdgePartOf(xp.Current(), edge)) {
-            std::string name {"Wire"};
-            name += std::to_string(index);
-            addSelection(msg, name);
-            break;
+    // The wires are numbered as getSubShape names them. An edge can lie on several wires (on a
+    // solid, every edge bounds two faces): the click then names none of them, and nothing is
+    // added rather than the first one found (ops#250).
+    std::vector<int> owners;
+    const int count = static_cast<int>(part.countSubShapes(TopAbs_WIRE));
+    for (int index = 1; index <= count; ++index) {
+        if (isEdgePartOf(part.getSubShape(TopAbs_WIRE, index), edge)) {
+            owners.push_back(index);
         }
-        index++;
     }
+
+    if (owners.size() != 1) {
+        const QString edgeName = QString::fromStdString(subName);
+        const QString message = owners.empty()
+            ? tr("%1 lies on no wire; nothing was added.").arg(edgeName)
+            : tr("%1 lies on %2 wires, so the wire to project is ambiguous; nothing was added. "
+                 "Pick an edge that belongs to one wire only.")
+                  .arg(edgeName)
+                  .arg(owners.size());
+        Gui::getMainWindow()->showMessage(message, 10000);
+        Base::Console().warning("%s\n", message.toUtf8().constData());
+        return;
+    }
+
+    addSelection(msg, "Wire" + std::to_string(owners.front()));
 }
 
 void DlgProjectOnSurface::addSelection(const Gui::SelectionChanges& msg, const std::string& subName)
