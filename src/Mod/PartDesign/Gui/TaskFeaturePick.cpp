@@ -428,9 +428,33 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
         Base::Console().warning("Unexpected boost exception\n");
         removeMade();
     }
+    // FreeCAD-CH (ops#244, PR 246 verification): an OCC or standard exception from a copy left
+    // the copies made before it in the document
+    catch (const Standard_Failure& e) {
+        Base::Console().error("A copy failed: %s\n", e.GetMessageString());
+        removeMade();
+    }
+    catch (const std::exception& e) {
+        Base::Console().error("A copy failed: %s\n", e.what());
+        removeMade();
+    }
 
     return result;
 }
+
+namespace
+{
+
+// An independent copy of a primitive: a shape binder of its whole shape, without a support
+// (ops#244 P3, P5)
+bool isPrimitiveCopy(const App::DocumentObject* original, const App::DocumentObject* copy)
+{
+    auto* binder = freecad_cast<const PartDesign::ShapeBinder*>(copy);
+    return binder && !binder->Support.getValue()
+        && original->isDerivedFrom<PartDesign::FeaturePrimitive>();
+}
+
+}  // namespace
 
 App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
@@ -493,9 +517,12 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                               .arg(QString::fromStdString(element), label));
         }
     }
-    if (independent
-        && (obj->isDerivedFrom<Sketcher::SketchObject>()
-            || obj->isDerivedFrom<PartDesign::FeaturePrimitive>())) {
+    // FreeCAD-CH (ops#244 P3, P5): an independent copy of a primitive is a shape binder of its
+    // shape (below), as other features' are. A primitive copy in a body joined its solid chain:
+    // the body's previous Tip became its BaseFeature, so its recompute fused it with (or cut it
+    // from) the body's solid, not the original's shape (P5), and one made while a feature was in
+    // edit became that feature's base, a cycle (P3). The user's decision, 2026-10-11.
+    if (independent && obj->isDerivedFrom<Sketcher::SketchObject>()) {
 
         // we do know that the created instance is a document object, as obj is one. But we do not
         // know which exact type
@@ -663,30 +690,17 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
         // names the copy then loses ("?Face1"), and the reference comes back resolved by
         // geometry, with a Warning. So the copy gets its own Shape here, before any caller links
         // it (ops#230; the Pipe panel did it for its spines and sections since ops#225). A sketch
-        // copy has no attachment and links nothing outside (above); a primitive gets its
-        // BaseFeature only when its caller adds it to a body.
-        // Only when the recompute keeps the original's shape (PR 223 review M1, M2): a primitive
-        // whose original sits on a BaseFeature would become the bare primitive, and a caller's
-        // Face1 would then name another face, silently; a subtractive one fails without a base.
-        // Those keep the pasted shape, and the old resolution by geometry, with its Warning.
-        auto keepsShape = [obj]() {
-            auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(obj);
-            return !primitive
-                || (!primitive->BaseFeature.getValue()
-                    && primitive->getAddSubType() == PartDesign::FeatureAddSub::Type::Additive);
-        };
+        // copy has no attachment and links nothing outside (above).
         // A recomputed copy has its own element names, so a caller's Face1/Edge1 would no longer
         // be flagged when it names another element than the one picked (PR 223 review N1): the
         // callers link the picked element instead (copiedElement).
-        if (keepsShape()) {
-            if (!copy->recomputeFeature()) {
-                Base::Console().warning(
-                    "The copy '%s' of '%s' doesn't recompute: %s\n",
-                    copy->Label.getValue(),
-                    obj->Label.getValue(),
-                    copy->getStatusString()
-                );
-            }
+        if (!copy->recomputeFeature()) {
+            Base::Console().warning(
+                "The copy '%s' of '%s' doesn't recompute: %s\n",
+                copy->Label.getValue(),
+                obj->Label.getValue(),
+                copy->getStatusString()
+            );
         }
     }
     else {
@@ -813,10 +827,25 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 
         if (independent && shapeProp) {
             auto* featureObj = static_cast<Part::Feature*>(obj);
+            // A primitive's copy binds its whole shape (ops#244 P3, P5): it has the original's
+            // elements under their index names, as the primitive copy it replaces had
+            // (copiedElement), so the callers' checks of the picked element still hold
+            const bool whole = entity.empty() || isPrimitiveCopy(obj, copy);
             shapeProp->setValue(
-                entity.empty() ? featureObj->Shape.getValue()
-                               : featureObj->Shape.getShape().getSubShape(entity.c_str())
+                whole ? featureObj->Shape.getValue()
+                      : featureObj->Shape.getShape().getSubShape(entity.c_str())
             );
+            // The copy takes the shape as last computed, the one shown. An original changed and
+            // not recomputed would give its new shape on its recompute, which the copy never
+            // takes: said, not silent (a primitive copy recomputed itself, which a check of the
+            // picked element then stopped)
+            if (obj->isTouched() || obj->mustExecute()) {
+                Base::Console().warning(
+                    "'%s' isn't up to date: its copy '%s' takes its shape as last computed\n",
+                    obj->Label.getValue(),
+                    copy->Label.getValue()
+                );
+            }
             // FreeCAD-CH (PR 224 round 2, decision 40): where the original is, as for the copies
             // above. The binder took the shape's placement, relative to the original's container:
             // a copy into a container placed otherwise moved, silently. (A dependent binder traces
@@ -1006,11 +1035,11 @@ std::optional<std::string> TaskFeaturePick::copiedElement(
     if (index.empty()) {
         return std::nullopt;
     }
-    // An independent sketch or primitive copy has the original's elements under the same index
-    // names, whether makeCopy recomputed it or it keeps the pasted shape
-    if (copy->getTypeId() == original->getTypeId()
-        && (copy->isDerivedFrom<Sketcher::SketchObject>()
-            || copy->isDerivedFrom<PartDesign::FeaturePrimitive>())) {
+    // An independent sketch copy (recomputed by makeCopy) or primitive copy (a shape binder of
+    // the whole shape: ops#244 P3, P5) has the original's elements under the same index names
+    if (isPrimitiveCopy(original, copy)
+        || (copy->getTypeId() == original->getTypeId()
+            && copy->isDerivedFrom<Sketcher::SketchObject>())) {
         if (!sameElement(original, copy, index)) {
             return std::nullopt;
         }

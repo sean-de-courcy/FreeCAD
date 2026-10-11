@@ -50,6 +50,7 @@
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "TaskFeaturePick.h"
 #include "Utils.h"
@@ -1090,6 +1091,26 @@ void CmdPartDesignMoveFeature::activated(int iMsg)
 
     PartDesign::Body* target = static_cast<PartDesign::Body*>(target_bodies[index]);
 
+    // FreeCAD-CH (ops#244, PR 246 verification): a traced binder of the source body's origin
+    // keeps binding that origin once moved (PR 246 review L2: it keeps its support, in place). It
+    // showed only in its Support, so it is said in the Report view.
+    std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> keptOrigin;
+    auto* sourceBody = freecad_cast<PartDesign::Body*>(source_body);
+    if (sourceBody && sourceBody->Origin.getValue()) {
+        const App::Origin* origin = sourceBody->getOrigin();
+        for (App::DocumentObject* feat : features) {
+            auto* binder = freecad_cast<PartDesign::ShapeBinder*>(feat);
+            if (!binder || !binder->TraceSupport.getValue()) {
+                continue;
+            }
+            for (App::DocumentObject* support : binder->Support.getValues()) {
+                if (support && origin->hasObject(support)) {
+                    keptOrigin.emplace_back(binder, support);
+                }
+            }
+        }
+    }
+
     openCommand(QT_TRANSLATE_NOOP("Command", "Move an object"));
 
     std::stringstream stream;
@@ -1104,6 +1125,15 @@ void CmdPartDesignMoveFeature::activated(int iMsg)
     runCommand(Doc, stream.str().c_str());
     FCMD_OBJ_CMD(source_body, "removeObjects(features_)");
     FCMD_OBJ_CMD(target, "addObjects(features_)");
+    for (const auto& [binder, support] : keptOrigin) {
+        Base::Console().warning(
+            "'%s' moved to '%s' still binds '%s' of '%s', where it was\n",
+            binder->Label.getValue(),
+            target->Label.getValue(),
+            support->Label.getValue(),
+            sourceBody->Label.getValue()
+        );
+    }
     /*
 
         // Find body of this feature
