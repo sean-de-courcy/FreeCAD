@@ -474,6 +474,64 @@ class DraftFaceNotchOffCentreRaisedCutAway(DraftFaceNotchOffCentreRaised):
         doc.Profile.delGeometry(1)  # the right side
 
 
+class DraftFaceNotchOffCentreRaisedCutBack(DraftFaceNotchOffCentreRaisedCutAway):
+    """DraftFaceNotchOffCentreRaisedCutAway, with the block cut back to x 0..12 (`cutAway`): the
+    picked rest is gone, and the front face is x 0..12, under the original's name. It holds the
+    original's saved centre (x = 10), so the centre test alone took it as the original returned
+    and held it plainly, with no warning: the silent partial (the Opus verification of fork PR
+    249 round 1, finding 1). It doesn't cover the saved extent (x 0..20): the reference breaks,
+    with it as candidate (ops#138)."""
+
+    def frontFace(self):
+        if self.stepName == "cutAway":
+            return Broken(face("plane", normal=-Y, through=(0, 0, 0), contains=(6, 0, 5)))
+        return super().frontFace()
+
+    def cutAway(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(
+            doc.Profile, {0: ((0, 0), (12, 0)), 1: ((12, 0), (12, 10)), 2: ((12, 10), (0, 10))}
+        )
+
+
+class DraftFaceNotchOffCentreRaisedRedrawn(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch drawn again at x 12..16 as new geometry
+    (`redraw`): the picked rest (x 8..20) is gone, and the front face is x 0..12, which kept the
+    original's name, and x 16..20. The named piece holds the original's saved centre (x = 10), but
+    it doesn't cover the original's saved extent (x 0..20): not the original returned (ops#138,
+    the Opus verification of fork PR 249 round 1, finding 1). No structure leads to the redrawn
+    pieces, and tier 3 chooses none: the reference breaks, with the pieces and the notch's side
+    as candidates, never held plainly."""
+
+    steps = ("edit", "heighten", "redraw")
+    notchAt = (12, 16)
+
+    def frontFace(self):
+        if self.stepName == "redraw" and self.solver:
+            return Broken(pieces(face("plane", normal=-Y, through=(0, 0, 0))))
+        return super().frontFace()
+
+    def redraw(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        left, right = self.notchAt
+        m.setLines(doc.Profile, {0: ((0, 0), (left, 0))})
+        doc.Profile.addGeometry(
+            m.polyline([(left, 0), (left, 2), (right, 2), (right, 0), (20, 0)]), False
+        )
+
+
+class DraftFaceNotchOffCentreRaisedSplitAtCentre(DraftFaceNotchOffCentreRaisedRedrawn):
+    """DraftFaceNotchOffCentreRaisedRedrawn with the notch at x 10..14: the named piece, x 0..10,
+    ends exactly at the original's saved centre, so it holds it within ε. Not the original
+    either: the reference breaks (ops#138)."""
+
+    notchAt = (10, 14)
+
+
 class DraftFaceNotchNamedPieceKept(DraftFaceNotch):
     """DraftFaceNotch's notch moved right, to x 12..16, in two steps. `notch`: the front face
     keeps its name on x 0..12, which holds the old face's centre (x = 10); the rest is x 16..20.

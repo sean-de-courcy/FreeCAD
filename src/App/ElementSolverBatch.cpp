@@ -567,8 +567,9 @@ bool rebuildSubList(const std::vector<SolverResolution>& resolutions,
                             }
                         }
                     }
-                    else {
-                        written.insert(elementOf(resolution->sub, resolution->shadow));
+                    else if (!held(resolution->sub, resolution->shadow)) {
+                        // One sub: an element another reference holds isn't written again (the
+                        // Opus verification of fork PR 249 round 1, finding 3)
                         add(resolution->sub, resolution->shadow, {}, froms[i], resolution->guess);
                     }
                     break;
@@ -1357,8 +1358,11 @@ bool solveElementReferences(DocumentObject* feature,
             // saved. It holds the original plainly, its record and warning gone (ops#138). The
             // name alone can give the piece of the original that kept it (ops#133), and the
             // search can end there when the pick is gone: the element must also hold the
-            // original's saved centre (G3's test), or it isn't the original returned (the Opus
-            // review of fork PR 249, M1). Nor if another reference of the property holds it.
+            // original's saved centre (G3's test) and cover all of its saved extent, or it
+            // isn't the original returned (the Opus review of fork PR 249, M1; a piece can hold
+            // the centre: its verification, finding 1). So a curved face, a B-spline, a vertex
+            // or a record without a saved fingerprint never returns: its guess stays. Nor if
+            // another reference of the property holds it.
             if (!entry.guess.empty() && entry.guess.kind != "rejected") {
                 std::string returned;
                 std::string returnedName;
@@ -1376,18 +1380,19 @@ bool solveElementReferences(DocumentObject* feature,
                     returned = outcome.candidates.front();
                     returnedName = outcome.candidateNames.front();
                 }
-                if (!returned.empty()
-                    && !Data::holdsCentre(
-                        Data::ElementFingerprint::fromString(entry.guess.origFingerprint),
-                        fingerprintOf(returned),
-                        diagonal,
-                        continuationDistance
-                    )) {
-                    FC_LOG(referenceName(entry.prop)
-                           << "[" << entry.index << "]: " << returned << ", which the original "
-                           << entry.guess.origIndex
-                           << "'s name gives, doesn't hold its saved centre: not the original");
-                    returned.clear();
+                if (!returned.empty()) {
+                    const auto saved =
+                        Data::ElementFingerprint::fromString(entry.guess.origFingerprint);
+                    const auto now = fingerprintOf(returned);
+                    if (!Data::holdsCentre(saved, now, diagonal, continuationDistance)
+                        || !Data::coversExtent(saved, now, diagonal, continuationDistance)) {
+                        FC_LOG(referenceName(entry.prop)
+                               << "[" << entry.index << "]: " << returned
+                               << ", which the original " << entry.guess.origIndex
+                               << "'s name gives, doesn't hold its saved centre and extent: "
+                                  "not the original");
+                        returned.clear();
+                    }
                 }
                 if (!returned.empty()
                     && std::any_of(entries.begin(), entries.end(), [&](const auto* other) {
@@ -1396,7 +1401,9 @@ bool solveElementReferences(DocumentObject* feature,
                                && other->obj == entry.obj && other->prefix == entry.prefix
                                && other->oldIndex == returned;
                        })) {
-                    returned.clear();  // held already: the guess and its warning stand
+                    // Held already: not settled here. The outcome below names an element the
+                    // other reference holds, and rebuildSubList() writes no second sub for it
+                    returned.clear();
                 }
                 if (!returned.empty()) {
                     SolverResolution resolution;

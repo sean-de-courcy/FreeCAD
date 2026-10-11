@@ -1541,6 +1541,67 @@ bool holdsCentre(const ElementFingerprint& saved,
     return false;
 }
 
+bool coversExtent(const ElementFingerprint& saved,
+                  const ElementFingerprint& element,
+                  double diagonal,
+                  double continuation)
+{
+    if (!saved.center || !element.center || !element.isValid() || saved.type != element.type
+        || saved.kind != element.kind || !saved.size || !element.size) {
+        return false;
+    }
+    const double eps = continuation * std::max(1.0, diagonal);
+    const Base::Vector3d s = *saved.center;
+    const Base::Vector3d c = *element.center;
+    if (element.type == 'E' && element.kind == "Line" && element.direction && saved.direction) {
+        Base::Vector3d d = *element.direction;
+        Base::Vector3d sd = *saved.direction;
+        if (d.Length() <= 0.0 || sd.Length() <= 0.0) {
+            return false;
+        }
+        d.Normalize();
+        sd.Normalize();
+        // Both ends of the saved segment on the element's line, within its length
+        for (double side : {-1.0, 1.0}) {
+            const Base::Vector3d v = s + sd * (side * *saved.size / 2.0) - c;
+            const double along = v * d;
+            if ((v - d * along).Length() > eps || std::abs(along) > *element.size / 2.0 + eps) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (element.type == 'E' && element.kind == "Circle" && element.location && saved.location
+        && !element.radii.empty() && !saved.radii.empty() && element.radii.front() > 0.0) {
+        // On the same circle, and the saved arc's whole angular range within the element's
+        const double r = element.radii.front();
+        if (std::abs(saved.radii.front() - r) > eps
+            || Base::Distance(*saved.location, *element.location) > eps) {
+            return false;
+        }
+        const Base::Vector3d a = s - *element.location;
+        const Base::Vector3d b = c - *element.location;
+        if (a.Length() <= eps || b.Length() <= eps) {
+            return false;
+        }
+        return a.GetAngle(b) + *saved.size / (2.0 * r) <= *element.size / (2.0 * r) + eps / r;
+    }
+    if (element.type == 'F' && element.kind == "Plane" && element.extentMin && element.extentMax
+        && saved.extentMin && saved.extentMax) {
+        // The box is necessary but not enough: a piece that lost a part inside its box (an L, a
+        // U) still spans it. The area, no smaller than the saved one, rules out such a piece
+        // when nothing grew elsewhere
+        const Base::Vector3d& lo = *element.extentMin;
+        const Base::Vector3d& hi = *element.extentMax;
+        const Base::Vector3d& slo = *saved.extentMin;
+        const Base::Vector3d& shi = *saved.extentMax;
+        return slo.x >= lo.x - eps && slo.y >= lo.y - eps && slo.z >= lo.z - eps
+            && shi.x <= hi.x + eps && shi.y <= hi.y + eps && shi.z <= hi.z + eps
+            && *element.size >= *saved.size - eps * std::max(1.0, diagonal);
+    }
+    return false;
+}
+
 namespace
 {
 
