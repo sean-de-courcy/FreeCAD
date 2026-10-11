@@ -48,6 +48,7 @@ from .harness import (
     Reopens,
     Scenario,
     Settled,
+    Warned,
     X,
     Y,
     Z,
@@ -426,6 +427,51 @@ class DraftFaceNotchOffCentreRaisedFilled(DraftFaceNotchOffCentreRaised):
             doc.Profile.delGeometry(geoId)
         m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
         self.split = False
+
+
+class DraftFaceNotchOffCentreRaisedRejectedFilled(DraftFaceNotchOffCentreRaisedFilled):
+    """DraftFaceNotchOffCentreRaisedFilled, with the guess marked broken before `fill`
+    (`reject`, solver documents): the record is a rejection, and the draft fails on the original,
+    missing. After `fill` the original's name gives the whole face again: the reference holds
+    it, and the rejection and its warning stay (ops#138's rule skips rejected records; the Opus
+    review of fork PR 249, L2)."""
+
+    steps = ("edit", "heighten", "reject", "fill")
+
+    def frontFace(self):
+        if self.stepName == "reject" and self.solver:
+            return Broken(pieces(face("plane", normal=-Y, through=(0, 0, 0))))
+        if self.stepName == "fill" and self.solver:
+            return Warned(face("plane", normal=-Y, through=(0, 0, 0)))
+        return super().frontFace()
+
+    def reject(self, doc):
+        if self.solver:
+            App.markReferenceBroken(doc.Draft, "Base", 0)
+
+
+class DraftFaceNotchOffCentreRaisedCutAway(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch run on to the right side (`cutAway`): the
+    picked rest (x 8..20) is gone, and the front face is only the piece x 0..4, which kept the
+    original's name. Its fingerprint isn't the original's, so the probe doesn't snap back; the
+    pick's name is gone. The piece doesn't hold the original's saved centre (x = 10): it isn't
+    the original returned, and holding it plainly would be the silent partial DraftFaceNotch
+    rules out. The reference breaks, or a guess onto the piece keeps its record and warning
+    (ops#138, the Opus review of fork PR 249, M1)."""
+
+    steps = ("edit", "heighten", "cutAway")
+
+    def frontFace(self):
+        if self.stepName == "cutAway":
+            return Broken(face("plane", normal=-Y, through=(0, 0, 0), contains=(2, 0, 5)))
+        return super().frontFace()
+
+    def cutAway(self, doc):
+        # the notch's lines: (4, 0)-(4, 2), (4, 2)-(8, 2), (8, 2)-(8, 0), (8, 0)-(20, 0)
+        for geoId in reversed(range(5, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {4: ((4, 0), (4, 10)), 2: ((4, 10), (0, 10))})
+        doc.Profile.delGeometry(1)  # the right side
 
 
 class DraftFaceNotchNamedPieceKept(DraftFaceNotch):

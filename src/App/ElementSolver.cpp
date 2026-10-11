@@ -1492,6 +1492,8 @@ Nearest findNearest(
     return result;
 }
 
+}  // namespace
+
 // G3 (ops#127, design note N2 5.2): whether a piece of a split element holds the saved element's
 // centre. A line piece: the centre lies on its line, within half its length; an arc piece: the
 // centre's direction from the circle's centre lies within the arc's angular half-width (a saved
@@ -1538,6 +1540,9 @@ bool holdsCentre(const ElementFingerprint& saved,
     }
     return false;
 }
+
+namespace
+{
 
 std::string describeNearest(const Nearest& nearest)
 {

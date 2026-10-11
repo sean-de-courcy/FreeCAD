@@ -1354,7 +1354,11 @@ bool solveElementReferences(DocumentObject* feature,
             // gives (resolved, guessed, or broken with it as the only candidate) has returned to
             // its original: two findings agree. The probe didn't snap it back because an
             // intervening edit changed the original since its fingerprint (a snapshot) was
-            // saved. It holds the original plainly, its record and warning gone (ops#138).
+            // saved. It holds the original plainly, its record and warning gone (ops#138). The
+            // name alone can give the piece of the original that kept it (ops#133), and the
+            // search can end there when the pick is gone: the element must also hold the
+            // original's saved centre (G3's test), or it isn't the original returned (the Opus
+            // review of fork PR 249, M1). Nor if another reference of the property holds it.
             if (!entry.guess.empty() && entry.guess.kind != "rejected") {
                 std::string returned;
                 std::string returnedName;
@@ -1372,9 +1376,33 @@ bool solveElementReferences(DocumentObject* feature,
                     returned = outcome.candidates.front();
                     returnedName = outcome.candidateNames.front();
                 }
+                if (!returned.empty()
+                    && !Data::holdsCentre(
+                        Data::ElementFingerprint::fromString(entry.guess.origFingerprint),
+                        fingerprintOf(returned),
+                        diagonal,
+                        continuationDistance
+                    )) {
+                    FC_LOG(referenceName(entry.prop)
+                           << "[" << entry.index << "]: " << returned << ", which the original "
+                           << entry.guess.origIndex
+                           << "'s name gives, doesn't hold its saved centre: not the original");
+                    returned.clear();
+                }
+                if (!returned.empty()
+                    && std::any_of(entries.begin(), entries.end(), [&](const auto* other) {
+                           return other->prop == entry.prop && other->index != entry.index
+                               && other->kind == SolverEntry::Kind::Exact
+                               && other->obj == entry.obj && other->prefix == entry.prefix
+                               && other->oldIndex == returned;
+                       })) {
+                    returned.clear();  // held already: the guess and its warning stand
+                }
                 if (!returned.empty()) {
                     SolverResolution resolution;
                     resolutionFor(entry, returned, mapForm(returnedName), resolution);
+                    resolution.clearFrom = outcome.status == Data::SolveStatus::Resolved
+                        && outcome.collapsed;
                     resolutions[entry.prop].push_back(resolution);
                     ReferenceReport::Entry item;
                     item.status = ReferenceReport::Status::Resolved;
