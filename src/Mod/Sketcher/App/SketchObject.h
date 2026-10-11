@@ -1306,6 +1306,9 @@ private:
     // couldn't tell every link's type keeps them, so that a later open still repairs it. Empty
     // otherwise (a new sketch's list holds one entry and no links).
     std::vector<long> pendingTypeRepair() const;
+    // The entry that marks a type list whose repair on open couldn't tell every link's type: the
+    // next open repairs only the links that are still undecided (ops#140). No type has this value.
+    static constexpr long pendingTypeRepairMark = -1;
     bool externalTypeRepairPending = false;
     // the keys of the links whose type the open couldn't tell: a full rebuild matches them with
     // their saved geometry once their element is back (ops#140)

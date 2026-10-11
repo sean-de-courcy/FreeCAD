@@ -1614,8 +1614,25 @@ void SketchObject::onSketchRestore()
         if(ExternalGeo.getSize()<=2) {
             // no saved geometry to repair a type list saved before ops#140 from: each link reads
             // the type at its index
-            if (ExternalTypes.getSize() > ExternalGeometry.getSize()
-                && ExternalGeometry.getSize() > 0) {
+            const auto& types = ExternalTypes.getValues();
+            const auto links = static_cast<std::size_t>(ExternalGeometry.getSize());
+            if (links > 0 && types.size() > links
+                && std::all_of(types.begin() + static_cast<std::ptrdiff_t>(links),
+                               types.end(),
+                               [](long type) { return type == pendingTypeRepairMark; })) {
+                // FreeCAD-CH (ops#237, PR 262 review L1): past the links only the mark of a
+                // repair an earlier open left pending. Without saved geometry no link can be
+                // told, so each waits, as after an undo (onUndoRedoFinished): the mark stays
+                // through edits, and a link appended outside the sketch is a projection
+                externalTypeRepairPending = true;
+                undecidedTypeKeys.clear();
+                undecidedTypeKeys.insert(externalGeoRef.begin(), externalGeoRef.end());
+                FC_WARN("External link types of " << getFullName() << " wait for a repair an "
+                        << "earlier open left pending, but the file holds no saved geometry to "
+                        << "finish it; each link reads the type at its index, which can be "
+                        << "another link's");
+            }
+            else if (links > 0 && types.size() > links) {
                 FC_WARN("External link types of " << getFullName() << " were saved before "
                         << "ops#140 without their geometry; they are read by index");
             }

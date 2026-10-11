@@ -21,6 +21,7 @@
 #include <App/Document.h>
 #include <Base/Console.h>
 #include <Base/FileInfo.h>
+#include <src/TempDirectory.h>
 #include <Mod/Part/App/FeaturePartBox.h>
 #include <Mod/Part/App/Geometry.h>
 #include <Mod/Part/App/PartFeature.h>
@@ -118,7 +119,7 @@ void setExternalFlag(Sketcher::SketchObject* sketch,
     sketch->ExternalGeo.setValues(std::move(geos));
 }
 
-// Collects the warnings sent while it lives
+// Collects the warnings and errors sent while it lives
 class WarningCollector final: public Base::ILogger
 {
 public:
@@ -144,6 +145,9 @@ public:
         if (level == Base::LogStyle::Warning) {
             warnings.push_back(msg);
         }
+        else if (level == Base::LogStyle::Error) {
+            errors.push_back(msg);
+        }
     }
     const char* name() override
     {
@@ -159,6 +163,7 @@ public:
     }
 
     std::vector<std::string> warnings;
+    std::vector<std::string> errors;
 };
 
 }  // namespace
@@ -225,6 +230,10 @@ protected:
     // Projects the box's bottom face (four geometries) and recomputes; returns their ends
     std::vector<std::pair<Base::Vector3d, Base::Vector3d>> projectFace();
     void unparkReplacesADeletedGeometry(int deleted);
+    // Projects `edge` and intersects a ball's face, then saves the sketch with a type list from
+    // before ops#140 whose ball can't be told (its face gone) and reopens it: the list ends in
+    // the mark of a pending repair, {0, 0, -1}
+    void reopenWithPendingRepair(Sketcher::SketchObject*& sketch);
 };
 
 std::vector<std::pair<Base::Vector3d, Base::Vector3d>> SketchObjectParkTest::projectFace()
@@ -687,12 +696,9 @@ TEST_F(SketchObjectParkTest, markMissingFlagsTheParkedGeometry)
     EXPECT_EQ(refOf(projection()), ref);
 }
 
-// A link appended to ExternalGeometry outside the sketch while an open's type repair is pending
-// (the list ends in the mark) is a projection, before the mark: read by index, the mark would be
-// its type, and it would build nothing (ops#237)
-TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
+void SketchObjectParkTest::reopenWithPendingRepair(Sketcher::SketchObject*& sketch)
 {
-    auto* sketch = getObject();
+    sketch = getObject();
     // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
     auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
     ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
@@ -721,6 +727,19 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
     ASSERT_NE(sketch, nullptr);
     box = doc->getObject("Box");
     ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+}
+
+// A link appended to ExternalGeometry outside the sketch while an open's type repair is pending
+// (the list ends in the mark) is a projection, before the mark: read by index, the mark would be
+// its type, and it would build nothing (ops#237)
+TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
+{
+    Sketcher::SketchObject* sketch {};
+    reopenWithPendingRepair(sketch);
+    if (HasFatalFailure()) {
+        return;
+    }
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
 
     auto objs = sketch->ExternalGeometry.getValues();
     auto subs = sketch->ExternalGeometry.getSubValues();
@@ -747,6 +766,150 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
     for (std::size_t k = 0; k < 2; ++k) {
         EXPECT_TRUE(ends[k].IsEqual(expected[k], tolerance));
     }
+}
+
+// Links that change beyond an append while a repair is pending (here: reordered, then one
+// appended) leave the types as they are, with a warning: which pending entry belongs to which
+// link isn't known (ops#237, PR 218 review L4: untested)
+TEST_F(SketchObjectParkTest, linksReorderedWhileARepairIsPendingWarn)
+{
+    Sketcher::SketchObject* sketch {};
+    reopenWithPendingRepair(sketch);
+    if (HasFatalFailure()) {
+        return;
+    }
+    auto objs = sketch->ExternalGeometry.getValues();
+    auto subs = sketch->ExternalGeometry.getSubValues();
+    ASSERT_EQ(objs.size(), 2U);
+    std::swap(objs[0], objs[1]);
+    std::swap(subs[0], subs[1]);
+    objs.push_back(box);
+    subs.push_back(otherEdge);
+    WarningCollector collector;
+    sketch->ExternalGeometry.setValues(objs, subs);
+    EXPECT_EQ(collector.count("changed beyond an append"), 1U);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+}
+
+// A carbon copy from a sketch whose link's type an open couldn't tell is refused, naming the
+// link, and changes neither sketch: copied, the guess at its index became the copy's settled type,
+// with no mark and no warning (ops#237, PR 262 review M1)
+TEST_F(SketchObjectParkTest, carbonCopyOfAnUndecidedLinkIsRefused)
+{
+    Sketcher::SketchObject* sketch {};
+    reopenWithPendingRepair(sketch);
+    if (HasFatalFailure()) {
+        return;
+    }
+    auto* dest = static_cast<Sketcher::SketchObject*>(
+        doc->addObject("Sketcher::SketchObject", "Dest"));
+    Part::GeomLineSegment line;
+    line.setPoints(Base::Vector3d(20, 0, 0), Base::Vector3d(30, 0, 0));
+    ASSERT_EQ(dest->addGeometry(&line), 0);
+    doc->recompute();
+    const auto sourceGeo = sketch->ExternalGeo.getSize();
+
+    WarningCollector collector;
+    EXPECT_EQ(dest->carbonCopy(sketch, false), -1);
+    ASSERT_EQ(collector.errors.size(), 1U);
+    EXPECT_NE(collector.errors[0].find("couldn't be told"), std::string::npos)
+        << collector.errors[0];
+    EXPECT_NE(collector.errors[0].find("Ball."), std::string::npos) << collector.errors[0];
+    EXPECT_EQ(dest->getInternalGeometry().size(), 1U);
+    EXPECT_EQ(dest->ExternalGeometry.getSize(), 0);
+    EXPECT_EQ(dest->ExternalGeo.getSize(), 2);
+    EXPECT_EQ(dest->Constraints.getSize(), 0);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+    EXPECT_EQ(sketch->ExternalGeometry.getSize(), 2);
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), sourceGeo);
+}
+
+namespace
+{
+// A sketch with one projected link of `box`'s `edge`, saved with `types` and no external
+// geometry but the axes, then reopened (`box` is fetched again); returns the warnings sent while
+// it opened
+std::vector<std::string> reopenWithoutSavedGeometry(App::Document*& doc,
+                                                    Sketcher::SketchObject*& sketch,
+                                                    App::DocumentObject*& box,
+                                                    const std::string& edge,
+                                                    const std::vector<long>& types)
+{
+    EXPECT_GE(sketch->addExternal(box, edge.c_str(), false, false), 0);
+    doc->recompute();
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
+    sketch->ExternalTypes.setValues(types);
+    const auto& geos = sketch->ExternalGeo.getValues();
+    sketch->ExternalGeo.setValues(
+        std::vector<Part::Geometry*>({geos[0]->clone(), geos[1]->clone()}));
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), 2);
+    doc->purgeTouched();
+
+    const std::string name = doc->getName();
+    const std::string sketchName = sketch->getNameInDocument();
+    // under the same name, which TearDown closes, in a folder of its own
+    tests::TempDirectory folder("SketchObjectPark");
+    auto path = folder.path() / (name + ".FCStd");
+    doc->saveAs(Base::FileInfo::pathToString(path).c_str());
+    App::GetApplication().closeDocument(name.c_str());
+    std::vector<std::string> warnings;
+    {
+        WarningCollector collector;
+        doc = App::GetApplication().openDocument(Base::FileInfo::pathToString(path).c_str());
+        warnings = collector.warnings;
+    }
+    EXPECT_NE(doc, nullptr);
+    if (!doc) {
+        sketch = nullptr;
+        return warnings;
+    }
+    EXPECT_EQ(std::string(doc->getName()), name);
+    box = doc->getObject("Box");
+    EXPECT_NE(box, nullptr);
+    sketch = static_cast<Sketcher::SketchObject*>(doc->getObject(sketchName.c_str()));
+    EXPECT_NE(sketch, nullptr);
+    return warnings;
+}
+
+std::size_t countContaining(const std::vector<std::string>& messages, const std::string& text)
+{
+    return static_cast<std::size_t>(
+        std::count_if(messages.begin(), messages.end(), [&](const std::string& msg) {
+            return msg.find(text) != std::string::npos;
+        }));
+}
+}  // namespace
+
+// A type list saved before ops#140 (longer than the links) without the geometry that could
+// repair it is read by index, with a warning (ops#237, PR 218 review: untested)
+TEST_F(SketchObjectParkTest, oldTypeListWithoutSavedGeometryWarns)
+{
+    auto* sketch = getObject();
+    auto warnings = reopenWithoutSavedGeometry(doc, sketch, box, edge, {1, 0});
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(countContaining(warnings, "were saved before ops#140 without their geometry"), 1U)
+        << warnings.size() << " warnings";
+}
+
+// A list that holds past the links only the mark of a pending repair is no old list (ops#237,
+// PR 218 review: it said so). Without saved geometry no link can be told: each waits, with a
+// warning, its projection built with the type at its index, and the mark stays through a
+// recompute (PR 262 review L1: the open left no repair pending, and the next change of the links
+// dropped the mark silently)
+TEST_F(SketchObjectParkTest, pendingMarkWithoutSavedGeometryWaits)
+{
+    auto* sketch = getObject();
+    auto warnings = reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(countContaining(warnings, "were saved before ops#140"), 0U);
+    EXPECT_EQ(countContaining(warnings, "wait for a repair an earlier open left pending"), 1U)
+        << warnings.size() << " warnings";
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(sketch->getGeometry(GeoEnum::RefExt)->is<Part::GeomLineSegment>());
+    doc->recompute();
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
 }
 
 // ops#278: a Both entry put back on geometry without kinds (parked before ops#264, when parking
