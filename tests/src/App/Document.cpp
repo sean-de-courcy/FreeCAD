@@ -8,6 +8,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 
 #include <zipios++/zipinputstream.h>
@@ -350,6 +351,97 @@ public:
 };
 
 }  // namespace
+
+namespace
+{
+// For each import into `doc` while it lives: whether the first imported object's source is
+// `doc` itself (importedWithin), as the import's slots see it
+struct WithinRecorder
+{
+    explicit WithinRecorder(App::Document* doc)
+        : connection(doc->signalImportObjects.connect(
+              [doc, this](const std::vector<App::DocumentObject*>& objs, Base::XMLReader&) {
+                  auto source = objs.empty() ? std::nullopt : App::importedSource(objs.front());
+                  within.push_back(source && App::importedWithin(*source, *doc));
+              }))
+    {}
+    ~WithinRecorder()
+    {
+        connection.disconnect();
+    }
+    WithinRecorder(const WithinRecorder&) = delete;
+    WithinRecorder& operator=(const WithinRecorder&) = delete;
+    fastsignals::connection connection;
+    std::vector<bool> within;
+};
+}  // namespace
+
+// A copy is from the document it is pasted into only when it is that document, by UUID: the
+// clipboard can outlive its document, and a new document can take that name (ops#171 A)
+TEST_F(DocumentTest, importedWithinGoesByTheDocumentsUuid)
+{
+    auto& app = App::GetApplication();
+    const std::string name = app.getUniqueDocumentName("CopySource");
+    App::Document* source = app.newDocument(name.c_str(), "testUser");
+    source->addObject("App::DocumentObjectGroup", "Copied");
+    std::stringstream copied;
+    source->exportObjects({source->getObject("Copied")}, copied);
+    EXPECT_NE(documentXml(copied).find(std::string("SourceDocument=\"") + source->Uid.getValueStr()
+                                       + "\""),
+              std::string::npos);
+
+    {
+        WithinRecorder recorder(source);
+        copied.clear();
+        copied.seekg(0);
+        App::MergeDocuments(source).importObjects(copied);
+        EXPECT_EQ(recorder.within, std::vector<bool>({true}));
+    }
+    app.closeDocument(name.c_str());
+
+    // another document under the same name
+    App::Document* sameName = app.newDocument(name.c_str(), "testUser");
+    ASSERT_EQ(std::string(sameName->getName()), name);
+    {
+        WithinRecorder recorder(sameName);
+        copied.clear();
+        copied.seekg(0);
+        App::MergeDocuments(sameName).importObjects(copied);
+        EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+    }
+    app.closeDocument(name.c_str());
+}
+
+// An import run from inside another import into the same document leaves the outer one's
+// sources in place (ops#171 C: it cleared them)
+TEST_F(DocumentTest, nestedImportKeepsTheOuterImportsSources)
+{
+    doc()->addObject("App::DocumentObjectGroup", "Outer");
+    doc()->addObject("App::DocumentObjectGroup", "Inner");
+    std::stringstream outer;
+    std::stringstream inner;
+    doc()->exportObjects({doc()->getObject("Outer")}, outer);
+    doc()->exportObjects({doc()->getObject("Inner")}, inner);
+
+    std::optional<App::ImportedSource> after;
+    bool nested = false;
+    auto connection = doc()->signalImportObjects.connect(
+        [&](const std::vector<App::DocumentObject*>& objs, Base::XMLReader&) {
+            if (nested || objs.empty()) {
+                return;
+            }
+            nested = true;
+            App::MergeDocuments(doc()).importObjects(inner);
+            after = App::importedSource(objs.front());
+        });
+    App::MergeDocuments(doc()).importObjects(outer);
+    connection.disconnect();
+
+    ASSERT_TRUE(nested);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->name.substr(0, after->name.find('@')), "Outer");
+    EXPECT_TRUE(App::importedWithin(*after, *doc()));
+}
 
 class RecomputeContinuationTest: public DocumentTest
 {

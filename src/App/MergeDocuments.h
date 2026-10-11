@@ -81,15 +81,21 @@ private:
 
 /// What Document::importObjects read for an object it imported: the name it was saved under (a
 /// saved project's name, or `<name>@<document>` from a copy, see DocumentObject::getExportName)
-/// and the ID it had there (ops#158)
+/// and the ID it had there (ops#158), and the UUID of the document it was copied from (ops#171;
+/// empty for a saved project, or a copy made by a build before ops#171)
 struct ImportedSource
 {
     std::string name;
     long id = 0;
+    std::string document;
 };
 
 /// The saved name and ID of obj while the import that read it runs (from the restore of the
 /// objects' properties to signalFinishImportObjects); none for any other object
 AppExport std::optional<ImportedSource> importedSource(const DocumentObject* obj);
+
+/// Whether source's object was copied from doc itself (a paste within the document), by the
+/// document's UUID: a name can be another document's once the first is closed (ops#171)
+AppExport bool importedWithin(const ImportedSource& source, const Document& doc);
 
 }  // namespace App
