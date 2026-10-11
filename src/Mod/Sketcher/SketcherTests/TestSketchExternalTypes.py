@@ -27,7 +27,7 @@ import Sketcher
 App = FreeCAD
 V = App.Vector
 TOL = 1e-6
-PROJECTION, INTERSECTION = 0, 1
+PROJECTION, INTERSECTION, BOTH = 0, 1, 2
 PENDING = -1  # the entry an open leaves when it couldn't tell every link's type
 
 
@@ -48,6 +48,9 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.sketch.addConstraint(Sketcher.Constraint("Coincident", line, 2, -5, 1))
         self.doc.recompute()
         self.assertRingPoints()
+        # which of the ring's points (x = 10 or -10) each constraint is on
+        self.ringSides = [round(g.X / 10) for g in self.constrainedExternals()]
+        self.assertEqual(sorted(self.ringSides), [-1, 1])
 
     def tearDown(self):
         if hasattr(self, "doc"):
@@ -519,3 +522,109 @@ class TestSketchExternalTypes(unittest.TestCase):
         lines = [g for g in list(sketch.ExternalGeo)[2:] if isinstance(g, Part.LineSegment)]
         self.assertEqual(len(lines), 2)
         self.assertEqual(self.externalPoints(sketch), [])
+
+    def constrainedExternals(self, sketch=None):
+        """The external geometry each constraint's second element is on, in constraint order."""
+        sketch = sketch or self.sketch
+        return [list(sketch.ExternalGeo)[-c.Second - 1] for c in sketch.Constraints]
+
+    def assertConstraintsOnRingPoints(self, x, sketch=None):
+        """Both constraints are on the ring's points at (x, 0) and (-x, 0), each on the one it
+        was on in setUp."""
+        geos = self.constrainedExternals(sketch)
+        self.assertTrue(all(isinstance(g, Part.Point) for g in geos), geos)
+        self.assertEqual([round(g.X, 6) for g in geos], [side * x for side in self.ringSides])
+        self.assertEqual([round(g.Y, 6) for g in geos], [0, 0])
+
+    def ringProjections(self, sketch=None):
+        """The ring's projection: lines on the X axis (the rail's is at y = 20)."""
+        sketch = sketch or self.sketch
+        return [
+            g
+            for g in list(sketch.ExternalGeo)[2:]
+            if isinstance(g, Part.LineSegment) and abs(g.StartPoint.y) < TOL
+        ]
+
+    def testProjectionAddedToAnIntersectionLinkKeepsItsConstraints(self):
+        """ops#260: the ring is an intersection link with both constraints on its points. Adding
+        its projection makes it Both. The constraints stay on the points, and the projection is
+        the line (-10, 0)-(10, 0); a later rebuild (the ring grown to radius 12) keeps them so."""
+        self.assertConstraintsOnRingPoints(10)
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, False)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, BOTH])
+        self.assertConstraintsOnRingPoints(10)
+        lines = self.ringProjections()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            sorted(round(p.x, 6) for p in (lines[0].StartPoint, lines[0].EndPoint)), [-10, 10]
+        )
+        self.doc.recompute()
+        self.assertRingPoints()
+        self.ring.Shape = Part.makeCircle(12, V(0, 0, 0), V(0, 1, 0))
+        self.doc.recompute()
+        self.assertConstraintsOnRingPoints(12)
+        self.assertEqual(len(self.ringProjections()), 1)
+        sketch = self.saveAndReopen("Both")
+        sketch.touch()
+        self.doc.recompute()
+        self.assertConstraintsOnRingPoints(12, sketch)
+
+    def testProjectionAddedToAnIntersectionLinkUndoes(self):
+        """Undo gives back the intersection link with its constraints on the points; redo the
+        Both link with them still on the points."""
+        self.doc.UndoMode = 1
+        self.doc.openTransaction("Add projection")
+        self.sketch.addExternal(self.ring.Name, "Edge1", False, False)
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.doc.undo()
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.assertEqual(self.ringProjections(), [])
+        self.assertConstraintsOnRingPoints(10)
+        self.doc.redo()
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, BOTH])
+        self.assertEqual(len(self.ringProjections()), 1)
+        self.assertConstraintsOnRingPoints(10)
+
+    def testDefiningProjectionAddedToAnIntersectionLink(self):
+        """A defining projection added to the (non-defining) ring link is defining: the sketch's
+        Shape has the sketch line and the projected line."""
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.Shape.Edges), 1)
+        self.sketch.addExternal(self.ring.Name, "Edge1", True, False)
+        self.doc.recompute()
+        self.assertConstraintsOnRingPoints(10)
+        self.assertEqual(len(self.sketch.Shape.Edges), 2)
+
+    def testIntersectionAddedToAProjectionLinkKeepsItsConstraint(self):
+        """The reverse: the ring linked as a projection in a second sketch, a constraint on the
+        projected line. Adding the intersection keeps the constraint on the line."""
+        sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch2")
+        sketch.addExternal(self.ring.Name, "Edge1", False, False)
+        line = sketch.addGeometry(Part.LineSegment(V(-9, 5, 0), V(9, 5, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Parallel", line, -3))
+        self.doc.recompute()
+        sketch.addExternal(self.ring.Name, "Edge1", False, True)
+        self.assertEqual(list(sketch.ExternalTypes), [BOTH])
+        self.doc.recompute()
+        geos = self.constrainedExternals(sketch)
+        self.assertIsInstance(geos[0], Part.LineSegment)
+        self.assertEqual(
+            sorted(round(p.x, 6) for p in (geos[0].StartPoint, geos[0].EndPoint)), [-10, 10]
+        )
+        self.assertEqual(self.externalPoints(sketch), [-10, 10])
+
+    def testProjectionAddedToAFrozenIntersectionLinkIsRefused(self):
+        """A frozen link isn't rebuilt, so the projection added to it would have no geometry
+        until the link thaws, and then take the points' slots. The add is refused, loudly."""
+        path = self.tempPath("FrozenRing.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.freezeInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        with self.assertRaises(ValueError):
+            sketch.addExternal("Ring", "Edge1", False, False)
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION])
+        self.assertConstraintsOnRingPoints(10, sketch)
