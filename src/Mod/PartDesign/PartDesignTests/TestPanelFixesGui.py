@@ -1584,7 +1584,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIndependentPrimitiveCopy(copy, box)
         # PR 261 review: said, since the user may expect the box alone
         self.assertIn(
-            "'Box' is on 'Base': its copy 'CopyBox' is the body's solid at 'Box', 'Base' included",
+            "The copy 'CopyBox' of 'Box' is the body's solid at 'Box' (on 'Base'), not 'Box' alone",
             (reportText() or "")[before:],
         )
         self.assertNotIn("isn't up to date", (reportText() or "")[before:])
@@ -1611,6 +1611,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(copy.isValid(), copy.getStatusString())
         self.assertSameShape(copy, cut)
         self.assertNotIn("doesn't recompute", (reportText() or "")[before:])
+        self.assertIn(
+            "The copy 'CopyCut' of 'Cut' is the body's solid at 'Cut' (on 'Box'), not 'Cut' alone",
+            (reportText() or "")[before:],
+        )
 
     def boxElement(self, box, kind, where):
         """The index name of the box's element of `kind` ("Face" or "Edge") whose centre of mass
@@ -1733,7 +1737,7 @@ class TestPanelFixesGui(unittest.TestCase):
         copy = self.doc.getObject("CopyBox")
         self.assertEqual(sketch.AttachmentSupport, [(copy, (top,))])
         self.assertNotIn("isn't up to date", (reportText() or "")[before:])
-        self.assertNotIn("'Box' is on", (reportText() or "")[before:])
+        self.assertNotIn("is the body's solid", (reportText() or "")[before:])
 
     def testNewSketchOnACopiedBoxAcrossPlacedParts(self):
         """PR 261 review L4: the box's body sits in an App::Part turned 90 degrees about Z and

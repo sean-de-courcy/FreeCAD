@@ -457,16 +457,23 @@ bool isPrimitiveCopy(const App::DocumentObject* original, const App::DocumentObj
 
 // Whether the object's recompute would change its shape: it must execute, or something it depends
 // on was changed (whose recompute then enforces its own). Touched alone (a recompute that wouldn't
-// execute it) doesn't count for the object itself (PR 261 review L1, L3).
+// execute it) doesn't count for the object itself (PR 261 review L1, L3). A dependency graph that
+// can't be walked (a cycle, too deep) counts as stale: said, rather than the copy failing (PR 261
+// verification).
 bool isStale(const App::DocumentObject* obj)
 {
-    if (obj->mustRecompute()) {
+    try {
+        if (obj->mustRecompute()) {
+            return true;
+        }
+        const std::vector<App::DocumentObject*> deps = obj->getOutListRecursive();
+        return std::ranges::any_of(deps, [](const App::DocumentObject* dep) {
+            return dep->isTouched() || dep->mustRecompute();
+        });
+    }
+    catch (const Base::Exception&) {
         return true;
     }
-    const std::vector<App::DocumentObject*> deps = obj->getOutListRecursive();
-    return std::ranges::any_of(deps, [](const App::DocumentObject* dep) {
-        return dep->isTouched() || dep->mustRecompute();
-    });
 }
 
 // A copy that fails after it was added is removed again (PR 261 review L1): the callers' cleanup
@@ -904,19 +911,20 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                         copy->Label.getValue()
                     );
                 }
-                // A primitive's shape is the body's solid at that feature, its base included
-                // (decided on PR 261's review, as for the copy of a pad)
+                // A primitive's shape is the body's solid at that feature, made on its base
+                // (decided on PR 261's review, as for the copy of a pad): an additive one's fused
+                // with the base, a subtractive one's cut from it
                 auto* primitive = freecad_cast<PartDesign::FeaturePrimitive*>(obj);
                 App::DocumentObject* base = primitive ? primitive->BaseFeature.getValue() : nullptr;
                 if (whole && base) {
                     Base::Console().warning(
-                        "'%s' is on '%s': its copy '%s' is the body's solid at '%s', '%s' "
-                        "included\n",
-                        obj->Label.getValue(),
-                        base->Label.getValue(),
+                        "The copy '%s' of '%s' is the body's solid at '%s' (on '%s'), not '%s' "
+                        "alone\n",
                         copy->Label.getValue(),
                         obj->Label.getValue(),
-                        base->Label.getValue()
+                        obj->Label.getValue(),
+                        base->Label.getValue(),
+                        obj->Label.getValue()
                     );
                 }
             }
