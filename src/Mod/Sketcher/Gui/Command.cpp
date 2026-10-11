@@ -1090,6 +1090,9 @@ namespace {
     //     plane finds no match for a geometry that lands elsewhere there
     //   - All links are added before any mapping is made, so that no later addition changes a
     //     geometry an earlier mapping uses
+    //   - A dstSketch geometry paired with a defining source geometry is defining; a link is
+    //     frozen when it is in every source that links it and its frozen geometries all paired,
+    //     else it follows the model, with a message (ops#261)
     //
     std::vector<std::map<int, int>> importExternalGeometry(
         const std::vector<const Sketcher::SketchObject*>& srcSketches,
@@ -1154,6 +1157,8 @@ namespace {
             // the Ids of the dst geometries that each add gave
             std::set<long> projectionIds;
             std::set<long> intersectionIds;
+            // Object.Element, for messages
+            std::string label;
         };
         std::vector<Link> links;
         // per source, per ExternalGeometry entry: its index in links, or -1 (out of scope)
@@ -1187,7 +1192,9 @@ namespace {
                     return link.obj == srcExtObj && link.sub == srcExtSub;
                 });
                 if (it == links.end()) {
-                    links.push_back({srcExtObj, srcExtSub, false, false, {}, {}});
+                    links.push_back({srcExtObj, srcExtSub, false, false, {}, {},
+                                     std::string(srcExtObj->getNameInDocument()) + "."
+                                         + srcOldSubs[i]});
                     it = std::prev(links.end());
                 }
                 it->projection = it->projection || projection;
@@ -1285,6 +1292,127 @@ namespace {
                     printSkipped(geo);
                 }
             }
+        }
+
+        // --- 4) carry the sources' Defining and Frozen states over (ops#261): the links were
+        //        added non-defining and live ---
+
+        using Sketcher::ExternalGeometryExtension;
+        using Sketcher::ExternalGeometryFacade;
+        // A dst geometry is defining when a source geometry paired with it is: the merged Shape
+        // holds what each source's Shape held
+        std::set<int> definingGeoIds;
+        // per link, the sources in which its entry is frozen and those in which it is live
+        struct FreezeState
+        {
+            QStringList frozenIn;
+            QStringList liveIn;
+            bool unmatched = false;  // a frozen geometry found no match
+        };
+        std::vector<FreezeState> freezeStates(links.size());
+        for (size_t s = 0; s < srcSketches.size(); ++s) {
+            const auto* srcSketch = srcSketches[s];
+            const auto& extGeoIdMap = maps[s];
+            auto dstGeoIdOf = [&](int srcGeoId) {
+                auto it = extGeoIdMap.find(srcGeoId);
+                return it == extGeoIdMap.end() ? int(Sketcher::GeoEnum::GeoUndef) : it->second;
+            };
+            const auto& srcGeos = srcSketch->getExternalGeometry();
+            std::map<long, int> srcGeoIdOf;  // a source geometry's GeoId, by its Id
+            for (size_t k = 2; k < srcGeos.size(); ++k) {
+                const int srcGeoId = -static_cast<int>(k) - 1;
+                srcGeoIdOf[Sketcher::GeometryFacade::getId(srcGeos[k])] = srcGeoId;
+                const int dstGeoId = dstGeoIdOf(srcGeoId);
+                if (dstGeoId != Sketcher::GeoEnum::GeoUndef
+                    && ExternalGeometryFacade::getFacade(srcGeos[k])
+                           ->testFlag(ExternalGeometryExtension::Defining)) {
+                    definingGeoIds.insert(dstGeoId);
+                }
+            }
+            const QString srcName = QString::fromUtf8(srcSketch->getNameInDocument());
+            for (size_t i = 0; i < entryLinks[s].size(); ++i) {
+                if (entryLinks[s][i] < 0) {
+                    continue;
+                }
+                // as the rebuild reads it: frozen when one of its geometries is, unless synced
+                bool frozen = false;
+                bool sync = false;
+                bool unmatched = false;
+                for (long id : srcSketch->externalGeometryIds(static_cast<int>(i))) {
+                    auto it = srcGeoIdOf.find(id);
+                    if (it == srcGeoIdOf.end()) {
+                        continue;
+                    }
+                    auto egf = ExternalGeometryFacade::getFacade(srcGeos[-it->second - 1]);
+                    frozen = frozen || egf->testFlag(ExternalGeometryExtension::Frozen);
+                    sync = sync || egf->testFlag(ExternalGeometryExtension::Sync);
+                    unmatched = unmatched
+                        || dstGeoIdOf(it->second) == Sketcher::GeoEnum::GeoUndef;
+                }
+                auto& state = freezeStates[entryLinks[s][i]];
+                if (frozen && !sync) {
+                    state.frozenIn.append(srcName);
+                    state.unmatched = state.unmatched || unmatched;
+                }
+                else {
+                    state.liveIn.append(srcName);
+                }
+            }
+        }
+
+        for (int dstGeoId : definingGeoIds) {
+            const int index = -dstGeoId - 1;
+            if (index >= 0 && index < static_cast<int>(dstGeos.size())
+                && !ExternalGeometryFacade::getFacade(dstGeos[index])
+                        ->testFlag(ExternalGeometryExtension::Defining)) {
+                dstSketch->toggleConstruction(dstGeoId);
+            }
+        }
+
+        // A link is frozen as a whole. It is frozen here when every source that links it has it
+        // frozen and its frozen geometries all found their match; otherwise it follows the model,
+        // and a message says so
+        for (size_t l = 0; l < links.size(); ++l) {
+            const auto& state = freezeStates[l];
+            if (state.frozenIn.isEmpty()) {
+                continue;
+            }
+            if (state.liveIn.isEmpty() && !state.unmatched) {
+                int frozenGeoId = Sketcher::GeoEnum::GeoUndef;
+                int dstGeoId = 0;
+                for (const auto* dstGeo : dstSketch->getExternalGeometry()) {
+                    --dstGeoId;
+                    const long id = Sketcher::GeometryFacade::getId(dstGeo);
+                    if (dstGeoId <= Sketcher::GeoEnum::RefExt
+                        && (links[l].projectionIds.count(id) || links[l].intersectionIds.count(id))) {
+                        frozenGeoId = dstGeoId;
+                        break;
+                    }
+                }
+                if (frozenGeoId != Sketcher::GeoEnum::GeoUndef) {
+                    // freezes every geometry of the link
+                    dstSketch->toggleExternalGeometryFlag(
+                        {frozenGeoId},
+                        {ExternalGeometryExtension::Frozen}
+                    );
+                    continue;
+                }
+            }
+            QString msg = state.liveIn.isEmpty()
+                ? qApp->translate(
+                      "CmdSketcherMergeSketches",
+                      "External geometry '%1' is frozen in '%2', and its frozen geometry no longer "
+                      "matches its source: in the merged sketch it follows the model.\n")
+                      .arg(QString::fromStdString(links[l].label),
+                           state.frozenIn.join(QStringLiteral("', '")))
+                : qApp->translate(
+                      "CmdSketcherMergeSketches",
+                      "External geometry '%1' is frozen in '%2' but not in '%3': in the merged "
+                      "sketch it follows the model.\n")
+                      .arg(QString::fromStdString(links[l].label),
+                           state.frozenIn.join(QStringLiteral("', '")),
+                           state.liveIn.join(QStringLiteral("', '")));
+            Base::Console().warning(msg.toUtf8().constData());
         }
 
         return maps;
