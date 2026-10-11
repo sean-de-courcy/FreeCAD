@@ -2773,6 +2773,42 @@ class TestPanelFixesGui(unittest.TestCase):
         pump(0.2)
         self.assertFalse(note.isVisible())
 
+    def referenceTexts(self):
+        widget = self.widget(QtWidgets.QListWidget, "listWidgetReferences")
+        return [widget.item(row).text() for row in range(widget.count())]
+
+    def testShapeBinderPanelListFollowsSupportSetElsewhere(self):
+        """ops#276: with the panel open on Box's top face, Support set from Python to Box's side
+        face, then to the other box's top face: the list and the object field show each, and OK
+        keeps the last. Only the note followed; the list kept the top face."""
+        box, other, binder, names = self.binderModel()
+        other.Label = "Right box"
+        otherTop = self.faceAt(other, V(25, 5, 10))
+        self.edit(binder)
+        self.assertEqual(self.referenceTexts(), [names["top"]])
+        binder.Support = [(box, names["side"])]
+        pump(0.2)
+        self.assertEqual(self.referenceTexts(), [names["side"]])
+        binder.Support = [(other, otherTop)]
+        pump(0.2)
+        self.assertEqual(self.referenceTexts(), [otherTop])
+        self.assertEqual(self.widget(QtWidgets.QLineEdit, "baseEdit").text(), "Right box")
+        self.close(ok=True)
+        self.assertEqual(self.support(binder), [(other.Name, (otherTop,))])
+
+    def testShapeBinderPanelOkAfterSupportClearedElsewhere(self):
+        """ops#276: Support cleared from Python with the panel open empties the object field and
+        the list, and OK leaves it empty. The field kept Box's label, and OK bound the whole box
+        again."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        binder.Support = []
+        pump(0.2)
+        self.assertEqual(self.widget(QtWidgets.QLineEdit, "baseEdit").text(), "")
+        self.assertEqual(self.referenceTexts(), [])
+        self.close(ok=True)
+        self.assertEqual(self.support(binder), [])
+
     def testShapeBinderPanelHasNoNoteOnAGoodSupport(self):
         """The panel on a binder that binds its Support shows no note (ops#266)."""
         box, _, binder, names = self.binderModel()
@@ -2810,6 +2846,62 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def testThicknessLeavesOutEveryEdge(self):
         self.dressUpOnEdgesAndAFace("PartDesign_Thickness", "PartDesign::Thickness")
+
+    # -- ops#252: transforms and profile features say which picks they leave out ----------------
+
+    def activeBodyWithBoxAndSketches(self):
+        """A 10 mm box in the active body, and two sketches on its top: squares 2 apart."""
+        self.body = models.body(self.doc)
+        box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        sketches = []
+        for name, x in (("First", 1), ("Second", 5)):
+            sketch = models.sketch(self.doc, name, models.rectangle(x, 1, x + 2, 3), self.body, z=10)
+            sketch.Label = name + " sketch"
+            sketches.append(sketch)
+        # the box is the solid a whole-shape transform takes
+        self.body.Tip = box
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        return box, sketches
+
+    def testMirrorOfABoxAndASketchSaysTheSketchIsLeftOut(self):
+        """The box and a sketch selected, then Mirror: the box is the original, and the status
+        bar names the sketch as left out (it said nothing; a sketch alone made a "Whole shape"
+        mirror, the same way. Not tested alone: the new mirror's first recompute then fails, and
+        the notification area off screen fails the command, notes/build.md)."""
+        box, (sketch, _) = self.activeBodyWithBoxAndSketches()
+        Gui.Selection.addSelection(self.doc.Name, box.Name)
+        Gui.Selection.addSelection(self.doc.Name, sketch.Name)
+        Gui.runCommand("PartDesign_Mirrored")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        [mirror] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Mirrored"]
+        self.assertEqual(mirror.Originals, [box])
+        self.assertTrue(
+            any("left out of the selection: 'First sketch'." in t for t in self.statusTexts()),
+            self.statusTexts(),
+        )
+
+    def testPadOfTwoSketchesSaysWhichIsLeftOut(self):
+        """Two sketches selected, then Pad: the first is the profile, and the status bar names
+        both, the second as left out (it was dropped without a word)."""
+        _, (first, second) = self.activeBodyWithBoxAndSketches()
+        Gui.Selection.addSelection(self.doc.Name, first.Name)
+        Gui.Selection.addSelection(self.doc.Name, second.Name)
+        Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        [pad] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Pad"]
+        self.assertIs(pad.Profile[0], first)
+        self.assertTrue(
+            any(
+                "'First sketch'" in t and "Left out of the selection: 'Second sketch'" in t
+                for t in self.statusTexts()
+            ),
+            self.statusTexts(),
+        )
 
     # -- ops#252: Move Feature To / After take the row chosen, not the first with its text -------
 

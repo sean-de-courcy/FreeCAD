@@ -1419,8 +1419,15 @@ bool ProfileBased::isParallelPlane(const TopoDS_Shape& s1, const TopoDS_Shape& s
     return false;
 }
 
-double ProfileBased::getReversedAngle(const Base::Vector3d& b, const Base::Vector3d& v) const
+double ProfileBased::getReversedAngle(
+    const Base::Vector3d& b,
+    const Base::Vector3d& v,
+    bool* computed
+) const
 {
+    if (computed) {
+        *computed = false;
+    }
     try {
         Part::Feature* obj = getVerifiedObject();
         TopoShape sketchshape = getTopoShapeVerifiedFace();
@@ -1440,7 +1447,11 @@ double ProfileBased::getReversedAngle(const Base::Vector3d& b, const Base::Vecto
         Base::Vector3d SketchNormal(0, 0, 1);
         SketchOrientation.multVec(SketchNormal, SketchNormal);
 
-        return SketchNormal * cross;
+        const double angle = SketchNormal * cross;
+        if (computed) {
+            *computed = true;
+        }
+        return angle;
     }
     catch (...) {
         return Reversed.getValue() ? 1 : 0;

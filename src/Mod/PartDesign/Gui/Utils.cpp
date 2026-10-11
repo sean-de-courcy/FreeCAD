@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <algorithm>
 #include <QMessageBox>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
@@ -476,7 +477,7 @@ bool isAnyNonPartDesignLinksTo(PartDesign::Feature* feature, bool respectGroups)
     return false;
 }
 
-void relinkToBody(PartDesign::Feature* feature)
+void relinkToBody(PartDesign::Feature* feature, bool last)
 {
     App::Document* doc = feature->getDocument();
     PartDesign::Body* body = PartDesign::Body::findBodyOf(feature);
@@ -485,6 +486,20 @@ void relinkToBody(PartDesign::Feature* feature)
         throw Base::RuntimeError("Could not find a body for the feature");
     }
 
+    // FreeCAD-CH (PR 255 review M1): an element of a feature before the chain's last is kept on
+    // the feature, said: on the body it would name another element of the last feature's shape
+    auto keptElement = [&](App::DocumentObject* obj, const App::Property* prop, const std::string& sub) {
+        if (last || sub.empty()) {
+            return false;
+        }
+        FC_WARN(
+            obj->getFullName() << "." << prop->getName() << " keeps its link to "
+                               << feature->getFullName() << "." << sub
+                               << ": it isn't the body's last feature, so the body's " << sub
+                               << " would be another element"
+        );
+        return true;
+    };
     for (const auto& obj : doc->getObjects()) {
         if (!isPartDesignAwareObjecta(obj)) {
             std::vector<App::Property*> properties;
@@ -501,6 +516,12 @@ void relinkToBody(PartDesign::Feature* feature)
                 else if (prop->isDerivedFrom(App::PropertyLinkSub::getClassTypeId())) {
                     App::PropertyLinkSub* propLink = static_cast<App::PropertyLinkSub*>(prop);
                     if (propLink->getValue() != feature) {
+                        continue;
+                    }
+                    const auto& subs = propLink->getSubValues();
+                    if (std::ranges::any_of(subs, [&](const std::string& sub) {
+                            return keptElement(obj, prop, sub);
+                        })) {
                         continue;
                     }
                     valueStr = buildLinkSubPythonStr(body, propLink->getSubValues());
@@ -521,18 +542,21 @@ void relinkToBody(PartDesign::Feature* feature)
                         //     (2015-08-13, Fat-Zer)
                     }
                 }
-                else if (prop->isDerivedFrom(App::PropertyLinkSub::getClassTypeId())) {
+                // (ops#252: guarded by PropertyLinkSub, handled above, so a sub-list was never
+                // relinked)
+                else if (prop->isDerivedFrom(App::PropertyLinkSubList::getClassTypeId())) {
                     App::PropertyLinkSubList* propLink = static_cast<App::PropertyLinkSubList*>(prop);
                     std::vector<App::DocumentObject*> linkList = propLink->getValues();
+                    const std::vector<std::string> subs = propLink->getSubValues();
                     bool valueChanged = false;
-                    for (auto& link : linkList) {
-                        if (link == feature) {
-                            link = body;
+                    for (std::size_t index = 0; index < linkList.size(); ++index) {
+                        if (linkList[index] == feature && !keptElement(obj, prop, subs[index])) {
+                            linkList[index] = body;
                             valueChanged = true;
                         }
                     }
                     if (valueChanged) {
-                        valueStr = buildLinkSubListPythonStr(linkList, propLink->getSubValues());
+                        valueStr = buildLinkSubListPythonStr(linkList, subs);
                         // TODO Issue some message here due to it likely will break something
                         //     (2015-08-13, Fat-Zer)
                     }

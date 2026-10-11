@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include <App/PropertyUnits.h>
 #include "FeatureSketchBased.h"
 
@@ -70,6 +72,8 @@ public:
 
     /// suggests a value for Reversed flag so that material is always added to the support
     bool suggestReversed();
+    /// the suggestion, or none when it can't be computed (no valid axis or profile face)
+    std::optional<bool> suggestedReversed();
 
     /// Returns the effective angular offset from the profile plane in degrees.
     double getStartOffset() const;

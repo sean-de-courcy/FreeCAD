@@ -27,6 +27,8 @@
 #include <QAction>
 #include <QLabel>
 #include <QMessageBox>
+#include <QSignalBlocker>
+#include <QTimer>
 
 
 #include <App/Document.h>
@@ -92,8 +94,11 @@ TaskShapeBinder::TaskShapeBinder(ViewProviderShapeBinder* view, bool newObj, QWi
     if (binder && binder->getDocument()) {
         supportConnection = binder->getDocument()->signalChangedObject.connect(
             [this, binder](const App::DocumentObject& obj, const App::Property& prop) {
+                // The object field and the list follow too, after the change is done (ops#276:
+                // the note did, the list didn't, and an OK set the stale object again). The
+                // panel's own edits come here as well: the list then already shows Support
                 if (&obj == binder && &prop == &binder->Support) {
-                    updateDroppedNote();
+                    QTimer::singleShot(0, this, [this]() { refreshFromSupport(); });
                 }
             }
         );
@@ -134,6 +139,42 @@ void TaskShapeBinder::updateUI()
             supportShow = svp->isShow();
             svp->setVisible(true);
         }
+    }
+
+    updateDroppedNote();
+}
+
+void TaskShapeBinder::refreshFromSupport()
+{
+    if (vp.expired()) {
+        return;
+    }
+    App::GeoFeature* obj = nullptr;
+    std::vector<std::string> subs;
+    PartDesign::ShapeBinder::getFilteredReferences(
+        &vp->getObject<PartDesign::ShapeBinder>()->Support,
+        obj,
+        subs
+    );
+
+    const QString label = obj ? QString::fromStdString(obj->Label.getStrValue()) : QString();
+    if (ui->baseEdit->text() != label) {
+        // Support is already what the field shows: clearing it mustn't write Support again
+        QSignalBlocker block(ui->baseEdit);
+        ui->baseEdit->setText(label);
+    }
+
+    QStringList wanted;
+    for (const auto& sub : subs) {
+        wanted << QString::fromStdString(sub);
+    }
+    QStringList shown;
+    for (int row = 0; row < ui->listWidgetReferences->count(); ++row) {
+        shown << ui->listWidgetReferences->item(row)->text();
+    }
+    if (shown != wanted) {
+        ui->listWidgetReferences->clear();
+        ui->listWidgetReferences->addItems(wanted);
     }
 
     updateDroppedNote();

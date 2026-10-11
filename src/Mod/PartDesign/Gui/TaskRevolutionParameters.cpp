@@ -95,9 +95,12 @@ TaskRevolutionParameters::TaskRevolutionParameters(
     }
 
     setupDialog();
-    // the user's choice, kept through axis picks: Reversed against the axis's suggestion
+    // the user's choice, kept through axis picks: Reversed against the axis's suggestion. With
+    // no suggestion (no valid axis yet) there is no choice to keep (ops#276: Reversed's own value
+    // was taken as one, and the first pick said "as you set it")
     if (auto rev = getObject<PartDesign::Revolved>()) {
-        userFlip = propReversed->getValue() != rev->suggestReversed();
+        const auto suggested = rev->suggestedReversed();
+        userFlip = suggested && propReversed->getValue() != *suggested;
     }
 
     setUpdateBlocked(false);
@@ -543,10 +546,13 @@ void TaskRevolutionParameters::writeAxis(
         // user's Reversed went against the suggestion (ops#252: every pick overwrote it silently;
         // PR 245 review M1: the choice is kept relative to the suggestion, not as a value). A
         // change, or a result against the suggestion, is said once the pick's recompute is done
-        // (it clears the status bar, so the message was never seen)
+        // (it clears the status bar, so the message was never seen). It is queued before the
+        // recompute, which can throw (ops#276: Reversed changed without a word)
         QString message;
-        if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
-            const bool reversed = revolved->suggestReversed() != userFlip;
+        auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution);
+        const auto suggested = revolved ? revolved->suggestedReversed() : std::nullopt;
+        if (suggested) {
+            const bool reversed = *suggested != userFlip;
             const bool changed = reversed != propReversed->getValue();
             if (changed) {
                 propReversed->setValue(reversed);
@@ -566,14 +572,14 @@ void TaskRevolutionParameters::writeAxis(
                     : tr("Reversed is now off: the revolution turns the way the axis suggests.");
             }
         }
-
-        recomputeFeature();
-        setGizmoPositions();
         if (!message.isEmpty()) {
             QTimer::singleShot(0, this, [message]() {
                 Gui::getMainWindow()->showMessage(message, 10000);
             });
         }
+
+        recomputeFeature();
+        setGizmoPositions();
     }
     catch (const Base::Exception& e) {
         e.reportException();
@@ -647,7 +653,8 @@ void TaskRevolutionParameters::onReversed(bool on)
     if (getObject()) {
         propReversed->setValue(on);
         if (auto revolved = getObject<PartDesign::Revolved>()) {
-            userFlip = on != revolved->suggestReversed();
+            const auto suggested = revolved->suggestedReversed();
+            userFlip = suggested && on != *suggested;
         }
         recomputeFeature();
 
