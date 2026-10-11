@@ -164,6 +164,7 @@ class ChamferProfile:
 
     def unchamfer(self, doc):
         sketch, low = doc.Profile, self.low
+        # The chamfer line is the last geometry: chamfer() adds it after every rectangle
         sketch.delGeometries([sketch.GeometryCount - 1])
         m.setLines(sketch, {0: ((10, low), (20, low)), 1: ((20, low), (20, 10))})
 
@@ -429,6 +430,10 @@ class RevolutionUpToFaceTwoSided(ChamferProfile, Scenario):
     area = "RevolutionUpToFace"
     REFS = ("sketch_top_side1", "sketch_top_side2")
     wallAcross = False
+    bottom, topZ = 5, 10
+
+    def profileGeometry(self):
+        return m.rectangle(10, self.bottom, 20, 10)
 
     def topSide1(self):
         return face("plane", normal=Z, through=(0, 0, 10), contains=ray(45, 15, 10))
@@ -443,7 +448,7 @@ class RevolutionUpToFaceTwoSided(ChamferProfile, Scenario):
         wallGeometry = m.rectangle(-5, -30, 0, 30) if self.wallAcross else m.polygon(slab(90, 5))
         wall = m.pad(body, m.sketch(doc, "Wall", wallGeometry, body, z=5), 10, name="WallPad")
         doc.recompute()
-        profile = m.sketch(doc, "Profile", m.rectangle(10, 5, 20, 10), body, placement=XZ)
+        profile = m.sketch(doc, "Profile", self.profileGeometry(), body, placement=XZ)
         revolved = body.newObject("PartDesign::Revolution", "Revolved")
         revolved.Profile = profile
         revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
@@ -452,13 +457,17 @@ class RevolutionUpToFaceTwoSided(ChamferProfile, Scenario):
         revolved.UpToFace = (wall, self.names(wall, wallFace(90, 10)))
         self.setSides(revolved, wall)
         doc.recompute()
+        self.consumers(doc, body)
+        body.Tip = revolved
+
+    def consumers(self, doc, body):
+        revolved = doc.Revolved
         sides = (("sketch_top_side1", self.topSide1), ("sketch_top_side2", self.topSide2))
         for name, expect in sides:
             sketch = body.newObject("Sketcher::SketchObject", "On" + name)
             sketch.AttachmentSupport = [(revolved, self.names(revolved, expect())[0])]
             sketch.MapMode = "FlatFace"
             self.ref(name, sketch, "AttachmentSupport", expect, Attached())
-        body.Tip = revolved
 
 
 class RevolutionUpToFaceSymmetric(RevolutionUpToFaceTwoSided):
@@ -512,6 +521,26 @@ class RevolutionUpToFaceBothUpTo(RevolutionUpToFaceTwoSided):
         revolved.Type2 = "UpToFace"
         otherHalf = face("plane", normal=(1, 0, 0), contains=(0, -15, 10))
         revolved.UpToFace2 = (wall, self.names(wall, otherHalf))
+
+
+class RevolutionTwoRingsUpToFaceSymmetric(InnerRing, RevolutionUpToFaceSymmetric):
+    __doc__ = RevolutionUpToFaceSymmetric.__doc__ + "\n\n" + InnerRing.__doc__
+    REFS = RevolutionUpToFaceSymmetric.REFS + InnerRing.INNER_REFS
+
+
+class RevolutionTwoRingsUpToFaceSymmetricAcross(InnerRing, RevolutionUpToFaceSymmetricAcross):
+    __doc__ = RevolutionUpToFaceSymmetricAcross.__doc__ + "\n\n" + InnerRing.__doc__
+    REFS = RevolutionUpToFaceSymmetricAcross.REFS + InnerRing.INNER_REFS
+
+
+class RevolutionTwoRingsUpToFaceUpToAndAngle(InnerRing, RevolutionUpToFaceUpToAndAngle):
+    __doc__ = RevolutionUpToFaceUpToAndAngle.__doc__ + "\n\n" + InnerRing.__doc__
+    REFS = RevolutionUpToFaceUpToAndAngle.REFS + InnerRing.INNER_REFS
+
+
+class RevolutionTwoRingsUpToFaceBothUpTo(InnerRing, RevolutionUpToFaceBothUpTo):
+    __doc__ = RevolutionUpToFaceBothUpTo.__doc__ + "\n\n" + InnerRing.__doc__
+    REFS = RevolutionUpToFaceBothUpTo.REFS + InnerRing.INNER_REFS
 
 
 class RevolutionSideOneToFaceFillet(Scenario):
@@ -620,6 +649,10 @@ class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
     REFS = ("start_top",)
     steps = ("symmetric", "twoSides")
     startAngle = 0
+    bottom, topZ = 5, 10
+
+    def profileGeometry(self):
+        return m.rectangle(10, self.bottom, 20, 10)
 
     def startTop(self):
         return edge("line", contains=ray(self.startAngle, 15, 10))
@@ -631,7 +664,7 @@ class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
 
     def revolve(self, doc, **properties):
         body = m.body(doc)
-        profile = m.sketch(doc, "Profile", m.rectangle(10, 5, 20, 10), body, placement=XZ)
+        profile = m.sketch(doc, "Profile", self.profileGeometry(), body, placement=XZ)
         revolved = body.newObject("PartDesign::Revolution", "Revolved")
         revolved.Profile = profile
         revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
@@ -640,6 +673,10 @@ class RevolutionStartFaceOfOneSideToSymmetric(Scenario):
         for name, value in properties.items():
             setattr(revolved, name, value)
         doc.recompute()
+        self.consumers(doc, body)
+
+    def consumers(self, doc, body):
+        revolved = doc.Revolved
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (revolved, self.names(revolved, self.startTop()))
         fillet.Radius = 1
@@ -684,3 +721,10 @@ class RevolutionStartFaceOfSymmetricAngleEdit(RevolutionStartFaceOfOneSideToSymm
         revolved.Type2 = "Angle"
         revolved.Angle2 = 50
         self.startAngle = -50
+
+
+class RevolutionTwoRingsStartFaceOfOneSideToSymmetric(
+    InnerRing, RevolutionStartFaceOfOneSideToSymmetric
+):
+    __doc__ = RevolutionStartFaceOfOneSideToSymmetric.__doc__ + "\n\n" + InnerRing.__doc__
+    REFS = RevolutionStartFaceOfOneSideToSymmetric.REFS + InnerRing.INNER_REFS

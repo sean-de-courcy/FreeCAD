@@ -573,9 +573,10 @@ class TestRevolve(unittest.TestCase):
         up to the face x = 0 of a box (x in [-6, 0] for a Revolution, [0, 6] for a Groove,
         y in [-6, 6], z in [0, 3]: 216), or up to the first face. Each face is revolved on its own
         up to its face and the tools are fused (ops#263): a quarter ring per face, 5 pi in all, or
-        a half ring per face for Symmetric, 10 pi. Refine is off: each ring's two cylinders are
-        faces of their own (two per side for Symmetric), named from the profile's lines, and no
-        two elements share a name."""
+        a half ring per face for Symmetric, 10 pi, or for Two sides with both sides up to the box's
+        face (or up to the first face), which reaches across the profile plane. Refine is off:
+        each ring's two cylinders are faces of their own (two per side for Symmetric and Two
+        sides), named from the profile's lines, and no two elements share a name."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = 6
@@ -605,11 +606,15 @@ class TestRevolve(unittest.TestCase):
         revolution.Type = upToType
         if upToType == "UpToFace":
             revolution.UpToFace = (block, [self.wallAtXZero(block)])
+        if sideType == "Two sides":
+            revolution.Type2 = upToType
+            if upToType == "UpToFace":
+                revolution.UpToFace2 = (block, [self.wallAtXZero(block)])
         self.Doc.recompute()
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertEqual(len(revolution.Shape.Solids), 1)
 
-        sides = 2 if sideType == "Symmetric" else 1
+        sides = 1 if sideType == "One side" else 2
         rings = sides * math.pi / 4 * ((2**2 - 1**2) + (4**2 - 3**2)) * 2
         if kind == "Revolution":
             self.assertAlmostEqual(revolution.Shape.Volume, 216 + rings, places=6)
@@ -663,13 +668,18 @@ class TestRevolve(unittest.TestCase):
     def testGrooveTwoFacesSymmetric(self):
         self.revolveTwoFaces("Groove", sideType="Symmetric")
 
-    def testRevolutionTwoFacesAcrossTheAxis(self):
-        """Faces on opposite sides of the axis whose sweeps overlap give the union of the sweeps
-        (ops#263, decision 44). The profile on XZ: A, x in [10, 14], and B, x in [-16, -12],
-        z in [0, 2], revolved about the origin's Z axis up to the face x = 0 of a wall x in
-        [-1, 0], y in [0, 30], z in [0, 3] (90). A sweeps 90 degrees, from 0 to the wall;
-        B sweeps 270, from 180 through 270 and 0 to the wall, across A's quarter at radii 12..14.
-        The tools are fused: A + B - their overlap."""
+    def testRevolutionTwoFacesTwoSides(self):
+        self.revolveTwoFaces("Revolution", sideType="Two sides")
+
+    def testGrooveTwoFacesTwoSides(self):
+        self.revolveTwoFaces("Groove", sideType="Two sides")
+
+    def testRevolutionTwoFacesTwoSidesUpToFirst(self):
+        self.revolveTwoFaces("Revolution", sideType="Two sides", upToType="UpToFirst")
+
+    def revolveAcrossTheAxis(self, angle2=None):
+        """The profile of testRevolutionTwoFacesAcrossTheAxis() revolved up to the wall's face;
+        with `angle2`, Two sides, side 2 by that angle."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         wall = body.newObject("PartDesign::AdditiveBox", "Wall")
         wall.Length = 1
@@ -702,9 +712,23 @@ class TestRevolve(unittest.TestCase):
         revolution.Refine = False
         revolution.Type = "UpToFace"
         revolution.UpToFace = (wall, [face])
+        if angle2 is not None:
+            revolution.SideType = "Two sides"
+            revolution.Type2 = "Angle"
+            revolution.Angle2 = angle2
         self.Doc.recompute()
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertEqual(len(revolution.Shape.Solids), 1)
+        return wall, sketch, revolution
+
+    def testRevolutionTwoFacesAcrossTheAxis(self):
+        """Faces on opposite sides of the axis whose sweeps overlap give the union of the sweeps
+        (ops#263, decision 44). The profile on XZ: A, x in [10, 14], and B, x in [-16, -12],
+        z in [0, 2], revolved about the origin's Z axis up to the face x = 0 of a wall x in
+        [-1, 0], y in [0, 30], z in [0, 3] (90). A sweeps 90 degrees, from 0 to the wall;
+        B sweeps 270, from 180 through 270 and 0 to the wall, across A's quarter at radii 12..14.
+        The tools are fused: A + B - their overlap."""
+        wall, sketch, revolution = self.revolveAcrossTheAxis()
         a = math.pi / 4 * (14**2 - 10**2) * 2
         b = 3 * math.pi / 4 * (16**2 - 12**2) * 2
         overlap = math.pi / 4 * (14**2 - 12**2) * 2
@@ -716,6 +740,60 @@ class TestRevolve(unittest.TestCase):
         self.assertFalse(revolution.Shape.isInside(FreeCAD.Vector(-10, 10, 1), 1e-7, True))
         harness.assertEveryElementNamed(revolution.Shape)
         harness.assertDistinctNames(revolution.Shape)
+
+    def revolveAcrossTheAxisTwoSides(self, angle2, sweeps):
+        """Two sides across the axis, side 1 up to the wall's face, side 2 by `angle2` degrees
+        (PR 259 round 1, M1). B's side 1 crosses A's start face, the seam at 0 degrees, at
+        radii 12..14, so the fusion of side 1's tools splits the seam's elements there. Side 1's
+        seam is marked (CPY;1) on each face's tool before the fusion: every name from the profile
+        on an element of the seam plane (y = 0, x in [10, 14]) carries this feature's copy
+        section, side 1's or side 2's. Marked after the fusion, the split pieces kept the
+        profile's names unmarked. `sweeps` is the tool's volume over 2 (the profile's height)."""
+        wall, sketch, revolution = self.revolveAcrossTheAxis(angle2)
+        tool = revolution.Shape.cut(wall.Shape)
+        self.assertAlmostEqual(tool.Volume, 2 * sweeps, places=6)
+        reverse = revolution.Shape.ElementReverseMap
+        seam = []
+        for kind, elements in (
+            ("Face", revolution.Shape.Faces),
+            ("Edge", revolution.Shape.Edges),
+            ("Vertex", revolution.Shape.Vertexes),
+        ):
+            for i, element in enumerate(elements):
+                bounds = element.BoundBox
+                if abs(bounds.YMin) < 1e-7 and abs(bounds.YMax) < 1e-7 and bounds.XMin > 9:
+                    seam.append("%s%d" % (kind, i + 1))
+        self.assertTrue(seam)
+        profile = f";{sketch.ID};SKT;"
+        marked = f";{revolution.ID};CPY;"
+        for name in seam:
+            mapped = reverse.get(name)
+            mapped = [mapped] if isinstance(mapped, str) else list(mapped or [])
+            self.assertTrue(mapped, name)
+            for each in mapped:
+                expanded = FreeCAD.expandMappedName(each).replace("^", "")
+                if profile in expanded:
+                    self.assertIn(marked, expanded, name)
+        harness.assertEveryElementNamed(revolution.Shape)
+        harness.assertDistinctNames(revolution.Shape)
+
+    @staticmethod
+    def sector(r0, r1, degrees):
+        """The area of the ring sector from radius r0 to r1 over `degrees`."""
+        return math.radians(degrees) / 2 * (r1**2 - r0**2)
+
+    def testRevolutionTwoFacesAcrossTheAxisTwoSides(self):
+        """Side 2 by 30 degrees: A from -30 to 0 and B from 150 to 180, A's across B's side 1
+        at radii 12..14. The seam lies inside, its edges on the outside."""
+        side1 = self.sector(10, 14, 90) + self.sector(12, 16, 270) - self.sector(12, 14, 90)
+        side2 = self.sector(10, 14, 30) + self.sector(12, 16, 30) - self.sector(12, 14, 30)
+        self.revolveAcrossTheAxisTwoSides(30, side1 + side2)
+
+    def testRevolutionTwoFacesAcrossTheAxisTwoSidesSameWay(self):
+        """Side 2 by -20 degrees, within side 1: the seam's piece at radii 10..12 is a face of
+        the result."""
+        side1 = self.sector(10, 14, 90) + self.sector(12, 16, 270) - self.sector(12, 14, 90)
+        self.revolveAcrossTheAxisTwoSides(-20, side1)
 
     def profileAcross(self, body):
         """The profile x in [1, 3], z in [0, 2] on XZ, revolved about Z (its V axis) in the tests

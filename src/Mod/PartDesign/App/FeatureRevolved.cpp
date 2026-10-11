@@ -579,7 +579,10 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             fuseSideResults = usesBRepFeatRevolution(method, revolMode)
                 || usesBRepFeatRevolution(method2, revolMode);
 
-            addRevolution(markSeam(generateSingleRevolutionSide(
+            // Side 1's seam is marked on each face's tool, before the tools are fused: the
+            // fusion renames a start face piece that another face's tool crosses, and the mark
+            // then missed it, silently (PR 259 round 1)
+            addRevolution(generateSingleRevolutionSide(
                 method,
                 angle,
                 UpToFace,
@@ -589,8 +592,9 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 pnt,
                 dir,
                 invObjLoc,
-                revolMode
-            )));
+                revolMode,
+                true
+            ));
 
             gp_Dir dir2 = dir;
             dir2.Reverse();
@@ -633,8 +637,10 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
             gp_Dir dir2 = dir;
             dir2.Reverse();
+            const bool ownNamesPerFace = faces.size() > 1
+                && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
             auto perFace = [&](TopoShape tool) {
-                return faces.size() > 1 ? ownNamesWhereNamed(tool, getID()) : tool;
+                return ownNamesPerFace ? ownNamesWhereNamed(tool, getID()) : tool;
             };
             for (std::size_t i = 0; i < faces.size(); ++i) {
                 TopoShape upToFace
@@ -740,7 +746,13 @@ TopoShape Revolved::tryToRevolveToFace(
     Part::RevolMode revolMode
 ) const
 {
-    // The callers pass one face at a time (upToProfileFaces, ops#263).
+    // The callers pass one face at a time (upToProfileFaces, ops#263): one BRepFeat call for
+    // several faces names only the last face's elements from the profile.
+    if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
+        throw Base::RuntimeError(
+            "Revolution: Internal error: several profile faces passed to tryToRevolveToFace()"
+        );
+    }
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
         supportface = TopoDS_Face();
@@ -887,7 +899,8 @@ TopoShape Revolved::generateSingleRevolutionSide(
     const gp_Pnt& pnt,
     const gp_Dir& dir,
     const TopLoc_Location& invObjLoc,
-    Part::RevolMode revolMode
+    Part::RevolMode revolMode,
+    bool markSeam
 )
 {
     TopoShape revolution = makeTopoShape();
@@ -899,6 +912,9 @@ TopoShape Revolved::generateSingleRevolutionSide(
             return revolution;
         }
         generateRevolution(revolution, sketchshape, gp_Ax1(pnt, dir), angle, 0.0, false, false, method);
+        if (markSeam) {
+            markStartCap(revolution, sketchshape, "1");
+        }
     }
     else if (
         method == RevolMethod::ToFirst
@@ -908,14 +924,22 @@ TopoShape Revolved::generateSingleRevolutionSide(
         gp_Ax1 axis(pnt, dir);
         // Each face of the profile up to its own face (its own first or last one), fused (ops#263)
         const std::vector<TopoShape> faces = upToProfileFaces(sketchshape);
+        // The own-names pass reads V2's sections only (PR 259 round 1)
+        const bool ownNamesPerFace = faces.size() > 1
+            && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
         std::vector<TopoShape> tools;
         for (const TopoShape& face : faces) {
             TopoShape upToFace
                 = getRevolutionUpToFace(method, upToFaceProp, base, face, invObjLoc, axis);
             TopoShape tool = tryToRevolveToFace(upToFace, axis, base, supportface, face, revolMode);
-            if (!tool.isNull() && !tool.getShape().IsNull()) {
-                tools.push_back(faces.size() > 1 ? ownNamesWhereNamed(tool, getID()) : tool);
+            if (tool.isNull() || tool.getShape().IsNull()) {
+                continue;
             }
+            // Side 1's seam before the own-names pass, as Symmetric's
+            if (markSeam) {
+                markStartCap(tool, sketchshape, "1");
+            }
+            tools.push_back(ownNamesPerFace ? ownNamesWhereNamed(tool, getID()) : tool);
         }
         if (tools.size() == 1) {
             revolution = tools.front();
