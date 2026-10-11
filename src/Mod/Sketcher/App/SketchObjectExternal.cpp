@@ -448,6 +448,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
 
     auto* psObj = static_cast<SketchObject*>(pObj);
 
+    // FreeCAD-CH (ops#280): an unaligned copy isn't flipped (xinv and yinv stay false), but a
+    // source whose plane faces the other way still sees this sketch's own geometry mirrored
+    const bool reversed = !xinv && !yinv
+        && psObj->Placement.getValue().getRotation().multVec(Base::Vector3d::UnitZ)
+                * this->Placement.getValue().getRotation().multVec(Base::Vector3d::UnitZ)
+            < 0;
+
     const std::vector<Part::Geometry*>& vals = getInternalGeometry();
 
     const std::vector<Sketcher::Constraint*>& cvals = Constraints.getValues();
@@ -692,12 +699,23 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                     const std::string external = "ExternalEdge"
                         + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", a copy of '"
                         + this->Label.getValue() + "' " + element;
-                    if (xinv || yinv) {
-                        // the copy is mirrored, the sketch's own geometry isn't: which of its
-                        // points the constraint's position names isn't known (an arc's ends swap)
+                    if (reversed) {
+                        // the source sees this sketch's geometry mirrored and the copy isn't
+                        // flipped back: neither the points nor the values carry over
                         refused = "it is on " + external
-                            + ", and the copy is mirrored here, so which point of it the "
-                              "constraint names isn't known";
+                            + ", which the source sees mirrored (its plane faces the other way), "
+                              "and the copy isn't flipped back here";
+                        break;
+                    }
+                    const PointPos named = constr->getPosId(i);
+                    if ((xinv || yinv) && posId == PointPos::none
+                        && (named == PointPos::start || named == PointPos::end)
+                        && !vals[mapped->second]->is<Part::GeomLineSegment>()) {
+                        // the copy is flipped back, so lines, points and values map; but an
+                        // arc's ends swap when mirrored (a sketch's arcs run counterclockwise),
+                        // and other curves' aren't known to keep theirs
+                        refused = "it is on an end of " + external
+                            + ", and the copy is mirrored here, so which end it names isn't known";
                         break;
                     }
                     if (posId != PointPos::none) {
@@ -3096,11 +3114,13 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 Exact   // and each is the saved one, within tolerance
             };
             // the match, and for the same kinds how far the built geometry is from the saved one
+            bool built = false;  // a type gave geometry: the element is there
             auto matchSaved = [&](long type) -> std::pair<Match, double> {
                 setType(type);
                 geos.clear();
                 try {
                     build();
+                    built = built || !geos.empty();
                     if (!std::equal(geos.begin(), geos.end(), saved.begin(), saved.end(),
                                     [](const auto& geo, const Part::Geometry* old) {
                                         return geo->getTypeId() == old->getTypeId();
@@ -3196,6 +3216,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                             << ": its type can't be told from a type list saved before ops#140;"
                             << " it keeps type " << indexType);
                 }
+                else if (built) {
+                    // FreeCAD-CH (ops#237): the element is back, but no type gives the saved
+                    // geometry: built with the type at its index, the link's saved geometry is
+                    // replaced, and nothing could tell its type any more
+                    FC_WARN("External link " << key << " in " << getFullName()
+                            << ": its element is back, but no type gives its saved geometry, so"
+                            << " its type can't be told from a type list saved before ops#140;"
+                            << " it takes type " << indexType
+                            << ", the type at its index, which can be another link's");
+                    undecidedTypeKeys.erase(key);
+                    typesRepaired = true;
+                }
             }
             if (decided && !typesOnly) {
                 undecidedTypeKeys.erase(key);
@@ -3204,10 +3236,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             setType(Types[i]);
             geos.clear();
         }
-        if (keepFrozen) {
-            refSet.insert(key);
-            continue;
-        }
+        // FreeCAD-CH (ops#278): a frozen link too, before it is skipped below: once unfrozen or
+        // resynced its rebuild hands the Ids out by kind as well
         if (typesOnly && hasSource) {
             // FreeCAD-CH (ops#269): geometry saved before ops#264 has no kinds, and its first
             // rebuild would give its Ids by position across them: a Both link whose projection
@@ -3262,11 +3292,16 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     FC_WARN("External link " << key << " in " << getFullName()
                             << ": its geometry was saved without recording which was projected "
                                "and which intersections, and its type no longer gives the same "
-                               "geometries; at its next rebuild the Ids go by position: check "
-                               "the constraints on it");
+                               "geometries; at its next rebuild"
+                            << (keepFrozen ? " (once it is unfrozen)" : "")
+                            << " the Ids go by position: check the constraints on it");
                 }
                 geos.clear();
             }
+        }
+        if (keepFrozen) {
+            refSet.insert(key);
+            continue;
         }
         if (!hasSource || typesOnly) {
             continue;
@@ -4050,6 +4085,30 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
                     break;
                 }
             }
+        }
+    }
+
+    // FreeCAD-CH (ops#278): kept geometry without a kind (also parked before ops#264, when parking
+    // kept none) splits a Both entry's Ids between its projection and its intersections by
+    // position: a split that moved while the entry was parked moves constraints
+    if (type == static_cast<int>(ExtType::Both)) {
+        bool kindless = false;
+        for (std::size_t n = 0; n < refs.size() && !kindless; ++n) {
+            if (!kept[n]) {
+                continue;
+            }
+            for (const auto* geo : geos) {
+                if (GeometryFacade::getId(geo) == refs[n]) {
+                    kindless = !kindOf(geo);
+                    break;
+                }
+            }
+        }
+        if (kindless) {
+            FC_WARN("External link " << key << " in " << getFullName()
+                    << ": its geometry, put back from where it was set aside, doesn't record "
+                       "which was projected and which intersections; at its next rebuild the "
+                       "Ids go by position: check the constraints on it");
         }
     }
 

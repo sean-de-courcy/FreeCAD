@@ -7,6 +7,7 @@ point, external geometry or nothing (GeoUndef). Designed geometry: a 10 x 10 squ
 one line apart from it in the destination, and edges of a box as external geometry; each copied
 element must name a geometry equal to the source's, with its position unchanged."""
 
+import math
 import os
 import re
 import shutil
@@ -161,26 +162,105 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         dest.solve()
         self.assertLess((dest.Geometry[2].StartPoint - dest.Geometry[1].EndPoint).Length, 1e-6)
 
-    def test_mirrored_copy_refuses_a_constraint_on_a_self_reference(self):
-        """Source turned over (180 degrees about X), so its copy is mirrored, while Dest's own
-        geometry isn't: which end of Edge2 a constraint on a line external at Dest.Edge2 names
-        isn't known, so that constraint isn't copied (with a warning). The length named width
-        after it is, and its expression lands on it, not one constraint further on."""
+    def turn_source_over(self):
+        """Source turned over, 180 degrees about X: it sees Dest's geometry with y the other
+        way round."""
         self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(1, 0, 0), 180))
-        self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
-        # Edge2 seen from the turned-over Source: y runs the other way
-        facade = Sketcher.ExternalGeometryFacade(Part.LineSegment(V(10, 0, 0), V(10, -10, 0)))
-        facade.Ref = "Dest.Edge2"
+
+    def add_self_reference(self, geometry, ref):
+        """`geometry` as an external of Source whose ref names Dest's `ref`: -3, the first."""
+        facade = Sketcher.ExternalGeometryFacade(geometry)
+        facade.Ref = ref
         self.source.ExternalGeo = list(self.source.ExternalGeo) + [facade.Geometry]
-        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+
+    def add_dest_arc(self):
+        """Dest's Edge3: a quarter of the circle of radius 10 about the origin, from (10, 0) to
+        (0, 10). Seen from the turned-over Source it runs from (0, -10) to (10, 0): a sketch's
+        arcs run counterclockwise, so its start is the image of Dest's end. Returns that arc."""
+        circle = Part.Circle(V(0, 0, 0), V(0, 0, 1), 10)
+        self.dest.addGeometry(Part.ArcOfCircle(circle, 0, math.pi / 2), False)
+        seen = Part.ArcOfCircle(circle, -math.pi / 2, 0)
+        end = self.dest.Geometry[2].EndPoint
+        self.assertLess((seen.StartPoint - V(end.x, -end.y, 0)).Length, TOL)
+        return seen
+
+    def add_width(self):
+        """A length named width on Source's line, after the constraints on the external, with
+        an expression."""
         width = self.source.addConstraint(Sketcher.Constraint("Distance", 0, 10))
         self.source.renameConstraint(width, "width")
+        self.source.setExpression(".Constraints.width", "4 mm + 6 mm")
+
+    def assert_width_copied_last(self):
+        """The width is the last constraint copied, and its expression lands on it, not one
+        constraint further on."""
+        last = len(self.dest.Constraints) - 1
+        self.assertEqual(self.dest.Constraints[last].Name, "width")
+        paths = [path for path, _ in self.dest.ExpressionEngine]
+        self.assertEqual(len(paths), 1)
+        self.assertIn(
+            paths[0], ("Constraints[%d]" % last, ".Constraints[%d]" % last, ".Constraints.width")
+        )
+
+    def test_mirrored_copy_keeps_a_constraint_on_a_self_referenced_line_end(self):
+        """ops#280 (the PR 250 verification's nit): Source turned over and copied aligned, so
+        the copy is mirrored back. A line keeps its start then (projected or mirrored, a line
+        runs the same way): the source line's start on the start of a line external at
+        Dest.Edge2 is copied, and the copy's start is on Edge2's start, (10, 0). Before, every
+        constraint on a self-reference was refused in a mirrored copy."""
+        self.turn_source_over()
+        self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
+        # Edge2 seen from the turned-over Source: y runs the other way
+        self.add_self_reference(Part.LineSegment(V(10, 0, 0), V(10, -10, 0)), "Dest.Edge2")
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        self.add_width()
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        coincident = self.dest.Constraints[0]
+        self.assertEqual(
+            (coincident.Type, coincident.First, coincident.FirstPos),
+            ("Coincident", 2, 1),
+        )
+        self.assertEqual((coincident.Second, coincident.SecondPos), (1, 1))
+        self.assert_width_copied_last()
+        self.dest.solve()
+        self.assertLess((self.dest.Geometry[2].StartPoint - V(10, 0, 0)).Length, 1e-6)
+
+    def test_mirrored_copy_refuses_a_constraint_on_a_self_referenced_arc_end(self):
+        """Mirrored back, an arc's ends swap: which end of Dest's arc a constraint on the start
+        of an arc external at Dest.Edge3 names isn't known, so that constraint isn't copied (with
+        a warning). One on the arc without a position (the line's end on it) is: an arc's
+        points don't swap. The width after them is copied with its expression."""
+        self.turn_source_over()
+        self.dest.setAllowUnaligned(False)
+        self.add_self_reference(self.add_dest_arc(), "Dest.Edge3")
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        self.source.addConstraint(Sketcher.Constraint("PointOnObject", 0, 2, -3))
+        self.add_width()
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["PointOnObject", "Distance"])
+        on_arc = self.dest.Constraints[0]
+        self.assertEqual((on_arc.First, on_arc.FirstPos, on_arc.Second), (3, 2, 2))
+        self.assert_width_copied_last()
+
+    def test_reversed_unaligned_copy_refuses_a_constraint_on_a_self_reference(self):
+        """ops#280 (PR 250 verification 1): Source turned over and copied unaligned (the
+        default), so the copy isn't flipped back, and Source still sees Dest's geometry mirrored:
+        a constraint on the start of an arc external at Dest.Edge3 named Dest's arc's end, and
+        copied as it was it named its start. No constraint on the self-reference is copied then,
+        with or without a position; the width is, with its expression. Before, both were copied
+        (with only the warning that they are on the edge itself)."""
+        self.turn_source_over()
+        # Dest allows unaligned copies by default
+        self.add_self_reference(self.add_dest_arc(), "Dest.Edge3")
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        self.source.addConstraint(Sketcher.Constraint("PointOnObject", 0, 2, -3))
+        self.add_width()
         self.dest.carbonCopy("Source", False)
         self.assertEqual(len(self.dest.ExternalGeo), 2)
         self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
-        paths = [path for path, _ in self.dest.ExpressionEngine]
-        self.assertEqual(len(paths), 1)
-        self.assertIn(paths[0], ("Constraints[0]", ".Constraints[0]", ".Constraints.width"))
+        self.assert_width_copied_last()
 
 
 if __name__ == "__main__":

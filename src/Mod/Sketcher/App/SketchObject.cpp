@@ -1522,6 +1522,32 @@ void SketchObject::onUndoRedoFinished()
     // prevents solve() from working before such a recompute in case it is redoing an operation with
     // invalid data.
     Constraints.checkConstraintIndices(getHighestCurveIndex(), -getExternalGeometryCount());
+
+    // FreeCAD-CH (ops#237 Q5): undo/redo restores ExternalTypes, with the entries after the links'
+    // types that wait for a repair, but not which links wait (a deciding rebuild undone left them
+    // decided, and the next rebuild with their element back kept the type at the index). Each
+    // link whose saved geometry is missing waits again, as on a later open: a full rebuild
+    // matches it with that geometry once its element is back
+    externalTypeRepairPending = ExternalTypes.getSize() > ExternalGeometry.getSize();
+    undecidedTypeKeys.clear();
+    if (externalTypeRepairPending) {
+        for (const auto& key : externalGeoRef) {
+            auto refs = externalGeoRefMap.find(key);
+            if (refs == externalGeoRefMap.end()) {
+                continue;
+            }
+            for (long id : refs->second) {
+                auto it = externalGeoMap.find(id);
+                if (it != externalGeoMap.end()
+                    && ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                           ->testFlag(ExternalGeometryExtension::Missing)) {
+                    undecidedTypeKeys.insert(key);
+                    break;
+                }
+            }
+        }
+    }
+
     acceptGeometry();
     synchroniseGeometryState();
     solve();
