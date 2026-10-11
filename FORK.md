@@ -251,7 +251,8 @@ names it.
 | `fix/234-pipe-copy-step-followups` | fix | ops#234 | - | `fix/225-pipe-copy-followups` `97d11994a2` | `5206f693a5` (fork PR 219), 2026-10-08 | never (fork fix) |
 | `fix/238-transaction-move-del-gaps` | fix | ops#238 | - | `integration` `ecb2ada10a` | `d93605a352` (fork PR 222), 2026-10-08 | when upstream's `Transaction` takes back moves into and out of objects created in the transaction and `moveDynamicProperty` completes a move a handler threw from |
 | `fix/230-makecopy-recompute` | fix | ops#230 | - | `integration` `5169738cd5` | `7801f7c453` (fork PR 223), 2026-10-08 | never (fork fix) |
-| `fix/236-makecopy-independent-copy` | fix | ops#236, ops#241 | - | `fix/230-makecopy-recompute` `88885d827d` (fork PR 223) | (fork PR 224) | never (fork fix) |
+| `fix/236-makecopy-independent-copy` | fix | ops#236, ops#241 | - | `fix/230-makecopy-recompute` `88885d827d` (fork PR 223) | `2bc636bdc4` (fork PR 224), 2026-10-10 | never (fork fix) |
+| `fix/243-pipe-recompute-failure` | fix | ops#243 | - | `integration` `2bc636bdc4` | (fork PR 226) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

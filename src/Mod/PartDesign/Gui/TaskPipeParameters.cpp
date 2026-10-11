@@ -33,6 +33,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 
 #include <Standard_Failure.hxx>
 #include <fmt/format.h>
@@ -526,8 +527,9 @@ void copyOutsideObjects(
             if (!PartDesignGui::TaskFeaturePick::sameElement(obj, copied(obj), sub)) {
                 throw Base::RuntimeError(fmt::format(
                     "{}: {} '{}' of '{}' would name another element on a copy, whose shape "
-                    "differs (or the element can't be read). Recompute '{}' and pick the "
-                    "reference again, or make a cross-reference instead.",
+                    "differs (or the element can't be read). If '{}' isn't up to date, "
+                    "recompute it and pick the reference again; otherwise make a "
+                    "cross-reference instead.",
                     pipe->Label.getValue(),
                     property,
                     sub,
@@ -654,36 +656,87 @@ bool TaskPipeParameters::accept()
         independent = dlg.radioIndependent->isChecked();
     }
 
-    // FreeCAD-CH (ops#234 round 2): a copy that fails, or a reference a copy can't keep, stops
-    // the copy step before it writes anything. Its copies are removed inside the edit's still-open
-    // transaction (created and removed in it, they leave nothing), and the edit stays open: the
-    // user can fix the reference and press OK again, or Cancel, which restores the state from
-    // before the edit. Aborting the transaction here undid the whole edit under the open panel.
-    if (copyOutside) {
-        auto stop = [&](const char* what) {
-            App::Document* doc = pipe->getDocument();
-            for (auto it = copies.rbegin(); it != copies.rend(); ++it) {
-                if ((*it)->isAttachedToDocument()) {
+    // FreeCAD-CH (ops#234 round 2, ops#243): a copy that fails, or a reference a copy can't
+    // keep, stops the copy step before it writes anything, and a pipe that then fails to
+    // recompute undoes it. Only the copy step is undone, inside the edit's still-open transaction:
+    // its objects, created and removed in it, leave nothing, and the three properties get their
+    // values from before it back. The edit stays open: the user can fix it and press OK again, or
+    // Cancel, which restores the state from before the edit. Aborting the transaction undid the
+    // whole edit under the open panel, and OK again then committed the old spine, outside undo.
+    std::unique_ptr<App::Property> spineBefore;
+    std::unique_ptr<App::Property> auxSpineBefore;
+    std::unique_ptr<App::Property> sectionsBefore;
+    std::vector<std::pair<App::Document*, std::set<App::DocumentObject*>>> objectsBefore;
+    // true when a property was written back
+    auto undoCopyStep = [&]() {
+        bool restored = false;
+        if (spineBefore) {
+            // the links first, so none is left on a removed object; a property is written only
+            // when the copy step changed it (its objects are replaced by copies)
+            auto restore = [&](App::PropertyLinkSub& prop, const App::Property& before) {
+                auto& old = static_cast<const App::PropertyLinkSub&>(before);
+                if (prop.getValue() != old.getValue()) {
+                    prop.Paste(before);
+                    restored = true;
+                }
+            };
+            restore(pipe->Spine, *spineBefore);
+            restore(pipe->AuxiliarySpine, *auxSpineBefore);
+            if (pipe->Sections.getValues()
+                != static_cast<const App::PropertyLinkSubList&>(*sectionsBefore).getValues()) {
+                pipe->Sections.Paste(*sectionsBefore);
+                restored = true;
+            }
+        }
+        // every object the copy step made, also one makeCopy didn't finish, each through its own
+        // document: makeCopy makes them in the active one
+        for (auto& [doc, before] : objectsBefore) {
+            std::vector<App::DocumentObject*> objs = doc->getObjects();
+            for (auto it = objs.rbegin(); it != objs.rend(); ++it) {
+                if (!before.count(*it) && (*it)->isAttachedToDocument()) {
                     doc->removeObject((*it)->getNameInDocument());
                 }
             }
-            copies.clear();
-            QMessageBox::warning(
-                this,
-                tr("Input Error"),
-                QApplication::translate("Exception", what) + QStringLiteral("\n\n")
-                    + tr("No copy was kept, and the edit is still open.")
-            );
-            return false;
-        };
+        }
+        copies.clear();
+        return restored;
+    };
+    auto stop = [&](const QString& what) {
+        if (undoCopyStep()) {
+            // the panel shows the pipe it would commit
+            pipe->recomputeFeature();
+        }
+        QMessageBox::warning(
+            this,
+            tr("Input Error"),
+            what + QStringLiteral("\n\n")
+                + (copyOutside ? tr("No copy was kept, and the edit is still open.")
+                               : tr("The edit is still open."))
+        );
+        return false;
+    };
+
+    if (copyOutside) {
+        spineBefore.reset(pipe->Spine.Copy());
+        auxSpineBefore.reset(pipe->AuxiliarySpine.Copy());
+        sectionsBefore.reset(pipe->Sections.Copy());
+        for (App::Document* doc : {pipe->getDocument(), App::GetApplication().getActiveDocument()}) {
+            if (doc && (objectsBefore.empty() || objectsBefore.front().first != doc)) {
+                std::vector<App::DocumentObject*> objs = doc->getObjects();
+                objectsBefore.emplace_back(
+                    doc,
+                    std::set<App::DocumentObject*>(objs.begin(), objs.end())
+                );
+            }
+        }
         try {
             copyOutsideObjects(pipe, pcActiveBody, outside, independent, copies);
         }
         catch (const Base::Exception& e) {
-            return stop(e.what());
+            return stop(QApplication::translate("Exception", e.what()));
         }
         catch (const Standard_Failure& e) {
-            return stop(e.GetMessageString());
+            return stop(QString::fromUtf8(e.GetMessageString()));
         }
     }
 
@@ -697,6 +750,15 @@ bool TaskPipeParameters::accept()
         if (!getObject()->isValid()) {
             throw Base::RuntimeError(getObject()->getStatusString());
         }
+    }
+    catch (const Base::Exception& e) {
+        return stop(QApplication::translate("Exception", e.what()));
+    }
+    catch (const Standard_Failure& e) {
+        return stop(QString::fromUtf8(e.GetMessageString()));
+    }
+
+    try {
         Gui::cmdGuiDocument(pipe, "resetEdit()");
         pipe->getDocument()->commitTransaction();
 
