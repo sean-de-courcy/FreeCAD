@@ -766,6 +766,7 @@ class TestRevolve(unittest.TestCase):
         self.assertTrue(seam)
         profile = f";{sketch.ID};SKT;"
         marked = f";{revolution.ID};CPY;"
+        fromProfile = []
         for name in seam:
             mapped = reverse.get(name)
             mapped = [mapped] if isinstance(mapped, str) else list(mapped or [])
@@ -773,7 +774,11 @@ class TestRevolve(unittest.TestCase):
             for each in mapped:
                 expanded = FreeCAD.expandMappedName(each).replace("^", "")
                 if profile in expanded:
+                    fromProfile.append(name)
                     self.assertIn(marked, expanded, name)
+        # Without a name from the profile on the seam, the check above holds vacuously (PR 259
+        # verification 1, L1).
+        self.assertTrue(fromProfile)
         harness.assertEveryElementNamed(revolution.Shape)
         harness.assertDistinctNames(revolution.Shape)
 
