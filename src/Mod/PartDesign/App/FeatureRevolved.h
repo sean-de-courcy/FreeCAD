@@ -129,7 +129,8 @@ private:
         const gp_Pnt& pnt,
         const gp_Dir& dir,
         const TopLoc_Location& invObjLoc,
-        Part::RevolMode revolMode
+        Part::RevolMode revolMode,
+        bool markSeam = false
     );
     void setResult(const TopoShape& base, const TopoShape& revolved);
 

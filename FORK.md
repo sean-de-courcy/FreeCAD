@@ -285,7 +285,8 @@ names it.
 | `fix/255-pad-twosided-names` | fix | ops#255 | - | `fix/254-symmetric-upto-sector` `ea7b468173` (stacked on fork PR 239) | `d9a3826388` (fork PR 243), 2026-10-11 | never (fork fix) |
 | `fix/134-random-reorder-edits` | fix | ops#134, ops#286 | - | `integration` `000f6639bd` | `e5d14c301b` (fork PR 256), 2026-10-11 | never (fork tests) |
 | `fix/284-continuation-collinear` | fix | ops#284 | - | `integration` `000f6639bd` | `7408058275` (fork PR 257), 2026-10-11 | never (fork fix) |
-| `fix/284-followups` | fix | ops#284 | - | `fix/284-continuation-collinear` `1e91d07eef` (stacked on fork PR 257) | (fork PR 258) | never (fork fix) |
+| `fix/284-followups` | fix | ops#284 | - | `fix/284-continuation-collinear` `1e91d07eef` (stacked on fork PR 257) | `551ce8b8a7` (fork PR 258), 2026-10-11 | never (fork fix) |
+| `fix/263-multiface-upto-revolve` | fix | ops#263 | - | `integration` `d9a3826388` | (fork PR 259) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

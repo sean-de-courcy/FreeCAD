@@ -231,6 +231,70 @@ TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrore
     return mirrored;
 }
 
+// The faces an up-to revolution revolves one at a time: a profile of several separate faces is
+// revolved face by face, each up to its own face, and the tools are fused (ops#263). One
+// BRepFeat call for the whole profile named only its last face's elements from the profile: its
+// later per-face steps rebuild the earlier faces' edges, so references to those faces could move
+// to other faces silently. A profile of one face (also in a compound) stays whole, as before.
+std::vector<TopoShape> upToProfileFaces(const TopoShape& profile)
+{
+    if (profile.countSubShapes(TopAbs_FACE) > 1) {
+        return profile.getSubTopoShapes(TopAbs_FACE);
+    }
+    return {profile};
+}
+
+// One face's tool of a profile of several, with only this feature's names on the elements that
+// have one (ops#263). BRepFeat names the pieces of a base edge it splits from that edge, told
+// apart by the duplicate counter alone, so the pieces in two faces' tools got the same name.
+// Each piece also has a name from its face's profile edge, and the fusion with the base names it
+// as the base edge's piece again. An element with no name of this feature's keeps its names.
+TopoShape ownNamesWhereNamed(const TopoShape& tool, long featureTag)
+{
+    if (!tool.hasElementMap()) {
+        return tool;
+    }
+    const std::string own = std::to_string(featureTag);
+    auto isOwn = [&own](const Data::MappedName& name) {
+        const auto& decoded = Data::MappedName::getDecodedMappedName(name.toString());
+        return !decoded.empty() && decoded.front().iterationTag == own;
+    };
+    struct Named
+    {
+        Data::IndexedName element;
+        Data::MappedName name;
+        Data::ElementIDRefs sids;
+    };
+    std::vector<Named> kept;
+    bool dropped = false;
+    for (const char* type : {"Vertex", "Edge", "Face"}) {
+        const int count = tool.countSubShapes(type);
+        for (int i = 1; i <= count; ++i) {
+            const auto element = Data::IndexedName::fromConst(type, i);
+            const auto names = tool.getElementMappedNames(element);
+            const bool hasOwn = std::ranges::any_of(names, [&](const auto& n) {
+                return isOwn(n.first);
+            });
+            for (const auto& [name, sids] : names) {
+                if (hasOwn && !isOwn(name)) {
+                    dropped = true;
+                    continue;
+                }
+                kept.push_back({element, name, sids});
+            }
+        }
+    }
+    if (!dropped) {
+        return tool;
+    }
+    TopoShape result(tool);
+    result.resetElementMap();
+    for (const auto& named : kept) {
+        result.setElementName(named.element, named.name, result.Tag, &named.sids);
+    }
+    return result;
+}
+
 }  // namespace
 
 Revolved::Revolved()
@@ -515,7 +579,10 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             fuseSideResults = usesBRepFeatRevolution(method, revolMode)
                 || usesBRepFeatRevolution(method2, revolMode);
 
-            addRevolution(markSeam(generateSingleRevolutionSide(
+            // Side 1's seam is marked on each face's tool, before the tools are fused: the
+            // fusion renames a start face piece that another face's tool crosses, and the mark
+            // then missed it, silently (PR 259 round 1)
+            addRevolution(generateSingleRevolutionSide(
                 method,
                 angle,
                 UpToFace,
@@ -525,8 +592,9 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 pnt,
                 dir,
                 invObjLoc,
-                revolMode
-            )));
+                revolMode,
+                true
+            ));
 
             gp_Dir dir2 = dir;
             dir2.Reverse();
@@ -553,41 +621,52 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             addRevolution(std::move(result));
         }
         else {
-            fuseSideResults = usesBRepFeatRevolution(method, revolMode);
+            // Each face of the profile on its own, both sides (ops#263); the sides and faces are
+            // fused, since two faces' tools may overlap.
+            const std::vector<TopoShape> faces = upToProfileFaces(sketchshape);
+            const std::vector<TopoShape> secondFaces = upToProfileFaces(secondSideProfile());
+            fuseSideResults = usesBRepFeatRevolution(method, revolMode) || faces.size() > 1;
             gp_Ax1 axis(pnt, dir);
-            TopoShape upToFace
-                = getRevolutionUpToFace(method, UpToFace, base, sketchshape, invObjLoc, axis);
-            TopoShape side = tryToRevolveToFace(
-                upToFace,
-                axis,
-                base,
-                supportface,
-                sketchshape.makeElementCopy(),
-                revolMode
-            );
-            if (!side.isNull() && !side.getShape().IsNull()) {
-                addRevolution(markSeam(side.makeElementCopy()));
-
-                // Use the profile's actual plane. The center of its axis-aligned bounding box is
-                // not necessarily on that plane for an asymmetric tilted profile; using it as
-                // the mirror origin made the angles unequal and could make BRepFeat fail.
-                gp_Pln sketchPlane;
-                if (!sketchshape.findPlane(sketchPlane)) {
-                    throw Base::RuntimeError("Could not determine the sketch plane!");
+            // Use the profile's actual plane. The center of its axis-aligned bounding box is not
+            // necessarily on that plane for an asymmetric tilted profile; using it as the mirror
+            // origin made the angles unequal and could make BRepFeat fail.
+            gp_Pln sketchPlane;
+            if (!sketchshape.findPlane(sketchPlane)) {
+                throw Base::RuntimeError("Could not determine the sketch plane!");
+            }
+            gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
+            gp_Dir dir2 = dir;
+            dir2.Reverse();
+            const bool ownNamesPerFace = faces.size() > 1
+                && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+            auto perFace = [&](TopoShape tool) {
+                return ownNamesPerFace ? ownNamesWhereNamed(tool, getID()) : tool;
+            };
+            for (std::size_t i = 0; i < faces.size(); ++i) {
+                TopoShape upToFace
+                    = getRevolutionUpToFace(method, UpToFace, base, faces[i], invObjLoc, axis);
+                TopoShape side = tryToRevolveToFace(
+                    upToFace,
+                    axis,
+                    base,
+                    supportface,
+                    faces[i].makeElementCopy(),
+                    revolMode
+                );
+                if (side.isNull() || side.getShape().IsNull()) {
+                    continue;
                 }
-                gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
+                addRevolution(perFace(markSeam(side.makeElementCopy())));
                 TopoShape mirroredUpToFace
                     = secondSideUpToFace(upToFace, upToFace.makeElementMirror(mirrorPlane));
-                gp_Dir dir2 = dir;
-                dir2.Reverse();
-                addRevolution(tryToRevolveToFace(
+                addRevolution(perFace(tryToRevolveToFace(
                     mirroredUpToFace,
                     gp_Ax1(pnt, dir2),
                     base,
                     supportface,
-                    secondSideProfile(),
+                    secondFaces[i],
                     revolMode
-                ));
+                )));
             }
         }
     }
@@ -667,19 +746,13 @@ TopoShape Revolved::tryToRevolveToFace(
     Part::RevolMode revolMode
 ) const
 {
-    // A profile of several separate faces would build, but only its last face's elements would be
-    // named from the profile: BRepFeat's later per-face steps rebuild the earlier faces' edges, so
-    // references to those faces could move to other faces silently (ops#263). Until then such a
-    // profile fails loudly, as it did before ops#240 (in every naming version). The faces are
-    // counted: a one-face profile in a compound still builds.
+    // The callers pass one face at a time (upToProfileFaces, ops#263): one BRepFeat call for
+    // several faces names only the last face's elements from the profile.
     if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Up to face, first or last can't revolve a profile of several separate faces yet. "
-            "Revolve each face in its own feature, or by an angle."
-        ));
+        throw Base::RuntimeError(
+            "Revolution: Internal error: several profile faces passed to tryToRevolveToFace()"
+        );
     }
-
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
         supportface = TopoDS_Face();
@@ -780,6 +853,8 @@ TopoShape Revolved::tryToRevolveToFace(
         return tool;
     };
 
+    // When the first attempt fails, the later one that succeeds names its elements by index, not
+    // from the profile (PR 235 review M1, ops#271).
     if (revolMode == Part::RevolMode::CutFromBase) {
         try {
             return makeRemovedVolume(makeRevolution(revolMode, Standard_True));
@@ -824,7 +899,8 @@ TopoShape Revolved::generateSingleRevolutionSide(
     const gp_Pnt& pnt,
     const gp_Dir& dir,
     const TopLoc_Location& invObjLoc,
-    Part::RevolMode revolMode
+    Part::RevolMode revolMode,
+    bool markSeam
 )
 {
     TopoShape revolution = makeTopoShape();
@@ -836,6 +912,9 @@ TopoShape Revolved::generateSingleRevolutionSide(
             return revolution;
         }
         generateRevolution(revolution, sketchshape, gp_Ax1(pnt, dir), angle, 0.0, false, false, method);
+        if (markSeam) {
+            markStartCap(revolution, sketchshape, "1");
+        }
     }
     else if (
         method == RevolMethod::ToFirst
@@ -843,10 +922,31 @@ TopoShape Revolved::generateSingleRevolutionSide(
         || method == RevolMethod::ToFace
     ) {
         gp_Ax1 axis(pnt, dir);
-        TopoShape upToFace
-            = getRevolutionUpToFace(method, upToFaceProp, base, sketchshape, invObjLoc, axis);
-
-        revolution = tryToRevolveToFace(upToFace, axis, base, supportface, sketchshape, revolMode);
+        // Each face of the profile up to its own face (its own first or last one), fused (ops#263)
+        const std::vector<TopoShape> faces = upToProfileFaces(sketchshape);
+        // The own-names pass reads V2's sections only (PR 259 round 1)
+        const bool ownNamesPerFace = faces.size() > 1
+            && getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+        std::vector<TopoShape> tools;
+        for (const TopoShape& face : faces) {
+            TopoShape upToFace
+                = getRevolutionUpToFace(method, upToFaceProp, base, face, invObjLoc, axis);
+            TopoShape tool = tryToRevolveToFace(upToFace, axis, base, supportface, face, revolMode);
+            if (tool.isNull() || tool.getShape().IsNull()) {
+                continue;
+            }
+            // Side 1's seam before the own-names pass, as Symmetric's
+            if (markSeam) {
+                markStartCap(tool, sketchshape, "1");
+            }
+            tools.push_back(ownNamesPerFace ? ownNamesWhereNamed(tool, getID()) : tool);
+        }
+        if (tools.size() == 1) {
+            revolution = tools.front();
+        }
+        else if (tools.size() > 1) {
+            revolution.makeElementFuse(tools, Part::OpCodes::Revolve);
+        }
     }
     else {
         throw Base::RuntimeError(
