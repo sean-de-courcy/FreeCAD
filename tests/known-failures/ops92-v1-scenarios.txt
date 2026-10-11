@@ -119,3 +119,17 @@ cli  PartDesignTests.TestNamingScenarios.DressUpInsertPocket.test_fillet_edge_V1
 
 reason: a reorder re-targets the hole sketch's support from Pad2 to the block by its name; V1's name of the face on Pad2 isn't the block's, so the support breaks ('?Face3'), where V2's name carries through the pad (ops#127)
 cli  PartDesignTests.TestNamingScenarios.MoveHoleAbovePadOnBlockFace.test_support_V1
+
+reason: an up-to Revolution or Groove in V1 keeps upstream's names: BRepFeat's result, without a tag, is its only source, so the next boolean names its faces by index, and a profile edge, an earlier feature's faces or the face moving shift them (ops#240, which names them from the profile in V2 only; V1 is the comparison column)
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceChamfer.test_sketch_top_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceChamfer.test_fillet_outer_arc_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceChamfer.test_binder_outer_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceHole.test_sketch_top_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceHole.test_fillet_outer_arc_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceHole.test_binder_outer_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceMove.test_fillet_outer_arc_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceMove.test_binder_outer_V1
+cli  PartDesignTests.TestNamingScenarios.GrooveUpToFaceChamfer.test_binder_outer_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceSymmetric.test_sketch_top_side1_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceUpToAndAngle.test_sketch_top_side1_V1
+cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceBothUpTo.test_sketch_top_side1_V1
