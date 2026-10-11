@@ -2979,17 +2979,19 @@ TEST_F(TopoShapeExpansionTest, makeElementRevolution)
         Part::RevolMode::None,
         Standard_False
     );
-    // Assert shape is correct: the wall and the quarter ring
-    EXPECT_NEAR(getVolume(result.getShape()), 9 + 3 * std::numbers::pi / 8, 1e-6);
+    // Assert shape is correct: the quarter ring alone (in RevolMode::None BRepFeat returns the
+    // revolved solid; PartDesign fuses it with the base afterwards)
+    EXPECT_NEAR(getVolume(result.getShape()), 3 * std::numbers::pi / 8, 1e-6);
     // Assert elementMap is correct (ops#240)
-    //   as a Pad up to a face: the profile's names, which the result links under its own tag (3).
-    //   The profile face is kept as the start face; each of its edges sweeps a face (GEN), and
-    //   each of its vertices an arc edge (GEN)
-    auto nameOf = [&](const std::string& element) {
-        return profile.getMappedName(IndexedName(element.c_str()));
+    //   as a Pad up to a face: named from the profile (tag 2), which has no element map here, so
+    //   its elements' names are their indexes. The profile face is kept as the start face; each of
+    //   its edges sweeps a face, and each of its vertices an arc edge, which the result names under
+    //   its own tag (3) as generated (GEN)
+    auto nameOf = [](const std::string& element) {
+        return unmappedName(element, 2, "RVL");
     };
     auto startFace = "Face" + std::to_string(result.findShape(profile.getShape()));
-    EXPECT_TRUE(elementHasNames(result, startFace.c_str(), {nameOf("Face1")}));
+    EXPECT_TRUE(elementHasNames(result, startFace.c_str(), {unmappedName("Face1", 2, "MKR")}));
     auto sweptBy = [&](const char* type, const std::string& element) {
         auto shape = profile.getSubShape(element.c_str());
         std::string swept;
@@ -3044,7 +3046,7 @@ TEST_F(TopoShapeExpansionTest, makeElementRevolutionV1)
     );
     // Assert: the same shape, and upstream's names, which ops#240 leaves alone: BRepFeat's result,
     // without a tag, is the only source, so the result has no element map
-    EXPECT_NEAR(getVolume(result.getShape()), 9 + 3 * std::numbers::pi / 8, 1e-6);
+    EXPECT_NEAR(getVolume(result.getShape()), 3 * std::numbers::pi / 8, 1e-6);
     EXPECT_EQ(result.getElementMapSize(), 0);
 }
 

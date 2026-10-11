@@ -715,17 +715,19 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         added = revolved.Shape.Volume - revolved.BaseFeature.Shape.Volume
         self.assertAlmostEqual(added, math.pi * 300 * 5 / 4)
         self.assertNamesDistinct(revolved.Shape)
-        fromProfile = re.compile(rf";{self.Doc.Profile.ID}\^*;SKT\^*;")
         shape = revolved.Shape
         ring = [
-            i for i, f in enumerate(shape.Faces, 1) if f.CenterOfMass.x > 1 and f.CenterOfMass.y > 1
+            i
+            for i, f in enumerate(shape.Faces, 1)
+            if f.CenterOfMass.x > 1 and f.CenterOfMass.y > -1e-6 and f.CenterOfMass.z > 5 + 1e-6
         ]
         self.assertEqual(len(ring), 4)  # the inner and outer cylinders, the start face and the top
         for i in ring:
             names = shape.ElementReverseMap[f"Face{i}"]
             for name in names if isinstance(names, list) else [names]:
-                self.assertRegex(name, fromProfile, f"Face{i}")
                 self.assertFalse(name.startswith("Face"), f"Face{i} is named by an index: {name}")
+                history = revolved.getElementHistory(name, recursive=True)
+                self.assertIn("Profile", [item[0].Name for item in history], f"Face{i}: {name}")
 
     def testRevolutionUpToFaceSidesNamedApart(self):
         """ops#240: the two sides of a Revolution up to a face, Symmetric or Two sides, are named

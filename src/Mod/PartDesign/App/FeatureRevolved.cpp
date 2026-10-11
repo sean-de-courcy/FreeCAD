@@ -355,12 +355,16 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     bool fuseSideResults = false;
 
     // Both sides are named from the same profile edges under the feature's tag, so in V2 the
-    // second side revolves a copy whose names are marked (CPY): otherwise the two sides' elements
-    // share names, told apart only by the duplicate counter in the order of the final fuse
-    // (ops#240). V1 keeps upstream's names.
+    // second side revolves a copy whose names are marked: a section with this feature's ID, CPY
+    // and side 2 appended to every name. Otherwise the two sides' elements share names, told apart
+    // only by the duplicate counter in the order of the final fuse (ops#240). The copy's op alone
+    // doesn't mark them: V2 copies a child's names as they are. V1 keeps upstream's names.
     auto secondSideProfile = [&]() {
-        const bool marked = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
-        return sketchshape.makeElementCopy(marked ? Part::OpCodes::Copy : nullptr);
+        TopoShape copy = sketchshape.makeElementCopy();
+        if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+            copy.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+        }
+        return copy;
     };
 
     if (sideType == "Two sides") {
