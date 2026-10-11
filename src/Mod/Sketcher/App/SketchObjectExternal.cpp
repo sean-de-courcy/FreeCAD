@@ -1152,6 +1152,21 @@ namespace
 // Set while addExternal adds a face's or shape's edges one by one: an edge that gives nothing
 // is skipped quietly, the whole add fails (loudly) only when none gives anything (ops#252)
 thread_local int addingSubShapes = 0;
+
+// Raises addingSubShapes for its scope, also when the add throws (PR 269 round 2)
+struct AddingSubShapes
+{
+    AddingSubShapes()
+    {
+        ++addingSubShapes;
+    }
+    ~AddingSubShapes()
+    {
+        --addingSubShapes;
+    }
+    AddingSubShapes(const AddingSubShapes&) = delete;
+    AddingSubShapes& operator=(const AddingSubShapes&) = delete;
+};
 }  // namespace
 
 int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, bool defining, bool intersection)
@@ -1183,6 +1198,9 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         std::string element = Part::TopoShape::shapeName(shapeType);
         std::size_t elementNameSize = element.size();
         int geometryCount = ExternalGeometry.getSize();
+        // FreeCAD-CH (PR 269 round 2): whether any sub-shape's add made geometry. Counting links
+        // missed an add that only gave existing links the other kind (they become Both)
+        bool added = false;
 
         gp_Pln sketchPlane;
         if (intersection) {
@@ -1217,12 +1235,13 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
                 }
             }
             element += std::to_string(idx);
-            ++addingSubShapes;
-            addExternal(Obj, element.c_str(), defining, intersection);
-            --addingSubShapes;
+            {
+                AddingSubShapes adding;
+                added = addExternal(Obj, element.c_str(), defining, intersection) >= 0 || added;
+            }
             element.resize(elementNameSize);
         }
-        if (ExternalGeometry.getSize() == geometryCount) {
+        if (!added) {
             if (addingSubShapes == 0) {
                 Base::Console().error("%s gives no %s geometry in this sketch.\n",
                                       SubName,
@@ -1230,7 +1249,8 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
             }
             return -1;
         }
-        return geometryCount;
+        return ExternalGeometry.getSize() > geometryCount ? geometryCount
+                                                          : ExternalGeometry.getSize() - 1;
     }
 
     // get the actual lists of the externals

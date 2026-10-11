@@ -701,6 +701,32 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(self.externalPoints(), [-10, 5, 10])
         self.assertEqual(len(self.sketch.Constraints), 2)
 
+    def testShapesIntersectionAddedToItsProjectionLinksIsAccepted(self):
+        """PR 269 round 2: a zigzag wire crossing the sketch plane twice, its two edges linked as
+        projections. The whole wire's intersection, added at once, gives each edge's link its
+        crossing point (both become Both) and adds no link. The add counted links, so it raised
+        "gives no intersection geometry" while keeping the change."""
+        zigzag = Part.Wire(
+            [
+                Part.makeLine(V(0, -30, -2), V(5, -30, 2)),
+                Part.makeLine(V(5, -30, 2), V(10, -30, -2)),
+            ]
+        )
+        source = self.addEdge("Zigzag", zigzag)
+        self.doc.recompute()
+        self.sketch.addExternal(source.Name, "Edge1", False, False)
+        self.sketch.addExternal(source.Name, "Edge2", False, False)
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 2)
+        self.sketch.addExternal(source.Name, "", False, True)
+        self.assertEqual(
+            list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, BOTH, BOTH]
+        )
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 2 + 2)
+        self.assertEqual(self.externalPoints(), [-10, 2.5, 7.5, 10])
+        self.assertEqual(len(self.sketch.Constraints), 2)
+
     def testProjectionAddedToAFrozenIntersectionLinkIsRefused(self):
         """A frozen link isn't rebuilt, so the projection added to it would have no geometry
         until the link thaws, and then take the points' slots. The add is refused, loudly."""

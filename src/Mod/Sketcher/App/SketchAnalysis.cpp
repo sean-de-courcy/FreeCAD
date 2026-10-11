@@ -547,6 +547,13 @@ int SketchAnalysis::detectMissingPointOnPointConstraints(double precision, bool 
     }
     vertexConstraintsGeometry = geometryTags();
     vertexConstraintsPrecision = precision;
+    vertexConstraintsPositions.clear();
+    for (const auto& vc : vertexConstraints) {
+        vertexConstraintsPositions[{vc.First, vc.FirstPos}]
+            = sketch->getPoint(vc.First, vc.FirstPos);
+        vertexConstraintsPositions[{vc.Second, vc.SecondPos}]
+            = sketch->getPoint(vc.Second, vc.SecondPos);
+    }
 
     // Return number of missing constraints
     return int(this->vertexConstraints.size());
@@ -677,26 +684,30 @@ std::vector<boost::uuids::uuid> SketchAnalysis::geometryTags() const
     return tags;
 }
 
-bool SketchAnalysis::vertexConstraintsStillApply()
+bool SketchAnalysis::vertexConstraintsStillApply(bool checkPositions)
 {
     // FreeCAD-CH (ops#252): the coincidences name GeoIds of the geometry they were found on. If
     // geometry was added, deleted or reordered since (e.g. between Detect and Fix in the
     // validation panel), they would join other points; geometry moved or trimmed in place keeps
     // its tag, but its points are no longer where they were found (PR 269 review L3). Then none
-    // is made, and the list stays for the caller to see (the panel says so)
+    // is made, and the list stays for the caller to see (the panel says so). Each point is
+    // compared with where it was itself (PR 269 round 2). autoconstraint() passes false: it
+    // solves its horizontal/vertical constraints between detecting and making, on purpose
     if (vertexConstraints.empty()) {
         return true;
     }
     bool apply = vertexConstraintsGeometry == geometryTags();
-    if (apply && vertexConstraintsPrecision >= 0) {
+    if (apply && checkPositions && vertexConstraintsPrecision >= 0) {
         const double tolerance = vertexConstraintsPrecision + Precision::Confusion();
-        auto near = [&](const Base::Vector3d& p, const Base::Vector3d& v) {
-            return std::fabs(p.x - v.x) <= tolerance && std::fabs(p.y - v.y) <= tolerance
-                && std::fabs(p.z - v.z) <= tolerance;
+        auto stillThere = [&](int geoId, Sketcher::PointPos pos) {
+            auto found = vertexConstraintsPositions.find({geoId, pos});
+            if (found == vertexConstraintsPositions.end()) {
+                return true;  // added to the list from outside: nothing to compare with
+            }
+            return Base::Distance(sketch->getPoint(geoId, pos), found->second) <= tolerance;
         };
         apply = std::all_of(vertexConstraints.begin(), vertexConstraints.end(), [&](const auto& vc) {
-            return near(sketch->getPoint(vc.First, vc.FirstPos), vc.v)
-                && near(sketch->getPoint(vc.Second, vc.SecondPos), vc.v);
+            return stillThere(vc.First, vc.FirstPos) && stillThere(vc.Second, vc.SecondPos);
         });
     }
     if (!apply) {
@@ -939,10 +950,15 @@ void SketchAnalysis::autoHorizontalVerticalConstraints()
 
 void SketchAnalysis::autoPointOnPointCoincident()
 {
+    // the horizontal/vertical step solved the sketch since detection and may have moved the points
+    if (!vertexConstraintsStillApply(/*checkPositions=*/false)) {
+        return;
+    }
+
     App::Document* doc = sketch->getDocument();
     doc->openTransaction("add coincident constraint");
 
-    makeMissingPointOnPointCoincident();
+    makeConstraints(vertexConstraints);
 
     // finish the transaction and update
     doc->commitTransaction();

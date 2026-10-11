@@ -20,6 +20,7 @@
 #   <https://www.gnu.org/licenses/>.                                       *
 # **************************************************************************
 
+import math
 import unittest
 import FreeCAD
 import Part
@@ -248,6 +249,50 @@ class TestSketchValidateCoincidents(unittest.TestCase):
         self.Doc.recompute()
         self.assertEqual(sketch.ConstraintCount, 0)
         self.assertEqual(len(sketch.MissingPointOnPointConstraints), 1)
+
+    def testMissingCoincidencesOfAThreePointGroup(self):
+        """PR 269 round 2: three line starts at x = -0.08, 0 and 0.08 form one group at precision
+        0.1, each within it of the group's middle point, but the outer two are 0.16 apart. Both
+        coincidences found are made: each point is still where it was found."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(0, 10, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(0.08, 0, 0), Vector(10, -5, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(-0.08, 0, 0), Vector(-10, -5, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(0.1), 2)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        made = sorted(
+            tuple(sorted(((c.First, c.FirstPos), (c.Second, c.SecondPos))))
+            for c in sketch.Constraints
+            if c.Type == "Coincident"
+        )
+        self.assertEqual(len(made), 2)
+        # the three starts end up joined
+        self.assertEqual({point for pair in made for point in pair}, {(0, 1), (1, 1), (2, 1)})
+
+    def testAutoconstraintMakesCoincidencesAfterHorizontalVertical(self):
+        """PR 269 round 2: autoconstraint() solves the horizontal/vertical constraints it finds
+        before it makes the coincidences it found earlier. A rectangle's bottom edge 3 degrees off
+        horizontal: making it horizontal moves its ends about 2.6, and the four corners are still
+        joined."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        rise = 100 * math.tan(math.radians(3))
+        corners = [Vector(0, 0, 0), Vector(100, rise, 0), Vector(100, 60, 0), Vector(0, 60, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        self.Doc.recompute()
+        sketch.autoconstraint()
+        self.Doc.recompute()
+        types = [c.Type for c in sketch.Constraints]
+        self.assertEqual(types.count("Horizontal"), 2)
+        self.assertEqual(types.count("Vertical"), 2)
+        self.assertEqual(types.count("Coincident"), 4)
+        bottom = sketch.Geometry[0]
+        self.assertAlmostEqual(bottom.StartPoint.y, bottom.EndPoint.y, places=6)
+        for i in range(4):
+            gap = sketch.Geometry[i].EndPoint - sketch.Geometry[(i + 1) % 4].StartPoint
+            self.assertLess(gap.Length, 1e-6)
 
     def testMissingCoincidenceAfterARecompute(self):
         """ops#252: a recompute between Detect and Make (the solver moves nothing here, and keeps
