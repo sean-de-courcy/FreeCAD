@@ -24,6 +24,7 @@
 
 
 #include <QApplication>
+#include <QComboBox>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <TopExp_Explorer.hxx>
@@ -62,6 +63,42 @@
 
 namespace PartDesignGui
 {
+
+/// The objects' labels for a list to choose from; a label that more than one has gets the
+/// object's name too, so the user can tell them apart (ops#252)
+static QStringList labelsToChoose(const std::vector<App::DocumentObject*>& objs)
+{
+    std::map<std::string, int> count;
+    for (auto obj : objs) {
+        ++count[obj->Label.getStrValue()];
+    }
+    QStringList items;
+    for (auto obj : objs) {
+        QString text = QString::fromUtf8(obj->Label.getValue());
+        if (count[obj->Label.getStrValue()] > 1) {
+            text += QStringLiteral(" (%1)").arg(QString::fromLatin1(obj->getNameInDocument()));
+        }
+        items.push_back(text);
+    }
+    return items;
+}
+
+/// The index of the item the user chose in a list dialog, or -1 when cancelled: by its row, not
+/// by its text, which another item can have too (a label, or a feature labelled "Beginning of the
+/// body"; ops#252)
+static int chooseItem(const QString& title, const QString& label, const QStringList& items)
+{
+    QInputDialog dialog(Gui::getMainWindow(), Qt::MSWindowsFixedSizeDialogHint);
+    dialog.setWindowTitle(title);
+    dialog.setLabelText(label);
+    dialog.setComboBoxItems(items);
+    dialog.setComboBoxEditable(false);
+    if (dialog.exec() != QDialog::Accepted) {
+        return -1;
+    }
+    auto combo = dialog.findChild<QComboBox*>();
+    return combo ? combo->currentIndex() : -1;
+}
 
 static Part::TopoShape getBaseFeatureShape(const App::DocumentObject* object)
 {
@@ -1038,26 +1075,12 @@ void CmdPartDesignMoveFeature::activated(int iMsg)
     }
 
     // Ask user to select the target body (remove source bodies from list)
-    bool ok;
-    QStringList items;
-    for (auto body : target_bodies) {
-        items.push_back(QString::fromUtf8(body->Label.getValue()));
-    }
-    QString text = QInputDialog::getItem(
-        Gui::getMainWindow(),
+    const int index = PartDesignGui::chooseItem(
         qApp->translate("PartDesign_MoveFeature", "Select Body"),
         qApp->translate("PartDesign_MoveFeature", "Select a body from the list"),
-        items,
-        0,
-        false,
-        &ok,
-        Qt::MSWindowsFixedSizeDialogHint
+        PartDesignGui::labelsToChoose(target_bodies)
     );
-    if (!ok) {
-        return;
-    }
-    int index = items.indexOf(text);
-    if (index < 0) {
+    if (index < 0 || index >= static_cast<int>(target_bodies.size())) {
         return;
     }
 
@@ -1221,32 +1244,24 @@ void CmdPartDesignMoveFeatureInTree::activated(int iMsg)
     const std::vector<App::DocumentObject*>& model = body->Group.getValues();
 
     // Ask user to select the target feature
-    bool ok;
-    QStringList items;
+    std::vector<App::DocumentObject*> listed;
     if (bodyBase) {
-        items.push_back(QString::fromUtf8(bodyBase->Label.getValue()));
+        listed.push_back(bodyBase);
     }
-    else {
-        items.push_back(QObject::tr("Beginning of the body"));
-    }
-    for (auto feat : model) {
-        items.push_back(QString::fromUtf8(feat->Label.getValue()));
+    listed.insert(listed.end(), model.begin(), model.end());
+    QStringList items = PartDesignGui::labelsToChoose(listed);
+    if (!bodyBase) {
+        items.push_front(QObject::tr("Beginning of the body"));
     }
 
-    QString text = QInputDialog::getItem(
-        Gui::getMainWindow(),
+    const int index = PartDesignGui::chooseItem(
         qApp->translate("PartDesign_MoveFeatureInTree", "Move Feature After…"),
         qApp->translate("PartDesign_MoveFeatureInTree", "Select a feature from the list"),
-        items,
-        0,
-        false,
-        &ok,
-        Qt::MSWindowsFixedSizeDialogHint
+        items
     );
-    if (!ok) {
+    if (index < 0 || index > static_cast<int>(model.size())) {
         return;
     }
-    int index = items.indexOf(text);
     // first object is the beginning of the body
     App::DocumentObject* target = index != 0 ? model[index - 1] : nullptr;
 

@@ -689,12 +689,19 @@ bool TaskPipeParameters::accept()
             }
         }
         // every object the copy step made, also one makeCopy didn't finish, each through its own
-        // document: makeCopy makes them in the active one
+        // document: makeCopy makes them in the active one. By name: an object made and removed in
+        // the same transaction is deleted at once, and removing one may remove another (PR 226
+        // review L2, ops#253)
         for (auto& [doc, before] : objectsBefore) {
-            std::vector<App::DocumentObject*> objs = doc->getObjects();
-            for (auto it = objs.rbegin(); it != objs.rend(); ++it) {
-                if (!before.count(*it) && (*it)->isAttachedToDocument()) {
-                    doc->removeObject((*it)->getNameInDocument());
+            std::vector<std::string> names;
+            for (App::DocumentObject* obj : doc->getObjects()) {
+                if (!before.count(obj)) {
+                    names.emplace_back(obj->getNameInDocument());
+                }
+            }
+            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+                if (doc->getObject(it->c_str())) {
+                    doc->removeObject(it->c_str());
                 }
             }
         }
@@ -706,6 +713,12 @@ bool TaskPipeParameters::accept()
             // the panel shows the pipe it would commit
             pipe->recomputeFeature();
         }
+        // the panel stays open, so it shows the spines and the profile again: a recompute
+        // failure comes after setVisibilityOfSpineAndProfile() put them back as they were before
+        // the edit (PR 226 review L1, ops#253)
+        shown.show(pipe->Spine.getValue());
+        shown.show(pipe->Profile.getValue());
+        shown.show(pipe->AuxiliarySpine.getValue());
         QMessageBox::warning(
             this,
             tr("Input Error"),

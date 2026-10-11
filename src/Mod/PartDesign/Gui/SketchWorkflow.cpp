@@ -389,8 +389,8 @@ private:
                 throw CopyMismatchException {
                     QObject::tr(
                         "%1 of '%2' is another face on its copy, whose shape differs (or the "
-                        "face can't be read). Recompute '%2' and select the face again, or make "
-                        "a cross-reference instead."
+                        "face can't be read). If '%2' isn't up to date, recompute it and select "
+                        "the face again; otherwise make a cross-reference instead."
                     )
                         .arg(QString::fromStdString(index), label)
                 };

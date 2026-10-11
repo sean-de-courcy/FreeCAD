@@ -36,6 +36,7 @@
 #include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
+#include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProvider.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
@@ -534,15 +535,21 @@ void TaskRevolutionParameters::writeAxis(
     }
 
     try {
-        // A picked axis turns the revolution as a chosen one does
+        // A picked axis turns the revolution as a chosen one does, unless the user set Reversed
+        // in this edit; a change it makes is said (ops#252: every pick overwrote it silently)
         bool reversed = propReversed->getValue();
         if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
             reversed = revolved->suggestReversed();
         }
-        if (reversed != propReversed->getValue()) {
+        if (reversed != propReversed->getValue() && !reversedByUser) {
             propReversed->setValue(reversed);
             QSignalBlocker block(ui->checkBoxReversed);
             ui->checkBoxReversed->setChecked(reversed);
+            Gui::getMainWindow()->showMessage(
+                reversed ? tr("Reversed is now on: the revolution turns the way the axis suggests.")
+                         : tr("Reversed is now off: the revolution turns the way the axis suggests."),
+                10000
+            );
         }
 
         recomputeFeature();
@@ -618,6 +625,7 @@ void TaskRevolutionParameters::onSidesModeChanged(int index)
 void TaskRevolutionParameters::onReversed(bool on)
 {
     if (getObject()) {
+        reversedByUser = true;
         propReversed->setValue(on);
         recomputeFeature();
 

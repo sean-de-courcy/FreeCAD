@@ -25,6 +25,7 @@
 
 #include <boost/core/ignore_unused.hpp>
 #include <QAction>
+#include <QLabel>
 #include <QMessageBox>
 
 
@@ -76,6 +77,13 @@ TaskShapeBinder::TaskShapeBinder(ViewProviderShapeBinder* view, bool newObj, QWi
 
     setupButtonGroup();
     setupContextMenu();
+    // A Support the binder doesn't bind as it is (set from Python) is named when the panel opens:
+    // an edit here sets Support to what the panel shows (PR 232 review L2, ops#266)
+    droppedNote = new QLabel(this);
+    droppedNote->setObjectName(QStringLiteral("droppedNote"));
+    droppedNote->setWordWrap(true);
+    droppedNote->setVisible(false);
+    this->groupLayout()->addWidget(droppedNote);
     this->groupLayout()->addWidget(proxy);
 
     updateUI();
@@ -116,6 +124,56 @@ void TaskShapeBinder::updateUI()
             svp->setVisible(true);
         }
     }
+
+    updateDroppedNote();
+}
+
+void TaskShapeBinder::updateDroppedNote()
+{
+    if (vp.expired()) {
+        return;
+    }
+    const QString dropped = droppedText(&vp->getObject<PartDesign::ShapeBinder>()->Support);
+    droppedNote->setText(
+        dropped.isEmpty() ? QString()
+                          : tr("The binder doesn't bind its Support as it is. %1\nThe list shows "
+                               "what it can bind; an edit here sets Support to that.")
+                                .arg(dropped)
+    );
+    droppedNote->setVisible(!dropped.isEmpty());
+}
+
+QString TaskShapeBinder::droppedText(const App::PropertyLinkSubList* support)
+{
+    using Kind = PartDesign::ShapeBinder::Dropped::Kind;
+    const PartDesign::ShapeBinder::Dropped dropped =
+        PartDesign::ShapeBinder::findDroppedReferences(support);
+    QStringList names;
+    for (const std::string& name : dropped.names) {
+        names << QStringLiteral("'%1'").arg(QString::fromStdString(name));
+    }
+    const QString list = names.join(QStringLiteral(", "));
+    const QString object = QString::fromStdString(dropped.object);
+    switch (dropped.kind) {
+        case Kind::None:
+            return {};
+        case Kind::NoPartFeature:
+            return tr("A shape binder binds a Part feature or a datum; Support links none, only %1.")
+                .arg(list);
+        case Kind::OtherObjects:
+            return tr("A shape binder binds one object: Support links '%1' and also %2. Use a "
+                      "sub-shape binder to bind several objects.")
+                .arg(object, list);
+        case Kind::Mixed:
+            return tr("Support links '%1' both as a whole and by its elements (%2); link either "
+                      "the object or its elements.")
+                .arg(object, list);
+        case Kind::DatumElements:
+            return tr("Support links the datum '%1' by its elements (%2); a datum is bound as a "
+                      "whole: link it without elements.")
+                .arg(object, list);
+    }
+    return {};
 }
 
 void TaskShapeBinder::setupButtonGroup()
@@ -155,6 +213,7 @@ void TaskShapeBinder::supportChanged(const QString& text)
         vp->highlightReferences(false);
         vp->getObject()->getDocument()->recomputeFeature(vp->getObject());
         ui->listWidgetReferences->clear();
+        updateDroppedNote();
     }
 }
 
@@ -223,6 +282,7 @@ void TaskShapeBinder::deleteItem()
 
             vp->highlightReferences(false);
             vp->getObject()->getDocument()->recomputeFeature(vp->getObject());
+            updateDroppedNote();
 
             clearButtons();
         }
@@ -298,6 +358,7 @@ void TaskShapeBinder::onSelectionChanged(const Gui::SelectionChanges& msg)
             if (!vp.expired()) {
                 vp->highlightReferences(false);
                 vp->getObject()->getDocument()->recomputeFeature(vp->getObject());
+                updateDroppedNote();
             }
         }
 
@@ -345,8 +406,17 @@ bool TaskShapeBinder::referenceSelected(const SelectionChanges& msg) const
             selectedObj = static_cast<Part::Feature*>(docObj);
         }
 
-        // ensure we have a valid object
+        // ensure we have a valid object, and say why another one binds nothing (PR 232 review
+        // L1, ops#266)
         if (!selectedObj) {
+            if (docObj) {
+                Gui::getMainWindow()->showMessage(
+                    tr("%1 isn't a Part feature: the panel binds a Part feature or its elements. "
+                       "Use a sub-shape binder to bind a Link or another object.")
+                        .arg(QString::fromStdString(docObj->Label.getStrValue())),
+                    10000
+                );
+            }
             return false;
         }
         if (!obj) {

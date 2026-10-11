@@ -4051,6 +4051,30 @@ class TestReferenceFieldGui(unittest.TestCase):
     def testGroovePickedAxis(self):
         self.pickedAxis(groove=True)
 
+    def testRevolutionAxisKeepsTheUsersReversed(self):
+        """ops#252: the line at x = -1 chosen as the axis sets Reversed as the axis suggests.
+        The user then sets Reversed the other way, chooses the V axis and the line again: Reversed
+        stays as the user set it (each axis choice overwrote it, silently)."""
+        feature = self.revolution()
+        self.edit(feature, count=0)
+        combo = self.axisCombo()
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        suggested = feature.Reversed
+        box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
+        box.click()
+        pump(0.2)
+        self.assertEqual(feature.Reversed, not suggested)
+        [vAxis] = [i for i in range(combo.count()) if combo.itemText(i) == "Vertical sketch axis"]
+        self.choose(combo, vAxis)
+        self.assertLink(feature.ReferenceAxis, self.ringSketch, ["V_Axis"])
+        self.selectReference("axis")
+        self.pick(self.lines[-1], "")
+        self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
+        self.assertEqual(feature.Reversed, not suggested)
+        self.assertEqual(box.isChecked(), not suggested)
+
     def testRevolutionAxisGuessed(self):
         """T22, B19: the axis an edge of a sketch that is drawn again: the row shows it guessed,
         no "?" entry in the combo; Accept guess makes it exact."""

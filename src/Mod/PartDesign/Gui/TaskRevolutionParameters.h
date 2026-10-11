@@ -187,6 +187,8 @@ private:
     bool isGroove;
     /// updateUI is running (its own guard: blockUpdate is also "Update view" off, ops#193)
     bool updatingUI = false;
+    /// Reversed set by the user in this edit: an axis pick keeps it (ops#252)
+    bool reversedByUser = false;
     double defaultGizmoMultFactor;
 
     /// The start reference (ops#150 W6)
