@@ -575,10 +575,12 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
                 // FreeCAD-CH (ops#238): a move back from another document goes under its own name
                 // (no temporary one); while that name is still taken at its source (to be freed by
                 // the Renames pass), the move is left for Transaction::apply, after the renames
-                if (data.target->isAttachedToDocument()) {
+                // (a property added in the transaction is only removed; the source is read only
+                // once the moved property is found, as applyMove does)
+                if (!data.added && data.target->isAttachedToDocument()) {
                     auto* obj = freecad_cast<DocumentObject*>(data.target);
-                    auto* source = freecad_cast<DocumentObject*>(data.source);
                     const char* current = obj ? obj->getPropertyName(data.propertyTarget) : nullptr;
+                    auto* source = current ? freecad_cast<DocumentObject*>(data.source) : nullptr;
                     if (current && source && source != obj
                         && source->getDocument() != obj->getDocument()
                         && source->getPropertyByName(

@@ -1053,8 +1053,10 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // FreeCAD-CH (ops#238): the target's document is used throughout (an object never added to a
-    // document has none)
-    if (!targetObj->_pDoc || targetObj->testStatus(ObjectStatus::Destroy)) {
+    // document has none), and a target not in its document (removed, or its creation undone) is
+    // held by a transaction that recording the move can free (the redo stack is cleared)
+    if (!targetObj->_pDoc || targetObj->testStatus(ObjectStatus::Destroy)
+        || !targetObj->isAttachedToDocument()) {
         FC_THROWM(Base::RuntimeError,
                   "Target container of property " << propertyName
                                                   << " is not in a document or is being destroyed");
@@ -1082,8 +1084,9 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // register the move in the document for transactions, and in the target's document as well
-    // FreeCAD-CH (ops#238): a failure here takes phase 1 back (nothing is recorded yet, or the
-    // completion below would finish a move no transaction knows of)
+    // FreeCAD-CH (ops#238): a failure here takes phase 1 back, so the completion below never
+    // finishes a move no transaction knows of. (If only the second recording fails, the source
+    // document's transaction keeps an entry for the removed property: out of memory only.)
     try {
         _pDoc->arrangeMovePropertyOfObject(this, prop, targetObj, newProp);
         if (targetObj->_pDoc != _pDoc) {

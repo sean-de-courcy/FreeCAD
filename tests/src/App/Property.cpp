@@ -1794,7 +1794,7 @@ TEST_F(MoveProperty, undoneMoveCannotLeave)
     ASSERT_NE(locked, nullptr);
     // locked, the property stays where it was, under the temporary name
     EXPECT_EQ(locked->getContainer(), varSet2Doc1);
-    EXPECT_EQ(dynamicNames(varSet2Doc1).size(), 1U);
+    EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>({"FreeCADMoveUndo1"}));
     EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>());
     ASSERT_EQ(errors.errors.size(), 1U);
     EXPECT_NE(errors.errors.front().find("handler failed"), std::string::npos)
@@ -1883,4 +1883,74 @@ TEST_F(MoveProperty, otherDocNameTakenAtSource)
     }
     EXPECT_EQ(errors.errors, std::vector<std::string>());
     doc1->clearUndos();
+}
+
+// Tests whether a move into an object whose creation was undone is refused (ops#238: the object
+// is held by the redo stack, which recording the move clears: phases 2 to 5 used freed memory;
+// reachable from Python with a handle on the object)
+TEST_F(MoveProperty, targetCreationUndone)
+{
+    doc1->openTransaction("Create");
+    auto* target = doc1->addObject("App::VarSet", "Target");
+    doc1->commitTransaction();
+    EXPECT_TRUE(doc1->undo());
+    ASSERT_FALSE(target->isAttachedToDocument());
+    doc1->openTransaction("Move Property");
+    EXPECT_THROW(varSet1Doc1->moveDynamicProperty(prop, target), Base::RuntimeError);
+    doc1->commitTransaction();
+    EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"}));
+    EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value);
+    doc1->clearUndos();
+}
+
+// Tests otherDocNameTakenAtSource with both documents recording (a global transaction), undone
+// and redone document by document, the source's first (ops#238). The other order is part of the
+// parked cross-document work (V3/T4 on ops#238): the target document's mirror entry moves the
+// property back while the source document's rename still holds the name.
+TEST_F(MoveProperty, otherDocNameTakenAtSourceBothRecording)
+{
+    auto* other = freecad_cast<App::PropertyInteger*>(
+        varSet1Doc1->addDynamicProperty("App::PropertyInteger", "Other", "Variables")
+    );
+    other->setValue(5);
+    ErrorCollector errors;
+    auto assertBefore = [this](const std::string& step) {
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Other", "Variable"}))
+            << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value) << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Other"), 5) << step;
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>()) << step;
+    };
+    {
+        const bool doc1First = true;  // (see above)
+        const std::string order = doc1First ? "doc1 first: " : "doc2 first: ";
+        auto both = [&](bool undo) {
+            for (auto* doc : doc1First ? std::vector {doc1, doc2} : std::vector {doc2, doc1}) {
+                EXPECT_TRUE(undo ? doc->undo() : doc->redo()) << order << doc->getName();
+            }
+        };
+        int tid = App::GetApplication().openGlobalTransaction({.name = "Move Property"});
+        ASSERT_NE(
+            varSet1Doc1->moveDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Variable"),
+                                             varSetDoc2),
+            nullptr
+        );
+        EXPECT_TRUE(
+            varSet1Doc1->renameDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Other"),
+                                               "Variable")
+        );
+        App::GetApplication().commitTransaction(tid);
+        both(true);
+        assertBefore(order + "undo");
+        both(false);
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"})) << order;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), 5) << order;
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>({"Variable"})) << order;
+        EXPECT_EQ(intValue(varSetDoc2, "Variable"), value) << order;
+        both(true);
+        assertBefore(order + "second undo");
+    }
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc1->clearUndos();
+    doc2->clearUndos();
 }
