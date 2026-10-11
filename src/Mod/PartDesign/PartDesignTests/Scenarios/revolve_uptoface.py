@@ -380,6 +380,19 @@ class RevolutionUpToFaceSymmetric(RevolutionUpToFaceTwoSided):
         revolved.SideType = "Symmetric"
 
 
+class RevolutionUpToFaceSymmetricAcross(RevolutionUpToFaceTwoSided):
+    __doc__ = (
+        RevolutionUpToFaceTwoSided.__doc__
+        + "\n\nSymmetric, the wall across the plate: its face mirrors onto itself, and the second "
+        + "side ends on the same face (ops#254: it was revolved the long way round)."
+    )
+    side2Angle = -45
+    wallAcross = True
+
+    def setSides(self, revolved, wall):
+        revolved.SideType = "Symmetric"
+
+
 class RevolutionUpToFaceUpToAndAngle(RevolutionUpToFaceTwoSided):
     __doc__ = (
         RevolutionUpToFaceTwoSided.__doc__
