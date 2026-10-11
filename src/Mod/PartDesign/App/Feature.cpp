@@ -35,6 +35,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Builder.hxx>
 
+#include <algorithm>
 #include <cstring>
 #include <set>
 #include <vector>
@@ -257,12 +258,14 @@ namespace
 // carries over from one shape to another: a reference is found exactly by its name (a 1:1
 // modified element keeps its incoming name, so an edge the old base only trimmed is the new
 // base's full edge), by the solver's evidence, or it breaks with its candidates reported.
-// Returns false, leaving the link as it is, if a reference has no mapped name or a sub-object
-// path, as the name match does.
-bool relinkThroughSolver(
+// Without the solver (ops#285) the references are found by their name only, as upstream's
+// missing references are. Returns false, leaving the link as it is, if a reference has no mapped
+// name or a sub-object path, as the name match does.
+bool relinkAsMissing(
     App::PropertyLinkSub& link,
     const Part::TopoShape& oldShape,
-    App::DocumentObject* newBase
+    App::DocumentObject* newBase,
+    bool solver
 )
 {
     const auto& oldSubs = link.getSubValues();
@@ -309,38 +312,40 @@ bool relinkThroughSolver(
     // solves the references, since a missing reference is solved on every update of its target
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
     if (newFeature && !newFeature->Shape.getShape().isNull()) {
-        App::solveElementReferences(newBase, {&link}, false, true);
+        if (solver) {
+            App::solveElementReferences(newBase, {&link}, false, true);
+        }
+        else {
+            link.updateElementReference(newBase, false, true);
+        }
     }
     return true;
 }
 
-}  // namespace
+/// Whether obj comes after the link's owner in the owner's Body: a reorder moved it below
+bool comesAfterOwner(const App::PropertyLinkSub& link, const App::DocumentObject* obj)
+{
+    auto owner = freecad_cast<App::DocumentObject*>(link.getContainer());
+    auto body = owner ? Body::findBodyOf(owner) : nullptr;
+    if (!body) {
+        return false;
+    }
+    const auto& group = body->Group.getValues();
+    auto ownerIt = std::ranges::find(group, owner);
+    auto objIt = std::ranges::find(group, obj);
+    return ownerIt != group.end() && objIt != group.end() && objIt > ownerIt;
+}
 
-bool Feature::relinkToMatchingSubelements(
+// The relink without the solver (upstream's): every reference must match exactly one element of
+// the new base by its name (V2) or its geometry (V1), or the link is left as it is
+bool relinkByName(
     App::PropertyLinkSub& link,
-    App::DocumentObject* oldBase,
-    App::DocumentObject* newBase
+    Part::Feature* oldFeature,
+    Part::Feature* newFeature
 )
 {
-    if (!oldBase || !newBase || link.getValue() != oldBase) {
-        return false;
-    }
-
-    auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
-    auto newFeature = freecad_cast<Part::Feature*>(newBase);
-    if (!oldFeature || !newFeature) {
-        return false;
-    }
-
     const auto& oldShape = oldFeature->Shape.getShape();
     const auto& newShape = newFeature->Shape.getShape();
-    if (oldShape.isNull()) {
-        return false;
-    }
-    if (link.inSolverDocument()) {
-        // Also onto a new base without a shape yet (ops#127, N1 2.2)
-        return relinkThroughSolver(link, oldShape, newBase);
-    }
     if (newShape.isNull()) {
         return false;
     }
@@ -395,7 +400,7 @@ bool Feature::relinkToMatchingSubelements(
         }
         else if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
             std::vector<Data::MappedElement> foundNames
-                = findSimilarNames(subMappedElement.name, newShape);
+                = Part::Feature::findSimilarNames(subMappedElement.name, newShape);
 
             if (foundNames.size()) {
                 names.push_back(foundNames.front().name.toString());
@@ -418,8 +423,48 @@ bool Feature::relinkToMatchingSubelements(
         newSubs.push_back(names.front());
     }
 
-    link.setValue(newBase, std::move(newSubs));
+    link.setValue(newFeature, std::move(newSubs));
     return true;
+}
+
+}  // namespace
+
+bool Feature::relinkToMatchingSubelements(
+    App::PropertyLinkSub& link,
+    App::DocumentObject* oldBase,
+    App::DocumentObject* newBase
+)
+{
+    if (!oldBase || !newBase || link.getValue() != oldBase) {
+        return false;
+    }
+
+    auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
+    auto newFeature = freecad_cast<Part::Feature*>(newBase);
+    if (!oldFeature || !newFeature) {
+        return false;
+    }
+
+    const auto& oldShape = oldFeature->Shape.getShape();
+    if (oldShape.isNull()) {
+        return false;
+    }
+    if (link.inSolverDocument()) {
+        // Also onto a new base without a shape yet (ops#127, N1 2.2)
+        return relinkAsMissing(link, oldShape, newBase, true);
+    }
+    if (relinkByName(link, oldFeature, newFeature)) {
+        return true;
+    }
+    // A reorder that moved the old base below the owner (ops#285): left there, the link would
+    // make a dependency cycle, which the reorder's cycle check doesn't see because it plans this
+    // link on the new base (N1 3.5). It moves there with its references missing, so the owner
+    // fails until they are re-picked. A link left on an earlier object (insert at the bar, N1 2.2)
+    // stays as it is.
+    if (comesAfterOwner(link, oldBase)) {
+        return relinkAsMissing(link, oldShape, newBase, false);
+    }
+    return false;
 }
 
 void Feature::onChanged(const App::Property* prop)

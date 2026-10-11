@@ -543,6 +543,35 @@ class BodyReorderBase:
         self.assertEqual(self.savedRetargets(), [])
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
+    def testDressUpBaseMovedBelowIt(self):
+        """Boss A moved below the fillet that follows its chamfer: the chamfer's edge has no match
+        on the block, its new base. The Base goes to the block with its reference missing, not left
+        on the boss now after the chamfer (a dependency cycle); the chamfer fails, and the boss and
+        the fillet compute (ops#285)."""
+        block = self.block()
+        a = self.boss("BossA", 1, 1)
+        self.recompute()
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (a, [edgeWhere(a.Shape, lambda e: isVerticalLineAt(e, 5, 1))])
+        chamfer.Size = 0.5
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (chamfer, [edgeWhere(chamfer.Shape, lambda e: isVerticalLineAt(e, 20, 0))])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertValid(a, chamfer, fillet)
+
+        self.body.reorderObject([a], fillet, True)
+        self.assertChain(block, chamfer, fillet, a)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertValid(fillet, a)
+        self.assertNotTouched(chamfer, fillet, a)
+        self.assertBody(BLOCK - ROUND + BOSS)
+
     def testSaveAndReopenWithARecord(self):
         """The hole moved above Pad2, saved and reopened: the support is still on the block with
         its re-target record; moved back, it is on Pad2's top face again (N1 3.4 a, review T1)."""
