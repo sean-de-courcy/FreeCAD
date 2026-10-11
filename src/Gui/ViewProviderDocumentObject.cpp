@@ -663,6 +663,12 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
     // Limit: a copy that replaces oldObj inside a sub-object path (the global search's links to
     // obj or a parent) links neither object directly, so it is always pasted, over any change
     // an earlier paste made to it.
+    // The distinct objects a property links: a sub list names its object once per sub
+    auto objectsOf = [](std::vector<App::DocumentObject*> objs) {
+        std::ranges::sort(objs);
+        objs.erase(std::ranges::unique(objs).begin(), objs.end());
+        return objs;
+    };
     auto linksOf = [](const App::Property* prop) {
         std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>> links;
         if (auto linkProp = freecad_cast<const App::PropertyLinkBase*>(prop)) {
@@ -697,7 +703,7 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
             // dropped. An owner that rewrote [A, C] to [B] doesn't match the copy [B, C], so the
             // copy is pasted and C kept.
             if (links != copiedLinks[i] && has(links.first, target) && !has(links.first, replaced)
-                && links.first == linksOf(v.second.get()).first) {
+                && objectsOf(links.first) == objectsOf(linksOf(v.second.get()).first)) {
                 continue;
             }
         }

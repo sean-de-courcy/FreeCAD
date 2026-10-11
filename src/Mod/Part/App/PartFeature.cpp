@@ -3030,22 +3030,48 @@ bool followBase(FilletBase& fillet)
     const Data::GeometryTolerances tolerances;
     const double distance = Data::SolveInput().continuationDistance;
 
-    // The new base's edges where the old base's edge `oldId` lies.
-    auto placesOf = [&](int oldId) {
-        Data::ElementFingerprint before;
+    // The new base's edges at the place of `before`, a fingerprint with the old base's placement.
+    auto placesAt = [&](const Data::ElementFingerprint& before) {
         std::vector<int> places;
-        if (placedEdgeFingerprint(oldShape, oldId, before)) {
-            for (int id = 1; id <= edgeCount; ++id) {
-                if (!measured[id - 1]) {
-                    placedEdgeFingerprint(newShape, id, newFingerprints[id - 1]);
-                    measured[id - 1] = true;
-                }
-                if (Data::atSamePlace(before, newFingerprints[id - 1], diagonal, tolerances, distance)) {
-                    places.push_back(id);
-                }
+        for (int id = 1; id <= edgeCount; ++id) {
+            if (!measured[id - 1]) {
+                placedEdgeFingerprint(newShape, id, newFingerprints[id - 1]);
+                measured[id - 1] = true;
+            }
+            if (Data::atSamePlace(before, newFingerprints[id - 1], diagonal, tolerances, distance)) {
+                places.push_back(id);
             }
         }
         return places;
+    };
+    // The new base's edges where the old base's edge `oldId` lies.
+    auto placesOf = [&](int oldId) {
+        Data::ElementFingerprint before;
+        return placedEdgeFingerprint(oldShape, oldId, before) ? placesAt(before)
+                                                              : std::vector<int>();
+    };
+    // Where a guess record's original lies on the new base: from its saved fingerprint, taken
+    // without the old base's placement. The old base's edge at the original's index is another
+    // edge (the original was gone when the guess was made), so without a fingerprint the
+    // original has no place (PR 248 review, L2).
+    const Base::Placement oldPlacement = oldShape.isNull() ? Base::Placement() : oldShape.getPlacement();
+    auto placesOfOriginal = [&](const std::string& text) {
+        Data::ElementFingerprint before = Data::ElementFingerprint::fromString(text);
+        if (!before.isValid() || before.type != 'E') {
+            return std::vector<int>();
+        }
+        const Base::Rotation& rotation = oldPlacement.getRotation();
+        auto place = [&](std::optional<Base::Vector3d>& point) {
+            if (point) {
+                oldPlacement.multVec(*point, *point);
+            }
+        };
+        place(before.center);
+        place(before.location);
+        if (before.direction) {
+            rotation.multVec(*before.direction, *before.direction);
+        }
+        return placesAt(before);
     };
 
     auto values = fillet.Edges.getValues();
@@ -3072,15 +3098,15 @@ bool followBase(FilletBase& fillet)
             // A guessed edge stays a guess where it goes (policy D). Its record's edges go to
             // the new base's edges at their places: the original, if it has one there (else the
             // record keeps only its kind), and the alternatives (each dropped without one).
-            // The original's name and fingerprint are the old base's (ops#275): the new base can
-            // carry the same mapped names elsewhere (a Box for a Box), and a record without a
-            // fingerprint would snap back to that edge by name alone. Both go, so the original
-            // never snaps back across a base change; Mark broken copied the fingerprint into the
-            // rejection too (ops#268).
+            // The original is placed from its fingerprint (above). Its name and fingerprint are
+            // the old base's (ops#275): the new base can carry the same mapped names elsewhere
+            // (a Box for a Box), and a record without a fingerprint would snap back to that edge
+            // by name alone. Both go, so the original never snaps back across a base change;
+            // Mark broken copied the fingerprint into the rejection too (ops#268).
             if (i < oldRecords.size() && !oldRecords[i].guess.empty()) {
                 auto guess = oldRecords[i].guess;
-                const int origId = Data::indexOfElement(guess.origIndex, "Edge");
-                const auto origAt = origId > 0 ? placesOf(origId) : std::vector<int>();
+                const auto origAt = guess.origIndex.empty() ? std::vector<int>()
+                                                            : placesOfOriginal(guess.origFingerprint);
                 guess.origIndex =
                     origAt.size() == 1 ? "Edge" + std::to_string(origAt.front()) : std::string();
                 guess.origName.clear();

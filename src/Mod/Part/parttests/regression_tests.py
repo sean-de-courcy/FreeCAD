@@ -777,7 +777,9 @@ class RegressionTests(unittest.TestCase):
                 self.assertTrue(rounded.isValid(), rounded.getStatusString())
                 [after] = guesses(rounded)
                 self.assertFalse(after["original"].get("name"))
-                self.assertEqual(centre(turned.Shape, after["original"]["index"]), (20.5, 10, 5))
+                # without a fingerprint the original has no place on the new base (PR 248
+                # review, L2): the old base's edge at its number is another edge
+                self.assertFalse(after["original"].get("index"))
                 # still the guess at (20.5, 0), not the edge the old name gives
                 rounded.touch()
                 self.Doc.recompute()

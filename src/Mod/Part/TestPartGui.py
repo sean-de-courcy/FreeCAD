@@ -866,6 +866,7 @@ class _ReplaceOwner:
         obj.addProperty("App::PropertyLink", "Base")
         obj.addProperty("App::PropertyLinkSub", "Dep")
         obj.addProperty("App::PropertyLinkList", "Deps")
+        obj.addProperty("App::PropertyLinkSubList", "DepSubs")
         self.then = None
 
     def onChanged(self, obj, prop):
@@ -965,6 +966,20 @@ class ReplaceObjectOwnerChangeTestCases(unittest.TestCase):
         owner.Deps = [A, C]
         self._replace(owner)
         self.assertEqual(owner.Deps, [B, C])
+
+    def testSubListFollowedWithAnEntryDroppedKeepsItsChange(self):
+        """The PR 248 review's L1: a sub list names its object once per sub. Base's change moved
+        [A.Edge1, A.Edge2] to [B.Edge5]: the same object as the copy [B.Edge1, B.Edge2], so the
+        change stands and the stale copy isn't pasted."""
+        A, B = self.boxes["A"], self.boxes["B"]
+
+        def follow(obj):
+            obj.DepSubs = [(obj.Base, ["Edge5"])]
+
+        owner = self._owner(None, follow)
+        owner.DepSubs = [(A, ["Edge1", "Edge2"])]
+        self._replace(owner)
+        self.assertEqual(owner.DepSubs, [(B, ("Edge5",))])
 
     def testListLinkingBothSwaps(self):
         """ops#268: a list property that links both the old and the new object (a compound of A
