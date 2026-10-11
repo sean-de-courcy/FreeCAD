@@ -81,23 +81,38 @@ class TestSketchCarbonCopyElements(unittest.TestCase):
             Sketcher.Constraint("Coincident", 0, 1, 99, 1)
         ]
 
-    def assert_copy_refused(self):
-        """The copy raises, and Dest keeps its one line."""
+    def state(self, sketch):
+        """What a refused copy mustn't change: the constraints, the links and the geometry."""
+        return (
+            [c.Content for c in sketch.Constraints],
+            sketch.ExternalGeometry,
+            [(g.StartPoint, g.EndPoint) for g in sketch.Geometry],
+        )
+
+    def assert_copy_refused(self, constraints):
+        """The copy raises, and changes neither sketch: Dest keeps its one line and its
+        `constraints`, a Horizontal first."""
+        dest, source = self.state(self.dest), self.state(self.source)
+        self.assertEqual(len(dest[2]), 1)
+        self.assertEqual(len(dest[0]), constraints)
+        self.assertEqual(self.dest.Constraints[0].Type, "Horizontal")
         with self.assertRaises(ValueError):
             self.dest.carbonCopy(self.source.Name, False)
-        self.assertEqual(len(self.dest.Geometry), 1)
+        self.assertEqual(self.state(self.dest), dest)
+        self.assertEqual(self.state(self.source), source)
 
     def test_copy_from_a_sketch_with_flagged_constraints_is_refused(self):
         """ops#237 (PR 218 review): before, the copy read the source's flagged list as empty and
         copied its geometry without a single constraint, silently."""
         self.flag(self.source)
-        self.assert_copy_refused()
+        self.dest.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        self.assert_copy_refused(1)
 
     def test_copy_into_a_sketch_with_flagged_constraints_is_refused(self):
         """ops#237 (PR 218 review): before, the copy read Dest's flagged list as empty and wrote
         back the source's constraints alone: Dest's own were gone, silently."""
         self.flag(self.dest)
-        self.assert_copy_refused()
+        self.assert_copy_refused(2)
 
     def test_external_elements_after_the_destinations_externals(self):
         """External elements name the copies of the source's external geometry, which come after

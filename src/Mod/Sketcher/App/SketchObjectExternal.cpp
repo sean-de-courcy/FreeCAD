@@ -452,8 +452,10 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     // geometry, or geometry it wasn't checked against) reads as empty. Copied from, the copy got
     // no constraints; copied into, the write below replaced this sketch's own with the source's
     // alone. Both silently: refuse instead, before anything changes
-    for (const SketchObject* sketch : {static_cast<const SketchObject*>(this),
-                                       static_cast<const SketchObject*>(psObj)}) {
+    for (SketchObject* sketch : {this, psObj}) {
+        // checked against the geometry as it is now: the flag can be stale (PR 262 review)
+        sketch->Constraints.checkConstraintIndices(sketch->getHighestCurveIndex(),
+                                                   -sketch->getExternalGeometryCount());
         // (an empty list is flagged too, in a sketch that hasn't had geometry or a recompute
         // yet: nothing to lose)
         if (&sketch->Constraints.getValues() != &sketch->Constraints.getValuesForce()
@@ -466,6 +468,27 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 sketch->Label.getValue()
             );
             return -1;
+        }
+    }
+
+    // FreeCAD-CH (ops#237, PR 262 review M1): a source link whose type an open couldn't tell (its
+    // repair pending) holds the type at its index, a guess. Copied, the guess became the copy's
+    // settled type, with no mark and nothing left to repair or warn: refuse instead, naming it
+    if (psObj->externalTypeRepairPending) {
+        for (const auto& key : psObj->externalGeoRef) {
+            if (psObj->undecidedTypeKeys.count(key) != 0) {
+                Base::Console().error(
+                    "Carbon copy of '%s' into '%s' refused: the type of its external link %s "
+                    "couldn't be told when the file was opened (a type list saved before ops#140), "
+                    "so it holds a guess. Bring the link's element back and recompute '%s', or "
+                    "delete the link, first.\n",
+                    psObj->Label.getValue(),
+                    this->Label.getValue(),
+                    key.c_str(),
+                    psObj->Label.getValue()
+                );
+                return -1;
+            }
         }
     }
 
@@ -2920,10 +2943,6 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
     return std::max(oneWay(curve, savedCurve), oneWay(savedCurve, curve));
 }
 
-// The entry that marks a type list whose repair on open couldn't tell every link's type: the next
-// open repairs only the links that are still undecided (ops#140). No type has this value.
-constexpr long pendingTypeRepairMark = -1;
-
 // "0", "0 and 1", "0, 1 and 2": the types, for a warning
 std::string typeList(const std::vector<long>& types)
 {
@@ -4183,8 +4202,10 @@ void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
 
     ExternalGeo.setValues(std::move(geos));
     Base::StateLocker lock(externalLinksWithTypes, true);
-    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
+    // the types first, as in setExternalLinksAndTypes: the links' change is signalled with the
+    // two in step for observers (ops#237, PR 262 review L3)
     ExternalTypes.setValues(types);
+    ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
 }
 
 int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
@@ -4214,8 +4235,8 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     subs.push_back(sub);
     shadows.push_back(std::move(shadow));
     {
-        // the types first, as in setExternalLinksAndTypes: setting the links signals that the
-        // elements changed, and an observer then reads the new link's type (ops#237)
+        // the types first, as in setExternalLinksAndTypes: the links' change is signalled with
+        // the two in step for observers (ops#237)
         Base::StateLocker lock(externalLinksWithTypes, true);
         ExternalTypes.setValues(types);
         ExternalGeometry.setValues(std::move(objs), std::move(subs), std::move(shadows));
