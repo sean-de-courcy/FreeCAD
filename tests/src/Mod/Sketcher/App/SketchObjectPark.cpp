@@ -826,6 +826,10 @@ TEST_F(SketchObjectParkTest, carbonCopyOfAnUndecidedLinkIsRefused)
 
 namespace
 {
+std::vector<std::string> saveAndReopen(App::Document*& doc,
+                                       Sketcher::SketchObject*& sketch,
+                                       App::DocumentObject*& box);
+
 // A sketch with one projected link of `box`'s `edge`, saved with `types` and no external
 // geometry but the axes, then reopened (`box` is fetched again); returns the warnings sent while
 // it opened
@@ -844,7 +848,15 @@ std::vector<std::string> reopenWithoutSavedGeometry(App::Document*& doc,
         std::vector<Part::Geometry*>({geos[0]->clone(), geos[1]->clone()}));
     EXPECT_EQ(sketch->ExternalGeo.getSize(), 2);
     doc->purgeTouched();
+    return saveAndReopen(doc, sketch, box);
+}
 
+// Saves `doc` and opens it again under the same name (`sketch` and `box` fetched again); returns
+// the warnings sent while it opened
+std::vector<std::string> saveAndReopen(App::Document*& doc,
+                                       Sketcher::SketchObject*& sketch,
+                                       App::DocumentObject*& box)
+{
     const std::string name = doc->getName();
     const std::string sketchName = sketch->getNameInDocument();
     // under the same name, which TearDown closes, in a folder of its own
@@ -910,6 +922,77 @@ TEST_F(SketchObjectParkTest, pendingMarkWithoutSavedGeometryWaits)
     doc->recompute();
     EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
     EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
+}
+
+// ops#287 (PR 262 verification L1): the link waiting above has its projection built with the
+// type at its index. Saved with that geometry and opened again, the geometry counted as evidence
+// of the type: the open settled the guess and dropped the mark, silently, and a carbon copy then
+// took the guess as the link's type. The geometry is marked as built from a guess, so the link
+// stays undecided, the open says so again, and a carbon copy from it is still refused
+TEST_F(SketchObjectParkTest, guessedGeometryLeavesTheLinkUndecidedOnALaterOpen)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt))
+                    ->testFlag(ExternalGeometryExtension::TypeGuessed));
+    doc->recompute();
+
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt))
+                    ->testFlag(ExternalGeometryExtension::TypeGuessed));
+
+    auto* dest = static_cast<Sketcher::SketchObject*>(
+        doc->addObject("Sketcher::SketchObject", "Dest"));
+    WarningCollector collector;
+    EXPECT_EQ(dest->carbonCopy(sketch, false), -1);
+    ASSERT_EQ(collector.errors.size(), 1U);
+    EXPECT_NE(collector.errors[0].find("Delete the link and add it again"), std::string::npos)
+        << collector.errors[0];
+}
+
+// A decided link's geometry isn't marked as guessed: a link added as usual, and the edge's link
+// once the repair above decided it from its saved line (ops#287)
+TEST_F(SketchObjectParkTest, decidedGeometryIsNotMarkedGuessed)
+{
+    Sketcher::SketchObject* sketch {};
+    reopenWithPendingRepair(sketch);
+    if (HasFatalFailure()) {
+        return;
+    }
+    doc->recompute();
+    EXPECT_FALSE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt))
+                     ->testFlag(ExternalGeometryExtension::TypeGuessed));
+    ASSERT_GE(sketch->addExternal(box, otherEdge.c_str(), false, false), 0);
+    doc->recompute();
+    EXPECT_FALSE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt - 2))
+                     ->testFlag(ExternalGeometryExtension::TypeGuessed));
+}
+
+// A carbon copy from a sketch whose repair is still pending, but whose undecided link (the ball)
+// was deleted, goes ahead: only a current undecided link refuses it (ops#287, PR 262
+// verification nit)
+TEST_F(SketchObjectParkTest, carbonCopyAfterTheUndecidedLinkIsDeleted)
+{
+    Sketcher::SketchObject* sketch {};
+    reopenWithPendingRepair(sketch);
+    if (HasFatalFailure()) {
+        return;
+    }
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
+    ASSERT_EQ(sketch->delExternal(GeoEnum::RefExt - 1), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 1);
+    auto* dest = static_cast<Sketcher::SketchObject*>(
+        doc->addObject("Sketcher::SketchObject", "Dest"));
+    EXPECT_GE(dest->carbonCopy(sketch, false), 0);
+    EXPECT_EQ(dest->ExternalGeometry.getSize(), 1);
 }
 
 // ops#278: a Both entry put back on geometry without kinds (parked before ops#264, when parking

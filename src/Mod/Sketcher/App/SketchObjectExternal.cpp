@@ -480,12 +480,11 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 Base::Console().error(
                     "Carbon copy of '%s' into '%s' refused: the type of its external link %s "
                     "couldn't be told when the file was opened (a type list saved before ops#140), "
-                    "so it holds a guess. Bring the link's element back and recompute '%s', or "
-                    "delete the link, first.\n",
+                    "so it holds a guess. Delete the link and add it again with the type it "
+                    "should have, first.\n",
                     psObj->Label.getValue(),
                     this->Label.getValue(),
-                    key.c_str(),
-                    psObj->Label.getValue()
+                    key.c_str()
                 );
                 return -1;
             }
@@ -3434,14 +3433,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
         std::vector<const Part::Geometry*> saved;
         bool savedMissing = false;
+        // FreeCAD-CH (ops#287): saved geometry built from a guess (TypeGuessed) gives back the
+        // guess, whichever type the link has: it decides nothing, and the link stays undecided
+        bool savedGuessed = false;
         if (openRepair || !undecidedTypeKeys.empty()) {
             for (long id : externalGeoRefMap[key]) {
                 auto it = externalGeoMap.find(id);
                 if (it != externalGeoMap.end()) {
                     saved.push_back(ExternalGeo[it->second]);
-                    savedMissing = savedMissing
-                        || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
-                               ->testFlag(ExternalGeometryExtension::Missing);
+                    auto egf = ExternalGeometryFacade::getFacade(ExternalGeo[it->second]);
+                    savedMissing = savedMissing || egf->testFlag(ExternalGeometryExtension::Missing);
+                    savedGuessed =
+                        savedGuessed || egf->testFlag(ExternalGeometryExtension::TypeGuessed);
                 }
             }
             // in build order: geometry added to a kind since goes after the link's other
@@ -3451,7 +3454,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             });
         }
         const bool repairThis = openRepair
-            ? (!laterOpen || saved.empty() || savedMissing)
+            ? (!laterOpen || saved.empty() || savedMissing || savedGuessed)
             : (undecidedTypeKeys.count(key) != 0 && savedMissing);
         if (repairThis) {
             auto setType = [&](long type) {
@@ -3500,7 +3503,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             const long indexType = Types[i];
             std::vector<long> exact;
             std::vector<std::pair<long, double>> kinds;
-            if (!saved.empty() && hasSource) {
+            if (!saved.empty() && hasSource && !savedGuessed) {
                 for (auto type : {ExtType::Projection, ExtType::Intersection, ExtType::Both}) {
                     auto [match, distance] = matchSaved(static_cast<long>(type));
                     switch (match) {
@@ -3555,7 +3558,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                             << " it takes the closest, type " << Types[i]);
                 }
             }
-            else if (auto type = typeFromSavedGeometry(SubElement, saved)) {
+            else if (auto type = savedGuessed ? std::nullopt
+                                              : typeFromSavedGeometry(SubElement, saved)) {
                 Types[i] = *type;
             }
             else {
@@ -3563,9 +3567,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 undecided = true;
                 if (typesOnly) {
                     undecidedTypeKeys.insert(key);
-                    FC_WARN("External link " << key << " in " << getFullName()
-                            << ": its type can't be told from a type list saved before ops#140;"
-                            << " it keeps type " << indexType);
+                    if (savedGuessed) {
+                        FC_WARN("External link " << key << " in " << getFullName()
+                                << ": its type is still undecided (a type list saved before"
+                                << " ops#140); its saved geometry was built with the type at its"
+                                << " index, type " << indexType << ", which it keeps. Delete the"
+                                << " link and add it again to settle its type");
+                    }
+                    else {
+                        FC_WARN("External link " << key << " in " << getFullName()
+                                << ": its type can't be told from a type list saved before"
+                                << " ops#140; it keeps type " << indexType);
+                    }
                 }
                 else if (built) {
                     // FreeCAD-CH (ops#237): the element is back, but no type gives the saved
@@ -3865,6 +3878,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // the link being added to keeps the Defining flag the add gives its new geometries
         bool hasLinkState = itKey != linkIsDefiningMap.end() && key != createdKey;
         bool isLinkDefining = hasLinkState ? itKey->second : false;
+        // the link still waits for its type (ops#287)
+        const bool guessed = externalTypeRepairPending && undecidedTypeKeys.count(key) != 0;
 
         const std::size_t before = addedProjections[n];
         std::vector<Part::Geometry*>* front = nullptr;  // where this link's added projections go
@@ -3882,6 +3897,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 if (hasLinkState) {
                     ExternalGeometryFacade::getFacade(geo.get())->setFlag(ExternalGeometryExtension::Defining, isLinkDefining);
                 }
+                // FreeCAD-CH (ops#287): built from the type at its index while the link waits
+                // for its type: saved, it mustn't count as evidence of the type on a later open
+                ExternalGeometryFacade::getFacade(geo.get())
+                    ->setFlag(ExternalGeometryExtension::TypeGuessed, guessed);
                 if (front && k < before) {
                     front->push_back(geo.release());
                 }
@@ -3896,6 +3915,12 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             ExternalGeometryFacade::copyFlags(geoms[it->second], geo.get());
             if (kind) {
                 setKind(geo.get(), *kind);
+            }
+            // geometry from before the link waited keeps telling its type (an undo marks every
+            // link undecided); a decided link's geometry no longer counts as guessed (ops#287)
+            if (!guessed) {
+                ExternalGeometryFacade::getFacade(geo.get())
+                    ->setFlag(ExternalGeometryExtension::TypeGuessed, false);
             }
             geoms[it->second] = geo.release();
         }

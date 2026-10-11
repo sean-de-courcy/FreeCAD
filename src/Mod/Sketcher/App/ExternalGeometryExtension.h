@@ -83,13 +83,18 @@ public:
         // the Ids out by; neither in a file saved before
         Projection = 5,
         Intersection = 6,
+        // FreeCAD-CH (ops#287): built while the link's type was undecided (a repair an open left
+        // pending), with the type at its index: the geometry doesn't tell the link's type. A
+        // build before reads the flags without it
+        TypeGuessed = 7,
         NumFlags       // Must be the last type
     };
     // END_CREDIT_BLOCK: Credit under LGPL for this block to Zheng, Lei (realthunder)
     // <realthunder.dev@gmail.com>
 
     constexpr static std::array<const char*, NumFlags> flag2str {
-        {"Defining", "Frozen", "Detached", "Missing", "Sync", "Projection", "Intersection"}
+        {"Defining", "Frozen", "Detached", "Missing", "Sync", "Projection", "Intersection",
+         "TypeGuessed"}
     };
 
 public:
