@@ -447,6 +447,94 @@ class FilletEdgesEditTestCases(unittest.TestCase):
         self.assertFalse(fillet.Shape.isInside(FreeCAD.Vector(39.9, 9.9, 5), 1e-7, True))
 
 
+class FilletReplaceBaseTestCases(unittest.TestCase):
+    """A Part Fillet/Chamfer's Base replaced as a tree drag does it (ViewObject.replaceObject):
+    each edge goes to the new base's edge at the same place, or its link goes missing and the
+    recompute fails (ops#265). The replace pastes Base, whose change follows the edges, and then
+    the edge links copied before it, which put the old base's edge numbers on the new base.
+
+    Three 10 mm cubes: A at the origin, B in the same place turned 90 degrees about its z axis
+    (its edge numbers sit at other corners), C 20 mm over in x. The feature is on A's vertical
+    edge at (10, 0)."""
+
+    corners = [(0, 0), (10, 0), (10, 10), (0, 10)]
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("FilletReplaceBase")
+        self.Doc.UndoMode = 1
+
+    def tearDown(self):
+        FreeCAD.closeDocument("FilletReplaceBase")
+
+    @staticmethod
+    def _verticalEdgeAt(shape, x, y):
+        for i, edge in enumerate(shape.Edges, 1):
+            box = edge.BoundBox
+            if box.XLength < 1e-6 and box.YLength < 1e-6 and box.ZLength > 9:
+                if abs(box.XMin - x) < 1e-6 and abs(box.YMin - y) < 1e-6:
+                    return i
+        return None
+
+    def _cutCorners(self, shape):
+        """The cube's corners a fillet or chamfer of radius 1 took off, half way up."""
+        cut = []
+        for x, y in self.corners:
+            inward = FreeCAD.Vector(0.1 if x < 5 else -0.1, 0.1 if y < 5 else -0.1, 0)
+            if not shape.isInside(FreeCAD.Vector(x, y, 5) + inward, 1e-7, True):
+                cut.append((x, y))
+        return cut
+
+    def testReplaceFollowsEdges(self):
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                cubes = {}
+                for name in ("A", "B", "C"):
+                    cube = self.Doc.addObject("Part::Box", name + feature)
+                    cube.Length = cube.Width = cube.Height = 10
+                    cubes[name] = cube
+                cubes["B"].Placement = FreeCAD.Placement(
+                    FreeCAD.Vector(10, 0, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 90)
+                )
+                cubes["C"].Placement.Base = FreeCAD.Vector(20, 0, 0)
+                self.Doc.recompute()
+                onA = self._verticalEdgeAt(cubes["A"].Shape, 10, 0)
+                onB = self._verticalEdgeAt(cubes["B"].Shape, 10, 0)
+                self.assertNotEqual(onA, onB)  # the designed model
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = cubes["A"]
+                rounded.Edges = [(onA, 1.0, 1.0)]
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+
+                # B has the edge at the same place: the feature follows it there.
+                self.Doc.openTransaction("Replace")
+                self.assertEqual(rounded.ViewObject.replaceObject(cubes["A"], cubes["B"]), 1)
+                self.Doc.commitTransaction()
+                self.assertEqual(rounded.Base, cubes["B"])
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onB)])
+                self.assertEqual([e[0] for e in rounded.Edges], [onB])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
+
+                # Undone, the feature is on A's edge again.
+                self.Doc.undo()
+                self.assertEqual(rounded.Base, cubes["A"])
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onA)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                self.assertEqual(self._cutCorners(rounded.Shape), [(10, 0)])
+
+                # C has no edge there: the link goes missing, and the recompute fails.
+                rounded.ViewObject.replaceObject(cubes["A"], cubes["C"])
+                self.assertEqual(rounded.Base, cubes["C"])
+                [link] = rounded.EdgeLinks[1]
+                self.assertTrue(link.startswith("?"), link)
+                self.Doc.recompute()
+                self.assertFalse(rounded.isValid())
+                self.assertIn("Missing edge", rounded.getStatusString())
+
+
 class PartMirrorGuiTestCases(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartMirrorGuiTest")
