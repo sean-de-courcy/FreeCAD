@@ -559,6 +559,52 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToFirstBaseFace(self):
         self.revolveUpToBaseFace(upToFirst=True)
 
+    def revolveTwoFacesUpToFace(self, kind):
+        """A profile of two separate rectangles, x in [1, 2] and [3, 4], z in [0, 2] on XZ about Z,
+        up to the face x = 0 of a box (x in [-6, 0] for a Revolution, [0, 6] for a Groove,
+        y in [-6, 6], z in [0, 3]). Only the last face's elements would be named from the profile
+        (ops#263), so the feature fails with an error, as before ops#240."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 6
+        block.Width = 12
+        block.Height = 3
+        x0 = -6 if kind == "Revolution" else 0
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, -6, 0), FreeCAD.Rotation())
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        for x0, x1 in ((1, 2), (3, 4)):
+            points = [
+                FreeCAD.Vector(x0, 0),
+                FreeCAD.Vector(x1, 0),
+                FreeCAD.Vector(x1, 2),
+                FreeCAD.Vector(x0, 2),
+            ]
+            for start, end in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(start, end), False)
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(block.Shape.Faces)
+            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
+        ]
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [wall])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("several separate faces", revolution.getStatusString())
+
+    def testRevolutionTwoFacesUpToFaceFails(self):
+        self.revolveTwoFacesUpToFace("Revolution")
+
+    def testGrooveTwoFacesUpToFaceFails(self):
+        self.revolveTwoFacesUpToFace("Groove")
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error and gives no solid."""

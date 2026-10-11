@@ -120,6 +120,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/patterns.py
     PartDesignTests/Scenarios/randomized.py
     PartDesignTests/Scenarios/reorder.py
+    PartDesignTests/Scenarios/revolve_uptoface.py
     PartDesignTests/Scenarios/rlist.py
     PartDesignTests/Scenarios/sketch_edits.py
     PartDesignTests/Scenarios/splits.py
@@ -174,6 +175,9 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/Refine.V1.txt
     PartDesignTests/NamingGolden/Refine.V2.txt
     PartDesignTests/NamingGolden/Refine.V2i-ids.txt
+    PartDesignTests/NamingGolden/RevolutionUpToFace.V1.txt
+    PartDesignTests/NamingGolden/RevolutionUpToFace.V2.txt
+    PartDesignTests/NamingGolden/RevolutionUpToFace.V2i-ids.txt
     PartDesignTests/NamingGolden/Sketch.V1.txt
     PartDesignTests/NamingGolden/Sketch.V2.txt
     PartDesignTests/NamingGolden/Sketch.V2i-ids.txt

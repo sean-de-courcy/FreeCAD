@@ -3,7 +3,7 @@
 # existing dump changes and the revision doesn't: a change of existing names needs a new revision,
 # which makes files saved before it re-derive their references from geometry once. A new or
 # removed dump only needs recording again.
-revision 1
+revision 2
 digest CompoundCopies.V2.txt 2a612b3cdc773ce40cf1adec9ec9918bd0ee9dfde45ac8b5f7453cefb04cb585
 digest CompoundCut.V2.txt 92b2428a9b30eb3dd666a37b62cf4ceb4f54546b79089ccf1833733bc828835c
 digest CutSplit.V2.txt 7eefaad2e013a3ff9c7fb6e26dcfa08c33e08276fc3616c41d7d546096fa58f1
@@ -19,5 +19,6 @@ digest PadPocket.V2.txt 8cd00bbb5e4716d9c11651dc3031fd11fb55e3f915c67a3eb2fb85fb
 digest PatternSteps.V2.txt 2c8ab69161187a0035fa8c867abf5ab41f7b28d8b55d6822801f821cc2b97d85
 digest PipeShell.V2.txt 960bc7f222dc10bb63fc075a37174fc49388b1417be51345b6d7f1b0553203e8
 digest Refine.V2.txt 18ed0b25f797163255b25559fd6a2cf70babf619ed10fa9f9e37c21511563f2d
+digest RevolutionUpToFace.V2.txt f67f10fed599f0c9d86fef0ce24bfc9bfead8924509995fcf74dc0edcc66a763
 digest Sketch.V2.txt 20e85d3a45312a3957991f952c91eb29ae35241adc65bc13652e7bc141ef3624
 digest Slice.V2.txt a37e613bb163bd97547577fa1d2d5072bc0fb7999d6ae2c7ef9b7293d0484f75

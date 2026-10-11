@@ -62,13 +62,14 @@ from PartDesignTests.Scenarios import attachment, booleans, dressups, patterns, 
 from PartDesignTests.Scenarios import ambiguous, consumers, crossdoc, external, internal, issues
 from PartDesignTests.Scenarios import interning, moves, reorder
 from PartDesignTests.Scenarios import rlist
-from PartDesignTests.Scenarios import randomized, splits, uptoface
+from PartDesignTests.Scenarios import randomized, revolve_uptoface, splits, uptoface
 
 AREAS = (
     sketch_edits,
     dressups,
     attachment,
     uptoface,
+    revolve_uptoface,
     patterns,
     booleans,
     splits,
