@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include <fastsignals/connection.h>
+
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
 #include <Gui/DocumentObserver.h>
@@ -104,6 +106,8 @@ private:
     std::unique_ptr<Ui_TaskShapeBinder> ui;
     Gui::ButtonGroup* buttonGroup;
     Gui::WeakPtrT<ViewProviderShapeBinder> vp;
+    /// refreshes the note when Support changes elsewhere: undo, redo, Python (PR 245 review L4)
+    fastsignals::scoped_connection supportConnection;
 };
 
 

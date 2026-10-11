@@ -260,6 +260,7 @@ ShapeBinder::Dropped ShapeBinder::findDroppedReferences(const App::PropertyLinkS
     // elements")
     const bool datum = obj && !obj->isDerivedFrom<Part::Feature>();
     std::vector<std::string> others;
+    std::vector<const App::DocumentObject*> othersSeen;  // by object: two can share a label
     bool mixed = false;
     std::vector<std::string> elements = subs;
     std::vector<std::string> datumElements;
@@ -269,9 +270,9 @@ ShapeBinder::Dropped ShapeBinder::findDroppedReferences(const App::PropertyLinkS
             continue;
         }
         if (it != obj) {
-            std::string text = label(it);
-            if (std::ranges::find(others, text) == others.end()) {
-                others.push_back(text);
+            if (std::ranges::find(othersSeen, it) == othersSeen.end()) {
+                othersSeen.push_back(it);
+                others.push_back(label(it));
             }
         }
         else if (datum) {

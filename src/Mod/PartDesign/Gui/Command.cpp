@@ -1987,7 +1987,8 @@ bool dressupGetSelected(
     return true;
 }
 
-// The picks a dress-up doesn't take, named in the status bar: they are left out (ops#252)
+// The picks a dress-up doesn't take, named in the status bar: they are left out (ops#252).
+// `which` is marked QT_TRANSLATE_NOOP("QObject", ...): it is translated here, in that context
 static void reportDroppedPicks(const char* which, const QString& takes, const std::vector<std::string>& dropped)
 {
     if (dropped.empty()) {
@@ -2276,7 +2277,7 @@ void CmdPartDesignDraft::activated(int iMsg)
     finishDressupFeature(this, "Draft", base, SubNames, useAllEdges);
     // after the panel opens, which would replace the message
     reportDroppedPicks(
-        QT_TR_NOOP("Draft"),
+        QT_TRANSLATE_NOOP("QObject", "Draft"),
         QObject::tr("planar, cylindrical and conical faces"),
         dropped
     );
@@ -2337,7 +2338,7 @@ void CmdPartDesignThickness::activated(int iMsg)
     }
 
     finishDressupFeature(this, "Thickness", base, SubNames, useAllEdges);
-    reportDroppedPicks(QT_TR_NOOP("Thickness"), QObject::tr("faces"), dropped);
+    reportDroppedPicks(QT_TRANSLATE_NOOP("QObject", "Thickness"), QObject::tr("faces"), dropped);
 }
 
 bool CmdPartDesignThickness::isActive()

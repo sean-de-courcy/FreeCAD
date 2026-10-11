@@ -66,7 +66,10 @@ namespace PartDesignGui
 
 /// The objects' labels for a list to choose from; a label that more than one has gets the
 /// object's name too, so the user can tell them apart (ops#252)
-static QStringList labelsToChoose(const std::vector<App::DocumentObject*>& objs)
+static QStringList labelsToChoose(
+    const std::vector<App::DocumentObject*>& objs,
+    const QString& reserved = QString()
+)
 {
     std::map<std::string, int> count;
     for (auto obj : objs) {
@@ -75,7 +78,8 @@ static QStringList labelsToChoose(const std::vector<App::DocumentObject*>& objs)
     QStringList items;
     for (auto obj : objs) {
         QString text = QString::fromUtf8(obj->Label.getValue());
-        if (count[obj->Label.getStrValue()] > 1) {
+        // a repeated label, or one equal to another row's text (PR 245 review L2)
+        if (count[obj->Label.getStrValue()] > 1 || (!reserved.isEmpty() && text == reserved)) {
             text += QStringLiteral(" (%1)").arg(QString::fromLatin1(obj->getNameInDocument()));
         }
         items.push_back(text);
@@ -1249,9 +1253,10 @@ void CmdPartDesignMoveFeatureInTree::activated(int iMsg)
         listed.push_back(bodyBase);
     }
     listed.insert(listed.end(), model.begin(), model.end());
-    QStringList items = PartDesignGui::labelsToChoose(listed);
+    const QString beginning = QObject::tr("Beginning of the body");
+    QStringList items = PartDesignGui::labelsToChoose(listed, bodyBase ? QString() : beginning);
     if (!bodyBase) {
-        items.push_front(QObject::tr("Beginning of the body"));
+        items.push_front(beginning);
     }
 
     const int index = PartDesignGui::chooseItem(

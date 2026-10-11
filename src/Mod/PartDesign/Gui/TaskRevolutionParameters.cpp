@@ -95,6 +95,10 @@ TaskRevolutionParameters::TaskRevolutionParameters(
     }
 
     setupDialog();
+    // the user's choice, kept through axis picks: Reversed against the axis's suggestion
+    if (auto rev = getObject<PartDesign::Revolved>()) {
+        userFlip = propReversed->getValue() != rev->suggestReversed();
+    }
 
     setUpdateBlocked(false);
     updateUI(Side::First);
@@ -535,21 +539,35 @@ void TaskRevolutionParameters::writeAxis(
     }
 
     try {
-        // A picked axis turns the revolution as a chosen one does, unless the user set Reversed
-        // in this edit; a change it makes is said (ops#252: every pick overwrote it silently)
-        bool reversed = propReversed->getValue();
+        // A picked axis turns the revolution the way it suggests, or the other way when the
+        // user's Reversed went against the suggestion (ops#252: every pick overwrote it silently;
+        // PR 245 review M1: the choice is kept relative to the suggestion, not as a value). A
+        // change, or a result against the suggestion, is said
         if (auto revolved = freecad_cast<PartDesign::Revolved*>(pcRevolution)) {
-            reversed = revolved->suggestReversed();
-        }
-        if (reversed != propReversed->getValue() && !reversedByUser) {
-            propReversed->setValue(reversed);
-            QSignalBlocker block(ui->checkBoxReversed);
-            ui->checkBoxReversed->setChecked(reversed);
-            Gui::getMainWindow()->showMessage(
-                reversed ? tr("Reversed is now on: the revolution turns the way the axis suggests.")
-                         : tr("Reversed is now off: the revolution turns the way the axis suggests."),
-                10000
-            );
+            const bool reversed = revolved->suggestReversed() != userFlip;
+            const bool changed = reversed != propReversed->getValue();
+            if (changed) {
+                propReversed->setValue(reversed);
+                QSignalBlocker block(ui->checkBoxReversed);
+                ui->checkBoxReversed->setChecked(reversed);
+            }
+            if (userFlip) {
+                Gui::getMainWindow()->showMessage(
+                    reversed ? tr("Reversed is on: the revolution turns against the way the axis "
+                                  "suggests, as you set it.")
+                             : tr("Reversed is off: the revolution turns against the way the axis "
+                                  "suggests, as you set it."),
+                    10000
+                );
+            }
+            else if (changed) {
+                Gui::getMainWindow()->showMessage(
+                    reversed
+                        ? tr("Reversed is now on: the revolution turns the way the axis suggests.")
+                        : tr("Reversed is now off: the revolution turns the way the axis suggests."),
+                    10000
+                );
+            }
         }
 
         recomputeFeature();
@@ -625,8 +643,10 @@ void TaskRevolutionParameters::onSidesModeChanged(int index)
 void TaskRevolutionParameters::onReversed(bool on)
 {
     if (getObject()) {
-        reversedByUser = true;
         propReversed->setValue(on);
+        if (auto revolved = getObject<PartDesign::Revolved>()) {
+            userFlip = on != revolved->suggestReversed();
+        }
         recomputeFeature();
 
         setGizmoPositions();

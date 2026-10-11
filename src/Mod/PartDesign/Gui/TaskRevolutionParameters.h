@@ -187,8 +187,9 @@ private:
     bool isGroove;
     /// updateUI is running (its own guard: blockUpdate is also "Update view" off, ops#193)
     bool updatingUI = false;
-    /// Reversed set by the user in this edit: an axis pick keeps it (ops#252)
-    bool reversedByUser = false;
+    /// Reversed differs from what the axis suggests (the user's choice): an axis pick keeps the
+    /// choice relative to the new axis's suggestion (ops#252, PR 245 review M1)
+    bool userFlip = false;
     double defaultGizmoMultFactor;
 
     /// The start reference (ops#150 W6)

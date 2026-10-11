@@ -87,6 +87,17 @@ TaskShapeBinder::TaskShapeBinder(ViewProviderShapeBinder* view, bool newObj, QWi
     this->groupLayout()->addWidget(proxy);
 
     updateUI();
+
+    auto* binder = view->getObject<PartDesign::ShapeBinder>();
+    if (binder && binder->getDocument()) {
+        supportConnection = binder->getDocument()->signalChangedObject.connect(
+            [this, binder](const App::DocumentObject& obj, const App::Property& prop) {
+                if (&obj == binder && &prop == &binder->Support) {
+                    updateDroppedNote();
+                }
+            }
+        );
+    }
 }
 
 TaskShapeBinder::~TaskShapeBinder() = default;

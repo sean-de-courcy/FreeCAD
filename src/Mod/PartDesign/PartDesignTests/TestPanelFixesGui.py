@@ -2386,6 +2386,27 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(binder.isValid(), binder.getStatusString())
         self.assertFalse(note.isVisible())
 
+    def testShapeBinderPanelNoteFollowsSupportSetElsewhere(self):
+        """PR 245 review L4: with the panel open on a good binder, Support set from Python to a
+        failing one (Box's top face and two faces of the other box) shows the note, naming the
+        other box once; set back to Box's top face, the note is gone. It changed only after an
+        edit in the panel."""
+        box, other, binder, names = self.binderModel()
+        other.Label = "Right box"
+        self.edit(binder)
+        note = self.widget(QtWidgets.QLabel, "droppedNote")
+        self.assertFalse(note.isVisible())
+        binder.Support = [
+            (box, names["top"]),
+            (other, (self.faceAt(other, V(25, 5, 10)), self.faceAt(other, V(25, 5, 0)))),
+        ]
+        pump(0.2)
+        self.assertTrue(note.isVisible())
+        self.assertEqual(note.text().count("'Right box'"), 1, note.text())
+        binder.Support = [(box, names["top"])]
+        pump(0.2)
+        self.assertFalse(note.isVisible())
+
     def testShapeBinderPanelHasNoNoteOnAGoodSupport(self):
         """The panel on a binder that binds its Support shows no note (ops#266)."""
         box, _, binder, names = self.binderModel()
@@ -2448,7 +2469,8 @@ class TestPanelFixesGui(unittest.TestCase):
     def testMoveFeatureAfterAFeatureLabelledLikeTheBeginning(self):
         """Three boxes in a body, the first labelled "Beginning of the body". Move Feature After
         on the third, with the first chosen (row 1): the third goes after it. It went to the
-        beginning: the row was looked up by its text, which row 0 has too."""
+        beginning: the row was looked up by its text, which row 0 has too. The first's row shows
+        its name, so the two rows differ."""
         self.body = models.body(self.doc)
         boxes = []
         for i in range(3):
@@ -2468,7 +2490,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: self.modals, 5.0), "no list dialog")
         self.answering = False
         pump(0.2)
-        self.assertEqual(self.modals[0][:2], ["Beginning of the body", "Beginning of the body"])
+        # the feature's row has its name too (PR 245 review L2: two identical rows)
+        self.assertEqual(
+            self.modals[0][:2], ["Beginning of the body", "Beginning of the body (Box0)"]
+        )
         self.assertEqual(
             [o.Name for o in self.body.Group if o in boxes], ["Box0", "Box2", "Box1"]
         )
