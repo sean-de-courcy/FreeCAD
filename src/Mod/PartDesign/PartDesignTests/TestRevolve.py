@@ -605,19 +605,9 @@ class TestRevolve(unittest.TestCase):
     def testGrooveTwoFacesUpToFaceFails(self):
         self.revolveTwoFacesUpToFace("Groove")
 
-    def revolveUpToFaceAcross(self, kind, sideType):
-        """A face of the base that reaches across the profile plane, so that it mirrors onto
-        itself (ops#254): the box x in [-4, 0], y in [-4, 4], z in [0, 2] (Revolution: 64), or
-        x in [0, 4], y in [-4, 4], z in [0, 3] (Groove: 96, its top layer keeps it one solid), and the profile x in [1, 3], z in [0, 2] on XZ about Z, up to the box's
-        face x = 0 on both sides. The tool is the half ring from -90 to +90 degrees, 8 pi, on the
-        side x >= 0; Symmetric revolved the second side the long way round, from +90 to +270."""
-        body = self.Doc.addObject("PartDesign::Body", "Body")
-        block = body.newObject("PartDesign::AdditiveBox", "Block")
-        block.Length = 4
-        block.Width = 8
-        block.Height = 2 if kind == "Revolution" else 3
-        x0 = -4 if kind == "Revolution" else 0
-        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, -4, 0), FreeCAD.Rotation())
+    def profileAcross(self, body):
+        """The profile x in [1, 3], z in [0, 2] on XZ, revolved about Z (its V axis) in the tests
+        of an up-to face across the profile plane (ops#254)."""
         sketch = body.newObject("Sketcher::SketchObject", "Profile")
         [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
         sketch.AttachmentSupport = (xz, [""])
@@ -631,29 +621,31 @@ class TestRevolve(unittest.TestCase):
         for start, end in zip(points, points[1:] + points[:1]):
             sketch.addGeometry(Part.LineSegment(start, end), False)
         self.Doc.recompute()
-        [wall] = [
-            "Face%d" % (i + 1)
-            for i, face in enumerate(block.Shape.Faces)
-            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
-        ]
+        return sketch
+
+    def revolveAcross(self, body, kind, sideType, upTo, upToType="UpToFace"):
+        """A `kind` of profileAcross() up to `upTo` (a link and its sub-names) on both sides."""
         revolution = body.newObject("PartDesign::" + kind, kind)
+        sketch = self.profileAcross(body)
         revolution.Profile = sketch
         revolution.ReferenceAxis = (sketch, ["V_Axis"])
         revolution.SideType = sideType
-        revolution.Type = "UpToFace"
-        revolution.UpToFace = (block, [wall])
+        revolution.Type = upToType
+        if upToType == "UpToFace":
+            revolution.UpToFace = upTo
         if sideType == "Two sides":
-            revolution.Type2 = "UpToFace"
-            revolution.UpToFace2 = (block, [wall])
+            revolution.Type2 = upToType
+            if upToType == "UpToFace":
+                revolution.UpToFace2 = upTo
         self.Doc.recompute()
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertEqual(len(revolution.Shape.Solids), 1)
-        expected = 64 + 8 * math.pi if kind == "Revolution" else 96 - 8 * math.pi
-        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
-        if kind == "Revolution":
-            tool = revolution.Shape.cut(block.Shape)
-        else:
-            tool = block.Shape.cut(revolution.Shape)
+        return revolution
+
+    def assertHalfRing(self, tool):
+        """The tool of profileAcross() is the half ring from -90 to +90 degrees, 8 pi, on the
+        side x >= 0. Symmetric revolved the second side the long way round, from +90 to +270,
+        when the up-to face mirrors onto itself (ops#254)."""
         self.assertAlmostEqual(tool.Volume, 8 * math.pi, places=6)
         bounds = tool.BoundBox
         self.assertAlmostEqual(bounds.XMin, 0, places=6)
@@ -663,6 +655,37 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(bounds.ZMin, 0, places=6)
         self.assertAlmostEqual(bounds.ZMax, 2, places=6)
 
+    def wallAtXZero(self, feature):
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(feature.Shape.Faces)
+            if abs(face.BoundBox.XMin) < 1e-9 and abs(face.BoundBox.XMax) < 1e-9
+        ]
+        return wall
+
+    def revolveUpToFaceAcross(self, kind, sideType, upToType="UpToFace"):
+        """A face of the base that reaches across the profile plane, so that it mirrors onto
+        itself (ops#254): the box x in [-4, 0], y in [-4, 4], z in [0, 2] (Revolution: 64), or
+        x in [0, 4], y in [-4, 4], z in [0, 3] (Groove: 96, its top layer keeps it one solid).
+        The profileAcross() goes up to the box's face x = 0 on both sides (or up to the first
+        face): assertHalfRing()."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2 if kind == "Revolution" else 3
+        x0 = -4 if kind == "Revolution" else 0
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(x0, -4, 0), FreeCAD.Rotation())
+        self.Doc.recompute()
+        upTo = (block, [self.wallAtXZero(block)])
+        revolution = self.revolveAcross(body, kind, sideType, upTo, upToType)
+        expected = 64 + 8 * math.pi if kind == "Revolution" else 96 - 8 * math.pi
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=6)
+        if kind == "Revolution":
+            self.assertHalfRing(revolution.Shape.cut(block.Shape))
+        else:
+            self.assertHalfRing(block.Shape.cut(revolution.Shape))
+
     def testRevolutionUpToFaceAcrossSymmetric(self):
         self.revolveUpToFaceAcross("Revolution", "Symmetric")
 
@@ -671,6 +694,85 @@ class TestRevolve(unittest.TestCase):
 
     def testGrooveUpToFaceAcrossSymmetric(self):
         self.revolveUpToFaceAcross("Groove", "Symmetric")
+
+    def testRevolutionUpToFirstAcrossSymmetric(self):
+        self.revolveUpToFaceAcross("Revolution", "Symmetric", "UpToFirst")
+
+    def testGrooveUpToFirstAcrossSymmetric(self):
+        self.revolveUpToFaceAcross("Groove", "Symmetric", "UpToFirst")
+
+    def testRevolutionUpToHoledFaceAcrossSymmetric(self):
+        """The box of revolveUpToFaceAcross() with a window through it at y in [-2.5, -1.5],
+        z in [0.5, 1.5]: its face x = 0 has a symmetric outline but not a symmetric hole, so it
+        doesn't mirror onto itself. The second side goes up to the mirrored face, solid where it
+        lands (the window would sit there in the face itself): assertHalfRing()."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-4, -4, 0), FreeCAD.Rotation())
+        window = body.newObject("PartDesign::SubtractiveBox", "Window")
+        window.Length = 6
+        window.Width = 1
+        window.Height = 1
+        window.Placement = FreeCAD.Placement(FreeCAD.Vector(-5, -2.5, 0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        upTo = (window, [self.wallAtXZero(window)])
+        revolution = self.revolveAcross(body, "Revolution", "Symmetric", upTo)
+        self.assertAlmostEqual(revolution.Shape.Volume, 60 + 8 * math.pi, places=6)
+        self.assertHalfRing(revolution.Shape.cut(window.Shape))
+
+    def testRevolutionUpToDiskAcrossSymmetric(self):
+        """The end disk of a cylinder along X (x in [-4, 0], radius 4 about y = 0, z = 1), across
+        the profile plane: a face that mirrors onto itself, though its seam vertex at the top
+        mirrors elsewhere. assertHalfRing()."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pin = body.newObject("PartDesign::AdditiveCylinder", "Pin")
+        pin.Radius = 4
+        pin.Height = 4
+        pin.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-4, 0, 1), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
+        )
+        self.Doc.recompute()
+        upTo = (pin, [self.wallAtXZero(pin)])
+        revolution = self.revolveAcross(body, "Revolution", "Symmetric", upTo)
+        self.assertAlmostEqual(revolution.Shape.Volume, 64 * math.pi + 8 * math.pi, places=6)
+        self.assertHalfRing(revolution.Shape.cut(pin.Shape))
+
+    def testRevolutionUpToPipeWallAcrossSymmetric(self):
+        """The wall of a pipe along Y (y in [-5, 5], radius 5 about x = -5, z = 1), across the
+        profile plane: a curved face that mirrors onto itself, though its axis mirrors to -Y.
+        The sweep enters it at x <= 0, so the tool isn't a half ring, but the second side mirrors
+        the first: the tool is symmetric about the profile plane and spans y in [-3, 3]."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pipe = body.newObject("PartDesign::AdditiveCylinder", "Pipe")
+        pipe.Radius = 5
+        pipe.Height = 10
+        pipe.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(-5, -5, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+        )
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(pipe.Shape.Faces)
+            if isinstance(face.Surface, Part.Cylinder)
+        ]
+        revolution = self.revolveAcross(body, "Revolution", "Symmetric", (pipe, [wall]))
+        tool = revolution.Shape.cut(pipe.Shape)
+        mirrored = tool.mirror(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 1, 0))
+        self.assertGreater(tool.Volume, 8 * math.pi)
+        self.assertAlmostEqual(tool.cut(mirrored).Volume, 0, places=6)
+        self.assertAlmostEqual(tool.BoundBox.YMin, -3, places=6)
+        self.assertAlmostEqual(tool.BoundBox.YMax, 3, places=6)
+
+    def testRevolutionUpToDatumAcrossSymmetric(self):
+        """The origin YZ plane, unbounded, across the profile plane, as the up-to face of the
+        first feature: assertHalfRing()."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
+        revolution = self.revolveAcross(body, "Revolution", "Symmetric", (yz, [""]))
+        self.assertHalfRing(revolution.Shape)
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never

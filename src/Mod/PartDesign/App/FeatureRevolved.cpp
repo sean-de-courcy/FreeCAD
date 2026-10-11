@@ -31,8 +31,12 @@
 #include <utility>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
@@ -140,6 +144,91 @@ std::optional<double> getPlanarStartReferenceAngle(
     const double phase = std::atan2(sineCoefficient, cosineCoefficient);
     const double delta = std::acos(std::clamp(solution, -1.0, 1.0));
     return std::min(normalizeAngleRadians(phase + delta), normalizeAngleRadians(phase - delta));
+}
+
+// A face without a wire (a datum or origin plane) or with an infinite bounding box: BRepFeat
+// trims it (BRepFeat::FaceUntil), and a boolean can't measure it.
+bool isUnboundedFace(const TopoShape& face)
+{
+    if (face.isNull()) {
+        return false;
+    }
+    if (!TopExp_Explorer(face.getShape(), TopAbs_WIRE).More()) {
+        return true;
+    }
+    Base::BoundBox3d faceBox = face.getBoundBox();
+    return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
+}
+
+double faceArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+// Whether two faces lie on the same plane.
+bool onSamePlane(const TopoDS_Face& face, const TopoDS_Face& other)
+{
+    BRepAdaptor_Surface surface(face);
+    BRepAdaptor_Surface otherSurface(other);
+    if (surface.GetType() != GeomAbs_Plane || otherSurface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    const gp_Pln plane = surface.Plane();
+    const gp_Pln otherPlane = otherSurface.Plane();
+    return plane.Axis().IsParallel(otherPlane.Axis(), Precision::Angular())
+        && otherPlane.Distance(plane.Location()) <= Precision::Confusion();
+}
+
+// Whether two bounded faces cover the same points: the area they share is the area of each.
+// Holes count, and so do curved faces and faces whose seams differ (a disk and its mirror image).
+bool coversSamePoints(const TopoShape& face, const TopoShape& other)
+{
+    try {
+        const double area = faceArea(face.getShape());
+        const double otherArea = faceArea(other.getShape());
+        BRepAlgoAPI_Common common(face.getShape(), other.getShape());
+        if (!common.IsDone() || area <= Precision::Confusion()) {
+            return false;
+        }
+        const double shared = faceArea(common.Shape());
+        const double tolerance = area * 1e-6;
+        return std::fabs(shared - area) <= tolerance && std::fabs(shared - otherArea) <= tolerance;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// The up-to face of Symmetric's second side, given the first side's face and its mirror image in
+// the profile plane. A face across the profile plane has an image on its own plane or surface:
+// BRepFeat then revolved the second side the long way round, from the face at the first side's
+// end to the image at its own, silently (ops#254).
+// - An image that covers the face's points (a wall or a disk across the plane, an unbounded
+//   plane through it) gives way to the face itself, which Two sides passes for both sides.
+// - An image that only shares the face's plane (a hole on one side of a wall across it) gives way
+//   to the unbounded plane: the second side meets it first where the image lies.
+// - Any other image stays.
+TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrored)
+{
+    if (upToFace.isNull() || mirrored.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE
+        || mirrored.getShape().ShapeType() != TopAbs_FACE) {
+        return mirrored;
+    }
+    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
+    const TopoDS_Face& image = TopoDS::Face(mirrored.getShape());
+    const bool samePlane = onSamePlane(face, image);
+    if (isUnboundedFace(upToFace) || isUnboundedFace(mirrored)) {
+        return samePlane ? upToFace : mirrored;
+    }
+    if (coversSamePoints(upToFace, mirrored)) {
+        return upToFace;
+    }
+    if (samePlane) {
+        return TopoShape(BRepBuilderAPI_MakeFace(BRepAdaptor_Surface(image).Plane()).Face());
+    }
+    return mirrored;
 }
 
 }  // namespace
@@ -477,15 +566,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     throw Base::RuntimeError("Could not determine the sketch plane!");
                 }
                 gp_Ax2 mirrorPlane(sketchPlane.Location(), sketchPlane.Axis().Direction());
-                TopoShape mirroredUpToFace = upToFace.makeElementMirror(mirrorPlane);
-                // An up-to face that is symmetric about the profile plane (a wall across it)
-                // mirrors onto itself. BRepFeat then revolved the second side the long way round,
-                // from the face on the first side's end to the face on its own, silently
-                // (ops#254). The face itself, which Two sides passes for both sides, gives the
-                // right sector.
-                if (!upToFace.findSubShapesWithSharedVertex(mirroredUpToFace).empty()) {
-                    mirroredUpToFace = upToFace;
-                }
+                TopoShape mirroredUpToFace
+                    = secondSideUpToFace(upToFace, upToFace.makeElementMirror(mirrorPlane));
                 gp_Dir dir2 = dir;
                 dir2.Reverse();
                 addRevolution(tryToRevolveToFace(
@@ -613,18 +695,8 @@ TopoShape Revolved::tryToRevolveToFace(
     // clears the base as well. A bounded up-to face isn't trimmed and keeps the base alone.
     // A Groove without a base gets the same box: makeRemovedVolume() then fails and the tool
     // itself becomes the result, as for a Groove by angle or a Pocket as the first feature.
-    auto isUnbounded = [](const TopoShape& face) {
-        if (face.isNull()) {
-            return false;
-        }
-        if (!TopExp_Explorer(face.getShape(), TopAbs_WIRE).More()) {
-            return true;
-        }
-        Base::BoundBox3d faceBox = face.getBoundBox();
-        return !faceBox.IsValid() || Precision::IsInfinite(faceBox.CalcDiagonalLength());
-    };
     TopoShape featureBase = base;
-    if (base.isNull() || isUnbounded(upToFace)) {
+    if (base.isNull() || isUnboundedFace(upToFace)) {
         Base::BoundBox3d bounds = sketchshape.getBoundBox();
         if (!base.isNull()) {
             bounds.Add(base.getBoundBox());
