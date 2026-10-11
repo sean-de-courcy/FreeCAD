@@ -495,7 +495,9 @@ class RevolutionSideTwoEndAfterSideOneToFace(RevolutionSideOneToFaceFillet):
     def endTop(self):
         if self.upTo and self.solver:
             return BROKEN
-        return super().endTop()
+        expected = super().endTop()
+        # Held plainly in V2 without the solver: a warned guess doesn't pass (verification 6, L2)
+        return Settled(expected) if self.upTo and self.mode == "V2" else expected
 
 
 class RevolutionSideTwoOuterEdgeAfterSideOneToFace(RevolutionSideTwoEndAfterSideOneToFace):
@@ -510,7 +512,8 @@ class RevolutionSideTwoOuterEdgeAfterSideOneToFace(RevolutionSideTwoEndAfterSide
     def endTop(self):
         if self.upTo and self.solver:
             return BROKEN
-        return edge("line", contains=ray(self.endAngle, 20, 7.5))
+        expected = edge("line", contains=ray(self.endAngle, 20, 7.5))
+        return Settled(expected) if self.upTo and self.mode == "V2" else expected
 
 
 class RevolutionStartFaceOfOneSideToSymmetric(Scenario):

@@ -1025,6 +1025,7 @@ class FilletSideOneEndOfTwoSidesUpToFaceToTaper(FilletBottomCapEdgeOfTwoSidesUpT
     other direction (tapered to untapered) is the same break. Documented, not fixed: the two
     builds name side 1's end differently."""
 
+    REFS = ("top_edge",)
     tapered = False
 
     def topEdge(self):
@@ -1047,7 +1048,7 @@ class FilletSideOneEndOfTwoSidesUpToFaceToTaper(FilletBottomCapEdgeOfTwoSidesUpT
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (pad, self.names(pad, self.topEdge()))
         fillet.Radius = 0.5
-        self.ref("bottom_edge", fillet, "Base", self.topEdge, Filleted(0.5))
+        self.ref("top_edge", fillet, "Base", self.topEdge, Filleted(0.5))
 
     def edit(self, doc):
         doc.Pad.TaperAngle = 5
@@ -1325,13 +1326,16 @@ class StartCapOfOneSideToUpToBlockApart(Scenario):
     area = "dress-ups"
     MULTI = True
     blockX0 = -5
+    blockY = 5
     apart = False
 
     def build(self, doc):
         body = m.body(doc)
         pillar = m.sketch(doc, "Pillar", m.rectangle(5, -5, 15, 5), body, z=-10)
         m.pad(body, pillar, 18, name="PillarPad")
-        block = m.sketch(doc, "Block", m.rectangle(self.blockX0, -5, 15, 5), body, z=8)
+        block = m.sketch(
+            doc, "Block", m.rectangle(self.blockX0, -self.blockY, 15, self.blockY), body, z=8
+        )
         self.block = m.pad(body, block, 2, name="BlockPad")
         profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
         pad = m.pad(body, profile, 5)
@@ -1424,6 +1428,137 @@ class FilletStartCapFrontEdgeOfOneSideToUpToBlockApart(StartCapOfOneSideToUpToBl
         fillet.Base = (pad, self.names(pad, self.frontEdge()))
         fillet.Radius = 0.5
         self.ref("front_edge", fillet, "Base", self.frontEdge, Filleted(0.5))
+
+
+class FilletStartCapEdgeOfOneSideToUpToOverhangingBlockApart(
+    FilletStartCapEdgeOfOneSideToUpToBlockApart
+):
+    __doc__ = (
+        FilletStartCapEdgeOfOneSideToUpToBlockApart.__doc__
+        + "\n\nPR 243 round 7 (Fable review 6, M1): the block overhangs in y (y -8..8). Side 1's far "
+        + "left edge is the middle piece of the block's bottom left edge (FUS;MOD), whose "
+        + "connected elements, per end vertex, are a Pad face holding it, possibly the profile's "
+        + "left line's GEN face (it runs along that face). Through that neighbour the old name "
+        + "was in the piece's ancestry outside a projection, and the reference resolved there, "
+        + "8 mm away, at tier 1. The reference breaks."
+    )
+
+    blockY = 8
+
+
+class PointOnStartCapCornerOfOneSideToUpToOverhangingBlockApart(
+    PointOnStartCapCornerOfOneSideToUpToBlockApart
+):
+    __doc__ = (
+        PointOnStartCapCornerOfOneSideToUpToBlockApart.__doc__
+        + "\n\nPR 243 round 7 (Fable review 6, M1): the block overhangs in y (y -8..8), so side "
+        + "1's far corner lies inside the block's bottom left edge. The reference breaks."
+    )
+
+    blockY = 8
+
+
+class StartCapOnPedestalToUpToBlockApart(Scenario):
+    """PR 243 round 7 (Fable review 6, M2): a pedestal (x, y -10..10, z -5..0) with a pillar
+    (x 7..10, y -5..5, z 0..8) under a block (x -5..10, y -5..5, z 8..10); a Pad of the square
+    x, y -5..5 on the pedestal's top, One side, 5 (z 0..5), Refine off. Its start cap lies in the
+    pedestal's top: the start cap's edges are FUS;MOD names that split the pedestal's top face.
+    Then Two sides: side 1 up to the block's bottom face (z = 8), side 2 0.5 long, with a start
+    offset of 1, so the sides are built apart (z 1..8 and 0.5..1) and lifted off the pedestal.
+    Side 1's far cap lies on the block, flush with its left side, so its left edge and corners
+    merge with the block's: FUS;MOD names over the PRJ names, which link the profile's names."""
+
+    abstract = True
+    area = "dress-ups"
+    MULTI = True
+    pedestal = (-10, -10, 10, 10)
+    blockY = 5
+    apart = False
+
+    def build(self, doc):
+        body = m.body(doc)
+        pedestal = m.sketch(doc, "Pedestal", m.rectangle(*self.pedestal), body, z=-5)
+        m.pad(body, pedestal, 5, name="PedestalPad")
+        pillar = m.sketch(doc, "Pillar", m.rectangle(7, -self.blockY, 10, self.blockY), body)
+        m.pad(body, pillar, 8, name="PillarPad")
+        block = m.sketch(doc, "Block", m.rectangle(-5, -self.blockY, 10, self.blockY), body, z=8)
+        self.block = m.pad(body, block, 2, name="BlockPad")
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        doc.recompute()
+        self.addConsumer(doc, body, pad)
+
+    def edit(self, doc):
+        pad = doc.Pad
+        pad.SideType = "Two sides"
+        pad.Type = "UpToFace"
+        under = face("plane", normal=-Z, through=(0, 0, 8), contains=(0, 0, 8))
+        pad.UpToFace = (self.block, self.names(self.block, under))
+        pad.Length2 = 0.5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        self.apart = True
+
+
+class FilletStartCapEdgeOnPedestalToUpToBlockApart(StartCapOnPedestalToUpToBlockApart):
+    __doc__ = (
+        StartCapOnPedestalToUpToBlockApart.__doc__
+        + "\n\nA fillet, radius 0.5, on the start cap's left edge (x = -5, z = 0), concave on the "
+        + "pedestal. Side 1's far left edge (z = 8) shares the old name's profile name through "
+        + "its PRJ linked name, and both are topped by FUS;MOD. The reference breaks."
+    )
+
+    REFS = ("left_edge",)
+
+    def leftEdge(self):
+        if self.apart:
+            return BROKEN
+        return edge("line", direction=Y, contains=(-5, 0, 0))
+
+    def addConsumer(self, doc, body, pad):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.leftEdge()))
+        fillet.Radius = 0.5
+        self.ref("left_edge", fillet, "Base", self.leftEdge, Filleted(0.5))
+
+
+class PointOnStartCapCornerOnPedestalToUpToBlockApart(StartCapOnPedestalToUpToBlockApart):
+    __doc__ = (
+        StartCapOnPedestalToUpToBlockApart.__doc__
+        + "\n\nA datum point on the start cap's front left corner (-5, -5, 0), on the pedestal. "
+        + "Side 1's far corner (-5, -5, 8) is the block's corner. The reference breaks."
+    )
+
+    REFS = ("corner",)
+
+    def corner(self):
+        if self.apart:
+            return BROKEN
+        return vertex((-5, -5, 0))
+
+    def addConsumer(self, doc, body, pad):
+        point = body.newObject("PartDesign::Point", "Corner")
+        point.AttachmentSupport = [(pad, self.names(pad, self.corner())[0])]
+        point.MapMode = "Vertex"
+        self.ref("corner", point, "AttachmentSupport", self.corner)
+        doc.recompute()
+
+
+class FilletStartCapPieceOnPedestalToUpToBlockApart(FilletStartCapEdgeOnPedestalToUpToBlockApart):
+    __doc__ = (
+        FilletStartCapEdgeOnPedestalToUpToBlockApart.__doc__
+        + "\n\nThe pedestal is x -10..10, y -3..3, the pillar and the block y -3..3. The start "
+        + "cap's left edge is split by the pedestal's top edges, and the fillet is on its middle "
+        + "piece (y -3..3), the profile's name then FUS;MOD. Side 1's far left edge is split by "
+        + "the block's: its middle piece, as long, parallel, 8 mm up, holds the PRJ name, then "
+        + "FUS;MOD. The tops agree and the PRJ name embeds the old one; round 6 took that as "
+        + "evidence, and only the two end pieces, with the same names, left it ambiguous. The "
+        + "reference breaks."
+    )
+
+    pedestal = (-10, -3, 10, 3)
+    blockY = 3
 
 
 class FilletSideOneEdgeOfTaperedTwoSidesClipped(FilletSideOneEdgeOfTaperedTwoSides):

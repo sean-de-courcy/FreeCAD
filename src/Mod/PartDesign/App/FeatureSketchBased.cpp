@@ -1000,13 +1000,20 @@ void ProfileBased::markStartCap(
         result.append(section.c_str());
         return result;
     };
-    auto isPartner = [](const Data::MappedName& name) {
-        const auto sections = Data::NameAncestry::splitSections(name.toString());
+    // A partner's name is topped by this feature's projection section, not an up-to face's name
+    // copied onto the far cap. The sections are views into the string, which must outlive them:
+    // round 6 split a temporary, and on macOS (CI run 38131094158) the views read freed memory,
+    // so no far cap name was marked.
+    const std::string tag = std::to_string(getID());
+    auto isPartner = [&tag](const Data::MappedName& name) {
+        const std::string text = name.toString();
+        const auto sections = Data::NameAncestry::splitSections(text);
         if (sections.empty()) {
             return false;
         }
         const auto& last = Data::MappedName::getDecodedMappedName(std::string(sections.back()));
-        return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION);
+        return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION)
+            && last.back().iterationTag == tag;
     };
 
     // Name by name, each marked name made from the name itself: an element may have other names
@@ -1017,8 +1024,10 @@ void ProfileBased::markStartCap(
     // (MappedNameRef::append), so the pairs could miss: on macOS (CI run 38126049631) the far
     // cap's PRJ name stayed unmarked, and a reference followed it to side 1's far cap.
     std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
-    bool capFound = false;
-    bool partnerFound = false;
+    // The distinct names marked on each cap: each profile name on the start cap has one partner
+    // on the far cap
+    std::set<std::string> capNames;
+    std::set<std::string> partnerNames;
     for (const char* type : types) {
         const std::string capSection = copySection(side, type[0]);
         const std::string farCapSection = copySection("2", type[0]);
@@ -1028,11 +1037,11 @@ void ProfileBased::markStartCap(
             for (const auto& [name, sids] : solid.getElementMappedNames(element)) {
                 if (profileNames.contains(name.toString())) {
                     names.emplace_back(element, marked(name, capSection), sids);
-                    capFound = true;
+                    capNames.insert(name.toString());
                 }
                 else if (farCapIsSide2 && isPartner(name)) {
                     names.emplace_back(element, marked(name, farCapSection), sids);
-                    partnerFound = true;
+                    partnerNames.insert(name.toString());
                 }
                 else {
                     names.emplace_back(element, name, sids);
@@ -1040,13 +1049,18 @@ void ProfileBased::markStartCap(
             }
         }
     }
-    if (!capFound) {
-        FC_LOG(getFullName() << ": no start cap element has the profile's names");
+    // Unmarked, a cap's names are another cap's when the sides are built apart, and references
+    // follow them there: never quietly
+    if (capNames.empty()) {
+        FC_WARN(getFullName() << ": no start cap element has the profile's names");
     }
-    if (farCapIsSide2 && !partnerFound) {
-        FC_LOG(getFullName() << ": no far cap element has a profile partner's name");
+    if (farCapIsSide2 && partnerNames.size() != capNames.size()) {
+        FC_WARN(
+            getFullName() << ": " << partnerNames.size() << " far cap names for "
+                          << capNames.size() << " start cap names"
+        );
     }
-    if (!capFound && !partnerFound) {
+    if (capNames.empty() && partnerNames.empty()) {
         return;
     }
     // A new map, as appendElementSection() makes: the old one may be shared

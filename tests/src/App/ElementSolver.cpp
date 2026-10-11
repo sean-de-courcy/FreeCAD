@@ -1649,6 +1649,54 @@ TEST(SolveOwner, topAgreementOfAnUnrelatedNameIsNoEvidence)
     EXPECT_EQ(outcomes[0].element, "Edge20");
 }
 
+TEST(SolveOwner, sharedTopThroughAProjectionIsNoEvidence)
+{
+    // PR 243 round 7 (Fable review 6, M2): the Pad's start cap edge lay on a pedestal, split by
+    // its edge (the profile's line 4, sketch 13, then FUS;MOD). Built as two sides apart, the
+    // start cap is off the pedestal, and side 1's far cap edge is split by a block's edge: its
+    // PRJ name, then FUS;MOD, besides the block sketch's plain line 4. Both names are topped by
+    // FUS;MOD, and the PRJ name embeds the old one: that ancestry is the partner's, not the
+    // element's own.
+    const auto startCapEdge = sketchEdge(4, 13);
+    const auto oldPiece = piece(startCapEdge, 15, "FUS", 0, 'E');
+    const auto farCapEdge = section({}, {startCapEdge}, 14, "XTR", 0, 'E', {"PRJ"});
+    const auto farCapPiece = piece(farCapEdge, 16, "FUS", 0, 'E');
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge28", {farCapPiece, sketchEdge(4, 11)})};
+    input.entries = {missing(oldPiece, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge28"});
+
+    //   nor the other way: a reference to the far cap's piece doesn't move to the start cap's
+    input.pool["Edge"] = {element("Edge24", {piece(startCapEdge, 16, "FUS", 0, 'E')})};
+    input.entries = {missing(piece(farCapEdge, 15, "FUS", 0, 'E'), "Edge")};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge24"});
+}
+
+TEST(SolveOwner, connectedElementIsNotAncestry)
+{
+    // PR 243 round 7 (Fable review 6, M1): a base block's edge, split where side 1's far cap
+    // meets it, lists among its piece's connected elements a face of the Pad holding an end
+    // vertex: the profile's line 4's extruded face. The old start cap edge (line 4) is in that
+    // neighbour's ancestry, not in the piece's: no evidence, though the top sections differ.
+    const auto startCapEdge = sketchEdge(4, 13);
+    const auto lineFace = generated({startCapEdge}, 14, "XTR", 'F');
+    const auto blockPiece = piece(sketchEdge(4, 11), 15, "FUS", 1, 'E', {lineFace});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge32", {blockPiece})};
+    input.entries = {missing(startCapEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge32"});
+}
+
 TEST(SolveOwner, patternSiblingNeverResolves)
 {
     // A pattern of two: the referenced instance's top face is gone and the other instance's copy

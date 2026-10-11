@@ -355,27 +355,42 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
     });
 }
 
-// True if \a ancestor is in the ancestry of \a name (as NameAncestry::ancestorsOf() walks it:
-// a node's prefix, in a copy section's context, and the names embedded in its last section)
-// other than through the names a projection section embeds (PR 243 round 5). A section with the
-// PRJ flag (MAPPER_FLAG_PROJECTION) names the element an extrusion or a revolution makes at its
-// far end from a profile element: a pad's top edge is `<bottom edge>|XTR|PRJ`. That is the
-// element's partner, made at the same time, and both are in the result: never the element
-// itself, nor a later state of it. A missing start-cap edge whose far-cap partner holds its name
-// is no evidence that the partner is that edge (a two-sided pad built as one prism, then as two
-// solids: the start cap's names are gone, side 1's far cap embeds them). \a visited holds the
-// nodes walked.
-bool reachesOutsideProjections(
-    std::string_view name,
-    std::string_view ancestor,
-    std::set<std::string>& visited
-)
+// The nodes of a name's ancestry, as NameAncestry::ancestorsOf() walks it (a node's prefix, in a
+// copy section's context, and the names embedded in its last section), in two sets. `outside`:
+// the element itself and its earlier states. `projected`: the nodes reached through the names a
+// projection section embeds (PR 243 round 5). A section with the PRJ flag
+// (MAPPER_FLAG_PROJECTION) names the element an extrusion or a revolution makes at its far end
+// from a profile element: a pad's top edge is `<bottom edge>|XTR|PRJ`. That is the element's
+// partner, made at the same time, and both are in the result: never the element itself, nor a
+// later state of it. A missing start-cap edge whose far-cap partner holds its name is no
+// evidence that the partner is that edge (a two-sided pad built as one prism, then as two
+// solids: the start cap's names are gone, side 1's far cap embeds them). Two partners of one
+// profile element are related, though: the far cap's edge before and after its profile is
+// redrawn. The connected elements are in neither (PR 243 round 7): a modified element's
+// neighbours, per end vertex the vertex and one face of another input holding it, which is never
+// the element itself; a base edge collinear with a profile line's extruded face lists that face.
+struct AncestryNodes
 {
-    if (name == ancestor) {
-        return true;
+    std::set<std::string> outside;
+    std::set<std::string> projected;
+
+    // True if both hold a node reached the same way
+    bool meets(const AncestryNodes& other) const
+    {
+        auto shares = [](const std::set<std::string>& a, const std::set<std::string>& b) {
+            return std::any_of(a.begin(), a.end(), [&](const std::string& node) {
+                return b.count(node) > 0;
+            });
+        };
+        return shares(outside, other.outside) || shares(projected, other.projected);
     }
-    if (!visited.emplace(name).second) {
-        return false;
+};
+
+void collectAncestryNodes(std::string_view name, bool projected, AncestryNodes& nodes)
+{
+    auto& set = projected ? nodes.projected : nodes.outside;
+    if (name.empty() || !set.emplace(name).second) {
+        return;
     }
     std::string context;
     std::string_view node = name;
@@ -389,7 +404,7 @@ bool reachesOutsideProjections(
     }
     auto sections = NameAncestry::splitSections(node);
     if (sections.empty()) {
-        return false;
+        return;
     }
     const auto& last = decodeSection(sections.back());
     if (sections.size() > 1) {
@@ -398,24 +413,28 @@ bool reachesOutsideProjections(
         if (isCopySection(last)) {
             prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
         }
-        if (reachesOutsideProjections(context + prefix, ancestor, visited)) {
-            return true;
+        collectAncestryNodes(context + prefix, projected, nodes);
+    }
+    const bool throughProjection = projected || last.hasMapperFlag(MAPPER_FLAG_PROJECTION);
+    for (const auto& embedded : last.linkedNames) {
+        if (!embedded.empty()) {
+            collectAncestryNodes(context + embedded, throughProjection, nodes);
         }
     }
-    if (!last.hasMapperFlag(MAPPER_FLAG_PROJECTION)) {
-        for (const auto& embedded : last.linkedNames) {
-            if (!embedded.empty()
-                && reachesOutsideProjections(context + embedded, ancestor, visited)) {
-                return true;
-            }
-        }
-    }
-    for (const auto& embedded : last.connectedElements) {
-        if (!embedded.empty() && reachesOutsideProjections(context + embedded, ancestor, visited)) {
-            return true;
-        }
-    }
-    return false;
+}
+
+AncestryNodes ancestryNodes(std::string_view name)
+{
+    AncestryNodes nodes;
+    collectAncestryNodes(name, false, nodes);
+    return nodes;
+}
+
+// True if \a ancestor is in the ancestry of \a name other than through a projection's embedded
+// names or the connected elements (AncestryNodes::outside).
+bool reachesOutsideProjections(std::string_view name, std::string_view ancestor)
+{
+    return ancestryNodes(name).outside.count(std::string(ancestor)) > 0;
 }
 
 }  // namespace
@@ -2962,8 +2981,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                                 if (!ancestry.contains(n, oldName)) {
                                     return false;
                                 }
-                                std::set<std::string> visited;
-                                return reachesOutsideProjections(n, oldName, visited);
+                                return reachesOutsideProjections(n, oldName);
                             });
             if (pool.exact.count(element.index) && !contains) {
                 continue;
@@ -3425,7 +3443,18 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // shares an ancestor with the old name. A partner found through one name (a far
             // cap's PRJ name, which embeds the old start cap's) that holds another, unrelated name
             // with the same top op code (another sketch's plain name, where the far cap meets a
-            // base element) has no evidence (PR 243 round 6).
+            // base element) has no evidence (PR 243 round 6). Nor one that shares an ancestor
+            // through a projection's embedded names on one side only, or through the connected
+            // elements (AncestryNodes, PR 243 round 7): where both caps meet base elements, the
+            // far cap's PRJ name and the start cap's name are both topped by FUS;MOD, and the PRJ
+            // name embeds the start cap's.
+            std::optional<AncestryNodes> oldNodes;
+            auto related = [&](const std::string& name) {
+                if (!oldNodes) {
+                    oldNodes = ancestryNodes(state.oldName);
+                }
+                return ancestryNodes(name).meets(*oldNodes);
+            };
             bool evidenced = k >= 0
                 && (state.geometric || state.inAncestry.count(k) > 0
                     || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
@@ -3436,7 +3465,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                         [&](const auto& n) {
                             return NameAncestry::topAgrees(state.oldName, n)
                                 && (state.matchedNames.count(n) > 0
-                                    || ancestry.overlap(state.oldName, n) > 0.0);
+                                    || related(n));
                         }
                     ));
             // A partner that tier 1 alone found must not contradict the saved geometry (ops#87:
