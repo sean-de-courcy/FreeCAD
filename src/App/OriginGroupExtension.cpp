@@ -298,9 +298,13 @@ std::vector<DocumentObject*> OriginGroupExtension::addObjects(std::vector<Docume
         // Not a shape binder that traces its support (FreeCAD-CH ops#273, as
         // PartDesign::Body::insertObject since ops#244): it binds another container's origin
         // feature where that one is, so the relink to this container's own made it bind another
-        // plane or axis, silently. App doesn't know PartDesign::ShapeBinder: its property names it.
+        // plane or axis, silently. App doesn't know PartDesign::ShapeBinder: its type is looked up
+        // by name (bad while PartDesign isn't loaded, when no binder can exist). The type is
+        // required as well as the property: any other object with a true TraceSupport, such as a
+        // Python feature's own property, kept its old support, silently (ops#282, PR 252 review).
+        const Base::Type binderType = Base::Type::fromName("PartDesign::ShapeBinder");
         auto trace = freecad_cast<PropertyBool*>(obj->getPropertyByName("TraceSupport"));
-        if (trace && trace->getValue()) {
+        if (!binderType.isBad() && obj->isDerivedFrom(binderType) && trace && trace->getValue()) {
             continue;
         }
         relinkToOrigin(obj);

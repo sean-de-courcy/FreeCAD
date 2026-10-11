@@ -676,6 +676,52 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         self.assertEqual(binder.Support[0][0], partXZ)
         self.assertEqual(plane.AttachmentSupport[0][0], partXZ)
 
+    def testATraceSupportPropertyAloneKeepsTheRelink(self):
+        """ops#282 (PR 252 review): a Python feature with its own true TraceSupport property and
+        a link to a body's XZ plane, put into an App::Part, is relinked to the Part's own XZ plane
+        like any other object. The skip went by the property alone, so it kept the body's plane,
+        silently; it is for a shape binder that traces its support."""
+        [xz] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        feature = self.Doc.addObject("App::FeaturePython", "Traced")
+        feature.addProperty("App::PropertyBool", "TraceSupport")
+        feature.TraceSupport = True
+        feature.addProperty("App::PropertyLinkSub", "Plane")
+        feature.Plane = (xz, [])
+        part = self.Doc.addObject("App::Part", "Part")
+        part.addObject(feature)
+        [partXZ] = [f for f in part.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        self.assertEqual(feature.Plane[0], partXZ)
+
+    def testBinderOfAPartsOriginPlaneIntoAnotherPlacedPart(self):
+        """ops#282 (PR 252 review): a traced binder in App::Part A (placed as Source: turned 90
+        degrees about Z, moved by (5, 0, 0)) of A's XZ plane, put into a placed Part B (a tree
+        drag calls addObject). It keeps binding A's plane, where that one is: globally the plane
+        y = 0 turned 90 degrees about Z, x = 5 along X (as a body's, ops#273)."""
+        partA = self.Doc.addObject("App::Part", "PartA")
+        partA.Placement = self.Source.Placement
+        [xz] = [f for f in partA.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binder = self.Doc.addObject("PartDesign::ShapeBinder", "Reference")
+        binder.Support = [(xz, "")]
+        binder.TraceSupport = True
+        partA.addObject(binder)
+        self.Doc.recompute()
+        partB = self.Doc.addObject("App::Part", "PartB")
+        partB.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(7, -2, 4), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 40)
+        )
+        partB.addObject(binder)
+        self.assertTrue(partB.hasObject(binder))
+        self.assertFalse(partA.hasObject(binder))
+        self.assertEqual(binder.Support[0][0], xz)
+        self.Doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        [face] = binder.Shape.Faces
+        container = binder.getGlobalPlacement().multiply(binder.Placement.inverse())
+        self.assertTrue(container.isSame(partB.Placement, 1e-9), container)
+        normal = container.Rotation.multVec(face.Surface.Axis)
+        self.assertAlmostEqual(abs(normal.x), 1, places=9)
+        self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
+
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
         sheet.set("A1", "2")
