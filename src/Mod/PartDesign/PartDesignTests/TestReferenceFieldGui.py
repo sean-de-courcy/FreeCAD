@@ -2832,6 +2832,79 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
         self.assertIn("No feature", self.statusText(field))
 
+    def testPatternOriginalsPickOfAPadOnABinderOfABinderAndAPocketOnASibling(self):
+        """Fork PR 267 round 2 verification: a pad on Outer, a SubShapeBinder of Inner, itself a
+        binder of a sketch outside the body; a pocket on Other, another binder of the sketch. The
+        rectangle crosses the box's top edge, so the pad overhangs, and the pocket's ceiling lies
+        on the overhang's bottom. That bottom's history ends at Inner, whose family holds only the
+        pad: the pocket, on the same sketch through the sibling binder, made it too. A pick says
+        no feature made it, rather than adding the pad. The pad's wall adds the pad."""
+        self.box()
+        source = models.sketch(self.doc, "Source", models.rectangle(8, 4, 12, 6), z=10)
+        inner = self.binder("PartDesign::SubShapeBinder", "Inner", source)
+        outer = self.binder("PartDesign::SubShapeBinder", "Outer", inner)
+        other = self.binder("PartDesign::SubShapeBinder", "Other", source)
+        pad = models.pad(self.body, outer, 3)
+        pad.Refine = False
+        self.doc.recompute()
+        pocket = models.pocket(self.body, other, 3)
+        pocket.Refine = False
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid() and pad.isValid())
+        [padWall] = face(contains=(8, 5, 11.5)).one(bump.Shape)
+        [overhang] = face(contains=(11, 5, 10)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, padWall)[-2:], [pad.Name, source.Name])
+        self.assertEqual(self.historyNames(bump, overhang), [bump.Name, inner.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, overhang)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+        self.pick(bump, padWall)
+        self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
+
+    def testPatternOriginalsPickOfALoftToABinderOfASectionAPadIsDownFrom(self):
+        """Fork PR 267 round 2 verification, nit: as in ...ALoftAndAPadDownFromItsSectionOnOneFace,
+        with the loft's section a SubShapeBinder of the sketch the pad goes down from. The loft's
+        role link is followed up the binder to the sketch: the pad is a rival, and a pick of the
+        loft's top says no feature made it."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        models.pad(self.body, profile, 5)
+        self.doc.recompute()
+        section = models.sketch(self.doc, "Section", models.rectangle(2, 2, 5, 5), self.body, z=9)
+        sectionBinder = self.binder("PartDesign::SubShapeBinder", "SectionBinder", section)
+        loftProfile = models.sketch(
+            self.doc, "LoftProfile", models.rectangle(2, 2, 5, 5), self.body, z=5
+        )
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = loftProfile
+        loft.Sections = [sectionBinder]
+        loft.Refine = False
+        self.doc.recompute()
+        down = models.pad(self.body, section, 4, "Down")
+        down.Reversed = True
+        down.Refine = False
+        self.doc.recompute()
+        self.assertTrue(loft.isValid() and down.isValid())
+        bump = self.bumpOn(7, 7, 5)
+        bump.Refine = False
+        self.doc.recompute()
+        [top] = face(contains=(3.5, 3.5, 9)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, top), [bump.Name, loft.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, top)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+
     def testPatternOriginalsPickOfAnotherBodysPadOfABoundSketch(self):
         """Fork PR 196 round 2: a Boolean fuses another body's pad into the body, and a pad
         reversed below it stands on a SubShapeBinder of the other body's sketch. The other pad's

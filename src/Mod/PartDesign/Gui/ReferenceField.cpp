@@ -1187,20 +1187,17 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         return onTool(obj).value_or(true);
     };
     // Whether a feature other than the candidate may have made the element too: one on the
-    // profiles or using them in a role, and the same for each object the candidate itself uses
-    // in a role (a pad down from a loft's section, against the loft: fork PR 267 round 1
-    // verification). Nothing tells them apart.
+    // profiles or using them in a role, and the same for the root of the candidate's own profile
+    // (a pocket on a sibling binder of the sketch the candidate's binders bind: fork PR 267
+    // round 2 verification) and for each object the candidate uses in a role (a pad down from a
+    // loft's section, against the loft: round 1 verification). Nothing tells them apart.
     auto rivalled = [&](App::DocumentObject* candidate,
                         const std::vector<App::DocumentObject*>& profiles,
                         const std::vector<App::DocumentObject*>& profiled) {
         auto other = [&](App::DocumentObject* obj) {
             return obj != candidate && mayTouch(obj);
         };
-        if (std::ranges::any_of(profiled, other)
-            || std::ranges::any_of(roleUsers(profiles), other)) {
-            return true;
-        }
-        return std::ranges::any_of(roleLinks(candidate), [&](App::DocumentObject* used) {
+        auto rivalOn = [&](App::DocumentObject* used) {
             App::DocumentObject* root = rootOf(used);
             if (!root) {
                 return false;
@@ -1208,7 +1205,16 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             auto [usedProfiles, usedProfiled] = profiledBy(root);
             return std::ranges::any_of(usedProfiled, other)
                 || std::ranges::any_of(roleUsers(usedProfiles), other);
-        });
+        };
+        if (std::ranges::any_of(profiled, other)
+            || std::ranges::any_of(roleUsers(profiles), other)) {
+            return true;
+        }
+        auto based = freecad_cast<PartDesign::ProfileBased*>(candidate);
+        if (based && rivalOn(based->Profile.getValue())) {
+            return true;
+        }
+        return std::ranges::any_of(roleLinks(candidate), rivalOn);
     };
     // An origin that is a feature made the element, unless the tool of another feature on its
     // profile, or on a binder of what its profile binds, or using them in a role, or on what the
