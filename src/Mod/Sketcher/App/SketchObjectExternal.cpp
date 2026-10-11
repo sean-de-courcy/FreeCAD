@@ -721,8 +721,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             if (radii->first - radii->second <= tolerance) {
                 return true;  // round: no axis to compare
             }
-            auto axis = static_cast<const Part::GeomEllipse*>(here)->getMajorAxisDir();
-            auto seenAxis = static_cast<const Part::GeomEllipse*>(seen)->getMajorAxisDir();
+            auto ellipse = dynamic_cast<const Part::GeomEllipse*>(here);
+            auto seenEllipse = dynamic_cast<const Part::GeomEllipse*>(seen);
+            if (!ellipse || !seenEllipse) {
+                return true;  // one is a circle, and the radii match: round within the tolerance
+            }
+            auto axis = ellipse->getMajorAxisDir();
+            auto seenAxis = seenEllipse->getMajorAxisDir();
             seenAxis.x = xinv ? -seenAxis.x : seenAxis.x;
             seenAxis.y = yinv ? -seenAxis.y : seenAxis.y;
             const double sine = std::abs(axis.x * seenAxis.y - axis.y * seenAxis.x)
