@@ -30,12 +30,20 @@
 #include <ranges>
 #include <utility>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepTools.hxx>
+#include <ElSLib.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <GeomAPI_IntCS.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
@@ -201,16 +209,166 @@ bool coversSamePoints(const TopoShape& face, const TopoShape& other)
     }
 }
 
-// The up-to face of Symmetric's second side, given the first side's face and its mirror image in
-// the profile plane. A face across the profile plane has an image on its own plane or surface:
-// BRepFeat then revolved the second side the long way round, from the face at the first side's
-// end to the image at its own, silently (ops#254).
+// Whether a bounded face reaches a plane: it crosses the plane or touches it.
+bool reachesPlane(const TopoShape& face, const gp_Pln& plane)
+{
+    const Base::BoundBox3d box = face.getBoundBox();
+    const gp_Pnt center(box.GetCenter().x, box.GetCenter().y, box.GetCenter().z);
+    Standard_Real u = 0.0;
+    Standard_Real v = 0.0;
+    ElSLib::Parameters(plane, center, u, v);
+    // The face's points project within half its diagonal of its centre's projection.
+    const double half = box.CalcDiagonalLength() + 1.0;
+    const TopoDS_Face planeFace
+        = BRepBuilderAPI_MakeFace(plane, u - half, u + half, v - half, v + half).Face();
+    BRepExtrema_DistShapeShape distance(face.getShape(), planeFace);
+    if (!distance.IsDone()) {
+        throw Base::RuntimeError(
+            "Symmetric: could not measure the up-to face's distance to the profile plane"
+        );
+    }
+    return distance.Value() <= Precision::Confusion();
+}
+
+// The whole surface a face lies on: an unbounded plane, or a surface within its natural bounds
+// (unbounded along a cylinder's axis, a whole sphere).
+TopoShape wholeSurface(const TopoDS_Face& face)
+{
+    BRepAdaptor_Surface adaptor(face);
+    if (adaptor.GetType() == GeomAbs_Plane) {
+        return TopoShape(BRepBuilderAPI_MakeFace(adaptor.Plane()).Face());
+    }
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    Handle(Geom_RectangularTrimmedSurface) trimmed
+        = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+    if (!trimmed.IsNull()) {
+        surface = trimmed->BasisSurface();
+    }
+    BRepBuilderAPI_MakeFace maker(surface, Precision::Confusion());
+    if (!maker.IsDone()) {
+        throw Base::RuntimeError("Symmetric: could not extend the up-to face to its whole surface");
+    }
+    return TopoShape(maker.Face());
+}
+
+// Points of a profile to follow round the axis: each face's vertices, three points on each edge,
+// and a grid of points inside it.
+std::vector<gp_Pnt> profileSamples(const TopoShape& profile)
+{
+    std::vector<gp_Pnt> samples;
+    for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        for (TopExp_Explorer vertices(face, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
+            samples.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
+        }
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+            for (double fraction : {0.25, 0.5, 0.75}) {
+                samples.push_back(curve.Value(
+                    curve.FirstParameter()
+                    + fraction * (curve.LastParameter() - curve.FirstParameter())
+                ));
+            }
+        }
+        Standard_Real uMin = 0.0;
+        Standard_Real uMax = 0.0;
+        Standard_Real vMin = 0.0;
+        Standard_Real vMax = 0.0;
+        BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+        BRepAdaptor_Surface surface(face);
+        constexpr int steps = 6;
+        for (int i = 1; i < steps; ++i) {
+            for (int j = 1; j < steps; ++j) {
+                const gp_Pnt2d uv(
+                    uMin + (uMax - uMin) * i / steps,
+                    vMin + (vMax - vMin) * j / steps
+                );
+                BRepClass_FaceClassifier classifier(face, uv, Precision::Confusion());
+                if (classifier.State() == TopAbs_IN) {
+                    samples.push_back(surface.Value(uv.X(), uv.Y()));
+                }
+            }
+        }
+    }
+    return samples;
+}
+
+// Whether the profile, turned about the axis in its positive sense, first meets the face's
+// surface on the face itself, at every sampled point of it. Then the whole surface of the mirror
+// image stops the second side where the image does.
+bool meetsSurfaceFirstOnFace(const TopoShape& profile, const gp_Ax1& axis, const TopoDS_Face& face)
+{
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    const double tolerance = std::max(Precision::Confusion(), BRep_Tool::Tolerance(face));
+    const gp_Dir& direction = axis.Direction();
+    for (const gp_Pnt& point : profileSamples(profile)) {
+        const gp_Vec fromAxis(axis.Location(), point);
+        const gp_Pnt center
+            = axis.Location().Translated(gp_Vec(direction) * fromAxis.Dot(gp_Vec(direction)));
+        const double radius = center.Distance(point);
+        if (radius <= Precision::Confusion()) {
+            continue;
+        }
+        Handle(Geom_Circle) circle
+            = new Geom_Circle(gp_Ax2(center, direction, gp_Dir(gp_Vec(center, point))), radius);
+        GeomAPI_IntCS intersection(circle, surface);
+        if (!intersection.IsDone()) {
+            throw Base::RuntimeError(
+                "Symmetric: could not intersect the profile's path with the up-to face's surface"
+            );
+        }
+        if (intersection.NbSegments() > 0) {
+            // The path lies on the surface (a surface of revolution about the same axis).
+            continue;
+        }
+        std::optional<double> first;
+        gp_Pnt firstPoint;
+        for (int i = 1; i <= intersection.NbPoints(); ++i) {
+            Standard_Real u = 0.0;
+            Standard_Real v = 0.0;
+            Standard_Real angle = 0.0;
+            intersection.Parameters(i, u, v, angle);
+            // The point itself on the surface
+            if (angle <= Precision::Angular()
+                || angle >= 2.0 * std::numbers::pi - Precision::Angular()) {
+                continue;
+            }
+            if (!first || angle < *first) {
+                first = angle;
+                firstPoint = intersection.Point(i);
+            }
+        }
+        if (!first) {
+            continue;
+        }
+        BRepClass_FaceClassifier classifier(face, firstPoint, tolerance);
+        if (classifier.State() != TopAbs_IN && classifier.State() != TopAbs_ON) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The up-to face of Symmetric's second side, given the first side's face, its mirror image in the
+// profile plane, and the first side's profile and axis. A face across the profile plane crosses
+// its own image there, and BRepFeat then lost the second side or revolved it the long way round,
+// silently, whenever the face was a face of the base: across the plane it isn't symmetric about
+// (a wall turned by any angle, a pipe longer on one side), and earlier across the plane it is
+// (ops#254, ops#272).
 // - An image that covers the face's points (a wall or a disk across the plane, an unbounded
 //   plane through it) gives way to the face itself, which Two sides passes for both sides.
-// - An image that only shares the face's plane (a hole on one side of a wall across it) gives way
-//   to the unbounded plane: the second side meets it first where the image lies.
-// - Any other image stays.
-TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrored)
+// - The image of any other face that reaches the plane, or that shares the face's plane (a hole
+//   on one side of a wall across it), gives way to its whole surface: the second side meets it
+//   first where the image lies, if the first side meets the face's surface first on the face.
+//   If it doesn't, the feature fails rather than stop the second side short.
+// - Any other image stays, an image that only touches the face included.
+TopoShape secondSideUpToFace(
+    const TopoShape& upToFace,
+    const TopoShape& mirrored,
+    const gp_Pln& profilePlane,
+    const TopoShape& profile,
+    const gp_Ax1& axis
+)
 {
     if (upToFace.isNull() || mirrored.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE
         || mirrored.getShape().ShapeType() != TopAbs_FACE) {
@@ -225,8 +383,14 @@ TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrore
     if (coversSamePoints(upToFace, mirrored)) {
         return upToFace;
     }
-    if (samePlane) {
-        return TopoShape(BRepBuilderAPI_MakeFace(BRepAdaptor_Surface(image).Plane()).Face());
+    if (samePlane || reachesPlane(upToFace, profilePlane)) {
+        if (!meetsSurfaceFirstOnFace(profile, axis, face)) {
+            throw Base::RuntimeError(
+                "Symmetric: the profile meets the up-to face's surface before the face itself, "
+                "so the second side can't mirror the first. Use Two sides."
+            );
+        }
+        return wholeSurface(image);
     }
     return mirrored;
 }
@@ -661,8 +825,13 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     continue;
                 }
                 addRevolution(perFace(markSeam(side.makeElementCopy())));
-                TopoShape mirroredUpToFace
-                    = secondSideUpToFace(upToFace, upToFace.makeElementMirror(mirrorPlane));
+                TopoShape mirroredUpToFace = secondSideUpToFace(
+                    upToFace,
+                    upToFace.makeElementMirror(mirrorPlane),
+                    sketchPlane,
+                    faces[i],
+                    axis
+                );
                 addRevolution(perFace(tryToRevolveToFace(
                     mirroredUpToFace,
                     gp_Ax1(pnt, dir2),

@@ -930,17 +930,15 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(revolution.Shape.Volume, 64 * math.pi + 8 * math.pi, places=6)
         self.assertHalfRing(revolution.Shape.cut(pin.Shape))
 
-    def testRevolutionUpToPipeWallAcrossSymmetric(self):
-        """The wall of a pipe along Y (y in [-5, 5], radius 5 about x = -5, z = 1), across the
-        profile plane: a curved face that mirrors onto itself, though its axis mirrors to -Y.
-        The sweep enters it at x <= 0, so the tool isn't a half ring, but the second side mirrors
-        the first: the tool is symmetric about the profile plane and spans y in [-3, 3]."""
+    def pipeToolAcross(self, start, length, sideType):
+        """The tool of profileAcross() up to the wall of a pipe along Y (radius 5 about x = -5,
+        z = 1, y in [start, start + length]): the Revolution minus the pipe."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         pipe = body.newObject("PartDesign::AdditiveCylinder", "Pipe")
         pipe.Radius = 5
-        pipe.Height = 10
+        pipe.Height = length
         pipe.Placement = FreeCAD.Placement(
-            FreeCAD.Vector(-5, -5, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+            FreeCAD.Vector(-5, start, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
         )
         self.Doc.recompute()
         [wall] = [
@@ -948,13 +946,35 @@ class TestRevolve(unittest.TestCase):
             for i, face in enumerate(pipe.Shape.Faces)
             if isinstance(face.Surface, Part.Cylinder)
         ]
-        revolution = self.revolveAcross(body, "Revolution", "Symmetric", (pipe, [wall]))
-        tool = revolution.Shape.cut(pipe.Shape)
+        revolution = self.revolveAcross(body, "Revolution", sideType, (pipe, [wall]))
+        return revolution.Shape.cut(pipe.Shape)
+
+    def assertMirroredPipeTool(self, start, length):
+        """Symmetric up to the wall of pipeToolAcross(): the second side mirrors the first, so the
+        tool is symmetric about the profile plane, twice One side's tool, and spans y in [-3, 3].
+        The sweep enters the wall at x <= 0, so it isn't a half ring."""
+        oneSide = self.pipeToolAcross(start, length, "One side")
+        tool = self.pipeToolAcross(start, length, "Symmetric")
         mirrored = tool.mirror(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 1, 0))
-        self.assertGreater(tool.Volume, 8 * math.pi)
+        self.assertGreater(oneSide.Volume, 4 * math.pi)
+        self.assertAlmostEqual(tool.Volume, 2 * oneSide.Volume, places=6)
         self.assertAlmostEqual(tool.cut(mirrored).Volume, 0, places=6)
         self.assertAlmostEqual(tool.BoundBox.YMin, -3, places=6)
         self.assertAlmostEqual(tool.BoundBox.YMax, 3, places=6)
+
+    def testRevolutionUpToPipeWallAcrossSymmetric(self):
+        """A pipe y in [-5, 5]: a curved face that mirrors onto itself, though its axis mirrors
+        to -Y."""
+        self.assertMirroredPipeTool(-5, 10)
+
+    def testRevolutionUpToLongerPipeWallAcrossSymmetric(self):
+        """A pipe longer on one side of the profile plane, y in [-5, 3] or [-1, 5]: its wall
+        crosses the plane and shares its surface with its image, but not its points. The second
+        side lost its tool silently (the first) or failed (the second); it goes up to the whole
+        cylinder now (ops#272)."""
+        for start, length in ((-5, 8), (-1, 6)):
+            with self.subTest(start=start):
+                self.assertMirroredPipeTool(start, length)
 
     def testRevolutionUpToDatumAcrossSymmetric(self):
         """The origin YZ plane, unbounded, across the profile plane, as the up-to face of the
@@ -963,6 +983,153 @@ class TestRevolve(unittest.TestCase):
         [yz] = [f for f in body.Origin.OriginFeatures if f.Role == "YZ_Plane"]
         revolution = self.revolveAcross(body, "Revolution", "Symmetric", (yz, [""]))
         self.assertHalfRing(revolution.Shape)
+
+    def ringSector(self, start, span):
+        """The sweep of profileAcross() from `start` degrees about Z over `span` degrees: the ring
+        r in [1, 3], z in [0, 2], 8 per radian."""
+        up = FreeCAD.Vector(0, 0, 1)
+        sector = Part.makeCylinder(3, 2, FreeCAD.Vector(), up, span).cut(
+            Part.makeCylinder(1, 2, FreeCAD.Vector(), up, span)
+        )
+        sector.rotate(FreeCAD.Vector(), up, start)
+        return sector
+
+    def assertSameSolid(self, shape, expected, delta=1e-6):
+        self.assertAlmostEqual(shape.Volume, expected.Volume, delta=delta)
+        self.assertAlmostEqual(shape.cut(expected).Volume, 0, delta=delta)
+        self.assertAlmostEqual(expected.cut(shape).Volume, 0, delta=delta)
+
+    def revolveUpToTurnedWallAcross(self, kind, degrees, delta=1e-6):
+        """The box of revolveUpToFaceAcross() turned about the axis by `degrees`: its face through
+        the axis crosses the profile plane and isn't symmetric about it, so its image crosses it
+        there. BRepFeat then lost the second side silently, at any angle (ops#272). Both sides
+        turn 90 + degrees, the second up to the image's plane: the sweep is the ring from
+        -(90 + degrees) to 90 + degrees, added to or cut from the box."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2 if kind == "Revolution" else 3
+        x0 = -4 if kind == "Revolution" else 0
+        turn = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), degrees)
+        block.Placement = FreeCAD.Placement(turn.multVec(FreeCAD.Vector(x0, -4, 0)), turn)
+        self.Doc.recompute()
+        normal = turn.multVec(FreeCAD.Vector(1, 0, 0))
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(block.Shape.Faces)
+            if abs(abs(face.normalAt(0, 0).dot(normal)) - 1) < 1e-9
+            and abs(face.CenterOfMass.dot(normal)) < 1e-6
+        ]
+        revolution = self.revolveAcross(body, kind, "Symmetric", (block, [wall]))
+        sweep = self.ringSector(-90 - degrees, 180 + 2 * degrees)
+        if kind == "Revolution":
+            self.assertSameSolid(revolution.Shape, block.Shape.fuse(sweep), delta)
+        else:
+            self.assertSameSolid(revolution.Shape, block.Shape.cut(sweep), delta)
+
+    def testRevolutionUpToTurnedWallAcrossSymmetric(self):
+        self.revolveUpToTurnedWallAcross("Revolution", 20)
+
+    def testGrooveUpToTurnedWallAcrossSymmetric(self):
+        self.revolveUpToTurnedWallAcross("Groove", 20)
+
+    def testRevolutionUpToNearlySymmetricWallAcrossSymmetric(self):
+        """Turned by 1e-5 and 1e-3 degrees: the wall's far end lies 7e-7 and 7e-5 off its image,
+        too far to count as the same face (ops#272, the PR 239 review's L1). The results agree
+        with the expected sweep to within the wall's offset over its area (8 * 7e-7)."""
+        for kind in ("Revolution", "Groove"):
+            for degrees in (1e-5, 1e-3):
+                with self.subTest(kind=kind, degrees=degrees):
+                    self.revolveUpToTurnedWallAcross(kind, degrees, delta=1e-5)
+
+    def testRevolutionUpToShortWallAcrossSymmetric(self):
+        """The box x in [-4, 0], y in [-4, 1]: its face x = 0 crosses the profile plane, but the
+        first side meets the plane x = 0 at y = r in [1, 3], beyond the face, and only meets the
+        face itself half a turn later. The image's whole plane would stop the second side a
+        quarter turn out, so the feature fails with an error instead (ops#272)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 5
+        block.Height = 2
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-4, -4, 0), FreeCAD.Rotation())
+        self.Doc.recompute()
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        sketch = self.profileAcross(body)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = "Symmetric"
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [self.wallAtXZero(block)])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("Use Two sides", revolution.getStatusString())
+
+    def testRevolutionUpToPartFaceSymmetricFirstSolid(self):
+        """The bounded face y in [0.5, 4] of revolveUpToWall(), on the plane x = 0 through the
+        axis, on one side of the profile plane: its image shares its plane, so the second side
+        goes up to the whole plane, through the box BRepFeat gets as its base (ops#272)."""
+        revolution = self.revolveUpToWall("Symmetric", core=False, wall="part")
+        self.assertSameSolid(revolution.Shape, self.ringSector(-90, 180))
+
+    def testRevolutionUpToLastAcrossSymmetric(self):
+        self.revolveUpToFaceAcross("Revolution", "Symmetric", "UpToLast")
+
+    def testGrooveUpToHoledFaceAcrossSymmetric(self):
+        """The Groove of testRevolutionUpToHoledFaceAcrossSymmetric(): the box x in [0, 4],
+        y in [-4, 4], z in [0, 3] with the window through it at y in [-2.5, -1.5],
+        z in [0.5, 1.5]. The groove cuts the half ring from -90 to 90 degrees (ops#272)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(0, -4, 0), FreeCAD.Rotation())
+        window = body.newObject("PartDesign::SubtractiveBox", "Window")
+        window.Length = 6
+        window.Width = 1
+        window.Height = 1
+        window.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, -2.5, 0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        upTo = (window, [self.wallAtXZero(window)])
+        groove = self.revolveAcross(body, "Groove", "Symmetric", upTo)
+        self.assertSameSolid(groove.Shape, window.Shape.cut(self.ringSector(-90, 180)))
+
+    def testRevolutionUpToPlaneThroughProfileSymmetric(self):
+        """The face x = 2 of the box x in [2, 6], y in [-4, 4], z in [0, 2], symmetric about the
+        profile plane and across the profile itself (x in [1, 3]): Symmetric passes the face
+        itself to both sides, as Two sides does, and gives the same result (ops#272). Today both
+        are valid and add nothing, without an error (ops#289)."""
+        results = {}
+        for sideType in ("Two sides", "Symmetric"):
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            block = body.newObject("PartDesign::AdditiveBox", "Block")
+            block.Length = 4
+            block.Width = 8
+            block.Height = 2
+            block.Placement = FreeCAD.Placement(FreeCAD.Vector(2, -4, 0), FreeCAD.Rotation())
+            self.Doc.recompute()
+            [face] = [
+                "Face%d" % (i + 1)
+                for i, f in enumerate(block.Shape.Faces)
+                if abs(f.BoundBox.XMin - 2) < 1e-9 and abs(f.BoundBox.XMax - 2) < 1e-9
+            ]
+            revolution = body.newObject("PartDesign::Revolution", "Revolution")
+            sketch = self.profileAcross(body)
+            revolution.Profile = sketch
+            revolution.ReferenceAxis = (sketch, ["V_Axis"])
+            revolution.SideType = sideType
+            revolution.Type = "UpToFace"
+            revolution.UpToFace = (block, [face])
+            if sideType == "Two sides":
+                revolution.Type2 = "UpToFace"
+                revolution.UpToFace2 = (block, [face])
+            self.Doc.recompute()
+            results[sideType] = (revolution.isValid(), revolution.Shape)
+        self.assertEqual(results["Symmetric"][0], results["Two sides"][0])
+        if results["Two sides"][0]:
+            self.assertSameSolid(results["Symmetric"][1], results["Two sides"][1])
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
