@@ -2935,11 +2935,149 @@ App::DocumentObjectExecReturn* FilletBase::execute()
     return Part::Feature::execute();
 }
 
+namespace
+{
+// The edge that an EdgeLinks entry names: its index, 0 if none, and whether the reference is
+// missing ('?Edge5').
+int linkedEdgeId(const std::string& sub, const App::PropertyLinkBase::ShadowSub& shadow, bool& missing)
+{
+    std::string name = Data::oldElementName(shadow.oldName.empty() ? sub.c_str() : shadow.oldName.c_str());
+    missing = Data::hasMissingElement(sub.c_str()) || Data::hasMissingElement(name.c_str());
+    if (missing) {
+        name.erase(0, name.find_first_not_of(Data::MISSING_PREFIX));
+    }
+    return Data::indexOfElement(name, "Edge");
+}
+
+// Whether EdgeLinks names Base's edges by the ids of Edges, in their order: then a sync would
+// change nothing but end the links' records, a solver guess's among them (ops#258).
+bool edgeLinksMatch(const FilletBase& fillet)
+{
+    const auto& values = fillet.Edges.getValues();
+    const auto& subs = fillet.EdgeLinks.getSubValues();
+    const auto& shadows = fillet.EdgeLinks.getShadowSubs();
+    if (fillet.EdgeLinks.getValue() != fillet.Base.getValue() || subs.size() != values.size()
+        || shadows.size() != subs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        bool missing = false;
+        if (linkedEdgeId(subs[i], shadows[i], missing) != values[i].edgeid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The fingerprint of edge `id` of `shape` where it lies, with the shape's placement: the copy
+// in a compound keeps the edge's location, which getElementFingerprint() leaves out only at the
+// top.
+bool placedEdgeFingerprint(const TopoShape& shape, int id, Data::ElementFingerprint& fingerprint)
+{
+    TopoDS_Shape edge;
+    try {
+        edge = shape.getSubShape(TopAbs_EDGE, id, true);
+    }
+    catch (...) {
+    }
+    if (edge.IsNull()) {
+        return false;
+    }
+    TopoDS_Compound holder;
+    BRep_Builder builder;
+    builder.MakeCompound(holder);
+    builder.Add(holder, edge);
+    return Feature::getElementFingerprint(TopoShape(holder), "Edge1", fingerprint);
+}
+
+// Base set to another object, by hand (ops#257): each edge goes to the new base's edge at its
+// place, or its link goes missing ('?Edge5'), so that the recompute fails naming it. Its old
+// index would name any edge of the new base. False when there is nothing to follow: the links
+// are made from Edges.
+bool followBase(FilletBase& fillet)
+{
+    App::DocumentObject* oldBase = fillet.EdgeLinks.getValue();
+    App::DocumentObject* newBase = fillet.Base.getValue();
+    if (oldBase == newBase || !oldBase || !newBase || !oldBase->isAttachedToDocument()
+        || fillet.EdgeLinks.getSubValues().empty()) {
+        return false;
+    }
+    TopoShape oldShape;
+    TopoShape newShape;
+    try {
+        oldShape = Feature::getTopoShape(oldBase, ShapeOption::ResolveLink | ShapeOption::Transform);
+        newShape = Feature::getTopoShape(newBase, ShapeOption::ResolveLink | ShapeOption::Transform);
+    }
+    catch (...) {
+    }
+    const int edgeCount = newShape.isNull() ? 0 : static_cast<int>(newShape.countSubShapes(TopAbs_EDGE));
+    std::vector<Data::ElementFingerprint> newFingerprints(edgeCount);
+    std::vector<bool> measured(edgeCount, false);
+    const double diagonal = newShape.isNull() ? 0.0 : newShape.getBoundBox().CalcDiagonalLength();
+    const Data::GeometryTolerances tolerances;
+    const double distance = Data::SolveInput().continuationDistance;
+
+    auto values = fillet.Edges.getValues();
+    const auto& subs = fillet.EdgeLinks.getSubValues();
+    const auto& shadows = fillet.EdgeLinks.getShadowSubs();
+    std::vector<std::string> newSubs;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        bool missing = false;
+        int oldId = 0;
+        if (i < subs.size() && i < shadows.size()) {
+            oldId = linkedEdgeId(subs[i], shadows[i], missing);
+        }
+        if (oldId <= 0) {
+            oldId = values[i].edgeid;
+        }
+        Data::ElementFingerprint before;
+        std::vector<int> places;
+        if (!missing && placedEdgeFingerprint(oldShape, oldId, before)) {
+            for (int id = 1; id <= edgeCount; ++id) {
+                if (!measured[id - 1]) {
+                    placedEdgeFingerprint(newShape, id, newFingerprints[id - 1]);
+                    measured[id - 1] = true;
+                }
+                if (Data::atSamePlace(before, newFingerprints[id - 1], diagonal, tolerances, distance)) {
+                    places.push_back(id);
+                }
+            }
+        }
+        const std::string oldName = "Edge" + std::to_string(oldId);
+        if (places.size() == 1) {
+            values[i].edgeid = places.front();
+            newSubs.push_back("Edge" + std::to_string(places.front()));
+            if (places.front() != oldId) {
+                FC_LOG(fillet.getFullName() << " " << oldName << " of " << oldBase->getFullName()
+                                            << " is " << newSubs.back() << " of "
+                                            << newBase->getFullName());
+            }
+        }
+        else {
+            values[i].edgeid = oldId;
+            newSubs.push_back(Data::MISSING_PREFIX + oldName);
+            FC_WARN(fillet.getFullName() << ": " << newBase->getFullName() << " has "
+                                         << (places.empty() ? "no edge" : "several edges")
+                                         << " where " << oldName << " of "
+                                         << oldBase->getFullName()
+                                         << " was; the edge link is missing");
+        }
+    }
+    fillet.Edges.setStatus(App::Property::User3, true);
+    fillet.Edges.setValues(values);
+    fillet.Edges.setStatus(App::Property::User3, false);
+    fillet.EdgeLinks.setValue(newBase, newSubs);
+    return true;
+}
+}  // namespace
+
 void FilletBase::onChanged(const App::Property* prop)
 {
-    if (getDocument() && !getDocument()->testStatus(App::Document::Restoring)) {
-        if (prop == &Edges || prop == &Base) {
-            if (!prop->testStatus(App::Property::User3)) {
+    // Not in an undo or redo either: it restores EdgeLinks itself.
+    if (getDocument() && !getDocument()->testStatus(App::Document::Restoring)
+        && !getDocument()->isPerformingTransaction()) {
+        if ((prop == &Edges || prop == &Base) && !prop->testStatus(App::Property::User3)) {
+            if (prop != &Base || !followBase(*this)) {
                 syncEdgeLink();
             }
         }
@@ -2959,6 +3097,9 @@ void FilletBase::syncEdgeLink()
 {
     if (!Base.getValue() || !Edges.getSize()) {
         EdgeLinks.setValue(0);
+        return;
+    }
+    if (edgeLinksMatch(*this)) {
         return;
     }
     std::vector<std::string> subs;

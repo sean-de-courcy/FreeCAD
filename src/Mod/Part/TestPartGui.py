@@ -343,6 +343,61 @@ class FilletEdgesEditTestCases(unittest.TestCase):
         """The same for a chamfer, which shares the dialog"""
         self._checkRemovedEdgeIsNotTicked("Part::Chamfer")
 
+    def testEditOkKeepsGuessedEdge(self):
+        """OK on a fillet whose edge the reference solver guessed keeps the guess (ops#258): the
+        edges are written as they were, which no longer makes the links anew.
+
+        A 20 x 10 x 10 block extruded from a sketch, the fillet on the vertical edge at
+        (20, 0); the sketch's right side drawn again 0.5 mm over, so the edge at (20.5, 0) is
+        the guess."""
+        self.Doc.ReferenceSolver = True
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+
+        def outline(points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(*a, 0), FreeCAD.Vector(*b, 0)), False
+                )
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def verticalAt(shape, point):
+            return [
+                i for i, e in enumerate(shape.Edges, 1) if (e.CenterOfMass - point).Length < 1e-6
+            ]
+
+        def guesses(feature):
+            report = FreeCAD.getReferenceReport(feature)
+            return [entry for entry in report if entry.get("status") == "guessed"]
+
+        outline([(0, 0), (20, 0), (20, 10), (0, 10)])
+        block = self.Doc.addObject("Part::Extrusion", "Block")
+        block.Base = sketch
+        block.DirMode = "Custom"
+        block.Dir = FreeCAD.Vector(0, 0, 1)
+        block.LengthFwd = 10
+        block.Solid = True
+        self.Doc.recompute()
+        fillet = self.Doc.addObject("Part::Fillet", "Fillet")
+        fillet.Base = block
+        fillet.Edges = [(verticalAt(block.Shape, FreeCAD.Vector(20, 0, 5))[0], 1.0, 1.0)]
+        self.Doc.recompute()
+        outline([(0, 0), (20.5, 0), (20.5, 10), (0, 10)])
+        self.Doc.recompute()
+        moved = verticalAt(block.Shape, FreeCAD.Vector(20.5, 0, 5))
+        self.assertEqual([e[0] for e in fillet.Edges], moved)
+        self.assertEqual(len(guesses(fillet)), 1, fillet.getStatusString())
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self.assertEqual(self._tickedEdges(tree), moved)
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual([e[0] for e in fillet.Edges], moved)
+        self.assertEqual(len(guesses(fillet)), 1)
+
 
 class PartMirrorGuiTestCases(unittest.TestCase):
     def setUp(self):
