@@ -1611,6 +1611,24 @@ class RandomSequence(Scenario):
                 return
             feature = getattr(feature, "BaseFeature", None)
 
+    def standsBy(self, spec, ref, broken, held):
+        """Whether a reference the repair keeps can be judged before the repair (ops#286): no
+        feature on its target's chain fails here, and none is a consumer the plan deletes unless
+        it holds its expected element (`held`: a redrawn element the solver followed). Below a
+        failed feature, or a deleted one that guessed among its candidates, the live shapes aren't
+        the spec's until the repair."""
+        if ref[5] in broken:
+            return False
+        obj = self.doc.getObject(ref[3])
+        while obj is not None:
+            if not obj.isValid():
+                return False
+            f = spec.byName(obj.Name)
+            if f in broken and f.name not in held:
+                return False
+            obj = getattr(obj, "BaseFeature", None)
+        return True
+
     def judgeAll(self, spec, step, text, names=None):
         results = []
         self.redrawnSubs = {}
@@ -1674,8 +1692,17 @@ class RandomSequence(Scenario):
                     judged = self.judgeAll(step.after, str(k), step.edit.text)
                 else:
                     broken = step.after.broken()
-                    names = [n for n, r in step.after.refs().items() if r[5] in broken]
+                    refs = step.after.refs()
+                    names = [n for n, r in refs.items() if r[5] in broken]
                     judged = self.judgeAll(step.after, str(k), step.edit.text, names)
+                    # The other references too, where the edit's state is the spec's (ops#286)
+                    holds = {n: r.passing and not str(r.record.get("expect")).startswith("BROKEN")
+                             for n, r in zip(names, judged)}
+                    held = {f.name for f in broken
+                            if all(h for n, h in holds.items() if refs[n][5] is f)}
+                    names = [n for n, r in refs.items()
+                             if self.standsBy(step.after, r, broken, held)]
+                    judged += self.judgeAll(step.after, str(k), step.edit.text, names)
                     for f in sorted(broken, key=lambda f: step.after.features.index(f),
                                     reverse=True):
                         deleteFeature(self.doc, body, f)
