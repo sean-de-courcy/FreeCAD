@@ -226,22 +226,75 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         self.dest.solve()
         self.assertLess((self.dest.Geometry[2].StartPoint - V(10, 0, 0)).Length, 1e-6)
 
-    def test_mirrored_copy_refuses_a_constraint_on_a_self_referenced_arc_end(self):
-        """Mirrored back, an arc's ends swap: which end of Dest's arc a constraint on the start
-        of an arc external at Dest.Edge3 names isn't known, so that constraint isn't copied (with
-        a warning). One on the arc without a position (the line's end on it) is: an arc's
-        points don't swap. The width after them is copied with its expression."""
+    def test_mirrored_copy_refuses_every_constraint_on_a_self_referenced_arc(self):
+        """Mirrored back, an arc runs the other way: its ends swap, and an angle at it changes
+        in a way the value corrections don't know. So no constraint on an arc external at
+        Dest.Edge3 is copied (each with a warning): the line's start on its start, the line's
+        end on it, a tangency of the line's end with it (locked when added), its sweep (an Angle
+        on it alone). The width after them is copied with its expression. Before (PR 253 review
+        M1), all but the first were copied: the sweep "corrected" to minus itself drove Dest's
+        arc to another sweep, and the tangency turned the copied line round."""
         self.turn_source_over()
         self.dest.setAllowUnaligned(False)
         self.add_self_reference(self.add_dest_arc(), "Dest.Edge3")
         self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
         self.source.addConstraint(Sketcher.Constraint("PointOnObject", 0, 2, -3))
+        self.source.addConstraint(Sketcher.Constraint("Tangent", 0, 2, -3))
+        self.source.addConstraint(Sketcher.Constraint("Angle", -3, math.pi / 2))
         self.add_width()
         self.dest.carbonCopy("Source", False)
         self.assertEqual(len(self.dest.ExternalGeo), 2)
-        self.assertEqual([c.Type for c in self.dest.Constraints], ["PointOnObject", "Distance"])
-        on_arc = self.dest.Constraints[0]
-        self.assertEqual((on_arc.First, on_arc.FirstPos, on_arc.Second), (3, 2, 2))
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
+        self.assert_width_copied_last()
+
+    def test_mirrored_copy_refuses_a_locked_perpendicular_at_a_self_referenced_line(self):
+        """A line keeps its start when mirrored back, but a perpendicularity of the source
+        line's end with a line external at Dest.Edge2, locked when added (+-90 degrees), says
+        which side the line turns to, and the mirror turns it to the other: it isn't copied,
+        with a warning. A perpendicularity of the two edges (no point, no locked value) is, on
+        Edge2, and so is the width. Before (PR 253 review M1), the locked one was copied as it
+        was."""
+        self.turn_source_over()
+        self.dest.setAllowUnaligned(False)
+        self.add_self_reference(Part.LineSegment(V(10, 0, 0), V(10, -10, 0)), "Dest.Edge2")
+        self.source.addConstraint(Sketcher.Constraint("Perpendicular", 0, -3))
+        locked = self.source.addConstraint(Sketcher.Constraint("Perpendicular", 0, 2, -3))
+        self.assertNotEqual(self.source.Constraints[locked].Value, 0)
+        self.add_width()
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Perpendicular", "Distance"])
+        perpendicular = self.dest.Constraints[0]
+        self.assertEqual((perpendicular.First, perpendicular.Second), (2, 1))
+        self.assert_width_copied_last()
+
+    def add_orphaned_self_reference(self):
+        """A line external of Source whose ref names Dest.Edge9, which Dest (two edges) doesn't
+        have, the source line's start on its start."""
+        self.add_self_reference(Part.LineSegment(V(40, 0, 0), V(50, 0, 0)), "Dest.Edge9")
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        self.add_width()
+
+    def test_copy_refuses_a_constraint_on_an_orphaned_self_reference(self):
+        """PR 253 review M2: the constraint on the external at Dest.Edge9 has nothing to go to
+        here: it isn't copied (with a warning), and Dest's list stays valid. Before, it was
+        copied onto GeoId 8, which Dest doesn't have: the list was flagged invalid."""
+        self.add_orphaned_self_reference()
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
+        self.assert_width_copied_last()
+        self.assertEqual(self.dest.solve(), 0)
+
+    def test_mirrored_copy_refuses_a_constraint_on_an_orphaned_self_reference(self):
+        """As above, mirrored back: before, the copy read Dest's geometry past its end (a
+        crash, or a wrong refusal)."""
+        self.turn_source_over()
+        self.dest.setAllowUnaligned(False)
+        self.add_orphaned_self_reference()
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
         self.assert_width_copied_last()
 
     def test_reversed_unaligned_copy_refuses_a_constraint_on_a_self_reference(self):

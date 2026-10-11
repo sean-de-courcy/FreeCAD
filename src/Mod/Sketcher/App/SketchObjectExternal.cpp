@@ -699,6 +699,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                     const std::string external = "ExternalEdge"
                         + std::to_string(GeoEnum::RefExt + 1 - geoId) + ", a copy of '"
                         + this->Label.getValue() + "' " + element;
+                    if (mapped->second >= static_cast<int>(vals.size())) {
+                        // FreeCAD-CH (PR 253 review M2): an orphaned ref (e.g. Edge9 of a
+                        // sketch with three edges) names no geometry here
+                        refused = "it is on " + external + ", which '" + this->Label.getValue()
+                            + "' doesn't have";
+                        break;
+                    }
                     if (reversed) {
                         // the source sees this sketch's geometry mirrored and the copy isn't
                         // flipped back: neither the points nor the values carry over
@@ -707,16 +714,32 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                               "and the copy isn't flipped back here";
                         break;
                     }
-                    const PointPos named = constr->getPosId(i);
-                    if ((xinv || yinv) && posId == PointPos::none
-                        && (named == PointPos::start || named == PointPos::end)
-                        && !vals[mapped->second]->is<Part::GeomLineSegment>()) {
-                        // the copy is flipped back, so lines, points and values map; but an
-                        // arc's ends swap when mirrored (a sketch's arcs run counterclockwise),
-                        // and other curves' aren't known to keep theirs
-                        refused = "it is on an end of " + external
-                            + ", and the copy is mirrored here, so which end it names isn't known";
-                        break;
+                    if ((xinv || yinv) && posId == PointPos::none) {
+                        // the copy is flipped back. An edge that is a line maps with its points
+                        // (projected or mirrored, a line keeps its start) and the values are
+                        // flip-corrected; a vertex is a point. But a mirrored arc runs the other
+                        // way (a sketch's arcs run counterclockwise): its ends swap, and an
+                        // angle at it (its sweep, a locked tangency) changes in a way the value
+                        // corrections don't know. Other curves aren't known to keep their
+                        // direction. A 180-degree turn (both flips) keeps an arc's ends, but
+                        // the value corrections don't know arcs there either (PR 253 review M1)
+                        if (!vals[mapped->second]->is<Part::GeomLineSegment>()) {
+                            refused = "it is on " + external
+                                + ", which isn't a line, and the copy is flipped here, so its "
+                                  "ends and the angles at it aren't known to carry over";
+                            break;
+                        }
+                        if ((constr->Type == Tangent || constr->Type == Perpendicular)
+                            && (constr->Third != GeoEnum::GeoUndef || constr->getValue() != 0.0)) {
+                            // a locked tangency or perpendicularity is an angle at a point,
+                            // which the value corrections don't flip
+                            refused = std::string("it is a ")
+                                + (constr->Type == Tangent ? "tangency" : "perpendicularity")
+                                + " at a point with " + external
+                                + ", and the copy is flipped here, so which side it turns to "
+                                  "isn't known";
+                            break;
+                        }
                     }
                     if (posId != PointPos::none) {
                         // a vertex: the source's external is a point, named by its start; here

@@ -773,9 +773,19 @@ class TestSketchExternalTypes(unittest.TestCase):
         """ops#278: a file saved before ops#264 (no kinds) with the tilted square face linked
         Both (four projected lines and a section line), frozen. The open records the kinds for a
         frozen link too, since its type gives the saved geometry, so once unfrozen its rebuild
-        hands the Ids out by kind. Before, the open skipped frozen links: no kinds."""
+        hands the Ids out by kind. Before, the open skipped frozen links: no kinds. The frozen
+        geometry stays as saved, and the open leaves the document untouched (PR 253 review L6)."""
+
+        def lineEnds(sketch):
+            return [
+                (tuple(round(c, 6) for c in g.StartPoint), tuple(round(c, 6) for c in g.EndPoint))
+                for g in list(sketch.ExternalGeo)[2:]
+                if isinstance(g, Part.LineSegment)
+            ]
+
         sketch = self.makeTiltedBothSketch(self.SQUARE)
         self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 4)
+        saved = lineEnds(sketch)
         path = self.tempPath("LegacyFrozenBoth.FCStd")
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
@@ -785,6 +795,9 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc = App.openDocument(path)
         sketch = self.doc.getObject("TiltedSketch")
         self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 4)
+        self.assertEqual(lineEnds(sketch), saved)
+        self.assertFalse(self.doc.isTouched())
+        self.assertNotIn("Touched", sketch.State)
 
     def testLegacyBothLinkInAStaleTypeListGetsTypeAndKindsOnOpen(self):
         """PR 251 review L3: a file saved before ops#140 and ops#264, a stale type in front of the

@@ -1527,23 +1527,28 @@ void SketchObject::onUndoRedoFinished()
     // types that wait for a repair, but not which links wait (a deciding rebuild undone left them
     // decided, and the next rebuild with their element back kept the type at the index). Each
     // link whose saved geometry is missing waits again, as on a later open: a full rebuild
-    // matches it with that geometry once its element is back
+    // matches it with that geometry once its element is back. So does one with no saved
+    // geometry, which the open can't decide either (PR 253 review L3)
     externalTypeRepairPending = ExternalTypes.getSize() > ExternalGeometry.getSize();
     undecidedTypeKeys.clear();
     if (externalTypeRepairPending) {
         for (const auto& key : externalGeoRef) {
+            bool saved = false;
+            bool missing = false;
             auto refs = externalGeoRefMap.find(key);
-            if (refs == externalGeoRefMap.end()) {
-                continue;
-            }
-            for (long id : refs->second) {
-                auto it = externalGeoMap.find(id);
-                if (it != externalGeoMap.end()
-                    && ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
-                           ->testFlag(ExternalGeometryExtension::Missing)) {
-                    undecidedTypeKeys.insert(key);
-                    break;
+            if (refs != externalGeoRefMap.end()) {
+                for (long id : refs->second) {
+                    auto it = externalGeoMap.find(id);
+                    if (it != externalGeoMap.end()) {
+                        saved = true;
+                        missing = missing
+                            || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                                   ->testFlag(ExternalGeometryExtension::Missing);
+                    }
                 }
+            }
+            if (!saved || missing) {
+                undecidedTypeKeys.insert(key);
             }
         }
     }
