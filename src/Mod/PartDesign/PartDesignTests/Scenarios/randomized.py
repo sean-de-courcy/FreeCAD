@@ -68,6 +68,22 @@ holds it, broken without the solver; then their consumers are deleted, as a brea
 delete-near deletes one feature of a near pair whose elements are referenced: they break, and
 policy D guesses no element of the neighbour (another source).
 
+Three edits change the body's order (ops#134, notes/reorder-rollback-plan.md section 4): a
+reorder moves a boss, pocket, hole or dress-up up or down by 1 to 3 solids; a rollback-insert rolls
+the bar back by 1 to 3 solids, adds a feature there and rolls to the end; an insert-before-dressup
+adds a boss, pocket or hole right before a dress-up. The spec follows the body's rules: a
+dress-up's Base follows its base feature, a sketch support on a solid now after its feature is
+re-targeted to the feature's base and put back when the order allows (Spec.rechain,
+Spec.retarget), and a label owned by a feature now after its consumer's object is gone, so its
+consumer is expected broken and then deleted. References these edits move are judged on the
+object the spec names (Spec.pinned), and in a plan with these edits every reference is
+(Spec.strict). After each step the body's solids must be the spec's chain, each built on the one
+before. They come from a random stream of their own, so a seed that draws none keeps its plan.
+
+A step with a repair judges the references expected broken, then, before the repair, the others
+whose owner it keeps and whose target is built on no failed feature (standsBy, ops#286), then
+every reference after the repair.
+
 Environment (TestNamingScenarios): FREECAD_SCENARIO_SEEDS ("1-4", "7,9"),
 FREECAD_SCENARIO_STEPS (8), FREECAD_SCENARIO_REPLAY=<seed>:<steps> (one seed),
 FREECAD_SCENARIO_GAP (GAP and MARGIN, 1 for N3's close-spaced series; `setSpacing`).
@@ -197,12 +213,13 @@ class Feature:
     depth); hole: `center` and `size` (radius); fillet, chamfer: `label` and `size`; marker,
     external: `label`. `target` names the object the reference links to. `near`: the fid of the
     feature it was placed near on purpose (a near pair). `order`: a rectangle's sides by geometry
-    index in its sketch (a redraw moves a side to the end)."""
+    index in its sketch (a redraw moves a side to the end). `on`: the solid a boss's, pocket's or
+    hole's sketch support was re-targeted to by a reorder (None: on `target`; ops#134)."""
 
     def __init__(self, fid, kind, target, **values):
         self.fid, self.kind, self.target = fid, kind, target
         self.region = self.center = self.label = None
-        self.size = self.near = None
+        self.size = self.near = self.on = None
         self.order = list(SIDES)
         for key, value in values.items():
             setattr(self, key, value)
@@ -218,6 +235,11 @@ class Feature:
     @property
     def solid(self):
         return self.kind in SOLID
+
+    @property
+    def support(self):
+        """The object a boss's, pocket's or hole's sketch is attached to now."""
+        return self.on or self.target
 
     def area(self):
         """The region the feature takes on the block's top (bosses, pockets, holes)."""
@@ -255,6 +277,15 @@ class Spec:
         self.nextId = 1
         self.nextKey = 1
         self.redrawn = set()  # labels whose element a redraw replaced in this step
+        # references whose object a reorder or an insert at the bar changed: judged on that
+        # object too (Ref.on; ops#134)
+        self.pinned = set()
+        # a plan with the reorder edits: every reference is judged on the spec's object, and an
+        # insert at the bar re-chains (the review of fork PR 256, Medium 4)
+        self.strict = False
+        # {reference: the object it stays on without the solver}: an insert at the bar leaves
+        # the next dress-up's link on the old object until a re-pick (N1 2.2)
+        self.kept = {}
 
     def copy(self):
         return copy.deepcopy(self)
@@ -431,7 +462,7 @@ class Spec:
                     f.sketchName,
                     "AttachmentSupport",
                     ("block", "face", "top"),
-                    f.target,
+                    f.support,
                     "attach",
                     f,
                 )
@@ -543,7 +574,57 @@ class Spec:
         return True
 
     def referrers(self, name):
-        return [f for f in self.features if f.target == name]
+        """The features linking to the object, a re-targeted support's original object too (its
+        re-target record names it)."""
+        return [f for f in self.features if name in (f.target, f.on)]
+
+    # reorder and insert at the bar (ops#134; notes/reorder-rollback-design.md 2.1-2.3, 3.2)
+
+    def move(self, feature, dest):
+        """Puts the solid feature right after the solid `dest` ("Pad": first), as
+        Body.reorderObject(feature, dest, True) does, and rewires the links as the body does."""
+        self.features.remove(feature)
+        self.features.insert(self.after(dest), feature)
+        self.rechain()
+        self.retarget()
+
+    def after(self, name):
+        """The index in `features` right after the solid `name`."""
+        return 0 if name == "Pad" else self.features.index(self.byName(name)) + 1
+
+    def rechain(self, insert=False):
+        """A dress-up's Base follows its base feature (the reroute, N1 2.2): each dress-up's
+        target is the solid before it. After an insert at the bar a link without the solver
+        stays on its old object (`kept`); any other change of its target ends that."""
+        for f in self.features:
+            if f.kind in DRESS:
+                base = self.previousSolid(f.name)
+                if f.target != base:
+                    name = f"F{f.fid}.base"
+                    if insert:
+                        self.kept.setdefault(name, f.target)
+                    else:
+                        self.kept.pop(name, None)
+                    f.target = base
+                    self.pinned.add(name)
+
+    def retarget(self):
+        """The re-target rule (N1 3.2) for the sketch supports: a support on a solid at or after
+        its feature goes to the feature's base; one re-targeted earlier stays where it is while
+        that is before the feature, and goes back to its own target once that is."""
+        for f in self.features:
+            if f.kind not in ("boss", "pocket", "hole"):
+                continue
+            at = self.position(f.name)
+            if self.position(f.target) < at:
+                on = None
+            elif f.on is not None and self.position(f.on) < at:
+                on = f.on
+            else:
+                on = self.previousSolid(f.name)
+            if on != f.on:
+                f.on = on
+                self.pinned.add(f"F{f.fid}.support")
 
     def deletable(self, feature):
         """A feature can be deleted when nothing links to it but the next solid feature's
@@ -559,7 +640,9 @@ class Spec:
             after = self.nextSolid(feature.name)
             if after is not None and after.kind in DRESS and after.target == feature.name:
                 after.target = self.previousSolid(feature.name)
+                self.kept.pop(f"F{after.fid}.base", None)
         self.features.remove(feature)
+        self.kept = {n: o for n, o in self.kept.items() if o != feature.name}
 
     def repaired(self):
         """The spec with the broken consumers deleted, last first, or None when one of them
@@ -649,6 +732,7 @@ def create(doc, body, spec, f, fresh=False):
     object it builds on), as a user building the model now would; elsewhere to its target."""
     target = doc.getObject(f.target)
     if f.kind in ("boss", "pocket", "hole"):
+        target = doc.getObject(f.support)
         top = spec.predicate(("block", "face", "top")).one(target.Shape)[0]
         sketch = attachedSketch(doc, body, f.sketchName, target, top)
         if f.kind == "hole":
@@ -933,6 +1017,10 @@ class AddFeature(Edit):
         f = copy.deepcopy(self.feature)
         spec.features.insert(0, f) if self.insert else spec.features.append(f)
         spec.nextId = max(spec.nextId, f.fid + 1)
+        if self.insert and (spec.strict or spec.pinned):
+            # a dress-up next follows the inserted feature (N1 2.3); judged on it only in a
+            # plan with the reorder edits, so the older seeds' records stay as they were
+            spec.rechain(insert=True)
 
     def apply(self, doc, body, before, after):
         f = after.byId(self.feature.fid)
@@ -956,6 +1044,66 @@ class DeleteFeature(Edit):
 
     def apply(self, doc, body, before, after):
         deleteFeature(doc, body, before.byId(self.fid))
+
+
+class Reorder(Edit):
+    """A boss, pocket, hole or dress-up moved up or down the chain (ops#134; N1 2.1):
+    Body.reorderObject puts it, with its sketch, right after the solid `dest`. A dress-up's Base
+    follows its base, a sketch support on a solid now at or after its feature is re-targeted to the
+    feature's base and goes back once the order allows (Spec.move). A feature moved below the
+    Tip (`held`): the plans' bodies are never rolled back, so the bar stays at the end and the
+    Tip is the moved feature (N1 2.1 step 7); the edit still rolls to the end after checking it."""
+
+    def __init__(self, fid, dest, held, text):
+        super().__init__(text + ("; roll to end" if held else ""))
+        self.fid, self.dest, self.held = fid, dest, held
+
+    def change(self, spec):
+        spec.move(spec.byId(self.fid), self.dest)
+
+    def apply(self, doc, body, before, after):
+        moved = doc.getObject(after.byId(self.fid).name)
+        body.reorderObject([moved], doc.getObject(self.dest), True)
+        if self.held:
+            # Dropped below the last solid of a body that isn't rolled back: the bar stays at
+            # the end, so the Tip is the moved feature (N1 2.1 step 7, Retarget.cpp), checked
+            # before the roll to the end would set it
+            if body.Tip is None or body.Tip.Name != after.tip():
+                raise ScenarioError(
+                    f"{moved.Name} moved below the Tip: the Tip is "
+                    f"{body.Tip.Name if body.Tip else None}, not {after.tip()}"
+                )
+            body.rollToEnd()
+
+
+class RollbackInsert(Edit):
+    """The bar rolled back to the solid `at`, a feature added there, the bar rolled to the end
+    (ops#134; N1 2.3): the solid after it now builds on the new feature, and a dress-up's Base
+    follows. `rollback-insert` adds any feature, `insert-before-dressup` a boss, pocket or hole
+    right before a dress-up."""
+
+    def __init__(self, feature, at, text):
+        super().__init__(text)
+        self.feature, self.at = feature, at
+
+    def change(self, spec):
+        f = copy.deepcopy(self.feature)
+        spec.features.insert(spec.after(self.at), f)
+        spec.nextId = max(spec.nextId, f.fid + 1)
+        spec.rechain(insert=True)
+
+    def apply(self, doc, body, before, after):
+        body.rollTo(doc.getObject(self.at))
+        f = after.byId(self.feature.fid)
+        create(doc, body, after, f)
+        # a solid feature added at the bar becomes the Tip (N1 2.3); a sketch leaves it
+        tip = f.name if f.solid else self.at
+        if body.Tip is None or body.Tip.Name != tip:
+            raise ScenarioError(
+                f"{f.name} added at {self.at}: the Tip is "
+                f"{body.Tip.Name if body.Tip else None}, not {tip}"
+            )
+        body.rollToEnd()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -994,14 +1142,15 @@ def drawNearRegion(rng, spec, size):
     return (rx, ry, rx + w, ry + d), other.fid
 
 
-def drawFeature(rng, spec, insert=False):
-    """A new feature for the tip (or, with insert, for after the pad), or None. A boss, pocket
-    or hole is placed near another one on purpose one time in four (a near pair)."""
+def drawFeature(rng, spec, insert=False, at=None, solidOnly=False):
+    """A new feature for the tip (or, with insert, for after the pad; with `at`, for after that
+    solid, the bar rolled back there), or None. A boss, pocket or hole is placed near another one
+    on purpose one time in four (a near pair). `solidOnly`: a boss, pocket or hole."""
     kinds = [("boss", 2), ("pocket", 2), ("hole", 1.5)]
-    if not insert:
+    if not insert and not solidOnly:
         kinds += [("fillet", 2), ("chamfer", 2), ("marker", 1.5), ("external", 1)]
     kind = weighted(rng, kinds)
-    tip = "Pad" if insert else spec.tip()
+    tip = "Pad" if insert else at or spec.tip()
     fid = spec.nextId
     if kind in ("boss", "pocket", "hole"):
         target = tip if insert or rng.random() < 0.7 else "Pad"
@@ -1157,6 +1306,71 @@ def drawEdit(rng, spec):
     return AddFeature(feature, insert=(kind == "insert")) if feature else None
 
 
+# The reorder edits (ops#134) come from a random stream of their own, so a seed that draws none
+# keeps the plan it had before them: NEW_SEEDS of the seeds draw them, and in those NEW_STEPS of
+# the steps try one first.
+NEW_SEEDS = 0.36
+NEW_STEPS = 0.35
+
+
+def drawReorder(rng, spec):
+    """A boss, pocket, hole or dress-up moved up or down by 1 to 3 solids, never above the
+    block's pad."""
+    movable = [f for f in spec.features if f.kind in ("boss", "pocket", "hole") + DRESS]
+    if not movable:
+        return None
+    f = rng.choice(movable)
+    chain = spec.chain()
+    i, k = chain.index(f.name), rng.randint(1, 3)
+    if rng.random() < 0.5:
+        if i - k < 1:
+            return None
+        dest, way = chain[i - k - 1], "up"
+    else:
+        if i + k > len(chain) - 1:
+            return None
+        dest, way = chain[i + k], "down"
+    held = dest == spec.tip()
+    return Reorder(f.fid, dest, held, f"reorder {f.name} {way} {k} (after {dest})")
+
+
+def drawRollbackInsert(rng, spec):
+    """The bar rolled back by 1 to 3 solids and a feature added there."""
+    chain = spec.chain()
+    if len(chain) < 2:
+        return None
+    k = rng.randint(1, min(3, len(chain) - 1))
+    at = chain[-1 - k]
+    f = drawFeature(rng, spec, at=at)
+    if f is None:
+        return None
+    return RollbackInsert(f, at, f"rollback-insert at {at} (back {k}): {f.describe()}")
+
+
+def drawInsertBeforeDressup(rng, spec):
+    """A boss, pocket or hole inserted right before a dress-up: its Base follows it."""
+    dress = [f for f in spec.features if f.kind in DRESS]
+    if not dress:
+        return None
+    d = rng.choice(dress)
+    at = spec.previousSolid(d.name)
+    f = drawFeature(rng, spec, at=at, solidOnly=True)
+    if f is None:
+        return None
+    return RollbackInsert(f, at, f"insert-before-dressup {d.name}: {f.describe()}")
+
+
+def drawNewEdit(rng, spec):
+    kind = weighted(
+        rng, [("reorder", 2), ("rollback-insert", 1), ("insert-before-dressup", 1)]
+    )
+    if kind == "reorder":
+        return drawReorder(rng, spec)
+    if kind == "rollback-insert":
+        return drawRollbackInsert(rng, spec)
+    return drawInsertBeforeDressup(rng, spec)
+
+
 def freshBuild(spec, mode):
     """Builds the spec in a new document: it must recompute, and every reference judge correct.
     Returns None when it does, else why not (the reason is counted in the plan)."""
@@ -1181,13 +1395,18 @@ def freshBuild(spec, mode):
 
 def makeRef(spec, name, sequence=None):
     """The reference's Ref; a redrawn element's expectation comes from `sequence`, the replay
-    judging it (RandomSequence.redrawnExpectation)."""
+    judging it (RandomSequence.redrawnExpectation). A reference a reorder or an insert at the
+    bar moved to another object (`Spec.pinned`) must be on the spec's object (ops#134), and so
+    must every reference in a plan with the reorder edits (`Spec.strict`)."""
     owner, prop, label, target, consumer, f = spec.refs()[name]
     expectation = spec.expectation(label, target, consumer)
     if isinstance(expectation, RedrawnElement):
         expectation = sequence.redrawnExpectation(name, expectation.predicate, target)
     outcome = None if isinstance(expectation, Broken) else spec.outcome(consumer, f)
-    return Ref(name, owner, prop, lambda: expectation, outcome)
+    if sequence is not None and not sequence.solver and name in spec.kept:
+        target = spec.kept[name]  # N1 2.2 without the solver: until a re-pick
+    on = (lambda: target) if spec.strict or name in spec.pinned else None
+    return Ref(name, owner, prop, lambda: expectation, outcome, on)
 
 
 # The reference solver's tier 3 (strict) and the guess rules' wide tier 3 (ops#127, N2 5.2):
@@ -1233,8 +1452,11 @@ def nearestIn(saved, edges, diagonal, reach):
 
 
 class Step:
+    """`tip`: where the plan leaves the body's Tip (the bar)."""
+
     def __init__(self, edit, before, after, repaired):
         self.edit, self.before, self.after, self.repaired = edit, before, after, repaired
+        self.tip = after.tip()
 
 
 class Plan:
@@ -1267,31 +1489,45 @@ def makePlan(seed, steps, mode="V2"):
     else:
         raise ScenarioError(f"seed {seed}: no model builds")
     initial, plan = spec, []
+    extra = random.Random(f"ops134:{seed}")  # the reorder edits' stream
+    newKinds = extra.random() < NEW_SEEDS
+    spec.strict = newKinds
     for _ in range(steps):
-        for _ in range(40):
-            edit = drawEdit(rng, spec)
-            if edit is None:
-                continue
-            after = spec.copy()
-            try:
-                edit.change(after)
-            except ScenarioError:
-                continue
-            if not after.valid():
-                continue
-            repaired = after.repaired()
-            if repaired is None:
-                continue
-            why = freshBuild(repaired, mode)
-            if why is not None:
-                discarded.append(f"{edit.text}: {why}")
-                continue
-            plan.append(Step(edit, spec, after, repaired if after.broken() else None))
-            spec = repaired
-            break
-        else:
+        step = None
+        if newKinds and extra.random() < NEW_STEPS:
+            step = drawStep(lambda: drawNewEdit(extra, spec), spec, mode, discarded)
+        if step is None:
+            step = drawStep(lambda: drawEdit(rng, spec), spec, mode, discarded)
+        if step is None:
             break  # nothing more to draw: the sequence ends early
+        step, spec = step
+        plan.append(step)
     return Plan(seed, initial, plan, discarded)
+
+
+def drawStep(draw, spec, mode, discarded):
+    """The first of up to 40 edits from `draw` that leaves a valid model: (its Step, the spec
+    after it and its repair), or None."""
+    for _ in range(40):
+        edit = draw()
+        if edit is None:
+            continue
+        after = spec.copy()
+        try:
+            edit.change(after)
+        except ScenarioError:
+            continue
+        if not after.valid():
+            continue
+        repaired = after.repaired()
+        if repaired is None:
+            continue
+        why = freshBuild(repaired, mode)
+        if why is not None:
+            discarded.append(f"{edit.text}: {why}")
+            continue
+        return Step(edit, spec, after, repaired if after.broken() else None), repaired
+    return None
 
 
 class Checker(Scenario):
@@ -1415,6 +1651,79 @@ class RandomSequence(Scenario):
                 return
             feature = getattr(feature, "BaseFeature", None)
 
+    def standsBy(self, spec, ref, broken, held):
+        """Whether a reference the repair keeps can be judged before the repair (ops#286): no
+        feature on its target's chain fails here, and none is a consumer the plan deletes unless
+        it holds its expected element (`held`: a redrawn element the solver followed). Below a
+        failed feature, or a deleted one that guessed among its candidates, the live shapes aren't
+        the spec's until the repair."""
+        if ref[5] in broken:
+            return False
+        obj = self.doc.getObject(ref[3])
+        while obj is not None:
+            if not obj.isValid():
+                return False
+            f = spec.byName(obj.Name)
+            if f in broken and f.name not in held:
+                return False
+            obj = getattr(obj, "BaseFeature", None)
+        return True
+
+    def reportsBreak(self, spec, name, result):
+        """An expected break the solver reports (the review of fork PR 256, Medium 5): its failed
+        owner has an error text, which lists candidates or says there is none. Else wrong: the
+        user can't tell what broke or what to pick."""
+        if not self.solver or result.verdict != "broken":
+            return
+        record = result.record
+        if not str(record.get("expect")).startswith("BROKEN"):
+            return
+        owner = self.doc.getObject(spec.refs()[name][0])
+        if owner is None or owner.isValid():
+            return  # reported one feature up (reportedUpstream)
+        error = (record.get("error") or "").strip()
+        listed = any(record.get("candidates") or [])
+        if error and (listed or "no candidate" in error):
+            return
+        result.verdict = "wrong"
+        record.update(
+            verdict="wrong",
+            detail="broken " + ("without an error text" if not error
+                                else "with neither candidates nor 'no candidate'"),
+        )
+
+    def checkOrder(self, body, spec, when):
+        """The body's solid features are the spec's chain, each built on the one before it (the
+        review of fork PR 256, Medium 3): else the edit didn't do what the plan says, and the step
+        would test nothing."""
+        solids = [o for o in body.Group if o.isDerivedFrom("PartDesign::Feature")]
+        names = [o.Name for o in solids]
+        if names != spec.chain():
+            raise ScenarioError(f"{when}: the body's solids are {names}, the plan's {spec.chain()}")
+        first = solids[0].BaseFeature
+        if first is not None and first != getattr(body, "BaseFeature", None):
+            raise ScenarioError(f"{when}: {solids[0].Name} builds on {first.Name}")
+        for a, b in zip(solids, solids[1:]):
+            if b.BaseFeature != a:
+                base = b.BaseFeature.Name if b.BaseFeature else None
+                raise ScenarioError(f"{when}: {b.Name} builds on {base}, not {a.Name}")
+
+    def stopped(self, k, step, e):
+        """A step the replay couldn't run as planned (an element the edit needs isn't there, or
+        the body's order or Tip isn't the plan's): a wrong record `edit@k`, and the sequence
+        stops, since the live model differs from the spec from here on."""
+        why = e if isinstance(e, ScenarioError) else f"{type(e).__name__}: {e}"
+        result = self.diverged(f"edit{k}", str(k), why)
+        result.scenario, result.ref = f"Random{self.plan.seed:04d}", f"edit@{k}"
+        result.record.update(
+            scenario=result.scenario,
+            ref=result.ref,
+            seed=self.plan.seed,
+            edit=step.edit.text,
+        )
+        emit(result)
+        return result
+
     def judgeAll(self, spec, step, text, names=None):
         results = []
         self.redrawnSubs = {}
@@ -1422,6 +1731,7 @@ class RandomSequence(Scenario):
             try:
                 result = self.judge(makeRef(spec, name, self), step)
                 self.reportedUpstream(spec, name, result)
+                self.reportsBreak(spec, name, result)
                 self.listsRedrawn(name, result)
             except ScenarioError as e:
                 result = self.diverged(name, step, e)
@@ -1451,37 +1761,45 @@ class RandomSequence(Scenario):
             for k, step in enumerate(self.plan.steps, 1):
                 try:
                     step.edit.apply(self.doc, body, step.before, step.after)
-                except ScenarioError as e:  # an element the edit needs isn't there
-                    result = self.diverged(f"edit{k}", str(k), e)
-                    result.scenario, result.ref = f"Random{self.plan.seed:04d}", f"edit@{k}"
-                    result.record.update(
-                        scenario=result.scenario,
-                        ref=result.ref,
-                        seed=self.plan.seed,
-                        edit=step.edit.text,
-                    )
-                    emit(result)
-                    results.append(result)
+                    self.saved = getattr(step.edit, "saved", {})
+                    self.doc.recompute()
+                    if body.Tip is None or body.Tip.Name != step.tip:
+                        # the Tip where the plan left it: a feature past it would be built on by
+                        # the next feature added there (ops#89), and a reorder or a roll forward
+                        # that leaves it elsewhere (ops#134) leaves the tail held
+                        raise ScenarioError(
+                            f"step {k} ({step.edit.text}): the body's tip is "
+                            f"{body.Tip.Name if body.Tip else None}, the plan's {step.tip}"
+                        )
+                    self.checkOrder(body, step.after, f"step {k}")
+                except Exception as e:  # e.g. a refused reorderObject (ValueError)
+                    results.append(self.stopped(k, step, e))
                     break
-                self.saved = getattr(step.edit, "saved", {})
-                self.doc.recompute()
-                if body.Tip is None or body.Tip.Name != step.after.tip():
-                    # a feature past the tip would be built on by the next feature added there
-                    # (ops#89): a defect of the edit's replay, not a verdict
-                    raise ScenarioError(
-                        f"step {k} ({step.edit.text}): the body's tip is "
-                        f"{body.Tip.Name if body.Tip else None}, the spec's {step.after.tip()}"
-                    )
                 if step.repaired is None:
                     judged = self.judgeAll(step.after, str(k), step.edit.text)
                 else:
                     broken = step.after.broken()
-                    names = [n for n, r in step.after.refs().items() if r[5] in broken]
+                    refs = step.after.refs()
+                    names = [n for n, r in refs.items() if r[5] in broken]
                     judged = self.judgeAll(step.after, str(k), step.edit.text, names)
+                    # The other references too, where the edit's state is the spec's (ops#286)
+                    holds = {n: r.passing and not str(r.record.get("expect")).startswith("BROKEN")
+                             for n, r in zip(names, judged)}
+                    held = {f.name for f in broken
+                            if all(h for n, h in holds.items() if refs[n][5] is f)}
+                    names = [n for n, r in refs.items()
+                             if self.standsBy(step.after, r, broken, held)]
+                    judged += self.judgeAll(step.after, str(k), step.edit.text, names)
                     for f in sorted(broken, key=lambda f: step.after.features.index(f),
                                     reverse=True):
                         deleteFeature(self.doc, body, f)
                     self.doc.recompute()
+                    try:
+                        self.checkOrder(body, step.repaired, f"step {k}'s repair")
+                    except ScenarioError as e:
+                        results += judged
+                        results.append(self.stopped(k, step, e))
+                        break
                     text = step.edit.text + "; repair: delete " + ", ".join(
                         f.name for f in broken)
                     judged += self.judgeAll(step.repaired, f"{k}r", text)
@@ -1497,9 +1815,17 @@ class RandomSequence(Scenario):
                 group.RemBool(MULTI_PARAM)
 
 
+def discardedByKind(plan):
+    """The discarded draws of the reorder edits, by kind (the review of fork PR 256, Low 7)."""
+    kinds = ("reorder", "rollback-insert", "insert-before-dressup")
+    return {k: sum(1 for why in plan.discarded if why.startswith(k + " ")) for k in kinds}
+
+
 def replayText(plan):
+    byKind = ", ".join(f"{k} {n}" for k, n in discardedByKind(plan).items())
     lines = [
-        f"seed {plan.seed}: {len(plan.steps)} steps, {len(plan.discarded)} draws discarded",
+        f"seed {plan.seed}: {len(plan.steps)} steps, {len(plan.discarded)} draws discarded "
+        f"({byKind})",
         "  build: " + "; ".join(f.describe() for f in plan.initial.features),
     ]
     for k, step in enumerate(plan.steps, 1):

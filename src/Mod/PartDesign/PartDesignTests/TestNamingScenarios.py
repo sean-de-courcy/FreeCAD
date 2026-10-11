@@ -434,6 +434,70 @@ class HarnessGuessVerdicts(unittest.TestCase):
         self.assertEqual(verdict, "broken")
         self.assertTrue(self.passing(harness.BROKEN, verdict))
 
+    def testContinuationOntoAnExtraElementIsWrong(self):
+        """ops#286: a pick whose stored set is wrong is guessed-wrong even when the consumer's
+        result is the same (ops#284: a chamfer continued onto an extra edge it leaves unchanged)."""
+        verdict = self.verdict(self.EDGE, "wrong", "equivalent", self.rows(kind="continued"))
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(self.EDGE, verdict))
+
+    def testGeometryPickOfAWrongSetIsWrong(self):
+        """A tier-3 pick (not a guess kind) of a wrong set with the same result (the
+        verification of fork PR 256, M1)."""
+        rows = self.rows(kind="tier3")
+        verdict = self.verdict(self.EDGE, "wrong", "equivalent", rows)
+        self.assertEqual(verdict, "equivalent")  # guessVerdict alone doesn't see it
+        verdict = harness.pickedWrongSet("wrong", verdict, rows)
+        self.assertEqual(verdict, "guessed-wrong")
+        self.assertFalse(self.passing(self.EDGE, verdict))
+        #   the expected element picked by geometry stays correct
+        self.assertEqual(harness.pickedWrongSet("correct", "correct", rows), "correct")
+        #   a record a break kept is no pick
+        self.assertEqual(
+            harness.pickedWrongSet("wrong", "equivalent", self.rows("broken", "tier3")),
+            "equivalent",
+        )
+
+    def testExpansionToTheExpectedPiecesPasses(self):
+        verdict = self.verdict(self.EDGE, "correct", "correct", self.rows(kind="expanded"))
+        self.assertEqual(verdict, "guessed")
+        self.assertTrue(self.passing(self.EDGE, verdict))
+
+
+class HarnessPinnedObject(unittest.TestCase):
+    """A reference that must be on another object (Ref.on) is wrong there even when its element
+    and its consumer's result are right (the review of fork PR 256, High 1)."""
+
+    def judge(self, on):
+        scenario = harness.Scenario("V2")
+        scenario.doc = doc = scenario.newDocument("Pinned")
+        try:
+            box = doc.addObject("Part::Box", "Box")
+            other = doc.addObject("Part::Box", "Other")
+            other.Placement.Base = harness.V(50, 0, 0)
+            doc.recompute()
+            top = harness.face("plane", normal=harness.Z, through=(0, 0, 10))
+            sketch = doc.addObject("Sketcher::SketchObject", "Sketch")
+            sketch.AttachmentSupport = [(box, scenario.names(box, top)[0])]
+            sketch.MapMode = "FlatFace"
+            doc.recompute()
+            ref = harness.Ref(
+                "support", "Sketch", "AttachmentSupport", lambda: top, harness.Attached(),
+                lambda: on,
+            )
+            return scenario.judge(ref, "edit")
+        finally:
+            scenario.cleanup()
+
+    def testOnItsObjectIsCorrect(self):
+        self.assertEqual(self.judge("Box").verdict, "correct")
+
+    def testOnAnotherObjectIsWrong(self):
+        result = self.judge("Other")
+        self.assertEqual(result.verdict, "wrong")
+        self.assertEqual(result.record["outcome"], "correct")
+        self.assertFalse(result.passing)
+
 
 __all__ = [
     name
@@ -441,4 +505,10 @@ __all__ = [
     if isinstance(value, type)
     and issubclass(value, ScenarioTestCase)
     and value is not ScenarioTestCase
-] + ["RandomSequences", "SolverSeeded", "HarnessSameSolid", "HarnessGuessVerdicts"]
+] + [
+    "RandomSequences",
+    "SolverSeeded",
+    "HarnessSameSolid",
+    "HarnessGuessVerdicts",
+    "HarnessPinnedObject",
+]
