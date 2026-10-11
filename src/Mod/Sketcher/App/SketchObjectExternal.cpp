@@ -681,39 +681,53 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             }
             return std::nullopt;
         };
-        // whether a whole conic (or a point) here is the image of the source's: centre and size
-        // (PR 260 review L1: a stale self-reference to a circle)
+        // a circle's or an ellipse's (major, minor) radii: a circle seen from a slightly tilted
+        // source is an ellipse
+        auto radiiOf = [](const Part::Geometry* geo) -> std::optional<std::pair<double, double>> {
+            if (auto circle = dynamic_cast<const Part::GeomCircle*>(geo)) {
+                return std::pair {circle->getRadius(), circle->getRadius()};
+            }
+            if (auto ellipse = dynamic_cast<const Part::GeomEllipse*>(geo)) {
+                return std::pair {ellipse->getMajorRadius(), ellipse->getMinorRadius()};
+            }
+            return std::nullopt;
+        };
+        // whether a whole conic here is the image of the source's: centre, radii and, for one
+        // that isn't round, the major axis (PR 260 review L1 and verification L1: a stale
+        // self-reference to a circle or ellipse). Self-references to edges only get here (a
+        // point is a vertex)
         auto sameShape = [&](const Part::Geometry* here, const Part::Geometry* seen) {
-            if (!here || !seen || here->getTypeId() != seen->getTypeId()) {
-                return false;
-            }
-            if (auto point = dynamic_cast<const Part::GeomPoint*>(here)) {
-                const auto other = static_cast<const Part::GeomPoint*>(seen)->getPoint();
-                return offBy(point->getPoint(), other) <= toleranceFor({point->getPoint(), other});
-            }
             auto conic = dynamic_cast<const Part::GeomConic*>(here);
-            if (!conic) {
+            auto seenConic = dynamic_cast<const Part::GeomConic*>(seen);
+            if (!conic || !seenConic) {
                 return false;
             }
             const auto centre = conic->getCenter();
-            const auto other = static_cast<const Part::GeomConic*>(seen)->getCenter();
-            const double tolerance = toleranceFor({centre, other});
+            const auto other = seenConic->getCenter();
+            const auto radii = radiiOf(here);
+            const auto seenRadii = radiiOf(seen);
+            const double tolerance = toleranceFor(
+                {centre, other, Base::Vector3d(radii ? radii->first : 0, 0, 0)});
             if (offBy(centre, other) > tolerance) {
                 return false;
             }
-            if (auto circle = dynamic_cast<const Part::GeomCircle*>(here)) {
-                return std::abs(circle->getRadius()
-                                - static_cast<const Part::GeomCircle*>(seen)->getRadius())
-                    <= tolerance;
+            if (!radii || !seenRadii) {
+                return here->getTypeId() == seen->getTypeId();  // another conic: its centre
             }
-            if (auto ellipse = dynamic_cast<const Part::GeomEllipse*>(here)) {
-                auto seenEllipse = static_cast<const Part::GeomEllipse*>(seen);
-                return std::abs(ellipse->getMajorRadius() - seenEllipse->getMajorRadius())
-                    <= tolerance
-                    && std::abs(ellipse->getMinorRadius() - seenEllipse->getMinorRadius())
-                    <= tolerance;
+            if (std::abs(radii->first - seenRadii->first) > tolerance
+                || std::abs(radii->second - seenRadii->second) > tolerance) {
+                return false;
             }
-            return true;
+            if (radii->first - radii->second <= tolerance) {
+                return true;  // round: no axis to compare
+            }
+            auto axis = static_cast<const Part::GeomEllipse*>(here)->getMajorAxisDir();
+            auto seenAxis = static_cast<const Part::GeomEllipse*>(seen)->getMajorAxisDir();
+            seenAxis.x = xinv ? -seenAxis.x : seenAxis.x;
+            seenAxis.y = yinv ? -seenAxis.y : seenAxis.y;
+            const double sine = std::abs(axis.x * seenAxis.y - axis.y * seenAxis.x)
+                / std::max(1e-12, std::hypot(axis.x, axis.y) * std::hypot(seenAxis.x, seenAxis.y));
+            return sine * radii->first <= tolerance;
         };
         for (const auto& [sourceId, id] : extMap) {
             const Part::Geometry* copied = nullptr;

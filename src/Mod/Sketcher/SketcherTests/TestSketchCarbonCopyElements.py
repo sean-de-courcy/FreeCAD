@@ -306,7 +306,7 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         """PR 260 review L2: Source's external of Dest.Edge3 is stale: the rest of the circle,
         drawn from Dest's end round to its start, which Source sees from (10, 0) to (0, -10).
         Its ends are where those of Dest's arc are, taken the other way, so they compare as
-        kept; its middle, the image of (-7.1, 7.1), isn't Dest's arc's. The source line's start
+        kept; its middle, which Dest sees at (-7.1, -7.1), isn't Dest's arc's. The source line's start
         on it isn't copied (with a warning); the width is. Before, the ends decided alone: the
         constraint was copied onto the wrong end, and an angle at it would be turned the wrong
         way."""
@@ -326,12 +326,23 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         """Dest's Edge3, the circle of radius 4 about (20, 5), and Source's external of it as a
         circle of `radius` about (20, -5), Source turned over; Source's line from (20, -19) to
         (20, -9) (the width's length), its end on that external. Copied aligned (flipped back)."""
+        self.add_dest_conic_seen(
+            Part.Circle(V(20, 5, 0), V(0, 0, 1), 4),
+            Part.Circle(V(20, -5, 0), V(0, 0, 1), radius),
+            (20, -19),
+            (20, -9),
+        )
+
+    def add_dest_conic_seen(self, conic, seen, start, end):
+        """Dest's Edge3 `conic`, and Source's external of it `seen`, Source turned over;
+        Source's line from `start` to `end`, its end on that external, and the width. Copied
+        aligned (flipped back)."""
         self.turn_source_over()
         self.dest.setAllowUnaligned(False)
-        self.dest.addGeometry(Part.Circle(V(20, 5, 0), V(0, 0, 1), 4), False)
-        self.add_self_reference(Part.Circle(V(20, -5, 0), V(0, 0, 1), radius), "Dest.Edge3")
+        self.dest.addGeometry(conic, False)
+        self.add_self_reference(seen, "Dest.Edge3")
         self.source.delGeometry(0)
-        self.source.addGeometry(Part.LineSegment(V(20, -19, 0), V(20, -9, 0)), False)
+        self.source.addGeometry(Part.LineSegment(V(*start, 0), V(*end, 0)), False)
         self.source.addConstraint(Sketcher.Constraint("PointOnObject", 0, 2, -3))
         self.add_width()
         self.dest.carbonCopy("Source", False)
@@ -359,6 +370,44 @@ class TestCarbonCopySelfReference(unittest.TestCase):
         round), a whole circle was taken unchecked, and the solve pulled the line's end onto a
         circle it was never on."""
         self.add_dest_circle_seen(5)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
+        self.assert_width_copied_last()
+
+    def add_dest_ellipse_seen(self, turned):
+        """Dest's Edge3, the ellipse about (20, 5) with radii 6 (along x) and 3, and Source's
+        external of it about (20, -5) with the same radii, its major axis along x, or along y
+        if `turned`; Source's line from (26, -15) to (26, -5), its end on the external's
+        major vertex as Source saw it."""
+        major = V(26, -5, 0) if not turned else V(20, 1, 0)
+        minor = V(20, -2, 0) if not turned else V(23, -5, 0)
+        self.add_dest_conic_seen(
+            Part.Ellipse(V(26, 5, 0), V(20, 8, 0), V(20, 5, 0)),
+            Part.Ellipse(major, minor, V(20, -5, 0)),
+            (26, -15),
+            (26, -5),
+        )
+
+    def test_mirrored_copy_keeps_a_point_on_a_self_referenced_ellipse(self):
+        """PR 260 verification L1: the external is the image of Dest's ellipse (centre, radii,
+        axis): the line's end on it goes onto Dest's own ellipse, and the solve leaves the copied
+        line at the image of Source's, from (26, 15) to (26, 5)."""
+        self.add_dest_ellipse_seen(turned=False)
+        self.assertEqual(
+            [(c.Type, c.First, c.FirstPos, c.Second) for c in self.dest.Constraints],
+            [("PointOnObject", 3, 2, 2), ("Distance", 3, 0, GEO_UNDEF)],
+        )
+        self.assert_width_copied_last()
+        self.assertEqual(self.dest.solve(), 0)
+        copied = self.dest.Geometry[3]
+        self.assertLess((copied.StartPoint - V(26, 15, 0)).Length, 1e-6)
+        self.assertLess((copied.EndPoint - V(26, 5, 0)).Length, 1e-6)
+
+    def test_mirrored_copy_refuses_a_point_on_a_stale_self_referenced_ellipse(self):
+        """PR 260 verification L1: Source last saw Dest's ellipse turned a quarter turn (same
+        centre and radii): stale, so the line's end on it isn't copied (with a warning); the
+        width is. Before, centre and radii matched, and the constraint was copied onto an
+        ellipse the end was never on."""
+        self.add_dest_ellipse_seen(turned=True)
         self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
         self.assert_width_copied_last()
 
@@ -704,18 +753,18 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         about where Dest sees the source's start (the other end is 10 away). Before, the ends
         compared to within 1e-6: neither pairing matched, and the constraint was refused."""
         self.turn_over(tilt=math.degrees(3e-4))
-        self.check_far_external()
+        self.check_far_external(0.01)
 
     def test_slightly_turned_copy_keeps_a_point_on_a_far_externals_end(self):
         """PR 260 review L4: as above, Source turned by 3e-4 rad about its normal instead (in
         the plane): the external's ends are seen about 0.03 off their images."""
         self.turn_over(spin=math.degrees(3e-4))
-        self.check_far_external()
+        self.check_far_external(0.05)
 
-    def check_far_external(self):
+    def check_far_external(self, bound):
         """The external line at x = 100 and the source line's start on its start, copied: the
         constraint is copied, and the copied line's start is on the copied external's start,
-        within 0.05 of where Dest sees the source's."""
+        within `bound` of where Dest sees the source's."""
         where = self.dest.Placement
         rail = self.doc.addObject("Part::Feature", "Rail")
         rail.Shape = Part.makeLine(where.multVec(V(100, 0, 0)), where.multVec(V(100, 10, 0)))
@@ -732,7 +781,7 @@ class TestCarbonCopyFlipped(unittest.TestCase):
         self.assertEqual(self.dest.solve(), 0)
         start = self.dest.Geometry[line].StartPoint
         self.assertLess((start - self.dest.getPoint(-3, 1)).Length, 1e-6)
-        self.assertLess((start - self.image(seen)).Length, 0.05)
+        self.assertLess((start - self.image(seen)).Length, bound)
 
     def test_flipped_copy_refuses_the_constraints_on_an_external_whose_ends_match_neither_way(self):
         """F4 (PR 254 review): an intersection-type external of a sloped face, which runs along
