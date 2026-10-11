@@ -437,6 +437,8 @@ std::string buildLinkSubPythonStr(const App::DocumentObject* obj, const std::vec
         return "None";
     }
 
+    // (obj, ["sub", ...]): upstream left the object out, so the PropertyLinkSub it was written to
+    // refused the list ("Expect input sequence of size 2"; ops#276)
     std::string result("[");
 
     for (const auto& sub : subs) {
@@ -444,7 +446,8 @@ std::string buildLinkSubPythonStr(const App::DocumentObject* obj, const std::vec
     }
     result += "]";
 
-    return result;
+    const std::string postfix = ", " + result + ")";
+    return Gui::Command::getObjectCmd(obj, "(", postfix.c_str());
 }
 
 std::string buildLinkSingleSubPythonStr(

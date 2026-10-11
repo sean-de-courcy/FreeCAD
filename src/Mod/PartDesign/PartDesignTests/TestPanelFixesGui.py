@@ -178,6 +178,50 @@ class TestPanelFixesGui(unittest.TestCase):
 
         QtCore.QTimer.singleShot(50, poll)
 
+    # -- ops#276: Migrate relinks the links to a legacy feature ---------------------------------
+
+    def testMigrateRelinksElementLinks(self):
+        """ops#276 (fork PR 255 review): two legacy boxes outside a body, the second on the first,
+        and a FeaturePython linking them by a PropertyLinkSubList, a PropertyLinkSub and two
+        PropertyXLinkSub. The link to the first box (not a PartDesign object) makes Migrate split
+        the chain: a body per box. Each link moves to its box's body with its element: the
+        PropertyLinkSub was written without its object and refused (an error box, the link left on
+        the box), and a PropertyXLinkSub, which derives from PropertyLink, moved as a whole object
+        and lost its element."""
+        box1 = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        box2 = self.doc.addObject("PartDesign::AdditiveBox", "Box2")
+        box2.BaseFeature = box1
+        box2.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation())
+        user = self.doc.addObject("App::FeaturePython", "User")
+        user.addProperty("App::PropertyLinkSubList", "Many")
+        user.addProperty("App::PropertyLinkSub", "One")
+        user.addProperty("App::PropertyXLinkSub", "Cross")
+        user.addProperty("App::PropertyXLinkSub", "CrossLast")
+        user.Many = [(box1, "Face3"), (box2, "")]
+        user.One = (box2, "Face1")
+        user.Cross = (box1, ["Face2"])
+        user.CrossLast = (box2, ["Face4"])
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        self.answerModals()
+        Gui.runCommand("PartDesign_Migrate")
+        pump()
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        body1 = self.doc.getObject("Box1Body")
+        body2 = self.doc.getObject("Box2Body")
+        self.assertIsNotNone(body1)
+        self.assertIsNotNone(body2)
+        self.assertIn(box1, body1.Group)
+        self.assertIn(box2, body2.Group)
+        many = [(obj.Name, sub) for obj, subs in user.Many for sub in subs]
+        self.assertEqual(many, [(body1.Name, "Face3"), (body2.Name, "")])
+        self.assertEqual((user.One[0].Name, list(user.One[1])), (body2.Name, ["Face1"]))
+        self.assertEqual((user.Cross[0].Name, list(user.Cross[1])), (body1.Name, ["Face2"]))
+        self.assertEqual(
+            (user.CrossLast[0].Name, list(user.CrossLast[1])), (body2.Name, ["Face4"])
+        )
+
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 
     def testPipeBinormalLoaded(self):
