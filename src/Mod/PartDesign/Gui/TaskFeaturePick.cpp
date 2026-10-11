@@ -388,28 +388,6 @@ std::vector<App::DocumentObject*> TaskFeaturePick::buildFeatures()
     return result;
 }
 
-namespace
-{
-
-// Whether two placements are the same within round-off: the position within
-// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
-// vector part of their difference, which stays exact near zero; Rotation::isSame's tolerance on
-// the quaternions' scalar product let about 0.036 degrees through: PR 227 verification)
-bool samePlace(const Base::Placement& a, const Base::Placement& b)
-{
-    if (!a.getPosition().IsEqual(b.getPosition(), Precision::Confusion())) {
-        return false;
-    }
-    double x = 0;
-    double y = 0;
-    double z = 0;
-    double w = 0;
-    (a.getRotation().inverse() * b.getRotation()).getValue(x, y, z, w);
-    return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
-}
-
-}  // namespace
-
 App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,
     std::string sub,
@@ -448,10 +426,22 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
     }
     // FreeCAD-CH (ops#244 L4): a sketch's axes and root point aren't in its shape, so a shape
     // binder of one bound nothing (the pick became "V_Axis1", which names no element). An
-    // independent copy is a sketch, which has them.
+    // independent copy is a sketch, which has them. Any element the shape doesn't have (also
+    // N_Axis, AxisN, ExternalEdgeN: PR 246 review L5).
     if (!independent && obj->isDerivedFrom<Sketcher::SketchObject>()) {
         const std::string element = Data::oldElementName(sub.c_str());
-        if (element == "V_Axis" || element == "H_Axis" || element == "RootPoint") {
+        bool inShape = false;
+        try {
+            inShape = !static_cast<Part::Feature*>(obj)
+                           ->Shape.getShape()
+                           .getSubShape(element.c_str(), /*silent=*/true)
+                           .IsNull();
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+        if (!element.empty() && !inShape) {
             return refuse(QObject::tr(
                               "%1 of '%2' isn't part of the sketch's shape, so a dependent copy "
                               "can't hold it. Make an independent copy instead."
@@ -556,6 +546,27 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     path.toString().c_str()
                 );
                 continue;
+            }
+            // A copy into another document (P4) would read Sheet.A1 or <<Params>>.Width there
+            // (PR 246 review L6): a same-named object gives another value, silently. Not made
+            // again, with a warning.
+            if (obj->getDocument() != doc) {
+                std::vector<std::string> labels;
+                const auto others = expression->getDepObjects(&labels);
+                if (!labels.empty() || std::ranges::any_of(others, [&](const auto& entry) {
+                        return entry.first != obj;
+                    })) {
+                    Base::Console().warning(
+                        "The copy '%s' of '%s' doesn't take the expression of %s: it reads other "
+                        "objects of '%s', and the copy is in '%s'\n",
+                        copy->Label.getValue(),
+                        obj->Label.getValue(),
+                        path.toString().c_str(),
+                        obj->getDocument()->Label.getValue(),
+                        doc->Label.getValue()
+                    );
+                    continue;
+                }
             }
             try {
                 copy->setExpression(
@@ -671,7 +682,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
                     * static_cast<App::GeoFeature*>(obj)->Placement.getValue().inverse();
                 const Base::Placement targetPlacement =
                     target ? App::GeoFeature::getGlobalPlacement(target) : Base::Placement();
-                if (!samePlace(container, targetPlacement)) {
+                if (!PartDesign::ShapeBinder::samePlace(container, targetPlacement)) {
                     return refuse(
                         QObject::tr(
                             "A dependent copy of '%1' would not be where '%1' is: the container "
@@ -901,8 +912,14 @@ bool TaskFeaturePick::sameElement(
             return false;
         }
         if (!boxBefore.IsVoid()) {
-            return boxBefore.CornerMin().Distance(boxAfter.CornerMin()) <= near
-                && boxBefore.CornerMax().Distance(boxAfter.CornerMax()) <= near;
+            // AddOptimal's box of a large or curved element is only that close (PR 246 review
+            // L4): the tolerance grows with its diagonal
+            const double nearBox = std::max(
+                near,
+                1e-9 * boxBefore.CornerMin().Distance(boxBefore.CornerMax())
+            );
+            return boxBefore.CornerMin().Distance(boxAfter.CornerMin()) <= nearBox
+                && boxBefore.CornerMax().Distance(boxAfter.CornerMax()) <= nearBox;
         }
     }
     catch (const Standard_Failure&) {

@@ -544,7 +544,9 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
 
     def testGroupChangeAfterReopening(self):
         """PR 244 verification 2 (optional test, L1): saved and opened again, the binder has no
-        frames from a recompute; its body is then put into a placed Part."""
+        frames from a recompute; its body is then put into a placed Part. It follows. (L1 itself,
+        that the shape isn't built again on each Group change after the open, saves work only:
+        this test passes without it, PR 246 review L8.)"""
         binder = self.tracedBinder(self.Target)
         self.assertWhereTheTopIs(binder, "made")
         path = os.path.join(tempfile.mkdtemp(), "traced.FCStd")
@@ -577,6 +579,29 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         normal = container.Rotation.multVec(face.Surface.Axis)
         self.assertAlmostEqual(abs(normal.x), 1, places=9)
         self.assertAlmostEqual(container.multVec(face.Surface.Position).x, 5, places=9)
+
+    def testBinderOfItsOwnBodysOriginPlaneMovedToAnotherBody(self):
+        """PR 246 review L2: a traced binder of its own body's XZ plane, moved to another body,
+        binds that body's XZ plane, as before ops#244; a traced binder of a third body's plane
+        moved the same way keeps it."""
+        [own] = [f for f in self.Source.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        [targets] = [f for f in self.Target.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        third = self.Doc.addObject("PartDesign::Body", "Third")
+        [thirds] = [f for f in third.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        binders = []
+        for name, plane in (("Own", own), ("Thirds", thirds)):
+            binder = self.Doc.addObject("PartDesign::ShapeBinder", name)
+            binder.Support = [(plane, "")]
+            binder.TraceSupport = True
+            self.Source.addObject(binder)
+            self.assertEqual(binder.Support[0][0], plane)
+            binders.append(binder)
+        self.Doc.recompute()
+        for binder in binders:
+            self.Target.addObject(binder)
+            self.assertTrue(self.Target.hasObject(binder))
+        self.assertEqual(binders[0].Support[0][0], targets)
+        self.assertEqual(binders[1].Support[0][0], thirds)
 
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")

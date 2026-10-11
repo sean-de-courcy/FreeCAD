@@ -2331,11 +2331,14 @@ class TestPanelFixesGui(unittest.TestCase):
         copy = datum.AttachmentSupport[0][0]
         self.assertEqual(copy.TypeId, "PartDesign::ShapeBinder")
         self.assertTrue(self.body.hasObject(copy))
-        self.doc.recompute()
-        self.assertTrue(datum.isValid(), datum.getStatusString())
-        placement = datum.getGlobalPlacement()
-        self.assertAlmostEqual(abs(placement.Rotation.multVec(Z).x), 1, places=6)
-        self.assertAlmostEqual(placement.Base.x, 5, places=6)
+        # PR 246 review M1: right straight after OK, with nothing left to compute
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        for _ in range(2):
+            self.assertTrue(datum.isValid(), datum.getStatusString())
+            placement = datum.getGlobalPlacement()
+            self.assertAlmostEqual(abs(placement.Rotation.multVec(Z).x), 1, places=6)
+            self.assertAlmostEqual(placement.Base.x, 5, places=6)
+            self.doc.recompute()
         return copy
 
     def testDatumOnAnOriginPlaneCopiedIntoAPlacedBody(self):

@@ -250,6 +250,12 @@ bool TaskDlgDatumParameters::accept()
             pcActivePart->addObject(obj);
         }
     }
+    // FreeCAD-CH (PR 246 review M1): the datum was placed against the copies at the document
+    // root. In a placed body a traced binder moves when it joins the body (its Group change
+    // touches it), and the datum stayed where it was until the next recompute
+    if (!copies.empty()) {
+        pcDatum->getDocument()->recompute();
+    }
 
     // After the attacher's commit: the Body's tail computes outside the datum's undo step, as
     // after a sketch (undoing the datum touches it, the next recompute computes the tail again)

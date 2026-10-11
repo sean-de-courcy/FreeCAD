@@ -117,10 +117,9 @@ Base::Placement datumPlacement(const App::GeoFeature* obj)
     return placement;
 }
 
-// Whether two placements are the same within round-off: the position within
-// Precision::Confusion, the angle between the rotations within Precision::Angular (from the
-// vector part of their difference, the sine of half the angle, which stays exact near zero)
-bool samePlace(const Base::Placement& a, const Base::Placement& b)
+}  // namespace
+
+bool ShapeBinder::samePlace(const Base::Placement& a, const Base::Placement& b)
 {
     if (!a.getPosition().IsEqual(b.getPosition(), Precision::Confusion())) {
         return false;
@@ -132,8 +131,6 @@ bool samePlace(const Base::Placement& a, const Base::Placement& b)
     (a.getRotation().inverse() * b.getRotation()).getValue(x, y, z, w);
     return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
 }
-
-}  // namespace
 
 bool ShapeBinder::containerFrames(Base::Placement& sourceCS, Base::Placement& targetCS) const
 {
@@ -445,10 +442,16 @@ void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::P
     try {
         followChangedObject(Obj, Prop);
     }
-    catch (const Base::Exception&) {
+    catch (const Base::Exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
         enforceRecompute();
     }
-    catch (const Standard_Failure&) {
+    catch (const Standard_Failure& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.GetMessageString());
+        enforceRecompute();
+    }
+    catch (const std::exception& e) {
+        FC_WARN(getFullName() << ": the container check failed: " << e.what());
         enforceRecompute();
     }
 }
