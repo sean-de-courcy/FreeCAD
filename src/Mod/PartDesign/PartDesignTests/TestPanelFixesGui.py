@@ -731,7 +731,8 @@ class TestPanelFixesGui(unittest.TestCase):
         bottom of the spine (globally the square around (5, 0, 0) in the plane z = 0). The panel
         recomputes the copy at the root, then adds it to the body: it kept the place it had at
         the root, so the spine sat off by the body's placement, silently. Its edge is where the
-        box's is, globally at x = 5, and the pipe sweeps the profile 10 up: V = 40."""
+        box's is, globally at x = 5, and the pipe sweeps the profile 10 up: V = 40, as OK leaves
+        it."""
         other = models.body(self.doc)
         other.Placement.Base = V(5, 0, 0)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
@@ -760,9 +761,18 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(self.modals, ["DlgReference"])
         self.assertIsNot(pipe.Spine[0], box)
         self.assertTrue(pipe.Spine[0].TraceSupport)
-        self.doc.recompute()
-        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+        # as OK leaves it (PR 244 verification 1: the pipe was built along the copy's place at
+        # the root, and the copy was left touched)
         self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+        swept = pipe.Shape.copy()
+        swept.Placement = self.body.getGlobalPlacement().multiply(swept.Placement)
+        box = swept.BoundBox
+        for got, want in zip(
+            (box.XMin, box.XMax, box.YMin, box.YMax, box.ZMin, box.ZMax), (4, 6, -1, 1, 0, 10)
+        ):
+            self.assertAlmostEqual(got, want, places=6, msg=box)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
     def testPipeCopyAbortedWithThePipe(self):
         """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so

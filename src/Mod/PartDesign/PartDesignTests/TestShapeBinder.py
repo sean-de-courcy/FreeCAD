@@ -463,7 +463,8 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         centre = container.multVec(face.CenterOfMass)
         self.assertLess((centre - sourceCentre).Length, 1e-6, f"{step}: {centre}")
         normal = container.Rotation.multVec(face.normalAt(0, 0))
-        self.assertAlmostEqual(abs(normal.z), 1, places=9, msg=step)
+        sourceNormal = self.Source.getGlobalPlacement().Rotation.multVec(source.normalAt(0, 0))
+        self.assertAlmostEqual(abs(normal.dot(sourceNormal)), 1, places=9, msg=step)
 
     def testInABody(self):
         binder = self.tracedBinder(self.Target)
@@ -492,6 +493,35 @@ class TestTracedBinderAcrossBodies(unittest.TestCase):
         other.removeObjects([binder])
         self.assertIsNone(binder.getParentGeoFeatureGroup())
         self.assertWhereTheTopIs(binder, "moved to the root")
+
+    def placedPart(self, *members):
+        part = self.Doc.addObject("App::Part", "Part")
+        part.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(2, -6, 3), FreeCAD.Rotation(FreeCAD.Vector(1, 2, 0), 40)
+        )
+        for member in members:
+            part.addObject(member)
+        return part
+
+    def testTargetBodyOutOfAPlacedPart(self):
+        """PR 244 verification 2(a): the binder's body is in a placed Part, then dragged out of it
+        to the root: only the Part's Group changes."""
+        part = self.placedPart(self.Target)
+        binder = self.tracedBinder(self.Target)
+        self.assertWhereTheTopIs(binder, "in the Part")
+        part.removeObject(self.Target)
+        self.assertIsNone(self.Target.getParentGeoFeatureGroup())
+        self.assertWhereTheTopIs(binder, "out of the Part")
+
+    def testSourceBodyIntoAPlacedPart(self):
+        """PR 244 verification 2(b): the box's body is dragged into a placed Part, then out of it
+        again: the box moves, and only the Part's Group changes."""
+        binder = self.tracedBinder(self.Target)
+        self.assertWhereTheTopIs(binder, "made")
+        part = self.placedPart(self.Source)
+        self.assertWhereTheTopIs(binder, "the box's body in the Part")
+        part.removeObject(self.Source)
+        self.assertWhereTheTopIs(binder, "the box's body out of the Part")
 
     def placementFromASheet(self, body):
         sheet = self.Doc.addObject("Spreadsheet::Sheet", "Sheet")
