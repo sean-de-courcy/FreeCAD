@@ -109,7 +109,8 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!fullErrMsg.empty()) {
             return new App::DocumentObjectExecReturn(fullErrMsg);
         }
-        Edges.setValues(edges);
+        // Edges isn't written back: it holds what was read, and a write would make EdgeLinks
+        // anew, without their records (ops#258).
 
         TopoDS_Shape shape = mkFillet.Shape();
         if (shape.IsNull()) {
