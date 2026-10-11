@@ -677,6 +677,113 @@ class RegressionTests(unittest.TestCase):
                     status,
                 )
 
+    def test_fillet_chamfer_follow_drops_original_name(self):
+        """ops#275: a followed guess keeps no original name or fingerprint of the old base. The
+        new base can carry that name on another edge, and a record without a fingerprint (saved
+        before ops#133) snapped back to it by name alone: the wrong edge, silently.
+
+        The guess as in test_fillet_chamfer_follow_clears_original (its original's number the
+        edge at (20.5, 10) now). The new base is the block as it was before the redraw, turned
+        180 degrees into x 0.5 to 20.5: it has edges at (20.5, 0) and (20.5, 10), and the
+        original's name on the edge at (0.5, 10). The record's fingerprint is stripped from the
+        saved file."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        if not hasattr(self.Doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+        import re
+        import shutil
+        import tempfile
+        import zipfile
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            return [
+                entry
+                for entry in FreeCAD.getReferenceReport(feature)
+                if entry.get("status") == "guessed"
+            ]
+
+        def centre(shape, index):
+            point = shape.Edges[int(index[len("Edge"):]) - 1].CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                # each in a new document: the last one is the reopened file
+                closeDocument(self.Doc.Name)
+                self.Doc = newDocument("PartRegressionTest." + self._testMethodName)
+                self.Doc.ReferenceSolver = True
+                self.Doc.InternNames = False  # compares name strings
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block")
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                turned = self.Doc.addObject("Part::Feature", "Turned")
+                turned.Shape = block.Shape.copy()
+                turned.Placement = Base.Placement(
+                    Vector(20.5, 10, 0), Base.Rotation(Vector(0, 0, 1), 180)
+                )
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 1.0, 1.0)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (10, 10), (0, 10)])
+                self.Doc.recompute()
+                [before] = guesses(rounded)
+                name = before["original"]["name"].lstrip(";")
+                # the designed model: the original's number is the edge at (20.5, 10), its name
+                # the turned block's edge at (0.5, 10)
+                self.assertEqual(centre(block.Shape, before["original"]["index"]), (20.5, 10, 5))
+                self.assertEqual(centre(turned.Shape, turned.Shape.ElementMap[name]), (0.5, 10, 5))
+
+                # a record without the original's fingerprint, as saved before ops#133
+                path = os.path.join(folder, feature + ".FCStd")
+                self.Doc.saveAs(path)
+                closeDocument(self.Doc.Name)
+                stripped = os.path.join(folder, feature + "Stripped.FCStd")
+                with zipfile.ZipFile(path) as source, zipfile.ZipFile(stripped, "w") as target:
+                    for item in source.infolist():
+                        data = source.read(item.filename)
+                        if item.filename == "Document.xml":
+                            text = data.decode("utf-8")
+                            self.assertIn(" ofp=", text)
+                            data = re.sub(r' ofp="[^"]*"', "", text).encode("utf-8")
+                        target.writestr(item, data)
+                self.Doc = FreeCAD.openDocument(stripped)
+                self.Doc.ReferenceSolver = True
+                rounded = self.Doc.getObject(feature)
+                turned = self.Doc.getObject("Turned")
+                self.assertEqual(len(guesses(rounded)), 1)
+
+                onTurned = self._verticalEdgeAt(turned.Shape, 20.5, 0)
+                rounded.Base = turned
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onTurned)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                [after] = guesses(rounded)
+                self.assertFalse(after["original"].get("name"))
+                self.assertEqual(centre(turned.Shape, after["original"]["index"]), (20.5, 10, 5))
+                # still the guess at (20.5, 0), not the edge the old name gives
+                rounded.touch()
+                self.Doc.recompute()
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onTurned)])
+                self.assertEqual(len(guesses(rounded)), 1)
+
     def test_fillet_chamfer_base_then_links_by_hand(self):
         """PR 240 review, M1: after a Base change by hand and a recompute, EdgeLinks written by
         hand with the old base's subs on the new base is the user's pick: it stays.

@@ -150,7 +150,36 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
 
     @staticmethod
     def _wiresContaining(shape, edge):
-        return [i for i, wire in enumerate(shape.Wires, 1) if any(edge.isSame(e) for e in wire.Edges)]
+        return [
+            i for i, wire in enumerate(shape.Wires, 1) if any(edge.isSame(e) for e in wire.Edges)
+        ]
+
+    @staticmethod
+    def _reportText():
+        """The Report view's text, where the dialog's console warnings go."""
+        for edit in FreeCADGui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+            if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+                return edit.toPlainText()
+        return ""
+
+    def _selected(self, obj):
+        return [
+            sub
+            for sel in FreeCADGui.Selection.getSelectionEx(self.Doc.Name)
+            if sel.Object == obj
+            for sub in sel.SubElementNames
+        ]
+
+    @staticmethod
+    def _square(x0, y0=0):
+        points = [
+            FreeCAD.Vector(x0, y0, 0),
+            FreeCAD.Vector(x0 + 10, y0, 0),
+            FreeCAD.Vector(x0 + 10, y0 + 10, 0),
+            FreeCAD.Vector(x0, y0 + 10, 0),
+            FreeCAD.Vector(x0, y0, 0),
+        ]
+        return Part.makePolygon(points)
 
     def testAddWireRefusesEdgeOnTwoWires(self):
         """An edge shared by two faces' wires names no single wire: nothing is added (ops#250)"""
@@ -160,13 +189,24 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
         self.assertEqual(len(self._wiresContaining(box.Shape, box.Shape.Edge1)), 2)
 
         projection = self._openDialogInAddWireMode()
+        warned = self._reportText().count("2 wires, so the wire to project is ambiguous")
         FreeCADGui.Selection.addSelection(box, "Edge1")
         FreeCADGui.updateGui()
 
         self.assertEqual(projection.Projection, [])
+        # the advice can be followed on a solid (ops#256)
         self.assertTrue(
-            any("Edge1" in text and "2 wires" in text for text in self._statusBarTexts()),
+            any(
+                "Edge1" in text and "2 wires" in text and "Add face" in text
+                for text in self._statusBarTexts()
+            ),
             self._statusBarTexts(),
+        )
+        # the refused edge doesn't stay selected, as if added (ops#256)
+        self.assertEqual(self._selected(box), [])
+        # and the warning reaches the Report view (ops#256)
+        self.assertEqual(
+            self._reportText().count("2 wires, so the wire to project is ambiguous"), warned + 1
         )
 
     def testAddWireRefusesEdgeOutsideAnyWire(self):
@@ -182,25 +222,18 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
 
         self.assertEqual(projection.Projection, [])
         self.assertTrue(
-            any("Edge1" in text and "no wire" in text for text in self._statusBarTexts()),
+            any(
+                "Edge1" in text and "no wire" in text and "Add edge" in text
+                for text in self._statusBarTexts()
+            ),
             self._statusBarTexts(),
         )
+        self.assertEqual(self._selected(line), [])
 
     def testAddWireAddsTheOnlyWire(self):
         """An edge on exactly one wire adds that wire, the one whose edges contain it (ops#250)"""
-
-        def square(x0):
-            points = [
-                FreeCAD.Vector(x0, 0, 0),
-                FreeCAD.Vector(x0 + 10, 0, 0),
-                FreeCAD.Vector(x0 + 10, 10, 0),
-                FreeCAD.Vector(x0, 10, 0),
-                FreeCAD.Vector(x0, 0, 0),
-            ]
-            return Part.makePolygon(points)
-
         wires = self.Doc.addObject("Part::Feature", "Wires")
-        wires.Shape = Part.Compound([square(0), square(20)])
+        wires.Shape = Part.Compound([self._square(0), self._square(20)])
         self.Doc.recompute()
         # The picked edge: the one of the square at x = 20..30 that runs along y = 10.
         edgeIndex = next(
@@ -224,6 +257,49 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
         self.assertTrue(any(edge.isSame(e) for e in added.Edges))
         self.assertAlmostEqual(added.BoundBox.XMin, 20.0)
         self.assertAlmostEqual(added.BoundBox.XMax, 30.0)
+
+    def testAddWireRefusalKeepsTheAddedWire(self):
+        """A refused pick after a valid one leaves exactly the valid one's wire (ops#256): a
+        square wire, then an edge of a box (on two wires)."""
+        wire = self.Doc.addObject("Part::Feature", "Wire")
+        wire.Shape = self._square(20)
+        box = self.Doc.addObject("Part::Box", "Box")
+        self.Doc.recompute()
+
+        projection = self._openDialogInAddWireMode()
+        FreeCADGui.Selection.addSelection(wire, "Edge1")
+        FreeCADGui.updateGui()
+        self.assertEqual(projection.Projection, [(wire, ("Wire1",))])
+        FreeCADGui.Selection.addSelection(box, "Edge1")
+        FreeCADGui.updateGui()
+        self.assertEqual(projection.Projection, [(wire, ("Wire1",))])
+        self.assertEqual(self._selected(box), [])
+
+    def testAddWireNumbersWiresAsTheShapeDoes(self):
+        """The added wire's number names the wire the edge lies on, in a compound of a face, that
+        face's outer wire again, and a second wire (ops#256: the numbering from ops#250). The
+        face's wire and its copy are one wire."""
+        face = Part.Face(self._square(0))
+        compound = self.Doc.addObject("Part::Feature", "Compound")
+        compound.Shape = Part.Compound([face, face.OuterWire, self._square(20, 20)])
+        self.Doc.recompute()
+        self.assertEqual(len(compound.Shape.Wires), 2)
+
+        projection = self._openDialogInAddWireMode()
+        for x0 in (0, 20):
+            edgeIndex = next(
+                i
+                for i, e in enumerate(compound.Shape.Edges, 1)
+                if abs(e.BoundBox.XMin - x0) < 1e-7 and abs(e.BoundBox.XMax - x0 - 10) < 1e-7
+            )
+            edge = compound.Shape.Edges[edgeIndex - 1]
+            FreeCADGui.Selection.addSelection(compound, "Edge{}".format(edgeIndex))
+            FreeCADGui.updateGui()
+            added = compound.Shape.getElement(projection.Projection[-1][1][-1])
+            self.assertEqual(added.ShapeType, "Wire")
+            self.assertTrue(any(edge.isSame(e) for e in added.Edges))
+            self.assertAlmostEqual(added.BoundBox.XMin, x0)
+        self.assertEqual(sum(len(subs) for _, subs in projection.Projection), 2)
 
     def tearDown(self):
         FreeCADGui.Selection.clearSelection()
@@ -789,6 +865,7 @@ class _ReplaceOwner:
         obj.Proxy = self
         obj.addProperty("App::PropertyLink", "Base")
         obj.addProperty("App::PropertyLinkSub", "Dep")
+        obj.addProperty("App::PropertyLinkList", "Deps")
         self.then = None
 
     def onChanged(self, obj, prop):
@@ -874,6 +951,20 @@ class ReplaceObjectOwnerChangeTestCases(unittest.TestCase):
         owner = self._owner((self.boxes["B"], ["Edge2"]), toA)
         self._replace(owner)
         self.assertEqual(owner.Dep, (self.boxes["A"], ["Edge5"]))
+
+    def testListRewriteKeepsItsOtherLinks(self):
+        """The PR 247 review's L1: Base's change rewrote a list [A, C] to [B]. That isn't the
+        copy [B, C], so the copy is pasted and C kept; before, the list was taken as followed and
+        C silently lost."""
+        A, B, C = self.boxes["A"], self.boxes["B"], self.boxes["C"]
+
+        def rewrite(obj):
+            obj.Deps = [B]
+
+        owner = self._owner(None, rewrite)
+        owner.Deps = [A, C]
+        self._replace(owner)
+        self.assertEqual(owner.Deps, [B, C])
 
     def testListLinkingBothSwaps(self):
         """ops#268: a list property that links both the old and the new object (a compound of A

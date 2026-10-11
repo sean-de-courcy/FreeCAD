@@ -1522,15 +1522,19 @@ void DlgProjectOnSurface::addWire(const Gui::SelectionChanges& msg)
     }
 
     if (owners.size() != 1) {
+        // On a solid every edge lies on two wires, so the advice points to the other modes
+        // (ops#256). The refused edge is deselected: left highlighted, it looked added.
         const QString edgeName = QString::fromStdString(subName);
         const QString message = owners.empty()
-            ? tr("%1 lies on no wire; nothing was added.").arg(edgeName)
+            ? tr("%1 lies on no wire; nothing was added. Use Add edge to project the edge.")
+                  .arg(edgeName)
             : tr("%1 lies on %2 wires, so the wire to project is ambiguous; nothing was added. "
-                 "Pick an edge that belongs to one wire only.")
+                 "Use Add face to project a face's boundary.")
                   .arg(edgeName)
                   .arg(owners.size());
         Gui::getMainWindow()->showMessage(message, 10000);
         Base::Console().warning("%s\n", message.toUtf8().constData());
+        Gui::Selection().rmvSelection(msg.pDocName, msg.pObjectName, msg.pSubName);
         return;
     }
 
