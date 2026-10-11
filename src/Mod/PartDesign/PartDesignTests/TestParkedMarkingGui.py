@@ -278,10 +278,9 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.edit(sketch)
         self.assertExtendedLabel(f"Pad2.{edge}")
 
-    def testDeletedTargetStaysParked(self):
-        """Pad2 deleted while parked: until the next move the line is still parked, and the mark
-        still names Pad2 (decision 21: it becomes a missing reference at the next move)."""
-        self.setParameter(ELEMENTS, "ExtendedNaming", False)
+    def deleteWhileParked(self):
+        """Parks the sketch's projection of Pad2, then deletes Pad2 and its profile; returns the
+        sketch and the edge."""
         block, pad2, sketch, hole, edge = self.projecting()
         self.park(hole)
         profile = pad2.Profile[0]
@@ -289,8 +288,29 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.doc.removeObject(pad2.Name)
         self.doc.removeObject(profile.Name)
         self.doc.recompute()
+        return sketch, edge
+
+    def testDeletedTargetStaysParked(self):
+        """Pad2 deleted while parked: until the next move the line is still parked, and the mark
+        still names Pad2 (decision 21: it becomes a missing reference at the next move), and
+        says it was deleted (ops#166 item 4)."""
+        self.setParameter(ELEMENTS, "ExtendedNaming", False)
+        sketch, edge = self.deleteWhileParked()
         self.edit(sketch)
-        self.assertTrue(self.lineLabels()[0].endswith(f" (parked: Pad2.{edge})"))
+        label = self.lineLabels()[0]
+        self.assertTrue(label.endswith(f" (parked: Pad2.{edge}, deleted)"), label)
+        self.assertMarked(parked=True)
+
+    def testReplacedTargetReadsDeleted(self):
+        """A new object takes the deleted Pad2's name: the mark still says deleted, since the
+        line can't move back to the new one (ops#158 names it by ID too; ops#166 item 4)."""
+        self.setParameter(ELEMENTS, "ExtendedNaming", True)
+        sketch, edge = self.deleteWhileParked()
+        other = self.doc.addObject("Part::Box", "Pad2")
+        self.assertEqual(other.Name, "Pad2")
+        self.doc.recompute()
+        self.edit(sketch)
+        self.assertExtendedLabel(f"parked: Pad2.{edge}, deleted")
         self.assertMarked(parked=True)
 
     def testParkedWhileTheEditorIsOpen(self):

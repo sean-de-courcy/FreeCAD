@@ -20,8 +20,9 @@ class SketchObject;
 /// changes
 constexpr const char* ParkedRecordProperty = "ParkedReferences";
 
-/// "<object>.<element>" the external geometry with this Id was projected from while it is parked;
-/// empty when it isn't parked
+/// "<object>.<element>" the external geometry with this Id was projected from while it is parked,
+/// with ", deleted" or ", in another document" when that object is gone from the sketch's
+/// document; empty when it isn't parked
 using ParkedReferenceProvider =
     std::function<std::string(const SketchObject& sketch, long geometryId)>;
 
@@ -29,7 +30,8 @@ using ParkedReferenceProvider =
 SketcherExport void setParkedReferenceProvider(ParkedReferenceProvider provider);
 
 /// What the external geometry GeoId (< 0) of sketch was projected from, when a reorder parked it:
-/// "<object>.<element>"; empty when it isn't parked, or without a provider
+/// "<object>.<element>" (and the provider's note); empty when it isn't parked, or without a
+/// provider
 SketcherExport std::string parkedReference(const SketchObject& sketch, int GeoId);
 
 }  // namespace Sketcher
