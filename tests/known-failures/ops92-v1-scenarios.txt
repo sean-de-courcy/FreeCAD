@@ -6,7 +6,7 @@
 
 issue: ops#92
 
-reason: V1 breaks (or, for FilletNotchBeside, moves) a reference that V2 resolves correctly: V2's gains over V1 (phase4-checkpoint.md 1.1); ChamferBesideFilletEndRedrawn's chamfer breaks with its fillet, which V1 breaks at the redraw (ops#284); DressUpInsertThenNotch errors because V1 can't build the model (its chamfer breaks at the insert); seed 1 breaks F4Fillet's edge at step 1; seed 4 breaks F4Chamfer's and F5Chamfer's edges at step 2 (block H -> 14.5; ops#169)
+reason: V1 breaks (or, for FilletNotchBeside, moves) a reference that V2 resolves correctly: V2's gains over V1 (phase4-checkpoint.md 1.1); ChamferBesideFilletEndRedrawn's chamfer breaks with its fillet at the redraw (V2 breaks the fillet too, listed in ops7-scenarios-broken.txt, but keeps the chamfer on the fillet's last shape; only the solver resolves the fillet, ops#284); DressUpInsertThenNotch errors because V1 can't build the model (its chamfer breaks at the insert); seed 1 breaks F4Fillet's edge at step 1; seed 4 breaks F4Chamfer's and F5Chamfer's edges at step 2 (block H -> 14.5; ops#169)
 cli  PartDesignTests.TestNamingScenarios.ChamferBesideFilletEndRedrawn.test_chamfer_edge_V1
 cli  PartDesignTests.TestNamingScenarios.ChamferBesideFilletEndRedrawn.test_chamfer_set_V1
 cli  PartDesignTests.TestNamingScenarios.ChamferEdgeShortened.test_chamfer_edge_V1

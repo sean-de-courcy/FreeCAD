@@ -3215,6 +3215,29 @@ TEST(Continuation, anotherMakersEdgeIsNoPiece)
     input.pool["Edge"][1].names = {filletEnd};
     input.sameMaker = false;
     EXPECT_EQ(Data::solveOwner(input)[0].elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+
+    //   a mixed pool: the piece (Edge2) is taken; another maker's edge on the shared face is
+    //   skipped, named in the evidence when it lies within the old edge (Edge3, 9..11), and no
+    //   run-past break when it runs past the end (14..26)
+    input = notch.input(Data::SolvePolicy::Expand);
+    input.pool["Edge"][2].names = {filletEnd};
+    auto fps = notch.fingerprints;
+    fps["Edge3"] = lineX(9, 11);
+    measure(input, fps, nullptr);
+    auto outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.tier, 4);
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(
+        outcome.evidence,
+        "continued by Edge2 (line within the old edge, shares Face1), skipped Edge3 "
+        "(another maker)"
+    );
+    fps["Edge3"] = lineX(14, 26);
+    measure(input, fps, nullptr);
+    outcome = Data::solveOwner(input)[0];
+    EXPECT_EQ(outcome.status, SolveStatus::Resolved) << describe(outcome);
+    EXPECT_EQ(outcome.elements, (std::vector<std::string> {"Edge1", "Edge2"}));
+    EXPECT_EQ(outcome.evidence, "continued by Edge2 (line within the old edge, shares Face1)");
 }
 
 TEST(Continuation, piecesLeaveOtherPools)
@@ -3236,6 +3259,17 @@ TEST(Continuation, piecesLeaveOtherPools)
     input.entries.push_back(missing(old, "Edge", {notch.pieceName}));
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].tier, 4);
+    EXPECT_EQ(outcomes[1].status, SolveStatus::Resolved) << describe(outcomes[1]);
+    EXPECT_EQ(outcomes[1].element, "Edge2");
+
+    //   made by another feature (tag 9; the review of fork PR 257: no boolean names a merged
+    //   piece so, it reports pieces as modified): no piece of the hit, which stays exact, and
+    //   the missing reference follows its merge
+    notch.pieceName = generated({old}, 9, "FUS", 'E');
+    input = notch.input(Data::SolvePolicy::Expand);
+    input.entries.push_back(missing(old, "Edge", {notch.pieceName}));
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(describe(outcomes[0]), "exact Edge1 0 [] ");
     EXPECT_EQ(outcomes[1].status, SolveStatus::Resolved) << describe(outcomes[1]);
     EXPECT_EQ(outcomes[1].element, "Edge2");
 }
