@@ -37,7 +37,9 @@
 #include <Base/Tools.h>
 #include <Base/Vector3D.h>
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 #include "GeoEnum.h"
@@ -893,31 +895,134 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
 
     const std::vector<Constraint*>& origvals = orig.Constraints.getValues();
 
+    // the index of the first copy (vals is the property's own list, which setValues replaces)
+    const std::size_t first = vals.size();
+
     std::vector<Constraint*> newVals(vals);
 
     newVals.reserve(vals.size() + origvals.size());
 
-    for (auto& v : origvals)
-        newVals.push_back(v->copy());
+    // A copy whose name is taken gets another: an expression is bound to a named constraint by
+    // its name, and a lookup by name finds the first of two, so the copy's expression would go
+    // to the other one (ops#261)
+    std::set<std::string> names;
+    for (const auto* constraint : vals) {
+        if (!constraint->Name.empty()) {
+            names.insert(constraint->Name);
+        }
+    }
+    for (const auto* original : origvals) {
+        auto* copy = original->copy();
+        if (!copy->Name.empty() && !names.insert(copy->Name).second) {
+            std::string name;
+            for (int n = 2; !names.insert(name = copy->Name + std::to_string(n)).second; ++n) {
+            }
+            Base::Console().warning(
+                "Constraint '%s' of '%s' is named '%s' in '%s': its name is taken there.\n",
+                copy->Name.c_str(),
+                orig.Label.getValue(),
+                name.c_str(),
+                this->Label.getValue()
+            );
+            copy->Name = std::move(name);
+        }
+        newVals.push_back(copy);
+    }
 
     this->Constraints.setValues(std::move(newVals));
 
-    auto& uvals = this->Constraints.getValues();
-
-    std::size_t uvalssize = uvals.size();
-
-    for (std::size_t i = uvalssize, j = 0; i < uvals.size(); i++, j++) {
-        if (uvals[i]->isDriving && uvals[i]->isDimensional()) {
-
-            App::ObjectIdentifier spath = orig.Constraints.createPath(j);
-
-            App::PropertyExpressionEngine::ExpressionInfo expr_info = orig.getExpression(spath);
-
-            if (expr_info.expression) {// if there is an expression on the source dimensional
-                App::ObjectIdentifier dpath = this->Constraints.createPath(i);
-                setExpression(dpath,
-                              std::shared_ptr<App::Expression>(expr_info.expression->copy()));
+    // The expressions of the driving dimensions, which the loop here used to skip (ops#261). Each
+    // is parsed again with this sketch as its owner, as a save and reopen would: a reference to
+    // the source's own constraints then names the copy here, which must be the copy of the one it
+    // named there. When it isn't (an index the copies moved, a renamed constraint, another
+    // property of the source), the expression isn't copied and the constraint keeps its value.
+    // The source's expressions are found by the constraint their path names: a path set from
+    // Python can be ".Constraints[i]", which createPath ("Constraints[i]") doesn't find.
+    std::map<std::size_t, const App::Expression*> sourceExpressions;
+    for (const auto& [path, expression] : orig.ExpressionEngine.getExpressions()) {
+        if (!expression || path.getProperty() != &orig.Constraints) {
+            continue;
+        }
+        try {
+            auto it = std::find(origvals.begin(), origvals.end(), orig.Constraints.getConstraint(path));
+            if (it != origvals.end()) {
+                sourceExpressions[static_cast<std::size_t>(it - origvals.begin())] = expression;
             }
+        }
+        catch (const Base::Exception&) {
+            // a path that names no constraint
+        }
+    }
+    for (const auto& [j, sourceExpression] : sourceExpressions) {
+        if (!(origvals[j]->isDriving && origvals[j]->isDimensional())) {
+            continue;
+        }
+        const std::string text = sourceExpression->toString(true);
+        auto warn = [&](const std::string& why) {
+            Base::Console().warning(
+                "The expression '%s' of constraint %d of '%s' isn't copied to '%s': %s. The "
+                "constraint keeps its value.\n",
+                text.c_str(),
+                static_cast<int>(j) + 1,
+                orig.Label.getValue(),
+                this->Label.getValue(),
+                why.c_str()
+            );
+        };
+        std::shared_ptr<App::Expression> expr;
+        try {
+            expr = App::Expression::parse(this, text);
+        }
+        catch (const Base::Exception& e) {
+            warn(e.what());
+            continue;
+        }
+        // Each reference must name here what it named in the source: the same object and
+        // property, or, for one of the source's constraints, that constraint's copy
+        const auto& copies = this->Constraints.getValuesForce();
+        auto sourceIds = sourceExpression->getIdentifiers();
+        auto ids = expr->getIdentifiers();
+        std::string moved;  // a reference that names something else here
+        if (sourceIds.size() != ids.size()) {
+            moved = text;
+        }
+        for (auto s = sourceIds.begin(), d = ids.begin(); moved.empty() && s != sourceIds.end();
+             ++s, ++d) {
+            const auto& sourceId = s->first;
+            const auto& id = d->first;
+            if (id.getDocumentObject() == sourceId.getDocumentObject()
+                && id.getProperty() == sourceId.getProperty()) {
+                continue;
+            }
+            bool same = false;
+            if (sourceId.getProperty() == &orig.Constraints && id.getProperty() == &this->Constraints) {
+                try {
+                    auto source = std::find(origvals.begin(), origvals.end(),
+                                            orig.Constraints.getConstraint(sourceId));
+                    auto copy = std::find(copies.begin(), copies.end(),
+                                          this->Constraints.getConstraint(id));
+                    same = source != origvals.end() && copy != copies.end()
+                        && copy - copies.begin()
+                            == static_cast<std::ptrdiff_t>(first) + (source - origvals.begin());
+                }
+                catch (const Base::Exception&) {
+                    same = false;
+                }
+            }
+            if (!same) {
+                moved = sourceId.toString();
+            }
+        }
+        if (!moved.empty()) {
+            warn("its reference '" + moved + "' would name something else there");
+            continue;
+        }
+        try {
+            expr->comment = sourceExpression->comment;
+            setExpression(this->Constraints.createPath(static_cast<int>(first + j)), expr);
+        }
+        catch (const Base::Exception& e) {
+            warn(e.what());
         }
     }
 
