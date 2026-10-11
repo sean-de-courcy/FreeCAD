@@ -1550,7 +1550,14 @@ void CmdSketcherMergeSketches::activated(int iMsg)
     bool committed = false;
     Base::ScopeGuard abortUnlessCommitted([&]() {
         if (!committed) {
-            abortCommand();
+            // runs from a destructor, maybe while an exception unwinds: a throw here would
+            // terminate (PR 250 review L3)
+            try {
+                abortCommand();
+            }
+            catch (...) {
+                Base::Console().error("Merge Sketches: failed to abort its transaction\n");
+            }
         }
     });
 

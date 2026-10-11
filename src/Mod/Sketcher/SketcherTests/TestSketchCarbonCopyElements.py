@@ -7,8 +7,12 @@ point, external geometry or nothing (GeoUndef). Designed geometry: a 10 x 10 squ
 one line apart from it in the destination, and edges of a box as external geometry; each copied
 element must name a geometry equal to the source's, with its position unchanged."""
 
+import os
 import re
+import shutil
+import tempfile
 import unittest
+import zipfile
 
 import FreeCAD
 import Part
@@ -99,6 +103,84 @@ class TestSketchCarbonCopyElements(unittest.TestCase):
             self.assert_same_line(
                 self.dest.ExternalGeo[-dest_id - 1], self.source.ExternalGeo[-source_id - 1]
             )
+
+
+class TestCarbonCopySelfReference(unittest.TestCase):
+    """PR 250 review L1: a source external whose ref names the destination's own geometry isn't
+    copied, and a constraint on it goes to that geometry. Such a ref has no live link (one would
+    make the copy a cycle, which carbonCopy refuses): the tests write the external geometry with
+    its ref, as a link removed from the file leaves it. Dest: Edge1 (0, 0)-(10, 0) and Edge2
+    (10, 0)-(10, 10); a sketch numbers each geometry's ends, so its Vertex4 is Edge2's end.
+    Source: one line."""
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("TestCarbonCopySelfReference")
+        self.dest = self.doc.addObject("Sketcher::SketchObject", "Dest")
+        self.dest.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)), False)
+        self.dest.addGeometry(Part.LineSegment(V(10, 0, 0), V(10, 10, 0)), False)
+        self.source = self.doc.addObject("Sketcher::SketchObject", "Source")
+        self.source.addGeometry(Part.LineSegment(V(20, 20, 0), V(30, 20, 0)), False)
+        self.doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+        for folder in getattr(self, "folders", []):
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_vertex_reference_names_that_point(self):
+        """A point external at Dest.Vertex4, the source line's start on it: the copy's start is
+        on Edge2's end, not on its start (the position the point's own constraint names). A
+        Part.Point loses its ref in Python, so the ref is written into the saved file."""
+        self.source.ExternalGeo = list(self.source.ExternalGeo) + [Part.Point(V(10, 10, 0))]
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        folder = tempfile.mkdtemp()
+        self.folders = [folder]
+        path = os.path.join(folder, "SelfReference.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    # Source's object data, its only point, that point's empty ref
+                    source = data.rindex(b'<Object name="Source"')
+                    point = data.index(b'<Geometry type="Part::GeomPoint"', source)
+                    ref = data.index(b'Ref=""', point)
+                    data = data[:ref] + b'Ref="Dest.Vertex4"' + data[ref + len(b'Ref=""') :]
+                archive.writestr(info, data)
+        self.doc = FreeCAD.openDocument(path)
+        dest = self.doc.getObject("Dest")
+        dest.carbonCopy("Source", False)
+        self.assertEqual(len(dest.ExternalGeo), 2)  # the point isn't copied
+        (c,) = dest.Constraints
+        # the copied line (2) by its start, Edge2 (1) by its end
+        self.assertEqual(
+            (c.Type, c.First, c.FirstPos, c.Second, c.SecondPos), ("Coincident", 2, 1, 1, 2)
+        )
+        dest.solve()
+        self.assertLess((dest.Geometry[2].StartPoint - dest.Geometry[1].EndPoint).Length, 1e-6)
+
+    def test_mirrored_copy_refuses_a_constraint_on_a_self_reference(self):
+        """Source turned over (180 degrees about X), so its copy is mirrored, while Dest's own
+        geometry isn't: which end of Edge2 a constraint on a line external at Dest.Edge2 names
+        isn't known, so that constraint isn't copied (with a warning). The length named width
+        after it is, and its expression lands on it, not one constraint further on."""
+        self.source.Placement = FreeCAD.Placement(V(), FreeCAD.Rotation(V(1, 0, 0), 180))
+        self.dest.setAllowUnaligned(False)  # True (the default) copies without flipping
+        # Edge2 seen from the turned-over Source: y runs the other way
+        facade = Sketcher.ExternalGeometryFacade(Part.LineSegment(V(10, 0, 0), V(10, -10, 0)))
+        facade.Ref = "Dest.Edge2"
+        self.source.ExternalGeo = list(self.source.ExternalGeo) + [facade.Geometry]
+        self.source.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -3, 1))
+        width = self.source.addConstraint(Sketcher.Constraint("Distance", 0, 10))
+        self.source.renameConstraint(width, "width")
+        self.dest.carbonCopy("Source", False)
+        self.assertEqual(len(self.dest.ExternalGeo), 2)
+        self.assertEqual([c.Type for c in self.dest.Constraints], ["Distance"])
+        paths = [path for path, _ in self.dest.ExpressionEngine]
+        self.assertEqual(len(paths), 1)
+        self.assertIn(paths[0], ("Constraints[0]", ".Constraints[0]", ".Constraints.width"))
 
 
 if __name__ == "__main__":

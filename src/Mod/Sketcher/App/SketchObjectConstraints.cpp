@@ -999,10 +999,11 @@ void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vec
             // a path that names no constraint
         }
     }
-    const auto& copies = this->Constraints.getValues();
+    // getValuesForce(): getValues() is empty while the list is flagged invalid (PR 250 review L2)
+    const auto& copies = this->Constraints.getValuesForce();
     for (const auto& [j, sourceExpression] : sourceExpressions) {
         const int target = copyOf(j);
-        if (target < 0 || target >= static_cast<int>(copies.size())) {
+        if (target == -1) {
             continue;  // the constraint isn't copied (Merge Sketches says so)
         }
         const std::string text = sourceExpression->toString(true);
@@ -1017,6 +1018,11 @@ void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vec
                 why.c_str()
             );
         };
+        if (target < 0 || target >= static_cast<int>(copies.size())) {
+            warn("its copy would be constraint " + std::to_string(target + 1) + ", which '"
+                 + this->Label.getValue() + "' doesn't have");
+            continue;
+        }
         if (!(origvals[j]->isDriving && origvals[j]->isDimensional())) {
             warn("the constraint isn't a driving dimension");
             continue;
