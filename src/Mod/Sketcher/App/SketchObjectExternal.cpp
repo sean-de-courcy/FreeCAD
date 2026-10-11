@@ -474,11 +474,6 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     newVals.reserve(vals.size() + svals.size());
     newcVals.reserve(cvals.size() + scvals.size());
 
-    const Base::Vector3d& origin = this->Placement.getValue().getPosition();
-    const Base::Rotation& rotation = this->Placement.getValue().getRotation();
-    const Base::Vector3d axisH = rotation.multVec(Base::Vector3d::UnitX);
-    const Base::Vector3d axisV = rotation.multVec(Base::Vector3d::UnitY);
-
     std::map<int, int> extMap;
     // for a source external that copies this sketch's own geometry: the element its ref names
     // (a vertex is a point of an edge, ops#267 PR 250 review L1)
@@ -583,16 +578,16 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         solverNeedsUpdate = true;
     }
 
-    auto applyGeometryFlipCorrection = [xinv, yinv, origin, axisV, axisH](Part::Geometry* geoNew) {
-        if (!xinv && !yinv) {
-            return;
-        }
-
+    // FreeCAD-CH (ops#283): the geometry is in this sketch's own frame, so the flip mirrors about
+    // its own axes there: x flips about the Y axis, y about the X axis. Before, it mirrored about
+    // this sketch's position and axes in the global frame, which shifted the copy (and with this
+    // sketch turned, flipped the other coordinate)
+    auto applyGeometryFlipCorrection = [xinv, yinv](Part::Geometry* geoNew) {
         if (xinv) {
-            geoNew->mirror(origin, axisV);
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitY);
         }
         if (yinv) {
-            geoNew->mirror(origin, axisH);
+            geoNew->mirror(Base::Vector3d(), Base::Vector3d::UnitX);
         }
     };
 
