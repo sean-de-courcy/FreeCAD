@@ -24,10 +24,13 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstring>
 #include <sstream>
+#include <QGridLayout>
 #include <QHeaderView>
 #include <QItemDelegate>
 #include <QItemSelectionModel>
+#include <QLabel>
 #include <QLocale>
 #include <QMessageBox>
 #include <QTimer>
@@ -219,6 +222,7 @@ public:
     QTimer* highlighttimer;
     FilletType filletType;
     std::vector<int> edge_ids;
+    QLabel* missingEdges;
     TopTools_IndexedMapOfShape all_edges;
     TopTools_IndexedMapOfShape all_faces;
     using Connection = fastsignals::connection;
@@ -265,6 +269,16 @@ DlgFilletEdges::DlgFilletEdges(
 
     d->object = nullptr;
     setSelectionGate();
+
+    // Stored edges that the edit can't tick are listed here (ops#249)
+    d->missingEdges = new QLabel(this);
+    d->missingEdges->setObjectName(QStringLiteral("labelMissingEdges"));
+    d->missingEdges->setWordWrap(true);
+    d->missingEdges->setStyleSheet(QStringLiteral("color: red;"));
+    d->missingEdges->hide();
+    if (auto grid = qobject_cast<QGridLayout*>(layout())) {
+        grid->addWidget(d->missingEdges, grid->rowCount(), 0, 1, grid->columnCount());
+    }
 
     d->fillet = fillet;
     // NOLINTBEGIN
@@ -627,6 +641,32 @@ void DlgFilletEdges::findShapes()
     }
 }
 
+namespace
+{
+// The base's current index of the edge that an EdgeLinks entry names, or 0 if the link can't
+// find it (ops#249). The stored edge ids follow the links only while they resolve: once an edge
+// is gone, its id is the last index it had, which may name another edge now.
+int linkedEdgeIndex(const Part::TopoShape& baseShape, const App::ElementNamePair& sub)
+{
+    if (Data::hasMissingElement(sub.oldName.c_str())) {
+        return 0;
+    }
+    if (sub.newName.empty()) {
+        return Data::indexOfElement(sub.oldName, "Edge");
+    }
+    Part::TopoShape edge;
+    try {
+        edge = baseShape.getSubShape(sub.newName.c_str());
+    }
+    catch (...) {
+    }
+    if (edge.isNull() || edge.getShape().ShapeType() != TopAbs_EDGE) {
+        return 0;
+    }
+    return baseShape.findShape(edge.getShape());
+}
+}  // namespace
+
 void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
 {
     App::DocumentObject* base = d->fillet->Base.getValue();
@@ -636,14 +676,9 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
         FC_ERR("edge link size mismatch");
         return;
     }
-    std::set<std::string> subSet;
-    for (auto& sub : subs) {
-        subSet.insert(sub.newName.empty() ? sub.oldName : sub.newName);
-    }
 
     if (auto it = std::ranges::find(objs, base); it != objs.end()) {
         // toggle visibility
-        std::string tmp;
         Gui::ViewProvider* vp;
         vp = Gui::Application::Instance->getViewProvider(d->fillet);
         if (vp) {
@@ -670,46 +705,27 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
             base,
             Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
         );
-        std::set<Part::FilletElement> elements;
+        // Tick each stored edge where its link finds it in the base now, never at a stored id
+        // the link can't confirm, and never a guess (ops#249). What can't be ticked is listed
+        // in the dialog; OK replaces it with the ticked edges.
+        QStringList missing;
+        QStringList unlisted;
         for (size_t i = 0; i < e.size(); ++i) {
-            auto& sub = subs[i];
-            if (sub.newName.empty()) {
-                int idx = Data::indexOfElement(sub.oldName, "Edge");
-                if (idx == 0) {
-                    FC_WARN("missing element reference: " << sub.oldName);
+            const auto& et = e[i];
+            int edgeIndex = linkedEdgeIndex(baseShape, subs[i]);
+            if (edgeIndex == 0) {
+                std::string name = subs[i].oldName;
+                if (Data::hasMissingElement(name.c_str())) {
+                    name.erase(name.rfind(Data::MISSING_PREFIX), std::strlen(Data::MISSING_PREFIX));
                 }
-                else {
-                    elements.insert(e[i]);
-                }
+                missing << QString::fromStdString(name);
                 continue;
             }
-            auto& ref = sub.newName;
-            Part::TopoShape edge;
-            try {
-                edge = baseShape.getSubShape(ref.c_str());
+            auto it2 = std::ranges::find(d->edge_ids, edgeIndex);
+            if (it2 == d->edge_ids.end()) {
+                unlisted << QStringLiteral("Edge%1").arg(edgeIndex);
             }
-            catch (...) {
-            }
-            if (!edge.isNull()) {
-                elements.insert(e[i]);
-                continue;
-            }
-            FC_WARN("missing element reference: " << base->getFullName() << "." << ref);
-
-            for (auto& mapped : Part::Feature::getRelatedElements(base, ref.c_str())) {
-                tmp.clear();
-                if (!subSet.insert(mapped.index.appendToStringBuffer(tmp)).second
-                    || !subSet.insert(mapped.name.toString(0)).second) {
-                    continue;
-                }
-                FC_WARN("guess element reference: " << ref << " -> " << mapped.index);
-                elements.emplace(mapped.index.getIndex(), e[i].radius1, e[i].radius2);
-            }
-        }
-
-        for (const auto& et : e) {
-            auto it2 = std::ranges::find(d->edge_ids, et.edgeid);
-            if (it2 != d->edge_ids.end()) {
+            else {
                 int index = it2 - d->edge_ids.begin();
                 model->setData(model->index(index, 0), Qt::Checked, Qt::CheckStateRole);
                 // model->setData(model->index(index, 1),
@@ -738,6 +754,28 @@ void DlgFilletEdges::setupFillet(const std::vector<App::DocumentObject*>& objs)
             }
         }
         model->blockSignals(block);
+
+        QStringList notTicked;
+        QString baseLabel = QString::fromUtf8(base->Label.getValue());
+        if (!missing.isEmpty()) {
+            notTicked << tr("%1 no longer has the edge stored as %2: not ticked.")
+                             .arg(baseLabel, missing.join(QStringLiteral(", ")));
+        }
+        if (!unlisted.isEmpty()) {
+            notTicked << tr("%1 is not in the list (not an edge between two faces): not ticked.")
+                             .arg(unlisted.join(QStringLiteral(", ")));
+        }
+        if (!notTicked.isEmpty()) {
+            notTicked << tr("OK keeps only the ticked edges.");
+            QString text = notTicked.join(QLatin1Char('\n'));
+            d->missingEdges->setText(text);
+            d->missingEdges->show();
+            Base::Console().warning(
+                "%s: %s\n",
+                d->fillet->getFullName().c_str(),
+                text.toUtf8().constData()
+            );
+        }
 
         // #0002273
         if (twoRadii) {

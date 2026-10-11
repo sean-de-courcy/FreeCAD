@@ -233,6 +233,117 @@ class ProjectionOnSurfaceTestCases(unittest.TestCase):
         FreeCAD.closeDocument("ProjectionOnSurface")
 
 
+class FilletEdgesEditTestCases(unittest.TestCase):
+    """The Fillet/Chamfer edit dialog ticks the stored edges where the base has them now (ops#249)
+
+    The base is a 10 mm box with a 2 x 2 mm tool box cut through it. The fillet's edge is the
+    box's vertical edge at x = y = 10, found by its centre (10, 10, 5).
+    """
+
+    target = FreeCAD.Vector(10, 10, 5)
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("FilletEdgesEdit")
+        box = self.Doc.addObject("Part::Box", "Box")
+        box.Length = box.Width = box.Height = 10
+        self.tool = self.Doc.addObject("Part::Box", "Tool")
+        self.tool.Length = self.tool.Width = 2
+        self.tool.Height = 20
+        self.tool.Placement.Base = FreeCAD.Vector(20, 20, -5)  # away from the box: no cut yet
+        self.cut = self.Doc.addObject("Part::Cut", "Cut")
+        self.cut.Base = box
+        self.cut.Tool = self.tool
+        self.Doc.recompute()
+
+    def tearDown(self):
+        FreeCADGui.Selection.clearSelection()
+        guiDocument = FreeCADGui.getDocument("FilletEdgesEdit")
+        if FreeCADGui.Control.activeDialog(guiDocument):
+            FreeCADGui.Control.closeDialog(guiDocument)
+        FreeCAD.closeDocument("FilletEdgesEdit")
+
+    def _edgesAt(self, point):
+        edges = self.cut.Shape.Edges
+        return [i for i, e in enumerate(edges, 1) if (e.CenterOfMass - point).Length < 1e-6]
+
+    def _makeFeature(self, typeName):
+        feature = self.Doc.addObject(typeName, typeName.split("::")[1])
+        feature.Base = self.cut
+        feature.Edges = [(self._edgesAt(self.target)[0], 1.0, 1.0)]
+        self.Doc.recompute()
+        return feature
+
+    def _openEdit(self, feature):
+        FreeCADGui.getDocument(self.Doc.Name).setEdit(feature.Name)
+        FreeCADGui.updateGui()
+        taskDialog = FreeCADGui.Control.activeTaskDialog()
+        self.assertIsNotNone(taskDialog)
+        for widget in taskDialog.getDialogContent():
+            tree = widget.findChild(QtWidgets.QTreeView, "treeView")
+            if tree:
+                return taskDialog, widget, tree
+        self.fail("no edge list in the edit dialog")
+
+    @staticmethod
+    def _tickedEdges(tree):
+        from PySide import QtCore
+
+        model = tree.model()
+        ticked = []
+        for row in range(model.rowCount()):
+            index = model.index(row, 0)
+            state = index.data(QtCore.Qt.CheckStateRole)
+            if int(getattr(state, "value", state) or 0) == 2:  # Qt.Checked
+                ticked.append(index.data(QtCore.Qt.UserRole))
+        return ticked
+
+    def _moveToolTo(self, x, y):
+        self.tool.Placement.Base = FreeCAD.Vector(x, y, -5)
+        self.Doc.recompute()
+
+    def testEditTicksRenumberedEdge(self):
+        """A cut at the opposite corner renumbers the edges: the dialog ticks the edge at its new
+        index, and OK keeps the fillet on it"""
+        fillet = self._makeFeature("Part::Fillet")
+        before = self._edgesAt(self.target)[0]
+        self._moveToolTo(-1, -1)
+        now = self._edgesAt(self.target)
+        self.assertEqual(len(now), 1)
+        self.assertNotEqual(now[0], before)
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self.assertEqual(self._tickedEdges(tree), now)
+
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertEqual([e[0] for e in fillet.Edges], now)
+        self.assertEqual(fillet.EdgeLinks[1], ["Edge{}".format(now[0])])
+
+    def _checkRemovedEdgeIsNotTicked(self, typeName):
+        feature = self._makeFeature(typeName)
+        self._moveToolTo(-1, -1)  # renumber first: the stored index follows the edge
+        stored = feature.Edges[0][0]
+        self._moveToolTo(9, 9)  # then cut the edge away
+        self.assertEqual(self._edgesAt(self.target), [])
+        # The stored index now names another edge of the base.
+        self.assertLessEqual(stored, len(self.cut.Shape.Edges))
+
+        taskDialog, widget, tree = self._openEdit(feature)
+        self.assertEqual(self._tickedEdges(tree), [])
+        label = widget.findChild(QtWidgets.QLabel, "labelMissingEdges")
+        self.assertIsNotNone(label)
+        self.assertFalse(label.isHidden())
+        self.assertIn("Edge{}".format(stored), label.text())
+
+    def testEditDoesNotTickRemovedFilletEdge(self):
+        """The fillet's edge is cut away: the dialog ticks no edge and says the edge is missing"""
+        self._checkRemovedEdgeIsNotTicked("Part::Fillet")
+
+    def testEditDoesNotTickRemovedChamferEdge(self):
+        """The same for a chamfer, which shares the dialog"""
+        self._checkRemovedEdgeIsNotTicked("Part::Chamfer")
+
+
 class PartMirrorGuiTestCases(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartMirrorGuiTest")
