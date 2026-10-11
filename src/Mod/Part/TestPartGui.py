@@ -297,6 +297,18 @@ class FilletEdgesEditTestCases(unittest.TestCase):
                 ticked.append(index.data(QtCore.Qt.UserRole))
         return ticked
 
+    @staticmethod
+    def _tick(tree, edge):
+        from PySide import QtCore
+
+        model = tree.model()
+        for row in range(model.rowCount()):
+            index = model.index(row, 0)
+            if index.data(QtCore.Qt.UserRole) == edge:
+                model.setData(index, QtCore.Qt.Checked, QtCore.Qt.CheckStateRole)
+                return
+        raise AssertionError("Edge{} isn't listed".format(edge))
+
     def _moveToolTo(self, x, y):
         self.tool.Placement.Base = FreeCAD.Vector(x, y, -5)
         self.Doc.recompute()
@@ -342,6 +354,97 @@ class FilletEdgesEditTestCases(unittest.TestCase):
     def testEditDoesNotTickRemovedChamferEdge(self):
         """The same for a chamfer, which shares the dialog"""
         self._checkRemovedEdgeIsNotTicked("Part::Chamfer")
+
+    def testEditOkKeepsGuessedEdge(self):
+        """OK on a fillet whose edge the reference solver guessed keeps the guess (ops#258): the
+        edges are written as they were, which no longer makes the links anew.
+
+        A 20 x 10 x 10 block extruded from a sketch, the fillet on the vertical edge at
+        (20, 0); the sketch's right side drawn again 0.5 mm over, so the edge at (20.5, 0) is
+        the guess."""
+        self.Doc.ReferenceSolver = True
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+
+        def outline(points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(*a, 0), FreeCAD.Vector(*b, 0)), False
+                )
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def verticalAt(shape, point):
+            return [
+                i for i, e in enumerate(shape.Edges, 1) if (e.CenterOfMass - point).Length < 1e-6
+            ]
+
+        def guesses(feature):
+            report = FreeCAD.getReferenceReport(feature)
+            return [entry for entry in report if entry.get("status") == "guessed"]
+
+        outline([(0, 0), (20, 0), (20, 10), (0, 10)])
+        block = self.Doc.addObject("Part::Extrusion", "Block")
+        block.Base = sketch
+        block.DirMode = "Custom"
+        block.Dir = FreeCAD.Vector(0, 0, 1)
+        block.LengthFwd = 10
+        block.Solid = True
+        self.Doc.recompute()
+        fillet = self.Doc.addObject("Part::Fillet", "Fillet")
+        fillet.Base = block
+        fillet.Edges = [(verticalAt(block.Shape, FreeCAD.Vector(20, 0, 5))[0], 1.0, 1.0)]
+        self.Doc.recompute()
+        outline([(0, 0), (20.5, 0), (20.5, 10), (0, 10)])
+        self.Doc.recompute()
+        moved = verticalAt(block.Shape, FreeCAD.Vector(20.5, 0, 5))
+        self.assertEqual([e[0] for e in fillet.Edges], moved)
+        self.assertEqual(len(guesses(fillet)), 1, fillet.getStatusString())
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self.assertEqual(self._tickedEdges(tree), moved)
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual([e[0] for e in fillet.Edges], moved)
+        self.assertEqual(len(guesses(fillet)), 1)
+
+        # OK with another edge ticked too (PR 236 review, M2): the guess stays with its edge.
+        other = verticalAt(block.Shape, FreeCAD.Vector(0, 0, 5))
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self._tick(tree, other[0])
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(sorted(e[0] for e in fillet.Edges), sorted(moved + other))
+        [entry] = guesses(fillet)
+        self.assertEqual(fillet.Edges[entry["index"]][0], moved[0])
+
+    def testEditRepicksMissingEdge(self):
+        """The fillet's Base set to a moved copy of the cut: no edge is where the old one was, so
+        the link goes missing and the dialog lists it (ops#257). Ticking the copy's edge with the
+        same index and OK makes it the fillet's edge (PR 236 review, H1)."""
+        fillet = self._makeFeature("Part::Fillet")
+        stored = fillet.Edges[0][0]
+        copy = self.Doc.addObject("Part::Feature", "Copy")
+        copy.Shape = self.cut.Shape
+        copy.Placement.Base = FreeCAD.Vector(30, 0, 0)
+        self.Doc.recompute()
+        fillet.Base = copy
+        self.assertTrue(fillet.EdgeLinks[1][0].startswith("?"), fillet.EdgeLinks)
+        self.Doc.recompute()
+        self.assertFalse(fillet.isValid())
+
+        taskDialog, widget, tree = self._openEdit(fillet)
+        self.assertEqual(self._tickedEdges(tree), [])
+        self._tick(tree, stored)
+        taskDialog.accept()
+        FreeCADGui.updateGui()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(fillet.EdgeLinks[1], ["Edge{}".format(stored)])
+        # rounded at the copy's corner (40, 10): a point just inside it is outside the solid
+        self.assertFalse(fillet.Shape.isInside(FreeCAD.Vector(39.9, 9.9, 5), 1e-7, True))
 
 
 class PartMirrorGuiTestCases(unittest.TestCase):
