@@ -896,6 +896,18 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
 
     const std::vector<Constraint*>& origvals = orig.Constraints.getValues();
 
+    if (origvals.empty() && orig.Constraints.getSize() > 0) {
+        // FreeCAD-CH (ops#280): a list flagged invalid (getValues() is empty) doesn't match orig's
+        // geometry, so none of it is copied, nor its expressions
+        Base::Console().warning(
+            "The constraints of '%s' aren't copied to '%s': they don't match its geometry (its "
+            "constraint list is flagged invalid). Repair '%s' and copy again.\n",
+            orig.Label.getValue(),
+            this->Label.getValue(),
+            orig.Label.getValue()
+        );
+    }
+
     std::vector<Constraint*> newVals(vals);
 
     newVals.reserve(vals.size() + origvals.size());
@@ -986,8 +998,24 @@ void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vec
     };
     std::map<int, const App::Expression*> sourceExpressions;
     for (const auto& [path, expression] : orig.ExpressionEngine.getExpressions()) {
-        if (!expression || path.getProperty() != &orig.Constraints) {
+        if (!expression) {
             continue;
+        }
+        if (path.getProperty() != &orig.Constraints) {
+            // FreeCAD-CH (ops#277): e.g. Placement, which Merge Sketches copies by value from the
+            // first sketch: the merged sketch doesn't follow the expression
+            Base::Console().warning(
+                "The expression '%s' on %s of '%s' isn't copied to '%s': only the constraints' "
+                "expressions are.\n",
+                expression->toString(true).c_str(),
+                path.toString().c_str(),
+                orig.Label.getValue(),
+                this->Label.getValue()
+            );
+            continue;
+        }
+        if (origvals.empty()) {
+            continue;  // flagged invalid: addCopyOfConstraints copied none (and said so)
         }
         try {
             int j = indexOf(path);

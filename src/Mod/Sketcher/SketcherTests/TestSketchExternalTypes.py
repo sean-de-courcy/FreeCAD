@@ -385,6 +385,37 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(self.circleRadii(sketch), [8])
         self.assertRingPoints(sketch)
 
+    def testUndecidedTypeRepairedAfterAnUndo(self):
+        """ops#237 Q5: as above, but the transaction that brings the face back (and so decides
+        the type) is undone: the list has its stale projection and the mark again, and the link
+        waits for its repair again. The face comes back once more: the recompute matches the
+        ball with its saved circle again, intersection, radius 8. Before, the undo left the link
+        decided, and it was built as the projection at its index, radius 10."""
+        ball = self.addBall()
+        ball.Shape = Part.Vertex(V(0, 0, 6))
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("UndoneDecision")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        self.doc.UndoMode = 1
+        ball = self.doc.getObject("Ball")
+        self.doc.openTransaction("The face back")
+        ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.doc.undo()
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        ball.Shape = Part.makeSphere(10, V(0, 0, 6))
+        self.doc.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, INTERSECTION])
+        self.assertEqual(self.circleRadii(sketch), [8])
+        self.assertRingPoints(sketch)
+
     def testUndecidedTypeKeptThroughARepairedReference(self):
         """As above, but the ball's sphere comes back as Face2 of a compound (Face1 a small square
         above the plane), and App.repairReference re-points the link to it: the link's key
@@ -726,6 +757,48 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.assertEqual(len(sketch.Constraints), 2)
         self.assertPointConstraintsKept(sketch)
 
+    def makeTiltedBothSketch(self, outline):
+        """The tilted face of `outline` linked Both by a new sketch, TiltedSketch; the sketch."""
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(outline)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        sketch.addExternal(face.Name, "Face1", False, True)
+        self.doc.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [BOTH])
+        return sketch
+
+    def testFrozenLegacyBothLinkGetsItsKindsOnOpen(self):
+        """ops#278: a file saved before ops#264 (no kinds) with the tilted square face linked
+        Both (four projected lines and a section line), frozen. The open records the kinds for a
+        frozen link too, since its type gives the saved geometry, so once unfrozen its rebuild
+        hands the Ids out by kind. Before, the open skipped frozen links: no kinds. The frozen
+        geometry stays as saved, and the open leaves the document untouched (PR 253 review L6)."""
+
+        def lineEnds(sketch):
+            return [
+                (tuple(round(c, 6) for c in g.StartPoint), tuple(round(c, 6) for c in g.EndPoint))
+                for g in list(sketch.ExternalGeo)[2:]
+                if isinstance(g, Part.LineSegment)
+            ]
+
+        sketch = self.makeTiltedBothSketch(self.SQUARE)
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 4)
+        saved = lineEnds(sketch)
+        path = self.tempPath("LegacyFrozenBoth.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Face")
+        self.freezeInFile(path, "Face")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("TiltedSketch")
+        self.assertEqual(sorted(self.lineKinds(sketch)), ["I"] + ["P"] * 4)
+        self.assertEqual(lineEnds(sketch), saved)
+        self.assertFalse(self.doc.isTouched())
+        self.assertNotIn("Touched", sketch.State)
+
     def testLegacyBothLinkInAStaleTypeListGetsTypeAndKindsOnOpen(self):
         """PR 251 review L3: a file saved before ops#140 and ops#264, a stale type in front of the
         rail and the ring Both, its geometry without kinds. One open gives each link its type
@@ -931,6 +1004,11 @@ class TestSketchExternalTypesGui(unittest.TestCase):
     SQUARE = TestSketchExternalTypes.SQUARE
     PENTAGON = TestSketchExternalTypes.PENTAGON
     lineKinds = TestSketchExternalTypes.lineKinds
+    freezeInFile = staticmethod(TestSketchExternalTypes.freezeInFile)
+    makeTiltedBothSketch = TestSketchExternalTypes.makeTiltedBothSketch
+    addBall = TestSketchExternalTypes.addBall
+    circleRadii = TestSketchExternalTypes.circleRadii
+    saveAndReopen = TestSketchExternalTypes.saveAndReopen
     sectionAndProjections = staticmethod(TestSketchExternalTypes.sectionAndProjections)
     # an arrowhead, its notch at (0, 1): the line v = 0 crosses its two arms apart
     DART = [(-5, -5), (0, 5), (5, -5), (0, 1)]
@@ -969,6 +1047,55 @@ class TestSketchExternalTypesGui(unittest.TestCase):
         self.doc.recompute()
         section, projections = self.sectionAndProjections(sketch)
         self.assertEqual((len(section), len(projections)), (2, 4))
+
+    def testFrozenLegacyBothLinkWhoseSplitMovedWarns(self):
+        """ops#278: the case above with the link frozen. The open compares the shapes for a
+        frozen link too: they differ, so it gives no kinds and says the Ids will go by position
+        once the link is unfrozen. Before, it skipped the frozen link silently."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        sketch = self.makeTiltedBothSketch(self.PENTAGON)
+        self.doc.getObject("Face").Shape = self.tiltedFace(self.DART)
+        path = self.tempPath("LegacyFrozenSplit.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Face")
+        self.freezeInFile(path, "Face")
+        before = len(reportText())
+        self.doc = App.openDocument(path)
+        new = reportText()[before:]
+        self.assertIn("its type no longer gives the same geometries", new)
+        self.assertIn("(once it is unfrozen) the Ids go by position", new)
+        sketch = self.doc.getObject("TiltedSketch")
+        self.assertEqual(self.lineKinds(sketch), [""] * 6)
+
+    def testUndecidedLinkWhoseElementComesBackUnmatchedWarns(self):
+        """ops#237 (its nit): as in testUndecidedTypeRepairedWhenTheElementComesBack, but the
+        ball's face comes back as a flat square above the sketch plane: no type gives the saved
+        circle (the projection gives four lines, the intersection nothing), so its type can't be
+        told. The recompute builds the type at its index, a projection, in place of the saved
+        circle, and says so; the mark goes. Before, it did so silently."""
+        if not App.GuiUp:
+            self.skipTest("the Report view")
+        ball = self.addBall()
+        ball.Shape = Part.Vertex(V(0, 0, 6))
+        self.doc.recompute()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION, PROJECTION, INTERSECTION]
+        sketch = self.saveAndReopen("ElementBackUnmatched")
+        self.assertEqual(
+            list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION, PENDING]
+        )
+        self.doc.getObject("Ball").Shape = Part.makePlane(4, 4, V(-2, -2, 5))
+        before = len(reportText())
+        self.doc.recompute()
+        new = reportText()[before:]
+        self.assertIn("its element is back, but no type gives its saved geometry", new)
+        self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION, PROJECTION])
+        self.assertEqual(self.circleRadii(sketch), [])
+        # the axes, the rail's line and the square's four
+        lines = [g for g in sketch.ExternalGeo if isinstance(g, Part.LineSegment)]
+        self.assertEqual(len(lines), 2 + 1 + 4)
 
     def testTypeWrittenBeforeTheFirstRebuildOfLegacyGeometryNamesTheDeletedConstraint(self):
         """PR 241 review M1 and L2: a file saved before ops#264 (no kinds) with the ring Both (its

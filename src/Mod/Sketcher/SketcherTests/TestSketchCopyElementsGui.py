@@ -19,6 +19,7 @@ import Part
 import Sketcher
 
 from SketcherTests.GuiTestCase import FreeCADGui, SketcherGuiTestCase
+from SketcherTests.TestSketchExternalTypes import reportText
 
 V = FreeCAD.Vector
 TOL = 1e-9
@@ -314,6 +315,42 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         sheet.set("A1", "9")
         self.doc.recompute()
         self.assertAlmostEqual(self.line_length(merged, 1), 9, delta=1e-7)
+
+    def test_merge_says_a_flagged_constraint_list_isnt_copied(self):
+        """ops#280 (PR 250 verification 2): Source's list names a line that is gone (its
+        geometry set without it from Python), so the list is flagged invalid and reads empty.
+        None of it is copied, nor the expression on its length, and Merge says why. Before,
+        both went silently (the expression too: its constraint wasn't found)."""
+        line = self.free_source_lines(1)[0]
+        self.add_length(self.source, line, "a", "4 mm + 6 mm")
+        self.doc.recompute()
+        before = len(reportText())
+        self.source.Geometry = self.source.Geometry[:line]
+        # flagged (Python's Constraints reads the list as it is)
+        self.assertIn("results in invalid constraint indices", reportText()[before:])
+        before = len(reportText())
+        merged = self.merge_dest_and_source()
+        new = reportText()[before:]
+        self.assertIn("The constraints of 'Source' aren't copied", new)
+        self.assertEqual(len(merged.Geometry), 1 + 4)
+        self.assertEqual(len(merged.Constraints), 0)
+        self.assertEqual(self.expressions(merged), {})
+
+    def test_merge_says_an_expression_on_a_sources_placement_isnt_copied(self):
+        """ops#277: Source's height (Placement.Base.z) is driven by a spreadsheet cell (5).
+        Merged first, Source gives the merged sketch its Placement by value: the merged sketch
+        doesn't follow the cell, and Merge says so, naming the property."""
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "5")
+        self.source.setExpression(".Placement.Base.z", "Sheet.A1")
+        self.doc.recompute()
+        self.assertAlmostEqual(self.source.Placement.Base.z, 5, delta=1e-7)
+        before = len(reportText())
+        merged = self.merge(self.source, self.dest)
+        new = reportText()[before:]
+        self.assertIn("Placement.Base.z of 'Source' isn't copied", new)
+        self.assertAlmostEqual(merged.Placement.Base.z, 5, delta=1e-7)
+        self.assertEqual(self.expressions(merged), {})
 
     def test_carbon_copy_remaps_every_element(self):
         """Carbon copy of the Source into Dest: the Group's four elements name the copied lines

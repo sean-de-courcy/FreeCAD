@@ -278,7 +278,8 @@ names it.
 | `fix/267-merge-copy-followups` | fix | ops#267 | - | `integration` `957d5e6bc0` | `766a1c0f7b` (fork PR 250), 2026-10-11 | never (fork fix) |
 | `fix/269-external-kind-followups` | fix | ops#269 | - | `fix/267-merge-copy-followups` `d06f986efa` (stacked on fork PR 250) | `5bf91f795b` (fork PR 251), 2026-10-11 | never (fork fix) |
 | `fix/273-part-binder-relink` | fix | ops#273 | - | `integration` `d47bd4ee85` | `80920dae5a` (fork PR 252), 2026-10-11 | never (fork fix) |
-| `fix/naming-minors-124-138-176` | fix | ops#176 ops#138 ops#124 ops#268 | - | `integration` `7ed101a873` | (fork PR 249) | never (fork fix) |
+| `fix/naming-minors-124-138-176` | fix | ops#176 ops#138 ops#124 ops#268 | - | `integration` `7ed101a873` | `df6a4acece` (fork PR 249), 2026-10-11 | never (fork fix) |
+| `fix/sketcher-minors-237-277-278-280` | fix | ops#280, ops#278, ops#277, ops#237, ops#281 | - | `integration` `5bf91f795b` | (fork PR 253) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

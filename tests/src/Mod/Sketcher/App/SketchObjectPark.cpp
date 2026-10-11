@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRep_Tool.hxx>
@@ -18,6 +19,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <Base/Console.h>
 #include <Base/FileInfo.h>
 #include <Mod/Part/App/FeaturePartBox.h>
 #include <Mod/Part/App/Geometry.h>
@@ -115,6 +117,49 @@ void setExternalFlag(Sketcher::SketchObject* sketch,
     }
     sketch->ExternalGeo.setValues(std::move(geos));
 }
+
+// Collects the warnings sent while it lives
+class WarningCollector final: public Base::ILogger
+{
+public:
+    WarningCollector()
+    {
+        Base::Console().attachObserver(this);
+    }
+    ~WarningCollector() override
+    {
+        Base::Console().detachObserver(this);
+    }
+    WarningCollector(const WarningCollector&) = delete;
+    WarningCollector(WarningCollector&&) = delete;
+    WarningCollector& operator=(const WarningCollector&) = delete;
+    WarningCollector& operator=(WarningCollector&&) = delete;
+
+    void sendLog(const std::string& /*notifiername*/,
+                 const std::string& msg,
+                 Base::LogStyle level,
+                 Base::IntendedRecipient /*recipient*/,
+                 Base::ContentType /*content*/) override
+    {
+        if (level == Base::LogStyle::Warning) {
+            warnings.push_back(msg);
+        }
+    }
+    const char* name() override
+    {
+        return "WarningCollector";
+    }
+
+    std::size_t count(const std::string& text) const
+    {
+        return static_cast<std::size_t>(
+            std::count_if(warnings.begin(), warnings.end(), [&](const std::string& msg) {
+                return msg.find(text) != std::string::npos;
+            }));
+    }
+
+    std::vector<std::string> warnings;
+};
 
 }  // namespace
 
@@ -702,4 +747,54 @@ TEST_F(SketchObjectParkTest, linkAppendedWhileARepairIsPendingIsAProjection)
     for (std::size_t k = 0; k < 2; ++k) {
         EXPECT_TRUE(ends[k].IsEqual(expected[k], tolerance));
     }
+}
+
+// ops#278: a Both entry put back on geometry without kinds (parked before ops#264, when parking
+// kept none) has its Ids split between projection and intersection by position at its next
+// rebuild, which moves constraints if the split moved while it was parked: unparking says so
+TEST_F(SketchObjectParkTest, unparkOfABothEntryWithoutKindsWarns)
+{
+    // Arrange: a rod from (0, 0, -5) to (10, 0, 5) linked Both: its projection is the line
+    // (0, 0)-(10, 0), its intersection the point (5, 0)
+    auto sketch = getObject();
+    auto rod = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Rod"));
+    rod->Shape.setValue(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, -5), gp_Pnt(10, 0, 5)).Edge());
+    doc->recompute();
+    ASSERT_GE(sketch->addExternal(rod, "Edge1"), 0);
+    ASSERT_GE(sketch->addExternal(rod, "Edge1", false, true), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({2}));
+    const auto ids = sketch->externalGeometryIds(0);
+    ASSERT_EQ(ids.size(), 2U);
+    EXPECT_EQ(sketch->externalGeometryKind(ids[0]), 1);
+    EXPECT_EQ(sketch->externalGeometryKind(ids[1]), 0);
+    auto parkAndPutBack = [&]() {
+        const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+        auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+        sketch->parkExternalGeometry({0});
+        WarningCollector collector;
+        EXPECT_EQ(sketch->unparkExternalGeometry(rod, sub, std::move(shadow), 2, ids), 0);
+        const std::size_t warned = collector.count("put back from where it was set aside");
+        doc->recompute();
+        EXPECT_EQ(sketch->externalGeometryIds(0), ids);
+        return warned;
+    };
+
+    // Act and assert: with its kinds (parked since ops#264), no warning
+    EXPECT_EQ(parkAndPutBack(), 0U);
+
+    // without them, as a file saved before ops#264 has its parked geometry: a warning
+    auto geos = sketch->ExternalGeo.getValues();
+    for (auto& geo : geos) {
+        if (refOf(geo).empty()) {
+            continue;
+        }
+        geo = geo->clone();
+        auto egf = ExternalGeometryFacade::getFacade(geo);
+        egf->setFlag(ExternalGeometryExtension::Projection, false);
+        egf->setFlag(ExternalGeometryExtension::Intersection, false);
+    }
+    sketch->ExternalGeo.setValues(std::move(geos));
+    ASSERT_EQ(sketch->externalGeometryKind(ids[0]), -1);
+    EXPECT_EQ(parkAndPutBack(), 1U);
 }
