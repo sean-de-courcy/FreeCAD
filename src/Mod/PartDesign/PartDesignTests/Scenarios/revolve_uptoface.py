@@ -523,23 +523,37 @@ class RevolutionUpToFaceBothUpTo(RevolutionUpToFaceTwoSided):
         revolved.UpToFace2 = (wall, self.names(wall, otherHalf))
 
 
-class RevolutionTwoRingsUpToFaceSymmetric(InnerRing, RevolutionUpToFaceSymmetric):
-    __doc__ = RevolutionUpToFaceSymmetric.__doc__ + "\n\n" + InnerRing.__doc__
+class SideOneInnerRing(InnerRing):
+    """Two sides built apart, Refine off: each side has its own inner cylinder (radius 8); the
+    binder takes side 1's."""
+
+    def innerOuter(self):
+        return face(
+            "cylinder",
+            where=lambda f: abs(f.Surface.Radius - 8) < 1e-6,
+            contains=ray(45, 8, (self.bottom + self.topZ) / 2),
+        )
+
+
+class RevolutionTwoRingsUpToFaceSymmetric(SideOneInnerRing, RevolutionUpToFaceSymmetric):
+    __doc__ = RevolutionUpToFaceSymmetric.__doc__ + "\n\n" + SideOneInnerRing.__doc__
     REFS = RevolutionUpToFaceSymmetric.REFS + InnerRing.INNER_REFS
 
 
-class RevolutionTwoRingsUpToFaceSymmetricAcross(InnerRing, RevolutionUpToFaceSymmetricAcross):
-    __doc__ = RevolutionUpToFaceSymmetricAcross.__doc__ + "\n\n" + InnerRing.__doc__
+class RevolutionTwoRingsUpToFaceSymmetricAcross(
+    SideOneInnerRing, RevolutionUpToFaceSymmetricAcross
+):
+    __doc__ = RevolutionUpToFaceSymmetricAcross.__doc__ + "\n\n" + SideOneInnerRing.__doc__
     REFS = RevolutionUpToFaceSymmetricAcross.REFS + InnerRing.INNER_REFS
 
 
-class RevolutionTwoRingsUpToFaceUpToAndAngle(InnerRing, RevolutionUpToFaceUpToAndAngle):
-    __doc__ = RevolutionUpToFaceUpToAndAngle.__doc__ + "\n\n" + InnerRing.__doc__
+class RevolutionTwoRingsUpToFaceUpToAndAngle(SideOneInnerRing, RevolutionUpToFaceUpToAndAngle):
+    __doc__ = RevolutionUpToFaceUpToAndAngle.__doc__ + "\n\n" + SideOneInnerRing.__doc__
     REFS = RevolutionUpToFaceUpToAndAngle.REFS + InnerRing.INNER_REFS
 
 
-class RevolutionTwoRingsUpToFaceBothUpTo(InnerRing, RevolutionUpToFaceBothUpTo):
-    __doc__ = RevolutionUpToFaceBothUpTo.__doc__ + "\n\n" + InnerRing.__doc__
+class RevolutionTwoRingsUpToFaceBothUpTo(SideOneInnerRing, RevolutionUpToFaceBothUpTo):
+    __doc__ = RevolutionUpToFaceBothUpTo.__doc__ + "\n\n" + SideOneInnerRing.__doc__
     REFS = RevolutionUpToFaceBothUpTo.REFS + InnerRing.INNER_REFS
 
 
