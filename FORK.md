@@ -258,7 +258,8 @@ names it.
 | `fix/247-sketcher-copy-remap-elements` | fix | ops#247 | - | `integration` `2bc636bdc4` | `f2efbec84c` (fork PR 229), 2026-10-10 | never (fork fix) |
 | `fix/250-projection-on-surface-subs` | fix | ops#250 | - | `integration` `d360d8c798` | `63c502ff6b` (fork PR 230), 2026-10-10 | never (fork fix) |
 | `fix/244-independent-copy-picks` | fix | ops#244, ops#245 | - | `integration` `2bc636bdc4` | `161adb82e9` (fork PR 227), 2026-10-10 | never (fork fix) |
-| `fix/249-part-fillet-stale-edges` | fix | ops#249 | - | `integration` `63c502ff6b` | (fork PR 231) | never (fork fix) |
+| `fix/249-part-fillet-stale-edges` | fix | ops#249 | - | `integration` `63c502ff6b` | `83a7885ab1` (fork PR 231), 2026-10-10 | never (fork fix) |
+| `fix/260-external-both-ids` | fix | ops#260 | - | `integration` `161adb82e9` | (fork PR 234) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
