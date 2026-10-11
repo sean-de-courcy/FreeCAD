@@ -1700,3 +1700,294 @@ TEST_F(MoveProperty, outOfCreatedObjectIntoRemovedTarget)
     }
     EXPECT_EQ(errors.errors, std::vector<std::string>());
 }
+
+// Tests whether a move into an object that was never added to a document is refused and changes
+// nothing (ops#238: the target's document was dereferenced)
+TEST_F(MoveProperty, targetNotInDocument)
+{
+    auto target = std::make_unique<App::VarSet>();
+    doc1->openTransaction("Move Property");
+    EXPECT_THROW(varSet1Doc1->moveDynamicProperty(prop, target.get()), Base::RuntimeError);
+    doc1->abortTransaction();
+    EXPECT_EQ(dynamicNames(target.get()), std::vector<std::string>());
+    EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"}));
+    EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value);
+}
+
+// Tests whether a move whose expression can't move with it (a cyclic reference at the target)
+// is completed before the error is passed on, and taken back with its expression (ops#238: the
+// completion pastes the value, since phase 3 didn't run)
+TEST_F(MoveProperty, expressionMoveRefused)
+{
+    auto setExpression = [](App::DocumentObject* obj, App::Property* property, const char* text) {
+        obj->setExpression(
+            App::ObjectIdentifier(*property),
+            std::shared_ptr<App::Expression>(App::Expression::parse(obj, text))
+        );
+    };
+    auto expressionOf = [](const App::DocumentObject* obj, const char* name) {
+        for (const auto& [path, expression] : obj->ExpressionEngine.getExpressions()) {
+            if (path.getPropertyName() == name) {
+                return expression->toString();
+            }
+        }
+        return std::string();
+    };
+    auto* y = freecad_cast<App::PropertyInteger*>(
+        varSet2Doc1->addDynamicProperty("App::PropertyInteger", "Y", "Variables")
+    );
+    y->setValue(4);
+    auto* link = varSet1Doc1->addDynamicProperty("App::PropertyInteger", "Link", "Variables");
+    // VarSet depends on VarSet001, so VarSet001 can't take an expression that reads VarSet
+    setExpression(varSet1Doc1, link, "VarSet001.Y");
+    setExpression(varSet1Doc1, prop, "Link + 1");
+    ErrorCollector errors;
+    for (const bool commit : {false, true}) {
+        doc1->openTransaction("Move Property");
+        EXPECT_THROW(
+            varSet1Doc1->moveDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Variable"),
+                                             varSet2Doc1),
+            Base::RuntimeError
+        );
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Link"}));
+        EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>({"Variable", "Y"}));
+        EXPECT_EQ(intValue(varSet2Doc1, "Variable"), value);
+        if (commit) {
+            doc1->commitTransaction();
+            EXPECT_TRUE(doc1->undo());
+        }
+        else {
+            doc1->abortTransaction();
+        }
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Link", "Variable"}))
+            << (commit ? "undo" : "abort");
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value);
+        EXPECT_EQ(expressionOf(varSet1Doc1, "Variable"), "Link + 1");
+        EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>({"Y"}));
+    }
+    // (a redo would meet the same refusal)
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc1->clearUndos();
+}
+
+// Tests whether a move taken back on undo whose property can't leave its object (a handler locks
+// it and throws) leaves nothing on the object it was to go to, and reports the handler's error
+// (ops#238: a FreeCADMoveUndo1 property stayed there, and the removal's error was reported)
+TEST_F(MoveProperty, undoneMoveCannotLeave)
+{
+    ErrorCollector errors;
+    doc1->openTransaction("Move Property");
+    ASSERT_NE(varSet1Doc1->moveDynamicProperty(prop, varSet2Doc1), nullptr);
+    doc1->commitTransaction();
+    App::Property* locked = nullptr;
+    {
+        fastsignals::scoped_connection conn =
+            App::GetApplication().signalMoveDynamicProperty.connect(
+                [&locked](const App::Property& moved, const App::DocumentObject&) {
+                    locked = const_cast<App::Property*>(&moved);
+                    locked->setStatus(App::Property::LockDynamic, true);
+                    throw Base::RuntimeError("handler failed");
+                }
+            );
+        EXPECT_TRUE(doc1->undo());
+    }
+    ASSERT_NE(locked, nullptr);
+    // locked, the property stays where it was, under the temporary name
+    EXPECT_EQ(locked->getContainer(), varSet2Doc1);
+    EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>({"FreeCADMoveUndo1"}));
+    EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>());
+    ASSERT_EQ(errors.errors.size(), 1U);
+    EXPECT_NE(errors.errors.front().find("handler failed"), std::string::npos)
+        << errors.errors.front();
+    locked->setStatus(App::Property::LockDynamic, false);
+    doc1->clearUndos();
+}
+
+// Tests whether a move into an object then removed, whose own property had given the name up,
+// comes out right through undo, redo and undo (ops#238: on redo the property moves into the
+// removed object early, where its own property has the name again; it keeps the temporary name
+// there)
+TEST_F(MoveProperty, intoRemovedObjectWhoseNameCameBack)
+{
+    auto* own = freecad_cast<App::PropertyInteger*>(
+        varSet2Doc1->addDynamicProperty("App::PropertyInteger", "Variable", "Variables")
+    );
+    own->setValue(5);
+    ErrorCollector errors;
+    doc1->openTransaction("Move Property");
+    EXPECT_TRUE(varSet2Doc1->renameDynamicProperty(own, "Own"));
+    ASSERT_NE(varSet1Doc1->moveDynamicProperty(prop, varSet2Doc1), nullptr);
+    doc1->removeObject(varSet2Doc1->getNameInDocument());
+    doc1->commitTransaction();
+    auto assertBefore = [this](const char* step) {
+        ASSERT_EQ(doc1->getObject("VarSet001"), varSet2Doc1) << step;
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"})) << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value) << step;
+        EXPECT_EQ(dynamicNames(varSet2Doc1), std::vector<std::string>({"Variable"})) << step;
+        EXPECT_EQ(intValue(varSet2Doc1, "Variable"), 5) << step;
+    };
+    EXPECT_TRUE(doc1->undo());
+    assertBefore("undo");
+    EXPECT_TRUE(doc1->redo());
+    EXPECT_EQ(doc1->getObject("VarSet001"), nullptr);
+    EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>());
+    EXPECT_TRUE(doc1->undo());
+    assertBefore("second undo");
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc1->clearUndos();
+}
+
+// Tests whether a property moved to another document comes back when its source gave its name
+// to another property in the same transaction (ops#238: between documents the move is taken
+// back without a temporary name, so the rename back must come first)
+TEST_F(MoveProperty, otherDocNameTakenAtSource)
+{
+    auto* other = freecad_cast<App::PropertyInteger*>(
+        varSet1Doc1->addDynamicProperty("App::PropertyInteger", "Other", "Variables")
+    );
+    other->setValue(5);
+    ErrorCollector errors;
+    auto assertBefore = [this](const char* step) {
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Other", "Variable"}))
+            << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value) << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Other"), 5) << step;
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>()) << step;
+    };
+    for (const bool commit : {false, true}) {
+        doc1->openTransaction("Move Property");
+        ASSERT_NE(
+            varSet1Doc1->moveDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Variable"),
+                                             varSetDoc2),
+            nullptr
+        );
+        EXPECT_TRUE(
+            varSet1Doc1->renameDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Other"),
+                                               "Variable")
+        );
+        if (!commit) {
+            doc1->abortTransaction();
+            assertBefore("abort");
+            continue;
+        }
+        doc1->commitTransaction();
+        EXPECT_TRUE(doc1->undo());
+        assertBefore("undo");
+        EXPECT_TRUE(doc1->redo());
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"}));
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), 5);
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>({"Variable"}));
+        EXPECT_EQ(intValue(varSetDoc2, "Variable"), value);
+        EXPECT_TRUE(doc1->undo());
+        assertBefore("second undo");
+    }
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc1->clearUndos();
+}
+
+// Tests whether a move into an object whose creation was undone is refused (ops#238: the object
+// is held by the redo stack, which recording the move clears: phases 2 to 5 used freed memory;
+// reachable from Python with a handle on the object)
+TEST_F(MoveProperty, targetCreationUndone)
+{
+    doc1->openTransaction("Create");
+    auto* target = doc1->addObject("App::VarSet", "Target");
+    doc1->commitTransaction();
+    EXPECT_TRUE(doc1->undo());
+    ASSERT_FALSE(target->isAttachedToDocument());
+    doc1->openTransaction("Move Property");
+    EXPECT_THROW(varSet1Doc1->moveDynamicProperty(prop, target), Base::RuntimeError);
+    doc1->commitTransaction();
+    EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"}));
+    EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value);
+    doc1->clearUndos();
+}
+
+// Tests otherDocNameTakenAtSource with both documents recording (a global transaction), undone
+// and redone document by document, the source's first (ops#238). The other order is part of the
+// parked cross-document work (V3/T4 on ops#238): the target document's mirror entry moves the
+// property back while the source document's rename still holds the name.
+TEST_F(MoveProperty, otherDocNameTakenAtSourceBothRecording)
+{
+    auto* other = freecad_cast<App::PropertyInteger*>(
+        varSet1Doc1->addDynamicProperty("App::PropertyInteger", "Other", "Variables")
+    );
+    other->setValue(5);
+    ErrorCollector errors;
+    auto assertBefore = [this](const std::string& step) {
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Other", "Variable"}))
+            << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), value) << step;
+        EXPECT_EQ(intValue(varSet1Doc1, "Other"), 5) << step;
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>()) << step;
+    };
+    {
+        const std::string order = "doc1 first: ";
+        auto both = [&](bool undo) {
+            for (auto* doc : {doc1, doc2}) {
+                EXPECT_TRUE(undo ? doc->undo() : doc->redo()) << order << doc->getName();
+            }
+        };
+        int tid = App::GetApplication().openGlobalTransaction({.name = "Move Property"});
+        ASSERT_NE(
+            varSet1Doc1->moveDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Variable"),
+                                             varSetDoc2),
+            nullptr
+        );
+        EXPECT_TRUE(
+            varSet1Doc1->renameDynamicProperty(varSet1Doc1->getDynamicPropertyByName("Other"),
+                                               "Variable")
+        );
+        App::GetApplication().commitTransaction(tid);
+        both(true);
+        assertBefore(order + "undo");
+        both(false);
+        EXPECT_EQ(dynamicNames(varSet1Doc1), std::vector<std::string>({"Variable"})) << order;
+        EXPECT_EQ(intValue(varSet1Doc1, "Variable"), 5) << order;
+        EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>({"Variable"})) << order;
+        EXPECT_EQ(intValue(varSetDoc2, "Variable"), value) << order;
+        both(true);
+        assertBefore(order + "second undo");
+    }
+    EXPECT_EQ(errors.errors, std::vector<std::string>());
+    doc1->clearUndos();
+    doc2->clearUndos();
+}
+
+// Tests whether a property added to an object created under a global transaction and moved to
+// another document goes back into that object when both documents are undone, source first,
+// and returns with redo (ops#238 round 2: undoing the target document moves it into the object
+// the source document already removed; refusing detached targets had left it on the target)
+TEST_F(MoveProperty, otherDocIntoCreatedObjectBothRecording)
+{
+    ErrorCollector errors;
+    int tid = App::GetApplication().openGlobalTransaction({.name = "Move Property"});
+    auto* source = doc1->addObject("App::VarSet", "Source");
+    auto* added = freecad_cast<App::PropertyInteger*>(
+        source->addDynamicProperty("App::PropertyInteger", "Extra", "Variables")
+    );
+    added->setValue(7);
+    ASSERT_NE(source->moveDynamicProperty(added, varSetDoc2), nullptr);
+    App::GetApplication().commitTransaction(tid);
+    EXPECT_TRUE(doc1->undo());
+    EXPECT_TRUE(doc2->undo());
+    EXPECT_EQ(doc1->getObject("Source"), nullptr);
+    EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>());
+    EXPECT_EQ(dynamicNames(source), std::vector<std::string>({"Extra"}));
+    EXPECT_TRUE(doc1->redo());
+    EXPECT_TRUE(doc2->redo());
+    ASSERT_EQ(doc1->getObject("Source"), source);
+    EXPECT_EQ(dynamicNames(source), std::vector<std::string>());
+    EXPECT_EQ(dynamicNames(varSetDoc2), std::vector<std::string>({"Extra"}));
+    EXPECT_EQ(intValue(varSetDoc2, "Extra"), 7);
+    // (moving into the detached object, a handler rewriting references to it reports it as an
+    // invalid object, as before the refusal; the move is completed)
+    ASSERT_EQ(errors.errors.size(), 1U);
+    EXPECT_NE(errors.errors.front().find("invalid object"), std::string::npos)
+        << errors.errors.front();
+    doc1->clearUndos();
+    doc2->clearUndos();
+    for (const auto& name : dynamicNames(varSetDoc2)) {
+        varSetDoc2->removeDynamicProperty(name.c_str());
+    }
+}

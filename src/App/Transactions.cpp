@@ -312,6 +312,27 @@ void Transaction::apply(Document& Doc, bool forward)
             for (auto& info : index) {
                 info.second->applyChnPass(const_cast<TransactionalObject*>(info.first), pass);
             }
+            if (pass != TransactionObject::ChnPass::Renames) {
+                continue;
+            }
+            // FreeCAD-CH (ops#238): the moves back from another document left by the Moves pass,
+            // their names now freed by the renames
+            for (auto& info : index) {
+                auto* to = info.second;
+                if (to->status != TransactionObject::New && to->status != TransactionObject::Chn) {
+                    continue;
+                }
+                for (auto& [key, data] : to->_PropChangeMap) {
+                    if (data.movedEarly || !data.propertyTarget || !data.target) {
+                        continue;
+                    }
+                    data.movedEarly = true;
+                    auto* pcObj = const_cast<TransactionalObject*>(info.first);
+                    applyEntry(pcObj, data.name, [&]() {
+                        to->applyMove(pcObj, data);
+                    });
+                }
+            }
         }
     }
     catch (Base::Exception& e) {
@@ -551,6 +572,24 @@ void TransactionObject::applyChnPass(TransactionalObject* pcObj, ChnPass pass)
                 if (!isMove(data) || data.movedEarly) {
                     continue;
                 }
+                // FreeCAD-CH (ops#238): a move back from another document goes under its own name
+                // (no temporary one); while that name is still taken at its source (to be freed by
+                // the Renames pass), the move is left for Transaction::apply, after the renames
+                // (a property added in the transaction is only removed; the source is read only
+                // once the moved property is found, as applyMove does)
+                if (!data.added && data.target->isAttachedToDocument()) {
+                    auto* obj = freecad_cast<DocumentObject*>(data.target);
+                    const char* current = obj ? obj->getPropertyName(data.propertyTarget) : nullptr;
+                    auto* source = current ? freecad_cast<DocumentObject*>(data.source) : nullptr;
+                    if (current && source && source != obj
+                        && source->getDocument() != obj->getDocument()
+                        && source->getPropertyByName(
+                            data.nameOrig.empty() ? current : data.nameOrig.c_str())) {
+                        continue;
+                    }
+                }
+                // (marked as moved: whatever is left is applied after the renames)
+                data.movedEarly = true;
                 // This means we are undoing/redoing a move operation
                 applyEntry(pcObj, data.name, [&]() {
                     applyMove(pcObj, data);
@@ -706,7 +745,6 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
     if (obj == nullptr) {
         return;
     }
-    auto* newTarget = freecad_cast<DocumentObject*>(data.source);
 
     // FreeCAD-CH (ops#235): the moved property itself, before anything uses the pointer;
     // getPropertyName() is safe with a property that no longer exists
@@ -715,6 +753,7 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
         FC_WARN("moved property " << obj->getFullName() << '.' << data.name << " not found");
         return;
     }
+    auto* newTarget = freecad_cast<DocumentObject*>(data.source);
 
     if (data.propertyTarget->getFullName() == "?") {
         // This is an entry we should ignore because it was
@@ -760,9 +799,22 @@ void TransactionObject::applyMove(TransactionalObject* /*pcObj*/, PropData& data
     }
     catch (...) {
         // FreeCAD-CH (ops#238): a move whose handler threw is completed: the property is on
-        // newTarget under the temporary name, to be named and restored by the next passes
+        // newTarget under the temporary name, to be named and restored by the next passes. One
+        // that couldn't leave its object (removal failed) is named back, and its copy on newTarget
+        // removed (after the rename, which a move entry would ignore)
         if (obj->getPropertyName(data.propertyTarget)) {
-            obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+            try {
+                obj->renameDynamicProperty(data.propertyTarget, name.c_str());
+            }
+            catch (...) {
+            }
+            if (newTarget->getDynamicPropertyByName(tmp.c_str())) {
+                try {
+                    newTarget->removeDynamicProperty(tmp.c_str());
+                }
+                catch (...) {
+                }
+            }
         }
         else {
             data.restored = newTarget->getDynamicPropertyByName(tmp.c_str());

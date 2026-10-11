@@ -996,15 +996,7 @@ void DocumentObject::arrangeMoveProperty(Property* toBeMovedProp,
                                          Property* newProp,
                                          DocumentObject* targetObj)
 {
-    // register the move in the document for transactions
-    auto* objOfToBeMovedProp = freecad_cast<DocumentObject*>(toBeMovedProp->getContainer());
-    if (_pDoc) {
-        _pDoc->arrangeMovePropertyOfObject(this, toBeMovedProp, targetObj, newProp);
-    }
-    if  (targetObj->getDocument() != objOfToBeMovedProp->getDocument()) {
-        // register the move in the target document as well
-        targetObj->_pDoc->arrangeMovePropertyOfObject(targetObj, toBeMovedProp, targetObj, newProp);
-    }
+    // (the move is registered for transactions by moveDynamicProperty)
 
     // Phase 2: Move an expression that targets the current property
     moveExpressionTargetingProp(toBeMovedProp, newProp, targetObj);
@@ -1060,6 +1052,17 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
                   "Object " << getFullName() << " is being destroyed");;
     }
 
+    // FreeCAD-CH (ops#238): the target's document is used throughout (an object never added to a
+    // document has none), and a target not in its document (removed, or its creation undone) is
+    // held by a transaction that recording the move can free (the redo stack is cleared). Undo and
+    // redo may move into one: from another document, into an object its own document removed
+    if (!targetObj->_pDoc || targetObj->testStatus(ObjectStatus::Destroy)
+        || (!targetObj->isAttachedToDocument() && !_pDoc->isPerformingTransaction())) {
+        FC_THROWM(Base::RuntimeError,
+                  "Target container of property " << propertyName
+                                                  << " is not in a document or is being destroyed");
+    }
+
     if (prop->isDerivedFrom<PropertyLinkBase>()) {
         clearOutListCache();
     }
@@ -1081,11 +1084,26 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
                                              << targetObj->getFullName());
     }
 
+    // register the move in the document for transactions, and in the target's document as well
+    // FreeCAD-CH (ops#238): a failure here takes phase 1 back, so the completion below never
+    // finishes a move no transaction knows of. (If only the second recording fails, the source
+    // document's transaction keeps an entry for the removed property: out of memory only.)
+    try {
+        _pDoc->arrangeMovePropertyOfObject(this, prop, targetObj, newProp);
+        if (targetObj->_pDoc != _pDoc) {
+            targetObj->_pDoc->arrangeMovePropertyOfObject(targetObj, prop, targetObj, newProp);
+        }
+    }
+    catch (...) {
+        targetObj->dynamicProps.removeDynamicProperty(propertyName);
+        throw;
+    }
+
     // Phases 2, 3, and 4
     // FreeCAD-CH (ops#238): a failure in phases 2 to 4 (a handler of the move that throws) used to
-    // leave the property on both objects. The move is recorded once phase 2 starts, so it is
-    // completed: the value pasted (the failure can come before phase 3), the source's property
-    // removed, then the exception passed on
+    // leave the property on both objects. The move is recorded, so it is completed: the value
+    // pasted (the failure can come before phase 3), the source's property removed, then the
+    // exception passed on
     std::exception_ptr error;
     try {
         arrangeMoveProperty(prop, newProp, targetObj);
@@ -1101,7 +1119,17 @@ Property* DocumentObject::moveDynamicProperty(Property* prop,
     }
 
     // Phase 5 remove the property from the source object
-    if (!dynamicProps.removeDynamicProperty(propertyName)) {
+    // FreeCAD-CH (ops#238): after a failure, the first exception is the one passed on
+    bool removed = false;
+    try {
+        removed = dynamicProps.removeDynamicProperty(propertyName);
+    }
+    catch (...) {
+        if (!error) {
+            throw;
+        }
+    }
+    if (!removed) {
         if (error) {
             std::rethrow_exception(error);
         }
