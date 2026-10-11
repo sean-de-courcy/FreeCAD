@@ -1108,8 +1108,8 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToPlaneThroughProfileSymmetric(self):
         """The face x = 2 of the box x in [2, 6], y in [-4, 4], z in [0, 2], symmetric about the
         profile plane and across the profile itself (x in [1, 3]): Symmetric passes the face
-        itself to both sides, as Two sides does, and gives the same result (ops#272). Today both
-        are valid and add nothing, without an error (ops#289)."""
+        itself to both sides, as Two sides does, and gives the same result (ops#272). Both fail
+        with an error, since the face cuts through the profile (ops#289)."""
         results = {}
         for sideType in ("Two sides", "Symmetric"):
             body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -1495,6 +1495,55 @@ class TestRevolve(unittest.TestCase):
         tube.rotate(FreeCAD.Vector(), up, -90 - degrees)
         self.assertGreater(tube.Volume, 2.5)
         self.assertSameSolid(revolution.Shape, block.Shape.fuse(tube))
+
+    def testRevolutionUpToFaceThroughProfile(self):
+        """The face x = 2 of the box x in [2, 6], y in [-4, 4], z in [0, 2] cuts through the
+        profile x in [1, 3]: its points at radius < 2 never meet the plane, those beyond it at
+        once. The Revolution or Groove up to it fails with an error, on one side, two sides and
+        Symmetric; before, it was valid and added or removed nothing (ops#289). So does the
+        unbounded plane x = 2 (a datum plane)."""
+        for kind in ("Revolution", "Groove"):
+            for sideType in ("One side", "Two sides", "Symmetric"):
+                for datum in (False, True):
+                    with self.subTest(kind=kind, sideType=sideType, datum=datum):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        block = body.newObject("PartDesign::AdditiveBox", "Block")
+                        block.Length = 4
+                        block.Width = 8
+                        block.Height = 2
+                        block.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(2, -4, 0), FreeCAD.Rotation()
+                        )
+                        self.Doc.recompute()
+                        if datum:
+                            plane = body.newObject("PartDesign::Plane", "Wall")
+                            plane.MapMode = "Deactivated"
+                            plane.Placement = FreeCAD.Placement(
+                                FreeCAD.Vector(2, 0, 0),
+                                FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90),
+                            )
+                            upTo = (plane, [""])
+                        else:
+                            [face] = [
+                                "Face%d" % (i + 1)
+                                for i, f in enumerate(block.Shape.Faces)
+                                if abs(f.BoundBox.XMin - 2) < 1e-9
+                                and abs(f.BoundBox.XMax - 2) < 1e-9
+                            ]
+                            upTo = (block, [face])
+                        revolution = body.newObject("PartDesign::" + kind, kind)
+                        sketch = self.profileAcross(body)
+                        revolution.Profile = sketch
+                        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                        revolution.SideType = sideType
+                        revolution.Type = "UpToFace"
+                        revolution.UpToFace = upTo
+                        if sideType == "Two sides":
+                            revolution.Type2 = "UpToFace"
+                            revolution.UpToFace2 = upTo
+                        self.Doc.recompute()
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn("cuts through the profile", revolution.getStatusString())
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never

@@ -35,6 +35,7 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -235,6 +236,62 @@ bool reachesPlane(const TopoShape& face, const gp_Pln& plane)
         );
     }
     return distance.Value() <= Precision::Confusion();
+}
+
+// Whether the up-to face cuts through the profile: the profile's points on the face are already
+// there, those on one side of it meet it at once, and the others only later or never. BRepFeat
+// then revolved nothing, with no error, on one side, two sides and Symmetric (ops#289). A face
+// that only touches the profile's boundary doesn't cut through it.
+bool cutsThroughProfile(const TopoShape& profile, const TopoShape& upToFace)
+{
+    if (upToFace.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE) {
+        return false;
+    }
+    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
+    TopoDS_Shape crossing;
+    try {
+        if (isUnboundedFace(upToFace)) {
+            // A boolean can't take an unbounded face; a plane goes as a plane.
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) {
+                return false;
+            }
+            BRepAlgoAPI_Section section(profile.getShape(), surface.Plane());
+            if (!section.IsDone()) {
+                return false;
+            }
+            crossing = section.Shape();
+        }
+        else {
+            BRepAlgoAPI_Section section(profile.getShape(), face);
+            if (!section.IsDone()) {
+                return false;
+            }
+            crossing = section.Shape();
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
+        const double tolerance
+            = std::max(Precision::Confusion(), BRep_Tool::Tolerance(profileFace));
+        for (TopExp_Explorer edges(crossing, TopAbs_EDGE); edges.More(); edges.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+            for (double fraction : {0.25, 0.5, 0.75}) {
+                const gp_Pnt point = curve.Value(
+                    curve.FirstParameter()
+                    + fraction * (curve.LastParameter() - curve.FirstParameter())
+                );
+                BRepClass_FaceClassifier classifier(profileFace, point, tolerance);
+                if (classifier.State() == TopAbs_IN) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 // The whole surface a face lies on: an unbounded plane, or a cylinder or cone unbounded along
@@ -1051,6 +1108,12 @@ TopoShape Revolved::tryToRevolveToFace(
     if (sketchshape.countSubShapes(TopAbs_FACE) > 1) {
         throw Base::RuntimeError(
             "Revolution: Internal error: several profile faces passed to tryToRevolveToFace()"
+        );
+    }
+    if (cutsThroughProfile(sketchshape, upToFace)) {
+        throw Base::RuntimeError(
+            "Revolution: the up-to face cuts through the profile, so part of the profile can't "
+            "revolve up to it"
         );
     }
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
