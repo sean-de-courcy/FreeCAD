@@ -771,7 +771,7 @@ bool TaskFeaturePick::sameElement(
     // both are compared without it, in their own frame. A dependent copy (a shape binder with a
     // support, which traces it: ops#244) globally, where it is where the original is.
     auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
-    const bool placed = binder && !binder->Support.getValues().empty();
+    const bool placed = binder && binder->TraceSupport.getValue();
     TopoDS_Shape before = elementShape(original, sub, placed);
     TopoDS_Shape after = elementShape(copy, sub, placed);
     // The reference is already broken on the original: on a copy that has the element it would

@@ -30,8 +30,10 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <Precision.hxx>
 
 
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,6 +41,7 @@
 
 #include <App/Application.h>
 #include <App/Document.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Datums.h>
@@ -151,7 +154,23 @@ bool ShapeBinder::hasPlacementChanged() const
 {
     Part::TopoShape shape(updatedShape());
     Base::Placement placement(shape.getTransform());
-    return this->Placement.getValue() != placement;
+    // FreeCAD-CH (ops#244, PR 244 review M2): within round-off. The transform is computed from
+    // the binder's own global placement, so it differs in the last bits once the binder has
+    // moved: compared exactly, a container's Placement set again to the same value (by its
+    // expression, in the next pass of a recompute) touched the binder once more, and it was left
+    // touched, a recompute behind
+    const Base::Placement& current = this->Placement.getValue();
+    if (!current.getPosition().IsEqual(placement.getPosition(), Precision::Confusion())) {
+        return true;
+    }
+    // the angle between the rotations, from the vector part of their difference (sin of half
+    // the angle), which stays exact near zero, unlike the quaternions' scalar product
+    double x = 0;
+    double y = 0;
+    double z = 0;
+    double w = 0;
+    (current.getRotation().inverse() * placement.getRotation()).getValue(x, y, z, w);
+    return 2 * std::sqrt(x * x + y * y + z * z) > Precision::Angular();
 }
 
 App::DocumentObjectExecReturn* ShapeBinder::execute()
@@ -404,6 +423,18 @@ void ShapeBinder::slotChangedObject(const App::DocumentObject& Obj, const App::P
         return;
     }
     if (!TraceSupport.getValue()) {
+        return;
+    }
+    // FreeCAD-CH (ops#244, PR 244 review H1, M1): the binder's place depends on its container's
+    // too, so it is recomputed when it enters or leaves one (a copy added to its body after its
+    // first recompute at the root, PartDesign_MoveFeature, a drag in the tree): a Group change
+    // alone touched nothing, and it kept its old place, silently
+    auto* group = Obj.getExtensionByType<App::GeoFeatureGroupExtension>(true);
+    if (group && &Prop == &group->Group) {
+        if ((group->hasObject(this, true) || !App::GeoFeatureGroupExtension::getGroupOfObject(this))
+            && hasPlacementChanged()) {
+            enforceRecompute();
+        }
         return;
     }
     if (!Prop.isDerivedFrom<App::PropertyPlacement>()) {

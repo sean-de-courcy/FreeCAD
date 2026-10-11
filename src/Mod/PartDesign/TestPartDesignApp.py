@@ -39,6 +39,7 @@ from PartDesignTests.TestShapeBinder import TestSubShapeBinder
 from PartDesignTests.TestShapeBinder import (
     TestShapeBinderOfACoordinateSystem,
     TestShapeBinderOfACoordinateSystemInAPlacedBody,
+    TestTracedBinderAcrossBodies,
 )
 
 # additive/subtractive features & primitives

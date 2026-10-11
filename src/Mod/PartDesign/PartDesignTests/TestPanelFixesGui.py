@@ -725,6 +725,45 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pipe.Spine[0].TraceSupport)
         self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
+    def testPipeDependentCopyIntoAPlacedBody(self):
+        """PR 244 review H1: testPipeDependentCopyInAPlacedBody's model with the pipe's body moved
+        by (1, 2, 10) and turned 30 degrees about X, and its 2 x 2 profile placed in it at the
+        bottom of the spine (globally the square around (5, 0, 0) in the plane z = 0). The panel
+        recomputes the copy at the root, then adds it to the body: it kept the place it had at
+        the root, so the spine sat off by the body's placement, silently. Its edge is where the
+        box's is, globally at x = 5, and the pipe sweeps the profile 10 up: V = 40."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(5, 0, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        self.body = models.body(self.doc)
+        self.body.Placement = App.Placement(V(1, 2, 10), App.Rotation(V(1, 0, 0), 30))
+        bottom = self.body.Placement.inverse().multiply(App.Placement(V(5, 0, 0), App.Rotation()))
+        self.profile = models.sketch(
+            self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body, placement=bottom
+        )
+        self.doc.recompute()
+        [sub] = [
+            f"Edge{i}"
+            for i, e in enumerate(box.Shape.Edges, 1)
+            if (e.CenterOfMass - V(0, 0, 5)).Length < 1e-6
+        ]
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (box, [sub])
+        self.doc.recompute()
+        self.edit(pipe)
+        self.answerModals("radioDependent")
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.assertIsNot(pipe.Spine[0], box)
+        self.assertTrue(pipe.Spine[0].TraceSupport)
+        self.doc.recompute()
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+
     def testPipeCopyAbortedWithThePipe(self):
         """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so
         the pipe fails. OK copies the spine from outside the body, recomputes it, then fails on
