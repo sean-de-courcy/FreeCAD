@@ -3072,19 +3072,19 @@ bool followBase(FilletBase& fillet)
             // A guessed edge stays a guess where it goes (policy D). Its record's edges go to
             // the new base's edges at their places: the original, if it has one there (else the
             // record keeps only its kind), and the alternatives (each dropped without one).
+            // The original's name and fingerprint are the old base's (ops#275): the new base can
+            // carry the same mapped names elsewhere (a Box for a Box), and a record without a
+            // fingerprint would snap back to that edge by name alone. Both go, so the original
+            // never snaps back across a base change; Mark broken copied the fingerprint into the
+            // rejection too (ops#268).
             if (i < oldRecords.size() && !oldRecords[i].guess.empty()) {
                 auto guess = oldRecords[i].guess;
                 const int origId = Data::indexOfElement(guess.origIndex, "Edge");
                 const auto origAt = origId > 0 ? placesOf(origId) : std::vector<int>();
-                if (origAt.size() == 1) {
-                    guess.origIndex = "Edge" + std::to_string(origAt.front());
-                }
-                else {
-                    guess.origIndex.clear();
-                    guess.origName.clear();
-                    // the old base's: Mark broken copied it into the rejection (ops#268)
-                    guess.origFingerprint.clear();
-                }
+                guess.origIndex =
+                    origAt.size() == 1 ? "Edge" + std::to_string(origAt.front()) : std::string();
+                guess.origName.clear();
+                guess.origFingerprint.clear();
                 std::vector<App::GuessRecord::Alternative> alternatives;
                 for (auto alternative : guess.alternatives) {
                     const int id = Data::indexOfElement(alternative.index, "Edge");

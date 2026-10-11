@@ -336,7 +336,7 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     if (entry && !entry->headline.empty()) {
         ss << entry->headline;
     }
-    else if (guess.kind == "rejected" && guess.origIndex.empty()) {
+    else if (guess.kind == "rejected" && guess.origIndex.empty() && guess.origName.empty()) {
         // Mark broken on a record that lost its original (ops#268): the missing link holds the
         // rejected pick, and "Missing edge reference: Edge3, rejected: Edge3" read as a
         // contradiction

@@ -692,11 +692,12 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
         if (replaced) {
             App::DocumentObject* target = replaced == oldObj ? newObj : oldObj;
             auto links = linksOf(prop);
-            // "Now contains the target, no longer the replaced object" is taken as proof that an
-            // earlier paste moved this property itself (ops#268). For a list it's weaker: an owner
-            // that rewrote [A, C] to [B] would lose C here, as its copy [B, C] isn't pasted. No
-            // owner in the tree does that today.
-            if (links != copiedLinks[i] && has(links.first, target) && !has(links.first, replaced)) {
+            // An earlier paste moved this property itself (ops#268) when it now links the same
+            // objects as its copy: the target, no longer the replaced object, and nothing else
+            // dropped. An owner that rewrote [A, C] to [B] doesn't match the copy [B, C], so the
+            // copy is pasted and C kept.
+            if (links != copiedLinks[i] && has(links.first, target) && !has(links.first, replaced)
+                && links.first == linksOf(v.second.get()).first) {
                 continue;
             }
         }

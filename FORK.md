@@ -272,7 +272,8 @@ names it.
 | `fix/254-symmetric-upto-sector` | fix | ops#254 | - | `fix/240-upto-revolution-naming` `d6547787b9` (fork PR 235) | `23a45e0cf8` (fork PR 239), 2026-10-11 | never (fork fix) |
 | `fix/244-binder-global-position` | fix | ops#244 | - | `integration` `e672115cd6` | `1e53a9110f` (fork PR 244), 2026-10-11 | never (fork fix) |
 | `fix/244-copy-followups` | fix | ops#244 | - | `fix/244-binder-global-position` `09ebf571d3` (stacked on fork PR 244) | `c95e01f4a5` (fork PR 246), 2026-10-11 | never (fork fix) |
-| `fix/268-replace-followups` | fix | ops#268 | - | `integration` `23a45e0cf8` | (fork PR 247) | never (fork fix) |
+| `fix/268-replace-followups` | fix | ops#268 | - | `integration` `23a45e0cf8` | `ecd1e20a39` (fork PR 247), 2026-10-11 | never (fork fix) |
+| `fix/part-minors-256-275` | fix | ops#268 ops#275 ops#256 | - | `fix/268-replace-followups` `75fb4ef8e1` (stacked on fork PR 247) | (fork PR 248) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
