@@ -500,6 +500,9 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 false,
                 RevolMethod::TwoAngles
             );
+            // Its start face (side 2's end, the turned profile) is marked: built as two solids,
+            // the profile's names are on the seam (PR 243 round 4).
+            markSingleStartCap(result, sketchshape);
             addRevolution(std::move(result));
         }
         else {
@@ -540,6 +543,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             && revolMode == Part::RevolMode::CutFromBase;
         if (method == RevolMethod::Angle || isThroughAll) {
             generateRevolution(result, sketchshape, gp_Ax1(pnt, dir), angle, 0.0, true, false, method);
+            // One solid, as Two sides by two angles: its start face is marked
+            markSingleStartCap(result, sketchshape);
             addRevolution(std::move(result));
         }
         else {

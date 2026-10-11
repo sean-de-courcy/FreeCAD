@@ -836,6 +836,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         invObjLoc
                     );
                     if (!prism1.isNull() && !prism1.getShape().IsNull()) {
+                        markSingleStartCap(prism1, sketchshape);
                         prisms.push_back(prism1);
                     }
                 }
@@ -896,7 +897,17 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 "Side 2 can't reach its face: the face lies behind side 2."
             );
 
-            if (!hasStartOffset && method1LengthBased && method2 != "UpToFirst" && noTaper) {
+            // Untapered from the profile plane, the two sides are one prism, from one side's end
+            // to the other's. Its start cap, the moved profile, is marked: built apart, the
+            // profile's names are on the seam (PR 243 round 4). In V2 it starts from side 2's end
+            // whenever side 2 has a length, so that the far cap is side 1's end, named as side
+            // 1's far cap is when the sides are built apart (side 2's has the copy section).
+            const bool fromSide1End = !hasStartOffset && method1LengthBased
+                && method2 != "UpToFirst" && noTaper;
+            const bool fromSide2End = !hasStartOffset && method2LengthBased && method != "UpToFirst"
+                && noTaper;
+            const bool v2 = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+            if (fromSide1End && !(v2 && fromSide2End)) {
                 gp_Trsf start_transform;
                 start_transform.SetTranslation(gp_Vec(dir) * L);
 
@@ -920,10 +931,12 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     return new App::DocumentObjectExecReturn(side2Reversed);
                 }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
+                    // From side 1's end: the far cap is side 2's
+                    markSingleStartCap(prism, sketchshape, true);
                     prisms.push_back(prism);
                 }
             }
-            else if (!hasStartOffset && method2LengthBased && method != "UpToFirst" && noTaper) {
+            else if (fromSide2End) {
                 gp_Trsf start_transform;
                 start_transform.SetTranslation(gp_Vec(dir).Reversed() * L2);
 
@@ -947,6 +960,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     return new App::DocumentObjectExecReturn(side1Reversed);
                 }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
+                    markSingleStartCap(prism, sketchshape);
                     prisms.push_back(prism);
                 }
             }

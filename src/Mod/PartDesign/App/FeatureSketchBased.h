@@ -200,6 +200,24 @@ protected:
         double offset
     );
 
+    /** In V2, mark the start cap of a feature's two sides built as one primitive (ops#255, PR
+     * 243 round 4): the elements whose names are all the profile's, i.e. the moved profile the
+     * primitive starts from, get the section `_;_;<feature>;CPY;0;<type>;0;MOD;_`. Built as two
+     * solids, the profile's names are on the seam at the profile plane (side 2's with CPY;2), so
+     * a reference to the cap would move to the seam. Marked, it breaks instead, and so does a
+     * reference to the seam when the sides are built as one again. Index 0: no side, since the
+     * single primitive has no second side to be a copy of.
+     * With `farCapIsSide2` (a primitive from side 1's end to side 2's), the far cap, the elements
+     * mapped as the profile's partners (MAPPER_FLAG_PROJECTION), gets side 2's section (CPY;2),
+     * as side 2's far cap has it when the sides are built apart: else its names are side 1's far
+     * cap's. The other elements keep their names.
+     */
+    void markSingleStartCap(
+        TopoShape& primitive,
+        const TopoShape& profile,
+        bool farCapIsSide2 = false
+    ) const;
+
     /// Create a shape with shapes and faces from a given LinkSubList
     /// return the face count or 2 if a unique full shape is selected
     static int getUpToShapeFromLinkSubList(

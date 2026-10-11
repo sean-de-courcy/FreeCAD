@@ -905,11 +905,12 @@ class PointOnSideOneEdgeOfTaperedTwoSidedPocket(FilletSideOneEdgeOfTaperedTwoSid
 
 
 class FilletMergedEdgeOfSymmetricToOneSide(Scenario):
-    """PR 243 round 3 (Sonnet M2): a Pad of the square x, y -5..5, Symmetric, 10 long, with
-    Refine on, so each corner edge is one edge from z = -5 to 5, merged from the two sides'
-    edges (side 2's named with the copy section); a fillet, radius 0.5, on the corner edge at
-    (-5, -5). The Pad is switched to One side: the corner edge runs from z = 0 to 10, and the
-    fillet follows it."""
+    """PR 243 round 3 (Sonnet M2), reworked in round 4: a Pad of the square x, y -5..5,
+    Symmetric up to a datum plane at z = 5, with Refine on. Symmetric up to a face mirrors side
+    1's prism for side 2, which is marked as a copy, and Refine merges each corner edge into one
+    edge from z = -5 to 5, named from both sides' edges. A fillet, radius 0.5, on the corner edge
+    at (-5, -5). The Pad is switched to One side, up to the same plane: the corner edge runs from
+    z = 0 to 5, and the fillet follows it."""
 
     area = "dress-ups"
     MULTI = True
@@ -917,15 +918,19 @@ class FilletMergedEdgeOfSymmetricToOneSide(Scenario):
     oneSide = False
 
     def cornerEdge(self):
-        z = 5 if self.oneSide else 0
+        z = 2.5 if self.oneSide else 0
         return edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, z))
 
     def build(self, doc):
         body = m.body(doc)
+        plane = body.newObject("PartDesign::Plane", "AtFive")
+        plane.Placement = App.Placement(V(0, 0, 5), App.Rotation())
         profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
         pad = m.pad(body, profile, 10)
         pad.Refine = True
         pad.SideType = "Symmetric"
+        pad.Type = "UpToFace"
+        pad.UpToFace = (plane, [""])
         doc.recompute()
         fillet = body.newObject("PartDesign::Fillet", "Fillet")
         fillet.Base = (pad, self.names(pad, self.cornerEdge()))
@@ -935,6 +940,144 @@ class FilletMergedEdgeOfSymmetricToOneSide(Scenario):
     def edit(self, doc):
         doc.Pad.SideType = "One side"
         self.oneSide = True
+
+
+class FilletBottomCapEdgeOfTwoSidesToStartOffset(Scenario):
+    """PR 243 round 4 (verification F3): a Pad of the square x, y -5..5, Two sides, 5 and 5,
+    untapered, Refine off: one prism from z = 5 down to -5, so no second side. A fillet, radius
+    0.5, on the bottom cap's front edge (y = -5, z = -5). A start offset of 1 then builds the two
+    sides apart (z -4..1 and 1..6), side 2 marked as a copy, and the profile's names are on the
+    seam at z = 1. The single prism's bottom cap is the moved profile: with its names the fillet
+    moved to the seam. In V2 the cap is marked as the single prism's (CPY;0), which no build of
+    the two sides has, so the reference breaks. V1 keeps upstream's names."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("bottom_edge",)
+    offset = 0
+
+    def bottomEdge(self):
+        z = -5 + self.offset
+        return edge("line", direction=X, contains=(0, -5, z))
+
+    def expectedBottomEdge(self):
+        if self.offset and self.mode == "V2":
+            return BROKEN
+        return self.bottomEdge()
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length2 = 5
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.StartType = "Offset"
+        doc.Pad.StartOffset = 1
+        self.offset = 1
+
+
+class FilletBottomCapEdgeOfTwoSidesUpToFaceToStartOffset(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """FilletBottomCapEdgeOfTwoSidesToStartOffset with side 2 up to a datum plane at z = -5: the
+    one prism then starts from side 1's end (z = 5), and its far cap is side 2's, up to the plane.
+    The start offset builds the sides apart (z -5..1 and 1..6): side 2's bottom cap is still at
+    z = -5, now with the copy section. The fillet stays on that edge (the old name is missing, the
+    edge is where it was), and doesn't move to side 1's top cap (z = 6)."""
+
+    def expectedBottomEdge(self):
+        return edge("line", direction=X, contains=(0, -5, -5))
+
+    def build(self, doc):
+        body = m.body(doc)
+        plane = body.newObject("PartDesign::Plane", "AtMinusFive")
+        plane.Placement = App.Placement(V(0, 0, -5), App.Rotation())
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Type2 = "UpToFace"
+        pad.UpToFace2 = (plane, [""])
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.expectedBottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+
+class FilletBottomCapEdgeOfSymmetricToTapered(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """The marked start cap of a Symmetric Pad (PR 243 round 4): the square x, y -5..5,
+    Symmetric, 10 long, untapered, Refine off, is one prism from z = -5 to 5, and its bottom cap
+    is the moved profile. A fillet, radius 0.5, on the bottom cap's front edge (y = -5, z = -5).
+    A taper of 5 degrees builds the two sides apart, and the profile's names are on the seam at
+    z = 0: with them the fillet moved there. In V2 the cap is marked (CPY;0), and the tapered
+    bottom edge isn't where the old one was, so the reference breaks (the old edge is gone). The
+    solver's guess, with its warning, is the tapered bottom edge, 0.44 away (the next is 5)."""
+
+    tapered = False
+
+    def expectedBottomEdge(self):
+        if not self.tapered:
+            return self.bottomEdge()
+        y = -5 - 5 * math.tan(math.radians(5))  # the taper widens each side away from z = 0
+        return Broken(edge("line", direction=X, contains=(0, y, -5)))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        pad.SideType = "Symmetric"
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.TaperAngle = 5
+        self.tapered = True
+
+
+class FilletBottomCapEdgeOfStartOffsetToTwoSides(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """FilletBottomCapEdgeOfTwoSidesToStartOffset the other way: the Pad starts with the start
+    offset of 1 (two prisms, z -4..1 and 1..6), the fillet on side 2's bottom edge (z = -4), and
+    the offset is removed, so the sides become one prism again (z -5..5). Its bottom cap is the
+    marked start cap (CPY;0), not side 2's (CPY;2): in V2 the reference breaks, and doesn't move
+    to the top cap, which is side 1's far cap in both builds."""
+
+    offset = 1
+
+    def expectedBottomEdge(self):
+        if not self.offset and self.mode == "V2":
+            return BROKEN
+        return self.bottomEdge()
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length2 = 5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.StartType = "Profile plane"
+        doc.Pad.StartOffset = 0
+        self.offset = 0
 
 
 class FilletSideOneEdgeOfTaperedTwoSidesClipped(FilletSideOneEdgeOfTaperedTwoSides):

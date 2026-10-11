@@ -136,6 +136,8 @@ cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceSymmetricAcross.test_
 cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceUpToAndAngle.test_sketch_top_side1_V1
 cli  PartDesignTests.TestNamingScenarios.RevolutionUpToFaceBothUpTo.test_sketch_top_side1_V1
 
-reason: V1 names a Two-sides Revolution's second side and a Symmetric Pad's merged edge as upstream does: the fillet on side 1's end-face edge moves when side 1 goes up to a face, and the fillet on a refined Symmetric Pad's corner edge breaks when it goes to One side (PR 243 round 3)
+reason: V1 keeps upstream's names: a Two-sides Revolution's end-face edge under a fillet moves when side 1 goes up to a face (both sides named from the same profile edges), and a refined Symmetric Pad's merged corner edge under a fillet breaks when the Pad goes to One side (V1's refined names; not a second-side limit); an untapered Two-sides Pad's bottom-cap edge under a fillet moves when a start offset builds the sides apart, and breaks the other way (V1 has no start-cap mark) (PR 243 rounds 3 and 4)
 cli  PartDesignTests.TestNamingScenarios.RevolutionSideOneToFaceFillet.test_fillet_end_top_V1
 cli  PartDesignTests.TestNamingScenarios.FilletMergedEdgeOfSymmetricToOneSide.test_merged_edge_V1
+cli  PartDesignTests.TestNamingScenarios.FilletBottomCapEdgeOfTwoSidesToStartOffset.test_bottom_edge_V1
+cli  PartDesignTests.TestNamingScenarios.FilletBottomCapEdgeOfStartOffsetToTwoSides.test_bottom_edge_V1

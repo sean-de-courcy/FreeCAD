@@ -23,11 +23,14 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <set>
+#include <tuple>
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -64,11 +67,13 @@
 #include <App/Document.h>
 #include <App/Datums.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolver.h>
 #include <Base/Converter.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/Tools.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
 #include "FeatureSketchBased.h"
@@ -950,6 +955,76 @@ TopoShape ProfileBased::moveProfileToStart(
     transform.SetTranslation(gp_Vec(direction) * offset);
     result.move(transform);
     return result;
+}
+
+void ProfileBased::markSingleStartCap(
+    TopoShape& primitive,
+    const TopoShape& profile,
+    bool farCapIsSide2
+) const
+{
+    if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || primitive.isNull()
+        || !primitive.hasElementMap() || !profile.hasElementMap()) {
+        return;
+    }
+    constexpr std::array types {"Vertex", "Edge", "Face"};
+    std::set<std::string> profileNames;
+    for (const char* type : types) {
+        const auto count = static_cast<int>(profile.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            for (const auto& [name, sids] :
+                 profile.getElementMappedNames(Data::IndexedName::fromConst(type, i))) {
+                profileNames.insert(name.toString());
+            }
+        }
+    }
+    // Every element marked, for the caps' names
+    TopoShape marked(primitive);
+    marked.appendElementSection(getID(), Part::OpCodes::Copy, "0");
+    TopoShape markedSide2(primitive);
+    if (farCapIsSide2) {
+        markedSide2.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+    }
+    auto isPartner = [](const Data::MappedName& name) {
+        const auto sections = Data::NameAncestry::splitSections(name.toString());
+        if (sections.empty()) {
+            return false;
+        }
+        const auto& last = Data::MappedName::getDecodedMappedName(std::string(sections.back()));
+        return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION);
+    };
+
+    std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
+    bool capFound = false;
+    for (const char* type : types) {
+        const auto count = static_cast<int>(primitive.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            const auto element = Data::IndexedName::fromConst(type, i);
+            auto own = primitive.getElementMappedNames(element);
+            const bool onCap = !own.empty() && std::ranges::all_of(own, [&](const auto& named) {
+                return profileNames.contains(named.first.toString());
+            });
+            const bool onFarCap = farCapIsSide2 && !onCap && !own.empty()
+                && std::ranges::all_of(own, [&](const auto& named) {
+                       return isPartner(named.first);
+                   });
+            capFound = capFound || onCap || onFarCap;
+            // In the element's order, so its first name stays first
+            for (auto& [name, sids] : onCap ? marked.getElementMappedNames(element)
+                     : onFarCap             ? markedSide2.getElementMappedNames(element)
+                                            : own) {
+                names.emplace_back(element, name, sids);
+            }
+        }
+    }
+    if (!capFound) {
+        return;
+    }
+    // A new map, as appendElementSection() makes: the old one may be shared
+    primitive.resetElementMap(std::make_shared<Data::ElementMap>());
+    for (const auto& [element, name, sids] : names) {
+        primitive.setElementName(element, name, primitive.Tag, &sids);
+    }
 }
 
 int ProfileBased::getUpToShapeFromLinkSubList(

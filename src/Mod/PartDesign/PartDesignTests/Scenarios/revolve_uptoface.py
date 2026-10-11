@@ -437,10 +437,13 @@ class RevolutionSideOneToFaceFillet(Scenario):
     REFS = ("fillet_end_top",)
     upTo = False
 
+    endAngle = 60  # the end face the fillet is on
+    endGone = True  # after the edit
+
     def endTop(self):
-        if self.upTo:
+        if self.upTo and self.endGone:
             return BROKEN
-        return edge("line", contains=ray(60, 15, 10))
+        return edge("line", contains=ray(self.endAngle, 15, 10))
 
     def build(self, doc):
         body = m.body(doc)
@@ -469,3 +472,19 @@ class RevolutionSideOneToFaceFillet(Scenario):
         revolved.Type = "UpToFace"
         revolved.UpToFace = (self.wall, self.names(self.wall, wallFace(90, 10)))
         self.upTo = True
+
+
+
+class RevolutionSideTwoEndAfterSideOneToFace(RevolutionSideOneToFaceFillet):
+    """PR 243 round 4 (verification F3): the Revolution of RevolutionSideOneToFaceFillet, Two
+    sides by angle, is one solid; the fillet is on the top edge of side 2's end face (at -60
+    degrees, z = 10) instead. That face is the solid's start face, the turned profile. Side 1
+    going up to the wall builds the sides apart, side 2 marked as a copy, and the profile's names
+    are on the seam at 0 degrees: with them the fillet moved there. In V2 the start face is marked
+    as the single solid's (CPY;0), which no build of the two sides has, so the name is missing,
+    and the geometric search finds the edge where it was: the fillet stays on side 2's end edge.
+    V1 keeps upstream's names."""
+
+    REFS = ("fillet_end_top",)
+    endAngle = -60
+    endGone = False

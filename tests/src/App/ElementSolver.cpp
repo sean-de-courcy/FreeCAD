@@ -1552,7 +1552,7 @@ TEST(SolveOwner, nameMatchOnTheOtherSideIsNotTaken)
 
     auto outcomes = Data::solveOwner(input);
 
-    EXPECT_NE(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
 
     //   a name match on the same side is still taken
     const auto sideOneAgain = generated({profileEdge}, 7, "RVL", 'E', 1);
