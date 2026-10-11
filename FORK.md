@@ -269,7 +269,8 @@ names it.
 | `fix/265-fillet-replace-object` | fix | ops#265 | - | `fix/257-part-fillet-edge-links` `614b36a033` (stacked on fork PR 236) | `8b3b308c48` (fork PR 240), 2026-10-11 | never (fork fix) |
 | `fix/264-external-ids-per-kind` | fix | ops#264 | - | `integration` `cf1c5b7b81` | `911e04b577` (fork PR 241), 2026-10-11 | never (fork fix) |
 | `fix/262-fillet-dialog-followups` | fix | ops#262 | - | `fix/265-fillet-replace-object` `ea656ad7b2` (stacked on fork PR 240) | `957d5e6bc0` (fork PR 242), 2026-10-11 | never (fork fix) |
-| `fix/254-symmetric-upto-sector` | fix | ops#254 | - | `fix/240-upto-revolution-naming` `d6547787b9` (fork PR 235) | (fork PR 239) | never (fork fix) |
+| `fix/254-symmetric-upto-sector` | fix | ops#254 | - | `fix/240-upto-revolution-naming` `d6547787b9` (fork PR 235) | `23a45e0cf8` (fork PR 239), 2026-10-11 | never (fork fix) |
+| `fix/244-binder-global-position` | fix | ops#244 | - | `integration` `e672115cd6` | (fork PR 244) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

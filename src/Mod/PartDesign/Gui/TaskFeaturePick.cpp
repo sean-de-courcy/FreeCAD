@@ -32,6 +32,7 @@
 #include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 
 #include <algorithm>
@@ -665,7 +666,12 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             auto* doc = App::GetApplication().getActiveDocument();
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
             if (!independent) {
+                // FreeCAD-CH (ops#244, decision 40): where the original is. Without TraceSupport
+                // the binder takes the support's place in its own container, so across containers
+                // placed otherwise it moved, silently; with it, the binder follows both
+                // containers' global placements, now and after either moves.
                 shapeBinderObj->Support.setValue(obj, entity.c_str());
+                shapeBinderObj->TraceSupport.setValue(true);
             }
             else {
                 shapeProp = &shapeBinderObj->Shape;
@@ -678,6 +684,7 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             auto* shapeBinderObj = doc->addObject<PartDesign::ShapeBinder>(name.c_str());
             if (!independent) {
                 shapeBinderObj->Support.setValue(obj, entity.c_str());
+                shapeBinderObj->TraceSupport.setValue(true);  // as above (ops#244)
             }
             else {
                 std::vector<std::string> subvalues;
@@ -705,8 +712,8 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
             );
             // FreeCAD-CH (PR 224 round 2, decision 40): where the original is, as for the copies
             // above. The binder took the shape's placement, relative to the original's container:
-            // a copy into a container placed otherwise moved, silently. (A dependent binder still
-            // does, ops#244.)
+            // a copy into a container placed otherwise moved, silently. (A dependent binder traces
+            // its support instead, ops#244.)
             auto* binder = static_cast<PartDesign::ShapeBinder*>(copy);
             const Base::Placement container = App::GeoFeature::getGlobalPlacement(obj)
                 * featureObj->Placement.getValue().inverse();
@@ -724,16 +731,19 @@ App::DocumentObject* TaskFeaturePick::makeCopy(
 namespace
 {
 
-// The shape of an element, or null when it can't be read; placed by the object's Placement when
-// `placed`
+// The shape of an element, or null when it can't be read; placed globally (by the object's global
+// placement) when `placed`
 TopoDS_Shape elementShape(App::DocumentObject* obj, const std::string& sub, bool placed)
 {
-    const Part::ShapeOptions options = placed
-        ? Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-            | Part::ShapeOption::Transform
-        : Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink;
+    const Part::ShapeOptions options = Part::ShapeOption::NeedSubElement
+        | Part::ShapeOption::ResolveLink;
     try {
-        return Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
+        TopoDS_Shape shape = Part::Feature::getTopoShape(obj, options, sub.c_str()).getShape();
+        if (placed && !shape.IsNull()) {
+            const Base::Placement global = App::GeoFeature::getGlobalPlacement(obj);
+            shape = shape.Moved(TopLoc_Location(Part::TopoShape::convert(global.toMatrix())));
+        }
+        return shape;
     }
     catch (const Base::Exception&) {
     }
@@ -759,10 +769,9 @@ bool TaskFeaturePick::sameElement(
     // An independent copy keeps the original's global place, so its own Placement differs from
     // the original's when their containers are placed differently (PR 224 review M2, round 2):
     // both are compared without it, in their own frame. A dependent copy (a shape binder with a
-    // support) in the frame of its container, which a copy in the body shares with an original
-    // beside the body.
+    // support, which traces it: ops#244) globally, where it is where the original is.
     auto* binder = freecad_cast<PartDesign::ShapeBinder*>(copy);
-    const bool placed = binder && !binder->Support.getValues().empty();
+    const bool placed = binder && binder->TraceSupport.getValue();
     TopoDS_Shape before = elementShape(original, sub, placed);
     TopoDS_Shape after = elementShape(copy, sub, placed);
     // The reference is already broken on the original: on a copy that has the element it would

@@ -73,6 +73,9 @@ public:
 protected:
     Part::TopoShape updatedShape() const;
     bool hasPlacementChanged() const;
+    /// The global placements of the support's container and of this binder's (identity at the
+    /// root), which TraceSupport maps between; false without a support
+    bool containerFrames(Base::Placement& sourceCS, Base::Placement& targetCS) const;
     void handleChangedPropertyType(
         Base::XMLReader& reader,
         const char* TypeName,
@@ -88,6 +91,10 @@ private:
 
     using Connection = fastsignals::connection;
     Connection connectDocumentChangedObject;
+    // the container frames of the last traced execute (FreeCAD-CH ops#244), not saved
+    Base::Placement tracedSourceCS;
+    Base::Placement tracedTargetCS;
+    bool traced = false;
 };
 
 class PartDesignExport SubShapeBinder: public Part::Feature

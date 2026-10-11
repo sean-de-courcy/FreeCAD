@@ -695,8 +695,9 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def testPipeDependentCopyInAPlacedBody(self):
         """ops#234 round 2 (PR 219 review L5): the spine is a vertical edge of a box in another
-        body moved by (5, 0, 0). Make dependent copy: no false stop (both shapes are compared in
-        their container's frame), and the pipe sweeps the 2 x 2 profile 10 up: V = 40."""
+        body moved by (5, 0, 0). Make dependent copy: no false stop, and the pipe sweeps the
+        2 x 2 profile 10 up: V = 40. Since ops#244 the copy traces its support, so its edge is
+        where the box's is, globally at x = 5 (both are compared globally)."""
         other = models.body(self.doc)
         other.Placement.Base = V(5, 0, 0)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
@@ -721,9 +722,57 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(self.modals, ["DlgReference"])
         self.assertTrue(self.body.hasObject(pipe.Spine[0]))
         self.assertIsNot(pipe.Spine[0], box)
+        self.assertTrue(pipe.Spine[0].TraceSupport)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
+
+    def testPipeDependentCopyIntoAPlacedBody(self):
+        """PR 244 review H1: testPipeDependentCopyInAPlacedBody's model with the pipe's body moved
+        by (1, 2, 10) and turned 30 degrees about X, and its 2 x 2 profile placed in it at the
+        bottom of the spine (globally the square around (5, 0, 0) in the plane z = 0). The panel
+        recomputes the copy at the root, then adds it to the body: it kept the place it had at
+        the root, so the spine sat off by the body's placement, silently. Its edge is where the
+        box's is, globally at x = 5, and the pipe sweeps the profile 10 up: V = 40, as OK leaves
+        it."""
+        other = models.body(self.doc)
+        other.Placement.Base = V(5, 0, 0)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        box.Width = 20
+        self.body = models.body(self.doc)
+        self.body.Placement = App.Placement(V(1, 2, 10), App.Rotation(V(1, 0, 0), 30))
+        bottom = self.body.Placement.inverse().multiply(App.Placement(V(5, 0, 0), App.Rotation()))
+        self.profile = models.sketch(
+            self.doc, "Profile", models.rectangle(-1, -1, 1, 1), self.body, placement=bottom
+        )
         self.doc.recompute()
-        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        [sub] = [
+            f"Edge{i}"
+            for i, e in enumerate(box.Shape.Edges, 1)
+            if (e.CenterOfMass - V(0, 0, 5)).Length < 1e-6
+        ]
+        pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.profile
+        pipe.Spine = (box, [sub])
+        self.doc.recompute()
+        self.edit(pipe)
+        self.answerModals("radioDependent")
+        self.close(ok=True)
+        self.answering = False
+        self.assertEqual(self.modals, ["DlgReference"])
+        self.assertIsNot(pipe.Spine[0], box)
+        self.assertTrue(pipe.Spine[0].TraceSupport)
+        # as OK leaves it (PR 244 verification 1: the pipe was built along the copy's place at
+        # the root, and the copy was left touched)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
         self.assertAlmostEqual(pipe.Shape.Volume, 40, places=3)
+        swept = pipe.Shape.copy()
+        swept.Placement = self.body.getGlobalPlacement().multiply(swept.Placement)
+        box = swept.BoundBox
+        for got, want in zip(
+            (box.XMin, box.XMax, box.YMin, box.YMax, box.ZMin, box.ZMax), (4, 6, -1, 1, 0, 10)
+        ):
+            self.assertAlmostEqual(got, want, places=6, msg=box)
+        self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
     def testPipeCopyAbortedWithThePipe(self):
         """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so
@@ -1281,11 +1330,11 @@ class TestPanelFixesGui(unittest.TestCase):
         self.answerModals(choice)
         Gui.runCommand("PartDesign_NewSketch")
 
-    def newSketchOnCopiedFace(self, feature, face="Face1"):
-        """New Sketch on `face` of feature (in another body), answered Make independent copy;
-        returns the sketch, left edit."""
+    def newSketchOnCopiedFace(self, feature, face="Face1", choice="radioIndependent"):
+        """New Sketch on `face` of feature (in another body), answered with `choice` (Make
+        independent copy); returns the sketch, left edit."""
         guiDoc = Gui.getDocument(self.doc.Name)
-        self.runNewSketchOnCopiedFace(feature, face)
+        self.runNewSketchOnCopiedFace(feature, face, choice)
         self.assertTrue(
             waitFor(lambda: guiDoc.getInEdit() is not None, 10.0),
             f"no sketch in edit; modals {self.modals}, workbench {Gui.activeWorkbench().name()}",
@@ -1741,6 +1790,59 @@ class TestPanelFixesGui(unittest.TestCase):
         normal = sketch.getGlobalPlacement().Rotation.multVec(Z)
         self.assertAlmostEqual(abs(normal.x), 1, places=6)
         self.assertAlmostEqual(sketch.getGlobalPlacement().Base.x, 25, places=6)
+
+    def testNewSketchOnADependentCopyFromAPlacedBody(self):
+        """ops#244 (your answer, 2026-10-11): New Sketch on the end face x = 20 of a 20 x 10 x 10
+        box in another body, Make dependent copy, the two bodies placed differently (the box's
+        turned 90 degrees about Z and moved by (5, 0, 0), the sketch's moved by (0, 3, 2) and
+        turned 30 degrees about X). The shape binder's face is where the box's face is,
+        globally, and stays there when either body moves afterwards. It took the box's place in
+        its own body: the face shifted by the bodies' difference, silently."""
+        other = models.body(self.doc)
+        other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length = 20
+        self.body = models.body(self.doc)
+        self.body.Placement = App.Placement(V(0, 3, 2), App.Rotation(V(1, 0, 0), 30))
+        self.doc.recompute()
+        end = self.boxElement(box, "Face", lambda p: abs(p.x - 20) < 1e-6)
+        sketch = self.newSketchOnCopiedFace(box, end, "radioDependent")
+        binder = self.doc.getObject("ReferenceBox")
+        self.assertIsNotNone(binder)
+        self.assertEqual(binder.TypeId, "PartDesign::ShapeBinder")
+        self.assertTrue(self.body.hasObject(binder))
+        self.assertEqual(binder.Support, [(box, (end,))])
+        self.assertTrue(binder.TraceSupport)
+        self.assertEqual(sketch.AttachmentSupport, [(binder, ("Face1",))])
+
+        def assertWhereTheBoxFaceIs(step):
+            self.doc.recompute()
+            self.assertTrue(binder.isValid(), binder.getStatusString())
+            self.assertTrue(sketch.isValid(), sketch.getStatusString())
+            source = box.Shape.getElement(end)
+            sourceCentre = other.getGlobalPlacement().multVec(source.CenterOfMass)
+            sourceNormal = other.getGlobalPlacement().Rotation.multVec(source.normalAt(0, 0))
+            [face] = binder.Shape.Faces
+            centre = self.body.getGlobalPlacement().multVec(face.CenterOfMass)
+            self.assertLess((centre - sourceCentre).Length, 1e-6, f"{step}: {centre}")
+            # the sketch lies in the face's plane
+            placement = sketch.getGlobalPlacement()
+            normal = placement.Rotation.multVec(Z)
+            self.assertAlmostEqual(abs(normal.dot(sourceNormal)), 1, places=6, msg=step)
+            self.assertAlmostEqual((placement.Base - sourceCentre).dot(sourceNormal), 0, places=6,
+                                   msg=step)
+
+        assertWhereTheBoxFaceIs("made")
+        # globally (0, 20, 5): the end's centre (20, 5, 5) turned 90 degrees, moved by (5, 0, 0)
+        self.assertLess(
+            (other.getGlobalPlacement().multVec(box.Shape.getElement(end).CenterOfMass)
+             - V(0, 20, 5)).Length,
+            1e-6,
+        )
+        other.Placement = App.Placement(V(-4, 1, 0), App.Rotation(Z, 45))
+        assertWhereTheBoxFaceIs("the box's body moved")
+        self.body.Placement = App.Placement(V(2, -1, 0), App.Rotation(V(0, 1, 0), 20))
+        assertWhereTheBoxFaceIs("the sketch's body moved")
 
     def testIndependentCopyWithADynamicProperty(self):
         """ops#236 (PR 215 verification N2): the spine outside the body has a dynamic property

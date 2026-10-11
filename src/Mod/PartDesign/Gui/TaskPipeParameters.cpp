@@ -60,6 +60,7 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeaturePipe.h>
+#include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ui_TaskPipeParameters.h"
 #include "ui_TaskPipeOrientation.h"
@@ -766,6 +767,17 @@ bool TaskPipeParameters::accept()
         // FreeCAD crashes unexplainably (copies holds no null, ops#180)
         for (auto obj : copies) {
             pcActiveBody->addObject(obj);
+        }
+        // FreeCAD-CH (ops#244, PR 244 verification 1): a dependent copy (a shape binder that
+        // traces its support) was computed at the root, so in a body placed otherwise it moves
+        // now, and the pipe with it; the pipe was left built along its root place. Not for a
+        // primitive copy, which the add puts on the body's solid (ops#244 P5)
+        auto touched = [](App::DocumentObject* obj) {
+            auto* binder = freecad_cast<PartDesign::ShapeBinder*>(obj);
+            return binder && binder->TraceSupport.getValue() && binder->isTouched();
+        };
+        if (std::ranges::any_of(copies, touched)) {
+            Gui::cmdAppDocument(pipe, "recompute()");
         }
     }
     catch (const Base::Exception& e) {
