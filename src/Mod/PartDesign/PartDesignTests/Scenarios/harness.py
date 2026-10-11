@@ -392,8 +392,9 @@ class Broken:
 BROKEN = Broken()
 
 
-# The guess rules' record kinds (ops#127, N2 section 5): G1, G2, G3
-GUESS_KINDS = ("nearest", "geometric", "piece")
+# The guess rules' record kinds (ops#127, N2 section 5): G1, G2, G3; and the warned picks of a
+# lost element's continuation (tier 4) and of a split's expansion (ops#286)
+GUESS_KINDS = ("nearest", "geometric", "piece", "continued", "expanded")
 
 
 class Guessed:
@@ -830,13 +831,15 @@ def liveGuesses(rows):
 def guessVerdict(expectation, stored, verdict, rows):
     """N2 7.2: the verdict of a reference whose report `rows` show a guess rule's pick. Right if
     the pick is the expected element, or one of an expected break's listed candidates (`stored`
-    "partial"); otherwise `guessed-wrong`. Without a live pick, `verdict` stands."""
+    "partial"); otherwise `guessed-wrong`. A pick whose stored set is wrong is wrong even when the
+    consumer's result is the same (ops#286): later edits act on the stored set. Without a live
+    pick, `verdict` stands."""
     if not liveGuesses(rows):
         return verdict
     if isinstance(expectation, Broken):
         right = stored == "partial"
     else:
-        right = verdict in ("correct", "equivalent")
+        right = verdict in ("correct", "equivalent") and stored != "wrong"
     return "guessed" if right else "guessed-wrong"
 
 
@@ -1087,9 +1090,11 @@ class Scenario:
                     stored = "wrong"
 
         onName = ref.on() if ref.on else None
+        misplaced = None
         if onName:
             record["expected_target"] = onName
-            if stored in ("correct", "partial") and target.Name != onName:
+            if target is not None and stored != "broken" and target.Name != onName:
+                misplaced = target.Name
                 stored = "wrong"
 
         # 2. The consumer's result
@@ -1112,9 +1117,9 @@ class Scenario:
             else:
                 result.verdict, detail = "wrong", f"{owner.Name} computes on the rest silently"
         solverReport = self._solverReport(owner, ref.prop)
+        rows = self._reportRows(owner, ref.prop)
         if not partialWarned:
             # A guess rule's pick (ops#127, N2 7.2)
-            rows = self._reportRows(owner, ref.prop)
             result.verdict = guessVerdict(expectation, stored, result.verdict, rows)
             if settled and result.verdict == "correct" and warned:
                 # the right element, but still warned: a record left behind
@@ -1122,6 +1127,11 @@ class Scenario:
             if warnedExpected and result.verdict == "correct" and not warned:
                 # the right element, silently: the record it should keep is gone
                 result.verdict, detail = "wrong", f"{owner.Name} has no warning"
+        if misplaced and result.verdict not in ("wrong", "guessed-wrong"):
+            # On another object than the one it must be on: wrong whatever the consumer computes
+            # there (the review of fork PR 256, High 1); later edits act on that object
+            result.verdict = "guessed-wrong" if liveGuesses(rows) else "wrong"
+            detail = "; ".join(d for d in (detail, f"on {misplaced}, not {onName}") if d)
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
         record.update(solverReport)
         if "evidence" in record:
