@@ -350,7 +350,23 @@ void markReferenceBroken(PropertyLinkBase* prop, int localIndex)
         resolution.shadow.newName = reference.prefix + Data::ComplexGeoData::elementMapPrefix()
             + guess.origName + "." + guess.origIndex;
     }
-    resolution.shadow.oldName = reference.prefix + Data::MISSING_PREFIX + guess.origIndex;
+    // A record can lose its original: a Part Fillet/Chamfer whose Base was replaced by one with
+    // no single edge where the original was (followBase, ops#265). The element the reference
+    // holds then names the missing link, not a bare "?"; the record still rejects it.
+    std::string original = guess.origIndex;
+    if (original.empty()) {
+        const std::string& held = reference.shadows[localIndex].oldName.empty()
+            ? reference.subs[localIndex]
+            : reference.shadows[localIndex].oldName;
+        const char* element = Data::findElementName(held.c_str());
+        if (element && element[0] && !Data::hasMissingElement(element)) {
+            original = element;
+        }
+    }
+    if (original.empty()) {
+        throw Base::ValueError("The guess names no original to mark missing; pick again");
+    }
+    resolution.shadow.oldName = reference.prefix + Data::MISSING_PREFIX + original;
     resolution.sub = !resolution.shadow.newName.empty()
             && Data::hasMappedElementName(reference.subs[localIndex].c_str())
         ? resolution.shadow.newName

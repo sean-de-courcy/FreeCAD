@@ -655,9 +655,14 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
     }
 
     // What each property links as the copies are made. A paste can make an owner change another
-    // of its links (a Part Fillet's Base change moves its edge links to the new base, ops#265):
-    // a property that a paste before it changed and that no longer links oldObj keeps that
-    // change, and its stale copy isn't pasted. Every other copy is pasted as it was made.
+    // of its links (a Part Fillet's Base change moves its edge links to the new base, ops#265).
+    // A property that a paste before it moved to the object its copy links, off the object the
+    // copy replaces (oldObj -> newObj, or newObj -> oldObj for a swap copy), keeps that change,
+    // and its stale copy isn't pasted. Every other copy is pasted as it was made: one that a
+    // paste cleared or set to something else, too (PR 240 round 2).
+    // Limit: a copy that replaces oldObj inside a sub-object path (the global search's links to
+    // obj or a parent) links neither object directly, so it is always pasted, over any change
+    // an earlier paste made to it.
     auto linksOf = [](const App::Property* prop) {
         std::pair<std::vector<App::DocumentObject*>, std::vector<std::string>> links;
         if (auto linkProp = freecad_cast<const App::PropertyLinkBase*>(prop)) {
@@ -677,9 +682,19 @@ int ViewProviderDocumentObject::replaceObject(App::DocumentObject* oldObj, App::
         if (!prop) {
             continue;
         }
-        auto links = linksOf(prop);
-        if (links != copiedLinks[i] && std::ranges::find(links.first, oldObj) == links.first.end()) {
-            continue;
+        const auto& before = copiedLinks[i].first;
+        auto has = [](const std::vector<App::DocumentObject*>& objs, const App::DocumentObject* o) {
+            return std::ranges::find(objs, o) != objs.end();
+        };
+        App::DocumentObject* replaced = has(before, oldObj) ? oldObj
+            : has(before, newObj)                         ? newObj
+                                                          : nullptr;
+        if (replaced) {
+            App::DocumentObject* target = replaced == oldObj ? newObj : oldObj;
+            auto links = linksOf(prop);
+            if (links != copiedLinks[i] && has(links.first, target) && !has(links.first, replaced)) {
+                continue;
+            }
         }
         prop->Paste(*v.second.get());
     }

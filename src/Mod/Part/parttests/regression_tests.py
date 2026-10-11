@@ -587,6 +587,83 @@ class RegressionTests(unittest.TestCase):
                 self.Doc.recompute()
                 self.assertEqual(len(guesses(rounded)), 1)
 
+    def test_fillet_chamfer_follow_clears_original(self):
+        """PR 240 round 2 (the round 1 verification's M2 follow-up): a followed guess whose
+        original has no edge at its place on the new base keeps no original. The report then
+        names none, and Mark broken names the link by the edge it held, not a bare "?".
+
+        A 20 x 10 x 10 block from a sketch, the feature on the vertical edge at (20, 0). The
+        sketch redrawn 0.5 mm over in x with a fifth corner on its top side renumbers the edges:
+        the guess is the edge at (20.5, 0), its original's number the edge at (20.5, 10) now.
+        The new base is the redrawn block with the corner at (20.5, 10) cut off."""
+        if "BUILD_SKETCHER" not in FreeCAD.__cmake__:
+            self.skipTest("needs Sketcher")
+        if not hasattr(self.Doc, "ReferenceSolver"):
+            self.skipTest("needs the reference solver")
+
+        def outline(sketch, points):
+            sketch.deleteAllGeometry()
+            for a, b in zip(points, points[1:] + points[:1]):
+                sketch.addGeometry(Part.LineSegment(Vector(*a, 0), Vector(*b, 0)), False)
+            n = len(points)
+            for k in range(n):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+
+        def guesses(feature):
+            return [
+                entry
+                for entry in FreeCAD.getReferenceReport(feature)
+                if entry.get("status") == "guessed"
+            ]
+
+        def centre(shape, index):
+            point = shape.Edges[int(index[len("Edge"):]) - 1].CenterOfMass
+            return tuple(round(c, 6) for c in point)
+
+        self.Doc.ReferenceSolver = True
+        for feature in ("Fillet", "Chamfer"):
+            with self.subTest(feature=feature):
+                sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch" + feature)
+                outline(sketch, [(0, 0), (20, 0), (20, 10), (0, 10)])
+                block = self.Doc.addObject("Part::Extrusion", "Block" + feature)
+                block.Base = sketch
+                block.DirMode = "Custom"
+                block.Dir = Vector(0, 0, 1)
+                block.LengthFwd = 10
+                block.Solid = True
+                self.Doc.recompute()
+                rounded = self.Doc.addObject("Part::" + feature, feature)
+                rounded.Base = block
+                rounded.Edges = [(self._verticalEdgeAt(block.Shape, 20, 0), 1.0, 1.0)]
+                self.Doc.recompute()
+                outline(sketch, [(0, 0), (20.5, 0), (20.5, 10), (10, 10), (0, 10)])
+                self.Doc.recompute()
+                [before] = guesses(rounded)
+                # the designed model: the original's number is the edge at (20.5, 10)
+                self.assertEqual(centre(block.Shape, before["original"]["index"]), (20.5, 10, 5))
+
+                corners = [(0, 0), (20.5, 0), (20.5, 9), (19.5, 10), (0, 10), (0, 0)]
+                face = Part.Face(Part.makePolygon([Vector(x, y, 0) for x, y in corners]))
+                cut = self.Doc.addObject("Part::Feature", "Cut" + feature)
+                cut.Shape = face.extrude(Vector(0, 0, 10))
+                self.Doc.recompute()
+                onCut = self._verticalEdgeAt(cut.Shape, 20.5, 0)
+                rounded.Base = cut
+                self.assertEqual(rounded.EdgeLinks[1], ["Edge{}".format(onCut)])
+                self.Doc.recompute()
+                self.assertTrue(rounded.isValid(), rounded.getStatusString())
+                [after] = guesses(rounded)
+                self.assertEqual(after["guess_kind"], before["guess_kind"])
+                self.assertFalse(after["original"].get("index"))
+                self.assertIn("Edge{}, original unknown (".format(onCut), after["warning"])
+                self.assertNotIn(" for ", after["warning"])
+
+                # Mark broken: the link goes missing under the edge it held
+                FreeCAD.markReferenceBroken(rounded, "EdgeLinks", 0)
+                self.Doc.recompute()
+                self.assertFalse(rounded.isValid())
+                self.assertEqual(rounded.EdgeLinks[1], ["?Edge{}".format(onCut)])
+
     def test_fillet_chamfer_base_then_links_by_hand(self):
         """PR 240 review, M1: after a Base change by hand and a recompute, EdgeLinks written by
         hand with the old base's subs on the new base is the user's pick: it stays.

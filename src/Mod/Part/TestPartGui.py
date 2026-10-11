@@ -606,6 +606,100 @@ class FilletReplaceBaseTestCases(unittest.TestCase):
                 self.assertEqual(inside, [False, True, True, True])
 
 
+class _ReplaceOwner:
+    """A Python feature whose Base change also changes its Dep link, as set by `then`."""
+
+    def __init__(self, obj):
+        obj.Proxy = self
+        obj.addProperty("App::PropertyLink", "Base")
+        obj.addProperty("App::PropertyLinkSub", "Dep")
+        self.then = None
+
+    def onChanged(self, obj, prop):
+        if prop == "Base" and getattr(self, "then", None):
+            self.then(obj)
+
+    def execute(self, obj):
+        pass
+
+
+class ReplaceObjectOwnerChangeTestCases(unittest.TestCase):
+    """ViewObject.replaceObject when pasting one copy changes another of the owner's links
+    (PR 240 round 2, ops#265). Base is pasted before Dep (property order). A Dep that Base's
+    change moved to the object its copy links, off the object the copy replaces, keeps that
+    change; a Dep that it cleared or set to something else gets its copy, as before.
+
+    Three boxes A, B, C; the owner's Base is A."""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("ReplaceObjectOwnerChange")
+        self.boxes = {}
+        for name in ("A", "B", "C"):
+            self.boxes[name] = self.Doc.addObject("Part::Box", name)
+        self.Doc.recompute()
+
+    def tearDown(self):
+        FreeCAD.closeDocument("ReplaceObjectOwnerChange")
+
+    def _owner(self, dep, then):
+        A = self.boxes["A"]
+        owner = self.Doc.addObject("App::FeaturePython", "Owner")
+        proxy = _ReplaceOwner(owner)
+        owner.Base = A
+        owner.Dep = dep
+        proxy.then = then
+        return owner
+
+    def _replace(self, owner):
+        self.assertEqual(owner.ViewObject.replaceObject(self.boxes["A"], self.boxes["B"]), 1)
+        self.assertEqual(owner.Base, self.boxes["B"])
+
+    def testClearedLinkGetsItsCopy(self):
+        """The Sonnet review's finding 1: before round 2 the cleared Dep stayed empty."""
+
+        def clear(obj):
+            obj.Dep = None
+
+        owner = self._owner((self.boxes["A"], ["Edge2"]), clear)
+        self._replace(owner)
+        self.assertEqual(owner.Dep, (self.boxes["B"], ["Edge2"]))
+
+    def testLinkSetElsewhereGetsItsCopy(self):
+        def toC(obj):
+            obj.Dep = (self.boxes["C"], ["Edge3"])
+
+        owner = self._owner((self.boxes["A"], ["Edge2"]), toC)
+        self._replace(owner)
+        self.assertEqual(owner.Dep, (self.boxes["B"], ["Edge2"]))
+
+    def testFollowedLinkKeepsItsChange(self):
+        def follow(obj):
+            obj.Dep = (obj.Base, ["Edge5"])
+
+        owner = self._owner((self.boxes["A"], ["Edge2"]), follow)
+        self._replace(owner)
+        self.assertEqual(owner.Dep, (self.boxes["B"], ["Edge5"]))
+
+    def testSwapCompletes(self):
+        """Dep on B, the replace's new object: its copy swaps it to A. A Base change that sets
+        Dep elsewhere doesn't stop the swap (the round 1 verification's swap Low)."""
+
+        def toC(obj):
+            obj.Dep = (self.boxes["C"], ["Edge3"])
+
+        owner = self._owner((self.boxes["B"], ["Edge2"]), toC)
+        self._replace(owner)
+        self.assertEqual(owner.Dep, (self.boxes["A"], ["Edge2"]))
+
+    def testSwapFollowedKeepsItsChange(self):
+        def toA(obj):
+            obj.Dep = (self.boxes["A"], ["Edge5"])
+
+        owner = self._owner((self.boxes["B"], ["Edge2"]), toA)
+        self._replace(owner)
+        self.assertEqual(owner.Dep, (self.boxes["A"], ["Edge5"]))
+
+
 class PartMirrorGuiTestCases(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartMirrorGuiTest")
