@@ -628,3 +628,161 @@ class TestSketchExternalTypes(unittest.TestCase):
             sketch.addExternal("Ring", "Edge1", False, False)
         self.assertEqual(list(sketch.ExternalTypes), [PROJECTION, INTERSECTION])
         self.assertConstraintsOnRingPoints(10, sketch)
+
+    # ops#264: a link's geometry Ids were handed out by position within the link, so a Both link
+    # whose projection changed in number, or a type written from Python, moved constraints from
+    # one kind to the other, silently. The Ids go per kind now (projection, intersection).
+
+    def testTypeWrittenFromPythonIntersectionToBothKeepsTheConstraints(self):
+        """ExternalTypes written from Python (the ring from intersection to both): the
+        constraints stay on the ring's points, and the projection is the line (-10, 0)-(10, 0)."""
+        self.sketch.ExternalTypes = [PROJECTION, BOTH]
+        self.doc.recompute()
+        self.assertConstraintsOnRingPoints(10)
+        self.assertEqual(len(self.ringProjections()), 1)
+        self.assertEqual(self.externalPoints(), [-10, 10])
+
+    def addRingProjectionWithAConstraint(self, sketch=None):
+        """The ring made Both by adding its projection, and a second sketch line parallel to the
+        projection: constraint 2, on the projected line."""
+        sketch = sketch or self.sketch
+        sketch.addExternal(self.ring.Name, "Edge1", False, False)
+        self.doc.recompute()
+        (index,) = [
+            i
+            for i, g in enumerate(sketch.ExternalGeo)
+            if i >= 2 and isinstance(g, Part.LineSegment) and abs(g.StartPoint.y) < TOL
+        ]
+        geo_id = -index - 1
+        line = sketch.addGeometry(Part.LineSegment(V(-5, 5, 0), V(5, 6, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Parallel", line, geo_id))
+        self.doc.recompute()
+        self.assertEqual(len(sketch.Constraints), 3)
+        self.assertIs(type(self.constrainedExternals(sketch)[2]), Part.LineSegment)
+        return line
+
+    def assertPointConstraintsKept(self, sketch=None):
+        """The first two constraints are still on the ring's points, each on its own."""
+        sketch = sketch or self.sketch
+        geos = self.constrainedExternals(sketch)[:2]
+        self.assertTrue(all(isinstance(g, Part.Point) for g in geos), geos)
+        self.assertEqual([round(g.X / 10) for g in geos], self.ringSides)
+
+    def testTypeWrittenFromPythonBothToIntersectionDropsOnlyTheProjection(self):
+        """The reverse: the ring Both, with a constraint on its projection, written back to
+        intersection. The projection goes, with its constraint (and a warning); the points keep
+        theirs."""
+        self.addRingProjectionWithAConstraint()
+        self.sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(self.ringProjections(), [])
+        self.assertEqual(len(self.sketch.Constraints), 2)
+        self.assertPointConstraintsKept()
+
+    def testLegacyGeometryWithoutKindsKeepsItsIds(self):
+        """A file saved before ops#264 has no kinds on its external geometry: a rebuild that gives
+        the same count keeps the Ids by position, as before, and records the kinds, so writing the
+        ring back to intersection afterwards keeps the points' constraints."""
+        self.addRingProjectionWithAConstraint()
+        path = self.tempPath("Legacy.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        del self.doc
+        self.clearKindsInFile(path, "Ring")
+        self.doc = App.openDocument(path)
+        sketch = self.doc.getObject("Sketch")
+        sketch.touch()
+        self.doc.recompute()
+        self.assertPointConstraintsKept(sketch)
+        self.assertIs(type(self.constrainedExternals(sketch)[2]), Part.LineSegment)
+        sketch.ExternalTypes = [PROJECTION, INTERSECTION]
+        self.doc.recompute()
+        self.assertEqual(len(sketch.Constraints), 2)
+        self.assertPointConstraintsKept(sketch)
+
+    @staticmethod
+    def clearKindsInFile(path, obj):
+        """Clears the kind flags (Projection, bit 5; Intersection, bit 6) of the external
+        geometries of `obj` in a saved file, as a file saved before ops#264 has them."""
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info.filename)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info, data in entries:
+                if info.filename == "Document.xml":
+                    data, count = re.subn(
+                        rb'(Ref="' + obj.encode() + rb'\.[^"]*" Flags=")(\d+)"',
+                        lambda m: m.group(1) + str(int(m.group(2)) & ~96).encode() + b'"',
+                        data,
+                    )
+                    assert count > 0
+                archive.writestr(info, data)
+
+    @staticmethod
+    def tiltedFace(outline):
+        """A face from `outline`, (u, v) points in its plane, tilted 45 degrees about the X axis:
+        (u, v) is at (u, v cos 45, v sin 45). It crosses the sketch plane z = 0 along v = 0."""
+        c = 0.5**0.5
+        points = [V(u, v * c, v * c) for u, v in outline]
+        return Part.Face(Part.makePolygon(points + points[:1]))
+
+    SQUARE = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
+    PENTAGON = [(-5, -5), (5, -5), (5, 5), (0, 8), (-5, 5)]
+
+    @staticmethod
+    def sectionAndProjections(sketch):
+        """The face link's external lines, as (index in ExternalGeo, line): the section (on
+        y = 0), and the projected edges."""
+        lines = [
+            (i, g)
+            for i, g in enumerate(list(sketch.ExternalGeo)[2:], 2)
+            if isinstance(g, Part.LineSegment)
+        ]
+        section = [(i, g) for i, g in lines if abs(g.StartPoint.y) + abs(g.EndPoint.y) < TOL]
+        return section, [(i, g) for i, g in lines if abs(g.StartPoint.y) + abs(g.EndPoint.y) >= TOL]
+
+    def testBothLinkWhoseProjectionChangesInNumberKeepsTheSectionsConstraint(self):
+        """A square face tilted 45 degrees, linked as Both: 4 projected edges and the section
+        line (-5, 0)-(5, 0), with a sketch line's start on the section's start. The face becomes
+        a pentagon (5 edges): the constraint stays on the section. A constraint on the fifth
+        edge, and the face a square again: that constraint goes (with a warning), the
+        section's stays."""
+        face = self.doc.addObject("Part::Feature", "Face")
+        face.Shape = self.tiltedFace(self.SQUARE)
+        sketch = self.doc.addObject("Sketcher::SketchObject", "TiltedSketch")
+        self.doc.recompute()
+        sketch.addExternal(face.Name, "Face1", False, False)
+        sketch.addExternal(face.Name, "Face1", False, True)
+        self.doc.recompute()
+        self.assertEqual(list(sketch.ExternalTypes), [BOTH])
+        section, projections = self.sectionAndProjections(sketch)
+        self.assertEqual((len(section), len(projections)), (1, 4))
+        line = sketch.addGeometry(Part.LineSegment(V(-4, 1, 0), V(4, 2, 0)), False)
+        sketch.addConstraint(Sketcher.Constraint("Coincident", line, 1, -section[0][0] - 1, 1))
+        self.doc.recompute()
+
+        def assertOnTheSection():
+            section, _ = self.sectionAndProjections(sketch)
+            self.assertEqual(len(section), 1)
+            self.assertEqual(-sketch.Constraints[0].Second - 1, section[0][0])
+            start = sketch.Geometry[line].StartPoint
+            self.assertLess((start - section[0][1].StartPoint).Length, TOL)
+
+        assertOnTheSection()
+        face.Shape = self.tiltedFace(self.PENTAGON)
+        self.doc.recompute()
+        section, projections = self.sectionAndProjections(sketch)
+        self.assertEqual((len(section), len(projections)), (1, 5))
+        assertOnTheSection()
+        # the edge that came with the fifth vertex: the last projected geometry (Ids within a
+        # kind still go by position, so a smaller face drops the last one)
+        tip = max(i for i, _ in projections)
+        end = 1
+        sketch.addConstraint(Sketcher.Constraint("Coincident", line, 2, -tip - 1, end))
+        self.doc.recompute()
+        self.assertEqual(len(sketch.Constraints), 2)
+        face.Shape = self.tiltedFace(self.SQUARE)
+        self.doc.recompute()
+        section, projections = self.sectionAndProjections(sketch)
+        self.assertEqual((len(section), len(projections)), (1, 4))
+        self.assertEqual(len(sketch.Constraints), 1)
+        assertOnTheSection()

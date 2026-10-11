@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -1440,6 +1441,28 @@ static Part::Geometry *fitArcs(std::vector<std::unique_ptr<Part::Geometry> > &ar
     return geo;
 }
 
+// FreeCAD-CH (ops#264): marks an external geometry as its link's projection or intersection
+static void setKind(Part::Geometry* geo, bool projection)
+{
+    auto egf = ExternalGeometryFacade::getFacade(geo);
+    egf->setFlag(ExternalGeometryExtension::Projection, projection);
+    egf->setFlag(ExternalGeometryExtension::Intersection, !projection);
+}
+
+// the kind setKind gave a geometry: true for a projection, false for an intersection, none for
+// geometry saved before ops#264
+static std::optional<bool> kindOf(const Part::Geometry* geo)
+{
+    auto egf = ExternalGeometryFacade::getFacade(geo);
+    if (egf->testFlag(ExternalGeometryExtension::Projection)) {
+        return true;
+    }
+    if (egf->testFlag(ExternalGeometryExtension::Intersection)) {
+        return false;
+    }
+    return std::nullopt;
+}
+
 void SketchObject::validateExternalLinks()
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -2737,6 +2760,8 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     // for each entry of newGeos, the projections that go before the link's existing geometry:
     // those of a projection added to an intersection link (ops#260)
     std::vector<std::size_t> addedProjections;
+    // for each entry of newGeos, how many of its geometries are the projection's (ops#264)
+    std::vector<std::size_t> projSizes;
     // the key of the link that is being added to, whose new geometries keep the flags it gives
     std::string createdKey;
     for (int i=0; i < int(Objects.size()); i++) {
@@ -2916,8 +2941,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
                 // Section of some face (e.g. sphere) produce more than one arcs
                 // from the same circle. So we try to fit the arcs with a single
-                // circle/arc.
-                if (refSubShape.ShapeType() == TopAbs_FACE && geos.size() > 1) {
+                // circle/arc. FreeCAD-CH (ops#264): only the section's, not a Both link's
+                // projection before them.
+                if (refSubShape.ShapeType() == TopAbs_FACE && geos.size() > projSize + 1) {
                     auto wires = Part::TopoShape().makeElementWires(edges);
                     if (wires.countSubShapes(TopAbs_WIRE) == 1) {
                         TopoDS_Vertex firstVertex, lastVertex;
@@ -2928,9 +2954,15 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                         lastVertex = exp.CurrentVertex();
                         gp_Pnt P1 = BRep_Tool::Pnt(firstVertex);
                         gp_Pnt P2 = BRep_Tool::Pnt(lastVertex);
-                        if (auto geo = fitArcs(geos, P1, P2, ArcFitTolerance.getValue())) {
-                            geos.clear();
+                        std::vector<std::unique_ptr<Part::Geometry>> sections;
+                        std::move(geos.begin() + static_cast<std::ptrdiff_t>(projSize),
+                                  geos.end(), std::back_inserter(sections));
+                        geos.resize(projSize);
+                        if (auto geo = fitArcs(sections, P1, P2, ArcFitTolerance.getValue())) {
                             geos.emplace_back(geo);
+                        }
+                        else {
+                            std::move(sections.begin(), sections.end(), std::back_inserter(geos));
                         }
                     }
                 }
@@ -2946,6 +2978,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     }
                 }
             }
+            // each geometry's kind, which the Ids are handed out by (ops#264)
+            for (std::size_t k = 0; k < geos.size(); ++k) {
+                setKind(geos[k].get(), k < projSize);
+            }
         };
 
         std::vector<const Part::Geometry*> saved;
@@ -2960,6 +2996,11 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                                ->testFlag(ExternalGeometryExtension::Missing);
                 }
             }
+            // in build order: geometry added to a kind since goes after the link's other
+            // geometry in ExternalGeo (ops#264)
+            std::stable_partition(saved.begin(), saved.end(), [](const Part::Geometry* geo) {
+                return kindOf(geo) != std::optional<bool>(false);
+            });
         }
         const bool repairThis = openRepair
             ? (!laterOpen || saved.empty() || savedMissing)
@@ -3127,6 +3168,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         // the projection, in build order already)
         const bool projectionAdded = beingCreated && !extToAdd->intersection && intersection;
         addedProjections.push_back(projectionAdded ? projSize : 0);
+        projSizes.push_back(projSize);
         if (beingCreated) {
             createdKey = key;
         }
@@ -3143,36 +3185,115 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         return;
     }
 
+    // How many constraints are on the geometries with these Ids, which the rebuild deletes
+    auto constraintsOn = [&](const std::set<long>& ids) {
+        std::set<int> geoIds;
+        for (long id : ids) {
+            auto it = externalGeoMap.find(id);
+            if (it != externalGeoMap.end()) {
+                geoIds.insert(-static_cast<int>(it->second) - 1);
+            }
+        }
+        int count = 0;
+        for (const auto* constraint : Constraints.getValuesForce()) {
+            for (int e = 0; constraint->hasElement(e); ++e) {
+                if (geoIds.count(constraint->getGeoId(e)) != 0) {
+                    ++count;
+                    break;
+                }
+            }
+        }
+        return count;
+    };
+
     // allocate unique geometry id
     for (std::size_t n = 0; n < newGeos.size(); ++n) {
         auto& geos = newGeos[n];
-        auto egf = ExternalGeometryFacade::getFacade(geos.front().get());
-        auto &refs = externalGeoRefMap[egf->getRef()];
-        if (addedProjections[n] > 0 && !refs.empty()) {
-            // The link's Ids are its intersection's, which the build gives after the projection:
-            // the projection takes new Ids before them, so the constraints on the intersection
-            // stay there (ops#260)
-            std::vector<long> ids;
-            while (ids.size() < addedProjections[n]) {
-                ids.push_back(++geoLastId);
+        const std::string key = ExternalGeometryFacade::getFacade(geos.front().get())->getRef();
+        auto &refs = externalGeoRefMap[key];
+        const std::size_t projCount = projSizes[n];
+
+        // FreeCAD-CH (ops#264): the Ids go per kind, the projection's to the projection and the
+        // intersection's to the intersection, so a Both link whose projection changes in number,
+        // or a type written from Python, doesn't move constraints from one kind to the other.
+        // Within a kind they still go by position. Geometry saved before has no kind: such a link
+        // gets its Ids by position, as before, once, and has kinds from then on.
+        std::vector<long> projectionIds;
+        std::vector<long> intersectionIds;
+        bool byKind = !refs.empty();
+        for (long id : refs) {
+            auto it = externalGeoMap.find(id);
+            auto kind = it != externalGeoMap.end() ? kindOf(ExternalGeo[it->second])
+                                                   : std::optional<bool>();
+            if (!kind) {
+                byKind = false;
+                break;
             }
-            refs.insert(refs.begin(), ids.begin(), ids.end());
+            (*kind ? projectionIds : intersectionIds).push_back(id);
+        }
+
+        std::set<long> geoIds;  // the Ids no new geometry takes, whose geometry goes
+        if (byKind) {
+            auto handOut = [&](const std::vector<long>& ids, std::size_t begin, std::size_t end) {
+                std::size_t k = 0;
+                for (std::size_t g = begin; g < end; ++g, ++k) {
+                    GeometryFacade::setId(geos[g].get(), k < ids.size() ? ids[k] : ++geoLastId);
+                }
+                geoIds.insert(ids.begin() + static_cast<std::ptrdiff_t>(std::min(k, ids.size())),
+                              ids.end());
+            };
+            handOut(projectionIds, 0, projCount);
+            handOut(intersectionIds, projCount, geos.size());
+            // a projection added to an intersection link goes before it, as below (ops#260)
+            if (!(addedProjections[n] > 0 && projectionIds.empty() && !intersectionIds.empty())) {
+                addedProjections[n] = 0;
+            }
+            refs.clear();
+            for (const auto& geo : geos) {
+                refs.push_back(GeometryFacade::getId(geo.get()));
+            }
         }
         else {
-            addedProjections[n] = 0;  // a new link: its geometries are appended in build order
+            const std::size_t oldCount = refs.size();
+            if (addedProjections[n] > 0 && !refs.empty()) {
+                // The link's Ids are its intersection's, which the build gives after the
+                // projection: the projection takes new Ids before them, so the constraints on the
+                // intersection stay there (ops#260)
+                std::vector<long> ids;
+                while (ids.size() < addedProjections[n]) {
+                    ids.push_back(++geoLastId);
+                }
+                refs.insert(refs.begin(), ids.begin(), ids.end());
+            }
+            else {
+                addedProjections[n] = 0;  // a new link: its geometries are appended in build order
+                if (oldCount != 0 && oldCount != geos.size() && projCount > 0
+                    && projCount < geos.size()) {
+                    FC_WARN("External link " << key << " in " << getFullName() << " gives "
+                            << geos.size() << " geometries instead of " << oldCount
+                            << ", and its saved geometry doesn't record which were projected and "
+                               "which intersections: check the constraints on it");
+                }
+            }
+            while(refs.size() < geos.size())
+                refs.push_back(++geoLastId);
+
+            // In case a projection reduces output geometries, delete them
+            geoIds.insert(refs.begin()+geos.size(),refs.end());
+
+            // Sync id and ref of the new geometries
+            int i = 0;
+            for(auto &geo : geos)
+                GeometryFacade::setId(geo.get(), refs[i++]);
         }
-        while(refs.size() < geos.size())
-            refs.push_back(++geoLastId);
 
-        // In case a projection reduces output geometries, delete them
-        std::set<long> geoIds;
-        geoIds.insert(refs.begin()+geos.size(),refs.end());
-
-        // Sync id and ref of the new geometries
-        int i = 0;
-        for(auto &geo : geos)
-            GeometryFacade::setId(geo.get(), refs[i++]);
-
+        // A link that gives fewer geometries than before deletes the others with their
+        // constraints, which isn't silent any more (ops#264)
+        if (int count = constraintsOn(geoIds)) {
+            FC_WARN("External link " << key << " in " << getFullName() << " gives fewer geometries "
+                    "than before: " << count << " constraint(s) on the geometry it no longer "
+                    "gives are deleted");
+        }
         delExternalPrivate(geoIds,false);
     }
 
@@ -3218,8 +3339,13 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
                 continue;
             }
-            // This is an existing geometry. Update it while keeping the old flags
+            // This is an existing geometry. Update it while keeping the old flags, but the kind
+            // the build gave (ops#264; geometry saved before has none)
+            const auto kind = kindOf(geo.get());
             ExternalGeometryFacade::copyFlags(geoms[it->second], geo.get());
+            if (kind) {
+                setKind(geo.get(), *kind);
+            }
             geoms[it->second] = geo.release();
         }
     }
@@ -3518,8 +3644,9 @@ std::vector<long> SketchObject::externalGeometryIds(int entry) const
     if (entry < 0 || entry >= static_cast<int>(externalGeoRef.size())) {
         return {};
     }
-    // externalGeoRefMap lists a key's Ids in the order of ExternalGeo, which is the order the
-    // rebuild gives them to the projections
+    // externalGeoRefMap lists a key's Ids in the order of ExternalGeo: within a kind, the order
+    // the rebuild gives them out (geometry a kind gains later goes after the link's other kind,
+    // ops#264)
     auto it = externalGeoRefMap.find(externalGeoRef[entry]);
     if (it == externalGeoRefMap.end()) {
         return {};

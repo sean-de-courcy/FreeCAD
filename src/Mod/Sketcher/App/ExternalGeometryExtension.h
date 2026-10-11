@@ -79,13 +79,17 @@ public:
         Detached = 2,  // signal the intentions of detaching the geometry from external reference
         Missing = 3,   // geometry with missing external reference
         Sync = 4,      // signal the intention to synchronize a frozen geometry
+        // FreeCAD-CH (ops#264): the kind of the link's geometry this is, which the rebuild hands
+        // the Ids out by; neither in a file saved before
+        Projection = 5,
+        Intersection = 6,
         NumFlags       // Must be the last type
     };
     // END_CREDIT_BLOCK: Credit under LGPL for this block to Zheng, Lei (realthunder)
     // <realthunder.dev@gmail.com>
 
     constexpr static std::array<const char*, NumFlags> flag2str {
-        {"Defining", "Frozen", "Detached", "Missing", "Sync"}
+        {"Defining", "Frozen", "Detached", "Missing", "Sync", "Projection", "Intersection"}
     };
 
 public:
