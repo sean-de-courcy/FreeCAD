@@ -254,6 +254,20 @@ std::vector<std::pair<std::string, std::string>> boundaries(const Data::DecodedM
     }
     return crossings;
 }
+
+// The second sides a V2 name is on (ops#255): the tag and the side of each of its CPY sections, in
+// order. A two-sided Pad's or Pocket's second side carries one on its own names, a Revolution's
+// on the profile's names inside its own.
+std::vector<std::pair<std::string, std::string>> secondSides(const Data::DecodedMappedName& name)
+{
+    std::vector<std::pair<std::string, std::string>> sides;
+    for (const auto& section : name) {
+        if (section.opCode == OpCodes::Copy) {
+            sides.emplace_back(section.iterationTag, section.index);
+        }
+    }
+    return sides;
+}
 }  // namespace
 
 // This is the name matching algorithms used for the V2 algorithm.
@@ -282,6 +296,12 @@ bool Feature::doNamesMatch(
     // in its own document, up to their EXT sections (ops#56), and the copies a binder brings in
     // from copies of one file (ops#112)
     if (boundaries(decodedName1) != boundaries(decodedName2)) {
+        return false;
+    }
+    // And a feature's second side, built from the first side's profile again, and its first side
+    // (PR 243 round 3). The linked names are compared through this function, so a Revolution's
+    // second-side face, whose profile name carries the CPY, is told apart there.
+    if (secondSides(decodedName1) != secondSides(decodedName2)) {
         return false;
     }
 

@@ -739,6 +739,26 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         double taper1 = TaperAngle.getValue();
         double offset1 = Offset.getValue();
 
+        // A second side is built from the same sketch edges as the first, so the two sides'
+        // names would differ only by the duplicate counter, which follows the order of the XOR
+        // below (ops#255). In V2 the second side's prism is marked as a copy, as a Revolution's
+        // second side is (ops#240): the prism, not its profile, since a tapered side's caps are
+        // named by the draft, not from the profile's names.
+        auto markSecondSide = [&](TopoShape shape) {
+            if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
+                shape.appendElementSection(getID(), Part::OpCodes::Copy, "2");
+            }
+            return shape;
+        };
+        // Side 1's start cap, when the sides are built apart, is the seam at the profile plane,
+        // and has the profile's names, as the start cap of one side or of two sides built as one
+        // prism has. In V2 it is marked (CPY;1), so that a reference to that cap doesn't move to
+        // the seam, or the other way, when an edit switches between the builds (PR 243 round 5).
+        auto markSeam = [&](TopoShape shape) {
+            markStartCap(shape, startSketch, "1");
+            return shape;
+        };
+
         if (Sidemethod == "One side") {
             TopoShape prism1 = generateSingleExtrusionSide(
                 startSketch,
@@ -764,7 +784,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     // to ensure the taper originates correctly from the sketch plane in both
                     // directions.
                     L /= 2.0;
-                    TopoShape prism1 = generateSingleExtrusionSide(
+                    TopoShape prism1 = markSeam(generateSingleExtrusionSide(
                         startSketch.makeElementCopy(),
                         method,
                         L,
@@ -776,14 +796,14 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         makeface,
                         base,
                         invObjLoc
-                    );
+                    ));
                     if (!prism1.isNull() && !prism1.getShape().IsNull()) {
                         prisms.push_back(prism1);
                     }
 
                     gp_Dir dir2 = dir;
                     dir2.Reverse();
-                    TopoShape prism2 = generateSingleExtrusionSide(
+                    TopoShape prism2 = markSecondSide(generateSingleExtrusionSide(
                         startSketch.makeElementCopy(),
                         method,
                         L,
@@ -795,7 +815,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                         makeface,
                         base,
                         invObjLoc
-                    );
+                    ));
                     if (!prism2.isNull() && !prism2.getShape().IsNull()) {
                         prisms.push_back(prism2);
                     }
@@ -843,7 +863,6 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     base,
                     invObjLoc
                 );
-                prisms.push_back(prism1);
 
                 // Prism 2: Mirror prism1 across the sketch plane.
                 // The mirror plane's normal must be the sketch normal, not the extrusion direction.
@@ -855,7 +874,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     gp_Pnt(sketchCenter.x, sketchCenter.y, sketchCenter.z),
                     sketchNormalDir
                 );
-                TopoShape prism2 = prism1.makeElementMirror(mirrorPlane);
+                TopoShape prism2 = markSecondSide(prism1.makeElementMirror(mirrorPlane));
+                // Side 1's seam marked after the mirror: side 2's names stay side 1's with CPY;2
+                prisms.push_back(markSeam(prism1));
                 prisms.push_back(prism2);
             }
         }
@@ -884,7 +905,18 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 "Side 2 can't reach its face: the face lies behind side 2."
             );
 
-            if (!hasStartOffset && method1LengthBased && method2 != "UpToFirst" && noTaper) {
+            // Untapered from the profile plane, the two sides are one prism, from one side's end
+            // to the other's. In V2 it starts from side 2's end whenever side 2 has a length, so
+            // that its start cap has the profile's names, as one side's has, and its far cap is
+            // side 1's end, named as side 1's far cap is when the sides are built apart (side 2's
+            // has the copy section). Built apart, side 1's start cap, the seam, is marked (PR 243
+            // rounds 4 and 5).
+            const bool fromSide1End = !hasStartOffset && method1LengthBased
+                && method2 != "UpToFirst" && noTaper;
+            const bool fromSide2End = !hasStartOffset && method2LengthBased && method != "UpToFirst"
+                && noTaper;
+            const bool v2 = getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2;
+            if (fromSide1End && !(v2 && fromSide2End)) {
                 gp_Trsf start_transform;
                 start_transform.SetTranslation(gp_Vec(dir) * L);
 
@@ -908,10 +940,13 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     return new App::DocumentObjectExecReturn(side2Reversed);
                 }
                 if (!prism.isNull() && !prism.getShape().IsNull()) {
+                    // From side 1's end (in V2, side 2 up to a face): the start cap is side
+                    // 1's end, and the far cap is side 2's
+                    markStartCap(prism, sketchshape, "0", true);
                     prisms.push_back(prism);
                 }
             }
-            else if (!hasStartOffset && method2LengthBased && method != "UpToFirst" && noTaper) {
+            else if (fromSide2End) {
                 gp_Trsf start_transform;
                 start_transform.SetTranslation(gp_Vec(dir).Reversed() * L2);
 
@@ -939,7 +974,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 }
             }
             else {
-                TopoShape prism1 = generateSingleExtrusionSide(
+                TopoShape prism1 = markSeam(generateSingleExtrusionSide(
                     startSketch.makeElementCopy(),
                     method,
                     L,
@@ -951,7 +986,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     makeface,
                     base,
                     invObjLoc
-                );
+                ));
                 if (!method1LengthBased && reversed(prism1, startSketch, dir)) {
                     return new App::DocumentObjectExecReturn(side1Reversed);
                 }
@@ -960,7 +995,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 }
 
                 // Side 2
-                TopoShape prism2 = generateSingleExtrusionSide(
+                TopoShape prism2 = markSecondSide(generateSingleExtrusionSide(
                     startSketch.makeElementCopy(),
                     method2,
                     L2,
@@ -972,7 +1007,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     makeface,
                     base,
                     invObjLoc
-                );
+                ));
                 if (!method2LengthBased && reversed(prism2, startSketch, dir2)) {
                     return new App::DocumentObjectExecReturn(side2Reversed);
                 }
@@ -1255,9 +1290,11 @@ void FeatureExtrude::onDocumentRestored()
         //   extrude = (L+L2) * dir
         // The new "Two sides" code extrudes Side 1 in dir, Side 2 in -dir,
         // with Reversed toggling the sign of dir. To preserve the same OCC
-        // topology (face/edge ordering), we toggle Reversed so the effective
+        // topology (face/edge ordering) in V1, we toggle Reversed so the effective
         // extrusion direction matches the old +dir, and swap Length/Length2
-        // to keep the correct offset for each side.
+        // to keep the correct offset for each side. (V2 builds the prism from
+        // side 2's end, the other way, and names its elements by their history,
+        // not their order: PR 243 round 4.)
         Reversed.setValue(!Reversed.getValue());
         double origL = Length.getValue();
         double origL2 = Length2.getValue();

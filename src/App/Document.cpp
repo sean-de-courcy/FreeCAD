@@ -118,7 +118,13 @@ namespace
 // PartDesignTests/NamingGolden/REVISION records it with a digest of the V2 golden dumps
 // (TestNamingDump.TestNamingRevision). 1: ops#56's boundary section (was `.X1`), and every
 // naming fix before it. 2: ops#240, a Revolution's or Groove's faces up to a face named from the
-// profile, and a two-sided Revolution's second side marked.
+// profile, and a two-sided Revolution's second side marked; ops#255, a two-sided Pad's or
+// Pocket's second side marked, and a Symmetric one's other half: the mirrored half for any
+// method but Length, the second prism of a tapered Length; PR 243 rounds 4 and 5, two sides
+// built as two solids mark side 1's start cap, the seam (CPY;1), and a Pad's two sides built
+// as one prism start from side 2's end when it has a length (when it goes up to a face, from
+// side 1's end, the start cap marked CPY;0 and the far cap CPY;2) (no build was released
+// between them).
 constexpr int ForkNamingRevision = 2;
 
 // The naming revision of each document's references (ops#116, NamingRevision.h): read from the

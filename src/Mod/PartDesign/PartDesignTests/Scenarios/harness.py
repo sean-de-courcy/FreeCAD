@@ -1123,6 +1123,11 @@ class Scenario:
                 # the right element, silently: the record it should keep is gone
                 result.verdict, detail = "wrong", f"{owner.Name} has no warning"
         record.update(stored=stored, outcome=outcome, detail=detail, verdict=result.verdict)
+        if result.verdict in ("wrong", "guessed-wrong") and target is not None:
+            # Every name of the elements involved, for a failure seen only on another platform
+            # (PR 243 round 6: an unmarked far-cap name on macOS)
+            subs = sorted({s for s in list(live) + list(expected) if not s.startswith("?")})
+            record["all_names"] = {s: self._allNames(masker, mode, target, s) for s in subs}
         record.update(solverReport)
         if "evidence" in record:
             # its names' tags masked as in `names`: records compare across hash seeds and runs
@@ -1189,6 +1194,19 @@ class Scenario:
         if name and mode == "V2" and hasattr(App, "expandMappedName"):
             name = App.expandMappedName(name)  # an interned name reads as V2's (ops#6)
         return masker.mask(name, mode, shape) if name else None
+
+    @staticmethod
+    def _allNames(masker, mode, target, sub):
+        """Every mapped name of the element, masked as `_name()` masks the first."""
+        try:
+            shape, sub = elementOf(target, sub)
+            value = shape.ElementReverseMap.get(sub)
+        except Exception:
+            return None
+        names = [] if value is None else [value] if isinstance(value, str) else list(value)
+        if mode == "V2" and hasattr(App, "expandMappedName"):
+            names = [App.expandMappedName(n) for n in names]
+        return [masker.mask(n, mode, shape) for n in names]
 
 
 class Reopens:

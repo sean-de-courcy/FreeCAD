@@ -200,6 +200,30 @@ protected:
         double offset
     );
 
+    /** In V2, mark the start cap of a side (ops#255, PR 243 rounds 4 and 5): the names of
+     * `solid`'s elements that are the profile's, i.e. those of the moved profile it starts from,
+     * get the section `_;_;<feature>;CPY;<side>;<type>;0;MOD;_`, a copy section, which the solver
+     * and Part's name matching read as a context of its own.
+     * - Side 1 of two sides built as two solids (`side` "1"): its start cap is the seam at the
+     *   profile plane (side 2's has CPY;2). One side, or two sides built as one primitive from
+     *   one side's end, has the profile's names on its start cap, which is a cap of the result:
+     *   marked, a reference to that cap doesn't move to the seam when the sides are built apart
+     *   (a start offset, a taper, an up-to side), and a reference to the seam doesn't move to
+     *   the cap the other way. It breaks instead.
+     * - A primitive from side 1's end to side 2's (`side` "0", no side, with `farCapIsSide2`):
+     *   its start cap is side 1's end, which has no profile names when built apart. The far
+     *   cap, the names mapped as the profile's partners (MAPPER_FLAG_PROJECTION), gets side
+     *   2's section (CPY;2), as side 2's far cap has it when the sides are built apart: else its
+     *   names are side 1's far cap's.
+     * The other names stay as they are, each element's in their order.
+     */
+    void markStartCap(
+        TopoShape& solid,
+        const TopoShape& profile,
+        const char* side,
+        bool farCapIsSide2 = false
+    ) const;
+
     /// Create a shape with shapes and faces from a given LinkSubList
     /// return the face count or 2 if a unique full shape is selected
     static int getUpToShapeFromLinkSubList(

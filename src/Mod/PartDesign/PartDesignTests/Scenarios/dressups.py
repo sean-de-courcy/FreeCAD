@@ -23,6 +23,10 @@
 """Dress-ups after upstream edits: a draft, a fillet and a chamfer keep their edges and faces
 when the features before them change, are inserted or are reordered."""
 
+import math
+
+import FreeCAD as App
+
 from .harness import (
     BROKEN,
     Attached,
@@ -33,6 +37,8 @@ from .harness import (
     Filleted,
     PartialWarned,
     Scenario,
+    Settled,
+    V,
     X,
     Y,
     Z,
@@ -42,6 +48,7 @@ from .harness import (
     faceNormal,
     pieces,
     sameSolid,
+    vertex,
 )
 from . import models as m
 
@@ -814,3 +821,756 @@ class FilletHoleCircleDeletedBesideAnother(Scenario):
     def edit(self, doc):
         doc.HoleSketch.delGeometry(0)
         self.gone = True
+
+
+class FilletSideOneEdgeOfTaperedTwoSides(Scenario):
+    """PR 243 round 2 (ops#255): a Pad of the square x, y -5..5, Two sides, 5 and 5, each side
+    tapered 10 degrees (widening), so the second side is built and named on its own; a fillet,
+    radius 0.5, on side 1's corner edge from (-5, -5, 0) up to z = 5. Side 1's taper is then set
+    to 0: that slanted edge is gone, and side 1's corner edge is vertical now. Side 2's corner edge,
+    from (-5, -5, 0) down to z = -5, is side 1's old name followed by the second side's copy
+    section: the solver took it at tier 1, "in ancestry", silently, with the fillet moved to the
+    other side. A copy section marks a twin, like a pattern instance: side 2's names share no
+    ancestry with side 1's, so the fillet breaks (the solver: no top agreement). Without the
+    solver, V2's name match took side 2's edge too, until the matcher compared the copy sections
+    (PR 243 round 3)."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("side_one_edge",)
+    untapered = False
+    sideOne = 1  # the direction of side 1 along Z
+
+    def cornerEdge(self):
+        s = self.sideOne
+        if self.untapered:
+            if self.solver:
+                return Broken(
+                    edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, 3 * s))
+                )
+            return BROKEN
+        d = 5 * math.tan(math.radians(10))
+        return edge(contains=(-5 - 0.6 * d, -5 - 0.6 * d, 3 * s))  # the draft's edge at |z| = 3
+
+    def twoSided(self, doc, body, feature):
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        twoSided = body.newObject(feature, "TwoSided")
+        twoSided.Profile = profile
+        twoSided.Refine = False
+        twoSided.SideType = "Two sides"
+        twoSided.Length = 5
+        twoSided.Length2 = 5
+        twoSided.TaperAngle = 10
+        twoSided.TaperAngle2 = 10
+        return twoSided
+
+    def solid(self, doc, body):
+        return self.twoSided(doc, body, "PartDesign::Pad")
+
+    def build(self, doc):
+        body = m.body(doc)
+        base = self.solid(doc, body)
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (base, self.names(base, self.cornerEdge()))
+        fillet.Radius = 0.5
+        self.ref("side_one_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.TwoSided.TaperAngle = 0
+        self.untapered = True
+
+
+class PointOnSideOneEdgeOfTaperedTwoSidedPocket(FilletSideOneEdgeOfTaperedTwoSides):
+    """The Pocket variant (PR 243 round 3): a block -15..15 x -15..15 x -10..10 and a Pocket of
+    the square x, y -5..5 at z = 0, Two sides, 5 and 5, each tapered 10 degrees (widening); side 1
+    goes down. A datum point at the centre of side 1's corner edge of the pocket, from (-5, -5, 0)
+    down to z = -5 (a fillet there, a concave edge ending in the sides' crease, differs from
+    Part's makeFillet); side 1's taper is set to 0: it breaks, and doesn't move to side 2's
+    edge."""
+
+    sideOne = -1
+
+    def solid(self, doc, body):
+        block = m.sketch(doc, "Block", m.rectangle(-15, -15, 15, 15), body, z=-10)
+        m.pad(body, block, 20, name="BlockPad")
+        return self.twoSided(doc, body, "PartDesign::Pocket")
+
+    def build(self, doc):
+        body = m.body(doc)
+        base = self.solid(doc, body)
+        doc.recompute()
+        point = body.newObject("PartDesign::Point", "OnEdge")
+        point.AttachmentSupport = [(base, self.names(base, self.cornerEdge())[0])]
+        point.MapMode = "CenterOfMass"
+        self.ref("side_one_edge", point, "AttachmentSupport", self.cornerEdge, Attached())
+
+
+class FilletMergedEdgeOfSymmetricToOneSide(Scenario):
+    """PR 243 round 3 (Sonnet M2), reworked in round 4: a Pad of the square x, y -5..5,
+    Symmetric up to a datum plane at z = 5, with Refine on. Symmetric up to a face mirrors side
+    1's prism for side 2, which is marked as a copy, and Refine merges each corner edge into one
+    edge from z = -5 to 5, named from both sides' edges. A fillet, radius 0.5, on the corner edge
+    at (-5, -5). The Pad is switched to One side, up to the same plane: the corner edge runs from
+    z = 0 to 5, and the fillet follows it."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("merged_edge",)
+    oneSide = False
+
+    def cornerEdge(self):
+        z = 2.5 if self.oneSide else 0
+        return edge("line", direction=Z, through=(-5, -5, 0), contains=(-5, -5, z))
+
+    def build(self, doc):
+        body = m.body(doc)
+        plane = body.newObject("PartDesign::Plane", "AtFive")
+        plane.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = True
+        pad.SideType = "Symmetric"
+        pad.Type = "UpToFace"
+        pad.UpToFace = (plane, [""])
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.cornerEdge()))
+        fillet.Radius = 0.5
+        self.ref("merged_edge", fillet, "Base", self.cornerEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.SideType = "One side"
+        self.oneSide = True
+
+
+class FilletBottomCapEdgeOfTwoSidesToStartOffset(Scenario):
+    """PR 243 round 4 (verification F3): a Pad of the square x, y -5..5, Two sides, 5 and 5,
+    untapered, Refine off: one prism from z = 5 down to -5, so no second side. A fillet, radius
+    0.5, on the bottom cap's front edge (y = -5, z = -5). A start offset of 1 then builds the two
+    sides apart (z -4..1 and 1..6), side 2 marked as a copy, and the profile's names are on the
+    seam at z = 1. The single prism's bottom cap is the moved profile: with its names the fillet
+    moved to the seam. In V2 the seam, side 1's start cap, is marked (CPY;1, PR 243 round 5), so
+    the profile's names are on no element of the two sides and the reference breaks. V1 keeps
+    upstream's names."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("bottom_edge",)
+    offset = 0
+
+    def bottomEdge(self):
+        z = -5 + self.offset
+        return edge("line", direction=X, contains=(0, -5, z))
+
+    def expectedBottomEdge(self):
+        if self.offset and self.mode == "V2":
+            return BROKEN
+        return self.bottomEdge()
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length2 = 5
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.StartType = "Offset"
+        doc.Pad.StartOffset = 1
+        self.offset = 1
+
+
+class FilletBottomCapEdgeOfTwoSidesUpToFaceToStartOffset(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """FilletBottomCapEdgeOfTwoSidesToStartOffset with side 2 up to a datum plane at z = -5: the
+    one prism then starts from side 1's end (z = 5), and its far cap is side 2's, up to the plane:
+    in V2 its start cap is marked as the single prism's (CPY;0) and its far cap as side 2's
+    (CPY;2). The start offset builds the sides apart (z -5..1 and 1..6): side 2's bottom cap is still at
+    z = -5, now with the copy section. The fillet stays on that edge (the old name is missing, the
+    edge is where it was), and doesn't move to side 1's top cap (z = 6)."""
+
+    def expectedBottomEdge(self):
+        return edge("line", direction=X, contains=(0, -5, -5))
+
+    def build(self, doc):
+        body = m.body(doc)
+        plane = body.newObject("PartDesign::Plane", "AtMinusFive")
+        plane.Placement = App.Placement(V(0, 0, -5), App.Rotation())
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Type2 = "UpToFace"
+        pad.UpToFace2 = (plane, [""])
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.expectedBottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+
+class FilletSideOneEndOfTwoSidesUpToFaceToTaper(FilletBottomCapEdgeOfTwoSidesUpToFaceToStartOffset):
+    """PR 243 round 6 (Fable review 5, L3): the Pad of FilletBottomCapEdgeOfTwoSidesUpToFaceToStartOffset
+    (side 1 5 long, side 2 up to a datum plane at z = -5: one prism from side 1's end), the
+    fillet on its top front edge (y = -5, z = 5), side 1's end. In V2 that cap is the prism's
+    start cap, marked CPY;0. A taper of 5 degrees on side 1 builds the sides apart, and side 1's
+    end is then its far cap, named from the profile through PRJ: the names share nothing, so the
+    reference breaks, loudly; the solver may guess the tapered top edge, with its warning. The
+    other direction (tapered to untapered) is the same break. Documented, not fixed: the two
+    builds name side 1's end differently."""
+
+    REFS = ("top_edge",)
+    tapered = False
+
+    def topEdge(self):
+        if not self.tapered:
+            return edge("line", direction=X, contains=(0, -5, 5))
+        y = -5 - 5 * math.tan(math.radians(5))  # the taper widens side 1 toward its end
+        return Broken(edge("line", direction=X, contains=(0, y, 5)))
+
+    def build(self, doc):
+        body = m.body(doc)
+        plane = body.newObject("PartDesign::Plane", "AtMinusFive")
+        plane.Placement = App.Placement(V(0, 0, -5), App.Rotation())
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Type2 = "UpToFace"
+        pad.UpToFace2 = (plane, [""])
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.topEdge()))
+        fillet.Radius = 0.5
+        self.ref("top_edge", fillet, "Base", self.topEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.TaperAngle = 5
+        self.tapered = True
+
+
+class FilletBottomCapEdgeOfSymmetricToTapered(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """The start cap of a Symmetric Pad (PR 243 rounds 4 and 5): the square x, y -5..5,
+    Symmetric, 10 long, untapered, Refine off, is one prism from z = -5 to 5, and its bottom cap
+    is the moved profile. A fillet, radius 0.5, on the bottom cap's front edge (y = -5, z = -5).
+    A taper of 5 degrees builds the two sides apart, and the profile's names were on the seam at
+    z = 0: with them the fillet moved there. In V2 the seam is marked (CPY;1), and the tapered
+    bottom edge isn't where the old one was, so the reference breaks (the old edge is gone). The
+    solver's guess, with its warning, is the tapered bottom edge, 0.44 away (the next is 5)."""
+
+    tapered = False
+
+    def expectedBottomEdge(self):
+        if not self.tapered:
+            return self.bottomEdge()
+        y = -5 - 5 * math.tan(math.radians(5))  # the taper widens each side away from z = 0
+        return Broken(edge("line", direction=X, contains=(0, y, -5)))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        pad.SideType = "Symmetric"
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.TaperAngle = 5
+        self.tapered = True
+
+
+class FilletBottomCapEdgeOfStartOffsetToTwoSides(FilletBottomCapEdgeOfTwoSidesToStartOffset):
+    """FilletBottomCapEdgeOfTwoSidesToStartOffset the other way: the Pad starts with the start
+    offset of 1 (two prisms, z -4..1 and 1..6), the fillet on side 2's bottom edge (z = -4), and
+    the offset is removed, so the sides become one prism again (z -5..5). Its bottom cap is its
+    start cap, with the profile's names, not side 2's (CPY;2): in V2 the reference breaks, and
+    doesn't move to the top cap, which is side 1's far cap in both builds."""
+
+    offset = 1
+
+    def expectedBottomEdge(self):
+        if not self.offset and self.mode == "V2":
+            return BROKEN
+        return self.bottomEdge()
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length2 = 5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.StartType = "Profile plane"
+        doc.Pad.StartOffset = 0
+        self.offset = 0
+
+
+class FilletBottomCapEdgeOfOneSideToSymmetric(Scenario):
+    """PR 243 round 5 (verification 4, finding 1): a Pad of the square x, y -5..5, One side, 10
+    long, Refine off; a fillet, radius 0.5, on the bottom cap's front edge (y = -5, z = 0). The
+    Pad goes Symmetric (one prism from z = -5 to 5), then Two sides, 5 and 5 (one prism, the
+    same): its start cap is the moved profile in each, with the profile's names, and the fillet
+    follows to the bottom edge at z = -5. Round 4 marked the single prism's start cap, and the
+    reference broke; round 5 marks the seam of two sides built apart instead."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("bottom_edge",)
+    steps = ("symmetric", "twoSides")
+    z = 0
+
+    def bottomEdge(self):
+        return edge("line", direction=X, contains=(0, -5, self.z))
+
+    def followedEdge(self):
+        """The edge, held plainly in V2: a warned guess doesn't pass (verification 5, L3)."""
+        expected = self.bottomEdge()
+        return Settled(expected) if self.mode == "V2" else expected
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.followedEdge, Filleted(0.5))
+
+    def symmetric(self, doc):
+        doc.Pad.SideType = "Symmetric"
+        self.z = -5
+
+    def twoSides(self, doc):
+        doc.Pad.SideType = "Two sides"
+        doc.Pad.Length = 5
+        doc.Pad.Length2 = 5
+
+
+class FilletBottomCapEdgeOfSymmetricLengthEdit(FilletBottomCapEdgeOfOneSideToSymmetric):
+    """PR 243 round 5 (verification 4, L6): a length edit within the single-prism build. The Pad
+    of the square x, y -5..5, Symmetric, 10 long, untapered, Refine off, is one prism from z = -5
+    to 5; a fillet, radius 0.5, on the bottom cap's front edge (y = -5, z = -5). The length goes
+    to 12 (z -6..6), then the Pad goes Two sides, 6 and 7 (z -7..6): the fillet follows the
+    bottom edge."""
+
+    steps = ("longer", "twoSides")
+    z = -5
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        pad.SideType = "Symmetric"
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.followedEdge, Filleted(0.5))
+
+    def longer(self, doc):
+        doc.Pad.Length = 12
+        self.z = -6
+
+    def twoSides(self, doc):
+        doc.Pad.SideType = "Two sides"
+        doc.Pad.Length = 6
+        doc.Pad.Length2 = 7
+        self.z = -7
+
+
+class FilletBottomCapEdgeOfOneSideToStartOffset(FilletBottomCapEdgeOfOneSideToSymmetric):
+    """PR 243 round 5: the Pad of FilletBottomCapEdgeOfOneSideToSymmetric (One side, 10 long, the
+    fillet on the bottom cap's front edge at z = 0) goes Two sides, 5 and 5, with a start offset
+    of 1: the sides are built apart (z -4..1 and 1..6), and the profile plane is the seam. Before
+    round 5 the seam had the profile's names, and the fillet moved there silently. In V2 the seam
+    is marked (CPY;1) and the bottom cap's names are on no element. Side 1's far cap (z = 6)
+    embeds them through its projection section (PRJ): the solver no longer takes that as
+    evidence, so the reference breaks."""
+
+    steps = ("apart",)
+
+    def expectedBottomEdge(self):
+        if self.z is None and self.mode == "V2":
+            return BROKEN
+        return self.bottomEdge()
+
+    def bottomEdge(self):
+        return edge("line", direction=X, contains=(0, -5, -4 if self.z is None else self.z))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("bottom_edge", fillet, "Base", self.expectedBottomEdge, Filleted(0.5))
+
+    def apart(self, doc):
+        pad = doc.Pad
+        pad.SideType = "Two sides"
+        pad.Length = 5
+        pad.Length2 = 5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        self.z = None
+
+
+class FilletTopCapEdgeOfTwoSidesLengthEdit(FilletBottomCapEdgeOfOneSideToSymmetric):
+    """PR 243 round 5, the projection partner rule's other side: a reference to a far cap's
+    (PRJ) edge still follows. The Pad of the square x, y -5..5, Two sides, 5 and 5, untapered,
+    Refine off (one prism from z = -5 to 5); a fillet, radius 0.5, on the top cap's front edge
+    (y = -5, z = 5), side 1's far cap. Side 1's length goes to 7 (z = 7), then a start offset of 1
+    builds the sides apart (side 1 from z = 1 to 8): the top cap is side 1's far cap in both
+    builds, and the fillet follows it."""
+
+    steps = ("longer", "apart")
+    z = 5
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        pad.SideType = "Two sides"
+        pad.Length2 = 5
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.bottomEdge()))
+        fillet.Radius = 0.5
+        self.ref("top_edge", fillet, "Base", self.followedEdge, Filleted(0.5))
+
+    REFS = ("top_edge",)
+
+    def longer(self, doc):
+        doc.Pad.Length = 7
+        self.z = 7
+
+    def apart(self, doc):
+        doc.Pad.StartType = "Offset"
+        doc.Pad.StartOffset = 1
+        self.z = 8
+
+
+class FilletSeamOfTaperedSymmetricToUntapered(Scenario):
+    """PR 243 round 5 (verification 4, finding 2): a Pad of the square x, y -5..5, Symmetric, 10
+    long, tapered 10 degrees, Refine off: two prisms from the profile plane, each widening away
+    from z = 0, so their side faces meet in a concave ridge at z = 0, which has the profile's
+    names (side 1's) and side 2's (CPY;2). A fillet, radius 0.5, on the front ridge (y = -5,
+    z = 0). The taper goes to 0: one prism from z = -5 to 5, whose start cap, at z = -5, has the
+    profile's names, and the ridge is gone. Before round 5 the fillet moved there silently. In
+    V2 the seam, side 1's start cap, is marked (CPY;1), so the reference breaks."""
+
+    area = "dress-ups"
+    MULTI = True
+    REFS = ("ridge",)
+    tapered = True
+
+    def ridge(self):
+        if not self.tapered:
+            return BROKEN
+        return edge("line", direction=X, contains=(0, -5, 0))
+
+    def build(self, doc):
+        body = m.body(doc)
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 10)
+        pad.Refine = False
+        pad.SideType = "Symmetric"
+        pad.TaperAngle = 10
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.ridge()))
+        fillet.Radius = 0.5
+        self.ref("ridge", fillet, "Base", self.ridge, Filleted(0.5))
+
+    def edit(self, doc):
+        doc.Pad.TaperAngle = 0
+        self.tapered = False
+
+
+class StartCapOfOneSideToUpToBlockApart(Scenario):
+    """PR 243 round 6 (Fable review 5, M1): a base of a pillar (x 5..15, y -5..5, z -10..8) under
+    a block (x `blockX0`..15, y -5..5, z 8..10); a Pad of the square x, y -5..5, One side, 5
+    (z 0..5), its right face on the pillar, Refine off. Then Two sides: side 1 up to the
+    block's bottom face (z = 8), side 2 5 long, with a start offset of 1, so the sides are built
+    apart (z 1..8 and -4..1) and the start cap's names are on no element (the seam is CPY;1).
+    Side 1's far cap lies on the block, and its edges and corners also hold the block's own
+    names where they meet the block's edges."""
+
+    abstract = True
+    area = "dress-ups"
+    MULTI = True
+    blockX0 = -5
+    blockY = 5
+    apart = False
+
+    def build(self, doc):
+        body = m.body(doc)
+        pillar = m.sketch(doc, "Pillar", m.rectangle(5, -5, 15, 5), body, z=-10)
+        m.pad(body, pillar, 18, name="PillarPad")
+        block = m.sketch(
+            doc, "Block", m.rectangle(self.blockX0, -self.blockY, 15, self.blockY), body, z=8
+        )
+        self.block = m.pad(body, block, 2, name="BlockPad")
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        doc.recompute()
+        self.addConsumer(doc, body, pad)
+
+    def edit(self, doc):
+        pad = doc.Pad
+        pad.SideType = "Two sides"
+        pad.Type = "UpToFace"
+        under = face("plane", normal=-Z, through=(0, 0, 8), contains=(0, 0, 8))
+        pad.UpToFace = (self.block, self.names(self.block, under))
+        pad.Length2 = 5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        self.apart = True
+
+
+class FilletStartCapEdgeOfOneSideToUpToBlockApart(StartCapOfOneSideToUpToBlockApart):
+    __doc__ = (
+        StartCapOfOneSideToUpToBlockApart.__doc__
+        + "\n\nA fillet, radius 0.5, on the start cap's left edge (x = -5, z = 0). Side 1's far "
+        + "left edge (z = 8) holds the block sketch's own left edge name besides its PRJ name. "
+        + "Before round 6 the solver took that name's top section (SKT, like the old name's) as "
+        + "evidence and resolved the reference there at tier 1, with no warning (the fillet then "
+        + "failed on the concave edge). The reference breaks."
+    )
+
+    REFS = ("left_edge",)
+
+    def leftEdge(self):
+        if self.apart:
+            return BROKEN
+        return edge("line", direction=Y, contains=(-5, 0, 0))
+
+    def addConsumer(self, doc, body, pad):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.leftEdge()))
+        fillet.Radius = 0.5
+        self.ref("left_edge", fillet, "Base", self.leftEdge, Filleted(0.5))
+
+
+class PointOnStartCapCornerOfOneSideToUpToBlockApart(StartCapOfOneSideToUpToBlockApart):
+    __doc__ = (
+        StartCapOfOneSideToUpToBlockApart.__doc__
+        + "\n\nA datum point on the start cap's front left corner (-5, -5, 0). Side 1's far "
+        + "corner (-5, -5, 8) is also the block sketch's corner, with its plain name. Before "
+        + "round 6 the solver resolved the point there at tier 1 (top sections agree), 8 mm away, "
+        + "silently. The reference breaks."
+    )
+
+    REFS = ("corner",)
+
+    def corner(self):
+        if self.apart:
+            return BROKEN
+        return vertex((-5, -5, 0))
+
+    def addConsumer(self, doc, body, pad):
+        point = body.newObject("PartDesign::Point", "Corner")
+        point.AttachmentSupport = [(pad, self.names(pad, self.corner())[0])]
+        point.MapMode = "Vertex"
+        self.ref("corner", point, "AttachmentSupport", self.corner)
+        doc.recompute()
+
+
+class FilletStartCapFrontEdgeOfOneSideToUpToBlockApart(StartCapOfOneSideToUpToBlockApart):
+    __doc__ = (
+        StartCapOfOneSideToUpToBlockApart.__doc__
+        + "\n\nThe block starts at x = 0, and a fillet, radius 0.5, is on the start cap's front "
+        + "edge (y = -5, z = 0). The pillar's front left edge (x = 5) is split by the Pad, and its "
+        + "piece z 1..8 lists the Pad's front face (the profile's front line, GEN) among its "
+        + "connected elements, so the old name is in its ancestry; tier 2 drops it (it runs along "
+        + "Z, the old edge along X). Side 1's far front edge, in two pieces at the block, holds "
+        + "the old name through PRJ only. The reference breaks (a guard for the connected "
+        + "elements' path)."
+    )
+
+    REFS = ("front_edge",)
+    blockX0 = 0
+
+    def frontEdge(self):
+        if self.apart:
+            return BROKEN
+        return edge("line", direction=X, contains=(0, -5, 0))
+
+    def addConsumer(self, doc, body, pad):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.frontEdge()))
+        fillet.Radius = 0.5
+        self.ref("front_edge", fillet, "Base", self.frontEdge, Filleted(0.5))
+
+
+class FilletStartCapEdgeOfOneSideToUpToOverhangingBlockApart(
+    FilletStartCapEdgeOfOneSideToUpToBlockApart
+):
+    __doc__ = (
+        FilletStartCapEdgeOfOneSideToUpToBlockApart.__doc__
+        + "\n\nPR 243 round 7 (Fable review 6, M1): the block overhangs in y (y -8..8). Side 1's far "
+        + "left edge is the middle piece of the block's bottom left edge (FUS;MOD), whose "
+        + "connected elements, per end vertex, are a Pad face holding it, possibly the profile's "
+        + "left line's GEN face (it runs along that face). Through that neighbour the old name "
+        + "was in the piece's ancestry outside a projection, and the reference resolved there, "
+        + "8 mm away, at tier 1. The reference breaks."
+    )
+
+    blockY = 8
+
+
+class PointOnStartCapCornerOfOneSideToUpToOverhangingBlockApart(
+    PointOnStartCapCornerOfOneSideToUpToBlockApart
+):
+    __doc__ = (
+        PointOnStartCapCornerOfOneSideToUpToBlockApart.__doc__
+        + "\n\nPR 243 round 7 (Fable review 6, M1): the block overhangs in y (y -8..8), so side "
+        + "1's far corner lies inside the block's bottom left edge. The reference breaks."
+    )
+
+    blockY = 8
+
+
+class StartCapOnPedestalToUpToBlockApart(Scenario):
+    """PR 243 round 7 (Fable review 6, M2): a pedestal (x, y -10..10, z -5..0) with a pillar
+    (x 7..10, y -5..5, z 0..8) under a block (x -5..10, y -5..5, z 8..10); a Pad of the square
+    x, y -5..5 on the pedestal's top, One side, 5 (z 0..5), Refine off. Its start cap lies in the
+    pedestal's top: the start cap's edges are FUS;MOD names that split the pedestal's top face.
+    Then Two sides: side 1 up to the block's bottom face (z = 8), side 2 0.5 long, with a start
+    offset of 1, so the sides are built apart (z 1..8 and 0.5..1) and lifted off the pedestal.
+    Side 1's far cap lies on the block, flush with its left side, so its left edge and corners
+    merge with the block's: FUS;MOD names over the PRJ names, which link the profile's names."""
+
+    abstract = True
+    area = "dress-ups"
+    MULTI = True
+    pedestal = (-10, -10, 10, 10)
+    blockY = 5
+    apart = False
+
+    def build(self, doc):
+        body = m.body(doc)
+        pedestal = m.sketch(doc, "Pedestal", m.rectangle(*self.pedestal), body, z=-5)
+        m.pad(body, pedestal, 5, name="PedestalPad")
+        pillar = m.sketch(doc, "Pillar", m.rectangle(7, -self.blockY, 10, self.blockY), body)
+        m.pad(body, pillar, 8, name="PillarPad")
+        block = m.sketch(doc, "Block", m.rectangle(-5, -self.blockY, 10, self.blockY), body, z=8)
+        self.block = m.pad(body, block, 2, name="BlockPad")
+        profile = m.sketch(doc, "Profile", m.rectangle(-5, -5, 5, 5), body)
+        pad = m.pad(body, profile, 5)
+        pad.Refine = False
+        doc.recompute()
+        self.addConsumer(doc, body, pad)
+
+    def edit(self, doc):
+        pad = doc.Pad
+        pad.SideType = "Two sides"
+        pad.Type = "UpToFace"
+        under = face("plane", normal=-Z, through=(0, 0, 8), contains=(0, 0, 8))
+        pad.UpToFace = (self.block, self.names(self.block, under))
+        pad.Length2 = 0.5
+        pad.StartType = "Offset"
+        pad.StartOffset = 1
+        self.apart = True
+
+
+class FilletStartCapEdgeOnPedestalToUpToBlockApart(StartCapOnPedestalToUpToBlockApart):
+    __doc__ = (
+        StartCapOnPedestalToUpToBlockApart.__doc__
+        + "\n\nA fillet, radius 0.5, on the start cap's left edge (x = -5, z = 0), concave on the "
+        + "pedestal. Side 1's far left edge (z = 8) shares the old name's profile name through "
+        + "its PRJ linked name, and both are topped by FUS;MOD. The reference breaks."
+    )
+
+    REFS = ("left_edge",)
+
+    def leftEdge(self):
+        if self.apart:
+            return BROKEN
+        return edge("line", direction=Y, contains=(-5, 0, 0))
+
+    def addConsumer(self, doc, body, pad):
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (pad, self.names(pad, self.leftEdge()))
+        fillet.Radius = 0.5
+        self.ref("left_edge", fillet, "Base", self.leftEdge, Filleted(0.5))
+
+
+class PointOnStartCapCornerOnPedestalToUpToBlockApart(StartCapOnPedestalToUpToBlockApart):
+    __doc__ = (
+        StartCapOnPedestalToUpToBlockApart.__doc__
+        + "\n\nA datum point on the start cap's front left corner (-5, -5, 0), on the pedestal. "
+        + "Side 1's far corner (-5, -5, 8) is the block's corner. The reference breaks."
+    )
+
+    REFS = ("corner",)
+
+    def corner(self):
+        if self.apart:
+            return BROKEN
+        return vertex((-5, -5, 0))
+
+    def addConsumer(self, doc, body, pad):
+        point = body.newObject("PartDesign::Point", "Corner")
+        point.AttachmentSupport = [(pad, self.names(pad, self.corner())[0])]
+        point.MapMode = "Vertex"
+        self.ref("corner", point, "AttachmentSupport", self.corner)
+        doc.recompute()
+
+
+class FilletStartCapPieceOnPedestalToUpToBlockApart(FilletStartCapEdgeOnPedestalToUpToBlockApart):
+    __doc__ = (
+        FilletStartCapEdgeOnPedestalToUpToBlockApart.__doc__
+        + "\n\nThe pedestal is x -10..10, y -3..3, the pillar and the block y -3..3. The start "
+        + "cap's left edge is split by the pedestal's top edges, and the fillet is on its middle "
+        + "piece (y -3..3), the profile's name then FUS;MOD. Side 1's far left edge is split by "
+        + "the block's: its middle piece, as long, parallel, 8 mm up, holds the PRJ name, then "
+        + "FUS;MOD. The tops agree and the PRJ name embeds the old one; round 6 took that as "
+        + "evidence, and only the two end pieces, with the same names, left it ambiguous. The "
+        + "reference breaks."
+    )
+
+    pedestal = (-10, -3, 10, 3)
+    blockY = 3
+
+
+class FilletSideOneEdgeOfTaperedTwoSidesClipped(FilletSideOneEdgeOfTaperedTwoSides):
+    """The Pad of FilletSideOneEdgeOfTaperedTwoSides, then a slot through all along Y at
+    x -6..-4, z -1..1 (a Pocket from a sketch at y = 20): it cuts the middle out of both sides'
+    corner edges at (-5, -5), so the top section of each is the slot's split (PR 243 round 3,
+    verification M1: top agreement then passes for side 2's edge). The fillet is on side 1's
+    piece, z 1..5; side 1's taper is set to 0: it breaks."""
+
+    def solid(self, doc, body):
+        pad = self.twoSided(doc, body, "PartDesign::Pad")
+        # sketch (u, v) at (u, 20, -v), the normal +Y: the slot goes down -Y
+        facingY = App.Placement(V(0, 20, 0), App.Rotation(V(1, 0, 0), -90))
+        slot = m.sketch(doc, "Slot", m.rectangle(-6, -1, -4, 1), body, placement=facingY)
+        return m.pocketThroughAll(body, slot, "SlotPocket")

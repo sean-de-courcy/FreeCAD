@@ -60,6 +60,21 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         harness.assertEveryElementNamed(shape)
         harness.assertDistinctNames(shape)
 
+    def assertNoPieceOfAnother(self, shape):
+        """No element's name reads, to the reference solver, as a piece of another element's
+        name: a second side's names end in a CPY section, which marks a twin, not a split
+        (PR 243 round 2)."""
+        names = harness.elementNames(shape)
+        for a, aNames in names.items():
+            for b, bNames in names.items():
+                if a == b:
+                    continue
+                for aName in aNames:
+                    for bName in bNames:
+                        self.assertFalse(
+                            App.isPieceOf(aName, bName), f"{a} {aName!r} / {b} {bName!r}"
+                        )
+
     def sketchSection(self, sketch, referenceIDs, elementType):
         """A sketch element's V2 name, decoded: one section with the sketch's ID as its tag.
         Reference IDs are sorted, since a vertex lists its geometry points in no set order."""
@@ -741,6 +756,95 @@ class TestTopologicalNamingProblem(unittest.TestCase):
                 )
                 self.assertNamesDistinct(revolved.Shape)
                 body = revolved.getParentGeoFeatureGroup()
+                for obj in reversed(body.Group):
+                    self.Doc.removeObject(obj.Name)
+                self.Doc.removeObject(body.Name)
+
+    def _extrudeUpToArms(self, kind, sides):
+        """ops#255: a C-shaped body, its XZ outline padded 20 along -Y: a bottom arm z 0..5, a top
+        arm z 20..25 (both x -10..15) and a back x -10..-5. The rectangle x 0..10, y -15..-5 at
+        z = 10 is padded between the arms (Two sides: up to the top arm's lower face and the
+        bottom arm's upper face; Symmetric: up to the top arm's lower face), or pocketed through
+        them (Two sides: up to the bottom arm's lower face and the top arm's upper face), with
+        Refine off. Both sides are built from the same sketch edges."""
+        xz = App.Placement(App.Vector(0, 0, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        body = models.body(self.Doc)
+        outline = [(-10, 0), (15, 0), (15, 5), (-5, 5), (-5, 20), (15, 20), (15, 25), (-10, 25)]
+        arms = models.sketch(self.Doc, "Arms", models.polygon(outline), body, placement=xz)
+        armsPad = models.pad(body, arms, 20, "ArmsPad")
+        self.Doc.recompute()
+        self.assertAlmostEqual(armsPad.Shape.BoundBox.YMin, -20)
+        profile = models.sketch(self.Doc, "Profile", models.rectangle(0, -15, 10, -5), body, z=10)
+        feature = body.newObject(kind, "UpToArms")
+        feature.Profile = profile
+        feature.Refine = False
+        feature.SideType = sides
+        feature.Type = "UpToFace"
+
+        def armFace(z, normal):
+            return harness.face("plane", normal=(0, 0, normal), through=(0, 0, z)).one(
+                armsPad.Shape
+            )
+
+        if kind == "PartDesign::Pad":
+            feature.UpToFace = (armsPad, armFace(20, -1))
+            if sides == "Two sides":
+                feature.Type2 = "UpToFace"
+                feature.UpToFace2 = (armsPad, armFace(5, 1))
+        else:
+            feature.UpToFace = (armsPad, armFace(0, -1))
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = (armsPad, armFace(25, 1))
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    def _extrudeSquare(self, kind, sides, base=False, **properties):
+        """ops#255: the square x, y -5..5 at z = 10, padded or pocketed with Refine off, on its
+        own or (base) on the block x, y -20..20, z 0..20."""
+        body = models.body(self.Doc)
+        if base:
+            block = models.sketch(self.Doc, "Block", models.rectangle(-20, -20, 20, 20), body)
+            models.pad(body, block, 20, "Block")
+        square = models.sketch(self.Doc, "Square", models.rectangle(-5, -5, 5, 5), body, z=10)
+        feature = body.newObject(kind, "Square" + kind.split(":")[-1])
+        feature.Profile = square
+        feature.Refine = False
+        feature.SideType = sides
+        for name, value in properties.items():
+            setattr(feature, name, value)
+        self.Doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        return feature
+
+    def testPadUpToFaceSidesNamedApart(self):
+        """ops#255: the two sides of a Pad or Pocket built from the same sketch edges (Two sides
+        up to faces or tapered on both sides; Symmetric up to a face, through all, or tapered by
+        Length) have the second side's names marked, so no two elements share a name up to the
+        duplicate counter, and no side-2 name reads as a piece of a side-1 name."""
+        # Each side tapered 10 degrees over 5 widens by d each way: a prismatoid on the 10 x 10
+        # square, its mid-section 10 + d and its far end 10 + 2d wide.
+        d = 5 * math.tan(math.radians(10))
+        twoTapered = 2 * 5 / 6 * (10**2 + 4 * (10 + d) ** 2 + (10 + 2 * d) ** 2)
+        tapered = {"Length": 10, "TaperAngle": 10}
+        bothTapered = {"Length": 5, "Length2": 5, "TaperAngle": 10, "TaperAngle2": 10}
+        throughAll = {"base": True, "Type": "ThroughAll"}
+        cases = (
+            (self._extrudeUpToArms, "PartDesign::Pad", "Two sides", {}, 1500),
+            (self._extrudeUpToArms, "PartDesign::Pad", "Symmetric", {}, 1500),
+            (self._extrudeUpToArms, "PartDesign::Pocket", "Two sides", {}, -1000),
+            (self._extrudeSquare, "PartDesign::Pad", "Symmetric", tapered, twoTapered),
+            (self._extrudeSquare, "PartDesign::Pad", "Two sides", bothTapered, twoTapered),
+            (self._extrudeSquare, "PartDesign::Pocket", "Symmetric", throughAll, -2000),
+        )
+        for build, kind, sides, properties, added in cases:
+            with self.subTest(kind=kind, sides=sides, **properties):
+                feature = build(kind, sides, **properties)
+                baseVolume = feature.BaseFeature.Shape.Volume if feature.BaseFeature else 0
+                self.assertAlmostEqual(feature.Shape.Volume - baseVolume, added)
+                self.assertNamesDistinct(feature.Shape)
+                self.assertNoPieceOfAnother(feature.Shape)
+                body = feature.getParentGeoFeatureGroup()
                 for obj in reversed(body.Group):
                     self.Doc.removeObject(obj.Name)
                 self.Doc.removeObject(body.Name)

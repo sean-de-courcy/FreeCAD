@@ -450,6 +450,116 @@ def modelRevolutionUpToFace(doc):
     return features
 
 
+def modelPadUpToFace(doc):
+    """Pads and a Pocket up to faces of a C-shaped body (ops#255): its XZ outline padded 20
+    along -Y, a bottom arm z 0..5, a top arm z 20..25 and a back x -10..-5. The rectangle
+    x 0..10, y -15..-5 at z = 10 goes up to the top arm's lower face (One side, Symmetric), up to
+    it and the bottom arm's upper face (Two sides), or through both arms (a Pocket, Two sides).
+    And a square padded Symmetric by Length 10, tapered 10 degrees: two prisms. A second side's
+    names are marked."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    outline = [(-10, 0), (15, 0), (15, 5), (-5, 5), (-5, 20), (15, 20), (15, 25), (-10, 25)]
+    cases = (
+        ("Pad", "One side", ((20, -1),)),
+        ("Pad", "Symmetric", ((20, -1),)),
+        ("Pad", "Two sides", ((20, -1), (5, 1))),
+        ("Pocket", "Two sides", ((0, -1), (25, 1))),
+    )
+    features = []
+    for kind, sides, faces in cases:
+        label = kind + sides.replace(" ", "")
+        body = models.body(doc)
+        arms = models.sketch(doc, f"Arms{label}", models.polygon(outline), body, placement=xz)
+        armsPad = models.pad(body, arms, 20, f"ArmsPad{label}")
+        doc.recompute()
+        rectangle = models.rectangle(0, -15, 10, -5)
+        profile = models.sketch(doc, f"Profile{label}", rectangle, body, z=10)
+        feature = body.newObject(f"PartDesign::{kind}", f"UpTo{label}")
+        feature.Profile = profile
+        feature.Refine = False
+        feature.SideType = sides
+        upTo = [
+            (armsPad, face("plane", normal=(0, 0, n), through=(0, 0, z)).one(armsPad.Shape))
+            for z, n in faces
+        ]
+        feature.Type = "UpToFace"
+        feature.UpToFace = upTo[0]
+        if len(upTo) > 1:
+            feature.Type2 = "UpToFace"
+            feature.UpToFace2 = upTo[1]
+        features.append(feature)
+    body = models.body(doc)
+    square = models.sketch(doc, "Square", models.rectangle(-5, -5, 5, 5), body)
+    tapered = body.newObject("PartDesign::Pad", "SymmetricTapered")
+    tapered.Profile = square
+    tapered.Refine = False
+    tapered.SideType = "Symmetric"
+    tapered.Length = 10
+    tapered.TaperAngle = 10
+    features.append(tapered)
+    return features
+
+
+def modelTwoSidesOnePrimitive(doc):
+    """Two sides built as one primitive, and apart (PR 243 rounds 4 and 5): a square padded Two
+    sides 5 and 5 and Symmetric by Length 10, untapered (one prism each, its start cap with the
+    profile's names, its far cap side 1's), and Two sides 5 and 5 with a start offset of 1 (two
+    prisms: side 1's start cap, the seam, marked CPY;1, side 2 CPY;2), and Two sides, side 1 5
+    long, side 2 up to a datum plane at z = -5 (one prism from side 1's end: its start cap CPY;0,
+    its far cap side 2's, CPY;2; PR 243 round 6); a rectangle revolved Two sides by 60 and 30
+    degrees and Symmetric by 90 degrees (one solid each)."""
+    xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+    features = []
+    for label, sides, offset in (
+        ("TwoSides", "Two sides", 0),
+        ("Symmetric", "Symmetric", 0),
+        ("TwoSidesApart", "Two sides", 1),
+    ):
+        body = models.body(doc)
+        square = models.sketch(doc, f"Square{label}", models.rectangle(-5, -5, 5, 5), body)
+        pad = body.newObject("PartDesign::Pad", f"Pad{label}")
+        pad.Profile = square
+        pad.Refine = False
+        pad.SideType = sides
+        pad.Length = 10 if sides == "Symmetric" else 5
+        pad.Length2 = 5
+        if offset:
+            pad.StartType = "Offset"
+            pad.StartOffset = offset
+        features.append(pad)
+    body = models.body(doc)
+    plane = body.newObject("PartDesign::Plane", "AtMinusFive")
+    plane.Placement = App.Placement(V(0, 0, -5), App.Rotation())
+    square = models.sketch(doc, "SquareUpToFace", models.rectangle(-5, -5, 5, 5), body)
+    pad = body.newObject("PartDesign::Pad", "PadUpToFace")
+    pad.Profile = square
+    pad.Refine = False
+    pad.SideType = "Two sides"
+    pad.Length = 5
+    pad.Type2 = "UpToFace"
+    pad.UpToFace2 = (plane, [""])
+    features.append(pad)
+    for label, sides, angle, angle2 in (
+        ("TwoSides", "Two sides", 60, 30),
+        ("Symmetric", "Symmetric", 90, 0),
+    ):
+        body = models.body(doc)
+        profile = models.sketch(
+            doc, f"Profile{label}", models.rectangle(10, 0, 20, 5), body, placement=xz
+        )
+        revolution = body.newObject("PartDesign::Revolution", f"Revolution{label}")
+        revolution.Profile = profile
+        revolution.ReferenceAxis = (models.originFeature(body, "Z_Axis"), [""])
+        revolution.Refine = False
+        revolution.SideType = sides
+        revolution.Angle = angle
+        if angle2:
+            revolution.Type2 = "Angle"
+            revolution.Angle2 = angle2
+        features.append(revolution)
+    return features
+
+
 MODELS = {
     "Sketch": modelSketch,
     "PadPocket": modelPadPocket,
@@ -469,6 +579,8 @@ MODELS = {
     "OffsetThickness": modelOffsetThickness,
     "OffsetSplitCylinder": modelOffsetSplitCylinder,
     "RevolutionUpToFace": modelRevolutionUpToFace,
+    "PadUpToFace": modelPadUpToFace,
+    "TwoSidesOnePrimitive": modelTwoSidesOnePrimitive,
 }
 
 # ---------------------------------------------------------------------------------------------

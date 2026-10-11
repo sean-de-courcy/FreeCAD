@@ -516,6 +516,63 @@ TEST_F(FeaturePartTest, doNamesMatchKeepsLinkInstancesApart)
     EXPECT_TRUE(Feature::doNamesMatch(throughTwo, sameThroughTwo));
 }
 
+TEST_F(FeaturePartTest, doNamesMatchKeepsSecondSidesApart)
+{
+    // Arrange
+    //   PR 243 round 3: a two-sided Pad's second side is built from the profile again, and its
+    //   names are the first side's followed by `_;_;<pad>;CPY;2;<type>;0;MOD;_`; a Revolution's
+    //   second side carries that section on the profile's edge inside its face's name
+    auto section = [](long tag,
+                      const char* op,
+                      int index,
+                      char type,
+                      const std::vector<std::string>& flags,
+                      const std::vector<Data::MappedName>& linked = {}) {
+        return Data::MappedName::makeEncodedSection(
+            std::vector<std::string> {},
+            linked,
+            tag,
+            op,
+            index,
+            type,
+            0,
+            flags,
+            std::vector<Data::MappedName> {}
+        );
+    };
+    auto withSection = [&](const Data::MappedName& name, long tag, const char* op, int index) {
+        return Data::MappedName(
+            name.toString() + "|" + section(tag, op, index, 'E', {Data::MAPPER_FLAG_MODIFIED})
+        );
+    };
+    auto profileEdge = Data::MappedName::makeUnmappedName({"g1"}, 5, "SKT", 'E');
+    auto sideOne = Data::MappedName(section(7, "XTR", 0, 'E', {"GEN"}, {profileEdge}));
+    auto sideTwo = withSection(sideOne, 7, OpCodes::Copy, 2);
+    auto sameSideTwo = withSection(sideOne, 7, OpCodes::Copy, 2);
+    //   a through-all Pocket clipping both sides' corners: the top section is its MOD on both
+    auto clippedOne = withSection(sideOne, 9, OpCodes::Cut, 0);
+    auto clippedTwo = withSection(sideTwo, 9, OpCodes::Cut, 0);
+    //   a Revolution's faces from the profile edge and from its second-side copy
+    auto profileCopy = withSection(profileEdge, 7, OpCodes::Copy, 2);
+    auto revolvedOne = Data::MappedName(section(7, "RVL", 0, 'F', {"GEN"}, {profileEdge}));
+    auto revolvedTwo = Data::MappedName(section(7, "RVL", 0, 'F', {"GEN"}, {profileCopy}));
+    auto sameRevolvedTwo = Data::MappedName(section(7, "RVL", 0, 'F', {"GEN"}, {profileCopy}));
+
+    // Act and assert
+    //   a second side's element is not the first side's, either way, nor after a later split
+    EXPECT_FALSE(Feature::doNamesMatch(sideTwo, sideOne));
+    EXPECT_FALSE(Feature::doNamesMatch(sideOne, sideTwo));
+    EXPECT_TRUE(Feature::doNamesMatch(sideTwo, sameSideTwo));
+    EXPECT_FALSE(Feature::doNamesMatch(clippedTwo, clippedOne));
+    EXPECT_FALSE(Feature::doNamesMatch(clippedOne, clippedTwo));
+    EXPECT_TRUE(Feature::doNamesMatch(clippedTwo, sideTwo));
+    EXPECT_TRUE(Feature::doNamesMatch(clippedOne, sideOne));
+    //   nor through a linked name
+    EXPECT_FALSE(Feature::doNamesMatch(revolvedTwo, revolvedOne));
+    EXPECT_FALSE(Feature::doNamesMatch(revolvedOne, revolvedTwo));
+    EXPECT_TRUE(Feature::doNamesMatch(revolvedTwo, sameRevolvedTwo));
+}
+
 TEST_F(FeaturePartTest, doNamesMatchKeepsBinderSupportsApart)
 {
     // Arrange

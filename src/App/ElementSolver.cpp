@@ -65,33 +65,51 @@ constexpr const char* patternInstanceOpCode = "TRF";
 // apart the supports from copies of one file (ops#112).
 constexpr const char* boundaryOpCode = "EXT";
 
-// A section that makes a copy of the element it ends: a pattern instance's or a boundary's.
+// The op code of a second side's section, `_;_;<feature>;CPY;2;<type>;0;MOD;_` (Part's
+// OpCodes::Copy). A two-sided or Symmetric Pad's or Pocket's second side is built from the
+// profile's edges again, and its names are the first side's with this section (ops#255); a
+// Revolution's second side has it on the profile's names inside its own (ops#240). It carries
+// the MOD flag, but the element is the first side's twin, no piece of it: like an instance, the
+// second side is a copy, and its names share no ancestry with the first side's (PR 243 round 2).
+constexpr const char* secondSideOpCode = "CPY";
+
+// The copy a section makes of the element it ends, as the context its prefix is in: k for a
+// pattern instance, EXT;i for a boundary, CPY;2 for a second side; empty for any other section
+// (and for a pattern instance without a number, still a copy section: isCopySection()).
+std::string copyIndex(const DecodedMappedSection& section)
+{
+    if (section.opCode == patternInstanceOpCode) {
+        return section.index;
+    }
+    if (section.opCode == boundaryOpCode || section.opCode == secondSideOpCode) {
+        return section.opCode + ";" + section.index;
+    }
+    return {};
+}
+
+// A section that makes a copy of the element it ends: a pattern instance's, a boundary's or a
+// second side's.
 bool isCopySection(const DecodedMappedSection& section)
 {
-    return section.opCode == patternInstanceOpCode || section.opCode == boundaryOpCode;
+    return section.opCode == patternInstanceOpCode || section.opCode == boundaryOpCode
+        || section.opCode == secondSideOpCode;
 }
 
 // Starts and ends a copy's context in a node of NameAncestry: `\x1e<tag>;<k>\x1e` for a pattern
-// instance, `\x1e<tag>;EXT;<i>\x1e` for a boundary, before a name (see
-// NameAncestry::ancestorsOf()).
+// instance, `\x1e<tag>;EXT;<i>\x1e` for a boundary, `\x1e<tag>;CPY;2\x1e` for a second side,
+// before a name (see NameAncestry::ancestorsOf()).
 // A control character starts no mapped name.
 constexpr char contextMark = '\x1e';
 
-// The copies a name is in: (tag, k) of each of its top-level TRF sections, (tag, EXT;i) of each
-// of its EXT sections, in order.
+// The copies a name is in: (tag, copyIndex()) of each of its top-level copy sections (TRF, EXT,
+// CPY), in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(std::string_view name)
 {
     std::vector<std::pair<std::string, std::string>> instances;
     for (auto section : NameAncestry::splitSections(name)) {
         const auto& decoded = decodeSection(section);
-        if (decoded.opCode == patternInstanceOpCode) {
-            instances.emplace_back(decoded.iterationTag, decoded.index);
-        }
-        else if (decoded.opCode == boundaryOpCode) {
-            instances.emplace_back(
-                decoded.iterationTag,
-                std::string(boundaryOpCode) + ";" + decoded.index
-            );
+        if (isCopySection(decoded)) {
+            instances.emplace_back(decoded.iterationTag, copyIndex(decoded));
         }
     }
     return instances;
@@ -195,20 +213,16 @@ bool hasTag(const DecodedMappedSection& section)
     return !section.iterationTag.empty() && section.iterationTag != Data::EMPTY_VALUE;
 }
 
-// The copies \a name's element is made in, in its whole lineage: its own top-level TRF and EXT
-// sections (patternInstances()) and those of every name its lineage links, at any depth, sorted.
+// The copies \a name's element is made in, in its whole lineage: its own top-level copy sections
+// (patternInstances()) and those of every name its lineage links, at any depth, sorted.
 // A later feature's element made from a copy's (a pocket slicing a Mirrored boss) carries the
 // copy only inside a linked name (ops#168 review).
 std::vector<std::pair<std::string, std::string>> copyContexts(std::string_view name)
 {
     auto contexts = patternInstances(name);
     walkLineage(name, false, [&](const DecodedMappedSection& section, bool) {
-        if (section.opCode == patternInstanceOpCode) {
-            contexts.emplace_back(section.iterationTag, section.index);
-        }
-        else if (section.opCode == boundaryOpCode) {
-            contexts.emplace_back(section.iterationTag,
-                                  std::string(boundaryOpCode) + ";" + section.index);
+        if (isCopySection(section)) {
+            contexts.emplace_back(section.iterationTag, copyIndex(section));
         }
         return false;
     });
@@ -341,6 +355,88 @@ bool lostASource(const std::vector<std::string>& names, const std::vector<Source
     });
 }
 
+// The nodes of a name's ancestry, as NameAncestry::ancestorsOf() walks it (a node's prefix, in a
+// copy section's context, and the names embedded in its last section), in two sets. `outside`:
+// the element itself and its earlier states. `projected`: the nodes reached through the names a
+// projection section embeds (PR 243 round 5). A section with the PRJ flag
+// (MAPPER_FLAG_PROJECTION) names the element an extrusion or a revolution makes at its far end
+// from a profile element: a pad's top edge is `<bottom edge>|XTR|PRJ`. That is the element's
+// partner, made at the same time, and both are in the result: never the element itself, nor a
+// later state of it. A missing start-cap edge whose far-cap partner holds its name is no
+// evidence that the partner is that edge (a two-sided pad built as one prism, then as two
+// solids: the start cap's names are gone, side 1's far cap embeds them). Two partners of one
+// profile element are related, though: the far cap's edge before and after its profile is
+// redrawn. The connected elements are in neither (PR 243 round 7): a modified element's
+// neighbours, per end vertex the vertex and one face of another input holding it, which is never
+// the element itself; a base edge collinear with a profile line's extruded face lists that face.
+struct AncestryNodes
+{
+    std::set<std::string> outside;
+    std::set<std::string> projected;
+
+    // True if both hold a node reached the same way
+    bool meets(const AncestryNodes& other) const
+    {
+        auto shares = [](const std::set<std::string>& a, const std::set<std::string>& b) {
+            return std::any_of(a.begin(), a.end(), [&](const std::string& node) {
+                return b.count(node) > 0;
+            });
+        };
+        return shares(outside, other.outside) || shares(projected, other.projected);
+    }
+};
+
+void collectAncestryNodes(std::string_view name, bool projected, AncestryNodes& nodes)
+{
+    auto& set = projected ? nodes.projected : nodes.outside;
+    if (name.empty() || !set.emplace(name).second) {
+        return;
+    }
+    std::string context;
+    std::string_view node = name;
+    while (!node.empty() && node.front() == contextMark) {
+        auto end = node.find(contextMark, 1);
+        if (end == std::string_view::npos) {
+            break;
+        }
+        context.append(node.substr(0, end + 1));
+        node.remove_prefix(end + 1);
+    }
+    auto sections = NameAncestry::splitSections(node);
+    if (sections.empty()) {
+        return;
+    }
+    const auto& last = decodeSection(sections.back());
+    if (sections.size() > 1) {
+        auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
+        std::string prefix(node.substr(0, prefixSize));
+        if (isCopySection(last)) {
+            prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark + prefix;
+        }
+        collectAncestryNodes(context + prefix, projected, nodes);
+    }
+    const bool throughProjection = projected || last.hasMapperFlag(MAPPER_FLAG_PROJECTION);
+    for (const auto& embedded : last.linkedNames) {
+        if (!embedded.empty()) {
+            collectAncestryNodes(context + embedded, throughProjection, nodes);
+        }
+    }
+}
+
+AncestryNodes ancestryNodes(std::string_view name)
+{
+    AncestryNodes nodes;
+    collectAncestryNodes(name, false, nodes);
+    return nodes;
+}
+
+// True if \a ancestor is in the ancestry of \a name other than through a projection's embedded
+// names or the connected elements (AncestryNodes::outside).
+bool reachesOutsideProjections(std::string_view name, std::string_view ancestor)
+{
+    return ancestryNodes(name).outside.count(std::string(ancestor)) > 0;
+}
+
 }  // namespace
 
 std::vector<std::string> NameAncestry::sourceTags(std::string_view name)
@@ -423,7 +519,8 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
     // edge of each of two instances); two names of one instance share the copies' ancestors.
     // A node in a context has the children of the name it stands for, in the same context.
     // A boundary section's prefix is the same (ops#56): `X|EXT` is X brought in through one Link
-    // or binder, so the copies through two links share no ancestry, nor do X and its copy.
+    // or binder, so the copies through two links share no ancestry, nor do X and its copy. So is
+    // a second side's (PR 243 round 2): `X|CPY` is the second side's twin of the first side's X.
     std::vector<std::string> children;
     std::vector<std::pair<std::string, std::string>> referenceIds;  // (ID, tag) of a leaf
     std::string context;  // the node's contexts, outermost first, for a node in a context
@@ -443,12 +540,9 @@ const NameAncestry::KeySet& NameAncestry::ancestorsOf(Key key)
             // Everything before the last top-level delimiter.
             auto prefixSize = static_cast<std::size_t>(sections.back().data() - node.data()) - 1;
             std::string prefix(node.substr(0, prefixSize));
-            if (last.opCode == patternInstanceOpCode) {
-                prefix = contextMark + last.iterationTag + ";" + last.index + contextMark + prefix;
-            }
-            else if (last.opCode == boundaryOpCode) {
-                prefix = contextMark + last.iterationTag + ";" + boundaryOpCode + ";" + last.index
-                    + contextMark + prefix;
+            if (isCopySection(last)) {
+                prefix = contextMark + last.iterationTag + ";" + copyIndex(last) + contextMark
+                    + prefix;
             }
             children.push_back(std::move(prefix));
         }
@@ -2719,6 +2813,7 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         std::vector<int> candidates;  // positions in the pool, in index order
         std::set<int> fromOverlap;
         std::set<int> fromNames;
+        std::set<std::string> matchedNames;  // the names the name match found them by
         std::set<int> inAncestry;
         // Tier 1's candidates that T1 dropped, made by another maker (ops#167), and that T1'
         // dropped, which lost one of the old element's sources (ops#173): for the evidence, and
@@ -2945,9 +3040,14 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             if (rejected.count(element.index)) {
                 continue;
             }
+            // A projection partner of the old element holds its name, but is another element
+            // (reachesOutsideProjections()): it is no evidence, and not in the old name's ancestry.
             bool contains = !oldName.empty()
                 && std::any_of(element.names.begin(), element.names.end(), [&](const auto& n) {
-                                return ancestry.contains(n, oldName);
+                                if (!ancestry.contains(n, oldName)) {
+                                    return false;
+                                }
+                                return reachesOutsideProjections(n, oldName);
                             });
             if (pool.exact.count(element.index) && !contains) {
                 continue;
@@ -2980,10 +3080,16 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
         }
         if (input.source != Tier1Source::Overlap) {
             for (int member : members) {
+                // A name match made in other copies than the old name's is another element,
+                // whatever the matcher made of the copy sections deep in its lineage (PR 243
+                // round 3).
+                const auto oldCopies = copyContexts(input.entries[member].oldName);
                 for (const auto& name : input.entries[member].nameMatches) {
                     auto it = pool.byName.find(name);
-                    if (it != pool.byName.end() && allowed[it->second]) {
+                    if (it != pool.byName.end() && allowed[it->second]
+                        && copyContexts(name) == oldCopies) {
                         state.fromNames.insert(it->second);
+                        state.matchedNames.insert(name);
                     }
                 }
             }
@@ -3398,7 +3504,23 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
             // edge that many elements embed through a face) doesn't show it is the same element.
             // A partner that only geometry found passed both geometric tiers. The IDX source and
             // the old element's pieces (an IDX element's pieces under another op code don't hold
-            // the old name) are evidence of their own.
+            // the old name) are evidence of their own. The name that agrees on the top section
+            // must be one tier 1 found the partner by: one the name match returned, or one that
+            // shares an ancestor with the old name. A partner found through one name (a far
+            // cap's PRJ name, which embeds the old start cap's) that holds another, unrelated name
+            // with the same top op code (another sketch's plain name, where the far cap meets a
+            // base element) has no evidence (PR 243 round 6). Nor one that shares an ancestor
+            // through a projection's embedded names on one side only, or through the connected
+            // elements (AncestryNodes, PR 243 round 7): where both caps meet base elements, the
+            // far cap's PRJ name and the start cap's name are both topped by FUS;MOD, and the PRJ
+            // name embeds the start cap's.
+            std::optional<AncestryNodes> oldNodes;
+            auto related = [&](const std::string& name) {
+                if (!oldNodes) {
+                    oldNodes = ancestryNodes(state.oldName);
+                }
+                return ancestryNodes(name).meets(*oldNodes);
+            };
             bool evidenced = k >= 0
                 && (state.geometric || state.inAncestry.count(k) > 0
                     || (state.indexed && state.fromIndex.count(k) > 0) || !state.equivalent.empty()
@@ -3406,7 +3528,11 @@ std::vector<SolveOutcome> solveOwner(const SolveInput& input)
                     || std::any_of(
                         state.pool->elements[k].names.begin(),
                         state.pool->elements[k].names.end(),
-                        [&](const auto& n) { return NameAncestry::topAgrees(state.oldName, n); }
+                        [&](const auto& n) {
+                            return NameAncestry::topAgrees(state.oldName, n)
+                                && (state.matchedNames.count(n) > 0
+                                    || related(n));
+                        }
                     ));
             // A partner that tier 1 alone found must not contradict the saved geometry (ops#87:
             // a thread's B-spline edge resolved to a circle with which it shares sources). The

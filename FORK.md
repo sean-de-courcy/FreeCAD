@@ -281,7 +281,8 @@ names it.
 | `fix/naming-minors-124-138-176` | fix | ops#176 ops#138 ops#124 ops#268 | - | `integration` `7ed101a873` | `df6a4acece` (fork PR 249), 2026-10-11 | never (fork fix) |
 | `fix/sketcher-minors-237-277-278-280` | fix | ops#280, ops#278, ops#277, ops#237, ops#281 | - | `integration` `5bf91f795b` | `24850925c7` (fork PR 253), 2026-10-11 | never (fork fix) |
 | `fix/283-carbon-copy-local-mirror` | fix | ops#283 | - | `fix/sketcher-minors-237-277-278-280` `7baf19f5f7` (stacked on fork PR 253) | `000f6639bd` (fork PR 254), 2026-10-11 | never (fork fix) |
-| `fix/276-partdesign-gui-minors` | fix | ops#276, ops#252, ops#253 | - | `integration` `000f6639bd` | (fork PR 255) | never (fork fix) |
+| `fix/276-partdesign-gui-minors` | fix | ops#276, ops#252, ops#253 | - | `integration` `000f6639bd` | `0f634bd007` (fork PR 255), 2026-10-11 | never (fork fix) |
+| `fix/255-pad-twosided-names` | fix | ops#255 | - | `fix/254-symmetric-upto-sector` `ea7b468173` (stacked on fork PR 239) | (fork PR 243) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

@@ -625,6 +625,58 @@ TEST(NameAncestry, linkCopiesHaveTheirOwnAncestry)
     EXPECT_GT(weighted.overlap(through(oldTop, 7), through(newTop, 7)), 0.0);
 }
 
+TEST(NameAncestry, secondSidesAreCopies)
+{
+    // ops#255, PR 243 round 2: a two-sided Pad's second side is built from the profile again,
+    // and its names are the first side's, X, followed by `_;_;<pad>;CPY;2;<type>;0;MOD;_`. The
+    // MOD flag makes no piece: the second side is a copy, with X's history in its own context.
+    NameAncestry ancestry;
+    const auto x = generated({sketchEdge(1)}, 7, "XTR", 'E');
+    const auto sideTwo = piece(x, 7, "CPY", 2, 'E');
+
+    EXPECT_FALSE(NameAncestry::isPieceOf(sideTwo, x));
+    EXPECT_FALSE(NameAncestry::isPieceOf(x, sideTwo));
+    //   a split before the copy (the tapered side's draft) is a piece of the second side only
+    const auto splitThenCopy = piece(piece(x, 7, "DFT", 0, 'E'), 7, "CPY", 2, 'E');
+    EXPECT_TRUE(NameAncestry::isPieceOf(splitThenCopy, sideTwo));
+    EXPECT_FALSE(NameAncestry::isPieceOf(splitThenCopy, x));
+    //   and a split after it too
+    EXPECT_TRUE(NameAncestry::isPieceOf(piece(sideTwo, 9, "CUT", 0, 'E'), sideTwo));
+    EXPECT_FALSE(NameAncestry::isPieceOf(piece(sideTwo, 9, "CUT", 0, 'E'), x));
+    //   the two sides share no ancestor
+    EXPECT_EQ(ancestry.overlap(x, sideTwo), 0.0);
+    EXPECT_FALSE(ancestry.contains(sideTwo, x));
+    //   tier 1 keeps neither side for the other
+    EXPECT_EQ(ancestry.structuralSurvivors(x, {sideTwo}, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(sideTwo, {x}, 1.0), std::vector<int> {});
+    EXPECT_EQ(ancestry.structuralSurvivors(x, {sideTwo, x}, 1.0), std::vector<int> {1});
+    //   a Revolution's second side: the CPY is on the profile's edge inside the face's name
+    const auto faceOne = generated({sketchEdge(1)}, 7, "RVL", 'F');
+    const auto faceTwo = generated({piece(sketchEdge(1), 7, "CPY", 2, 'E')}, 7, "RVL", 'F');
+    EXPECT_EQ(ancestry.overlap(faceOne, faceTwo), 0.0);
+    EXPECT_EQ(ancestry.structuralSurvivors(faceOne, {faceTwo}, 1.0), std::vector<int> {});
+}
+
+TEST(NameAncestry, patternInstanceWithoutNumberIsACopy)
+{
+    // PR 243 round 3 (Sonnet L1): a TRF section is a copy section by its op code, even with an
+    // empty instance number, as before round 2.
+    const auto x = generated({sketchEdge(1)}, 7, "XTR", 'F');
+    const auto unnumbered = x + "|"
+        + Data::MappedName::makeEncodedSection(
+                            std::vector<std::string> {},
+                            std::vector<std::string> {},
+                            "9",
+                            "TRF",
+                            "",
+                            'F',
+                            "0",
+                            {"MOD"},
+                            std::vector<std::string> {}
+        );
+    EXPECT_FALSE(NameAncestry::isPieceOf(unnumbered, x));
+}
+
 TEST(NameAncestry, binderSupportsFromTwinFilesHaveTheirOwnAncestry)
 {
     // ops#112: a binder's supports from copies of one file (equal IDs, so equal names) end in
@@ -1485,6 +1537,32 @@ TEST(SolveOwner, unionOfSourcesOnlyAddsCandidates)
     EXPECT_EQ(outcomes[0].evidence, "no top agreement");
 }
 
+TEST(SolveOwner, nameMatchOnTheOtherSideIsNotTaken)
+{
+    // PR 243 round 3: a Two-sides Revolution's side 1 changed from Angle to Up to face, so its
+    // end face's edge under a fillet is gone. Side 2's edge agrees on the top section and the
+    // name matcher returned it (the CPY is on the profile's name inside it): another element.
+    const auto profileEdge = sketchEdge(1);
+    const auto sideOne = generated({profileEdge}, 7, "RVL", 'E');
+    const auto sideTwo = generated({piece(profileEdge, 7, "CPY", 2, 'E')}, 7, "RVL", 'E');
+    SolveInput input;
+    input.source = Data::Tier1Source::Names;
+    input.pool["Edge"] = {element("Edge4", {sideTwo})};
+    input.entries = {missing(sideOne, "Edge", {sideTwo})};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+
+    //   a name match on the same side is still taken
+    const auto sideOneAgain = generated({profileEdge}, 7, "RVL", 'E', 1);
+    input.pool["Edge"] = {element("Edge4", {sideTwo}), element("Edge5", {sideOneAgain})};
+    input.entries = {missing(sideOne, "Edge", {sideTwo, sideOneAgain})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Edge5");
+}
+
 TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
 {
     // ChamferEdgeRemoved: the chamfered top edge of sketch line 1 is cut away. The only element
@@ -1527,6 +1605,96 @@ TEST(SolveOwner, sharedAncestorAloneDoesNotResolve)
     outcomes = Data::solveOwner(input);
     EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved);
     EXPECT_EQ(outcomes[0].element, "Edge7");
+}
+
+TEST(SolveOwner, topAgreementOfAnUnrelatedNameIsNoEvidence)
+{
+    // PR 243 round 6: a Pad's start cap edge (the profile's line 4, sketch 13) is gone. Side 1's
+    // far cap edge holds it through its PRJ name, and lies on a base block's edge, so it also
+    // holds the block sketch's line 4 (sketch 11), plain: that name's top section agrees with
+    // the old name's (SKT), but it shares nothing with it. Tier 1 resolved the reference there,
+    // 8 mm away, with no warning.
+    const auto oldEdge = sketchEdge(4, 13);
+    const auto farCapEdge = section({}, {oldEdge}, 14, "XTR", 0, 'E', {"PRJ"});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge28", {farCapEdge, sketchEdge(4, 11)})};
+    input.entries = {missing(oldEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge28"});
+    EXPECT_EQ(outcomes[0].evidence, "no top agreement");
+
+    //   a name that agrees on the top section and shares an ancestor with the old one is still
+    //   evidence
+    const auto oldSide = generated({sketchEdge(1), sketchEdge(2)}, 7, "XTR", 'F');
+    const auto newSide = generated({sketchEdge(1), sketchEdge(3)}, 7, "XTR", 'F');
+    input.pool.clear();
+    input.pool["Face"] = {element("Face3", {newSide})};
+    input.entries = {missing(oldSide, "Face")};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Face3");
+
+    //   and so is the name the name match returned, though it shares none (overlap 0, sources
+    //   names: random sequence 9, a boss's vertical edge after its back line is redrawn)
+    const auto oldGenerated = generated({sketchVertex({"g2v2", "g3v1"})}, 7, "XTR", 'E');
+    const auto renamed = generated({sketchVertex({"g2v2", "g5v1"})}, 7, "XTR", 'E');
+    input.pool.clear();
+    input.pool["Edge"] = {element("Edge20", {renamed})};
+    input.entries = {missing(oldGenerated, "Edge", {renamed})};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Resolved) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].element, "Edge20");
+}
+
+TEST(SolveOwner, sharedTopThroughAProjectionIsNoEvidence)
+{
+    // PR 243 round 7 (Fable review 6, M2): the Pad's start cap edge lay on a pedestal, split by
+    // its edge (the profile's line 4, sketch 13, then FUS;MOD). Built as two sides apart, the
+    // start cap is off the pedestal, and side 1's far cap edge is split by a block's edge: its
+    // PRJ name, then FUS;MOD, besides the block sketch's plain line 4. Both names are topped by
+    // FUS;MOD, and the PRJ name embeds the old one: that ancestry is the partner's, not the
+    // element's own.
+    const auto startCapEdge = sketchEdge(4, 13);
+    const auto oldPiece = piece(startCapEdge, 15, "FUS", 0, 'E');
+    const auto farCapEdge = section({}, {startCapEdge}, 14, "XTR", 0, 'E', {"PRJ"});
+    const auto farCapPiece = piece(farCapEdge, 16, "FUS", 0, 'E');
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge28", {farCapPiece, sketchEdge(4, 11)})};
+    input.entries = {missing(oldPiece, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge28"});
+
+    //   nor the other way: a reference to the far cap's piece doesn't move to the start cap's
+    input.pool["Edge"] = {element("Edge24", {piece(startCapEdge, 16, "FUS", 0, 'E')})};
+    input.entries = {missing(piece(farCapEdge, 15, "FUS", 0, 'E'), "Edge")};
+    outcomes = Data::solveOwner(input);
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge24"});
+}
+
+TEST(SolveOwner, connectedElementIsNotAncestry)
+{
+    // PR 243 round 7 (Fable review 6, M1): a base block's edge, split where side 1's far cap
+    // meets it, lists among its piece's connected elements a face of the Pad holding an end
+    // vertex: the profile's line 4's extruded face. The old start cap edge (line 4) is in that
+    // neighbour's ancestry, not in the piece's: no evidence, though the top sections differ.
+    const auto startCapEdge = sketchEdge(4, 13);
+    const auto lineFace = generated({startCapEdge}, 14, "XTR", 'F');
+    const auto blockPiece = piece(sketchEdge(4, 11), 15, "FUS", 1, 'E', {lineFace});
+    SolveInput input;
+    input.pool["Edge"] = {element("Edge32", {blockPiece})};
+    input.entries = {missing(startCapEdge, "Edge")};
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken) << outcomes[0].evidence;
+    EXPECT_EQ(outcomes[0].candidates, std::vector<std::string> {"Edge32"});
 }
 
 TEST(SolveOwner, patternSiblingNeverResolves)

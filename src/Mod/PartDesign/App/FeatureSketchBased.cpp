@@ -23,11 +23,14 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <set>
+#include <tuple>
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -64,11 +67,13 @@
 #include <App/Document.h>
 #include <App/Datums.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolver.h>
 #include <Base/Converter.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/Tools.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
 #include "FeatureSketchBased.h"
@@ -950,6 +955,119 @@ TopoShape ProfileBased::moveProfileToStart(
     transform.SetTranslation(gp_Vec(direction) * offset);
     result.move(transform);
     return result;
+}
+
+void ProfileBased::markStartCap(
+    TopoShape& solid,
+    const TopoShape& profile,
+    const char* side,
+    bool farCapIsSide2
+) const
+{
+    if (getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || solid.isNull()
+        || !solid.hasElementMap() || !profile.hasElementMap()) {
+        return;
+    }
+    constexpr std::array types {"Vertex", "Edge", "Face"};
+    std::set<std::string> profileNames;
+    for (const char* type : types) {
+        const auto count = static_cast<int>(profile.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            for (const auto& [name, sids] :
+                 profile.getElementMappedNames(Data::IndexedName::fromConst(type, i))) {
+                profileNames.insert(name.toString());
+            }
+        }
+    }
+    // The copy section appendElementSection() appends, per element type
+    const std::vector<Data::MappedName> noNames;
+    auto copySection = [&](const char* index, char elementType) {
+        return Data::NAME_SECTION_DELIMINATOR
+            + Data::MappedName::makeEncodedSection(
+                   {},
+                   noNames,
+                   std::to_string(getID()),
+                   Part::OpCodes::Copy,
+                   std::string(index),
+                   elementType,
+                   std::string("0"),
+                   {Data::MAPPER_FLAG_MODIFIED},
+                   noNames
+            );
+    };
+    auto marked = [&](const Data::MappedName& name, const std::string& section) {
+        Data::MappedName result(name);
+        result.append(section.c_str());
+        return result;
+    };
+    // A partner's name is topped by this feature's projection section, not an up-to face's name
+    // copied onto the far cap. The sections are views into the string, which must outlive them:
+    // round 6 split a temporary, and on macOS (CI run 38131094158) the views read freed memory,
+    // so no far cap name was marked.
+    const std::string tag = std::to_string(getID());
+    auto isPartner = [&tag](const Data::MappedName& name) {
+        const std::string text = name.toString();
+        const auto sections = Data::NameAncestry::splitSections(text);
+        if (sections.empty()) {
+            return false;
+        }
+        const auto& last = Data::MappedName::getDecodedMappedName(std::string(sections.back()));
+        return !last.empty() && last.back().hasMapperFlag(Data::MAPPER_FLAG_PROJECTION)
+            && last.back().iterationTag == tag;
+    };
+
+    // Name by name, each marked name made from the name itself: an element may have other names
+    // besides, e.g. from an up-to face, and which ones, and their order, depend on OCC's history
+    // maps, which differ between platforms. Round 4 marked only elements whose every name was a
+    // partner's, and round 5 paired each name with a copy of the shape marked whole by position;
+    // but the map keeps an element's later names after its head in another order
+    // (MappedNameRef::append), so the pairs could miss: on macOS (CI run 38126049631) the far
+    // cap's PRJ name stayed unmarked, and a reference followed it to side 1's far cap.
+    std::vector<std::tuple<Data::IndexedName, Data::MappedName, Data::ElementIDRefs>> names;
+    // The distinct names marked on each cap: each profile name on the start cap has one partner
+    // on the far cap
+    std::set<std::string> capNames;
+    std::set<std::string> partnerNames;
+    for (const char* type : types) {
+        const std::string capSection = copySection(side, type[0]);
+        const std::string farCapSection = copySection("2", type[0]);
+        const auto count = static_cast<int>(solid.countSubShapes(type));
+        for (int i = 1; i <= count; ++i) {
+            const auto element = Data::IndexedName::fromConst(type, i);
+            for (const auto& [name, sids] : solid.getElementMappedNames(element)) {
+                if (profileNames.contains(name.toString())) {
+                    names.emplace_back(element, marked(name, capSection), sids);
+                    capNames.insert(name.toString());
+                }
+                else if (farCapIsSide2 && isPartner(name)) {
+                    names.emplace_back(element, marked(name, farCapSection), sids);
+                    partnerNames.insert(name.toString());
+                }
+                else {
+                    names.emplace_back(element, name, sids);
+                }
+            }
+        }
+    }
+    // Unmarked, a cap's names are another cap's when the sides are built apart, and references
+    // follow them there: never quietly
+    if (capNames.empty()) {
+        FC_WARN(getFullName() << ": no start cap element has the profile's names");
+    }
+    if (farCapIsSide2 && partnerNames.size() != capNames.size()) {
+        FC_WARN(
+            getFullName() << ": " << partnerNames.size() << " far cap names for "
+                          << capNames.size() << " start cap names"
+        );
+    }
+    if (capNames.empty() && partnerNames.empty()) {
+        return;
+    }
+    // A new map, as appendElementSection() makes: the old one may be shared
+    solid.resetElementMap(std::make_shared<Data::ElementMap>());
+    for (const auto& [element, name, sids] : names) {
+        solid.setElementName(element, name, solid.Tag, &sids);
+    }
 }
 
 int ProfileBased::getUpToShapeFromLinkSubList(
