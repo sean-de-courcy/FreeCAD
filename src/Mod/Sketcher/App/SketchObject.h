@@ -1071,14 +1071,14 @@ public:  // geometry extension functionalities for single element sketch object 
     /// NOTE: Does NOT move any constraints
     void replaceGeometries(std::vector<int> oldGeoIds, std::vector<Part::Geometry*>& newGeos);
 
-protected:
     // Only the first flag is toggled, the rest of the flags is set or cleared following the first
-    // flag.
+    // flag. (Public for Merge Sketches, which carries Frozen over, ops#261.)
     int toggleExternalGeometryFlag(
         const std::vector<int>& geoIds,
         const std::vector<ExternalGeometryExtension::Flag>& flags
     );
 
+protected:
     void buildShape();
     /// get called by the container when a property has changed
     void onChanged(const App::Property* /*prop*/) override;
