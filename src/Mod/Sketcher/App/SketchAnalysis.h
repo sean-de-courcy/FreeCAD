@@ -110,6 +110,7 @@ public:
     {
         vertexConstraints = cl;
         vertexConstraintsGeometry = geometryTags();
+        vertexConstraintsPrecision = -1;  // set from outside: no detection to compare with
     }
     /// Point on Point constraint simple routine Make step (see constructor)
     void makeMissingPointOnPointCoincident();
@@ -197,6 +198,9 @@ private:
     /// The tags of the sketch's geometry when vertexConstraints was detected or set: its GeoIds
     /// name that geometry, so Make refuses once the geometry list has changed (ops#252)
     std::vector<boost::uuids::uuid> vertexConstraintsGeometry;
+    /// The precision they were detected with, which their points must still meet; negative when
+    /// they were set from outside (ops#252, PR 269 review L3)
+    double vertexConstraintsPrecision = -1;
     std::vector<ConstraintIds> verthorizConstraints;
     std::vector<ConstraintIds> lineequalityConstraints;
     std::vector<ConstraintIds> radiusequalityConstraints;

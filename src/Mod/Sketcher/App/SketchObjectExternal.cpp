@@ -1147,6 +1147,13 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     return svals.size();
 }
 
+namespace
+{
+// Set while addExternal adds a face's or shape's edges one by one: an edge that gives nothing
+// is skipped quietly, the whole add fails (loudly) only when none gives anything (ops#252)
+thread_local int addingSubShapes = 0;
+}  // namespace
+
 int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, bool defining, bool intersection)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -1210,10 +1217,17 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
                 }
             }
             element += std::to_string(idx);
+            ++addingSubShapes;
             addExternal(Obj, element.c_str(), defining, intersection);
+            --addingSubShapes;
             element.resize(elementNameSize);
         }
         if (ExternalGeometry.getSize() == geometryCount) {
+            if (addingSubShapes == 0) {
+                Base::Console().error("%s gives no %s geometry in this sketch.\n",
+                                      SubName,
+                                      intersection ? "intersection" : "projection");
+            }
             return -1;
         }
         return geometryCount;
@@ -1239,13 +1253,10 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     }
 
     bool add = true;
-    // the geometries the link gives before (none for a new link)
-    std::size_t idsBefore = 0;
     for (size_t i = 0; i < Objects.size(); ++i) {
         if (!(Objects[i] == Obj && std::string(SubName) == SubElements[i])) {
             continue;
         }
-        idsBefore = externalGeometryIds(static_cast<int>(i)).size();
         if (Types[i] == static_cast<int>(ExtType::Both)
             || (Types[i] == static_cast<int>(ExtType::Projection) && !intersection)
             || (Types[i] == static_cast<int>(ExtType::Intersection) && intersection)) {
@@ -1302,29 +1313,43 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         return -1;
     }
 
-    // FreeCAD-CH (ops#252): a link (or the kind added to one) that gives no geometry is a
+    // FreeCAD-CH (ops#252): a link, or the kind added to one, that gives no geometry is a
     // failure. A new one was dropped by the rebuild, and the index returned was another link's,
-    // so the GUI committed an empty command with no message
+    // so the GUI committed an empty command with no message; an added kind with none made the
+    // link Both with nothing of that kind. Counted by kind (PR 269 review L1): the rebuild builds
+    // the link's other kind again, whose count can change too
     {
-        std::size_t idsAfter = 0;
+        const int kind = intersection ? 0 : 1;  // externalGeometryKind's
+        std::size_t ofKind = 0;
         const auto& objects = ExternalGeometry.getValues();
         const auto& subs = ExternalGeometry.getSubValues();
         for (size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
             if (objects[i] == Obj && subs[i] == SubName) {
-                idsAfter = externalGeometryIds(static_cast<int>(i)).size();
+                for (long id : externalGeometryIds(static_cast<int>(i))) {
+                    ofKind += externalGeometryKind(id) == kind ? 1 : 0;
+                }
                 break;
             }
         }
-        if (idsAfter <= idsBefore) {
-            Base::Console().error(
-                "Link to %s gives no %s geometry in this sketch.\n",
-                SubName,
-                intersection ? "intersection" : "projection"
-            );
+        if (ofKind == 0) {
+            if (addingSubShapes == 0) {
+                Base::Console().error(
+                    "Link to %s gives no %s geometry in this sketch.\n",
+                    SubName,
+                    intersection ? "intersection" : "projection"
+                );
+            }
             if (ExternalGeometry.getValues() != originalObjects
                 || ExternalGeometry.getSubValues() != originalSubElements
                 || ExternalTypes.getValues() != originalTypes) {
                 setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
+                // the geometry as the links and types are again
+                try {
+                    rebuildExternalGeometry();
+                }
+                catch (const Base::Exception& e) {
+                    Base::Console().error("%s\n", e.what());
+                }
             }
             return -1;
         }

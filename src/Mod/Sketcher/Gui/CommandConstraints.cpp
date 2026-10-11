@@ -4011,9 +4011,18 @@ protected:
                 continue;
             }
 
-            if (addProjectedExternalReference(Obj, reference.source, reference.subName)
-                != GeoEnum::GeoUndef) {
-                restored = true;
+            // a link that gives no geometry now throws (PR 269 review L4): the tool restarts
+            // without it, as materializeExternalReference refuses it
+            try {
+                if (addProjectedExternalReference(Obj, reference.source, reference.subName)
+                    != GeoEnum::GeoUndef) {
+                    restored = true;
+                }
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().warning("Dimension: external reference %s not restored: %s\n",
+                                        reference.subName.c_str(),
+                                        e.what());
             }
         }
 

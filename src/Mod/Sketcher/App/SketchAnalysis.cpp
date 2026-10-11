@@ -23,6 +23,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <cmath>
 
 #include <BRep_Tool.hxx>
@@ -545,6 +546,7 @@ int SketchAnalysis::detectMissingPointOnPointConstraints(double precision, bool 
         this->vertexConstraints.push_back(coincidence);
     }
     vertexConstraintsGeometry = geometryTags();
+    vertexConstraintsPrecision = precision;
 
     // Return number of missing constraints
     return int(this->vertexConstraints.size());
@@ -679,17 +681,32 @@ bool SketchAnalysis::vertexConstraintsStillApply()
 {
     // FreeCAD-CH (ops#252): the coincidences name GeoIds of the geometry they were found on. If
     // geometry was added, deleted or reordered since (e.g. between Detect and Fix in the
-    // validation panel), they would join other points: none is made
-    if (vertexConstraints.empty() || vertexConstraintsGeometry == geometryTags()) {
+    // validation panel), they would join other points; geometry moved or trimmed in place keeps
+    // its tag, but its points are no longer where they were found (PR 269 review L3). Then none
+    // is made, and the list stays for the caller to see (the panel says so)
+    if (vertexConstraints.empty()) {
         return true;
     }
-    Base::Console().warning(
-        "'%s': the missing coincidences found before weren't added: the sketch's geometry has "
-        "changed since. Detect them again.\n",
-        sketch->Label.getValue()
-    );
-    vertexConstraints.clear();
-    return false;
+    bool apply = vertexConstraintsGeometry == geometryTags();
+    if (apply && vertexConstraintsPrecision >= 0) {
+        const double tolerance = vertexConstraintsPrecision + Precision::Confusion();
+        auto near = [&](const Base::Vector3d& p, const Base::Vector3d& v) {
+            return std::fabs(p.x - v.x) <= tolerance && std::fabs(p.y - v.y) <= tolerance
+                && std::fabs(p.z - v.z) <= tolerance;
+        };
+        apply = std::all_of(vertexConstraints.begin(), vertexConstraints.end(), [&](const auto& vc) {
+            return near(sketch->getPoint(vc.First, vc.FirstPos), vc.v)
+                && near(sketch->getPoint(vc.Second, vc.SecondPos), vc.v);
+        });
+    }
+    if (!apply) {
+        Base::Console().warning(
+            "'%s': the missing coincidences found before weren't added: the sketch's geometry "
+            "has changed since. Detect them again.\n",
+            sketch->Label.getValue()
+        );
+    }
+    return apply;
 }
 
 void SketchAnalysis::makeMissingPointOnPointCoincident()

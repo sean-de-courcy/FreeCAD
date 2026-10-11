@@ -679,6 +679,28 @@ class TestSketchExternalTypes(unittest.TestCase):
         self.doc.recompute()
         self.assertRingPoints()
 
+    def testProjectionAddedWhileTheIntersectionShrinksIsAccepted(self):
+        """PR 269 review L1: a wave crossing the sketch plane three times, linked as an
+        intersection (three points). Its source becomes a line crossing it once, and before a
+        recompute its projection is added: the rebuild gives one point and one projected line,
+        two geometries where there were three. The added projection gives one, so the add is
+        accepted (Both). Counting all of the link's geometries refused it."""
+        wave = Part.BSplineCurve()
+        wave.interpolate([V(0, -30, -2), V(5, -25, 2), V(10, -30, -2), V(15, -25, 2)])
+        source = self.addEdge("Wave", wave.toShape())
+        self.doc.recompute()
+        self.sketch.addExternal(source.Name, "Edge1", False, True)
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 3)
+        source.Shape = Part.makeLine(V(0, -30, -2), V(10, -30, 2))
+        self.sketch.addExternal(source.Name, "Edge1", False, False)
+        self.assertEqual(list(self.sketch.ExternalTypes), [PROJECTION, INTERSECTION, BOTH])
+        self.doc.recompute()
+        self.assertEqual(len(self.sketch.ExternalGeo), 2 + 3 + 2)
+        # the ring's two points and the line's crossing at x = 5; the ring's constraints kept
+        self.assertEqual(self.externalPoints(), [-10, 5, 10])
+        self.assertEqual(len(self.sketch.Constraints), 2)
+
     def testProjectionAddedToAFrozenIntersectionLinkIsRefused(self):
         """A frozen link isn't rebuilt, so the projection added to it would have no geometry
         until the link thaws, and then take the points' slots. The add is refused, loudly."""

@@ -232,6 +232,23 @@ class TestSketchValidateCoincidents(unittest.TestCase):
         # detected again on the geometry as it is: nothing missing
         self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 0)
 
+    def testMissingCoincidenceAfterTheGeometryMoved(self):
+        """PR 269 review L3: line 1's start moves from (10, 0) to (12, 3) after the coincidence
+        with line 0's end is found. The geometry keeps its tags, but the points are no longer
+        within the precision they were found with: nothing is added, and the list stays (the
+        validation panel tells the user)."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.moveGeometry(1, 1, Vector(12, 3, 0))
+        self.assertLess((sketch.Geometry[1].StartPoint - Vector(12, 3, 0)).Length, 1e-6)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 0)
+        self.assertEqual(len(sketch.MissingPointOnPointConstraints), 1)
+
     def testMissingCoincidenceAfterARecompute(self):
         """ops#252: a recompute between Detect and Make (the solver moves nothing here, and keeps
         each geometry's tag) doesn't stop the coincidence from being made."""
