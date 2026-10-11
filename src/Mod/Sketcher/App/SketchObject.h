@@ -211,8 +211,15 @@ public:
     int deleteAllConstraints(DeleteOptions options = DeleteOption::UpdateGeometry);
     /// add all constraints in the list
     int addConstraints(const std::vector<Constraint*>& ConstraintList);
-    /// Copy the constraints instead of cloning them and copying the expressions if any
+    /// Copy the constraints instead of cloning them; a copy whose name is taken gets another.
+    /// The expressions are copied by addCopyOfExpressions()
     int addCopyOfConstraints(const SketchObject& orig);
+    /** Copy the expressions of orig's driving dimensions to their copies here (FreeCAD-CH,
+     * ops#267). indexMap[j] is the index here of the copy of orig's constraint j, or -1 when it
+     * has none. A reference to orig's constraints is rewritten to the copy's; an expression that
+     * can't name here what it named in orig isn't copied, with a warning.
+     */
+    void addCopyOfExpressions(const SketchObject& orig, const std::vector<int>& indexMap);
     /// add constraint
     int addConstraint(const Constraint* constraint);
     /// add constraint

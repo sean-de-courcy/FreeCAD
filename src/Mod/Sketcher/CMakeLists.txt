@@ -27,6 +27,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketcherEllipse.py
     SketcherTests/TestSketchMissingExternal.py
     SketcherTests/TestSketchExternalTypes.py
+    SketcherTests/TestSketchCarbonCopyElements.py
 )
 
 if(BUILD_GUI)

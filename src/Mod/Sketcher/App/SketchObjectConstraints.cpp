@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 #include <QCoreApplication>
@@ -895,28 +896,33 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
 
     const std::vector<Constraint*>& origvals = orig.Constraints.getValues();
 
-    // the index of the first copy (vals is the property's own list, which setValues replaces)
-    const std::size_t first = vals.size();
-
     std::vector<Constraint*> newVals(vals);
 
     newVals.reserve(vals.size() + origvals.size());
 
     // A copy whose name is taken gets another: an expression is bound to a named constraint by
     // its name, and a lookup by name finds the first of two, so the copy's expression would go
-    // to the other one (ops#261)
+    // to the other one (ops#261). The new name is free of the source's own later names too
+    // (ops#267: dest a, source a and a2 gave a2 twice)
     std::set<std::string> names;
     for (const auto* constraint : vals) {
         if (!constraint->Name.empty()) {
             names.insert(constraint->Name);
         }
     }
+    std::set<std::string> taken = names;
+    for (const auto* original : origvals) {
+        if (!original->Name.empty()) {
+            names.insert(original->Name);
+        }
+    }
     for (const auto* original : origvals) {
         auto* copy = original->copy();
-        if (!copy->Name.empty() && !names.insert(copy->Name).second) {
+        if (!copy->Name.empty() && !taken.insert(copy->Name).second) {
             std::string name;
             for (int n = 2; !names.insert(name = copy->Name + std::to_string(n)).second; ++n) {
             }
+            taken.insert(name);
             Base::Console().warning(
                 "Constraint '%s' of '%s' is named '%s' in '%s': its name is taken there.\n",
                 copy->Name.c_str(),
@@ -931,36 +937,80 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
 
     this->Constraints.setValues(std::move(newVals));
 
-    // The expressions of the driving dimensions, which the loop here used to skip (ops#261). Each
-    // is parsed again with this sketch as its owner, as a save and reopen would: a reference to
-    // the source's own constraints then names the copy here, which must be the copy of the one it
-    // named there. When it isn't (an index the copies moved, a renamed constraint, another
-    // property of the source), the expression isn't copied and the constraint keeps its value.
+    if (noRecomputes) // if we do not have a recompute, the sketch must be solved to update the DoF of the solver
+        solve();
+
+    return this->Constraints.getSize() - 1;
+}
+
+namespace
+{
+// Calls a function on each variable of an expression
+class VariableVisitor: public App::ExpressionVisitor
+{
+public:
+    explicit VariableVisitor(std::function<void(App::VariableExpression&)> f)
+        : f(std::move(f))
+    {}
+    void visit(App::Expression& e) override
+    {
+        if (auto* variable = freecad_cast<App::VariableExpression*>(&e)) {
+            f(*variable);
+        }
+    }
+
+private:
+    std::function<void(App::VariableExpression&)> f;
+};
+}  // namespace
+
+void SketchObject::addCopyOfExpressions(const SketchObject& orig, const std::vector<int>& indexMap)
+{
+    const std::vector<Constraint*>& origvals = orig.Constraints.getValues();
+
+    // The expressions of the driving dimensions, which upstream's copy skipped (ops#261). Each
+    // is parsed again with this sketch as its owner, as a save and reopen would, and each of its
+    // references must name here what it named in orig: a reference to one of orig's constraints
+    // is rewritten to name its copy (by index or by name, as it was written; ops#267), any other
+    // must name the same object, property and sub-path. When one can't, the expression isn't
+    // copied and the constraint keeps its value.
     // The source's expressions are found by the constraint their path names: a path set from
     // Python can be ".Constraints[i]", which createPath ("Constraints[i]") doesn't find.
-    std::map<std::size_t, const App::Expression*> sourceExpressions;
+    auto indexOf = [&](const App::ObjectIdentifier& path) {
+        auto it = std::find(origvals.begin(), origvals.end(), orig.Constraints.getConstraint(path));
+        return it == origvals.end() ? -1 : static_cast<int>(it - origvals.begin());
+    };
+    auto copyOf = [&](int j) {
+        return j >= 0 && j < static_cast<int>(indexMap.size()) ? indexMap[j] : -1;
+    };
+    std::map<int, const App::Expression*> sourceExpressions;
     for (const auto& [path, expression] : orig.ExpressionEngine.getExpressions()) {
         if (!expression || path.getProperty() != &orig.Constraints) {
             continue;
         }
         try {
-            auto it = std::find(origvals.begin(), origvals.end(), orig.Constraints.getConstraint(path));
-            if (it != origvals.end()) {
-                sourceExpressions[static_cast<std::size_t>(it - origvals.begin())] = expression;
+            int j = indexOf(path);
+            if (j >= 0) {
+                sourceExpressions[j] = expression;
             }
         }
         catch (const Base::Exception&) {
             // a path that names no constraint
         }
     }
+    const auto& copies = this->Constraints.getValues();
     for (const auto& [j, sourceExpression] : sourceExpressions) {
+        const int target = copyOf(j);
+        if (target < 0 || target >= static_cast<int>(copies.size())) {
+            continue;  // the constraint isn't copied (Merge Sketches says so)
+        }
         const std::string text = sourceExpression->toString(true);
         auto warn = [&](const std::string& why) {
             Base::Console().warning(
                 "The expression '%s' of constraint %d of '%s' isn't copied to '%s': %s. The "
                 "constraint keeps its value.\n",
                 text.c_str(),
-                static_cast<int>(j) + 1,
+                j + 1,
                 orig.Label.getValue(),
                 this->Label.getValue(),
                 why.c_str()
@@ -970,82 +1020,100 @@ int SketchObject::addCopyOfConstraints(const SketchObject& orig)
             warn("the constraint isn't a driving dimension");
             continue;
         }
-        std::shared_ptr<App::Expression> expr;
         try {
-            expr = App::Expression::parse(this, text);
+            std::shared_ptr<App::Expression> expr(App::Expression::parse(this, text));
+            std::string why;  // why a reference isn't kept
+            std::set<App::ObjectIdentifier> checked;
+            std::vector<std::string> toSource;  // references kept that name orig itself
+            VariableVisitor visitor([&](App::VariableExpression& variable) {
+                if (!why.empty()) {
+                    return;
+                }
+                const App::ObjectIdentifier id = variable.getPath();
+                const std::string reference = id.toString();
+                const std::string named =
+                    "its reference '" + reference + "' would name something else there";
+                try {
+                    // what the reference named in orig
+                    const auto sourceId = App::ObjectIdentifier::parse(&orig, reference);
+                    if (sourceId.getProperty() == &orig.Constraints) {
+                        const int k = indexOf(sourceId);
+                        const int copy = copyOf(k);
+                        if (copy < 0 || copy >= static_cast<int>(copies.size())) {
+                            why = "its reference '" + reference + "' names constraint "
+                                + std::to_string(k + 1) + ", which isn't copied";
+                            return;
+                        }
+                        // parsed, so that it has the form a typed reference gets
+                        const auto path = App::ObjectIdentifier::parse(
+                            this,
+                            std::string(this->Constraints.getName())
+                                + (sourceId.getPropertyComponent(1).isArray()
+                                       ? "[" + std::to_string(copy) + "]"
+                                       : "." + copies[copy]->Name)
+                        );
+                        if (this->Constraints.getConstraint(path) != copies[copy]) {
+                            why = named;
+                            return;
+                        }
+                        variable.setPath(path);
+                        checked.insert(path);
+                        return;
+                    }
+                    if (id.getDocumentObject() != sourceId.getDocumentObject()
+                        || id.getProperty() != sourceId.getProperty()
+                        || id.getSubPathStr() != sourceId.getSubPathStr()) {
+                        why = named;
+                        return;
+                    }
+                    if (sourceId.getDocumentObject() == &orig) {
+                        toSource.push_back(reference);
+                    }
+                    checked.insert(id);
+                }
+                catch (const Base::Exception&) {
+                    why = named;
+                }
+                catch (const std::exception&) {
+                    why = named;
+                }
+            });
+            expr->visit(visitor);
+            // a reference the visitor didn't see (a range) isn't known to name the same thing
+            if (why.empty()) {
+                for (const auto& [id, hidden] : expr->getIdentifiers()) {
+                    if (!checked.count(id)) {
+                        why = "its reference '" + id.toString() + "' would name something else there";
+                        break;
+                    }
+                }
+            }
+            if (!why.empty()) {
+                warn(why);
+                continue;
+            }
+            expr->comment = sourceExpression->comment;
+            setExpression(this->Constraints.createPath(target), expr);
+            for (const auto& reference : toSource) {
+                Base::Console().warning(
+                    "The expression '%s' of constraint %d of '%s' is copied to '%s', and its "
+                    "reference '%s' still names '%s'.\n",
+                    text.c_str(),
+                    j + 1,
+                    orig.Label.getValue(),
+                    this->Label.getValue(),
+                    reference.c_str(),
+                    orig.Label.getValue()
+                );
+            }
         }
         catch (const Base::Exception& e) {
             warn(e.what());
-            continue;
         }
-        // Each reference must name here what it named in the source: the same object, property
-        // and sub-path, or, for one of the source's constraints, that constraint's copy. Each is
-        // parsed again on its own, as the expression's parse resolves it here.
-        const auto& copies = this->Constraints.getValuesForce();
-        std::string why;  // why a reference isn't kept
-        for (const auto& identifier : sourceExpression->getIdentifiers()) {
-            const auto& sourceId = identifier.first;
-            const std::string reference = sourceId.toString();
-            const std::string named =
-                "its reference '" + reference + "' would name something else there";
-            auto check = [&]() -> std::string {
-                App::ObjectIdentifier id = App::ObjectIdentifier::parse(this, reference);
-                if (id.getDocumentObject() == sourceId.getDocumentObject()
-                    && id.getProperty() == sourceId.getProperty()
-                    && id.getSubPathStr() == sourceId.getSubPathStr()) {
-                    return {};
-                }
-                if (sourceId.getProperty() != &orig.Constraints
-                    || id.getProperty() != &this->Constraints) {
-                    return named;
-                }
-                // An index isn't kept even when it lands on the copy: Merge Sketches then deletes
-                // the constraints it skips, and delConstraint renames an index only for an
-                // unnamed constraint that moved, so the reference would silently follow another
-                // constraint (ops#261)
-                if (sourceId.numSubComponents() == 2 && sourceId.getPropertyComponent(1).isArray()) {
-                    return "its reference '" + reference
-                        + "' names a constraint by its index, which merging can change; name the "
-                          "constraint and refer to it by name";
-                }
-                auto source = std::find(origvals.begin(), origvals.end(),
-                                        orig.Constraints.getConstraint(sourceId));
-                auto copy = std::find(copies.begin(), copies.end(),
-                                      this->Constraints.getConstraint(id));
-                if (source == origvals.end() || copy == copies.end()
-                    || copy - copies.begin()
-                        != static_cast<std::ptrdiff_t>(first) + (source - origvals.begin())) {
-                    return named;
-                }
-                return {};
-            };
-            try {
-                why = check();
-            }
-            catch (const Base::Exception&) {
-                why = named;
-            }
-            if (!why.empty()) {
-                break;
-            }
-        }
-        if (!why.empty()) {
-            warn(why);
-            continue;
-        }
-        try {
-            expr->comment = sourceExpression->comment;
-            setExpression(this->Constraints.createPath(static_cast<int>(first + j)), expr);
-        }
-        catch (const Base::Exception& e) {
+        catch (const std::exception& e) {
             warn(e.what());
         }
     }
-
-    if (noRecomputes) // if we do not have a recompute, the sketch must be solved to update the DoF of the solver
-        solve();
-
-    return this->Constraints.getSize() - 1;
 }
 
 int SketchObject::addConstraint(const Constraint* constraint)

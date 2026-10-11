@@ -673,7 +673,26 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
                 newConstr->setGeoId(i, geoId + nextgeoid);
             }
             else if (geoId < -2 && geoId != GeoEnum::GeoUndef) {
-                newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
+                // FreeCAD-CH (ops#267): through extMap, not a linear shift: a source external that
+                // copies this sketch's own edge isn't appended, so the ones after it move up
+                auto mapped = extMap.find(geoId);
+                if (mapped == extMap.end()) {
+                    newConstr->setGeoId(i, geoId - (nextextgeoid - 2));
+                    continue;
+                }
+                if (mapped->second >= 0) {
+                    Base::Console().warning(
+                        "Constraint %d of '%s' is on ExternalEdge%d, a copy of '%s' Edge%d: its "
+                        "copy here is on Edge%d itself.\n",
+                        static_cast<int>(&constr - scvals.data()) + 1,
+                        psObj->Label.getValue(),
+                        GeoEnum::RefExt + 1 - geoId,
+                        this->Label.getValue(),
+                        mapped->second + 1,
+                        mapped->second + 1
+                    );
+                }
+                newConstr->setGeoId(i, mapped->second);
             }
         }
 

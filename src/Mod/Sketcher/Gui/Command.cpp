@@ -33,6 +33,7 @@
 #include <QSignalBlocker>
 #include <QWidgetAction>
 
+#include <algorithm>
 #include <iterator>
 #include <set>
 
@@ -41,6 +42,7 @@
 
 #include <App/DocumentObjectGroup.h>
 #include <App/Datums.h>
+#include <Base/Tools.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -1112,13 +1114,18 @@ namespace {
             return true; // in scope
         };
 
-        // helper: print a warning for a skipped external geometry
-        auto printSkipped = [](const Part::Geometry* geo) {
-            QString msg = qApp->translate(
-                "CmdSketcherMergeSketches",
-                "Skipping external geometry #%1\n")
-                .arg(Sketcher::ExternalGeometryFacade::getFacade(geo)->getId());
-            Base::Console().message(msg.toUtf8().constData());
+        // helper: print a warning for a source's external geometry that has no match
+        auto printSkipped = [](const QString& element, const QString& srcName, const QString& label) {
+            QString msg = label.isEmpty()
+                ? qApp->translate(
+                      "CmdSketcherMergeSketches",
+                      "External geometry %1 of '%2' has no match in the merged sketch.\n")
+                      .arg(element, srcName)
+                : qApp->translate(
+                      "CmdSketcherMergeSketches",
+                      "External geometry %1 of '%2' (%3) has no match in the merged sketch.\n")
+                      .arg(element, srcName, label);
+            Base::Console().warning(msg.toUtf8().constData());
         };
 
         // helper: get refName-style subNames from srcSketch (without old suffixes)
@@ -1235,29 +1242,43 @@ namespace {
         for (size_t s = 0; s < srcSketches.size(); ++s) {
             const auto* srcSketch = srcSketches[s];
             auto& extGeoIdMap = maps[s];
+            const QString srcName = QString::fromUtf8(srcSketch->getNameInDocument());
 
-            // the candidates for each source geometry Id: the Ids its link's add of its kind gave
-            std::map<long, const std::set<long>*> candidatesOf;
-            std::map<long, std::set<long>> both;
+            // the geometries a constraint of the source uses
+            std::set<int> used;
+            for (const auto* constraint : srcSketch->Constraints.getValues()) {
+                for (size_t e = 0; e < constraint->getElementsSize(); ++e) {
+                    used.insert(constraint->getGeoId(e));
+                }
+            }
+
+            // the candidates for each source geometry Id: the Ids its link's adds of its kinds
+            // gave. An Id that two entries claim has none (ops#267)
+            struct Candidates
+            {
+                const Link* link = nullptr;
+                bool projection = false;
+                bool intersection = false;
+            };
+            std::map<long, Candidates> candidatesOf;
+            std::set<long> claimedTwice;
             for (size_t i = 0; i < entryLinks[s].size(); ++i) {
                 if (entryLinks[s][i] < 0) {
                     continue;
                 }
                 const auto& link = links[entryLinks[s][i]];
                 int type = srcSketch->externalType(static_cast<int>(i));
-                const std::set<long>* candidates = &link.projectionIds;
-                if (type == static_cast<int>(Sketcher::ExtType::Intersection)) {
-                    candidates = &link.intersectionIds;
-                }
-                else if (type == static_cast<int>(Sketcher::ExtType::Both)) {
-                    auto& ids = both[static_cast<long>(i)];
-                    ids = link.projectionIds;
-                    ids.insert(link.intersectionIds.begin(), link.intersectionIds.end());
-                    candidates = &ids;
-                }
+                Candidates candidates {&link,
+                                       type != static_cast<int>(Sketcher::ExtType::Intersection),
+                                       type != static_cast<int>(Sketcher::ExtType::Projection)};
                 for (long id : srcSketch->externalGeometryIds(static_cast<int>(i))) {
-                    candidatesOf[id] = candidates;
+                    if (!candidatesOf.emplace(id, candidates).second) {
+                        claimedTwice.insert(id);
+                    }
                 }
+            }
+            for (long id : claimedTwice) {
+                candidatesOf.erase(id);
             }
 
             std::set<int> taken;
@@ -1269,27 +1290,78 @@ namespace {
                     continue;
                 }
                 extGeoIdMap[srcGeoId] = Sketcher::GeoEnum::GeoUndef;
-                auto candidates = candidatesOf.find(Sketcher::GeometryFacade::getId(geo));
-                if (candidates != candidatesOf.end()) {
-                    int dstGeoId = 0;
-                    for (const auto* dstGeo : dstGeos) {
-                        --dstGeoId;
-                        if (dstGeoId > Sketcher::GeoEnum::RefExt || taken.count(dstGeoId)
-                            || !candidates->second->count(
-                                Sketcher::GeometryFacade::getId(dstGeo))) {
-                            continue;
+                // the name the user sees: GeoId -3 is ExternalEdge1
+                const QString element =
+                    QStringLiteral("ExternalEdge%1").arg(Sketcher::GeoEnum::RefExt + 1 - srcGeoId);
+                const auto egf = Sketcher::ExternalGeometryFacade::getFacade(geo);
+                auto found = candidatesOf.find(Sketcher::GeometryFacade::getId(geo));
+                if (found != candidatesOf.end()) {
+                    auto candidates = found->second;
+                    // a geometry of a link of both kinds pairs only with its own kind, when it
+                    // says which (ops#264); one saved before doesn't
+                    const bool isProjection =
+                        egf->testFlag(Sketcher::ExternalGeometryExtension::Projection);
+                    const bool isIntersection =
+                        egf->testFlag(Sketcher::ExternalGeometryExtension::Intersection);
+                    if (candidates.projection && candidates.intersection
+                        && isProjection != isIntersection) {
+                        candidates.projection = isProjection;
+                        candidates.intersection = isIntersection;
+                    }
+                    // the first free dst geometry of a kind with the same shape: within one
+                    // kind, equal candidates are the same geometry
+                    auto firstMatch = [&](const std::set<long>& ids) {
+                        int dstGeoId = 0;
+                        for (const auto* dstGeo : dstGeos) {
+                            --dstGeoId;
+                            if (dstGeoId > Sketcher::GeoEnum::RefExt || taken.count(dstGeoId)
+                                || !ids.count(Sketcher::GeometryFacade::getId(dstGeo))) {
+                                continue;
+                            }
+                            if (geo->isSame(*dstGeo, Precision::Confusion(), Precision::Angular())) {
+                                return dstGeoId;
+                            }
                         }
-                        // within one kind, equal candidates are the same geometry: the first
-                        // is taken
-                        if (geo->isSame(*dstGeo, Precision::Confusion(), Precision::Angular())) {
-                            extGeoIdMap[srcGeoId] = dstGeoId;
-                            taken.insert(dstGeoId);
-                            break;
-                        }
+                        return int(Sketcher::GeoEnum::GeoUndef);
+                    };
+                    const int projectionMatch = candidates.projection
+                        ? firstMatch(candidates.link->projectionIds)
+                        : int(Sketcher::GeoEnum::GeoUndef);
+                    const int intersectionMatch = candidates.intersection
+                        ? firstMatch(candidates.link->intersectionIds)
+                        : int(Sketcher::GeoEnum::GeoUndef);
+                    const int match = projectionMatch != Sketcher::GeoEnum::GeoUndef
+                        ? projectionMatch
+                        : intersectionMatch;
+                    if (projectionMatch != Sketcher::GeoEnum::GeoUndef
+                        && intersectionMatch != Sketcher::GeoEnum::GeoUndef) {
+                        // the same shape from both kinds, and nothing says which this is: the
+                        // projection, as before; the two can part when the model changes
+                        QString msg = qApp->translate(
+                            "CmdSketcherMergeSketches",
+                            "External geometry %1 of '%2' (%3) has the shape of both the "
+                            "projection and the intersection of its link, and nothing says which "
+                            "it is: it is paired with the projection.\n")
+                            .arg(element,
+                                 srcName,
+                                 QString::fromStdString(candidates.link->label));
+                        Base::Console().warning(msg.toUtf8().constData());
+                    }
+                    if (match != Sketcher::GeoEnum::GeoUndef) {
+                        extGeoIdMap[srcGeoId] = match;
+                        taken.insert(match);
                     }
                 }
-                if (extGeoIdMap[srcGeoId] == Sketcher::GeoEnum::GeoUndef) {
-                    printSkipped(geo);
+                // what an unpaired geometry loses: the constraints on it (each is named when it
+                // is skipped), or its part of the shape
+                if (extGeoIdMap[srcGeoId] == Sketcher::GeoEnum::GeoUndef
+                    && (used.count(srcGeoId)
+                        || egf->testFlag(Sketcher::ExternalGeometryExtension::Defining))) {
+                    printSkipped(element,
+                                 srcName,
+                                 found != candidatesOf.end()
+                                     ? QString::fromStdString(found->second.link->label)
+                                     : QString());
                 }
             }
         }
@@ -1390,28 +1462,49 @@ namespace {
                     }
                 }
                 if (frozenGeoId != Sketcher::GeoEnum::GeoUndef) {
-                    // freezes every geometry of the link
-                    dstSketch->toggleExternalGeometryFlag(
-                        {frozenGeoId},
-                        {ExternalGeometryExtension::Frozen}
-                    );
+                    // freezes every geometry of the link; the call flips the flag, so a link
+                    // frozen already is left alone (ops#267)
+                    if (!ExternalGeometryFacade::getFacade(
+                             dstSketch->getGeometry(frozenGeoId))
+                             ->testFlag(ExternalGeometryExtension::Frozen)) {
+                        dstSketch->toggleExternalGeometryFlag(
+                            {frozenGeoId},
+                            {ExternalGeometryExtension::Frozen}
+                        );
+                    }
                     continue;
                 }
             }
-            QString msg = state.liveIn.isEmpty()
-                ? qApp->translate(
-                      "CmdSketcherMergeSketches",
-                      "External geometry '%1' is frozen in '%2', and its frozen geometry no longer "
-                      "matches its source: in the merged sketch it follows the model.\n")
-                      .arg(QString::fromStdString(links[l].label),
-                           state.frozenIn.join(QStringLiteral("', '")))
-                : qApp->translate(
-                      "CmdSketcherMergeSketches",
-                      "External geometry '%1' is frozen in '%2' but not in '%3': in the merged "
-                      "sketch it follows the model.\n")
-                      .arg(QString::fromStdString(links[l].label),
-                           state.frozenIn.join(QStringLiteral("', '")),
-                           state.liveIn.join(QStringLiteral("', '")));
+            // the frozen geometry finds no match when the model changed since it froze, or when
+            // the source lies elsewhere than the first sketch (ops#267: say both)
+            const QString label = QString::fromStdString(links[l].label);
+            const QString frozenIn = state.frozenIn.join(QStringLiteral("', '"));
+            const QString liveIn = state.liveIn.join(QStringLiteral("', '"));
+            QString msg;
+            if (state.liveIn.isEmpty()) {
+                msg = qApp->translate(
+                          "CmdSketcherMergeSketches",
+                          "External geometry '%1' is frozen in '%2', and its frozen geometry has "
+                          "no match in the merged sketch (the model changed since it froze, or "
+                          "the sketch lies elsewhere than the first one): in the merged sketch it "
+                          "follows the model.\n")
+                          .arg(label, frozenIn);
+            }
+            else if (state.unmatched) {
+                msg = qApp->translate(
+                          "CmdSketcherMergeSketches",
+                          "External geometry '%1' is frozen in '%2' but not in '%3', and its frozen "
+                          "geometry has no match in the merged sketch: in the merged sketch it "
+                          "follows the model.\n")
+                          .arg(label, frozenIn, liveIn);
+            }
+            else {
+                msg = qApp->translate(
+                          "CmdSketcherMergeSketches",
+                          "External geometry '%1' is frozen in '%2' but not in '%3': in the merged "
+                          "sketch it follows the model.\n")
+                          .arg(label, frozenIn, liveIn);
+            }
             Base::Console().warning(msg.toUtf8().constData());
         }
 
@@ -1453,6 +1546,13 @@ void CmdSketcherMergeSketches::activated(int iMsg)
     std::string FeatName = getUniqueObjectName("Sketch");
 
     openCommand(QT_TRANSLATE_NOOP("Command", "Merge sketches"));
+    // an exception leaves no half-merged sketch and no open transaction (FreeCAD-CH, ops#267)
+    bool committed = false;
+    Base::ScopeGuard abortUnlessCommitted([&]() {
+        if (!committed) {
+            abortCommand();
+        }
+    });
 
     std::set<Part::BodyBase*> bodies;
     for (const auto& sel : selection) {
@@ -1494,6 +1594,8 @@ void CmdSketcherMergeSketches::activated(int iMsg)
 
     // constraint indices to delete after merging
     std::vector<int> constraintsToDelete;
+    // per source, the index of its first constraint's copy before the deletions
+    std::vector<int> firstConstraints;
 
     // helper: remap GeoId for merged constraints; return false if remapping fails
     auto remapGeoId =
@@ -1560,26 +1662,37 @@ void CmdSketcherMergeSketches::activated(int iMsg)
                 // FreeCAD-CH (ops#247): every element, not only First/Second/Third (a Group or
                 // a Text holds more)
                 bool remapped = true;
-                for (size_t e = 0; remapped && e < constraint->getElementsSize(); ++e) {
+                size_t e = 0;
+                for (; e < constraint->getElementsSize(); ++e) {
                     int geoId = constraint->getGeoId(e);
-                    remapped = remapGeoId(geoId, extGeoIdMap);
-                    if (remapped) {
-                        constraint->setGeoId(e, geoId);
+                    if (!remapGeoId(geoId, extGeoIdMap)) {
+                        remapped = false;
+                        break;
                     }
+                    constraint->setGeoId(e, geoId);
                 }
                 if (!remapped) {
                     constraintsToDelete.push_back(index);
+                    // the element, and the geometry as the user sees it (ops#267)
+                    const int geoId = constraint->getGeoId(e);
+                    const QString geometry = geoId >= 0
+                        ? QStringLiteral("Edge%1").arg(geoId + 1)
+                        : QStringLiteral("ExternalEdge%1").arg(Sketcher::GeoEnum::RefExt + 1 - geoId);
                     QString msg = qApp->translate(
                         "CmdSketcherMergeSketches",
-                        "Skipping constraint #%1 of '%2': references unmerged geometry.\n")
+                        "Skipping constraint #%1 of '%2': its element %3 references unmerged "
+                        "geometry (%4).\n")
                         .arg(i+1)
-                        .arg(srcSketch->getNameInDocument());
+                        .arg(QString::fromUtf8(srcSketch->getNameInDocument()))
+                        .arg(e + 1)
+                        .arg(geometry);
                     Base::Console().message(msg.toUtf8().constData());
                     continue;
                 }
             }
         }
 
+        firstConstraints.push_back(baseConstraints);
         baseGeometry = afterGeometry;
         baseConstraints = afterConstraints;
     }
@@ -1590,6 +1703,22 @@ void CmdSketcherMergeSketches::activated(int iMsg)
         mergeSketch->delConstraint(index);
     }
 
+    // FreeCAD-CH (ops#267): the expressions, once the constraints have their final indices: each
+    // source constraint's index here, or -1 when it was skipped
+    std::sort(constraintsToDelete.begin(), constraintsToDelete.end());
+    for (size_t s = 0; s < srcSketches.size(); ++s) {
+        std::vector<int> indexMap(srcSketches[s]->Constraints.getSize(), -1);
+        for (size_t j = 0; j < indexMap.size(); ++j) {
+            const int index = firstConstraints[s] + static_cast<int>(j);
+            auto deleted = std::lower_bound(constraintsToDelete.begin(), constraintsToDelete.end(), index);
+            if (deleted == constraintsToDelete.end() || *deleted != index) {
+                indexMap[j] = index - static_cast<int>(deleted - constraintsToDelete.begin());
+            }
+        }
+        mergeSketch->addCopyOfExpressions(*srcSketches[s], indexMap);
+    }
+
+    committed = true;
     commitCommand();
     doCommand(Doc, "App.activeDocument().recompute()");
 }
