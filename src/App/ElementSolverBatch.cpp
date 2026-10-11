@@ -929,6 +929,13 @@ bool solveElementReferences(DocumentObject* feature,
             }
             sourceRead = true;
         }
+        // Per guessed reference, the element its original's name gives, whether or not it snaps
+        // back (ops#138)
+        std::map<std::pair<const PropertyLinkBase*, int>, std::string> originalNow;
+        auto isOriginalNow = [&originalNow](const SolverEntry& entry, const std::string& element) {
+            auto it = originalNow.find({entry.prop, entry.index});
+            return it != originalNow.end() && it->second == element;
+        };
         if (anyGuessed) {
             // The probes (ops#133): the original's name gives an element again. The reference
             // snaps back to it only if it is the original as saved, its fingerprint agreeing
@@ -941,6 +948,9 @@ bool solveElementReferences(DocumentObject* feature,
             for (const auto* entry : entries) {
                 if (!entry->guessed || reverse) {
                     continue;
+                }
+                if (!entry->oldIndex.empty()) {
+                    originalNow[{entry->prop, entry->index}] = entry->oldIndex;
                 }
                 bool back = false;
                 const auto original = Data::ElementFingerprint::fromString(
@@ -1339,6 +1349,45 @@ bool solveElementReferences(DocumentObject* feature,
                         << "[" << entry.index << "]: " << oldName << " removed ("
                         << outcome.evidence << " to " << outcome.element << ")");
                 continue;
+            }
+            // A guess whose pick the solver finds again as the element the original's name
+            // gives (resolved, guessed, or broken with it as the only candidate) has returned to
+            // its original: two findings agree. The probe didn't snap it back because an
+            // intervening edit changed the original since its fingerprint (a snapshot) was
+            // saved. It holds the original plainly, its record and warning gone (ops#138).
+            if (!entry.guess.empty() && entry.guess.kind != "rejected") {
+                std::string returned;
+                std::string returnedName;
+                if ((outcome.status == Data::SolveStatus::Resolved && outcome.elements.empty())
+                    || outcome.status == Data::SolveStatus::Guessed) {
+                    if (isOriginalNow(entry, outcome.element)) {
+                        returned = outcome.element;
+                        returnedName = outcome.name;
+                    }
+                }
+                else if (outcome.status == Data::SolveStatus::Broken
+                         && outcome.candidates.size() == 1
+                         && outcome.candidateNames.size() == 1
+                         && isOriginalNow(entry, outcome.candidates.front())) {
+                    returned = outcome.candidates.front();
+                    returnedName = outcome.candidateNames.front();
+                }
+                if (!returned.empty()) {
+                    SolverResolution resolution;
+                    resolutionFor(entry, returned, mapForm(returnedName), resolution);
+                    resolutions[entry.prop].push_back(resolution);
+                    ReferenceReport::Entry item;
+                    item.status = ReferenceReport::Status::Resolved;
+                    item.tier = outcome.tier;
+                    item.newIndex = returned;
+                    item.evidence = "the original's name gives it again";
+                    report(entry, std::move(item));
+                    FC_WARN(referenceName(entry.prop)
+                            << "[" << entry.index << "]: " << oldName << " -> "
+                            << returned << " (the original " << entry.guess.origIndex
+                            << " is back, changed since it was saved)");
+                    continue;
+                }
             }
             ReferenceReport::Entry item;
             item.evidence = outcome.evidence;

@@ -47,6 +47,7 @@ from .harness import (
     Guessed,
     Reopens,
     Scenario,
+    Settled,
     X,
     Y,
     Z,
@@ -403,6 +404,28 @@ class DraftFaceNotchOffCentreRaised(DraftFaceNotchOffCentre):
     def heighten(self, doc):
         doc.Pad.Length = 12
         self.height = 12
+
+
+class DraftFaceNotchOffCentreRaisedFilled(DraftFaceNotchOffCentreRaised):
+    """DraftFaceNotchOffCentreRaised, then the notch's four lines deleted and the front line put
+    back to x 0..20 (`fill`): the front face is whole again. The original's name gives it, but
+    its saved fingerprint (10 high) no longer agrees (12 high), so the probe doesn't snap back;
+    the pick's name is gone (the piece merged) and structure follows it to the same face. That
+    is the original, returned: in solver documents the reference holds it plainly, its record
+    and warning gone (ops#138). Before, it kept "Guessed Face5 for Face1" and its warning."""
+
+    steps = ("edit", "heighten", "fill")
+
+    def frontFace(self):
+        if self.stepName == "fill" and self.solver:
+            return Settled(face("plane", normal=-Y, through=(0, 0, 0)))
+        return super().frontFace()
+
+    def fill(self, doc):
+        for geoId in reversed(range(4, doc.Profile.GeometryCount)):
+            doc.Profile.delGeometry(geoId)
+        m.setLines(doc.Profile, {0: ((0, 0), (20, 0))})
+        self.split = False
 
 
 class DraftFaceNotchNamedPieceKept(DraftFaceNotch):
