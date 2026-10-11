@@ -5687,6 +5687,21 @@ void App::resolveReregisteredReferences()
     App::reportReferenceMigration();
 }
 
+void App::queueReferencesIntoOtherDocuments(const Document* doc)
+{
+    for (const auto& [feature, props] : _ElementRefMap) {
+        if (!feature->isAttachedToDocument() || feature->getDocument() == doc) {
+            continue;
+        }
+        for (auto prop : props) {
+            auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
+            if (owner && owner->getDocument() == doc) {
+                _ResolveAfterRestore.insert(prop);
+            }
+        }
+    }
+}
+
 int App::namingRevisionToSave(const Document* doc)
 {
     // A producer not yet migrated (the recompute declined) holds the names of its file's

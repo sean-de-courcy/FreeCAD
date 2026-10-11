@@ -35,6 +35,7 @@ snapshot to search), never follow their names to the other face.
 
 import os
 import re
+import shutil
 
 import FreeCAD as App
 
@@ -325,6 +326,68 @@ class ConsumerPassTestBase(NamingGateTestBase):
         else:
             self.assertBroken(b, faceC, faceD)
 
+    def consumerReverted(self, config):
+        """B holds references through a Link, A migrated: B opened (the pass takes them), then
+        File > Revert of B itself, its file still older. The references take the pass again,
+        not left to follow their names at A's next edit (ops#124, L3)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config, throughLink=True)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        self.openAlone(pathA)
+        a = self.open(pathA)
+        b = self.open(pathB)
+        self.assertPassed(b, faceC, faceD)
+
+        # Act
+        b.restore()
+        a.getObject("Pad2").touch()
+        a.recompute()
+
+        # Assert
+        if b.ReferenceSolver:
+            self.assertOnFaces(b, faceC, faceD)
+        else:
+            self.assertBroken(b, faceC, faceD)
+
+    def twoProducers(self, config):
+        """A property of B with references into two producers, A and its copy A2, both migrated;
+        B opened while A2's file is missing: its references into A take the pass at the open.
+        A2 opened later: the references into A2 take it too, not the update by name (ops#124,
+        L4: the pass was kept per property, so the second producer's were skipped)."""
+        # Arrange
+        pathA, pathB, faceC, faceD = self.twoFiles(config)
+        pathA2 = os.path.join(self.folder, "A2.FCStd")
+        shutil.copy(pathA, pathA2)
+        a, a2, b = self.open(pathA), self.open(pathA2), self.open(pathB)
+        both = b.addObject("App::FeaturePython", "Both")
+        both.addProperty("App::PropertyXLinkSubList", "Ref")
+        both.Ref = [(a.getObject("Pad2"), [faceC]), (a2.getObject("Pad2"), [faceC])]
+        b.recompute()
+        b.save()
+        for doc in (b, a2, a):
+            App.closeDocument(doc.Name)
+        self.editFiles(pathA, pathB, faceC, faceD)
+        files = readFile(pathA2)
+        xml = withoutRevision(ageStamps(files["Document.xml"].decode("utf-8")))
+        files["Document.xml"] = xml.encode("utf-8")
+        mapText = files["Pad2.Shape.Map.txt"].decode("utf-8")
+        files["Pad2.Shape.Map.txt"] = swapNames(mapText, "Face", faceC, faceD).encode("utf-8")
+        writeFile(pathA2, files)
+        self.openAlone(pathA)
+        self.openAlone(pathA2)
+        away = os.path.join(self.folder, "away.FCStd")
+        os.rename(pathA2, away)
+        b = self.open(pathB)
+        self.assertPassed(b, faceC, faceD)
+        os.rename(away, pathA2)
+
+        # Act
+        a2 = self.open(pathA2)
+
+        # Assert
+        [subs] = [s for obj, s in b.getObject("Both").Ref if obj.Document == a2]
+        self.assertEqual(list(subs), [faceC] if b.ReferenceSolver else ["?" + faceC])
+
     def chain(self, config):
         """C references B's binder, B references A: opening C loads B and A; B's references into
         A (migrated alone) take the pass, and C's into B, whose names didn't move, are kept."""
@@ -592,6 +655,8 @@ def _addConfigTests():
         "targetSavedAtItsPath",
         "throughLinkOpenedLater",
         "throughLinkSavedAtItsPath",
+        "consumerReverted",
+        "twoProducers",
         "chain",
         "consumerFirst",
         "shapeLessConsumer",

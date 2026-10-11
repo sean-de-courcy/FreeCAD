@@ -2743,6 +2743,11 @@ void Document::restore(const char* filename,
 
     if (!delaySignal) {
         afterRestore(true);
+        // An older document reverted: its own references into other documents take the
+        // consumer pass with them, those through a Link too (ops#124)
+        if (documentNamingRevisions[this].older) {
+            queueReferencesIntoOtherDocuments(this);
+        }
         // References through Links into this document that its attach registered again are
         // resolved now: no end-of-open update follows (ops#120)
         resolveReregisteredReferences();
