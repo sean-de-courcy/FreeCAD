@@ -33,6 +33,7 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Document.h>
+#include <Gui/MainWindow.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/Tools.h>
 #include <Gui/Widgets.h>
@@ -197,6 +198,10 @@ void TaskShapeBinder::deleteItem()
 
     // Delete the selected spine
     int row = ui->listWidgetReferences->currentRow();
+    if (row >= 0 && ui->listWidgetReferences->count() == 1) {
+        refuseRemovingTheLastElement();
+        return;
+    }
     QListWidgetItem* item = ui->listWidgetReferences->takeItem(row);
     if (item) {
         QByteArray data = item->text().toLatin1();
@@ -222,6 +227,25 @@ void TaskShapeBinder::deleteItem()
             clearButtons();
         }
     }
+}
+
+void TaskShapeBinder::refuseRemovingTheLastElement() const
+{
+    // Support.setValue(obj, {}) stores (obj, ""): the whole object, which the user didn't pick
+    // (ops#251). Binding the whole object and emptying the binder have their own controls.
+    QString label;
+    if (!vp.expired()) {
+        if (auto obj = vp->getObject<PartDesign::ShapeBinder>()->Support.getValue()) {
+            label = QString::fromStdString(obj->Label.getStrValue());
+        }
+    }
+    Gui::getMainWindow()->showMessage(
+        tr("The binder's last element is kept: without it the binder would hold the whole of %1. "
+           "Use Object to bind the whole object. Clearing the object field unlinks the binder: it "
+           "then keeps its current shape and no longer follows %1.")
+            .arg(label),
+        10000
+    );
 }
 
 void TaskShapeBinder::removeFromListWidget(QListWidget* widget, QString itemstr)
@@ -333,12 +357,31 @@ bool TaskShapeBinder::referenceSelected(const SelectionChanges& msg) const
         if (selectionMode != refObjAdd) {
             // ensure the new selected subref belongs to the same object
             if (strcmp(msg.pObjectName, obj->getNameInDocument()) != 0) {
+                // Say why the click adds nothing (ops#251)
+                Gui::getMainWindow()->showMessage(
+                    tr("The binder holds elements of %1; %2 is another object. Use Object to "
+                       "bind another object, or a sub-shape binder to bind several.")
+                        .arg(QString::fromStdString(obj->Label.getStrValue()),
+                             QString::fromStdString(selectedObj->Label.getStrValue())),
+                    10000
+                );
                 return false;
             }
 
             const auto f = std::ranges::find(refs, subName);
 
             if (selectionMode == refAdd) {
+                if (subName.empty() && !refs.empty()) {
+                    // The whole object beside its elements is a Support the binder can't bind
+                    // (PR 232 review M1)
+                    Gui::getMainWindow()->showMessage(
+                        tr("The binder holds elements of %1, not the whole object. Use Object to "
+                           "bind the whole object.")
+                            .arg(QString::fromStdString(obj->Label.getStrValue())),
+                        10000
+                    );
+                    return false;
+                }
                 if (f == refs.end()) {
                     refs.push_back(subName);
                 }
@@ -347,6 +390,10 @@ bool TaskShapeBinder::referenceSelected(const SelectionChanges& msg) const
                 }
             }
             else {
+                if (f != refs.end() && refs.size() == 1) {
+                    refuseRemovingTheLastElement();
+                    return false;
+                }
                 if (f != refs.end()) {
                     refs.erase(f);
                 }

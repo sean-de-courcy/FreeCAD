@@ -2114,3 +2114,147 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(
             [o for o in self.doc.Objects if o.isDerivedFrom("Sketcher::SketchObject")], []
         )
+
+    # -- ops#251: the ShapeBinder panel and command bind no more and no less than picked ---------
+    #
+    # Designed model: two 10 mm boxes, Box at the origin and Box001 at x = 20, each in its own
+    # body; the binder in a third body. Box's top face is the one at z = 10, its side face the one
+    # at x = 0.
+
+    def binderModel(self, subs=("top",)):
+        """The two boxes and a ShapeBinder on Box's faces named in subs ("top", "side");
+        returns (box, other box, binder, {role: face name})."""
+        boxes = []
+        for x in (0, 20):
+            body = models.body(self.doc)
+            box = body.newObject("PartDesign::AdditiveBox", "Box")
+            box.Length = box.Width = box.Height = 10
+            box.Placement.Base = V(x, 0, 0)
+            boxes.append(box)
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        box = boxes[0]
+        names = {
+            "top": self.faceAt(box, V(5, 5, 10)),
+            "side": self.faceAt(box, V(0, 5, 5)),
+        }
+        binder = self.body.newObject("PartDesign::ShapeBinder", "ShapeBinder")
+        binder.Support = [(box, tuple(names[r] for r in subs))]
+        self.doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        return box, boxes[1], binder, names
+
+    @staticmethod
+    def faceAt(feature, center):
+        [name] = [
+            f"Face{i}"
+            for i, f in enumerate(feature.Shape.Faces, 1)
+            if (f.CenterOfMass - center).Length < 1e-6
+        ]
+        return name
+
+    @staticmethod
+    def support(binder):
+        return [(obj.Name, tuple(subs)) for obj, subs in binder.Support]
+
+    @staticmethod
+    def statusTexts():
+        statusBar = Gui.getMainWindow().statusBar()
+        return [label.text() for label in statusBar.findChildren(QtWidgets.QLabel)]
+
+    def assertBindsTopFace(self, binder, box, names):
+        self.assertEqual(self.support(binder), [(box.Name, (names["top"],))])
+        shape = binder.Shape
+        self.assertEqual(len(shape.Faces), 1)
+        self.assertEqual(len(shape.Solids), 0)
+        self.assertAlmostEqual(shape.Area, 100, places=6)
+        self.assertAlmostEqual(shape.BoundBox.ZMin, 10, places=6)
+        self.assertAlmostEqual(shape.BoundBox.ZMax, 10, places=6)
+
+    def testShapeBinderRemoveModeKeepsTheLastElement(self):
+        """Remove Geometry on the binder's only face is refused: the binder keeps the face (not
+        the whole box, as Support.setValue(obj, []) stored) and the status bar says why."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonRefRemove").click()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, names["top"])
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertEqual(self.widget(QtWidgets.QListWidget, "listWidgetReferences").count(), 1)
+        self.assertTrue(any("last element" in t for t in self.statusTexts()), self.statusTexts())
+
+    def testShapeBinderDeleteKeepsTheLastRow(self):
+        """The list's Remove (Delete) on the only row is refused the same way."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        refs = self.widget(QtWidgets.QListWidget, "listWidgetReferences")
+        refs.setCurrentRow(0)
+        [remove] = refs.actions()
+        remove.trigger()
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertEqual(refs.count(), 1)
+        self.assertTrue(any("last element" in t for t in self.statusTexts()), self.statusTexts())
+
+    def testShapeBinderRemoveModeRemovesOneOfTwo(self):
+        """Removing one of two faces still works: the binder keeps the other one."""
+        box, _, binder, names = self.binderModel(("top", "side"))
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonRefRemove").click()
+        Gui.Selection.addSelection(self.doc.Name, box.Name, names["side"])
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+
+    def testShapeBinderAddOnAnotherObjectSaysWhy(self):
+        """Add Geometry on the other box's face adds nothing (one object per binder), and the
+        status bar says so instead of ignoring the click."""
+        box, other, binder, names = self.binderModel()
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonRefAdd").click()
+        Gui.Selection.addSelection(self.doc.Name, other.Name, self.faceAt(other, V(25, 5, 10)))
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertTrue(
+            any(other.Label in t and box.Label in t for t in self.statusTexts()), self.statusTexts()
+        )
+
+    def testShapeBinderAddModeRefusesTheWholeObject(self):
+        """Add Geometry on the bound object itself (a tree click: no element) beside its face is
+        refused: it wrote Support [(Box, Face6), (Box, "")], which fails (PR 232 review M1)."""
+        box, _, binder, names = self.binderModel()
+        self.edit(binder)
+        self.widget(QtWidgets.QToolButton, "buttonRefAdd").click()
+        Gui.Selection.addSelection(self.doc.Name, box.Name)
+        pump(0.2)
+        self.assertBindsTopFace(binder, box, names)
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertTrue(
+            any("Use Object" in t and box.Label in t for t in self.statusTexts()),
+            self.statusTexts(),
+        )
+
+    def testShapeBinderCommandRefusesTwoObjects(self):
+        """PartDesign_ShapeBinder on faces of both boxes makes no binder (it would bind Box's face
+        only) and says why in a message box."""
+        box, other, binder, names = self.binderModel()
+        self.doc.removeObject(binder.Name)
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        guiDoc.ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.addSelection(self.doc.Name, box.Name, names["top"])
+        Gui.Selection.addSelection(self.doc.Name, other.Name, self.faceAt(other, V(25, 5, 10)))
+        self.answerModals()
+        Gui.runCommand("PartDesign_ShapeBinder")
+        self.assertTrue(waitFor(lambda: self.modals, 5.0), "no message box")
+        self.answering = False
+        binders = [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::ShapeBinder")]
+        self.assertEqual(binders, [])
+        self.assertEqual(len(self.modals), 1, self.modals)
+        self.assertIn(other.Name, self.modals[0])
+        # the refusal comes before the command's transaction (PR 232 review L5)
+        self.assertIsNone(App.getActiveTransaction())
+        self.assertFalse(self.doc.HasPendingTransaction)

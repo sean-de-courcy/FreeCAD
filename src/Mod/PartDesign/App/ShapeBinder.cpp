@@ -157,6 +157,12 @@ bool ShapeBinder::hasPlacementChanged() const
 App::DocumentObjectExecReturn* ShapeBinder::execute()
 {
     if (!this->isRestoring()) {
+        // A reference the binder would leave out fails the recompute rather than binding less
+        // than Support says (ops#251)
+        const std::string dropped = droppedReferences(&Support);
+        if (!dropped.empty()) {
+            return new App::DocumentObjectExecReturn(dropped);
+        }
         Part::TopoShape shape(updatedShape());
         if (!shape.isNull()) {
             this->Placement.setValue(shape.getTransform());
@@ -233,6 +239,66 @@ void ShapeBinder::getFilteredReferences(
             }
         }
     }
+}
+
+std::string ShapeBinder::droppedReferences(const App::PropertyLinkSubList* prop)
+{
+    App::GeoFeature* obj = nullptr;
+    std::vector<std::string> subs;
+    getFilteredReferences(prop, obj, subs);
+
+    const auto& objs = prop->getValues();
+    const auto& allSubs = prop->getSubValues();
+    auto join = [](const std::vector<std::string>& names) {
+        std::string text;
+        for (const auto& name : names) {
+            text += (text.empty() ? "" : ", ") + name;
+        }
+        return text;
+    };
+
+    // The objects left out, and obj's entries left out: its elements when the whole object is
+    // kept, or the whole object when its elements are
+    std::vector<std::string> others;
+    bool mixed = false;
+    std::vector<std::string> elements = subs;
+    for (std::size_t i = 0; i < objs.size() && i < allSubs.size(); ++i) {
+        const App::DocumentObject* it = objs[i];
+        if (!it) {
+            continue;
+        }
+        if (it != obj) {
+            const char* name = it->getNameInDocument();
+            std::string text = name ? name : "?";
+            if (std::ranges::find(others, text) == others.end()) {
+                others.push_back(text);
+            }
+        }
+        else if (subs.empty() != allSubs[i].empty()) {
+            mixed = true;
+            if (subs.empty()) {
+                elements.push_back(allSubs[i]);
+            }
+        }
+    }
+
+    if (!obj) {
+        if (others.empty()) {
+            return {};
+        }
+        return "A shape binder binds a Part feature or a datum; Support links none, only "
+            + join(others);
+    }
+    const std::string objName = obj->getNameInDocument() ? obj->getNameInDocument() : "?";
+    if (!others.empty()) {
+        return "A shape binder binds one object: Support links " + objName + " and also "
+            + join(others) + ". Use a sub-shape binder to bind several objects.";
+    }
+    if (mixed) {
+        return "Support links " + objName + " both as a whole and by its elements ("
+            + join(elements) + "); link either the object or its elements.";
+    }
+    return {};
 }
 
 Part::TopoShape ShapeBinder::buildShapeFromReferences(App::GeoFeature* obj, std::vector<std::string> subs)

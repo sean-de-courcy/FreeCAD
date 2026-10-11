@@ -371,14 +371,26 @@ void CmdPartDesignShapeBinder::activated(int iMsg)
             return;
         }
 
+        // remove the body from links in case it's selected as
+        // otherwise a cyclic dependency will be created
+        support.removeValue(pcActiveBody);
+
+        // A selection the binder would bind only part of (two objects, or an object both whole
+        // and by its elements) makes no binder (ops#251)
+        const std::string dropped = PartDesign::ShapeBinder::droppedReferences(&support);
+        if (!dropped.empty()) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Shape Binder"),
+                QString::fromStdString(dropped)
+            );
+            return;
+        }
+
         std::string FeatName = getUniqueObjectName("ShapeBinder", pcActiveBody);
 
         openCommand(QT_TRANSLATE_NOOP("Command", "Create Shape Binder"));
         FCMD_OBJ_CMD(pcActiveBody, "newObject('PartDesign::ShapeBinder','" << FeatName << "')");
-
-        // remove the body from links in case it's selected as
-        // otherwise a cyclic dependency will be created
-        support.removeValue(pcActiveBody);
 
         auto Feat = pcActiveBody->getObject(FeatName.c_str());
         if (!Feat) {
