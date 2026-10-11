@@ -1682,7 +1682,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         before it while it had no shape, without the solver: Body.insertObject can't relink Base
         (ops#82), so BaseFeature is the pocket and Base still names the pad; the dialog can't
         move Base onto the pocket either (the broken entry resolves to nothing there). Another
-        edge picked: the broken entry keeps its mapped name and its candidates (Use)."""
+        edge picked, on the pad, the object Base links (ops#176): the broken entry keeps its
+        mapped name and its candidates (Use)."""
         pad, fillet = self.boss()
         body = pad.getParent()
         notch = models.sketch(self.doc, "Notch", models.rectangle(5, 3, 7, 5), body, z=10)
@@ -1705,8 +1706,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         pump()
 
         self.arm(field, byFocus=False)
-        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pocket.Shape)
-        self.pick(pocket, other)
+        [other] = edge("line", direction=Z, through=(0, 0, 0)).one(pad.Shape)
+        self.pick(pad, other)
         self.assertTrue(waitFor(lambda: len(states(field)) == 2), texts(field))
         self.assertEqual(states(field), ["broken", "exact"])
         menu = openMenu(field, 0)
