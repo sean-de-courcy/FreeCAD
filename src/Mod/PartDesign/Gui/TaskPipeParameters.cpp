@@ -711,8 +711,9 @@ bool TaskPipeParameters::accept()
     };
     auto stop = [&](const QString& what) {
         if (undoCopyStep()) {
-            // the panel shows the pipe it would commit
-            pipe->recomputeFeature();
+            // the panel shows the pipe it would commit, and the features after it come out of
+            // the failed recompute's errors (ops#253: they stayed in error until the next one)
+            pipe->getDocument()->recompute();
         }
         // the panel stays open, so it shows the spines and the profile again: a recompute
         // failure comes after setVisibilityOfSpineAndProfile() put them back as they were before

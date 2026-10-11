@@ -912,6 +912,23 @@ bool Revolved::suggestReversed()
     return suggestReversedAngle(angle);
 }
 
+std::optional<bool> Revolved::suggestedReversed()
+{
+    try {
+        updateAxis();
+    }
+    catch (const Base::Exception&) {
+        return std::nullopt;
+    }
+
+    bool computed = false;
+    double angle = ProfileBased::getReversedAngle(Base.getValue(), Axis.getValue(), &computed);
+    if (!computed) {
+        return std::nullopt;
+    }
+    return suggestReversedAngle(angle);
+}
+
 double Revolved::getStartOffset() const
 {
     const char* startType = StartType.getValueAsString();

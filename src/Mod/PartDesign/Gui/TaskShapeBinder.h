@@ -97,6 +97,8 @@ private:
     void refuseRemovingTheLastElement() const;
     void exitSelectionMode();
     void updateDroppedNote();
+    /// shows Support in the object field and the list, and refreshes the note
+    void refreshFromSupport();
 
     bool supportShow = false;
 
@@ -106,7 +108,8 @@ private:
     std::unique_ptr<Ui_TaskShapeBinder> ui;
     Gui::ButtonGroup* buttonGroup;
     Gui::WeakPtrT<ViewProviderShapeBinder> vp;
-    /// refreshes the note when Support changes elsewhere: undo, redo, Python (PR 245 review L4)
+    /// refreshes the panel when Support changes elsewhere: undo, redo, Python (PR 245 review L4,
+    /// ops#276)
     fastsignals::scoped_connection supportConnection;
 };
 

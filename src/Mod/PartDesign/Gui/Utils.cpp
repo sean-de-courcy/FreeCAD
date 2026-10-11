@@ -521,7 +521,9 @@ void relinkToBody(PartDesign::Feature* feature)
                         //     (2015-08-13, Fat-Zer)
                     }
                 }
-                else if (prop->isDerivedFrom(App::PropertyLinkSub::getClassTypeId())) {
+                // (ops#252: guarded by PropertyLinkSub, handled above, so a sub-list was never
+                // relinked)
+                else if (prop->isDerivedFrom(App::PropertyLinkSubList::getClassTypeId())) {
                     App::PropertyLinkSubList* propLink = static_cast<App::PropertyLinkSubList*>(prop);
                     std::vector<App::DocumentObject*> linkList = propLink->getValues();
                     bool valueChanged = false;

@@ -236,8 +236,13 @@ protected:
 
 
     /// Used to suggest a value for Reversed flag so that material is always removed (Groove) or
-    /// added (Revolution) from the support
-    double getReversedAngle(const Base::Vector3d& b, const Base::Vector3d& v) const;
+    /// added (Revolution) from the support. \a computed, when given, says whether the angle could
+    /// be computed (otherwise the angle stands for Reversed's own value)
+    double getReversedAngle(
+        const Base::Vector3d& b,
+        const Base::Vector3d& v,
+        bool* computed = nullptr
+    ) const;
     /// get Axis from ReferenceAxis
     void getAxis(
         const App::DocumentObject* pcReferenceAxis,

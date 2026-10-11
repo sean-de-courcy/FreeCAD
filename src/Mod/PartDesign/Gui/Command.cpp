@@ -853,12 +853,14 @@ bool importExternalElements(App::PropertyLinkSub& prop, std::vector<App::SubObje
         std::string element = sobjT.getOldElementName();
         if (element.size()) {
             if (subs.size() == 1 && subs.front().empty()) {
-                for (auto it = sobjs.begin(); it != sobjs.end();) {
+                // (ops#252: the loop never advanced past another object's entry)
+                for (auto it = sobjs.begin(); it != sobjs.end(); ++it) {
                     if (it->getSubObject() == sobj) {
                         sobjs.erase(it);
                         break;
                     }
                 }
+                subs.clear();
             }
         }
         else if (subs.size() > 0) {
@@ -1079,7 +1081,43 @@ void prepareProfileBased(
             msgBox.exec();
         }
         else {
-            base_worker(selection.front().getObject(), selection.front().getSubNames());
+            // The first object's elements make the profile; a loft takes the other picks as
+            // sections, a pipe a second pick's edges as its spine. Say which picks are left out
+            // (ops#252: they were dropped without a word)
+            const bool loft = which == "AdditiveLoft" || which == "SubtractiveLoft";
+            const bool pipe = which == "AdditivePipe" || which == "SubtractivePipe";
+            const std::size_t used = loft ? selection.size()
+                                          : (pipe && selection.size() == 2 ? 2 : 1);
+            QStringList dropped;
+            for (std::size_t index = 1; index < selection.size(); ++index) {
+                App::DocumentObject* obj = selection[index].getObject();
+                if (!obj) {
+                    continue;
+                }
+                const QString label = QString::fromUtf8(obj->Label.getValue());
+                if (index >= used) {
+                    dropped << QStringLiteral("'%1'").arg(label);
+                    continue;
+                }
+                if (pipe) {
+                    for (const auto& sub : selection[index].getSubNames()) {
+                        if (sub.find("Edge") == std::string::npos) {
+                            dropped << QStringLiteral("'%1' %2").arg(label, QString::fromStdString(sub));
+                        }
+                    }
+                }
+            }
+            App::DocumentObject* profile = selection.front().getObject();
+            const QString profileLabel = QString::fromUtf8(profile->Label.getValue());
+            base_worker(profile, selection.front().getSubNames());
+            if (!dropped.isEmpty()) {
+                Gui::getMainWindow()->showMessage(
+                    QObject::tr("The profile is '%1': a feature takes the elements of one object. "
+                                "Left out of the selection: %2.")
+                        .arg(profileLabel, dropped.join(QStringLiteral(", "))),
+                    10000
+                );
+            }
         }
         return;
     }
@@ -2419,7 +2457,31 @@ void prepareTransformed(
             return;
         }
     }
+    // Say which picks the transform leaves out, once its panel is open (ops#252: a sketch alone
+    // made a "Whole shape" transform without a word)
+    QStringList dropped;
+    for (const auto& sel : cmd->getSelection().getSelectionEx()) {
+        App::DocumentObject* obj = sel.getObject();
+        if (obj && !obj->isDerivedFrom<PartDesign::Feature>()) {
+            dropped << QStringLiteral("'%1'").arg(QString::fromUtf8(obj->Label.getValue()));
+        }
+    }
+
     worker(features);
+
+    if (!dropped.isEmpty()) {
+        const QString list = dropped.join(QStringLiteral(", "));
+        Gui::getMainWindow()->showMessage(
+            features.empty()
+                ? QObject::tr("A transform takes PartDesign features; left out of the selection: "
+                              "%1. It transforms the whole shape instead.")
+                      .arg(list)
+                : QObject::tr("A transform takes PartDesign features; left out of the selection: "
+                              "%1.")
+                      .arg(list),
+            10000
+        );
+    }
 }
 
 void finishTransformed(Gui::Command* cmd, App::DocumentObject* Feat)
