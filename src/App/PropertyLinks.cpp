@@ -202,6 +202,10 @@ static std::unordered_set<const PropertyLinkBase*> _ConsumerPassLinks;
 // (ops#124 L4). A destroyed property leaves the map.
 static std::unordered_map<const PropertyLinkBase*, std::set<std::string>> _PassedRefs;
 
+// The properties destroyed while updateAllElementReferences() runs (one set per running call): a
+// reference update can destroy another property (a handler), whose pointer is then skipped
+static std::vector<std::unordered_set<const PropertyLinkBase*>*> _DestroyedWatches;
+
 // Whether \a prop's references into \a feature's document took the consumer pass already
 static bool passedInto(const PropertyLinkBase* prop, const DocumentObject* feature)
 {
@@ -292,6 +296,9 @@ PropertyLinkBase::~PropertyLinkBase()
     _LostElementRefs.erase(this);
     _ResolveAfterRestore.erase(this);
     _PassedRefs.erase(this);
+    for (auto destroyed : _DestroyedWatches) {
+        destroyed->insert(this);
+    }
 }
 
 void PropertyLinkBase::setAllowExternal(bool allow)
@@ -586,10 +593,22 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
     const bool pass =
         !reverse && (App::anyOpenedWithOlderNaming() || !_ConsumerPassLinks.empty());
     std::unordered_map<PropertyLinkBase*, std::vector<std::string>> passed;  // the state before
-    std::vector<std::pair<PropertyLinkBase*, DocumentObject*>> passedInto;  // and its producers
+    std::unordered_set<const PropertyLinkBase*> destroyed;  // since, by a handler
+    _DestroyedWatches.push_back(&destroyed);
+    struct Unwatch
+    {
+        std::unordered_set<const PropertyLinkBase*>* set;
+        ~Unwatch()
+        {
+            _DestroyedWatches.erase(
+                std::find(_DestroyedWatches.begin(), _DestroyedWatches.end(), set)
+            );
+        }
+    } unwatch {&destroyed};
     for (const auto& [feature, props] : references) {
         std::vector<PropertyLinkBase*> solverProps;
         std::vector<PropertyLinkBase*> solverPassProps;
+        std::vector<PropertyLinkBase*> passedInto;  // the pass's, into this producer
         for (auto prop : props) {
             auto it = _ElementRefMap.find(feature);
             if (it == _ElementRefMap.end() || it->second.count(prop) == 0) {
@@ -599,7 +618,7 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
                 && takesConsumerPass(prop, feature, true);
             if (inPass) {
                 passed.emplace(prop, referenceState(prop));
-                passedInto.emplace_back(prop, feature);
+                passedInto.push_back(prop);
             }
             if (prop->getContainer() && prop->inSolverDocument()) {
                 (inPass ? solverPassProps : solverProps).push_back(prop);
@@ -627,14 +646,22 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
         }
         solveReferences(feature, solverProps, reverse);
         solveReferences(feature, solverPassProps, true, false);
+        // Marked as each producer is done, not after the loop: an exception in a later one
+        // doesn't leave these to take the pass again (the Opus verification of fork PR 249
+        // round 1, finding 4)
+        for (auto prop : passedInto) {
+            if (destroyed.count(prop) == 0) {
+                markPassed(prop, feature);
+            }
+        }
     }
     if (!pass) {
         return;
     }
-    for (const auto& [prop, feature] : passedInto) {
-        markPassed(prop, feature);
-    }
     for (const auto& [prop, before] : passed) {
+        if (destroyed.count(prop) != 0) {
+            continue;
+        }
         auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
         if (owner && owner->getDocument() && referenceState(prop) != before) {
             owner->touch();
@@ -5676,12 +5703,8 @@ public:
     {
         const auto before = referenceState(prop);
         std::vector<DocumentObject*> features(prop->_ElementRefs.begin(), prop->_ElementRefs.end());
-        std::vector<DocumentObject*> passedInto;  // the producers it took the pass for
         for (auto feature : features) {
             const bool reverse = takesConsumerPass(prop, feature, false);
-            if (reverse) {
-                passedInto.push_back(feature);
-            }
             std::optional<ConsumerPassScope> scope;
             if (reverse) {
                 scope.emplace();
@@ -5692,9 +5715,11 @@ public:
             else {
                 prop->updateElementReference(feature, reverse, false);
             }
-        }
-        for (auto feature : passedInto) {
-            markPassed(prop, feature);
+            if (reverse) {
+                // Marked as each producer is done (the Opus verification of fork PR 249
+                // round 1, finding 4)
+                markPassed(prop, feature);
+            }
         }
         return referenceState(prop) != before;
     }
