@@ -168,6 +168,11 @@ void Property::setPathValue(const ObjectIdentifier& path, const boost::any& valu
     path.setValue(value);
 }
 
+boost::any Property::checkPathValue(const ObjectIdentifier& /*path*/, const boost::any& value) const
+{
+    return value;
+}
+
 const boost::any Property::getPathValue(const ObjectIdentifier& path) const
 {
     return path.getValue();

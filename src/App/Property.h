@@ -275,6 +275,21 @@ public:
     virtual void setPathValue(const App::ObjectIdentifier& path, const boost::any& value);
 
     /**
+     * @brief Check a value for the property identified by the path.
+     *
+     * FreeCAD-CH (ops#319): returns the value as setPathValue() would store it (e.g. snapped to a
+     * bound within rounding), and throws where setPathValue() would refuse it. The expression
+     * engine compares the result with the current value, so a value that is unchanged, such as
+     * an out-of-range value restored from a file, is still checked. The default returns @a value.
+     *
+     * @param[in] path The path to the property.
+     * @param[in] value The value to check.
+     * @return The value setPathValue() would store.
+     */
+    virtual boost::any checkPathValue(const App::ObjectIdentifier& path,
+                                      const boost::any& value) const;
+
+    /**
      * @brief Get the value of the property identified by the path.
      *
      * This function gets the value of the property identified by the path.  It

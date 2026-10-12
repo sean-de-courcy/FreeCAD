@@ -268,12 +268,18 @@ void PropertyQuantityConstraint::setPyObject(PyObject* value)
     PropertyFloat::setValue(checkedValue(quant.getValue()));  // clazy:exclude=skipped-base-method
 }
 
-void PropertyQuantityConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+boost::any PropertyQuantityConstraint::checkPathValue(const ObjectIdentifier& /*path*/,
+                                                      const boost::any& value) const
 {
     auto q = App::anyToQuantity(value);
     checkPathUnit(q);
     q.setValue(checkedValue(q.getValue()));
-    PropertyQuantity::setPathValue(path, q);
+    return q;
+}
+
+void PropertyQuantityConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyQuantity::setPathValue(path, checkPathValue(path, value));
 }
 
 // ------------------------------------------------------

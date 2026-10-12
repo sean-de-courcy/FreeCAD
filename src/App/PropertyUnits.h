@@ -147,6 +147,8 @@ public:
     const char* getEditorName() const override;
     void setPyObject(PyObject*) override;
     void setPathValue(const App::ObjectIdentifier& path, const boost::any& value) override;
+    boost::any checkPathValue(const App::ObjectIdentifier& path,
+                              const boost::any& value) const override;
 
 private:
     /// FreeCAD-CH (ops#319): the value, or a ValueError when it is outside the constraints.

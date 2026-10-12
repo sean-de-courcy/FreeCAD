@@ -447,6 +447,8 @@ void PropertyExpressionEngine::updateHiddenReference(const std::string& key)
         App::any value;
         try {
             value = it->second.expression->getValueAsAny();
+            // FreeCAD-CH (ops#319): as in execute(), compare the value the property would store.
+            value = myProp->checkPathValue(var, value);
             if (!isAnyEqual(value, myProp->getPathValue(var))) {
                 myProp->setPathValue(var, value);
             }
@@ -806,6 +808,13 @@ DocumentObjectExecReturn* App::PropertyExpressionEngine::execute(ExecuteOption o
             std::shared_ptr<App::Expression> expression = expressions[*it].expression;
             if (expression) {
                 value = expression->getValueAsAny();
+
+                // FreeCAD-CH (ops#319): the value as the property would store it, or an error
+                // where it would refuse it. Checked before the comparison below, so a value that
+                // is unchanged (e.g. out of range, restored from a file) is refused too, and a
+                // value the property snaps to a bound (`2*pi rad` to 360 deg) doesn't count as a
+                // change on every evaluation.
+                value = prop->checkPathValue(*it, value);
 
                 // Enable value comparison for all expression bindings to reduce
                 // unnecessary touch and recompute.
