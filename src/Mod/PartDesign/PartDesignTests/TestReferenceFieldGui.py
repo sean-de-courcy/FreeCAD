@@ -3368,6 +3368,33 @@ class TestReferenceFieldGui(unittest.TestCase):
         a pick of its side, [pad, pad below, sketch], adds it, not the pad below."""
         self.padOnTopOfAPad(onAFace=True)
 
+    def testPatternOriginalsPickOfASideARefinedPadMergedWith(self):
+        """ops#292: as in ...PadOnABinderOfAPadsTop, but the upper pad refines, so its side and
+        the lower pad's side merge into one face, 15 high. Its history names the lower pad and its
+        sketch only, though the upper pad made a third of it: the lower pad's tool has part of the
+        face and not the rest. A pick says no feature made it, rather than adding the lower pad
+        (which would pattern only part of the face). The rounding a fillet makes on a pad's edge,
+        which no tool has at all, still adds the pad (...FilletOfAPadOnABinder)."""
+        profile, pad, raised = self.padsOneOnTheOther(onAFace=False)
+        raised.Refine = True
+        self.doc.recompute()
+        bump = self.bumpOn(1, 1, 15)
+        bump.Refine = False
+        self.doc.recompute()
+        self.assertAlmostEqual(bump.Shape.Volume, 1000 + 500 + 1, places=6)
+        [side] = face(contains=(10, 5, 5)).one(bump.Shape)
+        self.assertEqual(face(contains=(10, 5, 12.5)).one(bump.Shape), [side])
+        history = self.historyNames(bump, side)
+        self.assertEqual(history[-2:], [pad.Name, profile.Name])
+        self.assertNotIn(raised.Name, history)
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, side)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+
     def testPatternOriginalsPickOfAFilletOfAPadOnABinder(self):
         """Fork PR 202 verification, N1: as in ...PadOnABinderOfAPadsTop, with a fillet (r = 1) on
         the upper pad's vertical edge, which takes the lower pad's edge below it along. The upper

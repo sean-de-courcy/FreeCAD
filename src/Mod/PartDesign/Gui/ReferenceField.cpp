@@ -240,25 +240,9 @@ void visitLink(App::PropertyLinkBase* prop, Fn&& fn)
     }
 }
 
-// Points that show where an element lies: its vertices, the middles of its edges and, for a face,
-// points inside it spread over it (one near a corner would let a tool face with a hole pass)
-std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
+// Points inside a face, spread over it: about nine, each costs a distance computation
+std::vector<gp_Pnt> insidePoints(const TopoDS_Face& face)
 {
-    std::vector<gp_Pnt> points;
-    for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
-        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
-    }
-    for (TopExp_Explorer it(element, TopAbs_EDGE); it.More(); it.Next()) {
-        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
-        if (!BRep_Tool::Degenerated(edge)) {
-            BRepAdaptor_Curve curve(edge);
-            points.push_back(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2));
-        }
-    }
-    if (element.ShapeType() != TopAbs_FACE) {
-        return points;
-    }
-    const TopoDS_Face& face = TopoDS::Face(element);
     double u0 = 0, u1 = 0, v0 = 0, v1 = 0;
     BRepTools::UVBounds(face, u0, u1, v0, v1);
     BRepAdaptor_Surface surface(face);
@@ -274,13 +258,56 @@ std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
             }
         }
     }
-    // About nine of them, spread over the grid (each costs a distance computation)
     constexpr std::size_t most = 9;
     const std::size_t stride = std::max<std::size_t>(1, inside.size() / most);
+    std::vector<gp_Pnt> points;
     for (std::size_t i = 0; i < inside.size(); i += stride) {
         points.push_back(inside[i]);
     }
     return points;
+}
+
+// Points that show where an element lies: its vertices, the middles of its edges and, for a face,
+// points inside it spread over it (one near a corner would let a tool face with a hole pass)
+std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
+{
+    std::vector<gp_Pnt> points;
+    for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
+        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+    }
+    for (TopExp_Explorer it(element, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (!BRep_Tool::Degenerated(edge)) {
+            BRepAdaptor_Curve curve(edge);
+            points.push_back(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2));
+        }
+    }
+    if (element.ShapeType() == TopAbs_FACE) {
+        std::ranges::copy(insidePoints(TopoDS::Face(element)), std::back_inserter(points));
+    }
+    return points;
+}
+
+// The faces of a tool, as one shape to measure distances to
+TopoDS_Compound toolFaces(const TopoDS_Shape& tool)
+{
+    BRep_Builder builder;
+    TopoDS_Compound faces;
+    builder.MakeCompound(faces);
+    for (TopExp_Explorer it(tool, TopAbs_FACE); it.More(); it.Next()) {
+        builder.Add(faces, it.Current());
+    }
+    return faces;
+}
+
+// The element's own tolerance, if larger (a face from a boolean with a loose tolerance)
+double toleranceOf(const TopoDS_Shape& element)
+{
+    double tolerance = 1e-5;
+    for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+    }
+    return tolerance;
 }
 
 // Whether the element lies in the boundary of the tool: a face within its faces (a face trimmed
@@ -295,18 +322,9 @@ std::optional<bool> liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool
         return false;
     }
     try {
-        BRep_Builder builder;
-        TopoDS_Compound faces;
-        builder.MakeCompound(faces);
-        for (TopExp_Explorer it(tool, TopAbs_FACE); it.More(); it.Next()) {
-            builder.Add(faces, it.Current());
-        }
+        const TopoDS_Compound faces = toolFaces(tool);
         const std::vector<gp_Pnt> points = samplePoints(element);
-        // The element's own tolerance, if larger (a face from a boolean with a loose tolerance)
-        double tolerance = 1e-5;
-        for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
-            tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
-        }
+        const double tolerance = toleranceOf(element);
         if (points.empty()) {
             return std::nullopt;
         }
@@ -322,6 +340,35 @@ std::optional<bool> liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool
             }
         }
         return unknown ? std::nullopt : std::optional<bool>(true);
+    }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+// Whether the tool's boundary has part of a face and not the rest: some of the points inside it
+// lie on the tool's faces and some don't. A refined feature merges its side with a coplanar side
+// of a feature below into one face, which names only the one below (ops#292); a fillet's rounding
+// of a feature's edge has no point on that feature's tool. Not for an edge or a vertex. Nothing
+// when that can't be told.
+std::optional<bool> partlyOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
+{
+    if (element.IsNull() || element.ShapeType() != TopAbs_FACE || tool.IsNull()) {
+        return element.IsNull() ? std::nullopt : std::optional<bool>(false);
+    }
+    try {
+        const TopoDS_Compound faces = toolFaces(tool);
+        const double tolerance = toleranceOf(element);
+        bool on = false;
+        bool off = false;
+        for (const gp_Pnt& point : insidePoints(TopoDS::Face(element))) {
+            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), faces);
+            if (!distance.IsDone()) {
+                return std::nullopt;
+            }
+            (distance.Value() > tolerance ? off : on) = true;
+        }
+        return on && off;
     }
     catch (const Standard_Failure&) {
         return std::nullopt;
@@ -1168,23 +1215,40 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // Whether the feature's tool (placed) has the element in its boundary; nothing when that can't
     // be told (fork PR 267 review, L3). Once per feature: each test costs a dozen distances.
     TopoDS_Shape element;
-    std::map<App::DocumentObject*, std::optional<bool>> tested;
-    auto onTool = [&element, &tested, shape, sub](App::DocumentObject* obj) -> std::optional<bool> {
-        if (auto it = tested.find(obj); it != tested.end()) {
-            return it->second;
-        }
+    auto theElement = [&element, shape, sub]() -> const TopoDS_Shape& {
         if (element.IsNull()) {
             const Part::ShapeOptions shapeOptions = Part::ShapeOption::NeedSubElement
                 | Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
             element = Part::Feature::getTopoShape(shape, shapeOptions, sub).getShape();
         }
+        return element;
+    };
+    auto toolOf = [](App::DocumentObject* obj) {
+        auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(obj);
+        if (!addSub) {
+            return TopoDS_Shape();
+        }
+        Part::TopoShape tool = addSub->AddSubShape.getShape();
+        return tool.moved(addSub->getLocation()).getShape();
+    };
+    std::map<App::DocumentObject*, std::optional<bool>> tested;
+    auto onTool = [&](App::DocumentObject* obj) -> std::optional<bool> {
+        if (auto it = tested.find(obj); it != tested.end()) {
+            return it->second;
+        }
         std::optional<bool> result;
-        if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(obj)) {
-            Part::TopoShape tool = addSub->AddSubShape.getShape();
-            result = liesOn(element, tool.moved(addSub->getLocation()).getShape());
+        if (freecad_cast<PartDesign::FeatureAddSub*>(obj)) {
+            result = liesOn(theElement(), toolOf(obj));
         }
         tested[obj] = result;
         return result;
+    };
+    // Whether the feature's tool has part of the face and not the rest: another feature made the
+    // rest, which the history doesn't name (a refined pad's side merged with the pad's below it,
+    // ops#292). Also when that can't be told: the candidate would be taken without its tool's test.
+    auto madePart = [&](App::DocumentObject* obj) {
+        return !freecad_cast<PartDesign::FeatureAddSub*>(obj)
+            || partlyOn(theElement(), toolOf(obj)).value_or(true);
     };
     // A candidate is taken when its tool has the element; another feature rules it out when its
     // tool may have it (also when that can't be told)
@@ -1242,7 +1306,9 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // Once a candidate's tool didn't have the element (a fillet on the pad on the binder rounded
     // its edge down into the pad below: [fillet, pad, pad below, sketch]), the element may have
     // been changed by something its history doesn't tell: every later candidate, also a plain one,
-    // needs it too.
+    // needs it too. A plain one whose tool doesn't have it is taken (a pad under a fillet: the
+    // rounding has no point on the pad's tool), unless its tool has part of it: another feature
+    // made the rest (ops#292).
     bool failed = false;
     for (auto item = history.begin(); item != history.end(); ++item) {
         auto next = std::next(item);
@@ -1259,7 +1325,8 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             failed = true;
             continue;
         }
-        if (rivalled(item->obj, family, candidates)) {
+        if ((plain && !touches(item->obj) && madePart(item->obj))
+            || rivalled(item->obj, family, candidates)) {
             return nullptr;
         }
         return item->obj;
@@ -1283,8 +1350,9 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     }
     // A feature that makes elements from the origin in a role, or from what the guess uses in a
     // role, whose tool may have the element: the history may have left it out (a single
-    // candidate is taken without the test above)
-    if (rivalled(guess, profiles, candidates)) {
+    // candidate is taken without the test above). Nor a single one whose tool has part of the
+    // element only (ops#292).
+    if ((!touches(guess) && madePart(guess)) || rivalled(guess, profiles, candidates)) {
         return nullptr;
     }
     // Every guess, also the single one: an origin that has solid faces of its own (the body's
