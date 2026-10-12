@@ -6,7 +6,8 @@ CLI suites shows in every run. A unittest result line, `name (Module.Class.name)
 a test; the time since the previous result line counts for its top-level module. Output that
 reaches the pipe in chunks blurs single tests but not module totals.
 
-The summary goes to stderr (not into the test log the pipe writes) and, on GitHub, into the
+The action runs it as `python ... || cat`, so the output still passes if Python fails to
+start or stops. The summary goes to stderr (not into the test log the pipe writes) and, on GitHub, into the
 step summary.
 """
 
@@ -27,18 +28,22 @@ def main():
     for line in sys.stdin.buffer:
         out.write(line)
         out.flush()
-        m = RESULT_RE.search(line)
-        if m:
-            now = time.monotonic()
-            module = m.group(1).decode("ascii")
-            seconds[module] += now - previous
-            counts[module] += 1
-            previous = now
+        try:  # the timing never costs a line of output
+            m = RESULT_RE.search(line)
+            if m:
+                now = time.monotonic()
+                module = m.group(1).decode("ascii", "replace")
+                seconds[module] += now - previous
+                counts[module] += 1
+                previous = now
+        except Exception:
+            pass
     try:
         total = time.monotonic() - start
         rows = [(module, seconds[module], counts[module]) for module, _ in seconds.most_common(TOP)]
         results = sum(counts.values())
         text = [f"Slowest test modules ({total / 60:.1f} min in all, {results} results):"]
+        print(f"test_timings: {sys.executable}", file=sys.stderr)
         text += [f"  {s:7.1f} s  {n:5d} tests  {module}" for module, s, n in rows]
         print("\n".join(text), file=sys.stderr)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
