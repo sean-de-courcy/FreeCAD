@@ -37,6 +37,7 @@
 
 #include <SignalException.h>
 #include "FeatureChamfer.h"
+#include "FilletFallback.h"
 #include "TopoShapeOpCode.h"
 #include "TopoShapeRepair.h"
 
@@ -110,6 +111,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         const bool sameSizes = std::all_of(sizes.begin(), sizes.end(), [&](const auto& s) {
             return s == sizes.front();
         });
+        Part::FilletFallback::Recorder recorder;
         TopoShape res = makeTopoShape();
         if (sameSizes && !edgeShapes.empty()) {
             // The same maker as below (the reference face is the edge's first ancestor), and the
@@ -136,6 +138,14 @@ App::DocumentObjectExecReturn* Chamfer::execute()
                 return new App::DocumentObjectExecReturn("Resulting shape is null");
             }
             res.makeElementShape(mkChamfer, baseTopoShape, Part::OpCodes::Chamfer);
+            // makeElementChamfer sends a face of zero width to the exact construction; OCCT's
+            // own maker leaves it (ops#298)
+            if (!FilletFallback::thinFace(res.getShape(), baseShape).IsNull()) {
+                return new App::DocumentObjectExecReturn(
+                    "The chamfer would leave a face of zero width (a face it consumes whole, or a "
+                    "sliver narrower than its tolerance)"
+                );
+            }
         }
         if (res.isNull()) {
             return new App::DocumentObjectExecReturn("Resulting shape is null");
@@ -144,6 +154,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         if (!Part::checkDressUp(res, baseTopoShape)) {
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
+        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
+        recorder.report(Label.getValue());
         this->Shape.setValue(res);
         return Part::FilletBase::execute();
     }

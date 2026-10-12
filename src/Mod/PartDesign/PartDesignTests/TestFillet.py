@@ -395,6 +395,42 @@ class TestFillet(unittest.TestCase):
         ]
         self._assertFails(self._fillet_on_base(base, edges, 2.65))
 
+    def testFilletWholeOutlineOfAStadium(self):
+        # ops#298: OCCT "succeeds" on a stadium's whole top outline at r = 2 (half its width),
+        # keeping the top face with area 0; the exact construction builds the full round. Just
+        # below, a top narrower than its tolerance is built the same way, and a sliver 2e-7
+        # wide (twice its tolerance) is OCCT's correct result
+        plate, outline = models.fused_stadium()
+        fillet = self._fillet_on_base(plate, outline, 2.0)
+        self._assertValidFillet(fillet, models.fused_stadium_rounded(2))
+        self.assertGreater(models.narrowest(fillet.Shape, plate), 0.5)
+        for radius, width in ((2 - 1e-8, 0.5), (2 - 1e-7, 1e-7)):
+            fillet.Radius = radius
+            self.Doc.recompute()
+            self._assertValidFillet(fillet, models.fused_stadium_rounded(radius))
+            self.assertGreater(models.narrowest(fillet.Shape, plate), width)
+
+    def testFilletCoincidentCases(self):
+        # Section 1 of the design note: OCCT fails at each of these limits; the feature gets the
+        # exact construction's result with the analytic volume. A plate's edge at its thickness,
+        # a column's four edges (a cylinder), a cube's twelve (a sphere: eight corners) and a
+        # tube's two rims (a toroidal full round)
+        plate = Part.makeBox(30, 20, 4)
+        edge = models.edge_between(plate, (0, 0, 4), (30, 0, 4))
+        self._assertValidFillet(
+            self._fillet_on_base(plate, [edge], 4.0), 2400 - self._fillet_section(4) * 30
+        )
+        column = Part.makeBox(4, 4, 20)
+        vertical = [e for e in column.Edges if e.BoundBox.ZLength > 1]
+        self._assertValidFillet(self._fillet_on_base(column, vertical, 2.0), pi * 4 * 20)
+        cube = Part.makeBox(4, 4, 4)
+        self._assertValidFillet(self._fillet_on_base(cube, cube.Edges, 2.0), 4 / 3 * pi * 8)
+        tube = Part.makeCylinder(10, 10).cut(Part.makeCylinder(6, 10))
+        rims = [e for e in tube.Edges if e.BoundBox.ZMin > 9.9]
+        c = self._fillet_section_centroid(2)
+        rounds = self._fillet_section(2) * 2 * pi * ((10 - c) + (6 + c))
+        self._assertValidFillet(self._fillet_on_base(tube, rims, 2.0), pi * 64 * 10 - rounds)
+
     def testFilletRepairKeepingTheSurface(self):
         # Four rounds meeting at a pyramid's apex: OCCT's faces are misoriented; the repair
         # reorients them. Rounds along the full length of the edges remove a little more

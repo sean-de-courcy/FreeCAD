@@ -34,6 +34,7 @@
 
 #include <Base/Exception.h>
 #include <Base/Reader.h>
+#include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
 
@@ -113,6 +114,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         Base::SignalException se;
 #endif
 
+        Part::FilletFallback::Recorder recorder;
         shape.makeElementFillet(baseShape, edges, Radius.getValue(), Radius.getValue());
         if (shape.isNull()) {
             return new App::DocumentObjectExecReturn(
@@ -133,6 +135,8 @@ App::DocumentObjectExecReturn* Fillet::execute()
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );
         }
+        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
+        recorder.report(Label.getValue());
 
         // store shape before refinement
         this->rawShape = shape;

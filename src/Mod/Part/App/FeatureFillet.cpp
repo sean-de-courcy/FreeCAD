@@ -40,6 +40,7 @@
 #include <Base/Exception.h>
 
 #include "FeatureFillet.h"
+#include "FilletFallback.h"
 #include "TopoShapeOpCode.h"
 #include "TopoShapeRepair.h"
 
@@ -120,6 +121,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // Edges isn't written back: it holds what was read, and a write would make EdgeLinks
         // anew, without their records (ops#258).
 
+        Part::FilletFallback::Recorder recorder;
         TopoShape res = makeTopoShape(false);
         if (sameRadii && !edgeShapes.empty()) {
             // The same maker as below, and the exact construction where OCCT fails or builds an
@@ -142,6 +144,14 @@ App::DocumentObjectExecReturn* Fillet::execute()
                 return new App::DocumentObjectExecReturn("Resulting shape is null");
             }
             res.makeElementShape(mkFillet, baseTopoShape, Part::OpCodes::Fillet);
+            // makeElementFillet sends a face of zero width to the exact construction; OCCT's
+            // own maker leaves it (ops#298)
+            if (!FilletFallback::thinFace(res.getShape(), baseShape).IsNull()) {
+                return new App::DocumentObjectExecReturn(
+                    "The fillet would leave a face of zero width (a face it consumes whole, or a "
+                    "sliver narrower than its tolerance)"
+                );
+            }
         }
         if (res.isNull()) {
             return new App::DocumentObjectExecReturn("Resulting shape is null");
@@ -150,6 +160,8 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!Part::checkDressUp(res, baseTopoShape)) {
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
+        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
+        recorder.report(Label.getValue());
         this->Shape.setValue(res);
         return Part::FilletBase::execute();
     }

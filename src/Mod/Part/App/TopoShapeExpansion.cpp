@@ -5874,6 +5874,25 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
     maker.Check();
     throw StdFail_NotDone("BRep_API: command not done");
 }
+
+/** Whether OCCT built the dress-up with a face of zero width (ops#298): the face it consumes whole,
+ * kept with area 0, or a sliver narrower than its tolerance. The exact construction builds the
+ * dress-up at the limit instead; if it can't, the dress-up fails with a clear error.
+ */
+bool builtThinFace(BRepFilletAPI_LocalOperation& maker, const TopoShape& base)
+{
+    return !FilletFallback::thinFace(maker.Shape(), base.getShape()).IsNull();
+}
+
+[[noreturn]] void raiseThinFaceError(const char* what, const std::string& reason)
+{
+    FC_THROWM(
+        Base::CADKernelError,
+        what << " would leave a face of zero width (a face it consumes whole, or a sliver "
+                "narrower than its tolerance), and its exact construction refused: "
+             << reason
+    );
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementFillet(
@@ -5908,16 +5927,21 @@ TopoShape& TopoShape::makeElementFillet(
     std::exception_ptr occtError;
     FilletFallback::Request request;
     const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
-    if (failed || builtInvalid(mkFillet)) {
+    const bool thin = !failed && builtThinFace(mkFillet, shape);
+    if (failed || thin || builtInvalid(mkFillet)) {
         Part::SignalException sig;
         request.kind = FilletFallback::Kind::Fillet;
         request.size1 = radius1;
         request.size2 = radius2;
-        if (FilletFallback::build(*this, shape, edges, request, op)) {
+        std::string reason;
+        if (FilletFallback::build(*this, shape, edges, request, op, &reason)) {
             return *this;
         }
         if (failed) {
             raiseDressUpError(mkFillet, occtError);
+        }
+        if (thin) {
+            raiseThinFaceError("The fillet", reason);
         }
     }
     return makeElementShape(mkFillet, shape, op);
@@ -5986,17 +6010,22 @@ TopoShape& TopoShape::makeElementChamfer(
     std::exception_ptr occtError;
     FilletFallback::Request request;
     const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
-    if (failed || builtInvalid(mkChamfer)) {
+    const bool thin = !failed && builtThinFace(mkChamfer, shape);
+    if (failed || thin || builtInvalid(mkChamfer)) {
         request.kind = FilletFallback::Kind::Chamfer;
         request.size1 = radius1;
         request.size2 = radius2;
         request.chamferType = chamferType;
         request.flipDirection = flipDirection;
-        if (FilletFallback::build(*this, shape, edges, request, op)) {
+        std::string reason;
+        if (FilletFallback::build(*this, shape, edges, request, op, &reason)) {
             return *this;
         }
         if (failed) {
             raiseDressUpError(mkChamfer, occtError);
+        }
+        if (thin) {
+            raiseThinFaceError("The chamfer", reason);
         }
     }
     return makeElementShape(mkChamfer, shape, op);
