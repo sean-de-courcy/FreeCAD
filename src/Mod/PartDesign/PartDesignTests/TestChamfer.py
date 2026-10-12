@@ -29,6 +29,7 @@ import unittest
 
 import FreeCAD
 import Part
+from parttests import FilletFallbackTest as models
 
 
 class TestChamfer(unittest.TestCase):
@@ -295,6 +296,69 @@ class TestChamfer(unittest.TestCase):
         self.assertEqual(chamfer.BaseFeature, boss)
         self.Doc.recompute()
         self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 4)
+
+    # Invalid results that OCCT (8.0.1) returns without an error (ops#297), on the models of
+    # parttests.FilletFallbackTest. The exact construction builds them where it can (at the
+    # limit); the feature repairs the others only if the repair keeps the solids and the faces,
+    # or fails.
+
+    def _chamfer_on_base(self, shape, edges, size, allow_compound=False):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.AllowCompound = allow_compound
+        feature = self.Doc.addObject("Part::Feature", "Base")
+        feature.Shape = shape
+        body.BaseFeature = feature
+        self.Doc.recompute()
+        names = [
+            "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge))
+            for edge in edges
+        ]
+        return self._add_chamfer(body, body.BaseFeature, names, size)
+
+    def _assertFails(self, chamfer):
+        self.assertFalse(chamfer.isValid())
+        self.assertEqual(chamfer.getStatusString(), "Resulting shape is invalid")
+
+    def testChamferInvalidOcctResultAtLimit(self):
+        # A chamfer as wide as a rib's top, against a wall
+        rib, edges = models.rib_against_wall()
+        self._assertValidDressUp(self._chamfer_on_base(rib, edges, 4.0), 4800 - 8 * 30)
+
+    def testChamferOverlongFails(self):
+        # Just over chamfers meeting on a disk's rim face, and on a stadium plate's: OCCT returns
+        # two invalid solids, which the feature stored with Allow Compound on
+        for model, size in ((models.disk, 1.00001), (models.stadium_plate, 2.0002)):
+            shape, edges = model()
+            self._assertFails(self._chamfer_on_base(shape, edges, size, allow_compound=True))
+
+    def testChamferOverlappingFail(self):
+        # Chamfers of 2.65 on two edges 4 apart overlap on the face between them, and no chamfer
+        # exists. OCCT's result has a self-intersecting wire, which the repair turned into a
+        # valid solid with two more faces: on the block, on a large block (where the faces'
+        # total area hardly changes), and on a base made invalid elsewhere
+        block, edges = models.notched_block()
+        self._assertFails(self._chamfer_on_base(block, edges, 2.65))
+        block, edges = models.notched_block(0.1, (1000, 1000, 1))
+        self._assertFails(self._chamfer_on_base(block, edges, 0.265))
+        block, edges = models.notched_block()
+        base = models.with_back_face_reversed(block)
+        edges = [
+            models.edge_between(base, e.Vertexes[0].Point, e.Vertexes[-1].Point) for e in edges
+        ]
+        self._assertFails(self._chamfer_on_base(base, edges, 2.65))
+
+    def testChamferRepairKeepingTheSurface(self):
+        # Four chamfers meeting at a pyramid's apex: OCCT's faces are misoriented; the repair
+        # reorients them. Chamfers along the full length of the four edges (10 sqrt 3, faces at
+        # 120 degrees, section sin(120 degrees) / 2) remove a little more
+        solid, edges = models.pyramid()
+        chamfer = self._chamfer_on_base(solid, edges, 1.0)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertTrue(chamfer.Shape.isValid())
+        chamfers = 4 * 3**0.5 / 4 * 10 * 3**0.5
+        removed = 4000 / 3 - chamfer.Shape.Volume
+        self.assertLess(removed, chamfers)
+        self.assertGreater(removed, 0.9 * chamfers)
 
     def tearDown(self):
         # closing doc

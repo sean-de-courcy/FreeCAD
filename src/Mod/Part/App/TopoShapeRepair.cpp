@@ -8,18 +8,27 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
 #include <tuple>
 #include <vector>
 
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -353,6 +362,242 @@ bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
     catch (...) {
         warnKept("unknown exception");
     }
+    return true;
+}
+
+namespace
+{
+
+// The largest relative change of a face's area that checkDressUp() accepts from a repair
+constexpr double repairAreaTolerance = 1e-6;
+
+// The areas of the shape's faces, smallest first
+std::vector<double> faceAreas(const TopoShape& shape)
+{
+    std::vector<double> areas;
+    for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(it.Current(), props);
+        areas.push_back(props.Mass());
+    }
+    std::sort(areas.begin(), areas.end());
+    return areas;
+}
+
+bool sameArea(double a, double b)
+{
+    return std::abs(a - b) <= repairAreaTolerance * std::max(a, b);
+}
+
+/* Why the repair of a dress-up's result changes its surface, or null. Each face is compared,
+ * not the total: a wrong repair adds two small faces (ShapeFix splitting the self-intersecting
+ * face of two overlapping rounds), which a tolerance on a large part's total area let through. An
+ * invalid base passes its defects on, and their repair may remove faces and area (a fin, ops#12),
+ * never add them. */
+const char* repairChangesSurface(const TopoShape& before, const TopoShape& after, bool validBase)
+{
+    const auto areasBefore = faceAreas(before);
+    const auto areasAfter = faceAreas(after);
+    if (!validBase) {
+        const auto sum = [](const std::vector<double>& areas) {
+            return std::accumulate(areas.begin(), areas.end(), 0.0);
+        };
+        if (areasAfter.size() > areasBefore.size()) {
+            return "adds faces";
+        }
+        if (sum(areasAfter) > (1 + repairAreaTolerance) * sum(areasBefore)) {
+            return "adds area";
+        }
+        return nullptr;
+    }
+    if (areasAfter.size() != areasBefore.size()) {
+        return "changes the number of faces";
+    }
+    for (size_t i = 0; i < areasBefore.size(); ++i) {
+        if (!sameArea(areasBefore[i], areasAfter[i])) {
+            return "changes the area of a face";
+        }
+    }
+    return nullptr;
+}
+
+// Whether the shape is solids only: a solid, or compounds of solids
+bool onlySolids(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    switch (shape.ShapeType()) {
+        case TopAbs_SOLID:
+            return true;
+        case TopAbs_COMPOUND:
+        case TopAbs_COMPSOLID:
+            for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+                if (!onlySolids(it.Value())) {
+                    return false;
+                }
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The faces outside the shape's solids, in loose shells or on their own
+TopoDS_Compound facesOutsideSolids(const TopoDS_Shape& shape)
+{
+    TopoDS_Compound faces;
+    BRep_Builder builder;
+    builder.MakeCompound(faces);
+    for (TopExp_Explorer it(shape, TopAbs_FACE, TopAbs_SOLID); it.More(); it.Next()) {
+        builder.Add(faces, it.Current());
+    }
+    return faces;
+}
+
+int faceCount(const TopoDS_Shape& shape)
+{
+    int count = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+// Whether the faces close up, enclosing a volume: every edge of theirs (but degenerate ones)
+// bounds two of them. A seam counts twice, so a lone closed face counts as closed.
+bool closesUp(const TopoDS_Shape& faces)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(faces, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    if (edgeFaces.IsEmpty()) {
+        return false;
+    }
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        if (!BRep_Tool::Degenerated(TopoDS::Edge(edgeFaces.FindKey(i)))
+            && edgeFaces(i).Extent() < 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The faces in sets connected through shared edges
+std::vector<TopoDS_Compound> connectedFaces(const TopoDS_Shape& faces)
+{
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(faces, TopAbs_FACE, all);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(faces, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoDS_Compound> sets;
+    std::vector<bool> seen(all.Extent() + 1, false);
+    BRep_Builder builder;
+    for (int start = 1; start <= all.Extent(); ++start) {
+        if (seen[start]) {
+            continue;
+        }
+        TopoDS_Compound set;
+        builder.MakeCompound(set);
+        std::vector<int> todo {start};
+        seen[start] = true;
+        while (!todo.empty()) {
+            const auto& face = all(todo.back());
+            todo.pop_back();
+            builder.Add(set, face);
+            for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                for (const auto& other : edgeFaces.FindFromKey(it.Current())) {
+                    const int index = all.FindIndex(other);
+                    if (index > 0 && !seen[index]) {
+                        seen[index] = true;
+                        todo.push_back(index);
+                    }
+                }
+            }
+        }
+        sets.push_back(set);
+    }
+    return sets;
+}
+
+// The shape's solids, with their names: the solid itself if there is one
+TopoShape solidsOf(const TopoShape& shape)
+{
+    auto solids = shape.getSubTopoShapes(TopAbs_SOLID);
+    if (solids.size() == 1) {
+        return solids.front();
+    }
+    TopoShape res(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    res.makeElementCompound(solids);
+    return res;
+}
+
+}  // namespace
+
+bool enclosesOutsideSolids(const TopoDS_Shape& shape)
+{
+    // Each shell on its own and each set of connected faces: a closed shell beside an open fin
+    // must not pass as open with it
+    for (TopExp_Explorer it(shape, TopAbs_SHELL, TopAbs_SOLID); it.More(); it.Next()) {
+        if (closesUp(it.Current())) {
+            return true;
+        }
+    }
+    const auto sets = connectedFaces(facesOutsideSolids(shape));
+    return std::any_of(sets.begin(), sets.end(), [](const auto& faces) {
+        return closesUp(faces);
+    });
+}
+
+bool checkDressUp(TopoShape& shape, const TopoShape& base)
+{
+    if (shape.isValid()) {
+        return true;
+    }
+    const auto solids = base.countSubShapes(TopAbs_SOLID);
+    const auto found = shape.countSubShapes(TopAbs_SOLID);
+    if (found != solids) {
+        FC_WARN("Invalid dress-up result with " << found << " solids from " << solids);
+        return false;
+    }
+    TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    repaired.makeElementCopy(shape);
+    if (!fixKeepingNames(repaired, shape)) {
+        FC_WARN("Invalid dress-up result that the repair can't make valid");
+        return false;
+    }
+    if (repaired.countSubShapes(TopAbs_SOLID) != solids) {
+        FC_WARN("Invalid dress-up result whose repair loses solids");
+        return false;
+    }
+    // ShapeFix may move faces out of the solid into an open shell beside it (the fin of an
+    // invalid base, ops#12): a valid compound whose volume counts the loose faces, wrong
+    // downstream. Judged on the result, not the base: OCCT drops a base's loose faces. The solids
+    // of a solids-only result are the repair if the base is invalid, unless the faces dropped
+    // enclose a volume; on a valid base nothing may move out. A result with faces outside its
+    // solids (a shell's) keeps them, and the repair may move no more out.
+    const auto outside = facesOutsideSolids(repaired.getShape());
+    if (onlySolids(shape.getShape())) {
+        if (!onlySolids(repaired.getShape())) {
+            if (base.isValid()) {
+                FC_WARN("Invalid dress-up result whose repair leaves shapes outside its solids");
+                return false;
+            }
+            if (enclosesOutsideSolids(repaired.getShape())) {
+                FC_WARN("Invalid dress-up result whose repair leaves a closed shell outside its solids");
+                return false;
+            }
+            repaired = solidsOf(repaired);
+        }
+    }
+    else if (faceCount(outside) > faceCount(facesOutsideSolids(shape.getShape()))) {
+        FC_WARN("Invalid dress-up result whose repair moves faces out of its solids");
+        return false;
+    }
+    if (const char* why = repairChangesSurface(shape, repaired, base.isValid())) {
+        FC_WARN("Invalid dress-up result whose repair " << why);
+        return false;
+    }
+    shape = repaired;
     return true;
 }
 

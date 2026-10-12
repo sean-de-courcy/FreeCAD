@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+
+#include <App/DocumentObject.h>
 #include <src/App/InitApplication.h>
 
 #include "PartTestHelpers.h"
@@ -96,10 +99,13 @@ TEST_F(FeatureFilletTest, testMostEdges)
         )
     );
     // Act
-    _fillet->execute();
-    double filletVolume = PartTestHelpers::getVolume(_fillet->Shape.getValue());
-    // Assert
-    EXPECT_NEAR(filletVolume, 118.38763, 1e-5);
+    std::unique_ptr<App::DocumentObjectExecReturn> ret(_fillet->execute());
+    // Assert: on the unrefined base, OCCT (8.0.1) builds this fillet invalid without an error
+    // (unorientable faces, volume 118.38763), and no repair makes it valid. The feature fails
+    // instead of storing it (FreeCAD-CH, ops#297)
+    ASSERT_NE(ret, nullptr);
+    EXPECT_EQ(ret->Why, "Resulting shape is invalid");
+    EXPECT_TRUE(_fillet->Shape.getValue().IsNull());
 }
 
 // Worth noting that FeaturePartCommon with insufficient parameters says MustExecute false,

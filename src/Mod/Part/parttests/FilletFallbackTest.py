@@ -115,3 +115,287 @@ class FilletFallbackTest(unittest.TestCase):
                 box.makeFillet(r, edges)
         with self.assertRaises(Part.OCCError):
             box.makeFillet(4.01, edges[:1])
+
+
+def rib_against_wall():
+    """A rib 30 x 4 x 20 against a wall as high as the rib, and its free top edge"""
+    rib = Part.makeBox(30, 4, 20).fuse(Part.makeBox(5, 24, 20, V(-5, -10, 0))).removeSplitter()
+    return rib, [edge_between(rib, (0, 0, 20), (30, 0, 20))]
+
+
+def stadium_plate():
+    """A plate 4 thick whose outline is two half discs of radius 5 and two straight sides 20
+    long, and the edges of both outlines"""
+    arcs = [
+        Part.makeCircle(5, V(20, 0, 0), V(0, 0, 1), -90, 90),
+        Part.makeCircle(5, V(0, 0, 0), V(0, 0, 1), 90, 270),
+    ]
+    lines = [Part.makeLine(V(20, 5, 0), V(0, 5, 0)), Part.makeLine(V(0, -5, 0), V(20, -5, 0))]
+    plate = Part.Face(Part.Wire(Part.__sortEdges__(arcs + lines))).extrude(V(0, 0, 4))
+    loops = [e for e in plate.Edges if e.BoundBox.ZLength < 1e-9]
+    return plate, loops
+
+
+def disk():
+    """A disk of radius 10, 2 thick, and its two rims"""
+    cylinder = Part.makeCylinder(10, 2)
+    return cylinder, [e for e in cylinder.Edges if e.Curve.TypeId == "Part::GeomCircle"]
+
+
+def notched_block(k=1, size=(24, 16, 10)):
+    """A block 24 x 16 x 10 with a notch 8 x 6 x 6 in its front top, and four edges: the front
+    bottom edge and the notch floor's front edge, 4 apart on the front face, the right bottom
+    edge and the notch floor's left edge. With k, the notch is k times as big and 4 k above the
+    bottom, in the front left corner of a block of the given size."""
+    length, width, height = size
+    block = Part.makeBox(length, width, height).cut(
+        Part.makeBox(8 * k, 6 * k, height, V(8 * k, 0, 4 * k))
+    )
+    ends = [
+        ((0, 0, 0), (length, 0, 0)),
+        ((8 * k, 0, 4 * k), (16 * k, 0, 4 * k)),
+        ((length, 0, 0), (length, width, 0)),
+        ((8 * k, 0, 4 * k), (8 * k, 6 * k, 4 * k)),
+    ]
+    return block, [edge_between(block, p, q) for p, q in ends]
+
+
+def with_back_face_reversed(shape):
+    """The shape, made invalid away from the notch: its back face reversed"""
+    back = max(shape.Faces, key=lambda face: face.BoundBox.YMin)
+    return Part.Solid(Part.Shell([f.reversed() if f.isSame(back) else f for f in shape.Faces]))
+
+
+def pyramid():
+    """A pyramid on a 20 x 20 square, 10 high, and the four edges at its apex"""
+    apex = V(10, 10, 10)
+    corners = [V(0, 0, 0), V(20, 0, 0), V(20, 20, 0), V(0, 20, 0)]
+    faces = [Part.Face(Part.makePolygon(corners + corners[:1]))]
+    faces += [
+        Part.Face(Part.makePolygon([p, q, apex, p]))
+        for p, q in zip(corners, corners[1:] + corners[:1])
+    ]
+    solid = Part.Solid(Part.Shell(faces))
+    return solid, [e for e in solid.Edges if any(v.Point.isEqual(apex, 1e-9) for v in e.Vertexes)]
+
+
+def pyramid_edge_rounds(r):
+    """The volume four rounds of radius r would remove along the full length of the pyramid's
+    apex edges (10 sqrt 3 long, where the faces meet at 120 degrees), counting their overlap at
+    the apex four times: more than the fillet removes"""
+    section = r * r * (1 / math.sqrt(3) - math.pi / 6)
+    return 4 * section * 10 * math.sqrt(3)
+
+
+def cube_with_fin():
+    """A 10 mm cube with a fin (ops#12): a square face hanging inward at 45 degrees from the
+    front bottom edge, so that three faces meet at the edge. Invalid; a dress-up passes the fin
+    on, and ShapeFix moves it into an open shell beside the solid"""
+    cube = Part.makeBox(10, 10, 10)
+    edge = edge_between(cube, (0, 0, 0), (10, 0, 0))
+    p0, p1, q0, q1 = V(0, 0, 0), V(10, 0, 0), V(0, 5, 5), V(10, 5, 5)
+    fin = Part.Face(
+        Part.Wire([edge, Part.makeLine(p1, q1), Part.makeLine(q1, q0), Part.makeLine(q0, p0)])
+    )
+    bottom = next(face for face in cube.Faces if face.CenterOfMass.z < 1e-6)
+    # The same face on the same edges; a new face, so that the replacement keeps it
+    new_bottom = Part.Face(bottom.Surface, bottom.OuterWire)
+    if bottom.Orientation == "Reversed":
+        new_bottom = new_bottom.reversed()
+    return cube.replaceShape([(bottom, Part.Compound([new_bottom, fin]))])
+
+
+class InvalidDressUpTest(unittest.TestCase):
+    """OCCT (8.0.1) sometimes returns an invalid fillet or chamfer without an error (ops#297).
+
+    makeFillet and makeChamfer build such a result by the exact construction where they can;
+    otherwise they return OCCT's result as it is, and Part::Fillet and Part::Chamfer check it: they
+    repair it if the repair keeps its solids and its faces, or fail.
+    """
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("InvalidDressUpTest")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def dressUp(self, kind, shape, edges, sizes):
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        feature = self.doc.addObject("Part::" + kind, kind)
+        feature.Base = base
+        indices = [
+            next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge)) for edge in edges
+        ]
+        feature.Edges = [(i, s[0], s[1]) for i, s in zip(indices, sizes)]
+        self.doc.recompute()
+        return feature
+
+    def assertExact(self, shape, volume):
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-6 * volume)
+
+    def assertFails(self, feature):
+        self.assertFalse(feature.isValid())
+        self.assertEqual(feature.getStatusString(), "Resulting shape is invalid")
+
+    def testRibAgainstWallAtTheLimit(self):
+        # A round as wide as the rib's top, ending against the wall: OCCT's result is invalid
+        # (unorientable faces), the exact construction builds it
+        rib, edges = rib_against_wall()
+        expected = 4800 - fillet_section(4) * 30
+        self.assertExact(rib.makeFillet(4, edges), expected)
+        feature = self.dressUp("Fillet", rib, edges, [(4, 4)])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertExact(feature.Shape, expected)
+
+    @staticmethod
+    def dressUpShape(kind, shape, size, edges):
+        if kind == "Fillet":
+            return shape.makeFillet(size, edges)
+        return shape.makeChamfer(size, edges)
+
+    def testOverlongFullRoundsFail(self):
+        # Just over a full round, OCCT returns two invalid solids with more volume than the base,
+        # which no fillet or chamfer can have
+        for kind in ("Fillet", "Chamfer"):
+            for model, size in ((stadium_plate, 2.0002), (disk, 1.00001)):
+                shape, edges = model()
+                raw = self.dressUpShape(kind, shape, size, edges)
+                self.assertFalse(raw.isValid())  # returned as OCCT built it
+                self.assertEqual(len(raw.Solids), 2)
+                feature = self.dressUp(kind, shape, edges, [(size, size)] * len(edges))
+                self.assertFails(feature)
+
+    def testOverlappingRoundsFail(self):
+        # Rounds or chamfers of 2.65 on two edges 4 apart overlap on the face between them: no
+        # dress-up exists. OCCT's result has a self-intersecting wire; its repair adds two faces
+        # (and 16.75 mm2 for the fillet)
+        for kind in ("Fillet", "Chamfer"):
+            block, edges = notched_block()
+            self.assertFalse(self.dressUpShape(kind, block, 2.65, edges).isValid())
+            self.assertFails(self.dressUp(kind, block, edges, [(2.65, 2.65)] * 4))
+
+    def testOverlappingRoundsOnALargePartFail(self):
+        # The notch at a tenth of the size in a block 1000 x 1000 x 1: the repair's added area
+        # (0.17 mm2) is far below a millionth of the block's (2 m2)
+        for kind in ("Fillet", "Chamfer"):
+            block, edges = notched_block(0.1, (1000, 1000, 1))
+            self.assertFalse(self.dressUpShape(kind, block, 0.265, edges).isValid())
+            self.assertFails(self.dressUp(kind, block, edges, [(0.265, 0.265)] * 4))
+
+    def testOverlappingRoundsOnAnInvalidBaseFail(self):
+        # The base made invalid away from the notch (its back face reversed): the repair may
+        # remove what the base passes on, but not add the two faces
+        for kind in ("Fillet", "Chamfer"):
+            block, _ = notched_block()
+            base = with_back_face_reversed(block)
+            self.assertFalse(base.isValid())
+            _, edges = notched_block()
+            edges = [
+                edge_between(base, e.Vertexes[0].Point, e.Vertexes[-1].Point) for e in edges
+            ]
+            self.assertFails(self.dressUp(kind, base, edges, [(2.65, 2.65)] * 4))
+
+    def testRepairKeepingTheSurface(self):
+        # Four rounds or chamfers meeting at the pyramid's apex: OCCT's faces are misoriented
+        # (negative volume); the repair reorients them and keeps every face and its area. Rounds
+        # or chamfers along the full length of the four edges (10 sqrt 3, faces at 120 degrees)
+        # remove a little more: their overlap at the apex counts four times
+        chamfers = 4 * math.sqrt(3) / 4 * 10 * math.sqrt(3)  # section d * d * sin(120 deg) / 2
+        bounds = {
+            "Fillet": (0.98 * pyramid_edge_rounds(1), pyramid_edge_rounds(1)),
+            "Chamfer": (0.9 * chamfers, chamfers),
+        }
+        for kind in ("Fillet", "Chamfer"):
+            solid, edges = pyramid()
+            raw = self.dressUpShape(kind, solid, 1, edges)
+            self.assertFalse(raw.isValid())
+            feature = self.dressUp(kind, solid, edges, [(1, 1)] * 4)
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            self.assertEqual(len(shape.Faces), len(raw.Faces))
+            # raw is a second OCCT run, not the one the feature repaired: on macOS the chamfer's
+            # (planar) faces came out 1.1e-6 apart in total between the two, the repair accepted
+            # (each face within 1e-6 of the feature's own run). A wrong repair adds faces and
+            # about 1 % of the area (the notch)
+            self.assertAlmostEqual(shape.Area, raw.Area, delta=1e-5 * raw.Area)
+            removed = 4000 / 3 - shape.Volume
+            self.assertGreater(removed, bounds[kind][0])
+            self.assertLess(removed, bounds[kind][1])
+
+    def testRepairDropsTheFinOfAnInvalidBase(self):
+        # The fin cube's fillet or chamfer: OCCT's result keeps the fin and is invalid, and its
+        # repair is the dressed-up cube plus the fin in an open shell, a valid compound. On the
+        # front top edge its volume counted the fin (974.3 for 997.9); the result is the solid
+        base = cube_with_fin()
+        self.assertFalse(base.isValid())
+        removed = {"Fillet": fillet_section(1) * 10, "Chamfer": 0.5 * 10}
+        for kind in ("Fillet", "Chamfer"):
+            for ends in (((0, 0, 10), (10, 0, 10)), ((0, 10, 10), (10, 10, 10))):
+                feature = self.dressUp(kind, base, [edge_between(base, *ends)], [(1, 1)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                shape = feature.Shape
+                self.assertEqual(shape.ShapeType, "Solid")
+                self.assertEqual(len(shape.Faces), 7)
+                self.assertExact(shape, 1000 - removed[kind])
+
+    def testRepairDropsTheFinOfABaseWithALooseFace(self):
+        # The fin cube beside a loose square face: OCCT's result drops the face, a solid with the
+        # fin, and its repair is the same compound with the fin outside the solid
+        corners = [V(20, 0, 0), V(30, 0, 0), V(30, 10, 0), V(20, 10, 0)]
+        loose = Part.Face(Part.makePolygon(corners, True))
+        base = Part.Compound([cube_with_fin(), loose])
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        for kind, removed in (("Fillet", fillet_section(1) * 10), ("Chamfer", 0.5 * 10)):
+            feature = self.dressUp(kind, base, [edge], [(1, 1)])
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertEqual(shape.ShapeType, "Solid")
+            self.assertEqual(len(shape.Faces), 7)
+            self.assertExact(shape, 1000 - removed)
+
+    def testPartFeaturesAtTheLimit(self):
+        # Part::Fillet and Part::Chamfer build what OCCT refuses as makeFillet does (ops#300)
+        box = Part.makeBox(30, 4, 20)
+        edges = top_edges(box)
+        fillet = self.dressUp("Fillet", box, edges, [(2, 2)] * 2)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertExact(fillet.Shape, 2400 - 2 * fillet_section(2) * 30)
+        chamfer = self.dressUp("Chamfer", box, edges, [(2, 2)] * 2)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertExact(chamfer.Shape, 2400 - 4 * 30)
+
+    def assertSameShape(self, shape, other):
+        self.assertEqual(len(shape.Faces), len(other.Faces))
+        self.assertEqual(len(shape.Edges), len(other.Edges))
+        points = [
+            sorted(tuple(round(c, 9) for c in v.Point) for v in s.Vertexes) for s in (shape, other)
+        ]
+        self.assertEqual(points[0], points[1])
+        self.assertAlmostEqual(shape.Volume, other.Volume, delta=1e-9 * other.Volume)
+
+    def testPartFeaturesBelowTheLimit(self):
+        # OCCT's own result, the same as makeFillet's and makeChamfer's
+        box = Part.makeBox(30, 4, 20)
+        edges = top_edges(box)
+        fillet = self.dressUp("Fillet", box, edges, [(1.5, 1.5)] * 2)
+        self.assertSameShape(fillet.Shape, box.makeFillet(1.5, edges))
+        self.assertExact(fillet.Shape, 2400 - 2 * fillet_section(1.5) * 30)
+        chamfer = self.dressUp("Chamfer", box, edges, [(1.5, 1)] * 2)
+        self.assertSameShape(chamfer.Shape, box.makeChamfer(1.5, 1, edges))
+        self.assertExact(chamfer.Shape, 2400 - 2 * 0.75 * 30)
+
+    def testPartFeaturesPerEdgeSizes(self):
+        # Different sizes per edge: OCCT's maker as before, with the check
+        box = Part.makeBox(30, 4, 20)
+        edges = top_edges(box)
+        fillet = self.dressUp("Fillet", box, edges, [(1, 1), (1.5, 1.5)])
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertExact(fillet.Shape, 2400 - (fillet_section(1) + fillet_section(1.5)) * 30)
+        chamfer = self.dressUp("Chamfer", box, edges, [(1, 1), (1.5, 1.5)])
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertExact(chamfer.Shape, 2400 - (0.5 + 1.125) * 30)
