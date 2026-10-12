@@ -2496,6 +2496,61 @@ class TestRevolve(unittest.TestCase):
             point = FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), 1.5)
             self.assertFalse(groove.Shape.isInside(point, 1e-7, False), radius)
 
+    def testGrooveUpToFoldedWall(self):
+        """A Groove of profileAcross() in a box, up to a wall along Z whose curve runs out from
+        r = 0.5 to 1.65 (angles 100 to 120 degrees), back in to 1.46 (120 to 200) and out to 3.5
+        (200 to 220). Both ends lie outside the profile's radii, so no edge of the wall enters the
+        profile's turn, but circles of radius 1.46 to 1.65 cross the wall three times, at about
+        118, 145 to 180, and 200 degrees; other circles cross it once. The band lay between
+        the profile's samples, and the Groove also removed those circles between their second and
+        third crossings, with no error (the PR 279 round 3 verification's 1). It fails, or leaves
+        them past where they first meet the wall."""
+        legs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
+        points = []
+        for index, (r0, r1, a0, a1) in enumerate(legs):
+            for k in range(61 if index == 2 else 60):
+                radius = r0 + (r1 - r0) * k / 60
+                angle = math.radians(a0 + (a1 - a0) * k / 60)
+                points.append(
+                    FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), -1)
+                )
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, 4))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def arc(radius, z, low, high):
+            center = FreeCAD.Vector(0, 0, z)
+            return Part.ArcOfCircle(
+                Part.Circle(center, FreeCAD.Vector(0, 0, 1), radius),
+                math.radians(low),
+                math.radians(high),
+            ).toShape()
+
+        def at(radius, degrees, z):
+            angle = math.radians(degrees)
+            return FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), z)
+
+        for radius in (1.52, 1.55, 1.58):
+            for z in (0.5, 1.5):
+                # First met by 125 degrees, then between 145 and 180 and past 196
+                self.assertAlmostEqual(arc(radius, z, 0, 125).distToShape(wall.Shape)[0], 0, 6)
+                self.assertGreater(arc(radius, z, 126, 145).distToShape(wall.Shape)[0], 0.01)
+                self.assertGreater(arc(radius, z, 180, 196).distToShape(wall.Shape)[0], 0.01)
+                self.assertFalse(groove.Shape.isInside(at(radius, 60, z), 1e-7, False))
+                for degrees in (135, 190):
+                    point = at(radius, degrees, z)
+                    self.assertTrue(groove.Shape.isInside(point, 1e-7, False), (radius, z, degrees))
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error that says so and gives no solid."""

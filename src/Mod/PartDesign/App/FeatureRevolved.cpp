@@ -1727,6 +1727,160 @@ bool toleranceHolds(const TopoDS_Shape& tool, std::initializer_list<TopoDS_Shape
     return largestTolerance(tool) <= limit;
 }
 
+// A point of the profile on the up-to face's silhouette (below), and the direction of the
+// silhouette's image there, in the profile's plane; zero when it couldn't be found.
+struct Fold
+{
+    gp_Pnt point;
+    gp_Vec along;
+};
+
+// Where circles about the axis touch the up-to face without crossing it, as `landing` puts them
+// in the profile (it turns a point of the face onto the profile's plane and keeps what lies in
+// the profile), at least `apart` from each other and at most 32. These points are the face's
+// silhouette as it turns about the axis: its normal is square to the circles there. A circle on
+// one side crosses the face twice more than one on the other, so first contact jumps there
+// when the fold is the first crossing (the PR 279 round 3 verification's 1: a wall folded back
+// between radii 1.46 and 1.65, its edges outside the profile's turn). The silhouette is found on
+// a grid over the face's parameters, where the normal's turn changes sign between two points of
+// a row or column, and bisected. The grid has 48 steps each way, or 4 per span of a B-spline,
+// up to 192: a fold narrower than a step, in both directions, slips between them. A plane
+// containing the axis or square to it, and a cylinder, cone, sphere or torus about it, never
+// changes sign, and only costs the grid.
+std::vector<Fold> foldsInProfile(
+    const TopoDS_Face& face,
+    const gp_Ax1& axis,
+    const std::function<std::vector<gp_Pnt>(const gp_Pnt&)>& landing,
+    double apart
+)
+{
+    std::vector<Fold> found;
+    BRepAdaptor_Surface surface(face);
+    const double uMin = surface.FirstUParameter();
+    const double uMax = surface.LastUParameter();
+    const double vMin = surface.FirstVParameter();
+    const double vMax = surface.LastVParameter();
+    if (Precision::IsInfinite(uMin) || Precision::IsInfinite(uMax) || Precision::IsInfinite(vMin)
+        || Precision::IsInfinite(vMax)) {
+        return found;
+    }
+    const int uSteps = std::clamp(4 * surface.NbUIntervals(GeomAbs_C2), 48, 192);
+    const int vSteps = std::clamp(4 * surface.NbVIntervals(GeomAbs_C2), 48, 192);
+    // The cosine between the face's normal and the circle's direction
+    auto across = [&](double u, double v, gp_Pnt& point) {
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(u, v, point, du, dv);
+        const gp_Vec normal = du.Crossed(dv);
+        const gp_Vec turning = gp_Vec(axis.Direction()).Crossed(gp_Vec(axis.Location(), point));
+        const double scale = normal.Magnitude() * turning.Magnitude();
+        return scale > gp::Resolution() ? normal.Dot(turning) / scale : 0.0;
+    };
+    auto uAt = [&](int i) { return uMin + (uMax - uMin) * i / uSteps; };
+    auto vAt = [&](int j) { return vMin + (vMax - vMin) * j / vSteps; };
+    std::vector<double> values((uSteps + 1) * (vSteps + 1));
+    auto value = [&](int i, int j) -> double& { return values[i * (vSteps + 1) + j]; };
+    gp_Pnt point;
+    for (int i = 0; i <= uSteps; ++i) {
+        for (int j = 0; j <= vSteps; ++j) {
+            value(i, j) = across(uAt(i), vAt(j), point);
+        }
+    }
+    // Square, within rounding: coaxial faces give 1e-16 of either sign
+    constexpr double square = 1e-6;
+    std::vector<std::pair<gp_Pnt, gp_Pnt2d>> kept;
+    auto bisect = [&](gp_Pnt2d low, gp_Pnt2d high, bool lowSign) {
+        for (int k = 0; k < 24; ++k) {
+            const gp_Pnt2d middle((low.X() + high.X()) / 2, (low.Y() + high.Y()) / 2);
+            if ((across(middle.X(), middle.Y(), point) > 0) == lowSign) {
+                low = middle;
+            }
+            else {
+                high = middle;
+            }
+        }
+        const gp_Pnt2d uv((low.X() + high.X()) / 2, (low.Y() + high.Y()) / 2);
+        BRepClass_FaceClassifier classifier(face, uv, Precision::PConfusion());
+        if (classifier.State() != TopAbs_IN) {
+            return;
+        }
+        across(uv.X(), uv.Y(), point);
+        for (const gp_Pnt& onPlane : landing(point)) {
+            if (std::ranges::none_of(kept, [&](const auto& other) {
+                    return other.first.Distance(onPlane) < apart;
+                })) {
+                kept.emplace_back(onPlane, uv);
+            }
+        }
+    };
+    // Along each row and column, from the last point off the silhouette to the next one, so a
+    // silhouette through a grid point is still bracketed
+    auto scan = [&](int count, int length, auto at) {
+        for (int line = 0; line <= count; ++line) {
+            int last = -1;
+            for (int k = 0; k <= length; ++k) {
+                const auto [uv, here] = at(line, k);
+                if (std::abs(here) <= square) {
+                    continue;
+                }
+                if (last >= 0) {
+                    const auto [lastUv, there] = at(line, last);
+                    if ((here > 0) != (there > 0)) {
+                        bisect(lastUv, uv, there > 0);
+                    }
+                }
+                last = k;
+            }
+        }
+    };
+    scan(vSteps, uSteps, [&](int j, int i) {
+        return std::pair(gp_Pnt2d(uAt(i), vAt(j)), value(i, j));
+    });
+    scan(uSteps, vSteps, [&](int i, int j) {
+        return std::pair(gp_Pnt2d(uAt(i), vAt(j)), value(i, j));
+    });
+    const size_t stride = kept.size() / 32 + 1;
+    // The silhouette's image runs between the images of its points a little way on either side,
+    // along the silhouette: square to the gradient of the normal's turn
+    const double uStep = 1e-5 * (uMax - uMin);
+    const double vStep = 1e-5 * (vMax - vMin);
+    for (size_t k = 0; k < kept.size(); k += stride) {
+        const auto& [onPlane, uv] = kept[k];
+        Fold fold {onPlane, gp_Vec()};
+        const double alongU = -(across(uv.X(), uv.Y() + vStep, point)
+                                - across(uv.X(), uv.Y() - vStep, point))
+            / vStep;
+        const double alongV = (across(uv.X() + uStep, uv.Y(), point)
+                               - across(uv.X() - uStep, uv.Y(), point))
+            / uStep;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(uv.X(), uv.Y(), point, du, dv);
+        const double length = (du * alongU + dv * alongV).Magnitude();
+        if (length > gp::Resolution()) {
+            const double scale = 0.25 * apart / length;
+            std::vector<gp_Pnt> ends;
+            for (double side : {1.0, -1.0}) {
+                const gp_Pnt onFace = surface.Value(
+                    uv.X() + side * scale * alongU,
+                    uv.Y() + side * scale * alongV
+                );
+                std::optional<gp_Pnt> nearest;
+                for (const gp_Pnt& image : landing(onFace)) {
+                    if (image.Distance(onPlane) < apart
+                        && (!nearest || image.Distance(onPlane) < nearest->Distance(onPlane))) {
+                        nearest = image;
+                    }
+                }
+                ends.push_back(nearest.value_or(onPlane));
+            }
+            fold.along = gp_Vec(ends[1], ends[0]);
+        }
+        found.push_back(fold);
+    }
+    return found;
+}
+
 // Whether a tool up to a face holds what first contact gives, checked without booleans at points
 // of the profile's interior (ops#293). BRepFeat kept the part of the sweep between two crossings
 // when a profile circle crosses the face twice: a whole cylinder beside the profile (17.18 instead
@@ -1967,6 +2121,29 @@ bool holdsFirstContact(
                             addInside(point, direction, nudge);
                         }
                     }
+                }
+            }
+            // Points on both sides of where circles touch the face without crossing it, a
+            // sample's spacing apart along there: first contact jumps there too, with no
+            // boundary nearby (the PR 279 round 3 verification's 1)
+            for (const auto& [point, along] : foldsInProfile(face, axis, [&](const gp_Pnt& onFace) {
+                     std::vector<gp_Pnt> landing;
+                     for (const gp_Pnt& point : ontoPlane(onFace)) {
+                         if (inProfile(point, true)) {
+                             landing.push_back(point);
+                         }
+                     }
+                     return landing;
+                 }, spacing)) {
+                // Across the silhouette's image, or every way when that isn't known
+                const gp_Vec across = gp_Vec(normal).Crossed(along);
+                if (across.Magnitude() > gp::Resolution()) {
+                    addInside(point, across.Normalized(), nudge);
+                    addInside(point, -across.Normalized(), nudge);
+                    continue;
+                }
+                for (const gp_Vec& direction : {alongAxis, -alongAxis, outward, -outward}) {
+                    addInside(point, direction, nudge);
                 }
             }
         }
