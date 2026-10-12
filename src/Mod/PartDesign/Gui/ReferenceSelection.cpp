@@ -437,14 +437,17 @@ std::string buildLinkSubPythonStr(const App::DocumentObject* obj, const std::vec
         return "None";
     }
 
+    // (obj, ["sub", ...]): upstream left the object out, so the PropertyLinkSub it was written to
+    // refused the list ("Expect input sequence of size 2"; ops#276)
     std::string result("[");
 
     for (const auto& sub : subs) {
-        result += "\"" + sub + "\",";
+        result += "\"" + Base::Tools::escapeEncodeString(sub) + "\",";
     }
     result += "]";
 
-    return result;
+    const std::string postfix = ", " + result + ")";
+    return Gui::Command::getObjectCmd(obj, "(", postfix.c_str());
 }
 
 std::string buildLinkSingleSubPythonStr(
@@ -460,7 +463,8 @@ std::string buildLinkSingleSubPythonStr(
         return Gui::Command::getObjectCmd(obj, "(", ", [''])");
     }
     else {
-        return Gui::Command::getObjectCmd(obj, "(", ", ['") + subs.front() + "'])";
+        return Gui::Command::getObjectCmd(obj, "(", ", ['")
+            + Base::Tools::escapeEncodeString(subs.front()) + "'])";
     }
 }
 
@@ -519,7 +523,7 @@ std::string buildLinkSubListPythonStr(
             result += '(';
             result += Gui::Command::getObjectCmd(objs[i]);
             result += ",\"";
-            result += subs[i];
+            result += Base::Tools::escapeEncodeString(subs[i]);
             result += "\"),";
         }
     }
