@@ -548,16 +548,56 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
         if (!common.IsDone() || common.HasErrors()) {
             return std::nullopt;
         }
+        // A common that warns (on a sphere or a torus, of a face with itself) may have dropped
+        // pieces, never added any: only all of the element can be told, and the points must
+        // agree (PR 287 verification, round 2, finding 3)
+        const bool warned = common.HasWarnings();
         const double total = measure(element);
         const double covered = measure(common.Shape());
+        // The allowance: a millionth of the element, and a length or area at model precision.
+        // Under the fuzzy tolerance a sliver narrower than that reads as all or none of the
+        // element by design: below model precision the shapes can't tell (round 2, finding 2).
         const double slack = total * 1e-6 + Precision::Confusion();
         if (total <= slack) {
             return std::nullopt;
         }
-        if (covered >= total - slack) {
+        const bool whole = covered >= total - slack;
+        if (!whole && warned) {
+            return std::nullopt;
+        }
+        if (covered > slack && !whole) {
+            return Presence::Part;
+        }
+        // None moves birth one feature later, so an empty common, while faces (edges) of the
+        // shape lie on the element's surface (curve), must agree with the points: none of the
+        // element's lies on them, or it's unknown (a common that came back empty on a surface it
+        // handles badly; round 2, finding 3). A Whole from a common that warned: all of them do.
+        if (whole && !warned) {
             return Presence::Whole;
         }
-        return covered <= slack ? Presence::None : Presence::Part;
+        std::vector<gp_Pnt> points;
+        if (isFace) {
+            points = insidePoints(TopoDS::Face(element));
+        }
+        else {
+            BRepAdaptor_Curve curve(TopoDS::Edge(element));
+            constexpr int steps = 8;
+            for (int i = 1; i < steps; ++i) {
+                const double t = curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * i / steps;
+                points.push_back(curve.Value(t));
+            }
+        }
+        if (points.empty()) {
+            return std::nullopt;
+        }
+        for (const gp_Pnt& point : points) {
+            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), on);
+            if (!distance.IsDone() || (distance.Value() <= tolerance) != whole) {
+                return std::nullopt;
+            }
+        }
+        return whole ? Presence::Whole : Presence::None;
     }
     catch (const Standard_Failure&) {
         return std::nullopt;

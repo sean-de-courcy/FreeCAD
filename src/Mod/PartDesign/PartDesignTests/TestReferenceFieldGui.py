@@ -3891,6 +3891,62 @@ class TestReferenceFieldGui(unittest.TestCase):
             self.pick(bump, element)
             self.assertEqual(self.originalNames(pattern), [bump.Name])
 
+    def revolvedTwins(self, geometry, origin):
+        """The box, then two Revolutions of one sketch, 360 degrees about its V axis, the sketch
+        on an XZ plane through `origin` (sketch y along Z): the second changes nothing. Returns
+        the first."""
+        self.box()
+        placement = App.Placement(App.Vector(*origin), App.Rotation(App.Vector(1, 0, 0), 90))
+        sketch = models.sketch(self.doc, "Shared", geometry, self.body, placement=placement)
+        made = []
+        for name in ("First", "Second"):
+            revolution = self.body.newObject("PartDesign::Revolution", name)
+            revolution.Profile = sketch
+            revolution.ReferenceAxis = (sketch, ["V_Axis"])
+            revolution.Angle = 360
+            revolution.Refine = False
+            self.doc.recompute()
+            self.assertTrue(revolution.isValid(), revolution.getStatusString())
+            made.append(revolution)
+        return made[0]
+
+    def assertTwinFacePicks(self, first, point, surface):
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        [twinFace] = face(contains=point).one(bump.Shape)
+        self.assertEqual(type(bump.Shape.getElement(twinFace).Surface).__name__, surface)
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+        self.pick(bump, twinFace)
+        self.assertEqual(self.originalNames(pattern), [first.Name, bump.Name])
+        self.assertNotIn("No feature", self.statusText(field))
+
+    def testPatternOriginalsPickOfASphereTwinRevolutionsShare(self):
+        """ops#292 L5 on a sphere (PR 287 round 3): two Revolutions of a half disc r 3 centred
+        on the box's top, (5, 5, 10): the second changes nothing. The upper half's face, with
+        its pole, is made by the first: birth measures it on a sphere as on a plane."""
+        arc = Part.ArcOfCircle(
+            Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 3), -math.pi / 2, math.pi / 2
+        )
+        first = self.revolvedTwins(
+            [arc, Part.LineSegment(App.Vector(0, 3, 0), App.Vector(0, -3, 0))], (5, 5, 10)
+        )
+        s = 3 * math.sqrt(0.5)
+        self.assertTwinFacePicks(first, (5 + s, 5, 10 + s), "Sphere")
+
+    def testPatternOriginalsPickOfATorusTwinRevolutionsShare(self):
+        """As ...SphereTwinRevolutionsShare on a torus: a circle r 2 at 6 from an axis through
+        (5, 5) at z 5, cutting through the box's sides. The torus's face outside the box is made
+        by the first."""
+        first = self.revolvedTwins([models.circle(6, 0, 2)], (5, 5, 5))
+        # 45 degrees up the tube, 40 degrees round the axis: off the seams, outside the box
+        r = 6 + 2 * math.cos(math.pi / 4)
+        a = math.radians(40)
+        point = (5 + r * math.cos(a), 5 + r * math.sin(a), 5 + 2 * math.sin(math.pi / 4))
+        self.assertTwinFacePicks(first, point, "Toroid")
+
     def testPatternOriginalsPickOfABoreRedrilledByAHoleOfItsDiameter(self):
         """ops#292 L5: a plate 10 x 10 x 10 padded from a sketch "Shared" with a circle r 2 at
         (5, 5) (a bore), then a Hole on that sketch, diameter 4, reversed, through all: it cuts
