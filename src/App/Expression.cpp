@@ -3611,19 +3611,43 @@ static int column;
 /// rule hands such characters to ECHO, which printed and dropped them (`!true` parsed as `true`).
 static std::string unmatchedChar;
 static bool unmatchedComplete = false;
+static const char* unmatchedEnd = nullptr;
+
+// Characters without a rule that count as whitespace: \r, \f, \v, the no-break space U+00A0 and
+// the narrow no-break space U+202F (some locales group digits with them).
+static bool isExtraWhitespace(const std::string& ch)
+{
+    return ch == "\r" || ch == "\f" || ch == "\v" || ch == "\xC2\xA0" || ch == "\xE2\x80\xAF";
+}
 
 static void noteUnmatched(const char* text, std::size_t len)
 {
     // The default rule matches one byte: collect the bytes of a UTF-8 character until complete.
-    if (unmatchedComplete || (unmatchedChar.empty() && len == 1 && text[0] == '\r')) {
-        return;
+    // A byte that doesn't directly follow the collected ones, or isn't a continuation byte, ends
+    // the character (an invalid sequence, reported as such).
+    for (std::size_t i = 0; i < len && !unmatchedComplete; ++i) {
+        auto byte = static_cast<unsigned char>(text[i]);
+        if (!unmatchedChar.empty() && (text + i != unmatchedEnd || (byte & 0xC0) != 0x80)) {
+            unmatchedComplete = true;
+            break;
+        }
+        unmatchedChar.push_back(text[i]);
+        unmatchedEnd = text + i + 1;
+        auto lead = static_cast<unsigned char>(unmatchedChar[0]);
+        std::size_t need = lead < 0xC0 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        if (unmatchedChar.size() >= need) {
+            if (isExtraWhitespace(unmatchedChar)) {
+                unmatchedChar.clear();
+            }
+            else {
+                unmatchedComplete = true;
+            }
+        }
     }
-    unmatchedChar.append(text, len);
-    auto lead = static_cast<unsigned char>(unmatchedChar[0]);
-    std::size_t need = lead < 0xC0 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
-    unmatchedComplete = unmatchedChar.size() >= need;
 }
 
+// <termios.h> defines ECHO on Linux and BSD; the generated lexer only defines it when it isn't.
+#undef ECHO
 #define ECHO noteUnmatched(yytext, static_cast<std::size_t>(yyleng))
 
 // show the parser the lexer method
@@ -3693,6 +3717,7 @@ static void initParser(const App::DocumentObject *owner)
     unitExpression = valueExpression = false;
     unmatchedChar.clear();
     unmatchedComplete = false;
+    unmatchedEnd = nullptr;
 
     if (!has_registered_functions) {
         registered_functions["abs"] = FunctionExpression::ABS;
@@ -3962,10 +3987,28 @@ void throwIfUnmatched(const char* original)
     if (ch.empty()) {
         return;
     }
-    auto cp = static_cast<unsigned>(codePointAt(ch, 0).first);
-    throw ParserError(
-        fmt::format("Unexpected character '{}' (U+{:04X}) in expression '{}'", ch, cp, original)
-    );
+    auto [cp, len] = codePointAt(ch, 0);
+    auto lead = static_cast<unsigned char>(ch[0]);
+    if (len != ch.size() || (len == 1 && lead >= 0x80)) {
+        // Not a whole UTF-8 character: name the byte, and keep the message valid UTF-8.
+        std::string text(original);
+        std::string shown;
+        for (std::size_t i = 0; i < text.size();) {
+            auto n = codePointAt(text, i).second;
+            bool invalid = n == 1 && static_cast<unsigned char>(text[i]) >= 0x80;
+            shown += invalid ? std::string("\xEF\xBF\xBD") : text.substr(i, n);
+            i += n;
+        }
+        throw ParserError(
+            fmt::format("Invalid UTF-8 byte 0x{:02X} in expression '{}'", lead, shown)
+        );
+    }
+    throw ParserError(fmt::format(
+        "Unexpected character '{}' (U+{:04X}) in expression '{}'",
+        ch,
+        static_cast<unsigned>(cp),
+        original
+    ));
 }
 
 }  // namespace
