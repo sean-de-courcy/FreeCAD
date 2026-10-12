@@ -1545,9 +1545,121 @@ class TestRevolve(unittest.TestCase):
                         self.assertFalse(revolution.isValid())
                         self.assertIn("cuts through the profile", revolution.getStatusString())
 
+    def testRevolutionUpToInfiniteCylinderThroughProfile(self):
+        """The whole cylinder of radius 1 about the line along Y through x = 2, z = 1 (a face with
+        no boundary) cuts through the profile x in [1, 3], z in [0, 2]: the circle where it
+        crosses the profile plane lies inside the profile. Its unbounded surface went unchecked
+        (the PR 273 review's M2); now the Revolution or Groove up to it fails with an error."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 1
+        cylinder.Center = FreeCAD.Vector(2, 0, 1)
+        cylinder.Axis = FreeCAD.Vector(0, 1, 0)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(cylinder)
+        for kind in ("Revolution", "Groove"):
+            for sideType in ("One side", "Two sides"):
+                with self.subTest(kind=kind, sideType=sideType):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    if kind == "Groove":
+                        block = body.newObject("PartDesign::AdditiveBox", "Block")
+                        block.Length = 8
+                        block.Width = 8
+                        block.Height = 4
+                        block.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(-4, -4, -1), FreeCAD.Rotation()
+                        )
+                    revolution = body.newObject("PartDesign::" + kind, kind)
+                    sketch = self.profileAcross(body)
+                    revolution.Profile = sketch
+                    revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                    revolution.SideType = sideType
+                    revolution.Type = "UpToFace"
+                    revolution.UpToFace = (wall, ["Face1"])
+                    if sideType == "Two sides":
+                        revolution.Type2 = "UpToFace"
+                        revolution.UpToFace2 = (wall, ["Face1"])
+                    self.Doc.recompute()
+                    self.assertFalse(revolution.isValid())
+                    self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def boxUpTo(self, body, xs, ys, zs, faceX):
+        """A box x in `xs`, y in `ys`, z in `zs`, and its face on the plane x = `faceX`."""
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = xs[1] - xs[0]
+        block.Width = ys[1] - ys[0]
+        block.Height = zs[1] - zs[0]
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(xs[0], ys[0], zs[0]), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [face] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(block.Shape.Faces)
+            if abs(f.BoundBox.XMin - faceX) < 1e-9 and abs(f.BoundBox.XMax - faceX) < 1e-9
+        ]
+        return block, face
+
+    def revolveProfileUpTo(self, body, kind, sideType, upTo, upToType="UpToFace"):
+        """A `kind` of profileAcross() up to `upTo`, on `sideType`, recomputed."""
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        sketch = self.profileAcross(body)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = sideType
+        revolution.Type = upToType
+        if upToType == "UpToFace":
+            revolution.UpToFace = upTo
+        if sideType == "Two sides":
+            revolution.Type2 = upToType
+            if upToType == "UpToFace":
+                revolution.UpToFace2 = upTo
+        self.Doc.recompute()
+        return revolution
+
+    def testRevolutionUpToFaceNeverMetByPartOfProfile(self):
+        """Faces that only touch the profile x in [1, 3], z in [0, 2], or miss it, where its
+        nearer points never reach them (the PR 273 review's M3): the face x = 3 of the box
+        x in [3, 6], y in [-4, 4] (points at radius < 3 never reach the plane x = 3), and the
+        face x = 2 of the box x in [2, 6], y in [1, 4] (trimmed off the profile plane: points at
+        radius < sqrt(5) never reach it). Before, a Revolution added a whole ring, or 48.6, and
+        a Groove removed nothing, or 1.2, with no error. Now each fails with an error, on one
+        side, two sides and Symmetric."""
+        cases = {"touching": ((3, 6), (-4, 4), 3), "trimmed": ((2, 6), (1, 4), 2)}
+        for case, (xs, ys, faceX) in cases.items():
+            for kind in ("Revolution", "Groove"):
+                for sideType in ("One side", "Two sides", "Symmetric"):
+                    with self.subTest(case=case, kind=kind, sideType=sideType):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        zs = (0, 2) if kind == "Revolution" else (0, 3)
+                        block, face = self.boxUpTo(body, xs, ys, zs, faceX)
+                        revolution = self.revolveProfileUpTo(body, kind, sideType, (block, [face]))
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn(
+                            "never meets the up-to face", revolution.getStatusString()
+                        )
+
+    def testRevolutionUpToFaceTouchingProfileWithinReach(self):
+        """The face x = 1 of the box x in [-6, 1], y in [-4, 4], z in [0, 2] touches the profile
+        x in [1, 3], z in [0, 2] along its edge x = 1, from where every point reaches it: the
+        point at radius r meets the plane x = 1 after the angle acos(1 / r). One side adds
+        2 * the integral of r * acos(1 / r) from 1 to 3, two sides twice that."""
+
+        def antiderivative(r):
+            # integral of r * acos(1 / r) dr
+            return r**2 / 2 * math.acos(1 / r) - math.sqrt(r**2 - 1) / 2
+
+        added = 2 * (antiderivative(3) - antiderivative(1))
+        for sideType, sides in (("One side", 1), ("Two sides", 2)):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (-6, 1), (-4, 4), (0, 2), 1)
+                revolution = self.revolveProfileUpTo(body, "Revolution", sideType, (block, [face]))
+                self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                self.assertEqual(len(revolution.Shape.Solids), 1)
+                self.assertGreater(added, 8)
+                self.assertAlmostEqual(revolution.Shape.Volume, 112 + sides * added, places=6)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
-        reaches it. The feature fails with an error and gives no solid."""
+        reaches it. The feature fails with an error that says so and gives no solid."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         sketch = body.newObject("Sketcher::SketchObject", "Profile")
         [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
@@ -1573,7 +1685,7 @@ class TestRevolve(unittest.TestCase):
         revolution.UpToFace = (wall, [""])
         self.Doc.recompute()
         self.assertFalse(revolution.isValid())
-        self.assertIn("Could not revolve the sketch", revolution.getStatusString())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
         self.assertTrue(revolution.Shape.isNull())
 
     def tearDown(self):

@@ -29,20 +29,25 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <string>
 #include <utility>
+#include <vector>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepTools.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
+#include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -53,6 +58,7 @@
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
@@ -238,45 +244,126 @@ bool reachesPlane(const TopoShape& face, const gp_Pln& plane)
     return distance.Value() <= Precision::Confusion();
 }
 
+// The face the profile is checked against: the up-to face itself, or for an unbounded face (a
+// datum plane, a whole cylinder) a face on its surface that holds every point the sweep of the
+// profile about the axis can reach, since booleans and distances can't take an unbounded face.
+// The sweep's points lie within reach of the surface's location, and an elementary surface's
+// unbounded parameters are lengths (a cone's along its generatrix: within 2 reach + its radius),
+// so a face trimmed to those holds them. An unbounded face on another kind of surface fails (the
+// PR 273 review's M2: a whole cylinder went unchecked).
+TopoDS_Face reachableUpToFace(
+    const TopoShape& upToFace,
+    const TopoShape& profile,
+    const gp_Ax1& axis
+)
+{
+    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
+    if (!isUnboundedFace(upToFace)) {
+        return face;
+    }
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    Handle(Geom_Surface) basis = surface;
+    Handle(Geom_RectangularTrimmedSurface) trimmed
+        = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+    if (!trimmed.IsNull()) {
+        basis = trimmed->BasisSurface();
+    }
+    Standard_Real uMin = 0.0;
+    Standard_Real uMax = 0.0;
+    Standard_Real vMin = 0.0;
+    Standard_Real vMax = 0.0;
+    surface->Bounds(uMin, uMax, vMin, vMax);
+    if (Precision::IsInfinite(uMin) || Precision::IsInfinite(uMax) || Precision::IsInfinite(vMin)
+        || Precision::IsInfinite(vMax)) {
+        Handle(Geom_ElementarySurface) elementary = Handle(Geom_ElementarySurface)::DownCast(basis);
+        if (elementary.IsNull()) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The up-to face is unbounded, and its kind of surface can't be checked against "
+                "the profile. Use a bounded face."
+            ));
+        }
+        double radius = 0.0;
+        if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(elementary);
+            !cylinder.IsNull()) {
+            radius = cylinder->Radius();
+        }
+        else if (auto cone = Handle(Geom_ConicalSurface)::DownCast(elementary); !cone.IsNull()) {
+            radius = cone->RefRadius();
+        }
+        // A point of the profile within d of the axis location sweeps within 2 d of it.
+        const Base::BoundBox3d bounds = profile.getBoundBox();
+        const gp_Pnt center(bounds.GetCenter().x, bounds.GetCenter().y, bounds.GetCenter().z);
+        const double reach = elementary->Location().Distance(axis.Location())
+            + 2.0 * (axis.Location().Distance(center) + bounds.CalcDiagonalLength() / 2.0);
+        const double limit = 2.0 * reach + radius + 1.0;
+        auto clamp = [limit](Standard_Real& low, Standard_Real& high) {
+            const Standard_Real clampedLow = std::max(low, -limit);
+            const Standard_Real clampedHigh = std::min(high, limit);
+            if (clampedLow < clampedHigh) {
+                low = clampedLow;
+                high = clampedHigh;
+            }
+            else if (Precision::IsInfinite(low)) {
+                low = high - 1.0;
+            }
+            else if (Precision::IsInfinite(high)) {
+                high = low + 1.0;
+            }
+        };
+        clamp(uMin, uMax);
+        clamp(vMin, vMax);
+    }
+    BRepBuilderAPI_MakeFace maker(surface, uMin, uMax, vMin, vMax, Precision::Confusion());
+    if (!maker.IsDone()) {
+        throw Base::RuntimeError(
+            QT_TRANSLATE_NOOP("Exception", "Could not check the up-to face against the profile")
+        );
+    }
+    return maker.Face();
+}
+
+// The tolerance of the checks of the profile against the up-to face, ten times the largest of
+// the shapes' own: section edges along a curved boundary are approximations (the PR 273 review's
+// L2).
+double profileCheckTolerance(const TopoDS_Shape& profile, const TopoDS_Face& face)
+{
+    double tolerance = std::max(Precision::Confusion(), BRep_Tool::Tolerance(face));
+    for (TopExp_Explorer faces(profile, TopAbs_FACE); faces.More(); faces.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Face(faces.Current())));
+    }
+    for (TopExp_Explorer edges(profile, TopAbs_EDGE); edges.More(); edges.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
+    }
+    return 10.0 * tolerance;
+}
+
 // Whether the up-to face cuts through the profile: the profile's points on the face are already
 // there, those on one side of it meet it at once, and the others only later or never. BRepFeat
 // then revolved nothing, with no error, on one side, two sides and Symmetric (ops#289). A face
-// that only touches the profile's boundary doesn't cut through it.
-bool cutsThroughProfile(const TopoShape& profile, const TopoShape& upToFace)
+// that only touches the profile's boundary doesn't cut through it. A section that fails throws:
+// the revolution mustn't go on unchecked (the PR 273 review's M1).
+bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, double tolerance)
 {
-    if (upToFace.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE) {
-        return false;
-    }
-    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
     TopoDS_Shape crossing;
     try {
-        if (isUnboundedFace(upToFace)) {
-            // A boolean can't take an unbounded face; a plane goes as a plane.
-            BRepAdaptor_Surface surface(face);
-            if (surface.GetType() != GeomAbs_Plane) {
-                return false;
-            }
-            BRepAlgoAPI_Section section(profile.getShape(), surface.Plane());
-            if (!section.IsDone()) {
-                return false;
-            }
-            crossing = section.Shape();
+        BRepAlgoAPI_Section section(profile.getShape(), face);
+        if (!section.IsDone()) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not check whether the up-to face cuts through the profile"
+            ));
         }
-        else {
-            BRepAlgoAPI_Section section(profile.getShape(), face);
-            if (!section.IsDone()) {
-                return false;
-            }
-            crossing = section.Shape();
-        }
+        crossing = section.Shape();
     }
     catch (const Standard_Failure&) {
-        return false;
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not check whether the up-to face cuts through the profile"
+        ));
     }
     for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
         const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
-        const double tolerance
-            = std::max(Precision::Confusion(), BRep_Tool::Tolerance(profileFace));
         for (TopExp_Explorer edges(crossing, TopAbs_EDGE); edges.More(); edges.Next()) {
             BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
             for (double fraction : {0.25, 0.5, 0.75}) {
@@ -290,6 +377,110 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoShape& upToFace)
                 }
             }
         }
+    }
+    return false;
+}
+
+// Points of the profile: its vertices, points along its edges, and points inside its faces (a
+// grid over each face's bounds, and the face classifier's own point).
+std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
+{
+    std::vector<gp_Pnt> points;
+    for (TopExp_Explorer vertices(profile, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
+        points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
+    }
+    for (TopExp_Explorer edges(profile, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        constexpr int samples = 8;
+        for (int i = 1; i < samples; ++i) {
+            points.push_back(curve.Value(
+                curve.FirstParameter()
+                + (curve.LastParameter() - curve.FirstParameter()) * i / samples
+            ));
+        }
+    }
+    for (TopExp_Explorer faces(profile, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        Standard_Real uMin = 0.0;
+        Standard_Real uMax = 0.0;
+        Standard_Real vMin = 0.0;
+        Standard_Real vMax = 0.0;
+        BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+        BRepAdaptor_Surface surface(face);
+        constexpr int steps = 6;
+        for (int i = 1; i < steps; ++i) {
+            for (int j = 1; j < steps; ++j) {
+                const gp_Pnt2d uv(
+                    uMin + (uMax - uMin) * i / steps,
+                    vMin + (vMax - vMin) * j / steps
+                );
+                BRepClass_FaceClassifier classifier(face, uv, Precision::Confusion());
+                if (classifier.State() == TopAbs_IN) {
+                    points.push_back(surface.Value(uv.X(), uv.Y()));
+                }
+            }
+        }
+        try {
+            gp_Pnt point;
+            gp_Pnt2d uv;
+            if (BOPTools_AlgoTools3D::PointInFace(face, point, uv, new IntTools_Context) == 0) {
+                points.push_back(point);
+            }
+        }
+        catch (const Standard_Failure&) {
+            // The grid's points stand.
+        }
+    }
+    return points;
+}
+
+// Whether a point of the profile never meets the up-to face as it turns about the axis: its
+// circle stays farther than the tolerance from the face. That part of the profile has nowhere to
+// stop, and BRepFeat revolved it all the way round or not at all, with no error: a face touching
+// the profile's boundary where the profile's nearer points never reach it, or a face trimmed
+// away from the profile plane (the PR 273 review's M3). The points are samples: a gap in the
+// face's reach that passes between them goes unnoticed.
+bool profileMissesFace(
+    const TopoShape& profile,
+    const TopoDS_Face& face,
+    const gp_Ax1& axis,
+    double tolerance
+)
+{
+    const gp_Lin line(axis);
+    try {
+        for (const gp_Pnt& point : profileSamples(profile.getShape())) {
+            const double radius = line.Distance(point);
+            TopoDS_Shape probe;
+            if (radius <= Precision::Confusion()) {
+                probe = BRepBuilderAPI_MakeVertex(point).Shape();
+            }
+            else {
+                const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
+                probe = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(center, axis.Direction()), radius))
+                            .Shape();
+            }
+            BRepExtrema_DistShapeShape distance(probe, face);
+            if (!distance.IsDone()) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not check whether the profile meets the up-to face"
+                ));
+            }
+            if (distance.Value() > tolerance) {
+                return true;
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not check whether the profile meets the up-to face"
+        ));
     }
     return false;
 }
@@ -451,7 +642,7 @@ bool liesWithin(const TopoDS_Face& face, const TopoDS_Face& other)
 // tools alone passed when the first side ran through the base (a Revolution) or through empty
 // space (a Groove) between the surface's first hit and the face: the second side then stopped at
 // the mirror of that first hit, and where the base isn't symmetric, the result lost material
-// silently (the PR 268 verification's High).
+// silently (the PR 268 verification's High). A sweep that fails throws, for the caller to say so.
 bool firstSideEndsOnFace(
     const TopoShape& upToFace,
     const TopoShape& whole,
@@ -461,16 +652,7 @@ bool firstSideEndsOnFace(
     const std::function<TopoShape(const TopoShape&)>& sweepUpTo
 )
 {
-    TopoShape sweep;
-    try {
-        sweep = sweepUpTo(whole);
-    }
-    catch (const Base::Exception&) {
-        return false;
-    }
-    catch (const Standard_Failure&) {
-        return false;
-    }
+    const TopoShape sweep = sweepUpTo(whole);
     if (sweep.isNull() || sweep.getShape().IsNull()) {
         return false;
     }
@@ -557,7 +739,27 @@ TopoShape secondSideUpToFace(
     }
     if (samePlane || reachesPlane(upToFace, profilePlane)) {
         const TopoShape whole = wholeSurface(face);
-        if (!firstSideEndsOnFace(upToFace, whole, firstSide, base, groove, sweepUpTo)) {
+        bool endsOnFace = false;
+        // The sweep up to the whole surface fails where the surface cuts through the profile or
+        // can't be checked against it: that reason, not a first hit before the face (the PR 273
+        // review's L1).
+        try {
+            endsOnFace = firstSideEndsOnFace(upToFace, whole, firstSide, base, groove, sweepUpTo);
+        }
+        catch (const Base::Exception& error) {
+            throw Base::RuntimeError(
+                std::string("Symmetric: the second side's check revolves the first side up to the "
+                            "up-to face's whole surface, and that failed: ")
+                + error.what() + ". Use Two sides."
+            );
+        }
+        catch (const Standard_Failure&) {
+            throw Base::RuntimeError(
+                "Symmetric: the second side's check could not revolve the first side up to the "
+                "up-to face's whole surface. Use Two sides."
+            );
+        }
+        if (!endsOnFace) {
             throw Base::RuntimeError(
                 "Symmetric: the profile meets the up-to face's surface before the face itself, "
                 "so the second side can't mirror the first. Use Two sides."
@@ -1110,11 +1312,25 @@ TopoShape Revolved::tryToRevolveToFace(
             "Revolution: Internal error: several profile faces passed to tryToRevolveToFace()"
         );
     }
-    if (cutsThroughProfile(sketchshape, upToFace)) {
-        throw Base::RuntimeError(
-            "Revolution: the up-to face cuts through the profile, so part of the profile can't "
-            "revolve up to it"
-        );
+    if (upToFace.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE) {
+        throw Base::RuntimeError("Could not revolve the sketch!");
+    }
+    {
+        const TopoDS_Face reachable = reachableUpToFace(upToFace, sketchshape, axis);
+        const double tolerance = profileCheckTolerance(sketchshape.getShape(), reachable);
+        if (cutsThroughProfile(sketchshape, reachable, tolerance)) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The up-to face cuts through the profile, so part of the profile can't revolve "
+                "up to it"
+            ));
+        }
+        if (profileMissesFace(sketchshape, reachable, axis, tolerance)) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Part of the profile never meets the up-to face as it revolves about the axis"
+            ));
+        }
     }
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);
     if (!Ex.More()) {
