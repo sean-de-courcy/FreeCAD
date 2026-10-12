@@ -111,6 +111,7 @@ set(PartDesign_TestScenarios
     PartDesignTests/Scenarios/crossdoc.py
     PartDesignTests/Scenarios/dressups.py
     PartDesignTests/Scenarios/external.py
+    PartDesignTests/Scenarios/fillet_limit.py
     PartDesignTests/Scenarios/harness.py
     PartDesignTests/Scenarios/internal.py
     PartDesignTests/Scenarios/interning.py

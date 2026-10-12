@@ -728,6 +728,33 @@ TEST_F(FilletFallbackTest, chamfers)
     EXPECT_TRUE(exact(dressUp(ring, circles, chamfer(2)), pi * 64 * 10 - removed));
 }
 
+// The rib's top edges chamfered just under the limit: the top strip left between the chamfers,
+// 2 (2 - d) wide, is within the Booleans' fuzzy reach of the ridge, which absorbs it with a grown
+// tolerance, and the result would lack the strip's volume. The construction refuses it (PR 286
+// verification, finding 1); at the limit and further below it builds exactly
+TEST_F(FilletFallbackTest, refusesAFaceMergedAwayJustUnderTheLimit)
+{
+    TopoShape base(box(30, 4, 20), 1L);
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(base, {0, 4, 20}, {30, 4, 20})
+    };
+    for (double d : {2 - 1e-7, 2 - 2e-7}) {
+        FF::Request request = chamfer(d);
+        request.limitOnly = false;
+        std::string reason;
+        EXPECT_TRUE(forced(base, edges, request, &reason).isNull()) << d;
+        EXPECT_NE(reason.find("tolerance grew"), std::string::npos) << d << ": " << reason;
+    }
+    EXPECT_TRUE(exact(forced(base, edges, chamfer(2)), 2400 - 4 * 30));
+    double d = 2 - 3e-7;
+    FF::Request below = chamfer(d);
+    below.limitOnly = false;
+    TopoShape built = forced(base, edges, below);
+    EXPECT_TRUE(exact(built, 2400 - d * d * 30));
+    EXPECT_EQ(built.countSubElements("Face"), 8);
+}
+
 TEST_F(FilletFallbackTest, slantedFreeEnds)
 {
     // A plate 4 thick whose end x = 30 .. 41.5 is slanted 30 degrees from the vertical: the tools
@@ -2170,7 +2197,7 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
         EXPECT_TRUE(recorder.built());
         EXPECT_EQ(
             recorder.report("Fillet"),
-            "Fillet: built exactly where OCCT refused: 12 edges, 8 corners"
+            "Fillet: built by the exact construction where OCCT failed: 12 edges, 8 corners"
         );
     }
     EXPECT_FALSE(outer.built());
@@ -2180,7 +2207,10 @@ TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
         edgeBetween(rib, {0, 4, 20}, {30, 4, 20})
     };
     dressUp(rib, pair, chamfer(2));
-    EXPECT_EQ(outer.report("Chamfer"), "Chamfer: built exactly where OCCT refused: 2 edges, 0 corners");
+    EXPECT_EQ(
+        outer.report("Chamfer"),
+        "Chamfer: built by the exact construction where OCCT failed: 2 edges, 0 corners"
+    );
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

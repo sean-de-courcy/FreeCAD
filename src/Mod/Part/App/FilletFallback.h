@@ -111,7 +111,8 @@ public:
     }
 
     /// Prints the Report-view line if it did, and returns it (else empty):
-    /// "<name>: built exactly where OCCT refused: N edges, M corners"
+    /// "<name>: built by the exact construction where OCCT failed: N edges, M corners" (OCCT
+    /// refused, or left a face of zero width or an invalid result)
     std::string report(const std::string& name) const;
 
 private:

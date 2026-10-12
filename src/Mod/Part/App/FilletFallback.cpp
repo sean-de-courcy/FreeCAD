@@ -1771,6 +1771,47 @@ TopoDS_Shape applyTools(
     return result;
 }
 
+/// A new edge between two planes whose tolerance grew past twice the base's largest, or null. A
+/// Boolean that merges a strip narrower than its fuzzy reach away (a chamfer's top strip just
+/// under the limit, 2 (2 - d) wide) raises the tolerance of the edge the strip collapses into, and
+/// the result is then off by the strip's volume (ops#300, PR 286 verification, finding 1). Two
+/// planes meet in an exact line, so a grown tolerance there is such a merge; the sections of
+/// spheres and tori with other faces are approximated and grow legitimately (3e-7 to 4e-7 on the
+/// stadium and the hexagon's corners)
+TopoDS_Edge grownEdge(const TopoDS_Shape& result, const TopoDS_Shape& base)
+{
+    double baseTolerance = linearTolerance;
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        baseTolerance = std::max(baseTolerance, BRep_Tool::Tolerance(TopoDS::Face(it.Current())));
+    }
+    for (TopExp_Explorer it(base, TopAbs_EDGE); it.More(); it.Next()) {
+        baseTolerance = std::max(baseTolerance, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+    }
+    for (TopExp_Explorer it(base, TopAbs_VERTEX); it.More(); it.Next()) {
+        double tolerance = BRep_Tool::Tolerance(TopoDS::Vertex(it.Current()));
+        baseTolerance = std::max(baseTolerance, tolerance);
+    }
+    TopTools_IndexedMapOfShape baseEdges;
+    TopExp::MapShapes(base, TopAbs_EDGE, baseEdges);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+        if (baseEdges.Contains(edge) || BRep_Tool::Tolerance(edge) <= 2 * baseTolerance) {
+            continue;
+        }
+        bool betweenPlanes = edgeFaces(i).Extent() == 2;
+        for (const auto& face : edgeFaces(i)) {
+            betweenPlanes = betweenPlanes
+                && BRepAdaptor_Surface(TopoDS::Face(face)).GetType() == GeomAbs_Plane;
+        }
+        if (betweenPlanes) {
+            return edge;
+        }
+    }
+    return {};
+}
+
 /// The construction; cornerCount receives how many corners it built
 TopoDS_Shape construct(
     TopoShape& result,
@@ -2057,6 +2098,10 @@ TopoDS_Shape construct(
     if (!thinFace(shape, base.getShape()).IsNull()) {
         refuse("the result has a face of zero width");
     }
+    if (TopoDS_Edge grown = grownEdge(shape, base.getShape()); !grown.IsNull()) {
+        refuse("an edge's tolerance grew to " + describe(BRep_Tool::Tolerance(grown))
+               + ": a face was merged away");
+    }
     // One solid, as OCCT's fillet returns, not a compound holding it
     if (shape.ShapeType() != TopAbs_SOLID) {
         TopoDS_Shape solid = TopExp_Explorer(shape, TopAbs_SOLID).Current();
@@ -2184,7 +2229,7 @@ std::string Recorder::report(const std::string& name) const
         return {};
     }
     std::ostringstream line;
-    line << name << ": built exactly where OCCT refused: " << edges
+    line << name << ": built by the exact construction where OCCT failed: " << edges
          << (edges == 1 ? " edge, " : " edges, ") << corners
          << (corners == 1 ? " corner" : " corners");
     Base::Console().message("%s\n", line.str().c_str());
