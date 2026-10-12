@@ -1675,7 +1675,7 @@ class BodyReorderBase:
         newcomer = other.getObject("Pad2")
         self.assertEqual(newcomer.Label, "Unrelated")
         # Doc1's Pad2 stayed behind: the copied line marks it as in another document, whatever
-        # ID the newcomer has here (PR 266 review H1: copyObject exports from the destination)
+        # ID the newcomer has here (the list mixes two documents' objects, PR 266 review H1)
         self.assertEqual([line.split("|")[2] for line in self.parked(sketch)], ["Pad2#-1"])
         self.recompute()
         self.assertIn("projects 'Pad2'", sketch.getStatusString())
@@ -1784,6 +1784,48 @@ class BodyReorderBase:
 
     def testParkedExpressionReadingAnotherDocumentMerged(self):
         self.parkedExpressionReadingAnotherDocument(self.mergeInto)
+
+    def testParkedExpressionReadingAnUncopiedObjectPasted(self):
+        """ops#171 B1: RO9 with B's Length read as BossA.Length * Sheet.Span / 4 from a
+        spreadsheet of self.doc (Span = 4), which isn't copied with the Body. The other document
+        has a Sheet of its own with Span = 8. Pasted there, the copied line is marked as in another
+        document (its target field ends in #-1); moved back, the expression isn't put back (it
+        would read the other Sheet: Length 10), and B keeps Length 5."""
+        block, a, b, c = self.chain()
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", "4")
+        sheet.setAlias("A1", "Span")
+        self.recompute()
+        b.setExpression("Length", "BossA.Length * Sheet.Span / 4")
+        self.recompute()
+        self.assertAlmostEqual(b.Length.Value, 5)
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.assertEqual(len(self.parked(b)), 1)
+        other = self.otherDocument("BossA", "BossB")
+        local = other.addObject("Spreadsheet::Sheet", "Sheet")
+        local.set("A1", "8")
+        local.setAlias("A1", "Span")
+        other.recompute()
+        before = self.pasteInto(other, [self.body])
+        self.assertIsNone(other.getObject("Sheet001"))
+        self.doc = other
+        self.body, a, b = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "BossA"),
+            ("PartDesign::Pad", "BossB"),
+        )
+        self.assertEqual([line.split("|")[2].split("#")[-1] for line in self.parked(b)], ["-1"])
+        self.recompute()
+
+        self.body.reorderObject([b], a, True)
+        self.assertEqual(self.parked(b), [])
+        self.assertEqual(b.ExpressionEngine, [])
+        self.recompute()
+        self.assertValid(a, b)
+        self.assertAlmostEqual(b.Length.Value, 5)
 
 
     # -- re-target records and new objects, copies and merges (ops#165) --------------------------

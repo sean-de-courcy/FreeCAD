@@ -465,16 +465,23 @@ TEST_F(DocumentTest, importedWithinGoesByTheObjectsDocument)
     EXPECT_NE(documentXml(exported).find("SourceDocument=\"" + doc()->Uid.getValueStr() + "\""),
               std::string::npos);
 
+    // a mixed list names each object's document (SourceDocuments), and has no SourceDocument
+    // (ops#171 B1, PR 266 verification L1)
     std::stringstream mixed;
     other->exportObjects({local, copied}, mixed);
-    EXPECT_EQ(documentXml(mixed).find("SourceDocument="), std::string::npos);
+    const std::string xml = documentXml(mixed);
+    EXPECT_EQ(xml.find("SourceDocument="), std::string::npos);
+    EXPECT_NE(xml.find(std::string(other->getName()) + ':' + other->Uid.getValueStr()),
+              std::string::npos);
+    EXPECT_NE(xml.find(std::string(doc()->getName()) + ':' + doc()->Uid.getValueStr()),
+              std::string::npos);
     {
-        // the first object, Local, is other's own
+        // the first object, Local, is other's own: within it (the list had no document before)
         WithinRecorder recorder(other);
         mixed.clear();
         mixed.seekg(0);
         App::MergeDocuments(other).importObjects(mixed);
-        EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+        EXPECT_EQ(recorder.within, std::vector<bool>({true}));
     }
     app.closeDocument(name.c_str());
 }

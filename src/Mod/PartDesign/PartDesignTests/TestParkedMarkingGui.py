@@ -358,3 +358,33 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.close()
         self.doc.recompute()
         self.assertTrue(hole.isValid(), hole.getStatusString())
+
+    # -- the warnings of an expression that reads an uncopied object (ops#171 B1) -----------------
+
+    def testUncopiedExpressionWarnsOnceAtThePasteAndOnceAtTheMove(self):
+        """ops#171 B1: TestBodyReorder's paste of a parked expression that reads a Sheet left
+        behind, run here to read the Report view: the paste says once that the line won't be put
+        back, and the move back says once that it isn't."""
+        from PartDesignTests.TestBodyReorder import TestBodyReorderV2
+
+        def lines(text):
+            return [line for line in (reportText() or "").splitlines() if text in line]
+
+        self.assertIsNotNone(reportText(), "no Report view")
+        pasted = len(lines("which wasn't copied with it"))
+        dropped = len(lines("reads an object that stayed in another document"))
+        result = unittest.TestResult()
+        TestBodyReorderV2("testParkedExpressionReadingAnUncopiedObjectPasted").run(result)
+        self.assertEqual(result.errors + result.failures, [])
+        self.assertEqual(result.testsRun, 1)
+        processEvents(0.2)
+        self.assertEqual(len(lines("which wasn't copied with it")), pasted + 1)
+        self.assertEqual(len(lines("reads an object that stayed in another document")), dropped + 1)
+
+
+def reportText():
+    """The Report view's text, where Console warnings go."""
+    for edit in Gui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+        if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+            return edit.toPlainText()
+    return None

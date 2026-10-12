@@ -1334,6 +1334,19 @@ private:
             if (target) {
                 plan.restoreExprs.push_back({*item, target});
             }
+            else {
+                // FreeCAD-CH (ops#171 B1): dropped, as a line whose object was deleted is; said
+                // so, since the property stays at its value without the expression
+                Base::Console().warning(
+                    "%s: the expression of '%s' set aside by a reorder isn't put back: %s. The "
+                    "property keeps its value.\n",
+                    owner->getFullName().c_str(),
+                    item->property.c_str(),
+                    item->targetId == -1
+                        ? "it reads an object that stayed in another document when it was copied"
+                        : ("'" + item->target + "' was deleted").c_str()
+                );
+            }
             plan.linesChanged = true;
         }
         plan.lines = std::move(kept);
@@ -1960,9 +1973,11 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
 {
     // The imported objects by the name each was saved under, with the ID it had there
     std::map<std::string, std::pair<App::DocumentObject*, long>> saved;
+    std::set<const App::DocumentObject*> imported;
     for (auto obj : objs) {
         if (auto source = App::importedSource(obj)) {
             saved[source->name] = {obj, source->id};
+            imported.insert(obj);
         }
     }
     for (auto owner : objs) {
@@ -1972,8 +1987,9 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
         }
         auto doc = owner->getDocument();
         // A copy's names end in `@<document>`, the document it was copied from (exportObjects); a
-        // saved project's (merge) don't. Whether that is this document goes by its UUID: the
-        // clipboard can outlive a document whose name another one takes (ops#171)
+        // saved project's (merge) don't. Whether that is this document goes by its UUID and that
+        // name (importedWithin): the clipboard can outlive a document whose name another one
+        // takes, and two open documents can share a UUID (ops#171)
         auto at = source->name.find('@');
         const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
         const bool sameDocument = App::importedWithin(*source, *doc);
@@ -2009,6 +2025,45 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
                     // document stays as it is. The parse doesn't rename them
                     std::unique_ptr<App::Expression> expr(
                         App::Expression::parse(owner, item->text));
+                    // FreeCAD-CH (ops#171 B1): pasted into another document, an object the text
+                    // names without a document that didn't come with it would read whatever this
+                    // document has under that name, silently. The line is marked as in another
+                    // document, as a projection's line is: the next move drops it, and says so
+                    if (!sameDocument && item->targetId != -1) {
+                        std::string uncopied;
+                        for (const auto& [id, hidden] : expr->getIdentifiers()) {
+                            (void)hidden;
+                            const std::string docName = id.getDocumentName().getString();
+                            if (!docName.empty() && docName != doc->getName()) {
+                                continue;  // another document's object
+                            }
+                            auto obj = id.getDocumentObject();
+                            if (obj == owner || (obj && obj->getDocument() != doc)
+                                || (obj && imported.count(obj))) {
+                                continue;  // the owner itself, or a copy that kept its name
+                            }
+                            const std::string name = obj
+                                ? std::string(obj->getNameInDocument())
+                                : id.getDocumentObjectName().getString();
+                            if (name.empty() || copyOf(name, 0)) {
+                                continue;  // copied under another name: renamed below
+                            }
+                            uncopied = name;
+                            break;
+                        }
+                        if (!uncopied.empty()) {
+                            item->targetId = -1;
+                            Base::Console().warning(
+                                "%s: the expression of '%s' set aside by a reorder reads '%s', "
+                                "which wasn't copied with it. It won't be put back, so that it "
+                                "doesn't read another object of that name here: the property "
+                                "keeps its value.\n",
+                                owner->getFullName().c_str(),
+                                item->property.c_str(),
+                                uncopied.c_str()
+                            );
+                        }
+                    }
                     std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> renames;
                     for (const auto& dep : expr->getDeps(App::Expression::DepAll)) {
                         auto obj = dep.first;
