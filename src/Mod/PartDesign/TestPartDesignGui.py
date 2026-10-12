@@ -54,6 +54,7 @@ from PartDesignTests.TestTreeItemsGui import TestTreeItemsGui
 from PartDesignTests.TestForkKeymapGui import TestForkKeymapGui
 from PartDesignTests.TestTaskStatusGui import TestTaskStatusGui
 from PartDesignTests.TestProblemNavigationGui import TestProblemNavigationGui
+from PartDesignTests.TestCrossBodyGui import TestCrossBodyGui
 
 
 # timer runs this class in order to access modal dialog

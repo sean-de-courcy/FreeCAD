@@ -71,6 +71,7 @@
 #include <Base/Converter.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
+#include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
 #include <Mod/Part/App/Tools.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -144,13 +145,64 @@ ProfileBased::ProfileBased()
     );
 }
 
+// A profile in another Body is read in its own Body's coordinates, as if it were in the feature's,
+// by every path that uses it (its shape, its sketch's placement, its support face): in a Body
+// placed elsewhere the feature comes out where the profile isn't (FreeCAD-CH ops#308 T4: a hole
+// through two stacked Bodies cut in the wrong place). So is what the profile is attached to: the
+// attachment reads it in its Body's coordinates too (a sketch on the top of another Body's pad,
+// that Body at (100, 50), sat at the origin). A binder carries either over. That other Body, or
+// nothing.
+const Body* ProfileBased::profileBodyElsewhere() const
+{
+    auto body = getFeatureBody();
+    auto profile = Profile.getValue();
+    if (!body || !profile) {
+        return nullptr;
+    }
+    std::vector<App::DocumentObject*> placers {profile};
+    if (auto attached = profile->getExtensionByType<Part::AttachExtension>(true)) {
+        const auto supports = attached->AttachmentSupport.getValues();
+        placers.insert(placers.end(), supports.begin(), supports.end());
+    }
+    for (auto obj : placers) {
+        auto other = obj ? Body::findBodyOf(obj) : nullptr;
+        if (other && other != body
+            && !other->globalPlacement().isSame(body->globalPlacement(), Precision::Confusion())) {
+            return other;
+        }
+    }
+    return nullptr;
+}
+
 short ProfileBased::mustExecute() const
 {
     if (Profile.isTouched() || Midplane.isTouched() || Reversed.isTouched() || UpToFace.isTouched()
         || UpToFace2.isTouched() || UpToShape.isTouched() || UpToShape2.isTouched()) {
         return 1;
     }
+    // Moving the profile's Body touches neither the profile nor this feature: run again while the
+    // Bodies are placed apart, and once more when they agree again, to clear the error
+    if (failedForBodyElsewhere || profileBodyElsewhere()) {
+        return 1;
+    }
     return PartDesign::FeatureAddSub::mustExecute();
+}
+
+App::DocumentObjectExecReturn* ProfileBased::recompute()
+{
+    auto body = getFeatureBody();
+    auto other = profileBodyElsewhere();
+    failedForBodyElsewhere = other && !Suppressed.getValue() && !body->holds(this);
+    if (failedForBodyElsewhere) {
+        auto profile = Profile.getValue();
+        return new App::DocumentObjectExecReturn(
+            std::string("The profile ") + profile->Label.getValue()
+                + ", or what it is attached to, is in Body " + other->Label.getValue()
+                + ", placed elsewhere than this feature's Body: bind it with a Sub-Shape Binder",
+            this
+        );
+    }
+    return FeatureAddSub::recompute();
 }
 
 void ProfileBased::setupObject()
@@ -163,6 +215,11 @@ void ProfileBased::positionByPrevious()
     Part::Feature* feat = getBaseObject(/* silent = */ true);
     if (feat) {
         this->Placement.setValue(feat->Placement.getValue());
+    }
+    else if (!getVerifiedSketch(/* silent = */ true)) {
+        // No base and a profile that isn't a sketch (a face of a feature in another Body,
+        // ops#308 T1): placed as that feature, as when it was taken as the base
+        this->Placement.setValue(getVerifiedObject()->Placement.getValue());
     }
     else {
         // no base. Use either Sketch support's placement, or sketch's placement itself.
@@ -756,6 +813,15 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
         return rv;
     }
 
+    // A feature of another Body is never an implicit base: it would import that Body's whole
+    // solid as this feature's start (FreeCAD-CH ops#308 T1: a first Pad on a sketch attached
+    // to another Body's face came out as that Body plus the Pad). Only the same Body's features
+    // remain implicit bases, for legacy files.
+    auto inAnotherBody = [this](const App::DocumentObject* obj) {
+        auto other = Body::findBodyOf(obj);
+        return other && other != Body::findBodyOf(this);
+    };
+
     // getVerifiedObject() may throw it's own exception if fail
     Part::Feature* obj = getVerifiedObject(silent);
 
@@ -764,7 +830,7 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
     }
 
     if (!obj->isDerivedFrom<Part::Part2DObject>()) {
-        return obj;
+        return inAnotherBody(obj) ? Feature::getBaseObject(silent) : obj;
     }
 
     // due to former test we know we have a 2d object
@@ -773,8 +839,8 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
     App::DocumentObject* spt = sketch->AttachmentSupport.getValue();
     if (spt) {
         // Attaching to a Body positions the profile but must not import its complete tip shape.
-        // Feature supports remain implicit bases for compatibility with legacy files.
-        if (spt->isDerivedFrom<PartDesign::Body>()) {
+        // The same holds for a feature of another Body (above).
+        if (spt->isDerivedFrom<PartDesign::Body>() || inAnotherBody(spt)) {
             return Feature::getBaseObject(silent);
         }
         if (spt->isDerivedFrom<Part::Feature>()) {

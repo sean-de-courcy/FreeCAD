@@ -40,6 +40,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestActiveObject.py
     PartDesignTests/TestDatum.py
     PartDesignTests/TestShapeBinder.py
+    PartDesignTests/TestCrossBody.py
     PartDesignTests/TestPad.py
     PartDesignTests/TestPocket.py
     PartDesignTests/TestHelix.py
@@ -81,6 +82,7 @@ if(BUILD_GUI)
         PartDesignTests/TestPreviewPython.py
         PartDesignTests/TestProfileLinkDialog.py
         PartDesignTests/TestReferencePickerGui.py
+        PartDesignTests/TestCrossBodyGui.py
         PartDesignTests/TestRollBackBarGui.py
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestSelectionFilterGui.py

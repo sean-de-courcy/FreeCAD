@@ -34,6 +34,7 @@
 #include <Standard_Failure.hxx>
 
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -115,6 +116,16 @@ Base::Placement datumPlacement(const App::GeoFeature* obj)
         placement = lcs->Placement.getValue() * placement;
     }
     return placement;
+}
+
+// Where the coordinates of an object's shape lie in the document: its container's global
+// placement (a Body's, through any App::Part), identity at the top level
+Base::Placement containerPlacement(const App::DocumentObject* obj)
+{
+    auto* container = freecad_cast<App::GeoFeature*>(
+        App::GeoFeatureGroupExtension::getGroupOfObject(obj)
+    );
+    return container ? container->globalPlacement() : Base::Placement();
 }
 
 }  // namespace
@@ -876,6 +887,11 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             std::string linkSub;
             auto link = obj;
             auto resolved = parent->resolveRelativeLink(resolvedSub, link, linkSub);
+            // Not found under the binder's parent (two Bodies at the document's top level, or
+            // under one App::Part): the path stays as it was, and the support's shape is in its
+            // own container's coordinates, not the document's (FreeCAD-CH ops#308 T4: a binder
+            // of a face of a feature in a Body moved by (100, 50) stayed at the origin)
+            const bool outside = resolved == parent && resolvedSub == parentSub && obj != parent;
             if (!resolved) {
                 if (!link) {
                     FC_WARN(
@@ -913,6 +929,10 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
                     // binding object
                     mat.inverseGauss();
                     res.first->second = Placement.getValue().toMatrix() * mat;
+                    if (outside) {
+                        res.first->second = res.first->second
+                            * containerPlacement(obj).toMatrix();
+                    }
                 }
             }
         }
@@ -1274,7 +1294,22 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
 
 void SubShapeBinder::slotRecomputedObject(const App::DocumentObject& Obj)
 {
-    if (Context.getValue() == &Obj && !this->testStatus(App::ObjectStatus::Recompute2)) {
+    // A container of a support moves it too, as the binder's own context does (ops#308 T4): a
+    // Body that was moved recomputes, its features don't
+    auto contains = [this, &Obj]() {
+        for (auto obj : Support.getValues()) {
+            for (auto group = obj ? App::GeoFeatureGroupExtension::getGroupOfObject(obj) : nullptr;
+                 group;
+                 group = App::GeoFeatureGroupExtension::getGroupOfObject(group)) {
+                if (group == &Obj) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    if ((Context.getValue() == &Obj || contains())
+        && !this->testStatus(App::ObjectStatus::Recompute2)) {
         try {
             update();
         }
@@ -1284,9 +1319,41 @@ void SubShapeBinder::slotRecomputedObject(const App::DocumentObject& Obj)
     }
 }
 
+App::DocumentObjectExecReturn* SubShapeBinder::recompute()
+{
+    // A support that depends on this binder makes a cycle, which no recompute settles: its
+    // objects stay touched after every one, with no error. A path through a Body does it when
+    // that Body holds a binder of this one's Body ((Body1, "PadA.Face6") in Body2, then
+    // (Body2, "PadB.Face5") in Body1): a Body depends on all its features. Bound to the feature
+    // itself, (PadA, "Face6"), nothing loops (FreeCAD-CH ops#308 T2). Checked before the
+    // reference check of DocumentObject::recompute(): once the cycle has failed the features
+    // between, the bound element is gone, and the cause would be reported as a missing face.
+    for (auto obj : Support.getValues()) {
+        if (!obj || obj == this) {
+            continue;
+        }
+        bool cyclic = false;
+        try {
+            const std::vector<App::DocumentObject*> deps = obj->getOutListRecursive();
+            cyclic = std::ranges::find(deps, this) != deps.end();
+        }
+        catch (const Base::BadGraphError&) {
+            cyclic = true;
+        }
+        if (cyclic) {
+            return new App::DocumentObjectExecReturn(
+                std::string("Cyclic dependency: the support ") + obj->Label.getValue()
+                    + " depends on this binder. Bind the feature's element itself (Feature, "
+                      "Face), not through its Body",
+                this
+            );
+        }
+    }
+    return inherited::recompute();
+}
+
 App::DocumentObjectExecReturn* SubShapeBinder::execute()
 {
-
     setupCopyOnChange();
 
     if (BindMode.getValue() == 0) {

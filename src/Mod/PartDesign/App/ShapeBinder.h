@@ -186,6 +186,9 @@ public:
         int depth = 0
     ) const override;
 
+    /// Fails on a support that depends on this binder, before anything else (FreeCAD-CH ops#308 T2)
+    App::DocumentObjectExecReturn* recompute() override;
+
 protected:
     App::DocumentObjectExecReturn* execute() override;
     void onChanged(const App::Property* prop) override;

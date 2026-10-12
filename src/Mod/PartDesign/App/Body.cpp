@@ -729,7 +729,17 @@ void Body::onChanged(const App::Property* prop)
                     // Initial placement is derived from the current global placements. Set the
                     // Body placement before assigning BaseFeature to keep the source feature's
                     // global position when the internal FeatureBase is created.
-                    bf->Placement.setValue(this->globalPlacement().inverse() * base->globalPlacement());
+                    Base::Placement source = base->globalPlacement();
+                    // A feature of a Body: FeatureBase::execute() takes its shape with the
+                    // feature's own placement applied, in its Body's coordinates, so only the
+                    // Body's placement is left (FreeCAD-CH ops#308 T5: a box at (5, 5, 5) was
+                    // copied to (10, 10, 10))
+                    if (base->isDerivedFrom<PartDesign::Feature>()) {
+                        if (auto* sourceBody = Body::findBodyOf(base)) {
+                            source = sourceBody->globalPlacement();
+                        }
+                    }
+                    bf->Placement.setValue(this->globalPlacement().inverse() * source);
                 }
             }
         }
