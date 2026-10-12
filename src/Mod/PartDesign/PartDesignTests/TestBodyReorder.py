@@ -176,6 +176,19 @@ class BodyReorderBase:
             xml = archive.read("Document.xml").decode("utf-8")
         return re.findall(r'\brt="([^"]*)"', xml)
 
+    def savedShadows(self, obj, prop):
+        """The shadows of obj.prop's subs in the document as saved."""
+        if not self.tempDir:
+            self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "shadows.FCStd")
+        self.doc.saveCopy(path)
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("Document.xml").decode("utf-8")
+        start = xml.index(f'<Object name="{obj.Name}"', xml.index("<ObjectData"))
+        start = xml.index(f'<Property name="{prop}"', start)
+        end = xml.index("</Property>", start)
+        return re.findall(r'shadow="([^"]*)"', xml[start:end])
+
     def parked(self, obj):
         return list(obj.ParkedReferences) if "ParkedReferences" in obj.PropertiesList else []
 
@@ -542,6 +555,120 @@ class BodyReorderBase:
         self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(1, 0, 0), V(20, 0, 0)))
         self.assertEqual(self.savedRetargets(), [])
         self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testDressUpBaseMovedBelowIt(self):
+        """Boss A moved below the fillet that follows its chamfer: the chamfer's edge has no match
+        on the block, its new base. The Base goes to the block with its reference missing, not left
+        on the boss now after the chamfer (a dependency cycle); the chamfer fails, and the boss and
+        the fillet compute (ops#285)."""
+        block = self.block()
+        a = self.boss("BossA", 1, 1)
+        self.recompute()
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        edge = edgeWhere(a.Shape, lambda e: isVerticalLineAt(e, 5, 1))
+        mapped = a.Shape.ElementReverseMap[edge]
+        mapped = mapped[0] if isinstance(mapped, (list, tuple)) else mapped
+        chamfer.Base = (a, [edge])
+        chamfer.Size = 0.5
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (chamfer, [edgeWhere(chamfer.Shape, lambda e: isVerticalLineAt(e, 20, 0))])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertValid(a, chamfer, fillet)
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([a], fillet, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, chamfer, fillet, a)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        # the boss's edge name kept as the shadow, for a re-pick (fork PR 270 review, L6)
+        [shadow] = self.savedShadows(chamfer, "Base")
+        self.assertIn(mapped, shadow)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertValid(fillet, a)
+        self.assertNotTouched(chamfer, fillet, a)
+        self.assertBody(BLOCK - ROUND + BOSS)
+
+        self.doc.undo()
+        self.assertChain(block, a, chamfer, fillet)
+        self.assertEqual(chamfer.Base, (a, [edge]))
+        self.recompute()
+        self.assertValid(a, chamfer, fillet)
+        self.doc.redo()
+        self.assertChain(block, chamfer, fillet, a)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertBody(BLOCK - ROUND + BOSS)
+
+    def testDressUpOfTheFirstSolidMovedAboveIt(self):
+        """The block moved below the chamfer on its edge: the chamfer is now the first solid, with
+        no base to move its edge to. Its Base is cleared rather than left on the block now after
+        it (a dependency cycle), so the chamfer fails and the block computes (fork PR 270 review,
+        M1)."""
+        block = self.block()
+        self.recompute()
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (block, [edgeWhere(block.Shape, lambda e: isVerticalLineAt(e, 20, 0))])
+        chamfer.Size = 0.5
+        self.recompute()
+        self.assertValid(chamfer)
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([block], chamfer, True)
+        self.doc.commitTransaction()
+        self.assertChain(chamfer, block)
+        self.assertIsNone(chamfer.Base)
+        self.assertNotIn(block, chamfer.OutList)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertValid(block)
+        self.assertNotTouched(chamfer, block)
+        self.assertBody(BLOCK)
+
+        self.doc.undo()
+        self.assertChain(block, chamfer)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.recompute()
+        self.assertValid(block, chamfer)
+
+    def testDressUpBaseWithoutAShapeMovedBelowIt(self):
+        """Boss A, with no shape (never computed), moved below the chamfer on its edge: there is no
+        element to carry to the block, the chamfer's new base, so the Base is cleared. The chamfer
+        stays on the block (BaseFeature), so the chain holds, and a re-pick of a block's edge
+        makes it compute (fork PR 270 round 1 verification)."""
+        block = self.block()
+        a = self.boss("BossA", 1, 1)
+        self.recompute()
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (a, [edgeWhere(a.Shape, lambda e: isVerticalLineAt(e, 5, 1))])
+        chamfer.Size = 0.5
+        self.recompute()
+        self.assertValid(a, chamfer)
+        a.Shape = Part.Shape()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([a], chamfer, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, chamfer, a)
+        self.assertIsNone(chamfer.Base)
+        self.assertIs(chamfer.BaseFeature, block)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertValid(block, a)
+
+        chamfer.Base = (block, [edgeWhere(block.Shape, lambda e: isVerticalLineAt(e, 20, 0))])
+        self.recompute()
+        self.assertChain(block, chamfer, a)
+        self.assertValid(block, chamfer, a)
+        self.assertBody(BLOCK - 0.5**2 / 2 * 10 + BOSS)
 
     def testSaveAndReopenWithARecord(self):
         """The hole moved above Pad2, saved and reopened: the support is still on the block with
