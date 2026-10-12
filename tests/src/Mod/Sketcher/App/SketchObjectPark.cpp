@@ -1252,6 +1252,81 @@ TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedWhenAFailedAddIsUndone)
         << warnings.size() << " warnings";
 }
 
+// PR 277 verification 3.6: a waiting link dropped from ExternalGeometry outside the sketch's own
+// paths (here from C++, as Python's sketch.ExternalGeometry = [...] does) keeps its geometry:
+// the next rebuild marks it missing, and the one after links it again. Its key was pruned with
+// the link, so it came back built from the type at its index, unflagged, and the next open
+// settled it silently. Its key stays while geometry still names it: it still waits
+TEST_F(SketchObjectParkTest, guessedLinkDroppedFromOutsideStillWaits)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    ASSERT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    sketch->ExternalGeometry.setValues(std::vector<App::DocumentObject*> {},
+                                       std::vector<std::string> {});
+    for (int k = 0; k < 2; ++k) {
+        sketch->touch();
+        doc->recompute();
+    }
+
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 1);
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+}
+
+// PR 277 verification 3.8: a first open of a type list saved before ops#140 leaves a link
+// undecided while its element is there (here no type gives its saved geometry, two lines for one
+// edge). Nothing rebuilds on open, so saved before a recompute its geometry was as before:
+// present, not missing, unflagged, and the next open took it as deciding the type at its index,
+// silently. The open flags that geometry as guessed, so the link still waits on the next open
+TEST_F(SketchObjectParkTest, linkAnOpenCouldntTellStillWaitsAfterASaveWithoutARecompute)
+{
+    auto* sketch = getObject();
+    const auto above = edgeAlongXAbove(box);
+    ASSERT_FALSE(above.empty());
+    ASSERT_GE(sketch->addExternal(box, above.c_str(), false, false), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    // the link's saved geometry: its line twice (another Id), which no type builds
+    {
+        auto geos = sketch->ExternalGeo.getValues();
+        std::vector<Part::Geometry*> copies;
+        for (auto* geo : geos) {
+            copies.push_back(geo->clone());
+        }
+        auto* twin = geos[2]->clone();
+        GeometryFacade::setId(twin, static_cast<int>(idOf(geos[2])) + 1000);
+        copies.push_back(twin);
+        sketch->ExternalGeo.setValues(std::move(copies));
+    }
+    // a list saved before ops#140
+    sketch->ExternalTypes.setValues({0, 0});
+    doc->purgeTouched();
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    ASSERT_EQ(countContaining(warnings, "its type can't be told"), 1U)
+        << warnings.size() << " warnings";
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
+
+    // saved again without a recompute
+    warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+}
+
 // A redo, as the undo above (H1): the link whose geometry was built from a guess still waits
 // after an edit is undone and redone (PR 277 verification 11)
 TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedThroughARedo)
