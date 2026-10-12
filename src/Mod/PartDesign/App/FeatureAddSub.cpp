@@ -31,7 +31,12 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 #include <GProp_GProps.hxx>
 #include <BRepGProp.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <App/Document.h>
 
+#include "Body.h"
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
 
@@ -120,6 +125,77 @@ short FeatureAddSub::mustExecute() const
         return 1;
     }
     return PartDesign::Feature::mustExecute();
+}
+
+App::DocumentObjectExecReturn* FeatureAddSub::recompute()
+{
+    App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
+    auto body = getFeatureBody();
+    // A subtractive feature with nothing before it cut nothing and returned its tool as material
+    // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
+    // longer takes as a base). Checked after the run, so an input's error is reported first; the
+    // failure passes the (empty) base through. Not when suppressed or held: those pass their
+    // base through already.
+    if (result == StdReturn && addSubType == Type::Subtractive && !Suppressed.getValue()
+        && !(body && body->holds(this)) && getBaseTopoShape(true).isNull()) {
+        return new App::DocumentObjectExecReturn(
+            "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
+            "BaseFeature",
+            this
+        );
+    }
+    if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
+        || (body && body->holds(this))) {
+        return result;
+    }
+    // A Common keeps only what its tool overlaps: in a base of several solids it removes the
+    // ones the tool doesn't reach, whole, with no sign (FreeCAD-CH ops#308 T3). Counted here
+    // for every subtractive feature: a base solid with no volume left in the result.
+    try {
+        const TopoShape base = getBaseTopoShape(true);
+        const std::vector<TopoShape> solids = base.getSubTopoShapes(TopAbs_SOLID);
+        const TopoDS_Shape& shape = Shape.getValue();
+        if (solids.size() < 2) {
+            return result;
+        }
+        Bnd_Box kept;
+        if (!shape.IsNull()) {
+            BRepBndLib::Add(shape, kept);
+        }
+        int gone = 0;
+        for (const TopoShape& solid : solids) {
+            Bnd_Box box;
+            BRepBndLib::Add(solid.getShape(), box);
+            double volume = 0;
+            if (!shape.IsNull() && !kept.IsOut(box)) {
+                BRepAlgoAPI_Common common(solid.getShape(), shape);
+                if (!common.IsDone()) {
+                    continue;  // unknown: not counted
+                }
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(common.Shape(), props);
+                volume = props.Mass();
+            }
+            gone += volume <= Precision::Confusion() ? 1 : 0;
+        }
+        if (gone > 0) {
+            const std::string text = "Common removed " + std::to_string(gone) + " of the "
+                + std::to_string(solids.size())
+                + " solids of its base entirely: those its tool doesn't overlap";
+            if (auto doc = getDocument()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return result;
 }
 
 void FeatureAddSub::getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& subShape)

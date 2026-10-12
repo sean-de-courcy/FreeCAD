@@ -61,6 +61,8 @@ public:
     const char* getBooleanMaker() const;
 
     short mustExecute() const override;
+    /// Warns when a Common removed whole solids of the base (FreeCAD-CH ops#308 T3)
+    App::DocumentObjectExecReturn* recompute() override;
 
     virtual void getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& subShape);
 

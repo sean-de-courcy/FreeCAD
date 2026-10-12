@@ -315,7 +315,8 @@ names it.
 | `feat/300-fillet-s3` | feat | ops#300 | - | `feat/300-fillet-s2` `e905ac5b46` (fork PR 286) | `4cd9e71421` (fork PR 288), 2026-10-12 | never (fork feature) |
 | `fix/292-originals-birth` | fix | ops#292 | - | `fix/292-stale-role-links` (fork PR 284) | `4a00e641fc` (fork PR 287), 2026-10-12 | never (fork fix) |
 | `fix/316-refine-locations` | fix | ops#316 | - | `integration` `4a00e641fc` | `09569c55bf` (fork PR 290), 2026-10-12 | never (fork fix) |
-| `fix/310-partdesign-location-chains` | fix | ops#310 | - | `fix/316-refine-locations` (fork PR 290) | (fork PR 291) | never (fork fix) |
+| `fix/310-partdesign-location-chains` | fix | ops#310 | - | `fix/316-refine-locations` (fork PR 290) | `746cbb6f2b` (fork PR 291), 2026-10-12 | never (fork fix) |
+| `fix/308-cross-body-traps` | fix | ops#308 | - | `integration` `e76ce293b2` | (fork PR 289) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

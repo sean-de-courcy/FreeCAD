@@ -64,6 +64,7 @@ from PartDesignTests.TestPolarPattern import TestPolarPattern
 from PartDesignTests.TestMultiTransform import TestMultiTransform
 from PartDesignTests.TestBoolean import TestBoolean
 from PartDesignTests.TestBaseFeature import TestBaseFeature
+from PartDesignTests.TestCrossBody import TestCrossBody
 
 # dressup features
 from PartDesignTests.TestFillet import TestFillet

@@ -415,6 +415,40 @@ bool CmdPartDesignShapeBinder::isActive()
 
 DEF_STD_CMD_A(CmdPartDesignSubShapeBinder)
 
+// A pick in another Body comes as a path through it, (Body2, "PadB.Face5"): a binder of that
+// depends on the whole Body, so two Bodies with binders of each other make a cycle that never
+// settles (FreeCAD-CH ops#308 T2). The feature itself, (PadB, "Face5"), is bound instead; the
+// binder follows its Body's placement. A whole Body picked stays as it is, and so does every pick
+// with no active Body: the binder is then made at the top level, where no cycle through a Body forms.
+static void bindFeaturesNotBodies(
+    std::map<App::DocumentObject*, std::vector<std::string>>& values,
+    const PartDesign::Body* active
+)
+{
+    std::map<App::DocumentObject*, std::vector<std::string>> result;
+    for (auto& [obj, subs] : values) {
+        auto body = freecad_cast<PartDesign::Body*>(obj);
+        if (!active || !body || body == active || subs.empty()) {
+            auto& kept = result[obj];
+            kept.insert(kept.end(), subs.begin(), subs.end());
+            continue;
+        }
+        for (const auto& sub : subs) {
+            const auto dot = sub.find('.');
+            App::DocumentObject* feature = dot == std::string::npos
+                ? nullptr
+                : obj->getSubObject(sub.substr(0, dot + 1).c_str(), nullptr, nullptr, false);
+            if (feature && body->hasObject(feature) && dot + 1 < sub.size()) {
+                result[feature].push_back(sub.substr(dot + 1));
+            }
+            else {
+                result[obj].push_back(sub);
+            }
+        }
+    }
+    values = std::move(result);
+}
+
 CmdPartDesignSubShapeBinder::CmdPartDesignSubShapeBinder()
     : Command("PartDesign_SubShapeBinder")
 {
@@ -472,6 +506,7 @@ void CmdPartDesignSubShapeBinder::activated(int iMsg)
         }
         values = std::move(links);
     }
+    bindFeaturesNotBodies(values, pcActiveBody);
 
     PartDesign::SubShapeBinder* binder = nullptr;
     try {

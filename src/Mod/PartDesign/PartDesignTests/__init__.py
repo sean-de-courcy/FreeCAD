@@ -3,6 +3,7 @@
 from . import TestBoolean
 from . import TestBaseFeature
 from . import TestChamfer
+from . import TestCrossBody
 from . import TestDatum
 from . import TestDraft
 from . import TestFillet
