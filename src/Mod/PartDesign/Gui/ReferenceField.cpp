@@ -64,6 +64,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 
 #include <App/Document.h>
@@ -482,8 +483,27 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
             onCurve.Perform(point);
             return onCurve.NbPoints() > 0 && onCurve.LowerDistance() <= tolerance;
         };
+        // The element's plane, if it is planar: a planar face on it needs no sampling
+        std::optional<gp_Pln> plane;
+        if (isFace) {
+            BRepAdaptor_Surface adaptor(TopoDS::Face(element), false);
+            if (adaptor.GetType() == GeomAbs_Plane) {
+                plane = adaptor.Plane();
+            }
+        }
+        auto onPlane = [&](const TopoDS_Shape& face) {
+            BRepAdaptor_Surface adaptor(TopoDS::Face(face), false);
+            if (!plane || adaptor.GetType() != GeomAbs_Plane) {
+                return false;
+            }
+            const gp_Pln own = adaptor.Plane();
+            return own.Axis().IsParallel(plane->Axis(), Precision::Angular())
+                && plane->Distance(own.Location()) <= tolerance;
+        };
         // The shape's faces (edges) on the element's surface (curve), their vertices tested first:
-        // they rule out most faces cheaply
+        // they rule out most faces cheaply. Sampling the rest costs a classification per point,
+        // about 0.2 s for a face with many holes, for each feature of a long body (ops#292 L5
+        // P4), so a planar face on the element's plane is taken whole
         BRep_Builder builder;
         TopoDS_Compound on;
         builder.MakeCompound(on);
@@ -492,6 +512,11 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
             bool vertices = true;
             for (TopExp_Explorer v(it.Current(), TopAbs_VERTEX); vertices && v.More(); v.Next()) {
                 vertices = onElement(BRep_Tool::Pnt(TopoDS::Vertex(v.Current())));
+            }
+            if (vertices && isFace && onPlane(it.Current())) {
+                builder.Add(on, it.Current());
+                any = true;
+                continue;
             }
             const std::vector<gp_Pnt> sample = vertices ? samplePoints(it.Current())
                                                         : std::vector<gp_Pnt>();
