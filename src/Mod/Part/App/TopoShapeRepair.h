@@ -4,6 +4,8 @@
 
 #include <Mod/Part/PartGlobal.h>
 
+class TopoDS_Shape;
+
 namespace Part
 {
 
@@ -59,5 +61,11 @@ PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
  * @return false if the result is invalid and wasn't repaired: the feature must fail
  */
 PartExport bool checkDressUp(TopoShape& shape, const TopoShape& base);
+
+/** Whether faces outside the shape's solids enclose a volume, which checkDressUp() never drops: a
+ * closed shell, or faces that close up among themselves (a sphere's face), each judged on its own,
+ * so that an open face beside them doesn't hide them (FreeCAD-CH, ops#297).
+ */
+PartExport bool enclosesOutsideSolids(const TopoDS_Shape& shape);
 
 }  // namespace Part

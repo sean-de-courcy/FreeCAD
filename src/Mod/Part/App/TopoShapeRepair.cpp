@@ -28,6 +28,7 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -465,7 +466,7 @@ int faceCount(const TopoDS_Shape& shape)
 
 // Whether the faces close up, enclosing a volume: every edge of theirs (but degenerate ones)
 // bounds two of them. A seam counts twice, so a lone closed face counts as closed.
-bool enclose(const TopoDS_Shape& faces)
+bool closesUp(const TopoDS_Shape& faces)
 {
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopExp::MapShapesAndAncestors(faces, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
@@ -481,6 +482,43 @@ bool enclose(const TopoDS_Shape& faces)
     return true;
 }
 
+// The faces in sets connected through shared edges
+std::vector<TopoDS_Compound> connectedFaces(const TopoDS_Shape& faces)
+{
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(faces, TopAbs_FACE, all);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(faces, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoDS_Compound> sets;
+    std::vector<bool> seen(all.Extent() + 1, false);
+    BRep_Builder builder;
+    for (int start = 1; start <= all.Extent(); ++start) {
+        if (seen[start]) {
+            continue;
+        }
+        TopoDS_Compound set;
+        builder.MakeCompound(set);
+        std::vector<int> todo {start};
+        seen[start] = true;
+        while (!todo.empty()) {
+            const auto& face = all(todo.back());
+            todo.pop_back();
+            builder.Add(set, face);
+            for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                for (const auto& other : edgeFaces.FindFromKey(it.Current())) {
+                    const int index = all.FindIndex(other);
+                    if (index > 0 && !seen[index]) {
+                        seen[index] = true;
+                        todo.push_back(index);
+                    }
+                }
+            }
+        }
+        sets.push_back(set);
+    }
+    return sets;
+}
+
 // The shape's solids, with their names: the solid itself if there is one
 TopoShape solidsOf(const TopoShape& shape)
 {
@@ -494,6 +532,21 @@ TopoShape solidsOf(const TopoShape& shape)
 }
 
 }  // namespace
+
+bool enclosesOutsideSolids(const TopoDS_Shape& shape)
+{
+    // Each shell on its own and each set of connected faces: a closed shell beside an open fin
+    // must not pass as open with it
+    for (TopExp_Explorer it(shape, TopAbs_SHELL, TopAbs_SOLID); it.More(); it.Next()) {
+        if (closesUp(it.Current())) {
+            return true;
+        }
+    }
+    const auto sets = connectedFaces(facesOutsideSolids(shape));
+    return std::any_of(sets.begin(), sets.end(), [](const auto& faces) {
+        return closesUp(faces);
+    });
+}
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base)
 {
@@ -529,7 +582,7 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
                 FC_WARN("Invalid dress-up result whose repair leaves shapes outside its solids");
                 return false;
             }
-            if (enclose(outside)) {
+            if (enclosesOutsideSolids(repaired.getShape())) {
                 FC_WARN("Invalid dress-up result whose repair leaves a closed shell outside its solids");
                 return false;
             }
