@@ -287,3 +287,260 @@ class TestUnknownCharacters(ExpressionUnitsBase):
         self.assertEqual(sheet.get("B1"), 10)
         self.assertEqual(sheet.get("B2"), 6)
         self.assertEqual(sheet.get("B3"), 7)
+
+
+class TestRestoredValues(ExpressionUnitsBase):
+    """ops#319 round 2: a value that is out of range but equal to its expression's result, as in
+    a file saved before the fix, is still checked: the engine skipped unchanged values."""
+
+    def testRestoredNegativeLength(self):
+        import os
+        import tempfile
+
+        varSet = self.addVarSet(L=("App::PropertyLength", 10))
+        # AllowNegativeValues isn't saved: the file holds -5 mm, as an older build would save it.
+        varSet.setPropertyStatus("L", "AllowNegativeValues")
+        varSet.setExpression("L", "-5 mm")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid())
+        self.assertEqual(varSet.L, FreeCAD.Units.Quantity("-5 mm"))
+        path = os.path.join(tempfile.mkdtemp(), "restored_negative_length.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+
+        self.doc = FreeCAD.openDocument(path)
+        varSet = self.doc.getObject("VarSet")
+        self.assertEqual(varSet.L, FreeCAD.Units.Quantity("-5 mm"))
+        varSet.touch()
+        self.doc.recompute()
+        self.assertInvalid(varSet, "below the minimum")
+
+
+class TestSnappedBound(ExpressionUnitsBase):
+    """ops#319 round 2: a value snapped to a bound doesn't count as a change on every evaluation."""
+
+    class Observer:
+        def __init__(self):
+            self.changes = []
+
+        def slotChangedObject(self, obj, prop):
+            self.changes.append((obj.Name, prop))
+
+    def testTwoPiRadiansSetOnce(self):
+        varSet = self.addVarSet(Ang=("App::PropertyAngle", 30))
+        varSet.setExpression("Ang", "2 * pi * 1 rad")
+        self.doc.recompute()
+        self.assertEqual(varSet.Ang.Value, 360.0)
+        observer = self.Observer()
+        FreeCAD.addDocumentObserver(observer)
+        try:
+            varSet.touch()
+            self.doc.recompute()
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+        self.assertNotIn(("VarSet", "Ang"), observer.changes)
+        self.assertTrue(varSet.isValid())
+
+
+class TestNumberConstraints(ExpressionUnitsBase):
+    """ops#319 round 2: Float and Integer constraints and Percent refuse a value outside their
+    range, from expressions and from Python (on document objects), instead of storing it as is
+    or clamping it."""
+
+    def testPercentByExpression(self):
+        varSet = self.addVarSet(P=("App::PropertyPercent", 50))
+        varSet.setExpression("P", "150")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "above the maximum")
+        self.assertEqual(varSet.P, 50)
+        varSet.setExpression("P", "-5")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "below the minimum")
+        self.assertEqual(varSet.P, 50)
+        varSet.setExpression("P", "100")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid())
+        self.assertEqual(varSet.P, 100)
+
+    def testPercentByValue(self):
+        varSet = self.addVarSet(P=("App::PropertyPercent", 50))
+        with self.assertRaises(ValueError):
+            varSet.P = 150
+        with self.assertRaises(ValueError):
+            varSet.P = -1
+        self.assertEqual(varSet.P, 50)
+        varSet.P = 0
+        self.assertEqual(varSet.P, 0)
+
+    def testFloatConstraint(self):
+        varSet = self.addVarSet(F=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
+        with self.assertRaises(ValueError):
+            varSet.F = 50.0
+        with self.assertRaises(ValueError):
+            varSet.F = 11
+        self.assertEqual(varSet.F, 5.0)
+        varSet.setExpression("F", "50")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "above the maximum")
+        self.assertEqual(varSet.F, 5.0)
+        varSet.setExpression("F", "2.5 * 4")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid())
+        self.assertEqual(varSet.F, 10.0)
+
+    def testIntegerConstraint(self):
+        varSet = self.addVarSet(N=("App::PropertyIntegerConstraint", (3, 1, 10, 1)))
+        varSet.setExpression("N", "21 / 2")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "above the maximum")
+        self.assertEqual(varSet.N, 3)
+        varSet.setExpression("N", "19 / 2")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid())
+        self.assertEqual(varSet.N, 10)  # 9.5 rounds to 10, the maximum
+
+    def testNewRangeStillFitsItsValue(self):
+        # The tuple form sets a new range; its value is fitted into it, as before.
+        varSet = self.addVarSet(F=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
+        varSet.F = (50.0, 0.0, 20.0, 1.0)
+        self.assertEqual(varSet.F, 20.0)
+
+
+class TestSubPathUnits(ExpressionUnitsBase):
+    """ops#319 round 2: Placement, Vector and Sketcher constraint sub-paths dropped a wrong unit
+    (`.Placement.Base.x = 30 deg` placed at 30 mm, an Angle constraint of `10 mm` gave 10 deg)."""
+
+    def testPlacementBase(self):
+        box = self.addBox()
+        box.setExpression(".Placement.Base.x", "30 deg")
+        self.doc.recompute()
+        self.assertInvalid(box, "Unit mismatch", "Length", "Angle")
+        self.assertEqual(box.Placement.Base.x, 0.0)
+        box.setExpression(".Placement.Base.x", "2 cm")
+        self.doc.recompute()
+        self.assertTrue(box.isValid())
+        self.assertEqual(box.Placement.Base.x, 20.0)
+        box.setExpression(".Placement.Base.x", "7")
+        self.doc.recompute()
+        self.assertTrue(box.isValid())
+        self.assertEqual(box.Placement.Base.x, 7.0)
+
+    def testPlacementAngle(self):
+        box = self.addBox()
+        box.setExpression(".Placement.Rotation.Angle", "10 mm")
+        self.doc.recompute()
+        self.assertInvalid(box, "Unit mismatch", "Angle", "Length")
+        self.assertAlmostEqual(box.Placement.Rotation.Angle, 0.0, places=12)
+        box.setExpression(".Placement.Rotation.Angle", "90 deg")
+        self.doc.recompute()
+        self.assertTrue(box.isValid())
+        self.assertAlmostEqual(box.Placement.Rotation.Angle, 1.5707963267948966, places=12)
+
+    def testVectorDistance(self):
+        varSet = self.addVarSet(V=("App::PropertyVectorDistance", FreeCAD.Vector(1, 2, 3)))
+        varSet.setExpression(".V.x", "30 deg")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "Unit mismatch")
+        self.assertEqual(varSet.V.x, 1.0)
+        varSet.setExpression(".V.x", "1 cm")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid())
+        self.assertEqual(varSet.V, FreeCAD.Vector(10, 2, 3))
+
+    def addSketch(self):
+        import Part
+        import Sketcher
+
+        sketch = self.doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 10, 0)))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 1, 1, 1))
+        sketch.addConstraint(Sketcher.Constraint("Horizontal", 0))
+        sketch.addConstraint(Sketcher.Constraint("Coincident", 0, 1, -1, 1))
+        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        sketch.renameConstraint(3, "d")
+        sketch.addConstraint(Sketcher.Constraint("Angle", 0, 1, 1.5707963267948966))
+        sketch.renameConstraint(4, "a")
+        sketch.addConstraint(Sketcher.Constraint("Distance", 1, 10.0))
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid())
+        return sketch
+
+    def testSketchDistance(self):
+        sketch = self.addSketch()
+        sketch.setExpression("Constraints.d", "30 deg")
+        self.doc.recompute()
+        self.assertInvalid(sketch, "Unit mismatch", "Length", "Angle")
+        self.assertAlmostEqual(sketch.Geometry[0].length(), 10.0, places=9)
+        sketch.setExpression("Constraints.d", "3 cm")
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid())
+        self.assertAlmostEqual(sketch.Geometry[0].length(), 30.0, places=9)
+
+    def testSketchAngle(self):
+        sketch = self.addSketch()
+        sketch.setExpression("Constraints.a", "10 mm")
+        self.doc.recompute()
+        self.assertInvalid(sketch, "Unit mismatch", "Angle", "Length")
+        sketch.setExpression("Constraints.a", "45 deg")
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid())
+        # Line 1 at 45 deg to line 0: its end is at (10 cos 45, 10 sin 45).
+        end = sketch.Geometry[1].EndPoint
+        self.assertAlmostEqual(end.x, 7.0710678118654755, places=9)
+        self.assertAlmostEqual(end.y, 7.0710678118654755, places=9)
+
+
+class TestRetypedProperties(ExpressionUnitsBase):
+    """ops#319 round 2: properties that hold an angle or a length were plain floats, so an
+    expression with its unit became an error: Part Revolution Angle, SubShapeBinder Offset."""
+
+    def testRevolutionAngleInDegrees(self):
+        import math
+        import Part
+
+        varSet = self.addVarSet(Ang=("App::PropertyAngle", 90))
+        profile = self.doc.addObject("Part::Feature", "Profile")
+        corners = [FreeCAD.Vector(x, 0, z) for x, z in ((10, 0), (20, 0), (20, 10), (10, 10))]
+        profile.Shape = Part.Face(Part.makePolygon(corners + corners[:1]))
+        revolution = self.doc.addObject("Part::Revolution", "Revolution")
+        revolution.Source = profile
+        revolution.Axis = FreeCAD.Vector(0, 0, 1)
+        revolution.Solid = True
+        revolution.setExpression("Angle", "VarSet.Ang")
+        self.doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertEqual(revolution.Angle, FreeCAD.Units.Quantity("90 deg"))
+        # Pappus: area 100 mm^2, centroid at radius 15 mm, a quarter turn.
+        self.assertAlmostEqual(revolution.Shape.Volume, 100 * 15 * math.pi / 2, places=6)
+        revolution.setExpression("Angle", "10 mm")
+        self.doc.recompute()
+        self.assertInvalid(revolution, "Unit mismatch")
+
+    def testSubShapeBinderOffsetInMillimetres(self):
+        import Part
+
+        source = self.doc.addObject("Part::Feature", "Square")
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
+        source.Shape = Part.makePolygon(corners + corners[:1])
+        binder = self.doc.addObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(source, ("Edge1", "Edge2", "Edge3", "Edge4"))]
+        binder.MakeFace = True
+        binder.setExpression("Offset", "0.2 cm")
+        self.doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertEqual(binder.Offset, FreeCAD.Units.Quantity("2 mm"))
+        # A 10 mm square grown by 2 mm with round corners: 100 + 4 * 10 * 2 + pi * 2^2.
+        import math
+
+        self.assertAlmostEqual(binder.Shape.Area, 180 + 4 * math.pi, places=4)
+
+
+class TestWhitespaceCharacters(ExpressionUnitsBase):
+    """ops#320 round 2: characters without a rule that count as whitespace."""
+
+    def testNoBreakSpaces(self):
+        varSet = self.addVarSet(Flag=("App::PropertyBool", False))
+        self.assertEqual(varSet.evalExpression("1 + 2"), 3)
+        self.assertEqual(varSet.evalExpression("1\f+\v2"), 3)
+        self.assertEqual(varSet.evalExpression("2 mm"), FreeCAD.Units.Quantity("2 mm"))

@@ -185,6 +185,29 @@ class TestVariablesGui(unittest.TestCase):
         dialog.reject()
         pump(0.2)
 
+    def test_formula_dialog_plain_quantity_keeps_unit(self):
+        """ops#319 round 2: a plain Quantity takes the result's unit, so the f(x) dialog doesn't
+        warn "unit discarded" for it."""
+        self.varSet.addProperty("App::PropertyQuantity", "Q")
+        spin = self.boundSpinBox(self.varSet, "Q")
+        QTest.keyClicks(spin, "=")
+        dialog = waitFor(
+            lambda: widgetsOfClass(spin, QtWidgets.QDialog, "Gui::Dialog::DlgExpressionInput")
+        )
+        self.assertTrue(dialog, "the f(x) dialog didn't open")
+        dialog = dialog[0]
+        editor = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+        ok = dialog.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.Ok)
+        message = dialog.findChild(QtWidgets.QLabel, "msg")
+
+        editor.setPlainText("30 deg")
+        pump(0.3)
+        self.assertNotIn("discarded", message.text())
+        self.assertNotIn("mismatch", message.text())
+        self.assertTrue(ok.isEnabled())
+        dialog.reject()
+        pump(0.2)
+
     def test_property_editor(self):
         """G12. The property editor's `value ( expr )` text."""
         self.assertIn("( #Width * 2 )", self.propertyRowText(self.box, "Length"))
