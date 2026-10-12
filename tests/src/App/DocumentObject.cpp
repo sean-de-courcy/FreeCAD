@@ -8,6 +8,8 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/Expression.h>
+#include <App/ObjectIdentifier.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <Base/Interpreter.h>
 
@@ -153,6 +155,27 @@ TEST_F(DocumentObjectTest, getSubObjectList)
     EXPECT_EQ(sizesFlatten.size(), 2);
     EXPECT_EQ(sizesFlatten[0], 0);
     EXPECT_EQ(sizesFlatten[1], strlen(fuseName) + strlen(boxName) + 2);
+}
+
+TEST_F(DocumentObjectTest, getOutListNoExpression)
+{
+    // FreeCAD-CH (ops#224): OutListNoExpression leaves out an expression's links. The expression
+    // engine is a link property too, so the loop over the link properties listed them anyway.
+    auto source = _doc->addObject("App::VarSet", "Source");
+    auto user = _doc->addObject("App::VarSet", "User");
+    source->addDynamicProperty("App::PropertyInteger", "Value", "Variables");
+    auto value = user->addDynamicProperty("App::PropertyInteger", "Value", "Variables");
+    user->setExpression(
+        App::ObjectIdentifier(*value),
+        std::shared_ptr<App::Expression>(App::Expression::parse(user, "Source.Value"))
+    );
+
+    EXPECT_THAT(user->getOutList(DocumentObject::OutListNoExpression), ::testing::IsEmpty());
+    EXPECT_THAT(
+        user->getOutList(DocumentObject::OutListNoExpression | DocumentObject::OutListNoHidden),
+        ::testing::IsEmpty()
+    );
+    EXPECT_THAT(user->getOutList(DocumentObject::OutListNoHidden), ::testing::Contains(source));
 }
 
 // NOLINTEND(readability-magic-numbers, cppcoreguidelines-avoid-magic-numbers)

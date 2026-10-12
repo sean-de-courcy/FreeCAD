@@ -21,6 +21,7 @@
  **************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -283,10 +284,14 @@ std::vector<gp_Pnt> samplePoints(const TopoDS_Shape& element)
 }
 
 // Whether the element lies in the boundary of the tool: a face within its faces (a face trimmed
-// by the features after it lies within the face it was cut from), an edge or a vertex on them
-bool liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
+// by the features after it lies within the face it was cut from), an edge or a vertex on them.
+// Nothing when that can't be told: no element, no point to test, or a failed computation.
+std::optional<bool> liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
 {
-    if (element.IsNull() || tool.IsNull()) {
+    if (element.IsNull()) {
+        return std::nullopt;
+    }
+    if (tool.IsNull()) {
         return false;
     }
     try {
@@ -302,14 +307,24 @@ bool liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
         for (TopExp_Explorer it(element, TopAbs_VERTEX); it.More(); it.Next()) {
             tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
         }
-        auto onTool = [&faces, tolerance](const gp_Pnt& point) {
+        if (points.empty()) {
+            return std::nullopt;
+        }
+        // A point off the tool decides; a point whose distance failed leaves it open
+        bool unknown = false;
+        for (const gp_Pnt& point : points) {
             BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), faces);
-            return distance.IsDone() && distance.Value() <= tolerance;
-        };
-        return !points.empty() && std::ranges::all_of(points, onTool);
+            if (!distance.IsDone()) {
+                unknown = true;
+            }
+            else if (distance.Value() > tolerance) {
+                return false;
+            }
+        }
+        return unknown ? std::nullopt : std::optional<bool>(true);
     }
     catch (const Standard_Failure&) {
-        return false;
+        return std::nullopt;
     }
 }
 
@@ -1028,9 +1043,6 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     if (!origin) {
         return nullptr;
     }
-    if (usable(origin)) {
-        return origin;
-    }
     // A sketch: the feature it is the profile of, also through binders: the side faces of a pad
     // on a ShapeBinder or SubShapeBinder come from the binder's source (a sketch, a face, an inner
     // binder). A binder counts by what it binds (its Support), not by its other links.
@@ -1071,37 +1083,174 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         }
         return std::pair {profiles, profiled};
     };
-    // Whether the candidate's tool (placed) has the element in its boundary
+    // The roles in which a feature makes elements from what it links (ops#224): not its other
+    // links, such as an attachment, a pattern's direction along the sketch's axis, or an
+    // expression (a fillet's radius from the sketch's placement)
+    static constexpr std::array roles {
+        "Sections",
+        "Spine",
+        "AuxiliarySpine",
+        "UpToFace",
+        "UpToFace2",
+        "UpToShape",
+        "UpToShape2",
+        "StartReference",
+    };
+    // What the feature links in those roles
+    auto roleLinks = [](App::DocumentObject* obj) {
+        std::vector<App::DocumentObject*> linked;
+        for (const char* role : roles) {
+            if (auto link = freecad_cast<App::PropertyLinkBase*>(obj->getPropertyByName(role))) {
+                link->getLinks(linked, true);
+            }
+        }
+        return linked;
+    };
+    auto inRole = [&roleLinks](App::DocumentObject* obj,
+                               const std::vector<App::DocumentObject*>& profiles) {
+        return std::ranges::any_of(roleLinks(obj), [&](App::DocumentObject* used) {
+            return std::ranges::find(profiles, used) != profiles.end();
+        });
+    };
+    // Up the binders to the objects they bind, through every support of a binder with several
+    // (fork PR 267 round 3 verification); a binder with none is its own root
+    auto rootsOf = [](App::DocumentObject* obj) {
+        std::vector<App::DocumentObject*> roots;
+        std::vector<App::DocumentObject*> bound;
+        std::vector<App::DocumentObject*> pending {obj};
+        while (!pending.empty()) {
+            obj = pending.back();
+            pending.pop_back();
+            if (!obj || std::ranges::find(bound, obj) != bound.end()) {
+                continue;
+            }
+            bound.push_back(obj);
+            std::vector<App::DocumentObject*> supports;
+            if (auto binder = freecad_cast<PartDesign::ShapeBinder*>(obj)) {
+                supports = binder->Support.getValues();
+            }
+            else if (auto binder = freecad_cast<PartDesign::SubShapeBinder*>(obj)) {
+                supports = binder->Support.getValues();
+            }
+            if (supports.empty()) {
+                roots.push_back(obj);
+            }
+            pending.insert(pending.end(), supports.begin(), supports.end());
+        }
+        return roots;
+    };
+    // The features that make elements from the profiles in a role (a loft through one as a
+    // section, a pipe along one, a pad up to one): the history can leave them out, so they are
+    // looked for among the profiles' users (fork PR 267 review, M1). Not a suppressed or failed
+    // one, nor one the shape can't hold (another body's, the owner, a feature after it).
+    PartDesign::Body* ownerBody = PartDesign::Body::findBodyOf(owner());
+    auto roleUsers = [this, &inRole, ownerBody](const std::vector<App::DocumentObject*>& profiles) {
+        std::vector<App::DocumentObject*> found;
+        for (App::DocumentObject* profile : profiles) {
+            for (App::DocumentObject* user : profile->getInList()) {
+                auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(user);
+                if (!addSub || addSub->Suppressed.getValue() || addSub->isError()
+                    || std::ranges::find(found, user) != found.end() || !inRole(user, profiles)
+                    || PartDesign::Body::findBodyOf(user) != ownerBody) {
+                    continue;
+                }
+                if (options.noDependents) {
+                    NoDependentsSelection independent(owner());
+                    if (!independent.allow(user->getDocument(), user, "")) {
+                        continue;
+                    }
+                }
+                found.push_back(user);
+            }
+        }
+        return found;
+    };
+    // Whether the feature's tool (placed) has the element in its boundary; nothing when that can't
+    // be told (fork PR 267 review, L3). Once per feature: each test costs a dozen distances.
     TopoDS_Shape element;
-    auto touches = [&element, shape, sub](App::DocumentObject* obj) {
+    std::map<App::DocumentObject*, std::optional<bool>> tested;
+    auto onTool = [&element, &tested, shape, sub](App::DocumentObject* obj) -> std::optional<bool> {
+        if (auto it = tested.find(obj); it != tested.end()) {
+            return it->second;
+        }
         if (element.IsNull()) {
             const Part::ShapeOptions shapeOptions = Part::ShapeOption::NeedSubElement
                 | Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
             element = Part::Feature::getTopoShape(shape, shapeOptions, sub).getShape();
         }
-        auto based = static_cast<PartDesign::ProfileBased*>(obj);
-        Part::TopoShape tool = based->AddSubShape.getShape();
-        return liesOn(element, tool.moved(based->getLocation()).getShape());
+        std::optional<bool> result;
+        if (auto addSub = freecad_cast<PartDesign::FeatureAddSub*>(obj)) {
+            Part::TopoShape tool = addSub->AddSubShape.getShape();
+            result = liesOn(element, tool.moved(addSub->getLocation()).getShape());
+        }
+        tested[obj] = result;
+        return result;
     };
+    // A candidate is taken when its tool has the element; another feature rules it out when its
+    // tool may have it (also when that can't be told)
+    auto touches = [&onTool](App::DocumentObject* obj) {
+        return onTool(obj).value_or(false);
+    };
+    auto mayTouch = [&onTool](App::DocumentObject* obj) {
+        return onTool(obj).value_or(true);
+    };
+    // Whether a feature other than the candidate may have made the element too: one on the
+    // profiles or using them in a role, and the same for each root of the candidate's own profile
+    // (a pocket on a sibling binder of the sketch the candidate's binders bind: fork PR 267
+    // round 2 verification) and of each object the candidate uses in a role (a pad down from a
+    // loft's section, against the loft: round 1 verification). Nothing tells them apart.
+    auto rivalled = [&](App::DocumentObject* candidate,
+                        const std::vector<App::DocumentObject*>& profiles,
+                        const std::vector<App::DocumentObject*>& profiled) {
+        auto other = [&](App::DocumentObject* obj) {
+            return obj != candidate && mayTouch(obj);
+        };
+        auto rivalOn = [&](App::DocumentObject* used) {
+            return std::ranges::any_of(rootsOf(used), [&](App::DocumentObject* root) {
+                auto [usedProfiles, usedProfiled] = profiledBy(root);
+                return std::ranges::any_of(usedProfiled, other)
+                    || std::ranges::any_of(roleUsers(usedProfiles), other);
+            });
+        };
+        if (std::ranges::any_of(profiled, other)
+            || std::ranges::any_of(roleUsers(profiles), other)) {
+            return true;
+        }
+        auto based = freecad_cast<PartDesign::ProfileBased*>(candidate);
+        if (based && rivalOn(based->Profile.getValue())) {
+            return true;
+        }
+        return std::ranges::any_of(roleLinks(candidate), rivalOn);
+    };
+    // An origin that is a feature made the element, unless the tool of another feature on its
+    // profile, or on a binder of what its profile binds, or using them in a role, or on what the
+    // origin itself uses in a role, has it in its boundary too: nothing tells them apart (a pad's
+    // bottom imprinted by a pocket below it, on a binder of the pad's binder, is named by the
+    // pocket alone, ops#224; a loft's cap that a pad down from its section has too). The rivals on
+    // the roots of its profile are those rivalled looks for on the candidate's profile.
+    if (usable(origin)) {
+        return rivalled(origin, {}, {}) ? nullptr : origin;
+    }
     // In the history, from the shape towards the origin: the first item that uses the next one
     // (nearer the origin) as its profile. A pad and a pocket on one sketch: the one whose wall it
     // is. A pad on a binder of a face of a pad: the pad on the binder, not the pad below it (its
     // faces have [pad, pad below, sketch]). A cut that only trimmed or imprinted the element is in
     // its history too, so a candidate reached through a binder or from an item above the origin
     // must have the element in its tool's boundary, or the search goes on. Another candidate whose
-    // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch): nothing tells them
-    // apart.
-    // Once a candidate's tool didn't have the element (a draft of the pad on the binder tilted its
-    // side: [draft, pad, pad below, sketch]), the element may have been changed by something its
-    // history doesn't tell: every later candidate, also a plain one, needs it too.
+    // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch), or a feature using
+    // the profiles in a role whose tool has it: nothing tells them apart.
+    // Once a candidate's tool didn't have the element (a fillet on the pad on the binder rounded
+    // its edge down into the pad below: [fillet, pad, pad below, sketch]), the element may have
+    // been changed by something its history doesn't tell: every later candidate, also a plain one,
+    // needs it too.
     bool failed = false;
     for (auto item = history.begin(); item != history.end(); ++item) {
         auto next = std::next(item);
         if (next == history.end() || !item->obj || !next->obj) {
             break;
         }
-        const std::vector<App::DocumentObject*> users = profiledBy(next->obj).second;
-        if (std::ranges::find(users, item->obj) == users.end()) {
+        const auto [family, candidates] = profiledBy(next->obj);
+        if (std::ranges::find(candidates, item->obj) == candidates.end()) {
             continue;
         }
         auto based = static_cast<PartDesign::ProfileBased*>(item->obj);
@@ -1110,40 +1259,60 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             failed = true;
             continue;
         }
-        if (std::ranges::any_of(users, [&](auto user) {
-                return user != item->obj && touches(user);
-            })) {
+        if (rivalled(item->obj, family, candidates)) {
             return nullptr;
         }
         return item->obj;
     }
-    auto [profiles, profiled] = profiledBy(origin);
+    const auto [profiles, candidates] = profiledBy(origin);
     // Not in the history: no guess unless it's a safe one (fork PR 196 review, ops#219). Several:
     // those whose tool has the element in its boundary; one left, that one, otherwise nothing
     // tells them apart (a face where a pad's bottom meets a pocket's ceiling). After a candidate
     // in the history failed that test, a single one needs it too.
-    if (profiled.empty()) {
+    if (candidates.empty()) {
         return nullptr;
     }
-    if (profiled.size() > 1 || failed) {
+    App::DocumentObject* guess = candidates.front();
+    if (candidates.size() > 1 || failed) {
         std::vector<App::DocumentObject*> touching;
-        std::ranges::copy_if(profiled, std::back_inserter(touching), touches);
-        if (touching.size() != 1) {
+        std::ranges::copy_if(candidates, std::back_inserter(touching), mayTouch);
+        if (touching.size() != 1 || !touches(touching.front())) {
             return nullptr;
         }
-        profiled = touching;
+        guess = touching.front();
+    }
+    // A feature that makes elements from the origin in a role, or from what the guess uses in a
+    // role, whose tool may have the element: the history may have left it out (a single
+    // candidate is taken without the test above)
+    if (rivalled(guess, profiles, candidates)) {
+        return nullptr;
     }
     // Every guess, also the single one: an origin that has solid faces of its own (the body's
     // base, a box cut into it, another body's feature) made the element itself: a pad on a binder
     // of its face left that face as it was. So did an object between the origin and the shape
     // that isn't a feature of the body (another body's pad of the sketch a binder binds, an
-    // extrusion of it as the base), and a feature of the body that uses the origin otherwise than
-    // the candidates do (a loft through it as a section, a pipe along it as its spine).
+    // extrusion of it as the base), and a feature of the body that makes elements from the origin
+    // otherwise than the candidates do (a loft through it as a section, a pipe along it as its
+    // spine, a pad up to it), also through a binder of it.
     auto feature = freecad_cast<PartDesign::Feature*>(owner());
     PartDesign::Body* body = feature ? feature->getFeatureBody() : nullptr;
     if (!body || body->BaseFeature.getValue() == origin) {
         return nullptr;
     }
+    auto makesFrom = [&](App::DocumentObject* obj) {
+        // The origin as the profile: a candidate that failed, or one that isn't usable. A binder
+        // of it as the profile of a feature that isn't a candidate (fork PR 267 review, M2).
+        auto based = freecad_cast<PartDesign::ProfileBased*>(obj);
+        if (based) {
+            App::DocumentObject* profile = based->Profile.getValue();
+            if (profile == origin
+                || (std::ranges::find(profiles, profile) != profiles.end()
+                    && std::ranges::find(candidates, obj) == candidates.end())) {
+                return true;
+            }
+        }
+        return inRole(obj, profiles);
+    };
     for (const Data::HistoryItem& item : history) {
         if (item.obj == origin) {
             continue;
@@ -1151,14 +1320,7 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj)) {
             return nullptr;
         }
-        // Not through an expression (a fillet's radius from the sketch's placement). getOutList()
-        // keeps those even with OutListNoExpression (the engine is a link property too).
-        const std::vector<App::DepEdge> links =
-            item.obj->getOutListProp(App::DocumentObject::OutListNoExpression);
-        const bool linked = std::ranges::any_of(links, [origin](const App::DepEdge& link) {
-            return link.toObj == origin;
-        });
-        if (linked && std::ranges::find(profiles, item.obj) == profiles.end()) {
+        if (makesFrom(item.obj)) {
             return nullptr;
         }
     }
@@ -1167,7 +1329,7 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         || freecad_cast<PartDesign::SubShapeBinder*>(origin)
         || !Part::Feature::getTopoShape(origin, Part::ShapeOption::ResolveLink)
                 .hasSubShape(TopAbs_SOLID);
-    return flat ? profiled.front() : nullptr;
+    return flat ? guess : nullptr;
 }
 
 void ReferenceField::pickObject(App::DocumentObject* obj, const char* sub)
