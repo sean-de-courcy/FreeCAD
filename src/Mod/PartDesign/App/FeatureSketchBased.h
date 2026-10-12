@@ -167,6 +167,9 @@ public:
     static const char* StartTypesEnums[];
 
 protected:
+    /// Reads whether the saved error is recompute()'s placed-elsewhere failure (ops#308)
+    void onDocumentRestored() override;
+
     /// Set while onDocumentRestored() rewrites deprecated properties, so that the deprecation
     /// notices in onChanged() stay quiet for the migration's own writes.
     bool migratingDeprecatedProperties = false;
@@ -290,6 +293,11 @@ protected:
     ) override;
 
 private:
+    // The last recompute failed because a placer is in a Body placed elsewhere (ops#308 R2-2).
+    // Not read from the error text in mustExecute(): a recompute sets the texts aside while it
+    // runs (ops#126)
+    bool failedElsewhere = false;
+
     bool isParallelPlane(const TopoDS_Shape&, const TopoDS_Shape&) const;
     bool isEqualGeometry(const TopoDS_Shape&, const TopoDS_Shape&) const;
     bool isQuasiEqual(const TopoDS_Shape&, const TopoDS_Shape&) const;

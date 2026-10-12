@@ -212,9 +212,7 @@ short ProfileBased::mustExecute() const
     // would ever settle (F6).
     auto body = getFeatureBody();
     if (body && !Suppressed.getValue() && !body->holds(this)) {
-        const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
-        const bool failedElsewhere = why && std::strstr(why, placedElsewhere);
-        if ((profileBodyElsewhere() != nullptr) != failedElsewhere) {
+        if ((profileBodyElsewhere() != nullptr) != (failedElsewhere && isError())) {
             return 1;
         }
     }
@@ -225,7 +223,8 @@ App::DocumentObjectExecReturn* ProfileBased::recompute()
 {
     auto body = getFeatureBody();
     auto other = profileBodyElsewhere();
-    if (other && !Suppressed.getValue() && !body->holds(this)) {
+    failedElsewhere = other && !Suppressed.getValue() && !body->holds(this);
+    if (failedElsewhere) {
         return new App::DocumentObjectExecReturn(
             std::string("The profile, a section, spine, up-to face or shape, or axis of this "
                         "feature, or what it is attached to, is in Body ")
@@ -235,6 +234,14 @@ App::DocumentObjectExecReturn* ProfileBased::recompute()
         );
     }
     return FeatureAddSub::recompute();
+}
+
+void ProfileBased::onDocumentRestored()
+{
+    // The error and its text are restored with the document, before this
+    const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
+    failedElsewhere = why && std::strstr(why, placedElsewhere);
+    FeatureAddSub::onDocumentRestored();
 }
 
 void ProfileBased::setupObject()
