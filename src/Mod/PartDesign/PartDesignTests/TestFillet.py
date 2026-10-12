@@ -27,6 +27,7 @@ import unittest
 
 import FreeCAD
 import Part
+from parttests import FilletFallbackTest as models
 
 
 class TestFillet(unittest.TestCase):
@@ -336,9 +337,10 @@ class TestFillet(unittest.TestCase):
         self.assertFalse(fillet.isValid())
         self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
 
-    # Invalid results that OCCT (8.0.1) returns without an error for valid bases (ops#297). The
-    # exact construction builds them where it can (at the limit); the feature repairs the others
-    # only if the repair keeps the solids and the surface, or fails.
+    # Invalid results that OCCT (8.0.1) returns without an error (ops#297), on the models of
+    # parttests.FilletFallbackTest. The exact construction builds them where it can (at the
+    # limit); the feature repairs the others only if the repair keeps the solids and the faces,
+    # or fails.
 
     def _fillet_on_base(self, shape, edges, radius, allow_compound=False):
         body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -347,32 +349,29 @@ class TestFillet(unittest.TestCase):
         feature.Shape = shape
         body.BaseFeature = feature
         self.Doc.recompute()
-        return self._add_fillet(body, body.BaseFeature, edges, radius)
+        names = [
+            "Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge))
+            for edge in edges
+        ]
+        return self._add_fillet(body, body.BaseFeature, names, radius)
 
-    def _edges_between(self, shape, ends):
-        return [self._edge_between(shape, p, q) for p, q in ends]
+    def _assertFails(self, fillet):
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
 
     def testFilletInvalidOcctResultAtLimit(self):
-        # A rib 30 x 4 x 20 against a wall as high: a round as wide as its top. OCCT's result is
-        # invalid; the exact construction builds it
-        V = FreeCAD.Vector
-        rib = Part.makeBox(30, 4, 20).fuse(Part.makeBox(5, 24, 20, V(-5, -10, 0))).removeSplitter()
-        edges = self._edges_between(rib, [((0, 0, 20), (30, 0, 20))])
+        # A round as wide as a rib's top, against a wall: OCCT's result is invalid; the exact
+        # construction builds it
+        rib, edges = models.rib_against_wall()
         fillet = self._fillet_on_base(rib, edges, 4.0)
         self._assertValidFillet(fillet, 4800 - self._fillet_section(4.0) * 30)
 
     def testFilletOverlongFullRoundFails(self):
-        # Just over the full round of a disk's rims (radius 10, 2 thick), OCCT returns two invalid
-        # solids with three quarters more volume, which the feature stored with Allow Compound on
-        disk = Part.makeCylinder(10, 2)
-        rims = [
-            "Edge%d" % i
-            for i, e in enumerate(disk.Edges, 1)
-            if e.Curve.TypeId == "Part::GeomCircle"
-        ]
+        # Just over the full round of a disk's rims, OCCT returns two invalid solids with
+        # three quarters more volume, which the feature stored with Allow Compound on
+        disk, rims = models.disk()
         fillet = self._fillet_on_base(disk, rims, 1.00001, allow_compound=True)
-        self.assertFalse(fillet.isValid())
-        self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
+        self._assertFails(fillet)
         fillet.Radius = 1.0
         self.Doc.recompute()
         c = self._fillet_section_centroid(1.0)
@@ -381,44 +380,31 @@ class TestFillet(unittest.TestCase):
         )
 
     def testFilletOverlappingRoundsFail(self):
-        # A block 24 x 16 x 10 with a notch 8 x 6 x 6 in its front top: rounds of 2.65 on the
-        # front bottom edge and the notch floor's front edge, 4 apart, overlap on the face between
-        # them, and no fillet exists. OCCT's result has a self-intersecting wire, which the repair
-        # turned into a valid solid with two more faces and more area
-        V = FreeCAD.Vector
-        block = Part.makeBox(24, 16, 10).cut(Part.makeBox(8, 6, 6, V(8, 0, 4)))
-        ends = [
-            ((0, 0, 0), (24, 0, 0)),
-            ((8, 0, 4), (16, 0, 4)),
-            ((24, 0, 0), (24, 16, 0)),
-            ((8, 0, 4), (8, 6, 4)),
+        # Rounds of 2.65 on two edges 4 apart overlap on the face between them, and no fillet
+        # exists. OCCT's result has a self-intersecting wire, which the repair turned into a
+        # valid solid with two more faces: on the block, on a large block (where the faces'
+        # total area hardly changes), and on a base made invalid elsewhere
+        block, edges = models.notched_block()
+        self._assertFails(self._fillet_on_base(block, edges, 2.65))
+        block, edges = models.notched_block(0.1, (1000, 1000, 1))
+        self._assertFails(self._fillet_on_base(block, edges, 0.265))
+        block, edges = models.notched_block()
+        base = models.with_back_face_reversed(block)
+        edges = [
+            models.edge_between(base, e.Vertexes[0].Point, e.Vertexes[-1].Point) for e in edges
         ]
-        fillet = self._fillet_on_base(block, self._edges_between(block, ends), 2.65)
-        self.assertFalse(fillet.isValid())
-        self.assertEqual(fillet.getStatusString(), "Resulting shape is invalid")
+        self._assertFails(self._fillet_on_base(base, edges, 2.65))
 
     def testFilletRepairKeepingTheSurface(self):
-        # Four rounds of 1 meeting at the apex of a pyramid (a 20 x 20 square, 10 high): OCCT's
-        # faces are misoriented; the repair reorients them. Rounds along the full length of the
-        # four edges (10 sqrt 3, faces at 120 degrees) remove a little more than the fillet: their
-        # overlap at the apex counts four times
-        V = FreeCAD.Vector
-        apex = V(10, 10, 10)
-        corners = [V(0, 0, 0), V(20, 0, 0), V(20, 20, 0), V(0, 20, 0)]
-        faces = [Part.Face(Part.makePolygon(corners + corners[:1]))]
-        faces += [
-            Part.Face(Part.makePolygon([p, q, apex, p]))
-            for p, q in zip(corners, corners[1:] + corners[:1])
-        ]
-        solid = Part.Solid(Part.Shell(faces))
-        ends = [((10, 10, 10), (p.x, p.y, p.z)) for p in corners]
-        fillet = self._fillet_on_base(solid, self._edges_between(solid, ends), 1.0)
+        # Four rounds meeting at a pyramid's apex: OCCT's faces are misoriented; the repair
+        # reorients them. Rounds along the full length of the edges remove a little more
+        solid, edges = models.pyramid()
+        fillet = self._fillet_on_base(solid, edges, 1.0)
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertTrue(fillet.Shape.isValid())
-        rounds = 4 * (1 / 3**0.5 - pi / 6) * 10 * 3**0.5
         removed = 4000 / 3 - fillet.Shape.Volume
-        self.assertLess(removed, rounds)
-        self.assertGreater(removed, 0.98 * rounds)
+        self.assertLess(removed, models.pyramid_edge_rounds(1))
+        self.assertGreater(removed, 0.98 * models.pyramid_edge_rounds(1))
 
     def tearDown(self):
         # closing doc

@@ -8,6 +8,7 @@
 #include <exception>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -359,14 +360,57 @@ bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
 namespace
 {
 
-// The largest relative change of the faces' total area that checkDressUp() accepts from a repair
+// The largest relative change of a face's area that checkDressUp() accepts from a repair
 constexpr double repairAreaTolerance = 1e-6;
 
-double totalArea(const TopoShape& shape)
+// The areas of the shape's faces, smallest first
+std::vector<double> faceAreas(const TopoShape& shape)
 {
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(shape.getShape(), props);
-    return props.Mass();
+    std::vector<double> areas;
+    for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(it.Current(), props);
+        areas.push_back(props.Mass());
+    }
+    std::sort(areas.begin(), areas.end());
+    return areas;
+}
+
+bool sameArea(double a, double b)
+{
+    return std::abs(a - b) <= repairAreaTolerance * std::max(a, b);
+}
+
+/* Why the repair of a dress-up's result changes its surface, or null. Each face is compared,
+ * not the total: a wrong repair adds two small faces (ShapeFix splitting the self-intersecting
+ * face of two overlapping rounds), which a tolerance on a large part's total area let through. An
+ * invalid base passes its defects on, and their repair may remove faces and area (a fin, ops#12),
+ * never add them. */
+const char* repairChangesSurface(const TopoShape& before, const TopoShape& after, bool validBase)
+{
+    const auto areasBefore = faceAreas(before);
+    const auto areasAfter = faceAreas(after);
+    if (!validBase) {
+        const auto sum = [](const std::vector<double>& areas) {
+            return std::accumulate(areas.begin(), areas.end(), 0.0);
+        };
+        if (areasAfter.size() > areasBefore.size()) {
+            return "adds faces";
+        }
+        if (sum(areasAfter) > (1 + repairAreaTolerance) * sum(areasBefore)) {
+            return "adds area";
+        }
+        return nullptr;
+    }
+    if (areasAfter.size() != areasBefore.size()) {
+        return "changes the number of faces";
+    }
+    for (size_t i = 0; i < areasBefore.size(); ++i) {
+        if (!sameArea(areasBefore[i], areasAfter[i])) {
+            return "changes the area of a face";
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -392,13 +436,8 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
         FC_WARN("Invalid dress-up result whose repair loses solids");
         return false;
     }
-    // An invalid base passes its defects on, and their repair may remove faces (a fin, ops#12)
-    const double before = totalArea(shape);
-    const double after = totalArea(repaired);
-    if (std::abs(after - before) > repairAreaTolerance * std::max(before, after)
-        && base.isValid()) {
-        FC_WARN("Invalid dress-up result whose repair changes its area from " << before << " to "
-                                                                             << after);
+    if (const char* why = repairChangesSurface(shape, repaired, base.isValid())) {
+        FC_WARN("Invalid dress-up result whose repair " << why);
         return false;
     }
     shape = repaired;
