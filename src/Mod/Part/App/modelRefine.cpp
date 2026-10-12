@@ -296,6 +296,18 @@ GeomAbs_SurfaceType FaceTypedBase::getFaceType(const TopoDS_Face& faceIn)
     return surfaceTest.GetType();
 }
 
+// A merged face is built on a copy of the input faces' surface. Its boundary edges are the
+// input's own, and an edge keeps its pcurves per surface handle and location. On the input
+// faces' own surface (what BRep_Tool::Surface returns for a location-free input), MakeFace and
+// ShapeFix_Face would add or shift pcurves that the input faces use, and so corrupt the input in
+// place, even when the merged face is then discarded and the input returned unrefined (ops#316).
+// A located input already gets a transformed copy from BRep_Tool::Surface.
+template<class T>
+static Handle(T) copyOfSurface(const Handle(T) & surface)
+{
+    return surface.IsNull() ? surface : Handle(T)::DownCast(surface->Copy());
+}
+
 void FaceTypedBase::boundarySplit(
     const FaceVectorType& facesIn,
     std::vector<EdgeVectorType>& boundariesOut
@@ -697,6 +709,7 @@ TopoDS_Face FaceTypedCylinder::buildFace(const FaceVectorType& faces) const
     if (surface.IsNull()) {
         return dummy;
     }
+    surface = copyOfSurface(surface);
     std::vector<TopoDS_Wire> innerWires, encirclingWires;
     std::vector<TopoDS_Wire>::iterator wireIt;
     for (wireIt = allWires.begin(); wireIt != allWires.end(); ++wireIt) {
@@ -1064,8 +1077,9 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
     std::sort(wires.begin(), wires.end(), ModelRefine::WireSort());
 
     // make face from surface and outer wire.
-    Handle(Geom_BSplineSurface)
-        surface = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces.at(0)));
+    Handle(Geom_BSplineSurface) surface = copyOfSurface(
+        Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces.at(0)))
+    );
     if (!surface) {
         return {};
     }
