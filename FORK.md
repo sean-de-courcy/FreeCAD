@@ -293,7 +293,8 @@ names it.
 | `fix/244-independent-primitive-copy` | fix | ops#244, ops#282 | - | `integration` `0f634bd007` | `e9571e3de2` (fork PR 261), 2026-10-11 | never (fork fix) |
 | `fix/166-parked-deleted-mark` | fix | ops#166 | - | `integration` `551ce8b8a7` | `8a87fd8596` (fork PR 265), 2026-10-11 | never (fork fix) |
 | `fix/171-parked-paste-source-doc` | fix | ops#171 | - | `fix/166-parked-deleted-mark` `cd1606625c` (fork PR 265) | `04564f6846` (fork PR 266), 2026-10-11 | never (fork fix) |
-| `fix/255-followups` | fix | ops#255 | - | `integration` `d9a3826388` | (fork PR 264) | never (fork fix) |
+| `fix/255-followups` | fix | ops#255 | - | `integration` `d9a3826388` | `e4c9812861` (fork PR 264), 2026-10-11 | never (fork fix) |
+| `fix/134-round2-nits` | fix | ops#134 | - | `integration` `e4c9812861` | (fork PR 271) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

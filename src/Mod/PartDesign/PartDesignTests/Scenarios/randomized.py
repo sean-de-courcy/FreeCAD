@@ -1400,11 +1400,11 @@ def makeRef(spec, name, sequence=None):
     must every reference in a plan with the reorder edits (`Spec.strict`)."""
     owner, prop, label, target, consumer, f = spec.refs()[name]
     expectation = spec.expectation(label, target, consumer)
+    if sequence is not None and not sequence.solver and name in spec.kept:
+        target = spec.kept[name]  # N1 2.2 without the solver: until a re-pick
     if isinstance(expectation, RedrawnElement):
         expectation = sequence.redrawnExpectation(name, expectation.predicate, target)
     outcome = None if isinstance(expectation, Broken) else spec.outcome(consumer, f)
-    if sequence is not None and not sequence.solver and name in spec.kept:
-        target = spec.kept[name]  # N1 2.2 without the solver: until a re-pick
     on = (lambda: target) if spec.strict or name in spec.pinned else None
     return Ref(name, owner, prop, lambda: expectation, outcome, on)
 
@@ -1700,6 +1700,8 @@ class RandomSequence(Scenario):
         names = [o.Name for o in solids]
         if names != spec.chain():
             raise ScenarioError(f"{when}: the body's solids are {names}, the plan's {spec.chain()}")
+        if not solids:
+            return
         first = solids[0].BaseFeature
         if first is not None and first != getattr(body, "BaseFeature", None):
             raise ScenarioError(f"{when}: {solids[0].Name} builds on {first.Name}")
@@ -1790,13 +1792,13 @@ class RandomSequence(Scenario):
                     names = [n for n, r in refs.items()
                              if self.standsBy(step.after, r, broken, held)]
                     judged += self.judgeAll(step.after, str(k), step.edit.text, names)
-                    for f in sorted(broken, key=lambda f: step.after.features.index(f),
-                                    reverse=True):
-                        deleteFeature(self.doc, body, f)
-                    self.doc.recompute()
                     try:
+                        for f in sorted(broken, key=lambda f: step.after.features.index(f),
+                                        reverse=True):
+                            deleteFeature(self.doc, body, f)
+                        self.doc.recompute()
                         self.checkOrder(body, step.repaired, f"step {k}'s repair")
-                    except ScenarioError as e:
+                    except Exception as e:  # as an edit's replay (L2): any failure stops here
                         results += judged
                         results.append(self.stopped(k, step, e))
                         break
