@@ -37,6 +37,7 @@
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/ExpressionTokenizer.h>
+#include <App/PropertyUnits.h>
 #include <App/VarSet.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
@@ -414,6 +415,19 @@ void DlgExpressionInput::checkExpression(const QString& text)
                     value.setUnit(impliedUnit);
                 }
                 else if (!value.isDimensionless()) {
+                    // FreeCAD-CH (ops#319): a number property refuses a value with a unit.
+                    if (!typePath.isDerivedFrom(App::PropertyQuantity::getClassTypeId())
+                        && (typePath.isDerivedFrom(App::PropertyFloat::getClassTypeId())
+                            || typePath.isDerivedFrom(App::PropertyInteger::getClassTypeId())
+                            || typePath.isDerivedFrom(App::PropertyBool::getClassTypeId()))) {
+                        THROWMT(
+                            Base::UnitsMismatchError,
+                            QT_TRANSLATE_NOOP(
+                                "Exceptions",
+                                "Unit mismatch: the property is a number without a unit"
+                            )
+                        );
+                    }
                     msg += tr(" (Warning: unit discarded)");
 
                     QPalette p(ui->msg->palette());

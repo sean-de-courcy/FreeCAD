@@ -33,6 +33,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/math/special_functions/round.hpp>
+#include <fmt/format.h>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -58,6 +59,25 @@
 using namespace App;
 using namespace Base;
 using namespace std;
+
+namespace
+{
+// FreeCAD-CH (ops#319): a value with a unit lost it silently on a property without one (`3 mm` on
+// a Float gave 3, `30 deg` on an Integer gave 30). It is refused; `expr / 1 mm` gives a number.
+double unitlessValue(const Property& prop, const Base::Quantity& q)
+{
+    if (!q.isDimensionless()) {
+        const char* name = prop.getName();
+        throw Base::UnitsMismatchError(fmt::format(
+            "Unit mismatch: {} is a number without a unit, but the value {} has one (divide by "
+            "the unit for a number)",
+            name ? name : "the property",
+            q.getUserString()
+        ));
+    }
+    return q.getValue();
+}
+}  // namespace
 
 
 //**************************************************************************
@@ -158,7 +178,7 @@ void PropertyInteger::setPathValue(const ObjectIdentifier& path, const boost::an
         setValue(boost::math::round(boost::any_cast<float>(value)));
     }
     else if (value.type() == typeid(Quantity)) {
-        setValue(boost::math::round(boost::any_cast<Quantity>(value).getValue()));
+        setValue(boost::math::round(unitlessValue(*this, boost::any_cast<Quantity>(value))));
     }
     else {
         throw bad_cast();
@@ -1152,7 +1172,7 @@ void PropertyFloat::setPathValue(const ObjectIdentifier& path, const boost::any&
         setValue(boost::any_cast<float>(value));
     }
     else if (value.type() == typeid(Quantity)) {
-        setValue((boost::any_cast<Quantity>(value)).getValue());
+        setValue(unitlessValue(*this, boost::any_cast<Quantity>(value)));
     }
     else {
         throw bad_cast();
@@ -2320,7 +2340,7 @@ void PropertyBool::setPathValue(const ObjectIdentifier& path, const boost::any& 
         setValue(boost::math::round(boost::any_cast<float>(value)));
     }
     else if (value.type() == typeid(Quantity)) {
-        setValue(boost::any_cast<Quantity>(value).getValue() != 0);
+        setValue(unitlessValue(*this, boost::any_cast<Quantity>(value)) != 0);
     }
     else {
         throw bad_cast();

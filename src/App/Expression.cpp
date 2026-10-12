@@ -3607,6 +3607,25 @@ static std::map<std::string, FunctionExpression::Function> registered_functions;
 static int last_column;
 static int column;
 
+/// FreeCAD-CH (ops#320): the first character that no rule of Expression.l matches. Flex's default
+/// rule hands such characters to ECHO, which printed and dropped them (`!true` parsed as `true`).
+static std::string unmatchedChar;
+static bool unmatchedComplete = false;
+
+static void noteUnmatched(const char* text, std::size_t len)
+{
+    // The default rule matches one byte: collect the bytes of a UTF-8 character until complete.
+    if (unmatchedComplete || (unmatchedChar.empty() && len == 1 && text[0] == '\r')) {
+        return;
+    }
+    unmatchedChar.append(text, len);
+    auto lead = static_cast<unsigned char>(unmatchedChar[0]);
+    std::size_t need = lead < 0xC0 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    unmatchedComplete = unmatchedChar.size() >= need;
+}
+
+#define ECHO noteUnmatched(yytext, static_cast<std::size_t>(yyleng))
+
 // show the parser the lexer method
 #define yylex ExpressionParserlex
 int ExpressionParserlex();
@@ -3672,6 +3691,8 @@ static void initParser(const App::DocumentObject *owner)
     labels = std::stack<std::string>();
     column = 0;
     unitExpression = valueExpression = false;
+    unmatchedChar.clear();
+    unmatchedComplete = false;
 
     if (!has_registered_functions) {
         registered_functions["abs"] = FunctionExpression::ABS;
@@ -3934,6 +3955,19 @@ std::string rewriteVariableRefs(const App::DocumentObject* owner, const char* bu
     return out;
 }
 
+// FreeCAD-CH (ops#320): a character the lexer had to drop makes the expression an error.
+void throwIfUnmatched(const char* original)
+{
+    const std::string& ch = App::ExpressionParser::unmatchedChar;
+    if (ch.empty()) {
+        return;
+    }
+    auto cp = static_cast<unsigned>(codePointAt(ch, 0).first);
+    throw ParserError(
+        fmt::format("Unexpected character '{}' (U+{:04X}) in expression '{}'", ch, cp, original)
+    );
+}
+
 }  // namespace
 
 ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, const char* buffer)
@@ -3951,6 +3985,11 @@ ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, con
 
     // run the parser
     int result = ExpressionParser::ExpressionParser_yyparse ();
+
+    if (!unmatchedChar.empty()) {
+        ScanResult.reset();
+        throwIfUnmatched(original);
+    }
 
     if (result != 0) {
         throw ParserError(fmt::format("Failed to parse expression '{}'", original));
@@ -3980,6 +4019,11 @@ std::unique_ptr<UnitExpression> ExpressionParser::parseUnit(
 
     // run the parser
     int result = ExpressionParser::ExpressionParser_yyparse ();
+
+    if (!unmatchedChar.empty()) {
+        ScanResult.reset();
+        throwIfUnmatched(buffer);
+    }
 
     if (result != 0)
         throw ParserError("Failed to parse expression.");
