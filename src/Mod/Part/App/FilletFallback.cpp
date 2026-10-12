@@ -92,6 +92,14 @@ struct Refusal
     throw Refusal {reason};
 }
 
+std::string describe(double value)
+{
+    std::ostringstream ss;
+    ss.precision(10);
+    ss << value;
+    return ss.str();
+}
+
 bool parallel(const gp_Dir& a, const gp_Dir& b)
 {
     return gp_Vec(a).Crossed(gp_Vec(b)).Magnitude() < angularTolerance;
@@ -318,8 +326,8 @@ Section makeSection(
  *
  * Corners (section 5.3) are built where the sizes and, at a two-edge corner, the dihedral angles
  * are equal: there OCCT builds a miter, a sphere patch or a corner triangle, which the tools
- * reproduce exactly. Two-edge corners with unequal dihedral angles have their own class, refused
- * until their construction (S1c-b) handles them.
+ * reproduce exactly. Two-edge corners with unequal dihedral angles have their own class: there
+ * OCCT's result is the union of the two tools, each run on to the other edge's side face.
  */
 enum class VertexClass
 {
@@ -331,8 +339,9 @@ enum class VertexClass
     /// One other selected edge meets this one at an angle (a two-edge corner), with the same
     /// dihedral angle: the two tools meet on the bisector plane of the faces they don't share
     Corner2,
-    /// A two-edge corner whose edges have different dihedral angles: OCCT's rounds meet along a
-    /// space curve, not a plane (S1c-b)
+    /// A two-edge corner whose edges have different dihedral angles, convex edges at a convex
+    /// vertex: OCCT's rounds meet along a space curve, not a plane. Each tool ends on the plane
+    /// of the other edge's side face, and the two overlap near the vertex (S1c-b)
     Corner2Unequal,
     /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
     /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
@@ -489,6 +498,8 @@ struct Corner
     gp_Dir away[3];  // along each edge, away from the vertex
     TopoDS_Face faces[3];
     gp_Dir normals[3];
+    /// The material is the trihedral: every face's outward normal points away from it
+    bool convex = true;
 
     int indexOf(const TopoDS_Shape& edge) const
     {
@@ -577,7 +588,73 @@ struct Tool
     /// The tool's faces in those planes: whatever they become must be the end face's image (the
     /// end face covers them, or they merge into it)
     std::vector<TopoDS_Shape> capFaces;
+    /// The planes of its ends at two-edge corners with unequal dihedral angles: the other edge's
+    /// side face, which its faces there lie on. They join contactFaces: nothing of them may be
+    /// left (the side face covers them, or the other edge's tool removes them)
+    std::vector<TrimPlane> openEnds;
 };
+
+/** The common part of the two tools at a two-edge corner with unequal dihedral angles (convex
+ * edges at a convex vertex), in closed form: its volume, and its area on the face that holds both
+ * edges (where their tangent strips overlap).
+ *
+ * Both edges lie in that face, and each tool is a prism along its edge, so a slice parallel to the
+ * face at the depth z cuts each tool in a band along its edge: from the trace of its side face to
+ * the round (or the chamfer), w(z) wide. Two bands crossing at the plan angle phi share a
+ * parallelogram of w_a w_b / sin phi, and the volume is its integral over the depth while both
+ * bands are there:
+ * - fillet, z = r (1 - cos theta): w = t - r sin theta - r (1 - cos theta) cot alpha, from the
+ *   tangent length t at theta = 0 to 0 at the tangent line on the side face, theta = pi - alpha
+ * - chamfer by equal distances d: w = d - z / sin alpha, from d at z = 0 to 0 at z = d sin alpha
+ */
+struct Overlap
+{
+    TopoDS_Shape edges[2];
+    TopoDS_Face face;
+    double area = 0.0;
+    double volume = 0.0;
+};
+
+Overlap overlapOf(
+    bool fillet,
+    double size,
+    const double alpha[2],
+    const double width[2],
+    double phi
+)
+{
+    Overlap overlap;
+    double sinPhi = std::sin(phi);
+    overlap.area = width[0] * width[1] / sinPhi;
+    if (fillet) {
+        // w = A + B sin theta + C cos theta; the integral of w_a w_b sin theta, term by term
+        double a[2], b[2], c[2];
+        for (int i = 0; i < 2; ++i) {
+            a[i] = width[i] - size / std::tan(alpha[i]);
+            b[i] = -size;
+            c[i] = size / std::tan(alpha[i]);
+        }
+        auto antiderivative = [&](double theta) {
+            double s = std::sin(theta);
+            double co = std::cos(theta);
+            return -a[0] * a[1] * co
+                + (a[0] * b[1] + b[0] * a[1]) * (theta / 2 - std::sin(2 * theta) / 4)
+                + (a[0] * c[1] + c[0] * a[1]) * s * s / 2
+                + b[0] * b[1] * (co * co * co / 3 - co)
+                + (b[0] * c[1] + c[0] * b[1]) * s * s * s / 3 - c[0] * c[1] * co * co * co / 3;
+        };
+        double top = std::min(pi - alpha[0], pi - alpha[1]);
+        overlap.volume = size * (antiderivative(top) - antiderivative(0.0)) / sinPhi;
+    }
+    else {
+        double k0 = 1 / std::sin(alpha[0]);
+        double k1 = 1 / std::sin(alpha[1]);
+        double z = std::min(size * std::sin(alpha[0]), size * std::sin(alpha[1]));
+        overlap.volume
+            = (size * size * z - size * (k0 + k1) * z * z / 2 + k0 * k1 * z * z * z / 3) / sinPhi;
+    }
+    return overlap;
+}
 
 /// A selected edge, analysed
 struct EdgeData
@@ -819,6 +896,8 @@ std::optional<Corner> cornerAt(const Context& ctx, const TopoDS_Vertex& vertex, 
         }
         corner.faces[opposite] = face;
         corner.normals[opposite] = along > 0 ? normal : normal.Reversed();
+        corner.convex = corner.convex
+            && outwardNormal(face, corner.point).Dot(corner.normals[opposite]) < 0;
     }
     return corner;
 }
@@ -887,8 +966,15 @@ VertexEnd classifyCorner(
         awayFrom(others.front()->edge, vertex, &there);
         if (std::abs(dihedralAt(data, here) - dihedralAt(*others.front(), there))
             > angularTolerance) {
+            // Where the edges or the vertex are concave, OCCT's rounds don't meet as the union
+            // of the two tools (5.6, "Corner classes left out")
+            if (!data.convex || !corner->convex) {
+                end.reason = "a two-edge corner with unequal dihedral angles that is not convex";
+                return end;
+            }
+            // The tool runs on to the plane of the face that holds the other edge, not this one
             end.kind = VertexClass::Corner2Unequal;
-            end.reason = "a two-edge corner with unequal dihedral angles";
+            end.trims = {{corner->point, corner->normals[k].Reversed()}};
             return end;
         }
         end.kind = VertexClass::Corner2;
@@ -1099,7 +1185,19 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
         for (int i = 0; i < 2; ++i) {
             planes.insert(planes.end(), ends[i].trims.begin(), ends[i].trims.end());
         }
-        tool.volume = polytopeOf(planes).volume;
+        // A second closed form, independent of the planes: the prism from the vertex at each
+        // box corner (the only three-edge chamfer corner accepted), less d^3 / 4 there, or from
+        // where the centroid crosses a single plane
+        gp_Pnt centroid = section.corner.Translated(section.centroid);
+        double begin = ends[0].trims.size() == 2 ? 0.0 : beginAt(centroid);
+        double finish = ends[1].trims.size() == 2 ? length : finishAt(centroid);
+        double d = section.length[0];
+        int boxCorners = (ends[0].trims.size() == 2 ? 1 : 0) + (ends[1].trims.size() == 2 ? 1 : 0);
+        tool.volume = section.area * (finish - begin) - boxCorners * d * d * d / 4;
+        double polytope = polytopeOf(planes).volume;
+        if (std::abs(polytope - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("a chamfer's tool at a corner differs from its closed form");
+        }
     }
     else {
         refuse("a round bounded by two planes at an end");
@@ -1148,6 +1246,9 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
     for (int i = 0; i < 2; ++i) {
         if (ends[i].kind == VertexClass::FreeEnd) {
             tool.caps.push_back(ends[i].trims.front());
+        }
+        else if (ends[i].kind == VertexClass::Corner2Unequal) {
+            tool.openEnds.push_back(ends[i].trims.front());
         }
     }
     return tool;
@@ -1211,7 +1312,12 @@ Tool cornerTool(const Context& ctx, const Corner& corner, bool cut)
         }
         planes.push_back({p.Translated((a[0] + a[1]) * size), gp_Dir(a[0] + a[1] + a[2])});
         Polytope tetrahedron = polytopeOf(planes);
-        tool.volume = tetrahedron.volume;
+        // A second closed form, independent of the planes: the tetrahedron with the corners
+        // d (1, 1, 0), d (1, 0, 1), d (0, 1, 1) and d (1, 1, 1) / 2 in the box corner's frame
+        tool.volume = size * size * size / 12;
+        if (std::abs(tetrahedron.volume - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("a corner tetrahedron differs from its closed form");
+        }
         tool.solid = solidOf(tetrahedron, planes);
     }
     return tool;
@@ -1343,6 +1449,12 @@ void findContactFaces(Tool& tool)
                 break;
             }
         }
+        for (const auto& end : tool.openEnds) {
+            if (inPlane(face, end)) {
+                tool.contactFaces.push_back(face);
+                break;
+            }
+        }
     }
 }
 
@@ -1426,13 +1538,21 @@ bool coincide(const FarSide& a, const FarSide& b)
  * At the limit (Request::limitOnly) one strip's far side must also land on an edge of its face or
  * on another strip's far side, or the strips must cover a face whole: the dress-ups OCCT refuses
  * and the construction is for. Anything else OCCT refuses keeps OCCT's error.
+ *
+ * The strips of the two tools at a two-edge corner with unequal dihedral angles overlap on the face
+ * that holds both edges by the closed form's parallelogram, and by nothing else.
  */
-void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
+void checkStrips(
+    const std::vector<Tool>& tools,
+    const std::vector<Overlap>& overlaps,
+    bool limitOnly
+)
 {
     struct OnFace
     {
         TopoDS_Face face;
         std::vector<const Strip*> strips;
+        std::vector<const Tool*> owners;
     };
     std::vector<OnFace> faces;
     for (const auto& tool : tools) {
@@ -1441,12 +1561,24 @@ void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
                 return f.face.IsSame(strip.face);
             });
             if (group == faces.end()) {
-                faces.push_back({strip.face, {}});
+                faces.push_back({strip.face, {}, {}});
                 group = std::prev(faces.end());
             }
             group->strips.push_back(&strip);
+            group->owners.push_back(&tool);
         }
     }
+    // The expected overlap of two tools' strips on the face
+    auto expectedOverlap = [&](const Tool* a, const Tool* b, const TopoDS_Face& face) {
+        for (const auto& overlap : overlaps) {
+            bool pair = (overlap.edges[0].IsSame(a->source) && overlap.edges[1].IsSame(b->source))
+                || (overlap.edges[0].IsSame(b->source) && overlap.edges[1].IsSame(a->source));
+            if (pair && overlap.face.IsSame(face)) {
+                return overlap.area;
+            }
+        }
+        return 0.0;
+    };
     bool atLimit = false;
     for (const auto& group : faces) {
         double covered = 0.0;
@@ -1465,17 +1597,28 @@ void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
         }
         for (size_t i = 0; i < group.strips.size(); ++i) {
             for (size_t j = i + 1; j < group.strips.size(); ++j) {
+                double expected = expectedOverlap(group.owners[i], group.owners[j], group.face);
+                double common = 0.0;
+                double summedTolerance = 0.0;
                 for (const auto& mine : group.strips[i]->contacts) {
                     for (const auto& theirs : group.strips[j]->contacts) {
                         double tolerance = std::min(
                             areaToleranceOf(mine, *group.strips[i]),
                             areaToleranceOf(theirs, *group.strips[j])
                         );
-                        if (areaOf(commonOf(mine, theirs)) > tolerance) {
+                        double area = areaOf(commonOf(mine, theirs));
+                        if (expected == 0.0 && area > tolerance) {
                             refuse("two tangent strips overlap");
                         }
+                        common += area;
+                        summedTolerance += tolerance;
                     }
                 }
+                if (std::abs(common - expected) > summedTolerance) {
+                    refuse("two tangent strips at a corner overlap by " + describe(common)
+                           + " instead of " + describe(expected));
+                }
+                covered -= expected;
             }
         }
         if (!limitOnly || atLimit) {
@@ -1566,18 +1709,13 @@ std::vector<TopoDS_Shape> imagesThrough(
     return current;
 }
 
-std::string describe(double value)
-{
-    std::ostringstream ss;
-    ss.precision(10);
-    ss << value;
-    return ss.str();
-}
-
-/// One Boolean stage, and its checks (5.6, interface point 5)
+/** One Boolean stage, and its checks (5.6, interface point 5). The tools are interior-disjoint but
+ * for the overlaps at unequal corners, counted once
+ */
 TopoDS_Shape applyTools(
     const TopoDS_Shape& shape,
     const std::vector<const Tool*>& tools,
+    double overlaps,
     bool cut,
     std::vector<Stage>& stages
 )
@@ -1585,7 +1723,7 @@ TopoDS_Shape applyTools(
     TopTools_ListOfShape arguments;
     arguments.Append(shape);
     TopTools_ListOfShape toolShapes;
-    double expected = 0.0;
+    double expected = -overlaps;
     for (const auto* tool : tools) {
         toolShapes.Append(tool->solid);
         expected += tool->volume;
@@ -1693,6 +1831,8 @@ TopoDS_Shape construct(
     };
     // The three-edge corners, each with its piece, of the convexity of its edges
     std::vector<std::pair<TopoDS_Vertex, bool>> corners;
+    // The two-edge corners with unequal dihedral angles
+    std::vector<TopoDS_Vertex> unequalCorners;
     for (const auto& edgeData : data) {
         VertexEnd ends[2];
         if (!edgeData.closed) {
@@ -1712,8 +1852,15 @@ TopoDS_Shape construct(
                 classified[slot] = true;
                 ends[slot] = classify(ctx, data, edgeData, vertices[i]);
                 VertexClass kind = ends[slot].kind;
-                if (kind == VertexClass::Refuse || kind == VertexClass::Corner2Unequal) {
+                if (kind == VertexClass::Refuse) {
                     refuse(ends[slot].reason);
+                }
+                auto known = [&](const TopoDS_Vertex& v) {
+                    return v.IsSame(vertices[i]);
+                };
+                if (kind == VertexClass::Corner2Unequal
+                    && std::none_of(unequalCorners.begin(), unequalCorners.end(), known)) {
+                    unequalCorners.push_back(vertices[i]);
                 }
                 if (kind == VertexClass::Corner3
                     && std::none_of(corners.begin(), corners.end(), [&](const auto& c) {
@@ -1763,7 +1910,62 @@ TopoDS_Shape construct(
         }
         admit(cornerTool(ctx, *corner, convex));
     }
-    checkStrips(tools, request.limitOnly);
+    // The two tools at each unequal corner overlap there; both are cut (convex edges)
+    std::vector<Overlap> overlaps;
+    for (const auto& vertex : unequalCorners) {
+        std::string reason;
+        auto corner = cornerAt(ctx, vertex, reason);
+        if (!corner) {
+            refuse(reason);
+        }
+        const EdgeData* pair[2] = {nullptr, nullptr};
+        int third = -1;
+        for (int k = 0; k < 3; ++k) {
+            auto it = std::find_if(data.begin(), data.end(), [&](const EdgeData& d) {
+                return d.edge.IsSame(corner->edges[k]);
+            });
+            if (it == data.end()) {
+                third = k;
+            }
+            else {
+                (pair[0] ? pair[1] : pair[0]) = &*it;
+            }
+        }
+        if (third < 0 || !pair[0] || !pair[1]) {
+            refuse("an unequal corner without two selected edges");
+        }
+        for (const auto* edgeData : pair) {
+            if (std::none_of(tools.begin(), tools.end(), [&](const Tool& t) {
+                    return t.source.IsSame(edgeData->edge);
+                })) {
+                refuse("a tool at an unequal corner has no length");
+            }
+        }
+        const TopoDS_Face& shared = corner->faces[third];
+        double alpha[2];
+        double width[2];
+        for (int i = 0; i < 2; ++i) {
+            double parameter = 0.0;
+            awayFrom(pair[i]->edge, vertex, &parameter);
+            alpha[i] = dihedralAt(*pair[i], parameter);
+            Section section = sectionAt(ctx, *pair[i], parameter);
+            width[i] = section.length[pair[i]->faces[0].IsSame(shared) ? 0 : 1];
+        }
+        double phi = corner->away[corner->indexOf(pair[0]->edge)].Angle(
+            corner->away[corner->indexOf(pair[1]->edge)]
+        );
+        Overlap overlap
+            = overlapOf(request.kind == Kind::Fillet, request.size1, alpha, width, phi);
+        overlap.edges[0] = pair[0]->edge;
+        overlap.edges[1] = pair[1]->edge;
+        overlap.face = shared;
+        overlaps.push_back(overlap);
+    }
+    double overlapVolume = 0.0;
+    for (const auto& overlap : overlaps) {
+        overlapVolume += overlap.volume;
+    }
+    checkStrips(tools, overlaps, request.limitOnly);
 
     std::vector<Stage> stages;
     std::vector<size_t> toolStage(tools.size(), 0);
@@ -1777,7 +1979,7 @@ TopoDS_Shape construct(
             }
         }
         if (!group.empty()) {
-            shape = applyTools(shape, group, cut, stages);
+            shape = applyTools(shape, group, cut ? overlapVolume : 0.0, cut, stages);
         }
     }
 
@@ -1863,6 +2065,7 @@ TopoDS_Shape construct(
     for (const auto& tool : tools) {
         (tool.cut ? cutVolume : fusedVolume) += tool.volume;
     }
+    cutVolume -= overlapVolume;
     double expected = baseVolume - cutVolume + fusedVolume;
     double measured = volumeOf(shape);
     if (std::abs(measured - expected) > volumeTolerance * (cutVolume + fusedVolume)) {

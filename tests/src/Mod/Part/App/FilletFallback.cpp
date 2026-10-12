@@ -5,6 +5,7 @@
 // the analytic volume, or OCCT's own result where OCCT works.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <numbers>
@@ -1029,7 +1030,261 @@ std::vector<TopoShape> edgesAt(const TopoShape& shape, const gp_Pnt& point)
     }
     return result;
 }
+
+/// The plate 30 x 20 x 4 with its end x = 30 leaning in by the angle (out, if negative): the top
+/// is (30 - 4 tan(angle)) x 20
+TopoDS_Shape leaningPlate(double angle)
+{
+    double lean = 4 * std::tan(angle);
+    return profileAlongY({{0, 0}, {30, 0}, {30 - lean, 4}, {0, 4}}, 20);
+}
+
+/// The plate 30 x 20 x 4 with all four walls leaning in by the angle from its bottom
+TopoDS_Shape draftedPlate(double angle)
+{
+    double c = std::cos(angle);
+    double s = std::sin(angle);
+    TopoDS_Shape shape = box(30, 20, 4);
+    for (auto [point, normal] : std::vector<std::pair<gp_Pnt, gp_Dir>> {
+             {{30, 0, 0}, {c, 0, s}},
+             {{0, 0, 0}, {-c, 0, s}},
+             {{0, 20, 0}, {0, c, s}},
+             {{0, 0, 0}, {0, -c, s}}
+         }) {
+        shape = BRepAlgoAPI_Cut(shape, beyondPlane(point, normal, 100)).Shape();
+    }
+    return shape;
+}
+
+/// The parallelogram 20 x 10 with a 60 degree corner at the origin, extruded along the vector
+TopoDS_Shape parallelepiped(const gp_Vec& along)
+{
+    BRepBuilderAPI_MakePolygon polygon(
+        gp_Pnt(0, 0, 0),
+        gp_Pnt(20, 0, 0),
+        gp_Pnt(20 + 10 * std::cos(pi / 3), 10 * std::sin(pi / 3), 0),
+        gp_Pnt(10 * std::cos(pi / 3), 10 * std::sin(pi / 3), 0),
+        Standard_True
+    );
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    return BRepPrimAPI_MakePrism(face, along).Shape();
+}
+
+/// The boss of bossOnAPlate with its wall x = 25 leaning in by 10 degrees
+TopoDS_Shape draftedBossOnAPlate()
+{
+    TopoDS_Shape boss = box(10, 10, 2, gp_Pnt(15, 15, 4));
+    gp_Dir leaning(std::cos(pi / 18), 0, std::sin(pi / 18));
+    boss = BRepAlgoAPI_Cut(boss, beyondPlane({25, 15, 4}, leaning, 100)).Shape();
+    BRepAlgoAPI_Fuse fuse(box(40, 40, 4), boss);
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// The integral of f over [a, b] by n-point Gauss-Legendre, its nodes by Newton's method
+double gaussLegendre(const std::function<double(double)>& f, double a, double b, int n = 32)
+{
+    double sum = 0.0;
+    for (int i = 1; i <= n; ++i) {
+        double x = std::cos(pi * (i - 0.25) / (n + 0.5));
+        double derivative = 0.0;
+        for (int iteration = 0; iteration < 100; ++iteration) {
+            double p0 = 1.0;
+            double p1 = x;
+            for (int k = 2; k <= n; ++k) {
+                double p2 = ((2 * k - 1) * x * p1 - (k - 1) * p0) / k;
+                p0 = p1;
+                p1 = p2;
+            }
+            derivative = n * (x * p1 - p0) / (x * x - 1);
+            double step = p1 / derivative;
+            x -= step;
+            if (std::abs(step) < 1e-16) {
+                break;
+            }
+        }
+        double weight = 2 / ((1 - x * x) * derivative * derivative);
+        sum += weight * f((a + b) / 2 + (b - a) / 2 * x);
+    }
+    return sum * (b - a) / 2;
+}
+
+/** What a dress-up of the four top edges of a plate removes, by slices parallel to the top at
+ * the depth z (Gauss-Legendre between the depths where a band ends). The top is the rectangle
+ * a x b, and its sides (x = 0, x = a, y = 0, y = b) meet it at the dihedral angles alpha. A slice
+ * of the plate is the rectangle with each side z cot alpha in from the top's, and it loses a band
+ * w(z) wide along each side: the union of the four rounds (or chamfers), as OCCT builds them where
+ * they meet at unequal angles, and its miter where they meet at equal ones.
+ * - fillet r, z = r (1 - cos theta): w = r cot(alpha / 2) - r sin theta - z cot alpha, down to
+ *   theta = pi - alpha (the tangent line on the side)
+ * - chamfer d: w = d - z / sin alpha, down to z = d sin alpha
+ */
+double plateTopRemoved(
+    bool isFillet,
+    double a,
+    double b,
+    const std::array<double, 4>& alpha,
+    double size,
+    double depth
+)
+{
+    auto removed = [&](double z, const std::array<double, 4>& width) {
+        std::array<double, 4> outer {};
+        std::array<double, 4> inner {};
+        for (int i = 0; i < 4; ++i) {
+            outer[i] = z / std::tan(alpha[i]);
+            inner[i] = outer[i] + std::max(0.0, width[i]);
+        }
+        return (a - outer[0] - outer[1]) * (b - outer[2] - outer[3])
+            - (a - inner[0] - inner[1]) * (b - inner[2] - inner[3]);
+    };
+    std::vector<double> ends;
+    double last = 0.0;
+    std::function<double(double)> slice;
+    if (isFillet) {
+        last = std::acos(1 - std::min(depth, 2 * size) / size);
+        for (double angle : alpha) {
+            ends.push_back(pi - angle);
+        }
+        slice = [&](double theta) {
+            double z = size * (1 - std::cos(theta));
+            std::array<double, 4> width {};
+            for (int i = 0; i < 4; ++i) {
+                width[i] = theta <= pi - alpha[i] ? size / std::tan(alpha[i] / 2)
+                        - size * std::sin(theta) - z / std::tan(alpha[i])
+                                                  : 0.0;
+            }
+            return removed(z, width) * size * std::sin(theta);
+        };
+    }
+    else {
+        last = depth;
+        for (double angle : alpha) {
+            ends.push_back(size * std::sin(angle));
+        }
+        slice = [&](double z) {
+            std::array<double, 4> width {};
+            for (int i = 0; i < 4; ++i) {
+                width[i] = size - z / std::sin(alpha[i]);
+            }
+            return removed(z, width);
+        };
+    }
+    ends.push_back(0.0);
+    ends.push_back(last);
+    std::sort(ends.begin(), ends.end());
+    double total = 0.0;
+    for (size_t i = 0; i + 1 < ends.size(); ++i) {
+        double from = std::clamp(ends[i], 0.0, last);
+        double to = std::clamp(ends[i + 1], 0.0, last);
+        if (to > from) {
+            total += gaussLegendre(slice, from, to);
+        }
+    }
+    return total;
+}
 }  // namespace
+
+TEST_F(FilletFallbackTest, twoEdgeCornersWithUnequalAngles)
+{
+    // The plate whose end leans in by 10 degrees: its top edge meets the long top edges at 100
+    // degrees against their 90. The four top edges at r = t, and chamfered at d = t: the long
+    // sides vanish; the rounds meet at the leaning end along a space curve, the union of the two
+    // tools, and in miters at the other
+    for (double degrees : {10.0, 25.0}) {
+        double angle = degrees * pi / 180;
+        TopoShape plate(leaningPlate(angle), 1L);
+        auto top = edgesWhere(plate, atHeight(4));
+        ASSERT_EQ(top.size(), 4U);
+        double a = 30 - 4 * std::tan(angle);
+        double volume = 4 * 20 * (30 + a) / 2;
+        std::array<double, 4> alpha {pi / 2, pi / 2 + angle, pi / 2, pi / 2};
+        ASSERT_TRUE(occtFilletFails(plate, top, 4, 4)) << degrees;
+        TopoShape rounded = dressUp(plate, top, fillet(4));
+        EXPECT_TRUE(exact(rounded, volume - plateTopRemoved(true, a, 20, alpha, 4, 4))) << degrees;
+        ASSERT_TRUE(occtFails(plate, top, chamfer(4))) << degrees;
+        double chamfered = volume - plateTopRemoved(false, a, 20, alpha, 4, 4);
+        EXPECT_TRUE(exact(dressUp(plate, top, chamfer(4)), chamfered)) << degrees;
+    }
+}
+
+TEST_F(FilletFallbackTest, unequalCornersSameAsOcctBelowTheLimit)
+{
+    // OCCT's result where it works, with the names: the two edges at a leaning end, the four top
+    // edges, an end leaning out (80 degrees), rounds and chamfers
+    for (double degrees : {10.0, -10.0, 25.0}) {
+        TopoShape plate(leaningPlate(degrees * pi / 180), 1L);
+        auto top = edgesWhere(plate, atHeight(4));
+        double a = 30 - 4 * std::tan(degrees * pi / 180);
+        std::vector<TopoShape> two {
+            edgeBetween(plate, {0, 0, 4}, {a, 0, 4}),
+            edgeBetween(plate, {a, 0, 4}, {a, 20, 4})
+        };
+        EXPECT_TRUE(sameAsOcct(plate, two, fillet(2))) << degrees;
+        EXPECT_TRUE(sameAsOcct(plate, two, chamfer(2))) << degrees;
+        EXPECT_TRUE(sameAsOcct(plate, top, fillet(degrees < 0 ? 2 : 3.9))) << degrees;
+        EXPECT_TRUE(sameAsOcct(plate, top, chamfer(degrees < 0 ? 2 : 3.9))) << degrees;
+    }
+}
+
+TEST_F(FilletFallbackTest, threeEdgeCornersWithUnequalAngles)
+{
+    // The plate with all four walls leaning in by 10 degrees, all 12 edges at r = t / 2: the
+    // walls vanish (top edges at 100 degrees, bottom ones at 80), the sphere patches are tangent
+    // to three planes at unequal angles. The result is the rectangle at half height that the
+    // offset walls bound, swept by the ball (Steiner): 2 A r + pi P r^2 / 2 + 4 pi r^3 / 3
+    double angle = pi / 18;
+    TopoShape plate(draftedPlate(angle), 1L);
+    auto all = plate.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_EQ(all.size(), 12U);
+    double r = 2;
+    ASSERT_TRUE(occtFilletFails(plate, all, r, r));
+    double inset = r * (std::tan(angle) + 1 / std::cos(angle));
+    double x = 30 - 2 * inset;
+    double y = 20 - 2 * inset;
+    TopoShape rounded = dressUp(plate, all, fillet(r));
+    EXPECT_TRUE(exact(rounded, 2 * x * y * r + pi * (x + y) * r * r + 4 * pi * r * r * r / 3));
+    EXPECT_EQ(sphereFaces(rounded), 8);
+    // The acute triangle (30, 75 and 75 degrees) with all edges at r = t / 2
+    double side = 30;
+    TopoShape triangle(
+        prismOf(
+            {{0, 0},
+             {side * std::cos(pi / 12), -side * std::sin(pi / 12)},
+             {side * std::cos(pi / 12), side * std::sin(pi / 12)}},
+            4
+        ),
+        1L
+    );
+    auto edges = triangle.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_TRUE(occtFilletFails(triangle, edges, r, r));
+    double area = side * side * std::sin(pi / 6) / 2;
+    double perimeter = 2 * side + 2 * side * std::sin(pi / 12);
+    double k = 1 / std::tan(pi / 12) + 2 / std::tan(5 * pi / 24);
+    TopoShape acute = dressUp(triangle, edges, fillet(r));
+    EXPECT_TRUE(exact(acute, roundedPrism(area, perimeter, k, 4, r)));
+    EXPECT_EQ(sphereFaces(acute), 6);
+    // An oblique parallelepiped, all edges at r = t / 2: its walls at half height, each moved in
+    // by r over the horizontal part of its unit normal, bound the parallelogram the ball sweeps
+    gp_Vec along(1, 0.5, 4);
+    TopoShape oblique(parallelepiped(along), 1L);
+    auto all12 = oblique.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_TRUE(occtFilletFails(oblique, all12, r, r));
+    auto moved = [&](const gp_Vec& side) {
+        gp_Vec normal = side.Crossed(along);
+        return r * normal.Magnitude() / std::hypot(normal.X(), normal.Y());
+    };
+    double sine = std::sin(pi / 3);
+    double lu = 20 - 2 * moved({std::cos(pi / 3), sine, 0}) / sine;
+    double lv = 10 - 2 * moved({1, 0, 0}) / sine;
+    TopoShape swept = dressUp(oblique, all12, fillet(r));
+    EXPECT_TRUE(exact(
+        swept,
+        2 * lu * lv * sine * r + pi * (lu + lv) * r * r + 4 * pi * r * r * r / 3
+    ));
+    EXPECT_EQ(sphereFaces(swept), 8);
+}
 
 TEST_F(FilletFallbackTest, twoEdgeCornersMiter)
 {
@@ -1343,16 +1598,34 @@ testing::AssertionResult refusedFor(
     return testing::AssertionSuccess();
 }
 
-TEST_F(FilletFallbackTest, refusesTwoEdgeCornersWithUnequalAngles)
+TEST_F(FilletFallbackTest, refusesUnequalCornersThatAreNotConvex)
 {
-    // A plate 30 x 20 x 4 whose end x = 30 leans in by 10 degrees: its top edge meets the long
-    // top edges at 100 degrees against their 90. OCCT's rounds meet along a space curve there,
-    // not a plane (S1c-b)
-    double lean = 4 * std::tan(pi / 18);
-    TopoShape base(profileAlongY({{0, 0}, {30, 0}, {30 - lean, 4}, {0, 4}}, 20), 1L);
+    // The boss with its wall x = 25 leaning in by 10 degrees: its base edge meets the base edges
+    // of the walls y = 15 and y = 25 at unequal angles, concave edges at vertices whose vertical
+    // edge is convex. OCCT's rounds don't meet as the union of the tools there
+    TopoShape boss(draftedBossOnAPlate(), 1L);
+    auto base = edgesWhere(boss, [](const gp_Pnt& p) {
+        return std::abs(p.Z() - 4) < 1e-7 && p.X() > 14 && p.X() < 26 && p.Y() > 14 && p.Y() < 26;
+    });
+    ASSERT_EQ(base.size(), 4U);
     std::string reason;
-    EXPECT_TRUE(forced(base, edgesWhere(base, atHeight(4)), fillet(4), &reason).isNull());
-    EXPECT_NE(reason.find("unequal dihedral angles"), std::string::npos) << reason;
+    EXPECT_TRUE(forced(boss, base, fillet(2), &reason).isNull());
+    EXPECT_NE(reason.find("unequal dihedral angles that is not convex"), std::string::npos)
+        << reason;
+}
+
+TEST_F(FilletFallbackTest, refusesObliqueCornersWhoseRoundsRunPastTheirVertex)
+{
+    // The parallelepiped extruded along (3, 1, 4), all edges at r = t / 2: at its obtuse corners
+    // the sphere centre's foot on an edge falls behind the vertex, so the edge's round would run
+    // past it, out of the material, and its strip off its face (5.3, a known refusal)
+    TopoShape oblique(parallelepiped({3, 1, 4}), 1L);
+    EXPECT_TRUE(refusedFor(
+        oblique,
+        oblique.getSubTopoShapes(TopAbs_EDGE),
+        fillet(2),
+        "a tangent strip runs off its face"
+    ));
 }
 
 TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
@@ -1363,11 +1636,12 @@ TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
     auto mixed = edgesAt(boss, {15, 15, 4});
     ASSERT_EQ(mixed.size(), 3U);
     EXPECT_TRUE(refusedFor(boss, mixed, fillet(2), "mixed convexity"));
-    // A15: the triangle plate's edges chamfered: its corners aren't square
-    TopoShape triangle(regularPlate(3), 1L);
-    EXPECT_TRUE(
-        refusedFor(triangle, triangle.getSubTopoShapes(TopAbs_EDGE), chamfer(2), "not square")
-    );
+    // A15: the triangle and hexagon plates' edges chamfered: their corners aren't square
+    for (int n : {3, 6}) {
+        TopoShape plate(regularPlate(n), 1L);
+        auto all = plate.getSubTopoShapes(TopAbs_EDGE);
+        EXPECT_TRUE(refusedFor(plate, all, chamfer(2), "not square")) << n;
+    }
     // The D plate: a line and a half circle meeting at an angle, top edges at r = t
     BRepBuilderAPI_MakeWire outline;
     outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, -10, 0), gp_Pnt(0, 10, 0)).Edge());
