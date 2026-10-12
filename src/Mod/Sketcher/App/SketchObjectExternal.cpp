@@ -2766,10 +2766,10 @@ double distanceFromSaved(const Part::Geometry* geo, const Part::Geometry* saved)
             }
             // closestParameter() gives an orthogonal foot when there is one, which on an arc
             // over half a turn can be the far side; an end can be nearer
-            const double near = std::min({Base::Distance(p, to->pointAtParameter(u)),
-                                          Base::Distance(p, to->pointAtParameter(toFirst)),
-                                          Base::Distance(p, to->pointAtParameter(toLast))});
-            distance = std::max(distance, near);
+            const double nearest = std::min({Base::Distance(p, to->pointAtParameter(u)),
+                                             Base::Distance(p, to->pointAtParameter(toFirst)),
+                                             Base::Distance(p, to->pointAtParameter(toLast))});
+            distance = std::max(distance, nearest);
         }
         return distance;
     };
