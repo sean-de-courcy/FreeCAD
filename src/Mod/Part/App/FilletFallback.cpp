@@ -48,8 +48,10 @@
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -310,6 +312,86 @@ Section makeSection(
     return s;
 }
 
+/** How a selected edge ends at one of its vertices (5.6, interface point 1).
+ *
+ * S1 builds free ends and tangent continuations; the corner kinds are refused with their own
+ * reason until the corner construction (S1c) handles them.
+ */
+enum class VertexClass
+{
+    /// No other selected edge at the vertex: the tool is bounded by the end face's plane
+    FreeEnd,
+    /// A selected edge continues this one tangentially: the two tools meet on the plane
+    /// normal to the common tangent
+    TangentContinuation,
+    /// One other selected edge meets this one at an angle (a two-edge corner)
+    Corner2,
+    /// All three edges at the vertex are selected (a three-edge corner)
+    Corner3,
+    /// Outside the scope
+    Refuse
+};
+
+/// A plane that bounds a tool: the tool keeps the side opposite to the normal
+struct TrimPlane
+{
+    gp_Pnt point;
+    gp_Dir normal;
+};
+
+/** Where a section ends on one of the faces, swept along the edge: the line or circle on which
+ * the dress-up's new edge lies. Not valid when the circle shrinks to a point on its axis.
+ */
+struct FarSide
+{
+    bool valid = false;
+    bool line = true;
+    gp_Lin lin;
+    gp_Circ circ;
+
+    double distance(const gp_Pnt& point) const
+    {
+        return line ? lin.Distance(point) : circ.Distance(point);
+    }
+};
+
+/// The tangent strip of a tool on one of the faces next to its edge
+struct Strip
+{
+    TopoDS_Face face;
+    /// The tool's faces on it
+    std::vector<TopoDS_Shape> contacts;
+    FarSide farSide;
+};
+
+/** One piece of material removed (cut) or added (fused) (5.6, interface point 2).
+ *
+ * The tools of one dress-up are interior-disjoint (interface point 7), so the volume of the
+ * result must equal the base's minus the cut tools' closed-form volumes plus the fused ones'.
+ */
+struct Tool
+{
+    TopoDS_Shape solid;
+    /// Cut from the base (a convex edge) or fused to it (a concave edge)
+    bool cut = true;
+    /// The selected edge (or, for corner pieces, the vertex) whose fillet the tool's faces are
+    /// named after
+    TopoDS_Shape source;
+    /// The tool's volume in closed form, not measured
+    double volume = 0.0;
+    /// On the edge's two faces, in the order of EdgeData::faces
+    Strip strips[2];
+    /// The faces of the tool that lie on the faces adjacent to the edge: the result must not
+    /// keep any part of them (each tangent strip must be backed by material, or by air)
+    std::vector<TopoDS_Shape> contactFaces;
+    /// The planes that bound the tool at the edge's free ends: a face of the tool left in such
+    /// a plane is merged into the base's coplanar face (interface point 4)
+    std::vector<TrimPlane> caps;
+    /// The tool's faces in those planes: whatever they become must be the end face's image (the
+    /// end face covers them, or they merge into it)
+    std::vector<TopoDS_Shape> capFaces;
+};
+
 /// A selected edge, analysed
 struct EdgeData
 {
@@ -541,8 +623,12 @@ VertexEnd classify(const Context& ctx, const EdgeData& data, const TopoDS_Vertex
             endFace = TopoDS::Face(shape);
         }
     }
+    if (endFace.IsNull()) {
+        end.reason = "no end face";
+        return end;
+    }
     BRepAdaptor_Surface surface(endFace, Standard_False);
-    if (endFace.IsNull() || surface.GetType() != GeomAbs_Plane) {
+    if (surface.GetType() != GeomAbs_Plane) {
         end.reason = "an end face that is not a plane";
         return end;
     }
@@ -588,6 +674,21 @@ Section sectionAt(const Context& ctx, const EdgeData& data, double parameter)
     );
 }
 
+/// The circle about the axis through the point
+FarSide circleAbout(const gp_Ax1& axis, const gp_Pnt& point)
+{
+    FarSide side;
+    side.line = false;
+    gp_Vec z(axis.Direction());
+    gp_Pnt centre = axis.Location().Translated(z * gp_Vec(axis.Location(), point).Dot(z));
+    double radius = centre.Distance(point);
+    if (radius > linearTolerance) {
+        side.valid = true;
+        side.circ = gp_Circ(gp_Ax2(centre, axis.Direction()), radius);
+    }
+    return side;
+}
+
 /// A prism along a straight edge, bounded by the planes at its ends
 Tool lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
@@ -617,6 +718,11 @@ Tool lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
     tool.source = data.edge;
     tool.cut = data.convex;
     tool.volume = section.area * (range(ends[1].trim, centroid) - range(ends[0].trim, centroid));
+    for (int k = 0; k < 2; ++k) {
+        tool.strips[k].face = data.faces[k];
+        tool.strips[k].farSide.valid = true;
+        tool.strips[k].farSide.lin = gp_Lin(section.ends[k], direction);
+    }
     double margin = 1.0 + section.length[0] + section.length[1];
     double begin = trimStart ? from - margin : 0.0;
     double finish = trimEnd ? to + margin : length;
@@ -686,6 +792,10 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     tool.source = data.edge;
     tool.cut = data.convex;
     tool.volume = section.area * centroidRadius * span;
+    for (int k = 0; k < 2; ++k) {
+        tool.strips[k].face = data.faces[k];
+        tool.strips[k].farSide = circleAbout(axis, section.ends[k]);
+    }
     TopoDS_Shape solid;
     if (!section.fillet) {
         solid = BRepPrimAPI_MakeRevol(section.face(), axis, span, Standard_True).Shape();
@@ -733,14 +843,185 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     return tool;
 }
 
-/// The tool's faces on the faces next to its edge
+bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane)
+{
+    gp_Pln pln(plane.point, plane.normal);
+    for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+        if (pln.Distance(BRep_Tool::Pnt(TopoDS::Vertex(it.Current()))) > linearTolerance) {
+            return false;
+        }
+    }
+    if (shape.ShapeType() == TopAbs_FACE) {
+        BRepAdaptor_Surface surface(TopoDS::Face(shape), Standard_False);
+        return surface.GetType() == GeomAbs_Plane
+            && parallel(surface.Plane().Axis().Direction(), plane.normal);
+    }
+    return true;
+}
+
+/// The tool's faces on the faces next to its edge, and in the planes of its caps
 void findContactFaces(Tool& tool, const EdgeData& data)
 {
     for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
         const TopoDS_Face& face = TopoDS::Face(it.Current());
-        if (sameDomain(face, data.faces[0]) || sameDomain(face, data.faces[1])) {
-            tool.contactFaces.push_back(face);
+        for (int k = 0; k < 2; ++k) {
+            if (sameDomain(face, data.faces[k])) {
+                tool.contactFaces.push_back(face);
+                tool.strips[k].contacts.push_back(face);
+            }
         }
+        for (const auto& cap : tool.caps) {
+            if (inPlane(face, cap)) {
+                tool.capFaces.push_back(face);
+                break;
+            }
+        }
+    }
+}
+
+/// The common part of two shapes (faces, or solids), without changing either
+TopoDS_Shape commonOf(const TopoDS_Shape& shape, const TopoDS_Shape& other)
+{
+    TopTools_ListOfShape arguments;
+    arguments.Append(shape);
+    TopTools_ListOfShape tools;
+    tools.Append(other);
+    BRepAlgoAPI_Common common;
+    common.SetArguments(arguments);
+    common.SetTools(tools);
+    common.SetNonDestructive(Standard_True);
+    common.SetRunParallel(Standard_False);
+    common.Build();
+    if (!common.IsDone() || common.HasErrors()) {
+        refuse("intersecting a tool with the base failed");
+    }
+    return common.Shape();
+}
+
+double perimeterOf(const TopoDS_Shape& face)
+{
+    GProp_GProps props;
+    BRepGProp::LinearProperties(face, props);
+    return props.Mass();
+}
+
+/// Areas this close are equal: the boundary moved by a little over the linear tolerance
+double areaToleranceOf(const TopoDS_Shape& face)
+{
+    return 10 * linearTolerance * perimeterOf(face);
+}
+
+/// The edge lies on the line or circle (exact for lines and circles: three points decide)
+bool liesOn(const TopoDS_Edge& edge, const FarSide& side)
+{
+    BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() != GeomAbs_Line && curve.GetType() != GeomAbs_Circle) {
+        return false;
+    }
+    double tolerance = std::max(linearTolerance, BRep_Tool::Tolerance(edge));
+    double first = curve.FirstParameter();
+    double last = curve.LastParameter();
+    for (double t : {first, (first + last) / 2, last}) {
+        if (side.distance(curve.Value(t)) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool coincide(const FarSide& a, const FarSide& b)
+{
+    if (a.line != b.line) {
+        return false;
+    }
+    if (a.line) {
+        return parallel(a.lin.Direction(), b.lin.Direction())
+            && a.lin.Distance(b.lin.Location()) < linearTolerance;
+    }
+    return parallel(a.circ.Axis().Direction(), b.circ.Axis().Direction())
+        && a.circ.Location().Distance(b.circ.Location()) < linearTolerance
+        && std::abs(a.circ.Radius() - b.circ.Radius()) < linearTolerance;
+}
+
+/** The tangent strips (section 2a), checked before any Boolean, with errors linear in the size:
+ * each lies on its face, and no two overlap. A dress-up slightly too big for its faces passes the
+ * volume checks, whose error grows with the square or cube of the excess.
+ *
+ * At the limit (Request::limitOnly) one strip's far side must also land on an edge of its face or
+ * on another strip's far side, or the strips must cover a face whole: the dress-ups OCCT refuses
+ * and the construction is for. Anything else OCCT refuses keeps OCCT's error.
+ */
+void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
+{
+    struct OnFace
+    {
+        TopoDS_Face face;
+        std::vector<const Strip*> strips;
+    };
+    std::vector<OnFace> faces;
+    for (const auto& tool : tools) {
+        for (const auto& strip : tool.strips) {
+            auto group = std::find_if(faces.begin(), faces.end(), [&](const OnFace& f) {
+                return f.face.IsSame(strip.face);
+            });
+            if (group == faces.end()) {
+                faces.push_back({strip.face, {}});
+                group = std::prev(faces.end());
+            }
+            group->strips.push_back(&strip);
+        }
+    }
+    bool atLimit = false;
+    for (const auto& group : faces) {
+        double covered = 0.0;
+        for (const auto* strip : group.strips) {
+            if (strip->contacts.empty()) {
+                refuse("a tool has no face on a face next to its edge");
+            }
+            for (const auto& contact : strip->contacts) {
+                double area = areaOf(contact);
+                if (area - areaOf(commonOf(group.face, contact)) > areaToleranceOf(contact)) {
+                    refuse("a tangent strip runs off its face");
+                }
+                covered += area;
+            }
+        }
+        for (size_t i = 0; i < group.strips.size(); ++i) {
+            for (size_t j = i + 1; j < group.strips.size(); ++j) {
+                for (const auto& mine : group.strips[i]->contacts) {
+                    for (const auto& theirs : group.strips[j]->contacts) {
+                        double tolerance = std::min(areaToleranceOf(mine), areaToleranceOf(theirs));
+                        if (areaOf(commonOf(mine, theirs)) > tolerance) {
+                            refuse("two tangent strips overlap");
+                        }
+                    }
+                }
+            }
+        }
+        if (!limitOnly || atLimit) {
+            continue;
+        }
+        if (areaOf(group.face) - covered <= areaToleranceOf(group.face)) {
+            atLimit = true;
+            continue;
+        }
+        for (const auto* strip : group.strips) {
+            if (!strip->farSide.valid) {
+                continue;
+            }
+            for (TopExp_Explorer it(group.face, TopAbs_EDGE); it.More() && !atLimit; it.Next()) {
+                atLimit = liesOn(TopoDS::Edge(it.Current()), strip->farSide);
+            }
+            for (const auto* other : group.strips) {
+                if (other != strip && other->farSide.valid
+                    && coincide(strip->farSide, other->farSide)) {
+                    atLimit = true;
+                }
+            }
+        }
+    }
+    if (limitOnly && !atLimit) {
+        refuse("not at the limit: no new edge lands on an existing one, and no face vanishes");
     }
 }
 
@@ -838,6 +1119,9 @@ TopoDS_Shape applyTools(
     }
     operation->SetArguments(arguments);
     operation->SetTools(toolShapes);
+    // The first stage's argument is the caller's base. (OCCT 8.0.1 then leaves the sphere of a
+    // cylinder's top rounded at r = R invalid, which the checks refuse)
+    operation->SetNonDestructive(Standard_True);
     operation->SetRunParallel(Standard_False);
     operation->Build();
     if (!operation->IsDone() || operation->HasErrors()) {
@@ -861,22 +1145,6 @@ TopoDS_Shape applyTools(
         }
     }
     return result;
-}
-
-bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane)
-{
-    gp_Pln pln(plane.point, plane.normal);
-    for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
-        if (pln.Distance(BRep_Tool::Pnt(TopoDS::Vertex(it.Current()))) > linearTolerance) {
-            return false;
-        }
-    }
-    if (shape.ShapeType() == TopAbs_FACE) {
-        BRepAdaptor_Surface surface(TopoDS::Face(shape), Standard_False);
-        return surface.GetType() == GeomAbs_Plane
-            && parallel(surface.Plane().Axis().Direction(), plane.normal);
-    }
-    return true;
 }
 
 TopoDS_Shape construct(
@@ -912,6 +1180,13 @@ TopoDS_Shape construct(
         }
         ctx.selected.Add(edge.getShape());
     }
+    // OCCT runs a dress-up on along tangent chains, by its own angular tolerance: where it would
+    // have reached an unselected edge, the construction (which stops there) differs from it
+    for (const auto& edge : request.contour) {
+        if (!ctx.selected.Contains(edge)) {
+            refuse("OCCT's contour runs on along a tangent chain onto an unselected edge");
+        }
+    }
     for (int i = 1; i <= ctx.selected.Extent(); ++i) {
         data.push_back(analyse(ctx, TopoDS::Edge(ctx.selected(i))));
     }
@@ -922,6 +1197,7 @@ TopoDS_Shape construct(
         if (!edgeData.closed) {
             TopoDS_Vertex vertices[2];
             TopExp::Vertices(edgeData.edge, vertices[0], vertices[1]);
+            bool classified[2] = {false, false};
             for (int i = 0; i < 2; ++i) {
                 // ends[0] at the first parameter
                 double parameter = 0.0;
@@ -929,6 +1205,10 @@ TopoDS_Shape construct(
                 bool atFirst
                     = std::abs(parameter - edgeData.first) < std::abs(parameter - edgeData.last);
                 int slot = atFirst ? 0 : 1;
+                if (classified[slot]) {
+                    refuse("the ends of a selected edge could not be told apart");
+                }
+                classified[slot] = true;
                 ends[slot] = classify(ctx, edgeData, vertices[i]);
                 VertexClass kind = ends[slot].kind;
                 if (kind == VertexClass::Refuse || kind == VertexClass::Corner2
@@ -970,8 +1250,15 @@ TopoDS_Shape construct(
                    + describe(tool.volume));
         }
         findContactFaces(tool, edgeData);
+        // A fused tool fills air only: material under it would be fused twice, and the volume
+        // checks after the cut could not tell (5.6, interface point 7)
+        if (!tool.cut
+            && volumeOf(commonOf(base.getShape(), tool.solid)) > volumeTolerance * tool.volume) {
+            refuse("a fused tool overlaps the base's material");
+        }
         tools.push_back(std::move(tool));
     }
+    checkStrips(tools, request.limitOnly);
 
     std::vector<Stage> stages;
     std::vector<size_t> toolStage(tools.size(), 0);
@@ -1051,10 +1338,47 @@ TopoDS_Shape construct(
             refuse("the result has a face of zero area");
         }
     }
+    // One solid, as OCCT's fillet returns, not a compound holding it
+    if (shape.ShapeType() != TopAbs_SOLID) {
+        TopoDS_Shape solid = TopExp_Explorer(shape, TopAbs_SOLID).Current();
+        TopTools_IndexedMapOfShape inShape;
+        TopTools_IndexedMapOfShape inSolid;
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopExp::MapShapes(shape, type, inShape);
+            TopExp::MapShapes(solid, type, inSolid);
+        }
+        if (inShape.Extent() != inSolid.Extent()) {
+            refuse("the result holds more than its solid");
+        }
+        shape = solid;
+    }
+    // The stages' checks don't cover the unification
+    double cutVolume = 0.0;
+    double fusedVolume = 0.0;
+    for (const auto& tool : tools) {
+        (tool.cut ? cutVolume : fusedVolume) += tool.volume;
+    }
+    double expected = baseVolume - cutVolume + fusedVolume;
+    double measured = volumeOf(shape);
+    if (std::abs(measured - expected) > volumeTolerance * (cutVolume + fusedVolume)) {
+        refuse("the result's volume " + describe(measured) + " differs from its closed form "
+               + describe(expected));
+    }
 
     // The fillet's history, composed from the stages' (section 3): the base's elements are
     // modified into their images; whatever else a tool's faces become is generated by its edge
     collectBaseImages();
+    // A tool's end in a free end's plane is covered by the end face (a cut leaves nothing of it),
+    // or merges into it (a fused tool, or a cut against a wall); else it is a step or a notch
+    for (size_t i = 0; i < tools.size(); ++i) {
+        for (const auto& cap : tools[i].capFaces) {
+            for (const auto& image : imagesThrough(stages, toolStage[i], cap)) {
+                if (!baseImages.Contains(image)) {
+                    refuse("the end face of a selected edge does not cover the end of its tool");
+                }
+            }
+        }
+    }
     ShapeMapper mapper;
     for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
         for (TopExp_Explorer it(base.getShape(), type); it.More(); it.Next()) {
@@ -1111,6 +1435,9 @@ bool build(
     }
     catch (const std::exception& e) {
         why = e.what();
+    }
+    catch (...) {
+        why = "an unknown exception";
     }
     FC_LOG("exact construction refused: " << why);
     if (reason) {

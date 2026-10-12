@@ -5827,9 +5827,19 @@ namespace
 /** Builds a fillet or chamfer maker: true when OCCT fails with StdFail_NotDone, the failure the
  * exact construction may build instead (ops#300). Other exceptions propagate as before.
  * @param error Receives what OCCT threw, if it threw
+ * @param contour Receives the edges of the maker's contours, read before the build
  */
-bool buildDressUpFailed(BRepBuilderAPI_MakeShape& maker, std::exception_ptr& error)
+bool buildDressUpFailed(
+    BRepFilletAPI_LocalOperation& maker,
+    std::exception_ptr& error,
+    std::vector<TopoDS_Shape>& contour
+)
 {
+    for (int i = 1; i <= maker.NbContours(); ++i) {
+        for (int j = 1; j <= maker.NbEdges(i); ++j) {
+            contour.push_back(maker.Edge(i, j));
+        }
+    }
     try {
         maker.Build();
     }
@@ -5887,8 +5897,9 @@ TopoShape& TopoShape::makeElementFillet(
         mkFillet.Add(radius1, radius2, TopoDS::Edge(edge));
     }
     std::exception_ptr occtError;
-    if (buildDressUpFailed(mkFillet, occtError)) {
-        FilletFallback::Request request;
+    FilletFallback::Request request;
+    if (buildDressUpFailed(mkFillet, occtError, request.contour)) {
+        Part::SignalException sig;
         request.kind = FilletFallback::Kind::Fillet;
         request.size1 = radius1;
         request.size2 = radius2;
@@ -5961,8 +5972,8 @@ TopoShape& TopoShape::makeElementChamfer(
     }
     Part::SignalException sig;
     std::exception_ptr occtError;
-    if (buildDressUpFailed(mkChamfer, occtError)) {
-        FilletFallback::Request request;
+    FilletFallback::Request request;
+    if (buildDressUpFailed(mkChamfer, occtError, request.contour)) {
         request.kind = FilletFallback::Kind::Chamfer;
         request.size1 = radius1;
         request.size2 = radius2;

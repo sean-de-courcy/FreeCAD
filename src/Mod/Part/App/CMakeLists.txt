@@ -559,6 +559,8 @@ SET(Part_SRCS
     CrossSection.h
     ExtrusionHelper.cpp
     ExtrusionHelper.h
+    FilletFallback.cpp
+    FilletFallback.h
     FuzzyHelper.cpp
     FuzzyHelper.h
     GeometryExtension.cpp
@@ -586,8 +588,6 @@ SET(Part_SRCS
     Services.h
     SignalException.cpp
     SignalException.h
-    FilletFallback.cpp
-    FilletFallback.h
     TopoShape.cpp
     TopoShape.h
     TopoShapeCache.cpp

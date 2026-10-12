@@ -101,7 +101,8 @@ class FilletFallbackTest(unittest.TestCase):
         self.assertExact(box.makeChamfer(4, edges[:1]), 2400 - 8 * 30)
 
     def testRefusalsKeepOcctsError(self):
-        # Corners (until they are built too), variable radius, overlapping rounds
+        # Corners (until they are built too), variable radius, overlapping rounds, rounds just
+        # over the limit (the strips overlap, or run off their face, by a hundredth)
         cube = Part.makeBox(4, 4, 4)
         with self.assertRaises(Part.OCCError):
             cube.makeFillet(2, cube.Edges)
@@ -109,5 +110,8 @@ class FilletFallbackTest(unittest.TestCase):
         edges = top_edges(box)
         with self.assertRaises(Part.OCCError):
             box.makeFillet(1, 2, edges)
+        for r in (2.1, 2.01):
+            with self.assertRaises(Part.OCCError):
+                box.makeFillet(r, edges)
         with self.assertRaises(Part.OCCError):
-            box.makeFillet(2.1, edges)
+            box.makeFillet(4.01, edges[:1])

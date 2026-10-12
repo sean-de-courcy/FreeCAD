@@ -37,6 +37,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GProp_GProps.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -150,6 +151,32 @@ TopoDS_Shape ribAgainstWall()
     ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
     unify.Build();
     return unify.Shape();
+}
+
+/// The box 30 x 4 x 20 on a lower block x in [-5, 0], z up to 17: the end face of the top edges
+/// at x = 0 covers z from 17 to 20 only
+TopoDS_Shape boxOnALowerBlock()
+{
+    BRepAlgoAPI_Fuse fuse(box(30, 4, 20), box(5, 4, 17, gp_Pnt(-5, 0, 0)));
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// A plate 20 high whose top is 4 wide at x = 0, the front y = 0 up to x = 30, then the front
+/// bending by the angle towards the back, which it meets at x = 30 + 4 / tan(angle)
+TopoDS_Shape bentFront(double angle)
+{
+    double tip = 30 + 4 / std::tan(angle);
+    BRepBuilderAPI_MakePolygon polygon(
+        gp_Pnt(0, 0, 0),
+        gp_Pnt(30, 0, 0),
+        gp_Pnt(tip, 4, 0),
+        gp_Pnt(0, 4, 0),
+        Standard_True
+    );
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, 20)).Shape();
 }
 
 /// The edge of the shape between the two points
@@ -288,6 +315,31 @@ FF::Request chamfer(
     request.chamferType = type;
     request.flipDirection = flip;
     return request;
+}
+
+/// OCCT's own dress-up fails (fillets, and chamfers by distances)
+bool occtFails(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const FF::Request& request
+)
+{
+    if (request.kind == FF::Kind::Fillet) {
+        return occtFilletFails(base, edges, request.size1, request.size2);
+    }
+    BRepFilletAPI_MakeChamfer maker(base.getShape());
+    for (const auto& e : edges) {
+        const auto& edge = TopoDS::Edge(e.getShape());
+        auto face = TopoDS::Face(base.findAncestorShape(edge, TopAbs_FACE));
+        maker.Add(request.size1, request.size2, edge, face);
+    }
+    try {
+        maker.Build();
+    }
+    catch (const Standard_Failure&) {
+        return true;
+    }
+    return !maker.IsDone();
 }
 
 /// The dress-up as the public functions build it: OCCT, or the exact construction after it
@@ -455,7 +507,9 @@ testing::AssertionResult sameAsOcct(
 )
 {
     TopoShape occt = dressUp(base, edges, request);
-    TopoShape exactRoute = forced(base, edges, request);
+    FF::Request belowTheLimit = request;
+    belowTheLimit.limitOnly = false;
+    TopoShape exactRoute = forced(base, edges, belowTheLimit);
     return sameAs(exactRoute, occt);
 }
 
@@ -547,7 +601,7 @@ TEST_F(FilletFallbackTest, columnRoundedIntoACylinder)
         ),
         edges.end()
     );
-    ASSERT_EQ(edges.size(), 4);
+    ASSERT_EQ(edges.size(), 4U);
     ASSERT_TRUE(occtFilletFails(base, edges, 2, 2));
     TopoShape result = dressUp(base, edges, fillet(2));
     EXPECT_TRUE(exact(result, pi * 4 * 10));
@@ -571,7 +625,7 @@ TEST_F(FilletFallbackTest, tubeFullRound)
 {
     TopoShape base(tube(), 1L);
     auto edges = edgesWhere(base, atHeight(10), true);
-    ASSERT_EQ(edges.size(), 2);
+    ASSERT_EQ(edges.size(), 2U);
     ASSERT_TRUE(occtFilletFails(base, edges, 2, 2));
     double c = filletCentroid(2);
     double removed = 2 * pi * (10 - c) * filletSection(2) + 2 * pi * (6 + c) * filletSection(2);
@@ -590,7 +644,7 @@ TEST_F(FilletFallbackTest, discRoundedOverItsWholeHeight)
     // A circular edge whose fillet consumes the cylinder face
     TopoShape base(BRepPrimAPI_MakeCylinder(10, 2).Shape(), 1L);
     auto edges = edgesWhere(base, atHeight(2), true);
-    ASSERT_EQ(edges.size(), 1);
+    ASSERT_EQ(edges.size(), 1U);
     ASSERT_TRUE(occtFilletFails(base, edges, 2, 2));
     double removed = 2 * pi * (10 - filletCentroid(2)) * filletSection(2);
     EXPECT_TRUE(exact(dressUp(base, edges, fillet(2)), pi * 100 * 2 - removed));
@@ -733,13 +787,21 @@ TEST_F(FilletFallbackTest, sameAsOcctBelowTheLimit)
     auto circles = edgesWhere(ring, atHeight(10), true);
     EXPECT_TRUE(sameAsOcct(ring, circles, fillet(1.9)));
     EXPECT_TRUE(sameAsOcct(ring, circles, chamfer(1.5)));
-    // A cylinder's top edge with r = R: a sphere
+    // A cylinder's top edge with r = R: a sphere. With the caller's base kept as it is
+    // (non-destructive Booleans), OCCT 8.0.1's cut leaves a face with misoriented wires here, and
+    // the construction refuses; OCCT builds this one itself. Built or refused, never different
     TopoShape cylinder(BRepPrimAPI_MakeCylinder(5, 10).Shape(), 1L);
-    EXPECT_TRUE(sameAsOcct(
-        cylinder,
-        edgesWhere(cylinder, atHeight(10), true),
-        fillet(5)
-    ));
+    auto rim = edgesWhere(cylinder, atHeight(10), true);
+    FF::Request sphere = fillet(5);
+    sphere.limitOnly = false;
+    std::string reason;
+    TopoShape exactRoute = forced(cylinder, rim, sphere, &reason);
+    if (exactRoute.isNull()) {
+        EXPECT_NE(reason.find("not valid"), std::string::npos) << reason;
+    }
+    else {
+        EXPECT_TRUE(sameAs(exactRoute, dressUp(cylinder, rim, fillet(5))));
+    }
 }
 
 TEST_F(FilletFallbackTest, sameAsOcctAtOtherAngles)
@@ -797,17 +859,86 @@ TEST_F(FilletFallbackTest, namedAsAFillet)
     EXPECT_TRUE(found);
 }
 
+// OCCT's own result wherever OCCT works
+
+TEST_F(FilletFallbackTest, occtsResultWhereOcctWorks)
+{
+    // The cube with all 12 edges at r = 1: OCCT builds it, with spherical corners; the exact
+    // construction refuses corners, so the result can only be OCCT's
+    TopoShape cube(box(4, 4, 4), 1L);
+    auto all = cube.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_FALSE(occtFilletFails(cube, all, 1, 1));
+    std::string reason;
+    EXPECT_TRUE(forced(cube, all, fillet(1), &reason).isNull());
+    EXPECT_NE(reason.find("corner"), std::string::npos) << reason;
+    TopoShape result = dressUp(cube, all, fillet(1));
+    EXPECT_TRUE(exact(result, 8 + 6 * 4 + 6 * pi + 4 * pi / 3));
+    int spheres = 0;
+    for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        spheres += surfaceType(it.Current()) == GeomAbs_Sphere ? 1 : 0;
+    }
+    EXPECT_EQ(spheres, 8);
+}
+
 // Refusals: the original OCCT error stands.
+
+/// The public function throws OCCT's StdFail_NotDone, with its message
+testing::AssertionResult throwsOcctsError(const std::function<void()>& run)
+{
+    try {
+        run();
+    }
+    catch (const StdFail_NotDone& e) {
+        if (std::string(e.GetMessageString()) != "BRep_API: command not done") {
+            return testing::AssertionFailure() << "message " << e.GetMessageString();
+        }
+        return testing::AssertionSuccess();
+    }
+    catch (const Standard_Failure& e) {
+        return testing::AssertionFailure() << "another OCCT error: " << e.GetMessageString();
+    }
+    return testing::AssertionFailure() << "no error";
+}
+
+/// OCCT fails, the public function raises OCCT's error, and the exact construction, forced,
+/// refuses for the reason
+testing::AssertionResult refusedFor(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    const FF::Request& request,
+    const char* expected
+)
+{
+    if (!occtFails(base, edges, request)) {
+        return testing::AssertionFailure() << "OCCT builds it";
+    }
+    auto raised = throwsOcctsError([&] { dressUp(base, edges, request); });
+    if (!raised) {
+        return raised;
+    }
+    std::string reason;
+    if (!forced(base, edges, request, &reason).isNull()) {
+        return testing::AssertionFailure() << "built when forced";
+    }
+    if (reason.find(expected) == std::string::npos) {
+        return testing::AssertionFailure() << "refused for: " << reason;
+    }
+    return testing::AssertionSuccess();
+}
 
 TEST_F(FilletFallbackTest, refusesCorners)
 {
     // Corners come with S1c: the cube rounded into a sphere fails as before
     TopoShape cube(box(4, 4, 4), 1L);
     auto all = cube.getSubTopoShapes(TopAbs_EDGE);
-    EXPECT_THROW(dressUp(cube, all, fillet(2)), Standard_Failure);
-    std::string reason;
-    forced(cube, all, fillet(2), &reason);
-    EXPECT_NE(reason.find("corner"), std::string::npos) << reason;
+    EXPECT_TRUE(refusedFor(cube, all, fillet(2), "corner"));
+    // Two top edges meeting at a corner, exactly at the limit
+    std::vector<TopoShape> two {
+        edgeBetween(cube, {0, 0, 4}, {4, 0, 4}),
+        edgeBetween(cube, {0, 0, 4}, {0, 4, 4})
+    };
+    EXPECT_TRUE(refusedFor(cube, two, fillet(4), "corner"));
+    EXPECT_TRUE(refusedFor(cube, two, chamfer(4), "corner"));
 }
 
 TEST_F(FilletFallbackTest, refusesVariableRadius)
@@ -818,33 +949,89 @@ TEST_F(FilletFallbackTest, refusesVariableRadius)
         edgeBetween(base, {0, 4, 20}, {30, 4, 20})
     };
     TopoShape result(2L);
-    EXPECT_THROW(result.makeElementFillet(base, edges, 1, 2), Standard_Failure);
+    EXPECT_TRUE(throwsOcctsError([&] { result.makeElementFillet(base, edges, 1, 2); }));
 }
 
 TEST_F(FilletFallbackTest, refusesOverlappingTools)
 {
-    // r = 2.1 on the rib 4 wide: the two rounds overlap, and the volume check refuses
+    // r = 2.1 on the rib 4 wide: the two rounds overlap
     TopoShape base(ribAgainstWall(), 1L);
     std::vector<TopoShape> edges {
         edgeBetween(base, {13, 0, 4}, {13, 20, 4}),
         edgeBetween(base, {17, 0, 4}, {17, 20, 4})
     };
-    EXPECT_THROW(dressUp(base, edges, fillet(2.1)), Standard_Failure);
+    EXPECT_TRUE(refusedFor(base, edges, fillet(2.1), "overlap"));
+}
+
+TEST_F(FilletFallbackTest, refusesJustOverTheLimit)
+{
+    // The volume error grows with the square or cube of the excess, so the volume checks pass
+    // these; the strips' areas grow linearly with it. The plate's top is 4 wide
+    TopoShape base(box(30, 4, 20), 1L);
+    TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
+    TopoShape back = edgeBetween(base, {0, 4, 20}, {30, 4, 20});
+    for (double r : {2.005, 2.01, 2.02}) {
+        EXPECT_TRUE(refusedFor(base, {front, back}, fillet(r), "overlap")) << r;
+    }
+    for (double r : {4.01, 4.02, 4.04}) {
+        EXPECT_TRUE(refusedFor(base, {front}, fillet(r), "runs off its face")) << r;
+    }
+    for (double d : {2.001, 2.002}) {
+        EXPECT_TRUE(refusedFor(base, {front, back}, chamfer(d), "overlap")) << d;
+    }
+    EXPECT_TRUE(refusedFor(base, {front}, chamfer(4.002), "runs off its face"));
+}
+
+TEST_F(FilletFallbackTest, refusesBelowTheLimit)
+{
+    // Where OCCT works the construction isn't needed, and isn't for: forced, it refuses
+    TopoShape base(box(30, 4, 20), 1L);
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(base, {0, 4, 20}, {30, 4, 20})
+    };
     std::string reason;
-    EXPECT_TRUE(forced(base, edges, fillet(2.1), &reason).isNull());
-    EXPECT_NE(reason.find("removed"), std::string::npos) << reason;
+    EXPECT_TRUE(forced(base, edges, fillet(1.9), &reason).isNull());
+    EXPECT_NE(reason.find("not at the limit"), std::string::npos) << reason;
+}
+
+TEST_F(FilletFallbackTest, refusesAnEndFaceThatDoesNotCoverTheTool)
+{
+    // The front top edge at r = 4: its end face at x = 0 reaches down to z = 17 only, so the
+    // round's end, down to z = 16, would leave a notch in the lower block. OCCT, below the
+    // limit, runs the round on over the block instead
+    TopoShape base(boxOnALowerBlock(), 1L);
+    TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
+    EXPECT_TRUE(refusedFor(base, {front}, fillet(4), "does not cover"));
+    // The full round of both top edges ends within the end face
+    TopoShape back = edgeBetween(base, {0, 4, 20}, {30, 4, 20});
+    EXPECT_TRUE(exact(dressUp(base, {front, back}, fillet(2)), 2740 - 2 * filletSection(2) * 30));
+}
+
+TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
+{
+    // The front bends by a small angle at x = 30: OCCT's contour runs on along the bent edge,
+    // and builds a second round there below the limit. The construction stops at the selected
+    // edge, so it must not build the dress-up at the limit
+    for (double angle : {0.005, 0.05, 0.1}) {
+        TopoShape base(bentFront(angle), 1L);
+        TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
+        ASSERT_TRUE(occtFilletFails(base, {front}, 4, 4));
+        EXPECT_TRUE(throwsOcctsError([&] { dressUp(base, {front}, fillet(4)); })) << angle;
+    }
 }
 
 TEST_F(FilletFallbackTest, refusesARoundUnderAnOverhang)
 {
     // The step's convex edge with r = 5: the round's tangent line on the riser lies 1 below
     // the riser's foot, inside the material. The volume is right, but the result would cut
-    // under the tread: refused
+    // under the tread: its strip runs off the riser (the contact check after the cut is the
+    // second line of defence)
     TopoShape base(step(), 1L);
     std::string reason;
     TopoShape convex = edgeBetween(base, {0, 10, 14}, {30, 10, 14});
     EXPECT_TRUE(forced(base, {convex}, fillet(5), &reason).isNull());
-    EXPECT_NE(reason.find("left in the result"), std::string::npos) << reason;
+    EXPECT_NE(reason.find("runs off its face"), std::string::npos) << reason;
 }
 
 TEST_F(FilletFallbackTest, refusesATangentChainOntoUnselectedEdges)
@@ -861,7 +1048,7 @@ TEST_F(FilletFallbackTest, refusesAConeFace)
     TopoShape base(BRepPrimAPI_MakeCone(5, 3, 10).Shape(), 1L);
     std::string reason;
     auto edges = edgesWhere(base, atHeight(10), true);
-    ASSERT_EQ(edges.size(), 1);
+    ASSERT_EQ(edges.size(), 1U);
     EXPECT_TRUE(forced(base, edges, fillet(1), &reason).isNull());
     EXPECT_FALSE(reason.empty());
 }

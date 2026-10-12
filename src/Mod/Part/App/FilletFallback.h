@@ -8,8 +8,10 @@
  * (two lines and a circular arc, or a triangle) is swept along the edge (a prism along a straight
  * edge between planes; a revolution about the axis of a circle between a plane and a coaxial
  * cylinder), bounded at the edge's ends, cut from the base (convex edge) or fused to it (concave
- * edge). The result is verified (valid, one solid, no zero-area face, every volume equal to its
- * closed form) and named through a composed history, as if the fillet had built it.
+ * edge). It is verified (at the limit; each tangent strip on its face and none overlapping; the
+ * ends covered by the end faces; OCCT's contour no longer than the selection; valid, one solid, no
+ * zero-area face, every volume equal to its closed form) and named through a composed history,
+ * as if the fillet had built it.
  *
  * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed. Whenever
  * a configuration is outside the scope or a check fails, build() refuses and the caller raises
@@ -23,10 +25,6 @@
 
 #include <string>
 #include <vector>
-
-#include <TopoDS_Shape.hxx>
-#include <gp_Pnt.hxx>
-#include <gp_Dir.hxx>
 
 #include <Mod/Part/PartGlobal.h>
 #include "TopoShape.h"
@@ -51,56 +49,12 @@ struct Request
     double size2 = 0.0;
     ChamferType chamferType = ChamferType::equalDistance;
     Flip flipDirection = Flip::none;
-};
-
-/** How a selected edge ends at one of its vertices (5.6, interface point 1).
- *
- * S1 builds free ends and tangent continuations; the corner kinds are refused with their own
- * reason until the corner construction (S1c) handles them.
- */
-enum class VertexClass
-{
-    /// No other selected edge at the vertex: the tool is bounded by the end face's plane
-    FreeEnd,
-    /// A selected edge continues this one tangentially: the two tools meet on the plane
-    /// normal to the common tangent
-    TangentContinuation,
-    /// One other selected edge meets this one at an angle (a two-edge corner)
-    Corner2,
-    /// All three edges at the vertex are selected (a three-edge corner)
-    Corner3,
-    /// Outside the scope
-    Refuse
-};
-
-/// A plane that bounds a tool: the tool keeps the side opposite to the normal
-struct TrimPlane
-{
-    gp_Pnt point;
-    gp_Dir normal;
-};
-
-/** One piece of material removed (cut) or added (fused) (5.6, interface point 2).
- *
- * The tools of one dress-up are interior-disjoint (interface point 7), so the volume of the
- * result must equal the base's minus the cut tools' closed-form volumes plus the fused ones'.
- */
-struct Tool
-{
-    TopoDS_Shape solid;
-    /// Cut from the base (a convex edge) or fused to it (a concave edge)
-    bool cut = true;
-    /// The selected edge (or, for corner pieces, the vertex) whose fillet the tool's faces are
-    /// named after
-    TopoDS_Shape source;
-    /// The tool's volume in closed form, not measured
-    double volume = 0.0;
-    /// The faces of the tool that lie on the faces adjacent to the edge: the result must not
-    /// keep any part of them (each tangent strip must be backed by material, or by air)
-    std::vector<TopoDS_Shape> contactFaces;
-    /// The planes that bound the tool at the edge's free ends: a face of the tool left in such
-    /// a plane is merged into the base's coplanar face (interface point 4)
-    std::vector<TrimPlane> caps;
+    /// The edges of OCCT's contours, as the maker reports them after Add(): every one must be
+    /// selected, or OCCT would have run the dress-up on along a tangent chain. Empty: not checked
+    std::vector<TopoDS_Shape> contour;
+    /// Build only at the limit, where a new edge lands on an existing one or a face vanishes:
+    /// the failures the construction is for. Off only to compare with OCCT below the limit
+    bool limitOnly = true;
 };
 
 /** Builds the dress-up by the exact construction.
