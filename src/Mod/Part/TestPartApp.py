@@ -40,6 +40,7 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import FilletFallbackTest, InvalidDressUpTest
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest
+from parttests.ForkReleaseTest import ForkReleaseTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.TestFaceMakerUnifiedPlanar import *

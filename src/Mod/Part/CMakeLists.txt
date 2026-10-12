@@ -87,6 +87,8 @@ set(Part_tests
     parttests/FilletFallbackTest.py
     parttests/ReferenceFingerprintTest.py
     parttests/InternNamesTest.py
+    parttests/ForkReleaseTest.py
+    parttests/ForkReleaseGuiTest.py
     parttests/TestTangentMode3-0.21.FCStd
     parttests/TestPartMirror.py
     parttests/TestFaceMakerUnifiedPlanar.py
