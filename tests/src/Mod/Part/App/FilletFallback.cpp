@@ -112,6 +112,18 @@ TopoDS_Shape profileAlongX(const std::vector<std::pair<double, double>>& yz, dou
     return BRepPrimAPI_MakePrism(face, gp_Vec(length, 0, 0)).Shape();
 }
 
+/// A prism of the polygon (in the plane y = 0, points as (x, z)) along y
+TopoDS_Shape profileAlongY(const std::vector<std::pair<double, double>>& xz, double length)
+{
+    BRepBuilderAPI_MakePolygon polygon;
+    for (auto [x, z] : xz) {
+        polygon.Add(gp_Pnt(x, 0, z));
+    }
+    polygon.Close();
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, length, 0)).Shape();
+}
+
 /// A step: a block 30 x 20 x 10 with a block 30 x 10 x 4 on its back half; the riser at y = 10
 /// has its concave edge at z = 10 and its convex edge at z = 14
 TopoDS_Shape step()
@@ -421,6 +433,23 @@ std::vector<std::string> sortedNames(const TopoShape& shape, const Data::Indexed
     return names;
 }
 
+/// The indices of the shape's elements of the type, without degenerated edges: OCCT's sphere
+/// patches can carry one at a pole on their boundary (A5), where the construction's sphere has its
+/// poles away from the patch. Such an edge has no length and nothing can refer to it usefully
+std::vector<int> elementsOf(const TopoShape& shape, const char* type)
+{
+    std::vector<int> indices;
+    auto n = static_cast<int>(shape.countSubElements(type));
+    for (int i = 1; i <= n; ++i) {
+        auto element = subShape(shape, type, i);
+        if (element.ShapeType() == TopAbs_EDGE && BRep_Tool::Degenerated(TopoDS::Edge(element))) {
+            continue;
+        }
+        indices.push_back(i);
+    }
+    return indices;
+}
+
 /// The two results are the same solid with the same elements, named the same, element for element
 /// (matched by position, to the precision of the integrated centres: the indices may differ)
 testing::AssertionResult sameAs(const TopoShape& result, const TopoShape& reference)
@@ -436,17 +465,30 @@ testing::AssertionResult sameAs(const TopoShape& result, const TopoShape& refere
         return testing::AssertionFailure() << "symmetric difference " << difference;
     }
     for (const char* type : {"Vertex", "Edge", "Face"}) {
-        auto n = static_cast<int>(reference.countSubElements(type));
-        if (static_cast<int>(result.countSubElements(type)) != n) {
-            return testing::AssertionFailure() << type << " count " << result.countSubElements(type)
-                                               << " != " << n;
+        auto ours = elementsOf(result, type);
+        auto theirs = elementsOf(reference, type);
+        auto list = [&](std::ostringstream& ss, const TopoShape& shape, const std::vector<int>& in) {
+            for (int j : in) {
+                double m = 0;
+                gp_Pnt c = centreOf(subShape(shape, type, j), m);
+                ss << "\n  " << type << j << " (" << c.X() << ", " << c.Y() << ", " << c.Z()
+                   << "; " << m << ")";
+            }
+        };
+        if (ours.size() != theirs.size()) {
+            std::ostringstream ss;
+            ss << type << " count " << ours.size() << " != " << theirs.size() << "\nthe result has";
+            list(ss, result, ours);
+            ss << "\nthe reference has";
+            list(ss, reference, theirs);
+            return testing::AssertionFailure() << ss.str();
         }
-        for (int i = 1; i <= n; ++i) {
+        for (int i : theirs) {
             Data::IndexedName element(type, i);
             double measure = 0;
             gp_Pnt centre = centreOf(subShape(reference, type, i), measure);
             int match = 0;
-            for (int j = 1; j <= n; ++j) {
+            for (int j : ours) {
                 double m = 0;
                 gp_Pnt c = centreOf(subShape(result, type, j), m);
                 double tolerance = 1e-5 * std::max(1.0, measure);
@@ -461,12 +503,7 @@ testing::AssertionResult sameAs(const TopoShape& result, const TopoShape& refere
                 std::ostringstream ss;
                 ss << "no element at " << element.toString() << " (" << centre.X() << ", "
                    << centre.Y() << ", " << centre.Z() << "; " << measure << "); the other has";
-                for (int j = 1; j <= n; ++j) {
-                    double m = 0;
-                    gp_Pnt c = centreOf(subShape(result, type, j), m);
-                    ss << "\n  " << type << j << " (" << c.X() << ", " << c.Y() << ", " << c.Z()
-                       << "; " << m << ")";
-                }
+                list(ss, result, ours);
                 return testing::AssertionFailure() << ss.str();
             }
             if (std::string(type) == "Face") {
@@ -859,18 +896,398 @@ TEST_F(FilletFallbackTest, namedAsAFillet)
     EXPECT_TRUE(found);
 }
 
+// Corners (section 5): miters where two selected edges meet, sphere patches and chamfer
+// triangles where three do, at the limit with the analytic volumes of 5.4
+
+namespace
+{
+constexpr double filletFraction = 1 - pi / 4;      // a 90 degree fillet's section over r^2
+constexpr double miterOverlap = 5.0 / 3 - pi / 2;  // two mitered rounds' overlap over r^3
+constexpr double sphereCell = 1 - pi / 6;          // a box corner's cell over r^3
+
+/// A box a x b x c with all 12 edges at r (Steiner)
+double roundedBox(double a, double b, double c, double r)
+{
+    double x = a - 2 * r;
+    double y = b - 2 * r;
+    double z = c - 2 * r;
+    return x * y * z + 2 * r * (x * y + y * z + z * x) + pi * r * r * (x + y + z)
+        + 4 * pi * r * r * r / 3;
+}
+
+std::vector<TopoShape> verticalEdges(const TopoShape& shape)
+{
+    std::vector<TopoShape> result;
+    for (const auto& edge : shape.getSubTopoShapes(TopAbs_EDGE)) {
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(TopoDS::Edge(edge.getShape()), v1, v2);
+        gp_Pnt a = BRep_Tool::Pnt(v1);
+        gp_Pnt b = BRep_Tool::Pnt(v2);
+        if (std::abs(a.X() - b.X()) < 1e-7 && std::abs(a.Y() - b.Y()) < 1e-7) {
+            result.push_back(edge);
+        }
+    }
+    return result;
+}
+
+int sphereFaces(const TopoShape& shape)
+{
+    int n = 0;
+    for (TopExp_Explorer it(shape.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        n += surfaceType(it.Current()) == GeomAbs_Sphere ? 1 : 0;
+    }
+    return n;
+}
+
+/// A prism of the polygon (in the plane z = 0, points as (x, y)) up to the height
+TopoDS_Shape prismOf(const std::vector<std::pair<double, double>>& xy, double height)
+{
+    BRepBuilderAPI_MakePolygon polygon;
+    for (auto [x, y] : xy) {
+        polygon.Add(gp_Pnt(x, y, 0));
+    }
+    polygon.Close();
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, height)).Shape();
+}
+
+/// The regular n-gon of circumradius 15, 4 high
+TopoDS_Shape regularPlate(int n)
+{
+    std::vector<std::pair<double, double>> xy;
+    for (int k = 0; k < n; ++k) {
+        xy.emplace_back(15 * std::cos(2 * pi * k / n), 15 * std::sin(2 * pi * k / n));
+    }
+    return prismOf(xy, 4);
+}
+
+/// A rhombus 40 long, 4 high, with corners of 45 and 135 degrees
+TopoDS_Shape rhombusPlate()
+{
+    double half = 20 * std::tan(pi / 8);
+    return prismOf({{20, 0}, {0, half}, {-20, 0}, {0, -half}}, 4);
+}
+
+/// A convex prism with all its edges at r (Steiner, as in 5.4): the plan's area and perimeter, and
+/// k, the sum of cot(theta / 2) over its plan angles
+double roundedPrism(double area, double perimeter, double k, double height, double r)
+{
+    double innerArea = area - perimeter * r + k * r * r;
+    double innerPerimeter = perimeter - 2 * k * r;
+    double z = height - 2 * r;
+    return innerArea * z + 2 * innerArea * r + innerPerimeter * z * r
+        + pi * r * r * innerPerimeter / 2 + pi * r * r * z + 4 * pi * r * r * r / 3;
+}
+
+/// A block 40 x 20 x 10 with a slot 30 x 4, 6 deep, from x = 5, y = 8
+TopoDS_Shape slotBlock()
+{
+    return BRepAlgoAPI_Cut(box(40, 20, 10), box(30, 4, 6, gp_Pnt(5, 8, 4))).Shape();
+}
+
+/// The slot's four floor edges, and with the vertical edges its four concave vertical edges
+std::vector<TopoShape> slotEdges(const TopoShape& slot, bool vertical)
+{
+    std::vector<TopoShape> edges = edgesWhere(slot, atHeight(4));
+    if (vertical) {
+        for (const auto& e : verticalEdges(slot)) {
+            gp_Pnt p = BRep_Tool::Pnt(TopExp::FirstVertex(TopoDS::Edge(e.getShape())));
+            if (p.X() > 1 && p.X() < 39 && p.Y() > 1 && p.Y() < 19) {
+                edges.push_back(e);
+            }
+        }
+    }
+    return edges;
+}
+
+/// A boss 10 x 10, 2 high, on a plate 40 x 40 x 4
+TopoDS_Shape bossOnAPlate()
+{
+    BRepAlgoAPI_Fuse fuse(box(40, 40, 4), box(10, 10, 2, gp_Pnt(15, 15, 4)));
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// An L block 4 high, its arms 30 x 10, the inner corner at (10, 10)
+TopoDS_Shape lBlock()
+{
+    return prismOf({{0, 0}, {30, 0}, {30, 10}, {10, 10}, {10, 30}, {0, 30}}, 4);
+}
+
+/// The edges of the shape with a vertex at the point
+std::vector<TopoShape> edgesAt(const TopoShape& shape, const gp_Pnt& point)
+{
+    std::vector<TopoShape> result;
+    for (const auto& edge : shape.getSubTopoShapes(TopAbs_EDGE)) {
+        for (TopExp_Explorer it(edge.getShape(), TopAbs_VERTEX); it.More(); it.Next()) {
+            if (BRep_Tool::Pnt(TopoDS::Vertex(it.Current())).Distance(point) < 1e-7) {
+                result.push_back(edge);
+                break;
+            }
+        }
+    }
+    return result;
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, twoEdgeCornersMiter)
+{
+    // A2: the plate's four top edges at r = t: the side faces vanish, the rounds meet in miters
+    TopoShape plate(box(30, 20, 4), 1L);
+    auto top = edgesWhere(plate, atHeight(4));
+    ASSERT_TRUE(occtFilletFails(plate, top, 4, 4));
+    double r = 4;
+    EXPECT_TRUE(exact(
+        dressUp(plate, top, fillet(r)),
+        2400 - (100 * r * r * filletFraction - 4 * r * r * r * miterOverlap)
+    ));
+    // A4: the rib's four top edges at r = 2: a full round, mitered into the end rounds
+    TopoShape rib(box(30, 4, 20), 1L);
+    auto ribTop = edgesWhere(rib, atHeight(20));
+    ASSERT_TRUE(occtFilletFails(rib, ribTop, 2, 2));
+    r = 2;
+    EXPECT_TRUE(exact(
+        dressUp(rib, ribTop, fillet(r)),
+        2400 - (68 * r * r * filletFraction - 4 * r * r * r * miterOverlap)
+    ));
+    // A8, A10: the same corners chamfered (P d^2 / 2 - k d^3 / 3)
+    EXPECT_TRUE(exact(dressUp(plate, top, chamfer(4)), 2400 - (100 * 8 - 4 * 64.0 / 3)));
+    EXPECT_TRUE(exact(dressUp(rib, ribTop, chamfer(2)), 2400 - (68 * 2 - 4 * 8.0 / 3)));
+    // Two edges of a cube at one corner, r = 4: both side faces vanish
+    TopoShape cube(box(4, 4, 4), 1L);
+    std::vector<TopoShape> two {
+        edgeBetween(cube, {0, 0, 4}, {4, 0, 4}),
+        edgeBetween(cube, {0, 0, 4}, {0, 4, 4})
+    };
+    EXPECT_TRUE(
+        exact(dressUp(cube, two, fillet(4)), 64 - (8 * 16 * filletFraction - 64 * miterOverlap))
+    );
+    EXPECT_TRUE(exact(dressUp(cube, two, chamfer(4)), 64 - (8 * 8 - 64.0 / 3)));
+}
+
+TEST_F(FilletFallbackTest, threeEdgeCornersSpherePatches)
+{
+    // A1: the plate's 12 edges at r = t / 2 (a rounded slab): the vertical rounds vanish
+    TopoShape plate(box(30, 20, 4), 1L);
+    auto all = plate.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_TRUE(occtFilletFails(plate, all, 2, 2));
+    TopoShape slab = dressUp(plate, all, fillet(2));
+    EXPECT_TRUE(exact(slab, roundedBox(30, 20, 4, 2)));
+    EXPECT_EQ(sphereFaces(slab), 8);
+    // A5: the rib's top and vertical edges at r = 2: domed ends
+    TopoShape rib(box(30, 4, 20), 1L);
+    auto edges = edgesWhere(rib, atHeight(20));
+    for (const auto& e : verticalEdges(rib)) {
+        edges.push_back(e);
+    }
+    ASSERT_TRUE(occtFilletFails(rib, edges, 2, 2));
+    double r = 2;
+    TopoShape domed = dressUp(rib, edges, fillet(r));
+    EXPECT_TRUE(exact(
+        domed,
+        2400
+            - (4 * r * r * r * sphereCell + 2 * 26 * r * r * filletFraction
+               + 4 * (20 - r) * r * r * filletFraction)
+    ));
+    EXPECT_EQ(sphereFaces(domed), 4);
+    // The cube's 12 edges at r = 2: a ball of eight patches
+    TopoShape cube(box(4, 4, 4), 1L);
+    EXPECT_TRUE(exact(dressUp(cube, cube.getSubTopoShapes(TopAbs_EDGE), fillet(2)), 32 * pi / 3));
+    // A3: the plate's top and vertical edges at r = t: the vertical rounds vanish, the sphere
+    // patches reach the bottom face
+    std::vector<TopoShape> topAndVertical = edgesWhere(plate, atHeight(4));
+    for (const auto& e : verticalEdges(plate)) {
+        topAndVertical.push_back(e);
+    }
+    ASSERT_TRUE(occtFilletFails(plate, topAndVertical, 4, 4));
+    r = 4;
+    TopoShape cornered = dressUp(plate, topAndVertical, fillet(r));
+    EXPECT_TRUE(exact(
+        cornered,
+        2400 - (4 * r * r * r * sphereCell + 2 * (22 + 12) * r * r * filletFraction)
+    ));
+    EXPECT_EQ(sphereFaces(cornered), 4);
+    // A6: the three edges at one corner of the rib at r = 4: the short top edge's two faces vanish
+    std::vector<TopoShape> three = edgesAt(rib, {0, 0, 20});
+    ASSERT_EQ(three.size(), 3U);
+    ASSERT_TRUE(occtFilletFails(rib, three, 4, 4));
+    TopoShape oneCorner = dressUp(rib, three, fillet(r));
+    EXPECT_TRUE(exact(
+        oneCorner,
+        2400 - (r * r * r * sphereCell + (26 + 0 + 16) * r * r * filletFraction)
+    ));
+    EXPECT_EQ(sphereFaces(oneCorner), 1);
+    // A11: a slot's floor and vertical edges, concave, r = 2: a ball-end slot
+    r = 2;
+    TopoShape slot(slotBlock(), 1L);
+    std::vector<TopoShape> concave = slotEdges(slot, true);
+    ASSERT_EQ(concave.size(), 8U);
+    ASSERT_TRUE(occtFilletFails(slot, concave, 2, 2));
+    EXPECT_TRUE(exact(
+        dressUp(slot, concave, fillet(r)),
+        8000 - 720
+            + (4 * r * r * r * sphereCell + 2 * 26 * r * r * filletFraction
+               + 4 * (6 - r) * r * r * filletFraction)
+    ));
+}
+
+TEST_F(FilletFallbackTest, threeEdgeCornersChamfered)
+{
+    // A9: the plate's 12 edges chamfered at d = t / 2: each box corner removes 5 d^3 / 6, each
+    // edge between corners (L - 2 d) d^2 / 2
+    TopoShape plate(box(30, 20, 4), 1L);
+    auto all = plate.getSubTopoShapes(TopAbs_EDGE);
+    double d = 2;
+    ASSERT_TRUE(occtFails(plate, all, chamfer(d)));
+    EXPECT_TRUE(exact(
+        dressUp(plate, all, chamfer(d)),
+        2400 - (8 * 5 * d * d * d / 6 + 4 * (26 + 16) * d * d / 2)
+    ));
+}
+
+TEST_F(FilletFallbackTest, twoEdgeCornersAtConcaveVertices)
+{
+    // A11b: the slot's floor edges, concave at a concave vertex, r = 2: the miter's overlap is
+    // added material counted twice, so it comes off
+    double r = 2;
+    TopoShape slot(slotBlock(), 1L);
+    auto floor = slotEdges(slot, false);
+    ASSERT_EQ(floor.size(), 4U);
+    ASSERT_TRUE(occtFilletFails(slot, floor, r, r));
+    EXPECT_TRUE(exact(
+        dressUp(slot, floor, fillet(r)),
+        7280 + 68 * r * r * filletFraction - 4 * r * r * r * miterOverlap
+    ));
+    // A12: the boss's base edges, concave, at vertices whose unselected edge is convex: the
+    // rounds run on past the boss's corners and add the miter term
+    TopoShape boss(bossOnAPlate(), 1L);
+    auto base = edgesWhere(boss, [](const gp_Pnt& p) {
+        return std::abs(p.Z() - 4) < 1e-7 && p.X() > 14 && p.X() < 26 && p.Y() > 14 && p.Y() < 26;
+    });
+    ASSERT_EQ(base.size(), 4U);
+    ASSERT_TRUE(occtFilletFails(boss, base, r, r));
+    EXPECT_TRUE(exact(
+        dressUp(boss, base, fillet(r)),
+        6600 + 40 * r * r * filletFraction + 4 * r * r * r * miterOverlap
+    ));
+    // A13: the L block's two convex top edges at its inner corner, a concave vertex, r = t = 4
+    r = 4;
+    TopoShape l(lBlock(), 1L);
+    std::vector<TopoShape> inner {
+        edgeBetween(l, {10, 10, 4}, {30, 10, 4}),
+        edgeBetween(l, {10, 10, 4}, {10, 30, 4})
+    };
+    ASSERT_TRUE(occtFilletFails(l, inner, r, r));
+    EXPECT_TRUE(exact(
+        dressUp(l, inner, fillet(r)),
+        2000 - (40 * r * r * filletFraction + r * r * r * miterOverlap)
+    ));
+}
+
+TEST_F(FilletFallbackTest, cornersAtOtherPlanAngles)
+{
+    // The triangle (60 degrees) and the hexagon (120): top edges at r = t, all edges at r = t / 2
+    for (int n : {3, 6}) {
+        TopoShape plate(regularPlate(n), 1L);
+        double area = n * 15 * 15 * std::sin(2 * pi / n) / 2;
+        double perimeter = n * 2 * 15 * std::sin(pi / n);
+        double k = n / std::tan(pi * (n - 2) / n / 2);
+        auto top = edgesWhere(plate, atHeight(4));
+        ASSERT_TRUE(occtFilletFails(plate, top, 4, 4)) << n;
+        EXPECT_TRUE(exact(
+            dressUp(plate, top, fillet(4)),
+            4 * area - (perimeter * 16 * filletFraction - k * 64 * miterOverlap)
+        )) << n;
+        auto all = plate.getSubTopoShapes(TopAbs_EDGE);
+        ASSERT_TRUE(occtFilletFails(plate, all, 2, 2)) << n;
+        TopoShape rounded = dressUp(plate, all, fillet(2));
+        EXPECT_TRUE(exact(rounded, roundedPrism(area, perimeter, k, 4, 2))) << n;
+        EXPECT_EQ(sphereFaces(rounded), 2 * n) << n;
+    }
+    // The rhombus (45 and 135 degrees): the same, and its top edges chamfered at d = t
+    TopoShape rhombus(rhombusPlate(), 1L);
+    double half = 20 * std::tan(pi / 8);
+    double area = 2 * 20 * half;
+    double perimeter = 4 * std::hypot(20, half);
+    double k = 2 / std::tan(pi / 8) + 2 / std::tan(3 * pi / 8);
+    auto top = edgesWhere(rhombus, atHeight(4));
+    ASSERT_TRUE(occtFilletFails(rhombus, top, 4, 4));
+    EXPECT_TRUE(exact(
+        dressUp(rhombus, top, fillet(4)),
+        4 * area - (perimeter * 16 * filletFraction - k * 64 * miterOverlap)
+    ));
+    auto all = rhombus.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_TRUE(occtFilletFails(rhombus, all, 2, 2));
+    EXPECT_TRUE(exact(dressUp(rhombus, all, fillet(2)), roundedPrism(area, perimeter, k, 4, 2)));
+    ASSERT_TRUE(occtFails(rhombus, top, chamfer(4)));
+    EXPECT_TRUE(
+        exact(dressUp(rhombus, top, chamfer(4)), 4 * area - (perimeter * 8 - k * 64.0 / 3))
+    );
+}
+
+TEST_F(FilletFallbackTest, fullRoundOfARibAgainstAWallWithItsEndEdge)
+{
+    // The rib's top edges end at the wall and meet its end edge in two miters at y = 20
+    TopoShape base(ribAgainstWall(), 1L);
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {13, 0, 4}, {13, 20, 4}),
+        edgeBetween(base, {17, 0, 4}, {17, 20, 4}),
+        edgeBetween(base, {13, 20, 4}, {17, 20, 4})
+    };
+    ASSERT_TRUE(occtFilletFails(base, edges, 2, 2));
+    double r = 2;
+    EXPECT_TRUE(exact(
+        dressUp(base, edges, fillet(r)),
+        6320 - (40 * r * r * filletFraction + 4 * r * r * filletFraction - 2 * r * r * r * miterOverlap)
+    ));
+}
+
+TEST_F(FilletFallbackTest, cornersSameAsOcctBelowTheLimit)
+{
+    TopoShape rib(box(30, 4, 20), 1L);
+    auto edges = edgesWhere(rib, atHeight(20));
+    EXPECT_TRUE(sameAsOcct(rib, edges, fillet(1.9)));
+    for (const auto& e : verticalEdges(rib)) {
+        edges.push_back(e);
+    }
+    EXPECT_TRUE(sameAsOcct(rib, edges, fillet(1.9)));
+    EXPECT_TRUE(sameAsOcct(rib, edgesAt(rib, {0, 0, 20}), fillet(3.9)));
+    TopoShape plate(box(30, 20, 4), 1L);
+    EXPECT_TRUE(sameAsOcct(plate, plate.getSubTopoShapes(TopAbs_EDGE), chamfer(1.9)));
+    std::vector<TopoShape> topAndVertical = edgesWhere(plate, atHeight(4));
+    for (const auto& e : verticalEdges(plate)) {
+        topAndVertical.push_back(e);
+    }
+    EXPECT_TRUE(sameAsOcct(plate, topAndVertical, fillet(3.9)));
+    TopoShape slot(slotBlock(), 1L);
+    EXPECT_TRUE(sameAsOcct(slot, slotEdges(slot, true), fillet(1.9)));
+    EXPECT_TRUE(sameAsOcct(slot, slotEdges(slot, false), fillet(1.9)));
+    TopoShape l(lBlock(), 1L);
+    std::vector<TopoShape> inner {
+        edgeBetween(l, {10, 10, 4}, {30, 10, 4}),
+        edgeBetween(l, {10, 10, 4}, {10, 30, 4})
+    };
+    EXPECT_TRUE(sameAsOcct(l, inner, fillet(3.9)));
+    TopoShape hexagon(regularPlate(6), 1L);
+    EXPECT_TRUE(sameAsOcct(hexagon, hexagon.getSubTopoShapes(TopAbs_EDGE), fillet(1.9)));
+    TopoShape rhombus(rhombusPlate(), 1L);
+    EXPECT_TRUE(sameAsOcct(rhombus, edgesWhere(rhombus, atHeight(4)), fillet(3.9)));
+    EXPECT_TRUE(sameAsOcct(rhombus, edgesWhere(rhombus, atHeight(4)), chamfer(3.9)));
+}
+
 // OCCT's own result wherever OCCT works
 
 TEST_F(FilletFallbackTest, occtsResultWhereOcctWorks)
 {
-    // The cube with all 12 edges at r = 1: OCCT builds it, with spherical corners; the exact
-    // construction refuses corners, so the result can only be OCCT's
+    // The cube with all 12 edges at r = 1: OCCT builds it, with spherical corners; below the
+    // limit the exact construction refuses, so the result can only be OCCT's
     TopoShape cube(box(4, 4, 4), 1L);
     auto all = cube.getSubTopoShapes(TopAbs_EDGE);
     ASSERT_FALSE(occtFilletFails(cube, all, 1, 1));
     std::string reason;
     EXPECT_TRUE(forced(cube, all, fillet(1), &reason).isNull());
-    EXPECT_NE(reason.find("corner"), std::string::npos) << reason;
+    EXPECT_NE(reason.find("not at the limit"), std::string::npos) << reason;
     TopoShape result = dressUp(cube, all, fillet(1));
     EXPECT_TRUE(exact(result, 8 + 6 * 4 + 6 * pi + 4 * pi / 3));
     int spheres = 0;
@@ -926,19 +1343,78 @@ testing::AssertionResult refusedFor(
     return testing::AssertionSuccess();
 }
 
-TEST_F(FilletFallbackTest, refusesCorners)
+TEST_F(FilletFallbackTest, refusesTwoEdgeCornersWithUnequalAngles)
 {
-    // Corners come with S1c: the cube rounded into a sphere fails as before
-    TopoShape cube(box(4, 4, 4), 1L);
-    auto all = cube.getSubTopoShapes(TopAbs_EDGE);
-    EXPECT_TRUE(refusedFor(cube, all, fillet(2), "corner"));
-    // Two top edges meeting at a corner, exactly at the limit
-    std::vector<TopoShape> two {
-        edgeBetween(cube, {0, 0, 4}, {4, 0, 4}),
-        edgeBetween(cube, {0, 0, 4}, {0, 4, 4})
-    };
-    EXPECT_TRUE(refusedFor(cube, two, fillet(4), "corner"));
-    EXPECT_TRUE(refusedFor(cube, two, chamfer(4), "corner"));
+    // A plate 30 x 20 x 4 whose end x = 30 leans in by 10 degrees: its top edge meets the long
+    // top edges at 100 degrees against their 90. OCCT's rounds meet along a space curve there,
+    // not a plane (S1c-b)
+    double lean = 4 * std::tan(pi / 18);
+    TopoShape base(profileAlongY({{0, 0}, {30, 0}, {30 - lean, 4}, {0, 4}}, 20), 1L);
+    std::string reason;
+    EXPECT_TRUE(forced(base, edgesWhere(base, atHeight(4)), fillet(4), &reason).isNull());
+    EXPECT_NE(reason.find("unequal dihedral angles"), std::string::npos) << reason;
+}
+
+TEST_F(FilletFallbackTest, refusesCornersOcctBuildsWithOtherPatches)
+{
+    // Section 5.3's refusals, where OCCT builds a torus or B-spline patch below the limit. A
+    // boss corner of mixed convexity: its convex vertical edge and the two concave base edges
+    TopoShape boss(bossOnAPlate(), 1L);
+    auto mixed = edgesAt(boss, {15, 15, 4});
+    ASSERT_EQ(mixed.size(), 3U);
+    EXPECT_TRUE(refusedFor(boss, mixed, fillet(2), "mixed convexity"));
+    // A15: the triangle plate's edges chamfered: its corners aren't square
+    TopoShape triangle(regularPlate(3), 1L);
+    EXPECT_TRUE(
+        refusedFor(triangle, triangle.getSubTopoShapes(TopAbs_EDGE), chamfer(2), "not square")
+    );
+    // The D plate: a line and a half circle meeting at an angle, top edges at r = t
+    BRepBuilderAPI_MakeWire outline;
+    outline.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, -10, 0), gp_Pnt(0, 10, 0)).Edge());
+    outline.Add(
+        BRepBuilderAPI_MakeEdge(
+            GC_MakeArcOfCircle(gp_Pnt(0, 10, 0), gp_Pnt(10, 0, 0), gp_Pnt(0, -10, 0)).Value()
+        )
+            .Edge()
+    );
+    TopoDS_Face d = BRepBuilderAPI_MakeFace(outline.Wire(), Standard_True).Face();
+    TopoShape dPlate(BRepPrimAPI_MakePrism(d, gp_Vec(0, 0, 4)).Shape(), 1L);
+    auto dTop = edgesWhere(dPlate, atHeight(4));
+    ASSERT_EQ(dTop.size(), 2U);
+    EXPECT_TRUE(refusedFor(dPlate, dTop, fillet(4), "not straight"));
+}
+
+TEST_F(FilletFallbackTest, refusesCornersJustOverTheLimit)
+{
+    // The domed rib over the limit: the planes through the two sphere centres at the ends of a
+    // short top edge cross inside its round, from limit + 2e-7 on
+    TopoShape rib(box(30, 4, 20), 1L);
+    auto edges = edgesWhere(rib, atHeight(20));
+    for (const auto& e : verticalEdges(rib)) {
+        edges.push_back(e);
+    }
+    for (double r : {2.0000002, 2.00001, 2.01, 2.1}) {
+        EXPECT_TRUE(refusedFor(rib, edges, fillet(r), "cross inside its tool")) << r;
+    }
+}
+
+TEST_F(FilletFallbackTest, refusesAnApexOfFourEdges)
+{
+    // A pyramid on a 20 x 20 square, 10 high: OCCT returns an invalid result there without an
+    // error (ops#297), which the exact construction doesn't take over
+    TopoDS_Shape solid = box(20, 20, 10);
+    gp_Pnt apex(10, 10, 10);
+    for (const auto& normal : {gp_Dir(0, -1, 1), gp_Dir(1, 0, 1), gp_Dir(0, 1, 1), gp_Dir(-1, 0, 1)}
+    ) {
+        solid = BRepAlgoAPI_Cut(solid, beyondPlane(apex, normal, 200)).Shape();
+    }
+    TopoShape pyramid(solid, 1L);
+    ASSERT_NEAR(volume(solid), 4000.0 / 3, 1e-9);
+    auto four = edgesAt(pyramid, apex);
+    ASSERT_EQ(four.size(), 4U);
+    std::string reason;
+    EXPECT_TRUE(forced(pyramid, four, fillet(1), &reason).isNull());
+    EXPECT_NE(reason.find("4 edges meet"), std::string::npos) << reason;
 }
 
 TEST_F(FilletFallbackTest, refusesVariableRadius)

@@ -100,12 +100,44 @@ class FilletFallbackTest(unittest.TestCase):
         self.assertExact(box.makeChamfer(2, edges), 2400 - 4 * 30)
         self.assertExact(box.makeChamfer(4, edges[:1]), 2400 - 8 * 30)
 
-    def testRefusalsKeepOcctsError(self):
-        # Corners (until they are built too), variable radius, overlapping rounds, rounds just
-        # over the limit (the strips overlap, or run off their face, by a hundredth)
+    def testCorners(self):
+        # Corners where selected edges meet, with equal sizes: miters, sphere patches named after
+        # their vertex, and a box corner's chamfer triangle
         cube = Part.makeBox(4, 4, 4)
+        cube.Tag = 1
+        ball = cube.makeFillet(2, cube.Edges)
+        self.assertExact(ball, 32 * math.pi / 3)
+        spheres = [
+            name
+            for name, index in ball.ElementMap.items()
+            if index.startswith("Face")
+            and ball.getElement(index).Surface.TypeId == "Part::GeomSphere"
+        ]
+        self.assertEqual(len(spheres), 8)
+        for name in spheres:
+            self.assertIn("Vertex", name)
+            self.assertIn("FLT", name)
+        plate = Part.makeBox(30, 20, 4)
+        top = [e for e in plate.Edges if all(abs(v.Point.z - 4) < 1e-7 for v in e.Vertexes)]
+        miter = 5.0 / 3 - math.pi / 2
+        self.assertExact(
+            plate.makeFillet(4, top), 2400 - (100 * fillet_section(4) - 4 * 64 * miter)
+        )
+        self.assertExact(
+            plate.makeChamfer(2, plate.Edges), 2400 - (8 * 5 * 8 / 6 + 4 * (26 + 16) * 2)
+        )
+
+    def testRefusalsKeepOcctsError(self):
+        # A corner of two edges with unequal dihedral angles (the plate's end x = 30 leans in by
+        # 10 degrees), variable radius, overlapping rounds, rounds just over the limit (the
+        # strips overlap, or run off their face, by a hundredth)
+        lean = 4 * math.tan(math.radians(10))
+        profile = [V(0, 0, 0), V(30, 0, 0), V(30 - lean, 0, 4), V(0, 0, 4)]
+        leaning = Part.Face(Part.makePolygon(profile + profile[:1])).extrude(V(0, 20, 0))
+        top = [e for e in leaning.Edges if all(abs(v.Point.z - 4) < 1e-7 for v in e.Vertexes)]
+        self.assertEqual(len(top), 4)
         with self.assertRaises(Part.OCCError):
-            cube.makeFillet(2, cube.Edges)
+            leaning.makeFillet(4, top)
         box = Part.makeBox(30, 4, 20)
         edges = top_edges(box)
         with self.assertRaises(Part.OCCError):
@@ -388,6 +420,29 @@ class InvalidDressUpTest(unittest.TestCase):
         chamfer = self.dressUp("Chamfer", box, edges, [(1.5, 1)] * 2)
         self.assertSameShape(chamfer.Shape, box.makeChamfer(1.5, 1, edges))
         self.assertExact(chamfer.Shape, 2400 - 2 * 0.75 * 30)
+
+    def testPartFeaturesUnequalCorner(self):
+        # The plate's top edges, the long ones at r = t and the short ones at 3: OCCT fails, and
+        # a corner of unequal radii keeps its error
+        plate = Part.makeBox(30, 20, 4)
+        long_edges = [
+            edge_between(plate, (0, 0, 4), (30, 0, 4)),
+            edge_between(plate, (0, 20, 4), (30, 20, 4)),
+        ]
+        short_edges = [
+            edge_between(plate, (0, 0, 4), (0, 20, 4)),
+            edge_between(plate, (30, 0, 4), (30, 20, 4)),
+        ]
+        fillet = self.dressUp(
+            "Fillet", plate, long_edges + short_edges, [(4, 4)] * 2 + [(3, 3)] * 2
+        )
+        self.assertFalse(fillet.isValid())
+        self.assertEqual(fillet.getStatusString(), "BRep_API: command not done")
+        # The same corners with equal radii are built
+        fillet = self.dressUp("Fillet", plate, long_edges + short_edges, [(4, 4)] * 4)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        miter = 5.0 / 3 - math.pi / 2
+        self.assertExact(fillet.Shape, 2400 - (100 * fillet_section(4) - 4 * 64 * miter))
 
     def testPartFeaturesPerEdgeSizes(self):
         # Different sizes per edge: OCCT's maker as before, with the check
