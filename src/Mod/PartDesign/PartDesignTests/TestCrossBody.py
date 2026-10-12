@@ -396,6 +396,76 @@ class TestCrossBody(unittest.TestCase):
         finally:
             self.closeIfOpen(other.Name)
 
+    def freezeAndChangeTheBox(self, box, boxPad, binders, docs):
+        """Freezes the binders, pads the box to 15 and moves its Body by (5, 0, 0); the binders
+        stay on the box's old top, (100, 50, 10)-(140, 90, 10) in the document."""
+        for binder in binders:
+            binder.BindMode = "Frozen"
+        for doc in docs:
+            doc.recompute()
+        boxPad.Length = 15
+        for doc in docs:
+            doc.recompute()
+        box.Placement.Base = box.Placement.Base + V(5, 0, 0)
+        for doc in docs:
+            doc.recompute()
+        for binder in binders:
+            self.assertGlobalBox(binder, 100, 50, 10, 140, 90, 10)
+
+    def testFrozenBinderStaysWhenItsSourceChangesAndMoves(self):
+        """r3 F1: Frozen binders of the box's top, in a Lid and at the top level, keep their
+        shape when the box is padded higher and its Body moves. Since round 1 they took the new
+        top at z 15, moved, as soon as the box's Body recomputed."""
+        box, inLid = self.boxAndBinder()
+        topLevel = self.doc.addObject("PartDesign::SubShapeBinder", "BoxTopLevel")
+        topLevel.Support = inLid.Support
+        self.doc.recompute()
+        self.freezeAndChangeTheBox(box, self.doc.getObject("BoxPad"), [inLid, topLevel], [self.doc])
+
+    def testFrozenBinderOfABodyInAnotherDocumentStays(self):
+        """r3 F1: the same for the four binders of bindersInAnotherDocument."""
+        import tempfile
+
+        other, binders = self.bindersInAnotherDocument(tempfile.mkdtemp())
+        try:
+            self.freezeAndChangeTheBox(other.getObject("Box"), other.getObject("BoxPad"), binders,
+                                       [other, self.doc])
+        finally:
+            self.closeIfOpen(other.Name)
+
+    def testUnchangedBindersReopenWithNothingToDo(self):
+        """r3 F2: binders of a face of a Body at a placement with many digits (at the top level
+        with Relative on and off, in a turned Lid with Relative on and off), saved after a
+        recompute and reopened: the document has nothing to recompute. Some reran: the saved
+        matrices differ from recomputed ones in the 15th digit, and were compared exactly."""
+        import os
+        import tempfile
+
+        rotation = FreeCAD.Rotation(V(0, 0, 1), 17.3)
+        box = self.body("Box", V(100.1234567, 50.7654321, 3.3333333))
+        box.Placement.Rotation = rotation
+        boxPad = self.pad(box, "BoxPad", self.sketch(box, "BoxSk", self.onXY(box),
+                                                     (0.3, 0.7, 40.1, 40.9)), 10.01)
+        self.doc.recompute()
+        lid = self.body("Lid", V(0.7, 1.9, 20.1))
+        lid.Placement.Rotation = FreeCAD.Rotation(V(0.2, 0.1, 1), 11.1)
+        face = self.topFace(boxPad, 10.01)
+        for container, relative in ((None, True), (None, False), (lid, True), (lid, False)):
+            if container:
+                binder = container.newObject("PartDesign::SubShapeBinder", "BoxTop")
+            else:
+                binder = self.doc.addObject("PartDesign::SubShapeBinder", "BoxTop")
+            binder.Support = [(boxPad, (face,))]
+            binder.Relative = relative
+        self.doc.recompute()
+        self.assertEqual(self.doc.recompute(), 0)
+        path = os.path.join(tempfile.mkdtemp(), "CrossBodyDigits.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        self.assertFalse(self.doc.mustExecute())
+        self.assertEqual(self.doc.recompute(), 0)
+
     def upper(self, at=V(0, 0, 50)):
         """Upper, a Body at z 50 with a pad 20 x 10 x 15; Lower, a Body at the origin with a pad
         20 x 10 x 5. Returns Upper, its pad, Lower and its pad."""

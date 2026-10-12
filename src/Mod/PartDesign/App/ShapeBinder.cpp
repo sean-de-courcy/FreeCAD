@@ -128,6 +128,21 @@ Base::Placement containerPlacement(const App::DocumentObject* obj)
     return container ? container->globalPlacement() : Base::Placement();
 }
 
+// Equal but for what saving loses: a Cache_ matrix keeps 16 significant digits, so a mapping
+// recomputed after reopening differs in the last ones (FreeCAD-CH ops#308 r3 F2: 7e-15)
+bool sameMapping(const Base::Matrix4D& a, const Base::Matrix4D& b)
+{
+    for (unsigned int i = 0; i < 4; ++i) {
+        for (unsigned int j = 0; j < 4; ++j) {
+            const double scale = std::max({1.0, std::abs(a[i][j]), std::abs(b[i][j])});
+            if (std::abs(a[i][j] - b[i][j]) > 1e-9 * scale) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool ShapeBinder::samePlace(const Base::Placement& a, const Base::Placement& b)
@@ -975,7 +990,7 @@ short SubShapeBinder::mustExecute() const
                      )) {
                 last = &prop->getValue();
             }
-            if (last && *last != mat) {
+            if (last && !sameMapping(*last, mat)) {
                 return 1;
             }
         }
@@ -1375,6 +1390,12 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
 
 void SubShapeBinder::slotRecomputedObject(const App::DocumentObject& Obj)
 {
+    // Only a synchronized binder follows its supports: update() re-reads their shapes, so a
+    // Frozen one took its source's later changes as soon as the source's Body or its own context
+    // recomputed (FreeCAD-CH ops#308 r3 F1)
+    if (BindMode.getValue() != 0) {
+        return;
+    }
     // A container of a support moves it too, as the binder's own context does (ops#308 T4): a
     // Body that was moved recomputes, its features don't
     auto contains = [this, &Obj]() {
