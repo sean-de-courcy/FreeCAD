@@ -1385,6 +1385,19 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
             return -1;
         }
     }
+    if (!decidedKey.empty()) {
+        // the user chose the added kind only: the link's other kind was built from the type at
+        // its index, a guess, which Both now keeps (PR 277 verification 7)
+        Base::Console().warning(
+            "Link to %s: its %s was built from a guessed type (a type list saved before "
+            "ops#140) and is kept, with the %s added. Delete the link and add it again if its "
+            "%s isn't wanted.\n",
+            SubName,
+            intersection ? "projection" : "intersection",
+            intersection ? "intersection" : "projection",
+            intersection ? "projection" : "intersection"
+        );
+    }
 
     acceptGeometry();  // This may need to be refactored into onChanged for ExternalGeometry
 
@@ -3928,14 +3941,14 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             if (kind) {
                 setKind(geo.get(), *kind);
             }
-            // geometry built before the link waited keeps telling its type, so it stays unflagged
-            // while the link waits (an undo marks undecided the links whose geometry is missing,
-            // absent or flagged, onUndoRedoFinished); a decided link's geometry no longer counts
-            // as guessed (ops#287)
-            if (!guessed) {
-                ExternalGeometryFacade::getFacade(geo.get())
-                    ->setFlag(ExternalGeometryExtension::TypeGuessed, false);
-            }
+            // rebuilt, it has the content of the type it was built with: while the link waits,
+            // that is the type at its index, a guess, so it is flagged as the new geometry is
+            // (geometry the build doesn't reach, e.g. missing, keeps its flags); a decided link's
+            // geometry no longer counts as guessed (ops#287). A rebuild in a failed add of the
+            // other kind runs with the link's key taken out, and the revert's rebuild flags it
+            // again (PR 277 verification 5)
+            ExternalGeometryFacade::getFacade(geo.get())
+                ->setFlag(ExternalGeometryExtension::TypeGuessed, guessed);
             geoms[it->second] = geo.release();
         }
     }

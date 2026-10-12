@@ -1659,26 +1659,20 @@ void SketchObject::onSketchRestore()
                 const auto savedTypes = ExternalTypes.getValues();
                 auto failed = [&](const std::string& why) {
                     FC_ERR("Failed to repair the external link types of "
-                           << getFullName() << " (" << why << "); until the file is opened "
-                           << "again, each link reads the type at its index, which can be "
-                           << "another link's");
-                    undecidedTypeKeys.clear();
+                           << getFullName() << " (" << why << "); each link waits for its "
+                           << "type and reads the type at its index, which can be another "
+                           << "link's. Geometry rebuilt meanwhile is marked as built from a "
+                           << "guess; the next open repairs the others again");
                     if (ExternalTypes.getValues() != savedTypes) {
                         ExternalTypes.setValues(savedTypes);
                     }
+                    // every link waits, as without saved geometry above: a full rebuild before
+                    // the next open builds each from the type at its index and flags it, so the
+                    // open doesn't take that geometry as evidence of the type (PR 277 review L2,
+                    // verification 2)
                     externalTypeRepairPending = true;
-                    // a link whose saved geometry was built from a guess still waits: a full
-                    // rebuild keeps its flag, and the next open still can't tell it (PR 277
-                    // review L2)
-                    for (auto geo : ExternalGeo.getValues()) {
-                        auto egf = ExternalGeometryFacade::getFacade(geo);
-                        if (egf->testFlag(ExternalGeometryExtension::TypeGuessed)
-                            && std::find(externalGeoRef.begin(), externalGeoRef.end(),
-                                         egf->getRef())
-                                != externalGeoRef.end()) {
-                            undecidedTypeKeys.insert(egf->getRef());
-                        }
-                    }
+                    undecidedTypeKeys.clear();
+                    undecidedTypeKeys.insert(externalGeoRef.begin(), externalGeoRef.end());
                 };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);
