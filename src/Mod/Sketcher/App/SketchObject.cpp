@@ -1659,20 +1659,51 @@ void SketchObject::onSketchRestore()
                 const auto savedTypes = ExternalTypes.getValues();
                 auto failed = [&](const std::string& why) {
                     FC_ERR("Failed to repair the external link types of "
-                           << getFullName() << " (" << why << "); each link waits for its "
-                           << "type and reads the type at its index, which can be another "
-                           << "link's. Geometry rebuilt meanwhile is marked as built from a "
-                           << "guess; the next open repairs the others again");
+                           << getFullName() << " (" << why << "); each link it was to "
+                           << "decide waits for its type and reads the type at its index, "
+                           << "which can be another link's. Geometry rebuilt meanwhile is "
+                           << "marked as built from a guess; the next open repairs the others "
+                           << "again");
                     if (ExternalTypes.getValues() != savedTypes) {
                         ExternalTypes.setValues(savedTypes);
                     }
-                    // every link waits, as without saved geometry above: a full rebuild before
-                    // the next open builds each from the type at its index and flags it, so the
-                    // open doesn't take that geometry as evidence of the type (PR 277 review L2,
-                    // verification 2)
+                    // the links the repair would have decided wait: a full rebuild before the
+                    // next open builds each from the type at its index and flags it, so the open
+                    // doesn't take that geometry as evidence of the type (PR 277 review L2,
+                    // verification 2). On a first open (no mark saved) that is every link, as
+                    // without saved geometry above; on a later open only those whose saved
+                    // geometry is absent, missing or flagged, as after an undo
+                    // (onUndoRedoFinished): an earlier open decided the others (verification 2.6)
+                    const auto links = static_cast<std::size_t>(ExternalGeometry.getSize());
+                    const bool laterOpen = savedTypes.size() > links
+                        && std::find(savedTypes.begin() + static_cast<std::ptrdiff_t>(links),
+                                     savedTypes.end(), pendingTypeRepairMark)
+                            != savedTypes.end();
                     externalTypeRepairPending = true;
                     undecidedTypeKeys.clear();
-                    undecidedTypeKeys.insert(externalGeoRef.begin(), externalGeoRef.end());
+                    for (const auto& key : externalGeoRef) {
+                        bool saved = false;
+                        bool missing = false;
+                        bool guessed = false;
+                        auto refs = externalGeoRefMap.find(key);
+                        if (laterOpen && refs != externalGeoRefMap.end()) {
+                            for (long id : refs->second) {
+                                auto it = externalGeoMap.find(id);
+                                if (it != externalGeoMap.end()) {
+                                    saved = true;
+                                    auto egf = ExternalGeometryFacade::getFacade(
+                                        ExternalGeo[it->second]);
+                                    missing = missing
+                                        || egf->testFlag(ExternalGeometryExtension::Missing);
+                                    guessed = guessed
+                                        || egf->testFlag(ExternalGeometryExtension::TypeGuessed);
+                                }
+                            }
+                        }
+                        if (!saved || missing || guessed) {
+                            undecidedTypeKeys.insert(key);
+                        }
+                    }
                 };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);

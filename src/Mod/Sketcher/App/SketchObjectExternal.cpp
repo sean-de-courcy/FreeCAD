@@ -1262,6 +1262,22 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     const std::vector<std::string> originalSubElements = SubElements;
     const std::vector<long> originalTypes = ExternalTypes.getValues();
     std::string decidedKey;  // a link waiting for its type that this add decides
+    // FreeCAD-CH (ops#287, PR 277 verification 2.5): a failed add puts back which links wait and
+    // the pending repair as they were. The add's rebuild can decide another waiting link whose
+    // element is back; if that was the last one, it drops the repair's mark from the types. Put
+    // back the links only, the mark would be lost and the next open would settle every waiting
+    // link silently
+    const std::set<std::string> originalUndecided = undecidedTypeKeys;
+    const bool originalRepairPending = externalTypeRepairPending;
+    auto revert = [&]() {
+        undecidedTypeKeys = originalUndecided;
+        externalTypeRepairPending = originalRepairPending;
+        Base::StateLocker lock(externalLinksWithTypes, true);
+        if (ExternalTypes.getValues() != originalTypes) {
+            ExternalTypes.setValues(originalTypes);
+        }
+        setExternalLinks(ExternalGeometry, originalObjects, originalSubElements);
+    };
 
     if (Objects.size() != SubElements.size()) {
         assert(0 /*counts of objects and subelements in external geometry links do not match*/);
@@ -1334,10 +1350,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     catch (const Base::Exception& e) {
         Base::Console().error("%s\n", e.what());
         // revert to original values
-        setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
-        if (!decidedKey.empty()) {
-            undecidedTypeKeys.insert(decidedKey);
-        }
+        revert();
         return -1;
     }
 
@@ -1369,11 +1382,10 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
             }
             if (ExternalGeometry.getValues() != originalObjects
                 || ExternalGeometry.getSubValues() != originalSubElements
-                || ExternalTypes.getValues() != originalTypes) {
-                setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
-                if (!decidedKey.empty()) {
-                    undecidedTypeKeys.insert(decidedKey);
-                }
+                || ExternalTypes.getValues() != originalTypes
+                || undecidedTypeKeys != originalUndecided
+                || externalTypeRepairPending != originalRepairPending) {
+                revert();
                 // the geometry as the links and types are again
                 try {
                     rebuildExternalGeometry();

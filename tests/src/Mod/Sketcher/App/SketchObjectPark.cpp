@@ -1168,6 +1168,66 @@ TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedAfterAFailedAddOfTheOtherK
     EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
 }
 
+// PR 277 verification 2.5: two links wait for their types after an open, the box edge's
+// (its saved line built from a guess) and the ball's (its saved circle missing). The ball gets
+// its face back, and the box edge's intersection is added, which fails: the add's rebuild
+// decides the ball from its saved circle, and with the box edge's key taken out that was the last
+// waiting link, so the rebuild dropped the repair's mark. The revert put back only the box
+// edge's key and the links' types: the mark and the ball's key stayed lost, both links were
+// rebuilt unflagged, the ball from the type at its index, and the next open settled both
+// silently. The revert puts back which links wait and the mark: both still wait, and the next
+// open says so for each
+TEST_F(SketchObjectParkTest, failedAddOfTheOtherKindKeepsEveryLinkWaiting)
+{
+    auto* sketch = getObject();
+    const auto above = edgeAlongXAbove(box);
+    ASSERT_FALSE(above.empty());
+    // a sphere of radius 10 about (0, 0, 6) crosses the sketch plane in a circle of radius 8
+    auto* ball = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Ball"));
+    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+    doc->recompute();
+    ASSERT_GE(sketch->addExternal(box, above.c_str(), false, false), 0);
+    ASSERT_GE(sketch->addExternal(ball, "Face1", false, true), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 1}));
+    // the ball loses its face: its saved circle is missing and can't tell its type
+    ball->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 6)).Shape());
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
+    // the box edge's line as an earlier open saved it, built from a guess
+    setExternalFlag(sketch, {2}, ExternalGeometryExtension::TypeGuessed);
+    ASSERT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    ASSERT_FALSE(typeGuessed(sketch, GeoEnum::RefExt - 1));
+    // a list saved before ops#140: the ball reads a projection by index
+    sketch->ExternalTypes.setValues({0, 0, 1});
+    saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    ball = static_cast<Part::Feature*>(doc->getObject("Ball"));
+    ASSERT_NE(ball, nullptr);
+    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
+    ASSERT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt - 1))
+                    ->testFlag(ExternalGeometryExtension::Missing));
+    ball->Shape.setValue(BRepPrimAPI_MakeSphere(gp_Pnt(0, 0, 6), 10).Shape());
+
+    doc->openTransaction("Intersection");
+    EXPECT_EQ(sketch->addExternal(box, above.c_str(), false, true), -1);
+    doc->commitTransaction();
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+    doc->recompute();
+
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 4);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt - 1));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, 0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 2U)
+        << warnings.size() << " warnings";
+}
+
 // The same failed add, undone: the undo marks the link undecided again from its flag (H1), so
 // it still waits and the next open says so (PR 277 verification 5)
 TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedWhenAFailedAddIsUndone)
