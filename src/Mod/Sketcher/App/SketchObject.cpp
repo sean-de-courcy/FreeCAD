@@ -90,6 +90,12 @@ namespace bgi = boost::geometry::index;
 // NOLINTNEXTLINE
 BOOST_GEOMETRY_REGISTER_POINT_3D(Base::Vector3d, double, bg::cs::cartesian, x, y, z)
 
+namespace Sketcher
+{
+// in SketchObjectExternal.cpp (PR 277 round 8)
+std::set<std::string> waitingTypeRefs(const std::vector<Part::Geometry*>& geos);
+}
+
 class SketchObject::GeoHistory
 {
 private:
@@ -1556,6 +1562,13 @@ void SketchObject::onUndoRedoFinished()
             }
         }
     }
+    // FreeCAD-CH (PR 277 round 8): and every link whose geometry says it waits, a dropped link's
+    // too (its geometry remains), with the mark in the restored list or not: the flags are the
+    // truth, and a link that lost its key would be formed again as decided, its flags cleared
+    for (const auto& ref : waitingTypeRefs(ExternalGeo.getValues())) {
+        undecidedTypeKeys.insert(ref);
+        externalTypeRepairPending = true;
+    }
 
     acceptGeometry();
     synchroniseGeometryState();
@@ -1708,6 +1721,10 @@ void SketchObject::onSketchRestore()
                             undecidedTypeKeys.insert(key);
                         }
                     }
+                    // and a dropped link whose geometry waits (PR 277 round 8)
+                    for (const auto& ref : waitingTypeRefs(ExternalGeo.getValues())) {
+                        undecidedTypeKeys.insert(ref);
+                    }
                 };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);
@@ -1735,6 +1752,13 @@ void SketchObject::onSketchRestore()
                     FC_WARN("Failed to record which external geometry of " << getFullName()
                             << " is projected and which intersections; at its next rebuild "
                             << "the Ids of geometry saved without it go by position");
+                    // the same pass repairs a link whose geometry says it waits (PR 277 round 8):
+                    // it still waits
+                    const auto waiting = waitingTypeRefs(ExternalGeo.getValues());
+                    if (!waiting.empty()) {
+                        undecidedTypeKeys = waiting;
+                        externalTypeRepairPending = true;
+                    }
                 }
             }
         }
