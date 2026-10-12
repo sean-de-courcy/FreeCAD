@@ -4,6 +4,7 @@
 #include <cmath>
 #include <memory>
 #include <numbers>
+#include <limits>
 #include <optional>
 #include <sstream>
 
@@ -45,6 +46,7 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
+#include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
@@ -314,8 +316,10 @@ Section makeSection(
 
 /** How a selected edge ends at one of its vertices (5.6, interface point 1).
  *
- * S1 builds free ends and tangent continuations; the corner kinds are refused with their own
- * reason until the corner construction (S1c) handles them.
+ * Corners (section 5.3) are built where the sizes and, at a two-edge corner, the dihedral angles
+ * are equal: there OCCT builds a miter, a sphere patch or a corner triangle, which the tools
+ * reproduce exactly. Two-edge corners with unequal dihedral angles have their own class, refused
+ * until their construction (S1c-b) handles them.
  */
 enum class VertexClass
 {
@@ -324,9 +328,14 @@ enum class VertexClass
     /// A selected edge continues this one tangentially: the two tools meet on the plane
     /// normal to the common tangent
     TangentContinuation,
-    /// One other selected edge meets this one at an angle (a two-edge corner)
+    /// One other selected edge meets this one at an angle (a two-edge corner), with the same
+    /// dihedral angle: the two tools meet on the bisector plane of the faces they don't share
     Corner2,
-    /// All three edges at the vertex are selected (a three-edge corner)
+    /// A two-edge corner whose edges have different dihedral angles: OCCT's rounds meet along a
+    /// space curve, not a plane (S1c-b)
+    Corner2Unequal,
+    /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
+    /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
     Corner3,
     /// Outside the scope
     Refuse
@@ -337,6 +346,181 @@ struct TrimPlane
 {
     gp_Pnt point;
     gp_Dir normal;
+};
+
+/** A convex polyhedron, the intersection of the half-spaces the planes keep: its vertices, and
+ * its volume in closed form (from the vertices, not measured)
+ */
+struct Polytope
+{
+    std::vector<gp_Pnt> vertices;
+    double volume = 0.0;
+};
+
+Polytope polytopeOf(const std::vector<TrimPlane>& planes)
+{
+    // Points on a plane, and points that are the same vertex, to this
+    constexpr double tolerance = 1e-8;
+    auto side = [](const TrimPlane& plane, const gp_Pnt& p) {
+        return gp_Vec(plane.point, p).Dot(gp_Vec(plane.normal));
+    };
+    Polytope result;
+    const size_t n = planes.size();
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = i + 1; j < n; ++j) {
+            for (size_t k = j + 1; k < n; ++k) {
+                gp_XYZ a = planes[i].normal.XYZ();
+                gp_XYZ b = planes[j].normal.XYZ();
+                gp_XYZ c = planes[k].normal.XYZ();
+                double det = a.Dot(b.Crossed(c));
+                if (std::abs(det) < 1e-12) {
+                    continue;
+                }
+                double da = a.Dot(planes[i].point.XYZ());
+                double db = b.Dot(planes[j].point.XYZ());
+                double dc = c.Dot(planes[k].point.XYZ());
+                gp_Pnt p((b.Crossed(c) * da + c.Crossed(a) * db + a.Crossed(b) * dc) / det);
+                bool inside = std::all_of(planes.begin(), planes.end(), [&](const TrimPlane& q) {
+                    return side(q, p) <= tolerance;
+                });
+                bool known = std::any_of(
+                    result.vertices.begin(),
+                    result.vertices.end(),
+                    [&](const gp_Pnt& v) { return v.Distance(p) <= tolerance; }
+                );
+                if (inside && !known) {
+                    result.vertices.push_back(p);
+                }
+            }
+        }
+    }
+    if (result.vertices.size() < 4) {
+        refuse("a degenerate corner piece");
+    }
+    gp_XYZ sum;
+    for (const auto& v : result.vertices) {
+        sum += v.XYZ();
+    }
+    gp_Pnt inner(sum / static_cast<double>(result.vertices.size()));
+    // Each face's area times its distance from an inner point, over three
+    for (const auto& plane : planes) {
+        std::vector<gp_Pnt> onFace;
+        gp_XYZ faceSum;
+        for (const auto& v : result.vertices) {
+            if (std::abs(side(plane, v)) <= tolerance) {
+                onFace.push_back(v);
+                faceSum += v.XYZ();
+            }
+        }
+        if (onFace.size() < 3) {
+            continue;
+        }
+        gp_Pnt centre(faceSum / static_cast<double>(onFace.size()));
+        gp_Ax2 frame(centre, plane.normal);
+        auto angle = [&](const gp_Pnt& v) {
+            gp_Vec d(centre, v);
+            return std::atan2(d.Dot(gp_Vec(frame.YDirection())), d.Dot(gp_Vec(frame.XDirection())));
+        };
+        std::sort(onFace.begin(), onFace.end(), [&](const gp_Pnt& p, const gp_Pnt& q) {
+            return angle(p) < angle(q);
+        });
+        double area = 0.0;
+        for (size_t m = 0; m < onFace.size(); ++m) {
+            gp_Vec p(centre, onFace[m]);
+            gp_Vec q(centre, onFace[(m + 1) % onFace.size()]);
+            area += p.Crossed(q).Dot(gp_Vec(plane.normal)) / 2;
+        }
+        result.volume += area * -side(plane, inner) / 3;
+    }
+    return result;
+}
+
+/// A big box on the far side of the plane, i.e. the half-space the tool must not reach into
+TopoDS_Shape halfSpaceBeyond(const TrimPlane& plane, double size)
+{
+    gp_Ax2 frame(plane.point, plane.normal);
+    gp_Vec x(frame.XDirection());
+    gp_Vec y(frame.YDirection());
+    gp_Pnt origin = plane.point.Translated(-x * size - y * size);
+    gp_Ax2 corner(origin, plane.normal, frame.XDirection());
+    return BRepPrimAPI_MakeBox(corner, 2 * size, 2 * size, size).Shape();
+}
+
+/// The polytope as a solid: a box around its vertices with the half-spaces cut away
+TopoDS_Shape solidOf(const Polytope& polytope, const std::vector<TrimPlane>& planes)
+{
+    Bnd_Box box;
+    for (const auto& v : polytope.vertices) {
+        box.Add(v);
+    }
+    box.Enlarge(1.0);
+    double xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    gp_Pnt low(xmin, ymin, zmin);
+    gp_Pnt high(xmax, ymax, zmax);
+    TopTools_ListOfShape arguments;
+    arguments.Append(BRepPrimAPI_MakeBox(low, high).Shape());
+    TopTools_ListOfShape beyond;
+    for (const auto& plane : planes) {
+        double size = 4 * (low.Distance(high) + plane.point.Distance(low)) + 4;
+        beyond.Append(halfSpaceBeyond(plane, size));
+    }
+    BRepAlgoAPI_Cut cut;
+    cut.SetArguments(arguments);
+    cut.SetTools(beyond);
+    cut.SetRunParallel(Standard_False);
+    cut.Build();
+    if (!cut.IsDone() || cut.HasErrors()) {
+        refuse("building a corner piece failed");
+    }
+    return cut.Shape();
+}
+
+/** A vertex where selected edges meet at an angle (section 5.3): three straight edges and three
+ * planar faces. faces[k] is the face that doesn't hold edges[k], and normals[k] its normal
+ * pointing into the trihedral the edges span (the material at a convex corner, the air at a
+ * concave one), so that normals[k] . away[k] > 0.
+ */
+struct Corner
+{
+    TopoDS_Vertex vertex;
+    gp_Pnt point;
+    TopoDS_Edge edges[3];
+    gp_Dir away[3];  // along each edge, away from the vertex
+    TopoDS_Face faces[3];
+    gp_Dir normals[3];
+
+    int indexOf(const TopoDS_Shape& edge) const
+    {
+        for (int k = 0; k < 3; ++k) {
+            if (edges[k].IsSame(edge)) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    /** Where the tool of edges[k] meets the tool of edges[j] when their sizes and dihedral angles
+     * are equal: the bisector plane of the faces they don't share (it holds the third edge). On
+     * edges[k]'s side a point is nearer to its own side face, so outside one round means outside
+     * the other: the two tools are OCCT's miter
+     */
+    TrimPlane miter(int k, int j) const
+    {
+        gp_Vec m = gp_Vec(normals[j]) - gp_Vec(normals[k]);
+        return {point, gp_Dir(m)};
+    }
+
+    /// The centre of the sphere of radius r tangent to the three faces, inside the trihedral
+    gp_Pnt sphereCentre(double r) const
+    {
+        gp_XYZ a = normals[0].XYZ();
+        gp_XYZ b = normals[1].XYZ();
+        gp_XYZ c = normals[2].XYZ();
+        double det = a.Dot(b.Crossed(c));
+        gp_XYZ offset = (b.Crossed(c) + c.Crossed(a) + a.Crossed(b)) * (r / det);
+        return gp_Pnt(point.XYZ() + offset);
+    }
 };
 
 /** Where a section ends on one of the faces, swept along the edge: the line or circle on which
@@ -377,12 +561,13 @@ struct Tool
     /// Cut from the base (a convex edge) or fused to it (a concave edge)
     bool cut = true;
     /// The selected edge (or, for corner pieces, the vertex) whose fillet the tool's faces are
-    /// named after
+    /// named after: a corner piece's faces are generated by the vertex, as OCCT's are (5.5)
     TopoDS_Shape source;
     /// The tool's volume in closed form, not measured
     double volume = 0.0;
-    /// On the edge's two faces, in the order of EdgeData::faces
-    Strip strips[2];
+    /// On the faces next to the source: an edge tool's two, in the order of EdgeData::faces; a
+    /// corner piece's three
+    std::vector<Strip> strips;
     /// The faces of the tool that lie on the faces adjacent to the edge: the result must not
     /// keep any part of them (each tangent strip must be backed by material, or by air)
     std::vector<TopoDS_Shape> contactFaces;
@@ -566,13 +751,185 @@ gp_Dir awayFrom(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, double* pa
 struct VertexEnd
 {
     VertexClass kind = VertexClass::Refuse;
-    TrimPlane trim;
+    /// The planes that bound the tool here: one, but two at a chamfer's three-edge corner
+    std::vector<TrimPlane> trims;
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     std::string reason;
 };
 
+/// The angle between the faces at the edge, through the material, at the parameter
+double dihedralAt(const EdgeData& data, double parameter)
+{
+    gp_Dir a = inwardIn(data.faces[0], data.edge, parameter);
+    gp_Dir b = inwardIn(data.faces[1], data.edge, parameter);
+    return std::acos(std::clamp(a.Dot(b), -1.0, 1.0));
+}
+
+/// The corner at the vertex, or a reason why it is outside the scope (section 5.3)
+std::optional<Corner> cornerAt(const Context& ctx, const TopoDS_Vertex& vertex, std::string& reason)
+{
+    auto edges = ctx.list(ctx.vertexEdges, vertex);
+    auto faces = ctx.list(ctx.vertexFaces, vertex);
+    if (edges.size() != 3 || faces.size() != 3) {
+        reason = "a corner where " + std::to_string(edges.size()) + " edges meet";
+        return std::nullopt;
+    }
+    Corner corner;
+    corner.vertex = vertex;
+    corner.point = BRep_Tool::Pnt(vertex);
+    for (int k = 0; k < 3; ++k) {
+        corner.edges[k] = TopoDS::Edge(edges[k]);
+        if (BRepAdaptor_Curve(corner.edges[k]).GetType() != GeomAbs_Line) {
+            reason = "a corner with an edge that is not straight";
+            return std::nullopt;
+        }
+        corner.away[k] = awayFrom(corner.edges[k], vertex);
+    }
+    for (const auto& shape : faces) {
+        const TopoDS_Face& face = TopoDS::Face(shape);
+        BRepAdaptor_Surface surface(face, Standard_False);
+        if (surface.GetType() != GeomAbs_Plane) {
+            reason = "a corner with a face that is not a plane";
+            return std::nullopt;
+        }
+        // The face holds two of the edges: it is the one opposite the third
+        int opposite = -1;
+        for (int k = 0; k < 3; ++k) {
+            auto ofEdge = ctx.list(ctx.edgeFaces, corner.edges[k]);
+            bool holds = std::any_of(ofEdge.begin(), ofEdge.end(), [&](const TopoDS_Shape& f) {
+                return f.IsSame(face);
+            });
+            if (!holds) {
+                if (opposite != -1) {
+                    reason = "a corner face that holds one edge";
+                    return std::nullopt;
+                }
+                opposite = k;
+            }
+        }
+        if (opposite == -1 || !corner.faces[opposite].IsNull()) {
+            reason = "a corner whose faces don't match its edges";
+            return std::nullopt;
+        }
+        gp_Dir normal = surface.Plane().Axis().Direction();
+        double along = normal.Dot(corner.away[opposite]);
+        if (std::abs(along) < 1e-6) {
+            reason = "a flat corner";
+            return std::nullopt;
+        }
+        corner.faces[opposite] = face;
+        corner.normals[opposite] = along > 0 ? normal : normal.Reversed();
+    }
+    return corner;
+}
+
+/** The corner kinds of section 5.3, at a vertex where other selected edges meet the edge at an
+ * angle: equal sizes (one size per dress-up; chamfers by equal distances) and one convexity; at a
+ * two-edge corner equal dihedral angles; at a chamfer's three-edge corner a box corner. Anything
+ * else keeps OCCT's error, since OCCT builds patches there (torus, B-spline) the tools don't
+ */
+VertexEnd classifyCorner(
+    const Context& ctx,
+    const std::vector<EdgeData>& all,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex,
+    const std::vector<TopoDS_Edge>& otherSelected,
+    VertexEnd end
+)
+{
+    bool continued = end.kind == VertexClass::TangentContinuation;
+    end.kind = VertexClass::Refuse;
+    end.trims.clear();
+    if (continued) {
+        end.reason = "a corner at a tangent continuation";
+        return end;
+    }
+    auto corner = cornerAt(ctx, vertex, end.reason);
+    if (!corner) {
+        return end;
+    }
+    std::vector<const EdgeData*> others;
+    for (const auto& edge : otherSelected) {
+        auto other = std::find_if(all.begin(), all.end(), [&](const EdgeData& d) {
+            return d.edge.IsSame(edge);
+        });
+        if (other == all.end() || corner->indexOf(edge) < 0) {
+            end.reason = "a corner edge that was not analysed";
+            return end;
+        }
+        if (other->convex != data.convex) {
+            end.reason = "a corner of mixed convexity";
+            return end;
+        }
+        others.push_back(&*other);
+    }
+    const Request& request = ctx.request;
+    bool chamfer = request.kind == Kind::Chamfer;
+    if (chamfer) {
+        bool equal = request.chamferType == ChamferType::equalDistance
+            || (request.chamferType == ChamferType::twoDistances
+                && std::abs(request.size1 - request.size2)
+                    <= linearTolerance * std::max(1.0, request.size1));
+        if (!equal) {
+            end.reason = "a two-distance or distance-angle chamfer at a corner";
+            return end;
+        }
+    }
+    int k = corner->indexOf(data.edge);
+    if (k < 0) {
+        end.reason = "a corner without its edge";
+        return end;
+    }
+    if (others.size() == 1) {
+        double here = 0.0;
+        double there = 0.0;
+        awayFrom(data.edge, vertex, &here);
+        awayFrom(others.front()->edge, vertex, &there);
+        if (std::abs(dihedralAt(data, here) - dihedralAt(*others.front(), there))
+            > angularTolerance) {
+            end.kind = VertexClass::Corner2Unequal;
+            end.reason = "a two-edge corner with unequal dihedral angles";
+            return end;
+        }
+        end.kind = VertexClass::Corner2;
+        end.trims = {corner->miter(k, corner->indexOf(others.front()->edge))};
+        return end;
+    }
+    if (!chamfer) {
+        // The round ends where it meets the sphere: on the plane through the sphere's centre,
+        // normal to the edge
+        gp_Pnt centre = corner->sphereCentre(request.size1);
+        end.kind = VertexClass::Corner3;
+        end.trims = {{centre, corner->away[k].Reversed()}};
+        return end;
+    }
+    // OCCT's corner triangle is reproduced at a box corner only (A15: other patches elsewhere)
+    if (!data.convex) {
+        end.reason = "a chamfer at a concave three-edge corner";
+        return end;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(corner->normals[i].Dot(corner->normals[(i + 1) % 3])) > angularTolerance) {
+            end.reason = "a chamfer at a three-edge corner that is not square";
+            return end;
+        }
+    }
+    end.kind = VertexClass::Corner3;
+    for (int j = 0; j < 3; ++j) {
+        if (j != k) {
+            end.trims.push_back(corner->miter(k, j));
+        }
+    }
+    return end;
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
-VertexEnd classify(const Context& ctx, const EdgeData& data, const TopoDS_Vertex& vertex)
+VertexEnd classify(
+    const Context& ctx,
+    const std::vector<EdgeData>& all,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex
+)
 {
     VertexEnd end;
     auto edges = ctx.list(ctx.vertexEdges, vertex);
@@ -583,7 +940,7 @@ VertexEnd classify(const Context& ctx, const EdgeData& data, const TopoDS_Vertex
     }
     gp_Dir away = awayFrom(data.edge, vertex);
     gp_Pnt point = BRep_Tool::Pnt(vertex);
-    int otherSelected = 0;
+    std::vector<TopoDS_Edge> otherSelected;
     for (const auto& shape : edges) {
         const TopoDS_Edge& other = TopoDS::Edge(shape);
         if (other.IsSame(data.edge)) {
@@ -599,21 +956,14 @@ VertexEnd classify(const Context& ctx, const EdgeData& data, const TopoDS_Vertex
             }
             end.kind = VertexClass::TangentContinuation;
             end.continuation = other;
-            end.trim = {point, away.Reversed()};
+            end.trims = {{point, away.Reversed()}};
         }
         else if (isSelected) {
-            ++otherSelected;
+            otherSelected.push_back(other);
         }
     }
-    if (otherSelected == 1) {
-        end.kind = VertexClass::Corner2;
-        end.reason = "a corner where two selected edges meet";
-        return end;
-    }
-    if (otherSelected == 2) {
-        end.kind = VertexClass::Corner3;
-        end.reason = "a corner where three selected edges meet";
-        return end;
+    if (!otherSelected.empty()) {
+        return classifyCorner(ctx, all, data, vertex, otherSelected, end);
     }
     if (end.kind == VertexClass::TangentContinuation) {
         return end;
@@ -643,19 +993,8 @@ VertexEnd classify(const Context& ctx, const EdgeData& data, const TopoDS_Vertex
         normal.Reverse();
     }
     end.kind = VertexClass::FreeEnd;
-    end.trim = {point, normal};
+    end.trims = {{point, normal}};
     return end;
-}
-
-/// A big box on the far side of the plane, i.e. the half-space the tool must not reach into
-TopoDS_Shape halfSpaceBeyond(const TrimPlane& plane, double size)
-{
-    gp_Ax2 frame(plane.point, plane.normal);
-    gp_Vec x(frame.XDirection());
-    gp_Vec y(frame.YDirection());
-    gp_Pnt origin = plane.point.Translated(-x * size - y * size);
-    gp_Ax2 corner(origin, plane.normal, frame.XDirection());
-    return BRepPrimAPI_MakeBox(corner, 2 * size, 2 * size, size).Shape();
 }
 
 /// Where the line through the point along the direction meets the plane, as a parameter
@@ -691,44 +1030,101 @@ FarSide circleAbout(const gp_Ax1& axis, const gp_Pnt& point)
     return side;
 }
 
-/// A prism along a straight edge, bounded by the planes at its ends
-Tool lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
+/** A prism along a straight edge, bounded by the planes at its ends. None where those planes
+ * leave it no length (the rounds of a slab's vertical edges at r = t / 2 vanish into the sphere
+ * patches): the tool is dropped, so that the result gets no degenerate face (5.2)
+ */
+std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
     gp_Dir direction(gp_Vec(data.start, data.end));
     double length = data.start.Distance(data.end);
     Section section = sectionAt(ctx, data, data.first);
-    // Each plane at the parameter where the section's corners and its centroid cross it
-    std::vector<gp_Pnt> hull = {section.corner, section.ends[0], section.ends[1]};
-    gp_Pnt centroid = section.corner.Translated(section.centroid);
-    auto range = [&](const TrimPlane& plane, const gp_Pnt& p) {
-        return crossing(plane, p, direction);
+    // Where the tool begins and ends along the edge, at a point of the section: at the last of
+    // the planes at its start, and the first of those at its end
+    auto beginAt = [&](const gp_Pnt& p) {
+        double s = -std::numeric_limits<double>::infinity();
+        for (const auto& plane : ends[0].trims) {
+            s = std::max(s, crossing(plane, p, direction));
+        }
+        return s;
     };
+    auto finishAt = [&](const gp_Pnt& p) {
+        double s = std::numeric_limits<double>::infinity();
+        for (const auto& plane : ends[1].trims) {
+            s = std::min(s, crossing(plane, p, direction));
+        }
+        return s;
+    };
+    // The length is concave over the section (a minimum minus a maximum of linear functions),
+    // so its least value is at a corner of the section's hull, whose corners are its own
+    std::vector<gp_Pnt> hull = {section.corner, section.ends[0], section.ends[1]};
     double from = 0.0;
     double to = length;
-    bool trimStart = !parallel(ends[0].trim.normal, direction);
-    bool trimEnd = !parallel(ends[1].trim.normal, direction);
+    double longest = 0.0;
     for (const auto& p : hull) {
-        double s0 = range(ends[0].trim, p);
-        double s1 = range(ends[1].trim, p);
-        if (s1 - s0 <= linearTolerance) {
+        double s0 = beginAt(p);
+        double s1 = finishAt(p);
+        if (s1 - s0 < -linearTolerance) {
             refuse("the planes at the ends of an edge cross inside its tool");
         }
+        longest = std::max(longest, s1 - s0);
         from = std::min(from, s0);
         to = std::max(to, s1);
+    }
+    if (longest <= linearTolerance) {
+        return std::nullopt;
     }
     Tool tool;
     tool.source = data.edge;
     tool.cut = data.convex;
-    tool.volume = section.area * (range(ends[1].trim, centroid) - range(ends[0].trim, centroid));
+    if (ends[0].trims.size() == 1 && ends[1].trims.size() == 1) {
+        // Each plane at the parameter where the section's centroid crosses it: exact for a prism
+        // cut by two planes that don't cross inside it
+        gp_Pnt centroid = section.corner.Translated(section.centroid);
+        tool.volume = section.area * (finishAt(centroid) - beginAt(centroid));
+    }
+    else if (!section.fillet) {
+        // A chamfer's tool at a box corner: a convex polyhedron, between the faces, the chamfer's
+        // plane and the planes at its ends
+        auto away = [&](const gp_Pnt& on, const gp_Vec& along, const gp_Pnt& inside) {
+            gp_Dir normal(gp_Vec(direction).Crossed(along));
+            return gp_Vec(on, inside).Dot(gp_Vec(normal)) > 0 ? TrimPlane {on, normal.Reversed()}
+                                                              : TrimPlane {on, normal};
+        };
+        std::vector<TrimPlane> planes {
+            away(section.corner, gp_Vec(section.inward[0]), section.ends[1]),
+            away(section.corner, gp_Vec(section.inward[1]), section.ends[0]),
+            away(section.ends[0], gp_Vec(section.ends[0], section.ends[1]), section.corner)
+        };
+        for (int i = 0; i < 2; ++i) {
+            planes.insert(planes.end(), ends[i].trims.begin(), ends[i].trims.end());
+        }
+        tool.volume = polytopeOf(planes).volume;
+    }
+    else {
+        refuse("a round bounded by two planes at an end");
+    }
+    tool.strips.resize(2);
     for (int k = 0; k < 2; ++k) {
         tool.strips[k].face = data.faces[k];
         tool.strips[k].width = section.length[k];
         tool.strips[k].farSide.valid = true;
         tool.strips[k].farSide.lin = gp_Lin(section.ends[k], direction);
     }
+    // An end bounded by one plane normal to the edge needs no trim: the prism ends there
+    bool trim[2];
+    for (int i = 0; i < 2; ++i) {
+        trim[i] = ends[i].trims.size() != 1 || !parallel(ends[i].trims.front().normal, direction);
+    }
     double margin = 1.0 + section.length[0] + section.length[1];
-    double begin = trimStart ? from - margin : 0.0;
-    double finish = trimEnd ? to + margin : length;
+    double begin = trim[0] ? from - margin : beginAt(section.corner);
+    double finish = trim[1] ? to + margin : finishAt(section.corner);
+    if (!trim[0] && std::abs(begin) <= linearTolerance) {
+        begin = 0.0;
+    }
+    if (!trim[1] && std::abs(finish - length) <= linearTolerance) {
+        finish = length;
+    }
     gp_Vec step(direction);
     TopoDS_Face face = section.face();
     gp_Trsf move;
@@ -737,20 +1133,86 @@ Tool lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
     TopoDS_Shape solid
         = BRepPrimAPI_MakePrism(face, step * (finish - begin), Standard_True).Shape();
     for (int i = 0; i < 2; ++i) {
-        if ((i == 0 && !trimStart) || (i == 1 && !trimEnd)) {
+        if (!trim[i]) {
             continue;
         }
-        BRepAlgoAPI_Cut trim(solid, halfSpaceBeyond(ends[i].trim, 4 * ctx.scale + 4 * margin));
-        if (!trim.IsDone() || trim.HasErrors()) {
-            refuse("trimming a tool failed");
+        for (const auto& plane : ends[i].trims) {
+            BRepAlgoAPI_Cut cut(solid, halfSpaceBeyond(plane, 4 * ctx.scale + 4 * margin));
+            if (!cut.IsDone() || cut.HasErrors()) {
+                refuse("trimming a tool failed");
+            }
+            solid = cut.Shape();
         }
-        solid = trim.Shape();
     }
     tool.solid = solid;
     for (int i = 0; i < 2; ++i) {
         if (ends[i].kind == VertexClass::FreeEnd) {
-            tool.caps.push_back(ends[i].trim);
+            tool.caps.push_back(ends[i].trims.front());
         }
+    }
+    return tool;
+}
+
+/** The piece at a three-edge corner (5.2), between the ends of the three edge tools, its faces
+ * generated by the vertex:
+ * - a fillet's corner cell: the trihedral cut by the three planes through the sphere's centre
+ *   normal to the edges, minus the ball; its volume is the polyhedron's minus Omega r^3 / 3, with
+ *   Omega = 2 pi - (the sum of the face angles at the vertex) the solid angle at the centre (5.4)
+ * - a chamfer's corner tetrahedron at a box corner: between the three chamfer planes and the
+ *   plane through the points where the chamfer lines meet on each face (OCCT's corner triangle)
+ */
+Tool cornerTool(const Context& ctx, const Corner& corner, bool cut)
+{
+    double size = ctx.request.size1;
+    const gp_Pnt& p = corner.point;
+    std::vector<TrimPlane> planes;
+    Tool tool;
+    tool.source = corner.vertex;
+    tool.cut = cut;
+    if (ctx.request.kind == Kind::Fillet) {
+        gp_Pnt centre = corner.sphereCentre(size);
+        for (int k = 0; k < 3; ++k) {
+            planes.push_back({p, corner.normals[k].Reversed()});
+        }
+        for (int k = 0; k < 3; ++k) {
+            planes.push_back({centre, corner.away[k]});
+        }
+        Polytope cell = polytopeOf(planes);
+        double faceAngles = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            faceAngles += corner.away[k].Angle(corner.away[(k + 1) % 3]);
+        }
+        double omega = 2 * pi - faceAngles;
+        tool.volume = cell.volume - omega * size * size * size / 3;
+        // The sphere's poles and seam away from the patch, so that its face isn't split (5.2)
+        gp_Dir w(gp_Vec(centre, p));
+        gp_Dir axis = std::abs(w.X()) < 0.9 ? w.Crossed(gp::DX()) : w.Crossed(gp::DY());
+        TopoDS_Shape ball = BRepPrimAPI_MakeSphere(gp_Ax2(centre, axis, w.Reversed()), size).Shape();
+        BRepAlgoAPI_Cut minus(solidOf(cell, planes), ball);
+        if (!minus.IsDone() || minus.HasErrors()) {
+            refuse("building a corner cell failed");
+        }
+        tool.solid = minus.Shape();
+        // Its faces on the corner's faces, which the result must not keep
+        tool.strips.resize(3);
+        for (int k = 0; k < 3; ++k) {
+            tool.strips[k].face = corner.faces[k];
+            tool.strips[k].width = size;
+        }
+    }
+    else {
+        // The tetrahedron touches the corner's faces at its corners only: no strips
+        // The edges of a box corner are square to each other
+        gp_Vec a[3] = {gp_Vec(corner.away[0]), gp_Vec(corner.away[1]), gp_Vec(corner.away[2])};
+        for (int k = 0; k < 3; ++k) {
+            const gp_Vec& i = a[(k + 1) % 3];
+            const gp_Vec& j = a[(k + 2) % 3];
+            planes.push_back({p.Translated(i * size), gp_Dir(-(i + j))});
+        }
+        planes.push_back({p.Translated((a[0] + a[1]) * size), gp_Dir(a[0] + a[1] + a[2])});
+        Polytope tetrahedron = polytopeOf(planes);
+        tool.volume = tetrahedron.volume;
+        tool.solid = solidOf(tetrahedron, planes);
     }
     return tool;
 }
@@ -766,7 +1228,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         refuse("a degenerate arc");
     }
     for (int i = 0; i < 2 && !data.closed; ++i) {
-        const TrimPlane& plane = ends[i].trim;
+        const TrimPlane& plane = ends[i].trims.front();
         if (std::abs(plane.normal.Dot(z)) > angularTolerance
             || gp_Pln(plane.point, plane.normal).Distance(circle.Location()) > linearTolerance) {
             refuse("the plane at the end of an arc does not contain its axis");
@@ -795,6 +1257,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     tool.source = data.edge;
     tool.cut = data.convex;
     tool.volume = section.area * centroidRadius * span;
+    tool.strips.resize(2);
     for (int k = 0; k < 2; ++k) {
         tool.strips[k].face = data.faces[k];
         tool.strips[k].width = section.length[k];
@@ -841,7 +1304,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     tool.solid = solid;
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (ends[i].kind == VertexClass::FreeEnd) {
-            tool.caps.push_back(ends[i].trim);
+            tool.caps.push_back(ends[i].trims.front());
         }
     }
     return tool;
@@ -863,15 +1326,15 @@ bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane)
     return true;
 }
 
-/// The tool's faces on the faces next to its edge, and in the planes of its caps
-void findContactFaces(Tool& tool, const EdgeData& data)
+/// The tool's faces on the faces next to its source, and in the planes of its caps
+void findContactFaces(Tool& tool)
 {
     for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
         const TopoDS_Face& face = TopoDS::Face(it.Current());
-        for (int k = 0; k < 2; ++k) {
-            if (sameDomain(face, data.faces[k])) {
+        for (auto& strip : tool.strips) {
+            if (sameDomain(face, strip.face)) {
                 tool.contactFaces.push_back(face);
-                tool.strips[k].contacts.push_back(face);
+                strip.contacts.push_back(face);
             }
         }
         for (const auto& cap : tool.caps) {
@@ -1209,6 +1672,27 @@ TopoDS_Shape construct(
     }
 
     std::vector<Tool> tools;
+    // Each tool's checks before any Boolean
+    auto admit = [&](Tool&& tool) {
+        if (countSolids(tool.solid) != 1) {
+            refuse("a tool is not one solid");
+        }
+        double measured = volumeOf(tool.solid);
+        if (std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("a tool's volume " + describe(measured) + " differs from its closed form "
+                   + describe(tool.volume));
+        }
+        findContactFaces(tool);
+        // A fused tool fills air only: material under it would be fused twice, and the volume
+        // checks after the cut could not tell (5.6, interface point 7)
+        if (!tool.cut
+            && volumeOf(commonOf(base.getShape(), tool.solid)) > volumeTolerance * tool.volume) {
+            refuse("a fused tool overlaps the base's material");
+        }
+        tools.push_back(std::move(tool));
+    };
+    // The three-edge corners, each with its piece, of the convexity of its edges
+    std::vector<std::pair<TopoDS_Vertex, bool>> corners;
     for (const auto& edgeData : data) {
         VertexEnd ends[2];
         if (!edgeData.closed) {
@@ -1226,11 +1710,16 @@ TopoDS_Shape construct(
                     refuse("the ends of a selected edge could not be told apart");
                 }
                 classified[slot] = true;
-                ends[slot] = classify(ctx, edgeData, vertices[i]);
+                ends[slot] = classify(ctx, data, edgeData, vertices[i]);
                 VertexClass kind = ends[slot].kind;
-                if (kind == VertexClass::Refuse || kind == VertexClass::Corner2
-                    || kind == VertexClass::Corner3) {
+                if (kind == VertexClass::Refuse || kind == VertexClass::Corner2Unequal) {
                     refuse(ends[slot].reason);
+                }
+                if (kind == VertexClass::Corner3
+                    && std::none_of(corners.begin(), corners.end(), [&](const auto& c) {
+                           return c.first.IsSame(vertices[i]);
+                       })) {
+                    corners.emplace_back(vertices[i], edgeData.convex);
                 }
                 if (ends[slot].kind == VertexClass::TangentContinuation) {
                     // The two tools meet on one plane only if their sections there agree
@@ -1257,23 +1746,22 @@ TopoDS_Shape construct(
                 }
             }
         }
-        Tool tool = edgeData.line ? lineTool(ctx, edgeData, ends) : circleTool(ctx, edgeData, ends);
-        if (countSolids(tool.solid) != 1) {
-            refuse("a tool is not one solid");
+        if (edgeData.line) {
+            if (auto tool = lineTool(ctx, edgeData, ends)) {
+                admit(std::move(*tool));
+            }
         }
-        double measured = volumeOf(tool.solid);
-        if (std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
-            refuse("a tool's volume " + describe(measured) + " differs from its closed form "
-                   + describe(tool.volume));
+        else {
+            admit(circleTool(ctx, edgeData, ends));
         }
-        findContactFaces(tool, edgeData);
-        // A fused tool fills air only: material under it would be fused twice, and the volume
-        // checks after the cut could not tell (5.6, interface point 7)
-        if (!tool.cut
-            && volumeOf(commonOf(base.getShape(), tool.solid)) > volumeTolerance * tool.volume) {
-            refuse("a fused tool overlaps the base's material");
+    }
+    for (const auto& [vertex, convex] : corners) {
+        std::string reason;
+        auto corner = cornerAt(ctx, vertex, reason);
+        if (!corner) {
+            refuse(reason);
         }
-        tools.push_back(std::move(tool));
+        admit(cornerTool(ctx, *corner, convex));
     }
     checkStrips(tools, request.limitOnly);
 

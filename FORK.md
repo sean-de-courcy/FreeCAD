@@ -306,7 +306,8 @@ names it.
 | `feat/300-fillet-fallback` | feat | ops#300 | - | `integration` `7e1d79cd66` | `6f8eb7477e` (fork PR 278), 2026-10-12 | never (fork feature) |
 | `infra/302-ci-timeout-near-guard` | infra | ops#302, ops#294 | - | `integration` `5c7276ebd4` | `e52e7f0bcd` (fork PR 280), 2026-10-12 | never |
 | `fix/287-undecided-type-settled` | fix | ops#287 | - | `integration` `7e1d79cd66` | `e7f3b31c22` (fork PR 277), 2026-10-12 | never (fork fix) |
-| `fix/297-fillet-validity` | fix | ops#297 | - | `feat/300-fillet-fallback` `07536f4ec8` (fork PR 278) | (fork PR 281) | never (fork fix) |
+| `fix/297-fillet-validity` | fix | ops#297 | - | `feat/300-fillet-fallback` `07536f4ec8` (fork PR 278) | `32d41c43f1` (fork PR 281), 2026-10-12 | never (fork fix) |
+| `feat/300-fillet-corners` | feat | ops#300 | - | `integration` `32d41c43f1` | (fork PR 283) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 
