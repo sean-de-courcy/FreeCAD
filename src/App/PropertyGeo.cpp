@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <fmt/format.h>
+
 #include <Base/MatrixPy.h>
 #include <Base/PlacementPy.h>
 #include <Base/Reader.h>
@@ -188,6 +190,53 @@ void PropertyVector::getPaths(std::vector<ObjectIdentifier>& paths) const
                     << ObjectIdentifier::SimpleComponent(ObjectIdentifier::String("y")));
     paths.push_back(ObjectIdentifier(*this)
                     << ObjectIdentifier::SimpleComponent(ObjectIdentifier::String("z")));
+}
+
+namespace
+{
+// FreeCAD-CH (ops#319): a sub-path value with another unit lost it silently (`.Base.x = 30 deg`
+// gave 30 mm, `.Rotation.Angle = 10 mm` gave 10 deg). It is refused; a number without a unit
+// takes the sub-path's, as before.
+void checkSubPathUnit(
+    const Property& prop,
+    const std::string& subpath,
+    const boost::any& value,
+    const Base::Unit& unit
+)
+{
+    if (value.type() != typeid(Base::Quantity)) {
+        return;
+    }
+    const auto& q = boost::any_cast<const Base::Quantity&>(value);
+    if (q.isDimensionless() || q.getUnit() == unit) {
+        return;
+    }
+    auto describe = [](const Base::Unit& u) {
+        std::string type = u.getTypeString();
+        return type.empty() ? u.getString() : fmt::format("{} ({})", type, u.getString());
+    };
+    const char* name = prop.getName();
+    throw Base::UnitsMismatchError(fmt::format(
+        "Unit mismatch: {}{} needs {}, but the value {} has {}",
+        name ? name : "",
+        subpath,
+        describe(unit),
+        q.getUserString(),
+        describe(q.getUnit())
+    ));
+}
+}  // namespace
+
+void PropertyVector::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    Base::Unit unit = getUnit();
+    if (unit != Unit::One) {
+        std::string p = path.getSubPathStr();
+        if (p == ".x" || p == ".y" || p == ".z") {
+            checkSubPathUnit(*this, p, value, unit);
+        }
+    }
+    Property::setPathValue(path, value);
 }
 
 const boost::any PropertyVector::getPathValue(const ObjectIdentifier& path) const
@@ -674,6 +723,14 @@ void PropertyPlacement::setPathValue(const ObjectIdentifier& path, const boost::
     };
 
     std::string subpath = path.getSubPathStr();
+    if (subpath == ".Base.x" || subpath == ".Base.y" || subpath == ".Base.z") {
+        checkSubPathUnit(*this, subpath, value, Unit::Length);
+    }
+    else if (subpath == ".Rotation.Angle" || subpath == ".Rotation.Yaw"
+             || subpath == ".Rotation.Pitch" || subpath == ".Rotation.Roll") {
+        checkSubPathUnit(*this, subpath, value, Unit::Angle);
+    }
+
     if (subpath == ".Rotation.Angle") {
         double avalue = toDouble(value);
         Property::setPathValue(path, Base::toRadians(avalue));
@@ -1143,6 +1200,7 @@ void PropertyRotation::setPathValue(const ObjectIdentifier& path, const boost::a
 
     std::string subpath = path.getSubPathStr();
     if (subpath == ".Angle") {
+        checkSubPathUnit(*this, subpath, value, Unit::Angle);
         double avalue = toDouble(value);
         Property::setPathValue(path, Base::toRadians(avalue));
     }

@@ -101,6 +101,7 @@ public:
     }
 
     const boost::any getPathValue(const ObjectIdentifier& path) const override;
+    void setPathValue(const ObjectIdentifier& path, const boost::any& value) override;
 
     bool getPyPathValue(const ObjectIdentifier& path, Py::Object& res) const override;
 
