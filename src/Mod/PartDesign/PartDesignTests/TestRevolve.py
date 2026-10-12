@@ -1672,13 +1672,16 @@ class TestRevolve(unittest.TestCase):
         ]
         return block, face
 
-    def revolveProfileUpTo(self, body, kind, sideType, upTo, upToType="UpToFace"):
+    def revolveProfileUpTo(
+        self, body, kind, sideType, upTo, upToType="UpToFace", reversed_=False
+    ):
         """A `kind` of profileAcross() up to `upTo`, on `sideType`, recomputed."""
         revolution = body.newObject("PartDesign::" + kind, kind)
         sketch = self.profileAcross(body)
         revolution.Profile = sketch
         revolution.ReferenceAxis = (sketch, ["V_Axis"])
         revolution.SideType = sideType
+        revolution.Reversed = reversed_
         revolution.Type = upToType
         if upToType == "UpToFace":
             revolution.UpToFace = upTo
@@ -2161,7 +2164,12 @@ class TestRevolve(unittest.TestCase):
         up to the face misses an intersection there too (ops#293). The Revolution and the Groove
         either fail or give the tool that first contact gives, about 11.2277, and the Groove
         removes nothing (the torus is beyond the first contact). Turning the other way (Two
-        sides' second side) the tool is about 13.3486."""
+        sides' second side, or One side Reversed) the tool is about 13.3486.
+        The torus is also turned about its own axis, which moves its seams and nothing else
+        (PR 279 review): turned 10 degrees One side and 330 degrees Reversed, BRepFeat kept the
+        piece from where the circles leave the torus round to the profile too (497.90 instead of
+        484.97 and 487.09); not turned and Reversed, its tool had a vertex of tolerance 0.995 and
+        a volume of 14.20, with no error."""
         steps = 200
         step = 2.0 / steps
         phase = math.atan2(2, 15)
@@ -2175,25 +2183,35 @@ class TestRevolve(unittest.TestCase):
                 cosine = ((6 + minor) ** 2 - r * r - 57.25) / (r * math.sqrt(229))
                 expected += r * (math.acos(cosine) - phase) * step * step
                 other += r * (math.acos(cosine) + phase) * step * step
-        for kind in ("Revolution", "Groove"):
-            for sideType in ("One side", "Two sides", "Symmetric"):
-                with self.subTest(kind=kind, sideType=sideType):
-                    body = self.Doc.addObject("PartDesign::Body", "Body")
-                    torus = body.newObject("PartDesign::AdditiveTorus", "Ring")
-                    torus.Radius1 = 6
-                    torus.Radius2 = 2
-                    torus.Placement = FreeCAD.Placement(
-                        FreeCAD.Vector(-7.5, 1, 1), FreeCAD.Rotation()
-                    )
-                    self.Doc.recompute()
-                    base = torus.Shape.Volume
-                    feature = self.revolveProfileUpTo(body, kind, sideType, (torus, ["Face1"]))
-                    if not feature.isValid():
-                        continue
-                    tools = {"One side": expected, "Two sides": expected + other}
-                    tools["Symmetric"] = 2 * expected
-                    change = tools[sideType] if kind == "Revolution" else 0
-                    self.assertAlmostEqual(feature.Shape.Volume, base + change, delta=1e-3)
+        tools = {
+            ("One side", False): expected,
+            ("One side", True): other,
+            ("Two sides", False): expected + other,
+            ("Symmetric", False): 2 * expected,
+        }
+        for turned in (0, 10, 330, 350):
+            for kind in ("Revolution", "Groove"):
+                for (sideType, reversed_), tool in tools.items():
+                    with self.subTest(
+                        turned=turned, kind=kind, sideType=sideType, reversed_=reversed_
+                    ):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        torus = body.newObject("PartDesign::AdditiveTorus", "Ring")
+                        torus.Radius1 = 6
+                        torus.Radius2 = 2
+                        torus.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(-7.5, 1, 1),
+                            FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), turned),
+                        )
+                        self.Doc.recompute()
+                        base = torus.Shape.Volume
+                        feature = self.revolveProfileUpTo(
+                            body, kind, sideType, (torus, ["Face1"]), reversed_=reversed_
+                        )
+                        if not feature.isValid():
+                            continue
+                        change = tool if kind == "Revolution" else 0
+                        self.assertAlmostEqual(feature.Shape.Volume, base + change, delta=1e-3)
 
     def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
         """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of

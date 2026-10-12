@@ -28,6 +28,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <ranges>
@@ -1594,18 +1595,67 @@ enum class FirstContactTool
     Sweep
 };
 
-// Where a point is in a shape's solids: in one of them, on one's boundary, or outside them all
-TopAbs_State solidState(const TopoDS_Shape& shape, const gp_Pnt& point, double tolerance)
+// Where points are in a shape's solids: in one of them, on one's boundary, or outside them all.
+// Each solid is loaded once: a classifier built per point made the check slow with many holes
+// (PR 279 review: 2.8 s for 40).
+class SolidStates
 {
-    bool on = false;
-    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
-        BRepClass3d_SolidClassifier classifier(solids.Current(), point, tolerance);
-        if (classifier.State() == TopAbs_IN) {
-            return TopAbs_IN;
+public:
+    explicit SolidStates(const TopoDS_Shape& shape)
+    {
+        for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+            classifiers.push_back(std::make_unique<BRepClass3d_SolidClassifier>(solids.Current()));
         }
-        on = on || classifier.State() == TopAbs_ON;
     }
-    return on ? TopAbs_ON : TopAbs_OUT;
+
+    TopAbs_State operator()(const gp_Pnt& point, double tolerance) const
+    {
+        bool on = false;
+        for (const auto& classifier : classifiers) {
+            classifier->Perform(point, tolerance);
+            if (classifier->State() == TopAbs_IN) {
+                return TopAbs_IN;
+            }
+            on = on || classifier->State() == TopAbs_ON;
+        }
+        return on ? TopAbs_ON : TopAbs_OUT;
+    }
+
+private:
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> classifiers;
+};
+
+// The largest tolerance of a shape's vertices and edges
+double largestTolerance(const TopoDS_Shape& shape)
+{
+    double largest = 0.0;
+    for (TopExp_Explorer vertices(shape, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
+        largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Vertex(vertices.Current())));
+    }
+    for (TopExp_Explorer edges(shape, TopAbs_EDGE); edges.More(); edges.Next()) {
+        largest = std::max(largest, BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
+    }
+    return largest;
+}
+
+// Whether a tool up to a face is built to the precision of its inputs: no vertex or edge
+// tolerance above 1e-4 of its size, or ten times its inputs' largest. Up to PartDesign's torus
+// face Reversed, BRepFeat's tool and the sweep both had a vertex of tolerance 0.995 on a 2 x 2
+// profile, covering edges that don't meet: its points classify right, but its caps measure 10.82
+// and 5.86 where both are 7.05, and its volume 14.20 instead of 13.35, which no check of points
+// sees (ops#293, PR 279 review). Good tools there stay below 5e-6.
+bool toleranceHolds(const TopoDS_Shape& tool, std::initializer_list<TopoDS_Shape> inputs)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(tool, box);
+    if (box.IsVoid()) {
+        return false;
+    }
+    double limit = 1e-4 * std::sqrt(box.SquareExtent());
+    for (const TopoDS_Shape& input : inputs) {
+        limit = std::max(limit, 10.0 * largestTolerance(input));
+    }
+    return largestTolerance(tool) <= limit;
 }
 
 // Whether a tool up to a face holds what first contact gives, checked without booleans at points
@@ -1615,12 +1665,14 @@ TopAbs_State solidState(const TopoDS_Shape& shape, const gp_Pnt& point, double t
 // a Groove through empty space removed 33.8 instead of nothing (ops#296), and a wall crossed twice
 // Reversed gave 37.28 instead of 4 pi. For each point, its circle starts at the point and first
 // meets the face at the smallest angle where the quick contacts find the face: points of the arc
-// up to there are in S, and points from just past there to the next contact (or back to the
-// start) are not, unless the circle comes back to the profile. Points on a boundary decide
-// nothing. False when a point lies on the wrong side, or when no point could be checked.
+// up to there are in S, and points of the rest of the turn are not, unless the circle comes back
+// to the profile: between each two later contacts and from the last back to the start, since
+// BRepFeat also kept the piece from where the circle leaves the face round to the profile (the
+// PR 279 review: a torus turned 10 degrees, 497.90 instead of 484.97). Points on a boundary
+// decide nothing. False when a point lies on the wrong side, or when no point could be checked.
 // It can't see a solid whose faces are wrong but whose points classify right: up to PartDesign's
 // torus face Reversed, the tool's caps measure 10.82 and 5.86 where both are 7.05, and its
-// volume 14.20 instead of 13.35 (ops#293).
+// volume 14.20 instead of 13.35 (ops#293). toleranceHolds() refuses that one.
 bool holdsFirstContact(
     const TopoDS_Shape& tool,
     FirstContactTool kind,
@@ -1704,6 +1756,8 @@ bool holdsFirstContact(
     }
     int checked = 0;
     try {
+        const SolidStates toolStates(tool);
+        const SolidStates baseStates(base);
         for (const gp_Pnt& point : points) {
             const double radius = line.Distance(point);
             if (radius <= 10.0 * tolerance || !inProfile(point, false)) {
@@ -1721,53 +1775,87 @@ bool holdsFirstContact(
             }
             std::ranges::sort(contacts);
             const double first = contacts.front();
-            const auto next = std::ranges::find_if(contacts, [&](double contact) {
-                return contact > first + 2.0 * slack;
-            });
-            const double after = next == contacts.end() ? turn : *next;
+            // The contacts past the first, one per crossing
+            std::vector<double> later;
+            for (double contact : contacts) {
+                if (contact > (later.empty() ? first : later.back()) + 2.0 * slack) {
+                    later.push_back(contact);
+                }
+            }
             // The circle meets the profile's plane again at twice the angle of the plane's normal
             // in the circle's frame: when it is in the profile there, the profile sweeps that
-            // circle from there too.
+            // circle from there too, up to the first contact past there.
             const gp_Ax2& frame = circle.Position();
-            const double again = 2.0
-                * std::atan2(
-                                     gp_Vec(frame.YDirection()).Dot(gp_Vec(normal)),
-                                     gp_Vec(frame.XDirection()).Dot(gp_Vec(normal))
-                );
+            const double again = ElCLib::InPeriod(
+                2.0
+                    * std::atan2(
+                        gp_Vec(frame.YDirection()).Dot(gp_Vec(normal)),
+                        gp_Vec(frame.XDirection()).Dot(gp_Vec(normal))
+                    ),
+                0.0,
+                turn
+            );
             const bool sweptTwice = inProfile(ElCLib::Value(again, circle), true);
             // Before the contact: in S, so in the tool, except where the base decides
             bool inS = kind == FirstContactTool::Sweep;
             for (double fraction : {0.5, 0.9}) {
                 const gp_Pnt within = ElCLib::Value(fraction * first, circle);
                 if (kind != FirstContactTool::Sweep) {
-                    const TopAbs_State inBase = solidState(base, within, tolerance);
+                    const TopAbs_State inBase = baseStates(within, tolerance);
                     inS = inBase != TopAbs_ON
                         && (inBase == TopAbs_IN) == (kind == FirstContactTool::Removed);
                 }
                 if (!inS) {
                     continue;
                 }
-                const TopAbs_State state = solidState(tool, within, tolerance);
+                const TopAbs_State state = toolStates(within, tolerance);
                 if (state == TopAbs_OUT) {
                     return false;
                 }
                 checked += state == TopAbs_IN ? 1 : 0;
             }
-            // Past the contact, from just past it up to the next contact or back to the start:
-            // outside S, so outside the tool
-            if (sweptTwice) {
+            // The rest of the turn is outside S, so outside the tool: from the first contact to
+            // the start, split at the later contacts, except from where the circle comes back to
+            // the profile up to its next contact. Starting before the first contact, that part of
+            // S ends at the first contact too.
+            std::vector<std::pair<double, double>> outside;
+            double from = first;
+            for (double to : later) {
+                outside.emplace_back(from, to);
+                from = to;
+            }
+            outside.emplace_back(from, turn);
+            if (sweptTwice && (again <= slack || again >= turn - slack)) {
                 continue;
             }
-            for (double fraction : {0.02, 0.1, 0.5, 0.9}) {
-                const double angle = first + fraction * (after - first);
-                if ((angle - first) * radius <= 10.0 * tolerance) {
-                    continue;
+            if (sweptTwice && again > first + slack) {
+                const auto past = std::ranges::find_if(later, [&](double contact) {
+                    return contact > again;
+                });
+                const double until = past == later.end() ? turn : *past;
+                std::vector<std::pair<double, double>> kept;
+                for (const auto& [low, high] : outside) {
+                    if (low < again) {
+                        kept.emplace_back(low, std::min(high, again));
+                    }
+                    if (high > until) {
+                        kept.emplace_back(std::max(low, until), high);
+                    }
                 }
-                const TopAbs_State state = solidState(tool, ElCLib::Value(angle, circle), tolerance);
-                if (state == TopAbs_IN) {
-                    return false;
+                outside = std::move(kept);
+            }
+            for (const auto& [low, high] : outside) {
+                for (double fraction : {0.02, 0.1, 0.5, 0.9, 0.98}) {
+                    const double angle = low + fraction * (high - low);
+                    if (std::min(angle - low, high - angle) * radius <= 10.0 * tolerance) {
+                        continue;
+                    }
+                    const TopAbs_State state = toolStates(ElCLib::Value(angle, circle), tolerance);
+                    if (state == TopAbs_IN) {
+                        return false;
+                    }
+                    checked += state == TopAbs_OUT ? 1 : 0;
                 }
-                checked += state == TopAbs_OUT ? 1 : 0;
             }
         }
     }
@@ -2424,6 +2512,7 @@ TopoShape Revolved::tryToRevolveToFace(
         const TopoDS_Shape& kindBase = kind == FirstContactTool::Removed ? base.getShape()
                                                                           : featureBase.getShape();
         if (tool.isValid()
+            && toleranceHolds(tool.getShape(), {sketchshape.getShape(), reachable, kindBase})
             && holdsFirstContact(tool.getShape(), kind, kindBase, sketchshape, reachable, axis, tolerance)) {
             return tool;
         }
@@ -2437,7 +2526,9 @@ TopoShape Revolved::tryToRevolveToFace(
         catch (const Standard_Failure&) {
             // Refused below
         }
-        if (sweep && sweep->isValid()
+        const bool precise = sweep && sweep->isValid()
+            && toleranceHolds(sweep->getShape(), {sketchshape.getShape(), reachable});
+        if (precise
             && holdsFirstContact(
                 sweep->getShape(),
                 FirstContactTool::Sweep,
@@ -2448,6 +2539,13 @@ TopoShape Revolved::tryToRevolveToFace(
                 tolerance
             )) {
             return *sweep;
+        }
+        if (sweep && sweep->isValid() && !precise) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not revolve up to the face: the result's edges don't meet within the "
+                "precision of the profile and the face"
+            ));
         }
         throw Base::RuntimeError(QT_TRANSLATE_NOOP(
             "Exception",
