@@ -1033,7 +1033,7 @@ bool TaskFeaturePick::sameElement(
         }
         return points;
     };
-    const double near = Precision::Confusion() * 10;
+    const double closeEnough = Precision::Confusion() * 10;
     try {
         const std::vector<gp_Pnt> pointsBefore = vertices(before);
         const std::vector<gp_Pnt> pointsAfter = vertices(after);
@@ -1042,7 +1042,7 @@ bool TaskFeaturePick::sameElement(
         }
         for (const gp_Pnt& point : pointsBefore) {
             if (std::ranges::none_of(pointsAfter, [&](const gp_Pnt& other) {
-                    return other.Distance(point) <= near;
+                    return other.Distance(point) <= closeEnough;
                 })) {
                 return false;
             }
@@ -1058,7 +1058,7 @@ bool TaskFeaturePick::sameElement(
             // AddOptimal's box of a large or curved element is only that close (PR 246 review
             // L4): the tolerance grows with its diagonal
             const double nearBox = std::max(
-                near,
+                closeEnough,
                 1e-9 * boxBefore.CornerMin().Distance(boxBefore.CornerMax())
             );
             return boxBefore.CornerMin().Distance(boxAfter.CornerMin()) <= nearBox
