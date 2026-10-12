@@ -310,7 +310,8 @@ names it.
 | `feat/300-fillet-corners` | feat | ops#300 | - | `integration` `32d41c43f1` | `61925c451a` (fork PR 283), 2026-10-12 | never (fork feature) |
 | `fix/291-reorder-missing-base` | fix | ops#291 | - | `integration` `e52e7f0bcd` | `5414cccbfd` (fork PR 282), 2026-10-12 | never (fork fix) |
 | `fix/292-stale-role-links` | fix | ops#292 | - | `integration` `32d41c43f1` | `e1b79b6d9e` (fork PR 284), 2026-10-12 | never (fork fix) |
-| `feat/300-fillet-corners-unequal` | feat | ops#300 | - | `integration` `61925c451a` | (fork PR 285) | never (fork feature) |
+| `feat/300-fillet-corners-unequal` | feat | ops#300 | - | `integration` `61925c451a` | `e76ce293b2` (fork PR 285), 2026-10-12 | never (fork feature) |
+| `feat/300-fillet-s2` | feat | ops#300 | - | `feat/300-fillet-corners-unequal` `9694566e98` (fork PR 285) | (fork PR 286) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

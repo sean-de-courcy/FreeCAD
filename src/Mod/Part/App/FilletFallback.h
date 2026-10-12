@@ -13,10 +13,11 @@
  * zero-area face, every volume equal to its closed form) and named through a composed history,
  * as if the fillet had built it.
  *
- * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed, or has built
- * an invalid result without an error (ops#297). Whenever a configuration is outside the scope or a
- * check fails, build() refuses and the caller raises OCCT's original error, or returns OCCT's
- * invalid result for the feature's check (Part::checkDressUp()): never a silent wrong solid.
+ * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed, has built
+ * an invalid result without an error (ops#297), or has left a face of zero width (thinFace(),
+ * ops#298). Whenever a configuration is outside the scope or a check fails, build() refuses and
+ * the caller raises OCCT's original error or one for the thin face, or returns OCCT's invalid
+ * result for the feature's check (Part::checkDressUp()): never a silent wrong solid.
  *
  * Design: notes/fillet-workarounds.md in the ops repository, sections 2a, 3, 4 and 5.6.
  */
@@ -26,6 +27,8 @@
 
 #include <string>
 #include <vector>
+
+#include <TopoDS_Face.hxx>
 
 #include <Mod/Part/PartGlobal.h>
 #include "TopoShape.h"
@@ -77,6 +80,46 @@ PartExport bool build(
     const char* op,
     std::string* reason = nullptr
 );
+
+/** The first face of a dress-up's result, not a face of its base, that is too thin to be one: what
+ * OCCT leaves of a face the dress-up consumes whole (the stadium's top, area 0, ops#298), or a
+ * sliver near that limit narrower than its own tolerance. Its width, that of the rectangle with
+ * its area and perimeter (a strip's width, a square's side), is below the largest tolerance of
+ * its edges (at least Precision::Confusion()). A sliver wider than that is a face OCCT built
+ * correctly (the rib's top at r = 2 - 1e-7 is 2e-7 wide), and is kept. Null if there is none.
+ */
+PartExport TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base);
+
+/** Collects what the exact construction builds on this thread while it exists, for the feature's
+ * Report-view line (decision 54). Recorders nest; the innermost collects.
+ */
+class PartExport Recorder
+{
+public:
+    Recorder();
+    ~Recorder();
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+
+    /// Adds one construction's result to the innermost recorder, if there is one
+    static void add(int edges, int corners);
+
+    /// Whether the construction built a result while this recorder collected
+    bool built() const
+    {
+        return builds > 0;
+    }
+
+    /// Prints the Report-view line if it did, and returns it (else empty):
+    /// "<name>: built exactly where OCCT refused: N edges, M corners"
+    std::string report(const std::string& name) const;
+
+private:
+    Recorder* outer;
+    int builds = 0;
+    int edges = 0;
+    int corners = 0;
+};
 
 }  // namespace Part::FilletFallback
 

@@ -36,6 +36,7 @@
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Base/Tools.h>
+#include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/SignalException.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
@@ -161,6 +162,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         TopoShape shape = makeTopoShape();
         Part::SignalException sig;
 
+        Part::FilletFallback::Recorder recorder;
         shape.makeElementChamfer(
             TopShape,
             edges,
@@ -183,6 +185,8 @@ App::DocumentObjectExecReturn* Chamfer::execute()
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );
         }
+        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
+        recorder.report(Label.getValue());
 
         // store shape before refinement
         this->rawShape = shape;

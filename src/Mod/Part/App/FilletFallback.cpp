@@ -78,8 +78,6 @@ constexpr double linearTolerance = 1e-7;  // Precision::Confusion()
 constexpr double angularTolerance = 1e-9;
 /// Every measured volume must equal its closed form to this, relative to the tool volumes
 constexpr double volumeTolerance = 1e-6;
-/// A face of the result with a smaller area is degenerate
-constexpr double areaTolerance = 1e-7;
 
 /// Thrown inside the construction when it refuses; caught by build()
 struct Refusal
@@ -340,8 +338,9 @@ enum class VertexClass
     /// dihedral angle: the two tools meet on the bisector plane of the faces they don't share
     Corner2,
     /// A two-edge corner whose edges have different dihedral angles, convex edges at a convex
-    /// vertex: OCCT's rounds meet along a space curve, not a plane. Each tool ends on the plane
-    /// of the other edge's side face, and the two overlap near the vertex (S1c-b)
+    /// vertex: OCCT's rounds meet where the two tools cross (equal radii: in a planar ellipse, on
+    /// the plane bisecting the two axes), not on the bisector plane of the faces. Each tool ends
+    /// on the plane of the other edge's side face, and the two overlap near the vertex (S1c-b)
     Corner2Unequal,
     /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
     /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
@@ -1020,7 +1019,10 @@ VertexEnd classify(
     VertexEnd end;
     auto edges = ctx.list(ctx.vertexEdges, vertex);
     auto faces = ctx.list(ctx.vertexFaces, vertex);
-    if (edges.size() != 3 || faces.size() != 3) {
+    // A vertex inside a curve, between two edges on the same two faces (a circle split at its
+    // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
+    bool insideCurve = edges.size() == 2 && faces.size() == 2;
+    if (!insideCurve && (edges.size() != 3 || faces.size() != 3)) {
         end.reason = "a vertex where " + std::to_string(edges.size()) + " edges meet";
         return end;
     }
@@ -1047,6 +1049,10 @@ VertexEnd classify(
         else if (isSelected) {
             otherSelected.push_back(other);
         }
+    }
+    if (insideCurve && end.kind != VertexClass::TangentContinuation) {
+        end.reason = "a vertex where 2 edges meet at an angle";
+        return end;
     }
     if (!otherSelected.empty()) {
         return classifyCorner(ctx, all, data, vertex, otherSelected, end);
@@ -1765,12 +1771,14 @@ TopoDS_Shape applyTools(
     return result;
 }
 
+/// The construction; cornerCount receives how many corners it built
 TopoDS_Shape construct(
     TopoShape& result,
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
     const Request& request,
-    const char* op
+    const char* op,
+    int& cornerCount
 )
 {
     if (base.isNull() || countSolids(base.getShape()) != 1) {
@@ -1833,6 +1841,8 @@ TopoDS_Shape construct(
     std::vector<std::pair<TopoDS_Vertex, bool>> corners;
     // The two-edge corners with unequal dihedral angles
     std::vector<TopoDS_Vertex> unequalCorners;
+    // Every corner, for the Report-view line
+    TopTools_IndexedMapOfShape cornerVertices;
     for (const auto& edgeData : data) {
         VertexEnd ends[2];
         if (!edgeData.closed) {
@@ -1854,6 +1864,10 @@ TopoDS_Shape construct(
                 VertexClass kind = ends[slot].kind;
                 if (kind == VertexClass::Refuse) {
                     refuse(ends[slot].reason);
+                }
+                if (kind == VertexClass::Corner2 || kind == VertexClass::Corner2Unequal
+                    || kind == VertexClass::Corner3) {
+                    cornerVertices.Add(vertices[i]);
                 }
                 auto known = [&](const TopoDS_Vertex& v) {
                     return v.IsSame(vertices[i]);
@@ -2040,10 +2054,8 @@ TopoDS_Shape construct(
     if (!BRepCheck_Analyzer(shape).IsValid()) {
         refuse("the result is not valid");
     }
-    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
-        if (areaOf(it.Current()) < areaTolerance) {
-            refuse("the result has a face of zero area");
-        }
+    if (!thinFace(shape, base.getShape()).IsNull()) {
+        refuse("the result has a face of zero width");
     }
     // One solid, as OCCT's fillet returns, not a compound holding it
     if (shape.ShapeType() != TopAbs_SOLID) {
@@ -2110,10 +2122,74 @@ TopoDS_Shape construct(
         }
     }
     result.makeShapeWithElementMap(shape, mapper, {base}, op);
+    cornerCount = cornerVertices.Extent();
     return shape;
 }
 
+thread_local Recorder* innermostRecorder = nullptr;
+
 }  // namespace
+
+TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
+{
+    TopTools_IndexedMapOfShape baseFaces;
+    TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(result, TopAbs_FACE, faces);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        if (baseFaces.Contains(face)) {
+            continue;
+        }
+        double tolerance = linearTolerance;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(it.Current())));
+        }
+        // The width w of the rectangle with the face's area A and perimeter P, the smaller root
+        // of w^2 - P w / 2 + A = 0 (a strip's width, a square's side), in the form that doesn't
+        // cancel (a face rounder than a square: A / (P / 4), a disc's diameter)
+        double area = std::abs(areaOf(face));
+        double quarter = perimeterOf(face) / 4;
+        double width = area / (quarter + std::sqrt(std::max(0.0, quarter * quarter - area)));
+        if (!(width >= tolerance)) {
+            return face;
+        }
+    }
+    return {};
+}
+
+Recorder::Recorder()
+    : outer(innermostRecorder)
+{
+    innermostRecorder = this;
+}
+
+Recorder::~Recorder()
+{
+    innermostRecorder = outer;
+}
+
+void Recorder::add(int edges, int corners)
+{
+    if (Recorder* recorder = innermostRecorder) {
+        ++recorder->builds;
+        recorder->edges += edges;
+        recorder->corners += corners;
+    }
+}
+
+std::string Recorder::report(const std::string& name) const
+{
+    if (builds == 0) {
+        return {};
+    }
+    std::ostringstream line;
+    line << name << ": built exactly where OCCT refused: " << edges
+         << (edges == 1 ? " edge, " : " edges, ") << corners
+         << (corners == 1 ? " corner" : " corners");
+    Base::Console().message("%s\n", line.str().c_str());
+    return line.str();
+}
 
 bool build(
     TopoShape& result,
@@ -2128,8 +2204,15 @@ bool build(
     try {
         // A copy keeps the result's tag, hasher and history algorithm, which name the elements
         TopoShape built(result);
-        construct(built, base, edges, request, op);
+        int corners = 0;
+        construct(built, base, edges, request, op, corners);
         result = built;
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            selected.Add(edge.getShape());
+        }
+        FC_LOG("built exactly: " << selected.Extent() << " edges, " << corners << " corners");
+        Recorder::add(selected.Extent(), corners);
         return true;
     }
     catch (const Refusal& refusal) {

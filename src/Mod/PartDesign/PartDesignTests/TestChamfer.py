@@ -347,6 +347,27 @@ class TestChamfer(unittest.TestCase):
         ]
         self._assertFails(self._chamfer_on_base(base, edges, 2.65))
 
+    def testChamferWholeOutlineOfAStadium(self):
+        # ops#298: OCCT "succeeds" on a stadium's whole top outline at d = 2 (half its width),
+        # keeping the top face with area 0; the exact construction builds the ridge: two
+        # 45 degree strips and a cone on each end
+        plate, outline = models.fused_stadium()
+        chamfer = self._chamfer_on_base(plate, outline, 2.0)
+        self._assertValidDressUp(chamfer, 240 + pi * 12 - 80 - 2 * pi * (2 - 2 / 3) * 2)
+        self.assertGreater(models.narrowest(chamfer.Shape, plate), 0.5)
+
+    def testChamferCoincidentCases(self):
+        # Section 1 of the design note: OCCT fails at each of these limits; the feature gets the
+        # exact construction's result with the analytic volume. The 4 mm top of a rib (a ridge),
+        # a plate's edge at its thickness, and a cube's twelve edges (an octahedron's corners)
+        rib = Part.makeBox(30, 4, 20)
+        self._assertValidDressUp(
+            self._chamfer_on_base(rib, models.top_edges(rib), 2.0), 2400 - 4 * 30
+        )
+        plate = Part.makeBox(30, 20, 4)
+        edge = models.edge_between(plate, (0, 0, 4), (30, 0, 4))
+        self._assertValidDressUp(self._chamfer_on_base(plate, [edge], 4.0), 2400 - 8 * 30)
+
     def testChamferRepairKeepingTheSurface(self):
         # Four chamfers meeting at a pyramid's apex: OCCT's faces are misoriented; the repair
         # reorients them. Chamfers along the full length of the four edges (10 sqrt 3, faces at

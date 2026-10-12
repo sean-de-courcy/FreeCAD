@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numbers>
 #include <sstream>
 #include <gtest/gtest.h>
@@ -43,8 +44,10 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Pln.hxx>
+#include <gp_XY.hxx>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -1190,8 +1193,9 @@ TEST_F(FilletFallbackTest, twoEdgeCornersWithUnequalAngles)
 {
     // The plate whose end leans in by 10 degrees: its top edge meets the long top edges at 100
     // degrees against their 90. The four top edges at r = t, and chamfered at d = t: the long
-    // sides vanish; the rounds meet at the leaning end along a space curve, the union of the two
-    // tools, and in miters at the other
+    // sides vanish; the rounds meet at the leaning end where the two tools cross (an ellipse on
+    // the plane bisecting their axes, not the faces' bisector plane), the union of the two tools,
+    // and in miters at the other
     for (double degrees : {10.0, 25.0}) {
         double angle = degrees * pi / 180;
         TopoShape plate(leaningPlate(angle), 1L);
@@ -1819,6 +1823,364 @@ TEST_F(FilletFallbackTest, refusesAConeFace)
     ASSERT_EQ(edges.size(), 1U);
     EXPECT_TRUE(forced(base, edges, fillet(1), &reason).isNull());
     EXPECT_FALSE(reason.empty());
+}
+
+// A plan angle other than 90 degrees at the unequal corners (PR 285 verification, F1): the two
+// strips overlap in a parallelogram of area w_a w_b / sin(phi), and the tools' common volume
+// carries the same factor.
+
+namespace
+{
+
+/// A slab t thick over a convex footprint (counterclockwise), its wall i (from foot[i] to
+/// foot[i + 1]) leaning in from its bottom edge by lean[i] degrees (out if negative)
+TopoDS_Shape leaningSlab(const std::vector<gp_XY>& foot, double t, const std::vector<double>& lean)
+{
+    double xmin = foot[0].X();
+    double xmax = xmin;
+    double ymin = foot[0].Y();
+    double ymax = ymin;
+    for (const auto& p : foot) {
+        xmin = std::min(xmin, p.X());
+        xmax = std::max(xmax, p.X());
+        ymin = std::min(ymin, p.Y());
+        ymax = std::max(ymax, p.Y());
+    }
+    double margin = 3 * t + 10;
+    TopoDS_Shape shape = box(
+        xmax - xmin + 2 * margin,
+        ymax - ymin + 2 * margin,
+        t,
+        gp_Pnt(xmin - margin, ymin - margin, 0)
+    );
+    for (size_t i = 0; i < foot.size(); ++i) {
+        gp_XY along = (foot[(i + 1) % foot.size()] - foot[i]).Normalized();
+        double beta = lean[i] * pi / 180;
+        gp_Dir normal(along.Y() * std::cos(beta), -along.X() * std::cos(beta), std::sin(beta));
+        gp_Pnt at(foot[i].X(), foot[i].Y(), 0);
+        shape = BRepAlgoAPI_Cut(shape, beyondPlane(at, normal, 100)).Shape();
+    }
+    return shape;
+}
+
+/// The part of the convex polygon where normal . p <= c
+std::vector<gp_XY> clipped(const std::vector<gp_XY>& polygon, const gp_XY& normal, double c)
+{
+    std::vector<gp_XY> result;
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        const gp_XY& p = polygon[i];
+        const gp_XY& q = polygon[(i + 1) % polygon.size()];
+        double fp = normal.Dot(p) - c;
+        double fq = normal.Dot(q) - c;
+        if (fp <= 0) {
+            result.push_back(p);
+        }
+        if ((fp < 0 && fq > 0) || (fq < 0 && fp > 0)) {
+            result.push_back(p + (q - p) * (fp / (fp - fq)));
+        }
+    }
+    return result;
+}
+
+double polygonArea(const std::vector<gp_XY>& polygon)
+{
+    double twice = 0.0;
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        twice += polygon[i].Crossed(polygon[(i + 1) % polygon.size()]);
+    }
+    return std::abs(twice) / 2;
+}
+
+/** What a dress-up of all the top edges of leaningSlab() removes, by slices parallel to the top
+ * at the depth z (plateTopRemoved() for any convex footprint; the verification's polygon slice
+ * integral). A slice is the top polygon with each side z cot(alpha) further in, and it loses a
+ * band w(z) along each side; the slices come from clipping a large square by the sides' lines.
+ * Pure plane geometry: nothing of the construction's tools, overlaps or plan angles.
+ */
+double slabTopRemoved(
+    bool isFillet,
+    const std::vector<gp_XY>& foot,
+    double t,
+    const std::vector<double>& lean,
+    double size
+)
+{
+    struct Wall
+    {
+        gp_XY normal;  // outward, in the plane
+        double top;    // normal . p of the top's side
+        double beta;   // the lean
+        double alpha;  // the dihedral angle at the top edge
+    };
+    std::vector<Wall> walls;
+    for (size_t i = 0; i < foot.size(); ++i) {
+        gp_XY along = (foot[(i + 1) % foot.size()] - foot[i]).Normalized();
+        gp_XY normal(along.Y(), -along.X());
+        double beta = lean[i] * pi / 180;
+        walls.push_back({normal, normal.Dot(foot[i]) - t * std::tan(beta), beta, pi / 2 + beta});
+    }
+    auto sliceArea = [&](double z, const std::vector<double>& width) {
+        std::vector<gp_XY> polygon {{-1e4, -1e4}, {1e4, -1e4}, {1e4, 1e4}, {-1e4, 1e4}};
+        for (size_t i = 0; i < walls.size() && !polygon.empty(); ++i) {
+            double c = walls[i].top + z * std::tan(walls[i].beta) - width[i];
+            polygon = clipped(polygon, walls[i].normal, c);
+        }
+        return polygonArea(polygon);
+    };
+    std::vector<double> none(walls.size(), 0.0);
+    std::vector<double> ends {0.0};
+    double last = 0.0;
+    std::function<double(double)> slice;
+    if (isFillet) {
+        last = std::acos(std::max(-1.0, 1 - t / size));
+        for (const auto& wall : walls) {
+            ends.push_back(std::clamp(pi - wall.alpha, 0.0, last));
+        }
+        slice = [&](double theta) {
+            double z = size * (1 - std::cos(theta));
+            std::vector<double> width;
+            for (const auto& wall : walls) {
+                width.push_back(
+                    theta <= pi - wall.alpha ? size / std::tan(wall.alpha / 2)
+                            - size * std::sin(theta) - z / std::tan(wall.alpha)
+                                             : 0.0
+                );
+            }
+            return (sliceArea(z, none) - sliceArea(z, width)) * size * std::sin(theta);
+        };
+    }
+    else {
+        last = t;
+        for (const auto& wall : walls) {
+            ends.push_back(std::min(size * std::sin(wall.alpha), t));
+        }
+        slice = [&](double z) {
+            std::vector<double> width;
+            for (const auto& wall : walls) {
+                width.push_back(
+                    z <= size * std::sin(wall.alpha) ? size - z / std::sin(wall.alpha) : 0.0
+                );
+            }
+            return sliceArea(z, none) - sliceArea(z, width);
+        };
+    }
+    ends.push_back(last);
+    std::sort(ends.begin(), ends.end());
+    // The slice area has kinks where a slice's polygon changes its corners: many short pieces
+    constexpr int pieces = 200;
+    double total = 0.0;
+    for (size_t i = 0; i + 1 < ends.size(); ++i) {
+        double step = (ends[i + 1] - ends[i]) / pieces;
+        for (int k = 0; step > 0 && k < pieces; ++k) {
+            total += gaussLegendre(slice, ends[i] + k * step, ends[i] + (k + 1) * step, 16);
+        }
+    }
+    return total;
+}
+
+/// The limits where the thinnest wall vanishes: r = t / (1 + cos alpha), d = t / sin alpha
+double filletLimit(double t, const std::vector<double>& lean)
+{
+    double limit = std::numeric_limits<double>::max();
+    for (double degrees : lean) {
+        limit = std::min(limit, t / (1 + std::cos(pi / 2 + degrees * pi / 180)));
+    }
+    return limit;
+}
+
+double chamferLimit(double t, const std::vector<double>& lean)
+{
+    double limit = std::numeric_limits<double>::max();
+    for (double degrees : lean) {
+        limit = std::min(limit, t / std::sin(pi / 2 + degrees * pi / 180));
+    }
+    return limit;
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, unequalCornersAtOtherPlanAngles)
+{
+    // The 60 degree parallelogram 30 x 15 (walls leaning 0, 20 out, 25 in, 0), and the triangle
+    // with corners of 60, 80 and 40 degrees on a 40 mm side (walls leaning 20 out, 10 in, 30 in),
+    // 4 thick: all top edges at the limit, where the wall leaning out vanishes, against the slice
+    // integral; and the forced construction equal to OCCT below it
+    double c60 = std::cos(pi / 3);
+    double s60 = std::sin(pi / 3);
+    double side = 40 * std::sin(2 * pi / 9) / std::sin(4 * pi / 9);
+    std::vector<std::pair<std::vector<gp_XY>, std::vector<double>>> slabs {
+        {{{0, 0}, {30, 0}, {30 + 15 * c60, 15 * s60}, {15 * c60, 15 * s60}}, {0, -20, 25, 0}},
+        {{{0, 0}, {40, 0}, {side * c60, side * s60}}, {-20, 10, 30}}
+    };
+    for (const auto& [foot, lean] : slabs) {
+        TopoShape slab(leaningSlab(foot, 4, lean), 1L);
+        auto top = edgesWhere(slab, atHeight(4));
+        ASSERT_EQ(top.size(), foot.size());
+        double plate = volume(slab.getShape());
+        double r = filletLimit(4, lean);
+        double d = chamferLimit(4, lean);
+        ASSERT_TRUE(occtFails(slab, top, fillet(r))) << foot.size();
+        EXPECT_TRUE(exact(dressUp(slab, top, fillet(r)), plate - slabTopRemoved(true, foot, 4, lean, r)))
+            << foot.size();
+        ASSERT_TRUE(occtFails(slab, top, chamfer(d))) << foot.size();
+        EXPECT_TRUE(
+            exact(dressUp(slab, top, chamfer(d)), plate - slabTopRemoved(false, foot, 4, lean, d))
+        ) << foot.size();
+        EXPECT_TRUE(sameAsOcct(slab, top, fillet(0.9 * r))) << foot.size();
+        EXPECT_TRUE(sameAsOcct(slab, top, chamfer(0.9 * d))) << foot.size();
+    }
+}
+
+// A face of zero width in OCCT's result (ops#298): OCCT succeeds where the dress-up consumes a
+// face whole if the face shrinks to a line that the dress-up doesn't run along (the stadium's
+// top), and keeps the face with area 0. Near the limit it leaves slivers narrower than their own
+// tolerance. makeElementFillet / makeElementChamfer send both to the exact construction.
+
+namespace
+{
+
+/// OCCT's fillet as makeElementFillet builds it (start and end radius), without the exact
+/// construction
+TopoDS_Shape occtFillet(const TopoShape& base, const std::vector<TopoShape>& edges, double r)
+{
+    BRepFilletAPI_MakeFillet maker(base.getShape());
+    for (const auto& e : edges) {
+        maker.Add(r, r, TopoDS::Edge(e.getShape()));
+    }
+    maker.Build();
+    return maker.IsDone() ? maker.Shape() : TopoDS_Shape();
+}
+
+double faceArea(const TopoDS_Shape& face)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(face, props);
+    return props.Mass();
+}
+
+/// stadium() as a box fused with two cylinders, unified: the half circle at x = 20 is split in
+/// two at its cylinder's seam (22, 2), a vertex of two edges on two faces
+TopoDS_Shape fusedStadium()
+{
+    // As Python's box.fuse([cylinder, cylinder]).removeSplitter()
+    TopoShape fused;
+    fused.makeElementBoolean(
+        OpCodes::Fuse,
+        {TopoShape(box(20, 4, 3)),
+         TopoShape(BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 2, 0), gp::DZ()), 2, 3).Shape()),
+         TopoShape(BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(20, 2, 0), gp::DZ()), 2, 3).Shape())}
+    );
+    return fused.removeSplitter();
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, thinFacesOfOcctsResult)
+{
+    // The fused stadium's whole top outline at r = 2: OCCT keeps the top face with area 0
+    TopoShape stadiumPlate(fusedStadium(), 1L);
+    auto outline = edgesWhere(stadiumPlate, atHeight(3));
+    TopoDS_Shape occt = occtFillet(stadiumPlate, outline, 2);
+    ASSERT_FALSE(occt.IsNull());
+    EXPECT_TRUE(BRepCheck_Analyzer(occt).IsValid());
+    TopoDS_Face thin = FF::thinFace(occt, stadiumPlate.getShape());
+    ASSERT_FALSE(thin.IsNull());
+    EXPECT_LT(faceArea(thin), 1e-12);
+    // The base's own faces aren't looked at
+    EXPECT_TRUE(FF::thinFace(stadiumPlate.getShape(), stadiumPlate.getShape()).IsNull());
+
+    // The full round of the 4 mm top: just below r = 2 OCCT leaves a sliver 2 (2 - r) wide, as
+    // wide as it should be. Narrower than its edges' tolerance (1e-7) it is thin; from 2e-7 on
+    // it is a face OCCT built correctly
+    TopoShape rib(box(30, 4, 20), 1L);
+    std::vector<TopoShape> pair {
+        edgeBetween(rib, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(rib, {0, 4, 20}, {30, 4, 20})
+    };
+    for (double gap : {1e-9, 1e-8}) {
+        occt = occtFillet(rib, pair, 2 - gap);
+        ASSERT_FALSE(occt.IsNull()) << gap;
+        EXPECT_FALSE(FF::thinFace(occt, rib.getShape()).IsNull()) << gap;
+    }
+    for (double gap : {1e-7, 1e-5, 1e-3}) {
+        occt = occtFillet(rib, pair, 2 - gap);
+        ASSERT_FALSE(occt.IsNull()) << gap;
+        EXPECT_TRUE(FF::thinFace(occt, rib.getShape()).IsNull()) << gap;
+        EXPECT_EQ(count(occt, TopAbs_FACE), 8) << gap;
+    }
+}
+
+TEST_F(FilletFallbackTest, wholeOutlineOfAStadium)
+{
+    // The stadium's whole top outline at r = w / 2 and d = w / 2. On the fused stadium OCCT
+    // "succeeds", keeping the top face with area 0 (11 faces), down to r = 2 - 1e-8; on the
+    // extruded one its result is invalid. makeElementFillet / makeElementChamfer build the full
+    // round and the ridge exactly instead: the straight edges' tools meet the half circles' (a
+    // sphere for the fillet, a cone for the chamfer) by tangent continuation, also across the
+    // fused stadium's seam vertex: 9 faces, 10 with the half circle in two
+    double plate = 20 * 4 * 3 + pi * 4 * 3;
+    auto rounded = [&](double r) {
+        double c = filletCentroid(r);
+        return plate - 2 * filletSection(r) * 20 - 2 * pi * (2 - c) * filletSection(r);
+    };
+    for (const auto& [shape, faces] :
+         std::vector<std::pair<TopoDS_Shape, int>> {{stadium(), 9}, {fusedStadium(), 10}}) {
+        TopoShape base(shape, 1L);
+        auto top = edgesWhere(base, atHeight(3));
+        ASSERT_EQ(top.size(), faces - 5);
+        TopoShape round = dressUp(base, top, fillet(2));
+        EXPECT_TRUE(exact(round, rounded(2))) << faces;
+        EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull()) << faces;
+        EXPECT_EQ(round.countSubElements("Face"), faces);
+        TopoShape ridge = dressUp(base, top, chamfer(2));
+        EXPECT_TRUE(exact(ridge, plate - 2 * 2 * 20 - 2 * pi * (2 - 2.0 / 3) * 2)) << faces;
+        EXPECT_TRUE(FF::thinFace(ridge.getShape(), base.getShape()).IsNull()) << faces;
+        EXPECT_EQ(ridge.countSubElements("Face"), faces);
+    }
+    // Just below: OCCT's face of area 0 at 2 - 1e-8 is built exactly; its sliver 2e-7 wide at
+    // 2 - 1e-7 is a face OCCT built correctly, and stays
+    TopoShape base(fusedStadium(), 1L);
+    auto top = edgesWhere(base, atHeight(3));
+    TopoShape round = dressUp(base, top, fillet(2 - 1e-8));
+    EXPECT_TRUE(exact(round, rounded(2 - 1e-8)));
+    EXPECT_EQ(round.countSubElements("Face"), 10);
+    round = dressUp(base, top, fillet(2 - 1e-7));
+    EXPECT_TRUE(exact(round, rounded(2 - 1e-7)));
+    EXPECT_EQ(round.countSubElements("Face"), 11);
+    EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull());
+}
+
+TEST_F(FilletFallbackTest, recorderReportsWhatTheConstructionBuilt)
+{
+    // The feature's Report-view line (decision 54): nothing where OCCT built the dress-up; the
+    // edges and the corners where the exact construction did, in the innermost recorder
+    TopoShape cube(box(4, 4, 4), 1L);
+    auto all = cube.getSubTopoShapes(TopAbs_EDGE);
+    ASSERT_EQ(all.size(), 12);
+    FF::Recorder outer;
+    {
+        FF::Recorder recorder;
+        dressUp(cube, all, fillet(1.9));
+        EXPECT_FALSE(recorder.built());
+        EXPECT_EQ(recorder.report("Fillet"), "");
+    }
+    {
+        FF::Recorder recorder;
+        dressUp(cube, all, fillet(2));
+        EXPECT_TRUE(recorder.built());
+        EXPECT_EQ(
+            recorder.report("Fillet"),
+            "Fillet: built exactly where OCCT refused: 12 edges, 8 corners"
+        );
+    }
+    EXPECT_FALSE(outer.built());
+    TopoShape rib(box(30, 4, 20), 1L);
+    std::vector<TopoShape> pair {
+        edgeBetween(rib, {0, 0, 20}, {30, 0, 20}),
+        edgeBetween(rib, {0, 4, 20}, {30, 4, 20})
+    };
+    dressUp(rib, pair, chamfer(2));
+    EXPECT_EQ(outer.report("Chamfer"), "Chamfer: built exactly where OCCT refused: 2 edges, 0 corners");
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
