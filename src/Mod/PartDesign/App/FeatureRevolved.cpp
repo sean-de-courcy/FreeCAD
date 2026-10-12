@@ -31,6 +31,7 @@
 #include <ranges>
 #include <utility>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -40,6 +41,7 @@
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepTools.hxx>
+#include <BOPTools_AlgoTools3D.hxx>
 #include <ElSLib.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
@@ -53,6 +55,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
+#include <IntTools_Context.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -300,18 +303,41 @@ bool sameSolid(const TopoShape& shape, const TopoShape& other)
     }
 }
 
-// Whether a face lies on a surface: its vertices and a grid of points inside it.
+// Whether a face lies on a surface: its vertices, points along its edges, and points inside it
+// (a grid over its bounds and a point the face classifier finds). A face whose inside yields no
+// point (a thin ring or crescent can miss every grid point, the PR 268 round 2 verification's
+// finding 1) is judged by its boundary alone, never skipped: its callers then check that it lies
+// within the up-to face, by area, which a face off the surface fails.
 bool liesOnSurface(const TopoDS_Face& face, const Handle(Geom_Surface)& surface)
 {
-    const double tolerance
-        = std::max(10.0 * Precision::Confusion(), 2.0 * BRep_Tool::Tolerance(face));
-    auto onSurface = [&](const gp_Pnt& point) {
+    const double faceTolerance = BRep_Tool::Tolerance(face);
+    auto onSurface = [&](const gp_Pnt& point, double shapeTolerance) {
+        const double tolerance = std::max(
+            10.0 * Precision::Confusion(),
+            2.0 * std::max(faceTolerance, shapeTolerance)
+        );
         GeomAPI_ProjectPointOnSurf projection(point, surface);
         return projection.NbPoints() > 0 && projection.LowerDistance() <= tolerance;
     };
     for (TopExp_Explorer vertices(face, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
-        if (!onSurface(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())))) {
+        const TopoDS_Vertex& vertex = TopoDS::Vertex(vertices.Current());
+        if (!onSurface(BRep_Tool::Pnt(vertex), BRep_Tool::Tolerance(vertex))) {
             return false;
+        }
+    }
+    for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        constexpr int samples = 8;
+        for (int i = 1; i < samples; ++i) {
+            const double parameter = curve.FirstParameter()
+                + (curve.LastParameter() - curve.FirstParameter()) * i / samples;
+            if (!onSurface(curve.Value(parameter), BRep_Tool::Tolerance(edge))) {
+                return false;
+            }
         }
     }
     Standard_Real uMin = 0.0;
@@ -320,22 +346,29 @@ bool liesOnSurface(const TopoDS_Face& face, const Handle(Geom_Surface)& surface)
     Standard_Real vMax = 0.0;
     BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
     BRepAdaptor_Surface faceSurface(face);
-    bool inside = false;
     constexpr int steps = 4;
     for (int i = 1; i < steps; ++i) {
         for (int j = 1; j < steps; ++j) {
             const gp_Pnt2d uv(uMin + (uMax - uMin) * i / steps, vMin + (vMax - vMin) * j / steps);
             BRepClass_FaceClassifier classifier(face, uv, Precision::Confusion());
-            if (classifier.State() != TopAbs_IN) {
-                continue;
-            }
-            inside = true;
-            if (!onSurface(faceSurface.Value(uv.X(), uv.Y()))) {
+            if (classifier.State() == TopAbs_IN
+                && !onSurface(faceSurface.Value(uv.X(), uv.Y()), 0.0)) {
                 return false;
             }
         }
     }
-    return inside;
+    try {
+        gp_Pnt point;
+        gp_Pnt2d uv;
+        if (BOPTools_AlgoTools3D::PointInFace(face, point, uv, new IntTools_Context) == 0
+            && !onSurface(point, 0.0)) {
+            return false;
+        }
+    }
+    catch (const Standard_Failure&) {
+        // No point found inside: the boundary decides.
+    }
+    return true;
 }
 
 // Whether a face lies within another face on the same surface: their common area is its own.

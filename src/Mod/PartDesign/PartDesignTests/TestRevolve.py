@@ -1437,6 +1437,61 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(removed.Volume, 2 * oneSide.Volume, delta=1e-5)
         self.assertAlmostEqual(removed.cut(mirrored).Volume, 0, delta=1e-5)
 
+    def testRevolutionOfThinRingUpToTurnedWallAcrossSymmetric(self):
+        """A thin ring profile on XZ, the circles of radius 0.9 and 0.72 about x = 2, z = 1,
+        revolved Symmetric up to the box wall of revolveUpToTurnedWallAcross() turned by 20
+        degrees. The first side's sweep ends in a ring on the wall whose hole holds the 3 x 3
+        grid of points the check sampled inside the ring's bounds (wall under 0.29 of the
+        radius), so the end face was skipped rather than checked: here the feature failed,
+        naming Two sides; with a second end piece it could pass with side 2 wrong (the PR 268
+        round 2 verification's finding 1). The end face is now judged by its edges too: the
+        result is the box and the tube from -110 to 110 degrees, hollow inside."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 4
+        block.Width = 8
+        block.Height = 2
+        degrees = 20
+        turn = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), degrees)
+        block.Placement = FreeCAD.Placement(turn.multVec(FreeCAD.Vector(-4, -4, 0)), turn)
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        for radius in (0.9, 0.72):
+            sketch.addGeometry(
+                Part.Circle(FreeCAD.Vector(2, 1, 0), FreeCAD.Vector(0, 0, 1), radius), False
+            )
+        self.Doc.recompute()
+        normal = turn.multVec(FreeCAD.Vector(1, 0, 0))
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(block.Shape.Faces)
+            if abs(abs(face.normalAt(0, 0).dot(normal)) - 1) < 1e-9
+            and abs(face.CenterOfMass.dot(normal)) < 1e-6
+        ]
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = "Symmetric"
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [wall])
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        ring = Part.Face(
+            [
+                Part.Wire(
+                    Part.Circle(FreeCAD.Vector(2, 0, 1), FreeCAD.Vector(0, 1, 0), radius).toShape()
+                )
+                for radius in (0.9, 0.72)
+            ]
+        )
+        up = FreeCAD.Vector(0, 0, 1)
+        tube = ring.revolve(FreeCAD.Vector(), up, 180 + 2 * degrees)
+        tube.rotate(FreeCAD.Vector(), up, -90 - degrees)
+        self.assertGreater(tube.Volume, 2.5)
+        self.assertSameSolid(revolution.Shape, block.Shape.fuse(tube))
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error and gives no solid."""
