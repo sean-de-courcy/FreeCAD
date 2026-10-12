@@ -13,9 +13,10 @@
  * zero-area face, every volume equal to its closed form) and named through a composed history,
  * as if the fillet had built it.
  *
- * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed. Whenever
- * a configuration is outside the scope or a check fails, build() refuses and the caller raises
- * OCCT's original error: never a silent wrong solid.
+ * TopoShape::makeElementFillet / makeElementChamfer try it only after OCCT has failed, or has built
+ * an invalid result without an error (ops#297). Whenever a configuration is outside the scope or a
+ * check fails, build() refuses and the caller raises OCCT's original error, or returns OCCT's
+ * invalid result for the feature's check (Part::checkDressUp()): never a silent wrong solid.
  *
  * Design: notes/fillet-workarounds.md in the ops repository, sections 2a, 3, 4 and 5.6.
  */

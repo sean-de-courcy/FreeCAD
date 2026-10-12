@@ -5850,6 +5850,15 @@ bool buildDressUpFailed(
     return !maker.IsDone();
 }
 
+/** Whether OCCT built the dress-up invalid without an error (ops#297), which the exact construction
+ * may build instead. If it doesn't, the invalid result is returned as before, and the feature's
+ * check (Part::checkDressUp()) repairs it or fails.
+ */
+bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
+{
+    return !BRepCheck_Analyzer(maker.Shape()).IsValid();
+}
+
 /** Raises OCCT's error for a maker that failed, as before the exact construction: what it threw,
  * or StdFail_NotDone. The maker must not be built again: ChFi3d crashes on a second build after a
  * failed one.
@@ -5898,7 +5907,8 @@ TopoShape& TopoShape::makeElementFillet(
     }
     std::exception_ptr occtError;
     FilletFallback::Request request;
-    if (buildDressUpFailed(mkFillet, occtError, request.contour)) {
+    const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
+    if (failed || builtInvalid(mkFillet)) {
         Part::SignalException sig;
         request.kind = FilletFallback::Kind::Fillet;
         request.size1 = radius1;
@@ -5906,7 +5916,9 @@ TopoShape& TopoShape::makeElementFillet(
         if (FilletFallback::build(*this, shape, edges, request, op)) {
             return *this;
         }
-        raiseDressUpError(mkFillet, occtError);
+        if (failed) {
+            raiseDressUpError(mkFillet, occtError);
+        }
     }
     return makeElementShape(mkFillet, shape, op);
 }
@@ -5973,7 +5985,8 @@ TopoShape& TopoShape::makeElementChamfer(
     Part::SignalException sig;
     std::exception_ptr occtError;
     FilletFallback::Request request;
-    if (buildDressUpFailed(mkChamfer, occtError, request.contour)) {
+    const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
+    if (failed || builtInvalid(mkChamfer)) {
         request.kind = FilletFallback::Kind::Chamfer;
         request.size1 = radius1;
         request.size2 = radius2;
@@ -5982,7 +5995,9 @@ TopoShape& TopoShape::makeElementChamfer(
         if (FilletFallback::build(*this, shape, edges, request, op)) {
             return *this;
         }
-        raiseDressUpError(mkChamfer, occtError);
+        if (failed) {
+            raiseDressUpError(mkChamfer, occtError);
+        }
     }
     return makeElementShape(mkChamfer, shape, op);
 }

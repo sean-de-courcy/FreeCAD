@@ -356,4 +356,53 @@ bool fixKeepingNames(TopoShape& shape, const TopoShape& before)
     return true;
 }
 
+namespace
+{
+
+// The largest relative change of the faces' total area that checkDressUp() accepts from a repair
+constexpr double repairAreaTolerance = 1e-6;
+
+double totalArea(const TopoShape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape.getShape(), props);
+    return props.Mass();
+}
+
+}  // namespace
+
+bool checkDressUp(TopoShape& shape, const TopoShape& base)
+{
+    if (shape.isValid()) {
+        return true;
+    }
+    const auto solids = base.countSubShapes(TopAbs_SOLID);
+    const auto found = shape.countSubShapes(TopAbs_SOLID);
+    if (found != solids) {
+        FC_WARN("Invalid dress-up result with " << found << " solids from " << solids);
+        return false;
+    }
+    TopoShape repaired(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    repaired.makeElementCopy(shape);
+    if (!fixKeepingNames(repaired, shape)) {
+        FC_WARN("Invalid dress-up result that the repair can't make valid");
+        return false;
+    }
+    if (repaired.countSubShapes(TopAbs_SOLID) != solids) {
+        FC_WARN("Invalid dress-up result whose repair loses solids");
+        return false;
+    }
+    // An invalid base passes its defects on, and their repair may remove faces (a fin, ops#12)
+    const double before = totalArea(shape);
+    const double after = totalArea(repaired);
+    if (std::abs(after - before) > repairAreaTolerance * std::max(before, after)
+        && base.isValid()) {
+        FC_WARN("Invalid dress-up result whose repair changes its area from " << before << " to "
+                                                                             << after);
+        return false;
+    }
+    shape = repaired;
+    return true;
+}
+
 }  // namespace Part
