@@ -308,7 +308,8 @@ names it.
 | `fix/287-undecided-type-settled` | fix | ops#287 | - | `integration` `7e1d79cd66` | `e7f3b31c22` (fork PR 277), 2026-10-12 | never (fork fix) |
 | `fix/297-fillet-validity` | fix | ops#297 | - | `feat/300-fillet-fallback` `07536f4ec8` (fork PR 278) | `32d41c43f1` (fork PR 281), 2026-10-12 | never (fork fix) |
 | `feat/300-fillet-corners` | feat | ops#300 | - | `integration` `32d41c43f1` | `61925c451a` (fork PR 283), 2026-10-12 | never (fork feature) |
-| `fix/291-reorder-missing-base` | fix | ops#291 | - | `integration` `e52e7f0bcd` | (fork PR 282) | never (fork fix) |
+| `fix/291-reorder-missing-base` | fix | ops#291 | - | `integration` `e52e7f0bcd` | `5414cccbfd` (fork PR 282), 2026-10-12 | never (fork fix) |
+| `fix/292-stale-role-links` | fix | ops#292 | - | `integration` `32d41c43f1` | (fork PR 284) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

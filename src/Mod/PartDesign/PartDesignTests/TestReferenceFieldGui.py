@@ -3274,6 +3274,59 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [bump.Name])
         self.assertIn("No feature", self.statusText(field))
 
+    def staleRoleLid(self, role):
+        """As in ...PadAndALoftThroughItsSketchOnOneFace without the loft: a pad down from a sketch
+        at z 9 (4 deep), a tower beside it (z 5 to 11), and a pocket "Lid" from a sketch at z 12, 3
+        deep, that cuts the tower's top: its tool's bottom lies on the pad's top, a face the pocket
+        didn't make (it cut nothing there). The pocket keeps a link to the pad's sketch in `role`
+        that its type doesn't read (UpToFace after Type -> Length, StartReference after StartType
+        -> Profile plane). A pick of the pad's top is the pad's: the stale link doesn't make the
+        pocket a rival (fork PR 267 review, L6)."""
+        self.body = models.body(self.doc)
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body)
+        models.pad(self.body, profile, 5)
+        self.doc.recompute()
+        section = models.sketch(self.doc, "Section", models.rectangle(2, 2, 5, 5), self.body, z=9)
+        down = models.pad(self.body, section, 4, "Down")
+        down.Reversed = True
+        down.Refine = False
+        towerSketch = models.sketch(
+            self.doc, "TowerSketch", models.rectangle(7, 7, 9, 9), self.body, z=5
+        )
+        tower = models.pad(self.body, towerSketch, 6, "Tower")
+        tower.Refine = False
+        self.doc.recompute()
+        lidSketch = models.sketch(
+            self.doc, "LidSketch", models.rectangle(0, 0, 10, 10), self.body, z=12
+        )
+        lid = models.pocket(self.body, lidSketch, 3, "Lid")
+        lid.Refine = False
+        setattr(lid, role, (section, [""]))
+        self.doc.recompute()
+        self.assertTrue(down.isValid() and tower.isValid() and lid.isValid())
+        self.assertEqual((lid.Type, lid.StartType), ("Length", "Profile plane"))
+        bump = self.bumpOn(0, 0, 5)
+        bump.Refine = False
+        self.doc.recompute()
+        [top] = face(contains=(3.5, 3.5, 9)).one(bump.Shape)
+        self.assertEqual(self.historyNames(bump, top), [bump.Name, section.Name])
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+
+        self.pick(bump, top)
+        self.assertEqual(
+            self.originalNames(pattern), [down.Name, bump.Name], self.statusText(field)
+        )
+
+    def testPatternOriginalsPickBesideAStaleUpToFace(self):
+        """A pocket of Type Length with UpToFace still on the pad's sketch (L6)."""
+        self.staleRoleLid("UpToFace")
+
+    def testPatternOriginalsPickBesideAStaleStartReference(self):
+        """A pocket from its profile plane with StartReference still on the pad's sketch (L6)."""
+        self.staleRoleLid("StartReference")
+
     def testPatternOriginalsPickOfALoftAndAPadDownFromItsSectionOnOneFace(self):
         """Fork PR 267 round 1 verification: as in ...PadAndALoftThroughItsSketchOnOneFace, with
         the loft first and then the pad down from its section. The loft's top has [bump, loft] in
