@@ -895,6 +895,35 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
     return rv;
 }
 
+bool ProfileBased::isStudioProfile(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* topParent,
+    const char* subname
+)
+{
+    if (!Part::BodyBase::isStudioPick(owner, topParent, subname)) {
+        return false;
+    }
+    const App::DocumentObject* target = topParent->getSubObjectList(subname).back();
+    if (target->isDerivedFrom<Part::Part2DObject>()) {
+        return true;
+    }
+    // A face of a solid: not for a first solid feature (T1's second path)
+    if (auto feature = freecad_cast<const PartDesign::Feature*>(owner)) {
+        return feature->BaseFeature.getValue() != nullptr;
+    }
+    auto body = freecad_cast<const PartDesign::Body*>(owner);
+    if (!body) {
+        return false;
+    }
+    if (body->BaseFeature.getValue()) {
+        return true;
+    }
+    App::DocumentObject* tip = body->Tip.getValue();
+    return tip
+        && (Body::isSolidFeature(tip) || const_cast<Body*>(body)->getPrevSolidFeature(tip));
+}
+
 void ProfileBased::onChanged(const App::Property* prop)
 {
     if (prop == &Profile) {

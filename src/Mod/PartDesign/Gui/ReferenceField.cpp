@@ -1801,6 +1801,11 @@ void ReferenceField::pickSingle(const Gui::SelectionChanges& msg)
     message.clear();
     repickIndex = -1;
     std::erase(subs, std::string());
+    // FreeCAD-CH (ops#325): another Body's origin in the same studio: the owner's own, the same
+    // plane or axis under one origin
+    if (auto own = Part::BodyBase::studioOriginFeature(owner(), obj)) {
+        obj = own;
+    }
     // The same reference again: nothing to write
     std::vector<std::string> old;
     visitLink(property(), [&old](auto& link) { old = link.getSubValues(false); });

@@ -316,7 +316,10 @@ private:
 
     void handleIfSupportOutOfBody(App::DocumentObject* selectedObject)
     {
-        if (!activeBody->hasObject(selectedObject)) {
+        // FreeCAD-CH (ops#325): another part of the same studio is a cross-reference, with no
+        // dialog
+        if (!activeBody->hasObject(selectedObject)
+            && !PartDesignGui::isStudioSelection(activeBody, selectedObject)) {
             if (!selectedObject->isDerivedFrom(App::Plane::getClassTypeId())) {
                 // TODO check here if the plane associated with right part/body (2015-09-01, Fat-Zer)
 

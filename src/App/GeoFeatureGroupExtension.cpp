@@ -32,9 +32,32 @@
 #include "Origin.h"
 #include "Datums.h"
 #include "OriginGroupExtension.h"
+#include "Part.h"
 
 
 using namespace App;
+
+namespace
+{
+// FreeCAD-CH (ops#325, B+): two Bodies of one studio, the App::Part holding them (not an
+// Assembly) or the document's top level, share one origin, so a Local link between them is in
+// scope. Part::BodyBase::studioOf() is the same rule, for the pick gates; App doesn't link Part
+// or Assembly, so the types are looked up by name.
+bool isStudioSibling(const DocumentObject* group, const DocumentObject* other)
+{
+    static const Base::Type bodyType = Base::Type::fromName("Part::BodyBase");
+    static const Base::Type assemblyType = Base::Type::fromName("Assembly::AssemblyObject");
+    if (!group || !other || bodyType.isBad() || !group->isDerivedFrom(bodyType)
+        || !other->isDerivedFrom(bodyType)) {
+        return false;
+    }
+    auto studio = App::Part::getPartOfObject(group, /*recursive=*/true);
+    if (studio && !assemblyType.isBad() && studio->isDerivedFrom(assemblyType)) {
+        return false;
+    }
+    return studio == App::Part::getPartOfObject(other, /*recursive=*/true);
+}
+}  // namespace
 
 
 EXTENSION_PROPERTY_SOURCE(App::GeoFeatureGroupExtension, App::GroupExtension)
@@ -510,7 +533,8 @@ bool GeoFeatureGroupExtension::isLinkValid(App::Property* prop)
     }
 
     for (auto link : result) {
-        if (getGroupOfObject(link) != group) {
+        auto linkGroup = getGroupOfObject(link);
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
             return false;
         }
     }
@@ -543,7 +567,8 @@ void GeoFeatureGroupExtension::getInvalidLinkObjects(const DocumentObject* obj,
         ? obj
         : getGroupOfObject(obj);
     for (auto link : result) {
-        if (getGroupOfObject(link) != group) {
+        auto linkGroup = getGroupOfObject(link);
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
             vec.push_back(link);
         }
     }

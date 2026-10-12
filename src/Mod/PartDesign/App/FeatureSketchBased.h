@@ -153,6 +153,18 @@ public:
 
     Part::Feature* getBaseObject(bool silent = false) const override;
 
+    /** Whether the pick @p topParent / @p subname may be the Profile of @p owner, a profile
+     * feature or the Body a new one goes into, as a direct link into a Body of the same studio
+     * (ops#325): a sketch, or a face of a solid. A face of another Body is refused for a Body's
+     * first solid feature: getBaseObject() would take its owner as the base (T1's second path,
+     * ops#308), until T1 covers it.
+     */
+    static bool isStudioProfile(
+        const App::DocumentObject* owner,
+        const App::DocumentObject* topParent,
+        const char* subname
+    );
+
     // backwards compatibility: profile property was renamed and has different type now
     void Restore(Base::XMLReader& reader) override;
     void handleChangedPropertyName(

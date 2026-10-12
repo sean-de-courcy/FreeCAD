@@ -108,6 +108,7 @@ from PartDesignTests.TestBodyReorder import (  # FreeCAD-CH, ops#127
     TestBodyReorderV2,
     TestBodyReorderV2s,
 )
+from PartDesignTests.TestStudio import TestStudio  # FreeCAD-CH, ops#325
 
 # The CI reopen gate (FreeCAD-CH, ops#323)
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus

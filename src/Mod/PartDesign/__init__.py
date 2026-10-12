@@ -3,3 +3,7 @@
 import _PartDesign
 
 makeFilletArc = _PartDesign.makeFilletArc
+studioOf = _PartDesign.studioOf
+isStudioPick = _PartDesign.isStudioPick
+isStudioProfile = _PartDesign.isStudioProfile
+studioOriginFeature = _PartDesign.studioOriginFeature

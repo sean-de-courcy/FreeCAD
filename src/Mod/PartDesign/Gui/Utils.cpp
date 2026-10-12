@@ -37,6 +37,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
+#include <Gui/Selection/Selection.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/Feature.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
@@ -294,6 +295,27 @@ App::Part* getActivePart()
     else {
         return nullptr;
     }
+}
+
+bool isStudioSelection(const App::DocumentObject* owner, const App::DocumentObject* obj)
+{
+    if (!owner || !obj) {
+        return false;
+    }
+    for (const auto& sel : Gui::Selection().getSelection(
+             obj->getDocument()->getName(),
+             Gui::ResolveMode::NoResolve
+         )) {
+        if (!sel.pObject) {
+            continue;
+        }
+        auto path = sel.pObject->getSubObjectList(sel.SubName);
+        if (!path.empty() && path.back() == obj
+            && !Part::BodyBase::isStudioPick(owner, sel.pObject, sel.SubName)) {
+            return false;
+        }
+    }
+    return Part::BodyBase::isInOneStudio(owner, obj);
 }
 
 App::Part* getPartFor(const App::DocumentObject* obj, bool messageIfNot)

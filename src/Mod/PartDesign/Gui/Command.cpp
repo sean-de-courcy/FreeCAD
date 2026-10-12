@@ -745,6 +745,10 @@ unsigned validateSketches(
     firstFreeSketch = sketches.end();
 
     for (std::vector<App::DocumentObject*>::iterator s = sketches.begin(); s != sketches.end(); s++) {
+        // FreeCAD-CH (ops#325): a sketch of another Body of the same studio is linked directly,
+        // and may be used there too
+        const bool studioSketch = pcActiveBody && !pcActiveBody->hasObject(*s)
+            && PartDesignGui::isStudioSelection(pcActiveBody, *s);
 
         if (!pcActiveBody) {
             // We work in the old style outside any body
@@ -753,7 +757,7 @@ unsigned validateSketches(
                 continue;
             }
         }
-        else if (!pcActiveBody->hasObject(*s)) {
+        else if (!pcActiveBody->hasObject(*s) && !studioSketch) {
             // Check whether this plane belongs to a body of the same part
             PartDesign::Body* b = PartDesign::Body::findBodyOf(*s);
             if (!b) {
@@ -786,12 +790,12 @@ unsigned validateSketches(
                 ++o;
             }
         }
-        if (!inList.empty()) {
+        if (!inList.empty() && !studioSketch) {
             status.push_back(PartDesignGui::TaskFeaturePick::isUsed);
             continue;
         }
 
-        if (pcActiveBody && pcActiveBody->isAfterInsertPoint(*s)) {
+        if (pcActiveBody && !studioSketch && pcActiveBody->isAfterInsertPoint(*s)) {
             status.push_back(PartDesignGui::TaskFeaturePick::afterTip);
             continue;
         }
@@ -815,11 +819,14 @@ unsigned validateSketches(
             continue;
         }
 
-        // All checks passed - found a valid sketch
-        if (firstFreeSketch == sketches.end()) {
-            firstFreeSketch = s;
+        // All checks passed - found a valid sketch. Another part's is offered in the pick dialog
+        // but never taken without asking (ops#325)
+        if (!studioSketch) {
+            if (firstFreeSketch == sketches.end()) {
+                firstFreeSketch = s;
+            }
+            freeSketches++;
         }
-        freeSketches++;
         status.push_back(PartDesignGui::TaskFeaturePick::validFeature);
     }
 
@@ -1096,14 +1103,37 @@ void prepareProfileBased(
     std::vector<Gui::SelectionObject> selection = cmd->getSelection().getSelectionEx();
     if (!selection.empty()) {
         bool onlyAllowed = true;
+        bool firstFeatureFace = false;
         for (const auto& it : selection) {
-            if (PartDesign::Body::findBodyOf(it.getObject())
-                != pcActiveBody) {  // the selected objects must belong to the body
-                onlyAllowed = false;
-                break;
+            const App::DocumentObject* obj = it.getObject();
+            if (PartDesign::Body::findBodyOf(obj) == pcActiveBody) {
+                continue;
             }
+            // the selected objects must belong to the body, or (FreeCAD-CH, ops#325) to another
+            // part of its studio
+            const std::vector<std::string>& subs = it.getSubNames();
+            if (PartDesignGui::isStudioSelection(pcActiveBody, obj)) {
+                if (PartDesign::ProfileBased::isStudioProfile(
+                        pcActiveBody,
+                        obj,
+                        subs.empty() ? "" : subs.front().c_str()
+                    )) {
+                    continue;
+                }
+                firstFeatureFace = true;
+            }
+            onlyAllowed = false;
+            break;
         }
-        if (!onlyAllowed) {
+        if (firstFeatureFace) {
+            QMessageBox::warning(
+                Gui::getMainWindow(),
+                QObject::tr("Cannot use selected object"),
+                QObject::tr("A face of another part can't be the profile of a body's first "
+                            "feature.")
+            );
+        }
+        else if (!onlyAllowed) {
             QMessageBox msgBox(Gui::getMainWindow());
             msgBox.setText(
                 QObject::tr("Cannot use selected object. Selected object must belong to the active body")

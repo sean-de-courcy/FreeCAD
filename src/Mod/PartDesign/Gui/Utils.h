@@ -98,6 +98,12 @@ PartDesign::Body* getBodyFor(
 );
 
 App::Part* getPartFor(const App::DocumentObject*, bool messageIfNot);
+
+/** Whether @p owner may link @p obj, a selected object, directly (ops#325): one Body, or two
+ * Bodies of one studio. Every selection of @p obj whose path goes through an App::Link is
+ * refused; with no such selection, the objects alone decide.
+ */
+bool isStudioSelection(const App::DocumentObject* owner, const App::DocumentObject* obj);
 App::Part* getActivePart();
 
 /// Fix sketch support after moving a free sketch into a body

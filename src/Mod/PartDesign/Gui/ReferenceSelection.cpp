@@ -162,7 +162,10 @@ bool ReferenceSelection::allowOrigin(
     if (fits) {  // check that it actually belongs to the chosen body or part
         try {    // here are some throwers
             if (body) {
-                if (body->hasObject(pObj, true)) {
+                // FreeCAD-CH (ops#325): another Body's origin in the same studio is the same
+                // plane or axis; the pick is relinked to this Body's own
+                if (body->hasObject(pObj, true)
+                    || Part::BodyBase::studioOriginFeature(body, pObj)) {
                     return true;
                 }
             }
@@ -183,7 +186,8 @@ bool ReferenceSelection::allowDatum(PartDesign::Body* body, App::DocumentObject*
     if (!body) {  // Allow selecting Part::Datum features from the active Body
         return false;
     }
-    else if (!type.testFlag(AllowSelection::OTHERBODY) && !body->hasObject(pObj)) {
+    else if (!type.testFlag(AllowSelection::OTHERBODY) && !body->hasObject(pObj)
+             && !Part::BodyBase::isInOneStudio(body, pObj)) {  // FreeCAD-CH (ops#325)
         return false;
     }
 
@@ -334,9 +338,17 @@ bool getReferencedSelection(
     // be supported
     PartDesign::Body* body = PartDesignGui::getBodyFor(thisObj, false);
     bool originfeature = selObj->isDerivedFrom<App::DatumElement>();
+    if (originfeature) {
+        // FreeCAD-CH (ops#325): another Body's origin in the same studio: this Body's own
+        if (auto own = Part::BodyBase::studioOriginFeature(thisObj, selObj)) {
+            selObj = own;
+        }
+    }
     if (!originfeature && body) {
         PartDesign::Body* selBody = PartDesignGui::getBodyFor(selObj, false);
-        if (!selBody || body != selBody) {
+        // FreeCAD-CH (ops#325): another Body of the same studio is referenced directly
+        if ((!selBody || body != selBody)
+            && !Part::BodyBase::isStudioPick(thisObj, selObj, subname.c_str())) {
             QDialog dia(Gui::getMainWindow());
             Ui_DlgReference dlg;
             dlg.setupUi(&dia);

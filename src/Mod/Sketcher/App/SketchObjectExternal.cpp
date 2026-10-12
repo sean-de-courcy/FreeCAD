@@ -321,6 +321,10 @@ bool SketchObject::isExternalAllowed(App::Document* pDoc, App::DocumentObject* p
         else if (body_this == body_obj) {
             return true;
         }
+        // FreeCAD-CH (ops#325): another Body of the same studio, at one origin
+        else if (Part::BodyBase::isInOneStudio(this, pObj)) {
+            return true;
+        }
         else {
             if (rsn)
                 *rsn = rlOtherBody;
@@ -389,8 +393,9 @@ bool SketchObject::isCarbonCopyAllowed(App::Document* pDoc, App::DocumentObject*
         return false;
     }
 
-    // Hereafter assuming: either in the same part, or in the root of document
-    if (body_this && body_this != body_obj) {
+    // Hereafter assuming: either in the same part, or in the root of document. FreeCAD-CH
+    // (ops#325): another Body of the same studio is like this one
+    if (body_this && body_this != body_obj && !Part::BodyBase::isInOneStudio(this, pObj)) {
         if (!this->allowOtherBody) {
             setReason(rlOtherBody);
             return false;

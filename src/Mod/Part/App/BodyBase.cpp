@@ -23,7 +23,9 @@
  ***************************************************************************/
 
 
+#include <App/Datums.h>
 #include <App/Document.h>
+#include <App/Part.h>
 
 #include "BodyBase.h"
 #include "BodyBasePy.h"
@@ -58,6 +60,111 @@ BodyBase* BodyBase::findBodyOf(const App::DocumentObject* f)
     }
 
     return nullptr;
+}
+
+BodyBase* BodyBase::bodyOfObject(const App::DocumentObject* obj)
+{
+    if (!obj) {
+        return nullptr;
+    }
+    if (obj->isDerivedFrom<BodyBase>()) {
+        return const_cast<BodyBase*>(static_cast<const BodyBase*>(obj));
+    }
+    if (auto body = findBodyOf(obj)) {
+        return body;
+    }
+    // An origin plane or axis: the Body of its origin
+    if (auto datum = freecad_cast<const App::DatumElement*>(obj)) {
+        if (auto lcs = datum->getLCS()) {
+            for (auto parent : lcs->getInList()) {
+                auto body = freecad_cast<BodyBase*>(parent);
+                if (body && body->Origin.getValue() == lcs) {
+                    return body;
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool BodyBase::studioOf(const BodyBase* body, App::Part*& studio)
+{
+    studio = nullptr;
+    if (!body) {
+        return false;
+    }
+    studio = App::Part::getPartOfObject(body, /*recursive=*/true);
+    // Assembly::AssemblyObject derives from App::Part; looked up by name, as Part doesn't link
+    // the Assembly module
+    static const Base::Type assemblyType = Base::Type::fromName("Assembly::AssemblyObject");
+    return !(studio && !assemblyType.isBad() && studio->isDerivedFrom(assemblyType));
+}
+
+bool BodyBase::isInOneStudio(const App::DocumentObject* owner, const App::DocumentObject* target)
+{
+    if (!owner || !target || owner->getDocument() != target->getDocument()) {
+        return false;
+    }
+    BodyBase* ownerBody = bodyOfObject(owner);
+    BodyBase* targetBody = bodyOfObject(target);
+    if (!ownerBody || !targetBody) {
+        return false;
+    }
+    if (ownerBody == targetBody) {
+        return true;
+    }
+    App::Part* ownerStudio = nullptr;
+    App::Part* targetStudio = nullptr;
+    return studioOf(ownerBody, ownerStudio) && studioOf(targetBody, targetStudio)
+        && ownerStudio == targetStudio;
+}
+
+bool BodyBase::isStudioPick(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* topParent,
+    const char* subname
+)
+{
+    if (!topParent) {
+        return false;
+    }
+    std::vector<App::DocumentObject*> path {const_cast<App::DocumentObject*>(topParent)};
+    if (subname && *subname) {
+        path = topParent->getSubObjectList(subname);
+        if (path.empty()) {
+            return false;
+        }
+    }
+    for (auto obj : path) {
+        if (!obj || obj->getLinkedObject(false) != obj) {
+            return false;
+        }
+    }
+    return isInOneStudio(owner, path.back());
+}
+
+App::DocumentObject* BodyBase::studioOriginFeature(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* feature
+)
+{
+    auto datum = freecad_cast<const App::DatumElement*>(feature);
+    BodyBase* ownerBody = bodyOfObject(owner);
+    BodyBase* featureBody = bodyOfObject(feature);
+    if (!datum || !datum->getLCS() || !ownerBody || !featureBody || ownerBody == featureBody
+        || !isInOneStudio(ownerBody, featureBody)) {
+        return nullptr;
+    }
+    auto origin = freecad_cast<App::LocalCoordinateSystem*>(ownerBody->Origin.getValue());
+    if (!origin || datum->getLCS() != featureBody->Origin.getValue()) {
+        return nullptr;
+    }
+    try {
+        return origin->getDatumElement(datum->Role.getValue());
+    }
+    catch (const Base::Exception&) {
+        return nullptr;
+    }
 }
 
 bool BodyBase::isAfter(const App::DocumentObject* feature, const App::DocumentObject* target) const
