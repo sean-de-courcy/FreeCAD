@@ -187,6 +187,24 @@ def pyramid_edge_rounds(r):
     return 4 * section * 10 * math.sqrt(3)
 
 
+def cube_with_fin():
+    """A 10 mm cube with a fin (ops#12): a square face hanging inward at 45 degrees from the
+    front bottom edge, so that three faces meet at the edge. Invalid; a dress-up passes the fin
+    on, and ShapeFix moves it into an open shell beside the solid"""
+    cube = Part.makeBox(10, 10, 10)
+    edge = edge_between(cube, (0, 0, 0), (10, 0, 0))
+    p0, p1, q0, q1 = V(0, 0, 0), V(10, 0, 0), V(0, 5, 5), V(10, 5, 5)
+    fin = Part.Face(
+        Part.Wire([edge, Part.makeLine(p1, q1), Part.makeLine(q1, q0), Part.makeLine(q0, p0)])
+    )
+    bottom = next(face for face in cube.Faces if face.CenterOfMass.z < 1e-6)
+    # The same face on the same edges; a new face, so that the replacement keeps it
+    new_bottom = Part.Face(bottom.Surface, bottom.OuterWire)
+    if bottom.Orientation == "Reversed":
+        new_bottom = new_bottom.reversed()
+    return cube.replaceShape([(bottom, Part.Compound([new_bottom, fin]))])
+
+
 class InvalidDressUpTest(unittest.TestCase):
     """OCCT (8.0.1) sometimes returns an invalid fillet or chamfer without an error (ops#297).
 
@@ -304,6 +322,22 @@ class InvalidDressUpTest(unittest.TestCase):
             removed = 4000 / 3 - shape.Volume
             self.assertGreater(removed, bounds[kind][0])
             self.assertLess(removed, bounds[kind][1])
+
+    def testRepairDropsTheFinOfAnInvalidBase(self):
+        # The fin cube's fillet or chamfer: OCCT's result keeps the fin and is invalid, and its
+        # repair is the dressed-up cube plus the fin in an open shell, a valid compound. On the
+        # front top edge its volume counted the fin (974.3 for 997.9); the result is the solid
+        base = cube_with_fin()
+        self.assertFalse(base.isValid())
+        removed = {"Fillet": fillet_section(1) * 10, "Chamfer": 0.5 * 10}
+        for kind in ("Fillet", "Chamfer"):
+            for ends in (((0, 0, 10), (10, 0, 10)), ((0, 10, 10), (10, 10, 10))):
+                feature = self.dressUp(kind, base, [edge_between(base, *ends)], [(1, 1)])
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                shape = feature.Shape
+                self.assertEqual(shape.ShapeType, "Solid")
+                self.assertEqual(len(shape.Faces), 7)
+                self.assertExact(shape, 1000 - removed[kind])
 
     def testPartFeaturesAtTheLimit(self):
         # Part::Fillet and Part::Chamfer build what OCCT refuses as makeFillet does (ops#300)

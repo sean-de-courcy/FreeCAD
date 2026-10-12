@@ -48,7 +48,10 @@ PartExport bool fixKeepingNames(TopoShape& shape, const TopoShape& before);
  * repair may reorient faces and fix wires and tolerances, but one that changes the surface
  * (ShapeFix splitting the self-intersecting face of two overlapping fillets into more faces) would
  * be a valid, wrong solid. An invalid base passes its defects on to the result, and their repair
- * may remove faces and area (a fin), but not add any. A failure is logged with its reason.
+ * may remove faces and area (a fin), but not add any. A repair that moves faces out of the solids
+ * of a solids-only base (ShapeFix putting a fin into an open shell beside the solid, whose
+ * compound has the wrong volume) is cut down to its solids if the base is invalid, and fails if
+ * it is valid. A failure is logged with its reason.
  *
  * @param shape The result; replaced by the repaired shape if the repair is kept
  * @param base The shape that was dressed up

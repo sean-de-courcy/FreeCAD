@@ -21,6 +21,7 @@
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Iterator.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -413,6 +414,40 @@ const char* repairChangesSurface(const TopoShape& before, const TopoShape& after
     return nullptr;
 }
 
+// Whether the shape is solids only: a solid, or compounds of solids
+bool onlySolids(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return false;
+    }
+    switch (shape.ShapeType()) {
+        case TopAbs_SOLID:
+            return true;
+        case TopAbs_COMPOUND:
+        case TopAbs_COMPSOLID:
+            for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+                if (!onlySolids(it.Value())) {
+                    return false;
+                }
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The shape's solids, with their names: the solid itself if there is one
+TopoShape solidsOf(const TopoShape& shape)
+{
+    auto solids = shape.getSubTopoShapes(TopAbs_SOLID);
+    if (solids.size() == 1) {
+        return solids.front();
+    }
+    TopoShape res(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+    res.makeElementCompound(solids);
+    return res;
+}
+
 }  // namespace
 
 bool checkDressUp(TopoShape& shape, const TopoShape& base)
@@ -435,6 +470,17 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
     if (repaired.countSubShapes(TopAbs_SOLID) != solids) {
         FC_WARN("Invalid dress-up result whose repair loses solids");
         return false;
+    }
+    // ShapeFix may move faces out of the solid into an open shell beside it (the fin of an
+    // invalid base, ops#12): a valid compound whose volume counts the loose faces, wrong
+    // downstream. The solid alone is the result, and on a valid base nothing may move out. (A base
+    // that isn't solids only, a shell, keeps the checks below.)
+    if (onlySolids(base.getShape()) && !onlySolids(repaired.getShape())) {
+        if (base.isValid()) {
+            FC_WARN("Invalid dress-up result whose repair leaves shapes outside its solids");
+            return false;
+        }
+        repaired = solidsOf(repaired);
     }
     if (const char* why = repairChangesSurface(shape, repaired, base.isValid())) {
         FC_WARN("Invalid dress-up result whose repair " << why);
