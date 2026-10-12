@@ -312,7 +312,8 @@ names it.
 | `fix/292-stale-role-links` | fix | ops#292 | - | `integration` `32d41c43f1` | `e1b79b6d9e` (fork PR 284), 2026-10-12 | never (fork fix) |
 | `feat/300-fillet-corners-unequal` | feat | ops#300 | - | `integration` `61925c451a` | `e76ce293b2` (fork PR 285), 2026-10-12 | never (fork feature) |
 | `feat/300-fillet-s2` | feat | ops#300 | - | `feat/300-fillet-corners-unequal` `9694566e98` (fork PR 285) | `a6ad24584a` (fork PR 286), 2026-10-12 | never (fork feature) |
-| `feat/300-fillet-s3` | feat | ops#300 | - | `feat/300-fillet-s2` `e905ac5b46` (fork PR 286) | (fork PR 288) | never (fork feature) |
+| `feat/300-fillet-s3` | feat | ops#300 | - | `feat/300-fillet-s2` `e905ac5b46` (fork PR 286) | `4cd9e71421` (fork PR 288), 2026-10-12 | never (fork feature) |
+| `fix/292-originals-birth` | fix | ops#292 | - | `fix/292-stale-role-links` (fork PR 284) | (fork PR 287) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

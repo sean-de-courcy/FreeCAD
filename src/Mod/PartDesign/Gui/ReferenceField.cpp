@@ -48,6 +48,8 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepGProp.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -58,12 +60,15 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
+#include <GProp_GProps.hxx>
 #include <Inventor/SbBox3f.h>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 
 #include <App/Document.h>
@@ -408,6 +413,191 @@ std::optional<bool> sharesGeometry(const TopoDS_Shape& element, const TopoDS_Sha
             return false;
         }
         return false;
+    }
+    catch (const Standard_Failure&) {
+        return std::nullopt;
+    }
+}
+
+// How much of an element a shape has
+enum class Presence
+{
+    None,
+    Part,
+    Whole,
+};
+
+// How much of the element lies in the shape's boundary: all, some or none of its area (length)
+// covered by the shape's faces on the element's surface (its edges on the element's curve). A
+// face that a feature made is in none of the shapes before it; one that grew from an older face
+// (a refined pad's bottom merged with it) is in part (ops#292 L5). Measured, not sampled: a
+// sliver or a small hole that sampled points missed read as all of it, and birth landed too early
+// (PR 287 verification 1). Not for a vertex. Nothing when that can't be told.
+std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Shape& shape)
+{
+    if (element.IsNull()) {
+        return std::nullopt;
+    }
+    if (shape.IsNull()) {
+        return Presence::None;
+    }
+    const bool isFace = element.ShapeType() == TopAbs_FACE;
+    if (!isFace && element.ShapeType() != TopAbs_EDGE) {
+        return std::nullopt;
+    }
+    try {
+        const double tolerance = toleranceOf(element);
+        // The projector is built once: a shape of hundreds of faces costs a projection per point
+        GeomAPI_ProjectPointOnSurf onSurface;
+        GeomAPI_ProjectPointOnCurve onCurve;
+        if (isFace) {
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(element));
+            if (surface.IsNull()) {
+                return std::nullopt;
+            }
+            double u0 = 0;
+            double u1 = 0;
+            double v0 = 0;
+            double v1 = 0;
+            surface->Bounds(u0, u1, v0, v1);
+            onSurface.Init(surface, u0, u1, v0, v1);
+        }
+        else {
+            double first = 0;
+            double last = 0;
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(TopoDS::Edge(element), first, last);
+            if (curve.IsNull()) {
+                return std::nullopt;
+            }
+            onCurve.Init(curve, curve->FirstParameter(), curve->LastParameter());
+        }
+        auto onElement = [&](const gp_Pnt& point) {
+            if (isFace) {
+                onSurface.Perform(point);
+                return onSurface.NbPoints() > 0 && onSurface.LowerDistance() <= tolerance;
+            }
+            onCurve.Perform(point);
+            return onCurve.NbPoints() > 0 && onCurve.LowerDistance() <= tolerance;
+        };
+        // The element's plane, if it is planar: a planar face on it needs no sampling
+        std::optional<gp_Pln> plane;
+        if (isFace) {
+            BRepAdaptor_Surface adaptor(TopoDS::Face(element), false);
+            if (adaptor.GetType() == GeomAbs_Plane) {
+                plane = adaptor.Plane();
+            }
+        }
+        auto onPlane = [&](const TopoDS_Shape& face) {
+            BRepAdaptor_Surface adaptor(TopoDS::Face(face), false);
+            if (!plane || adaptor.GetType() != GeomAbs_Plane) {
+                return false;
+            }
+            const gp_Pln own = adaptor.Plane();
+            return own.Axis().IsParallel(plane->Axis(), Precision::Angular())
+                && plane->Distance(own.Location()) <= tolerance;
+        };
+        // The shape's faces (edges) on the element's surface (curve), their vertices tested first:
+        // they rule out most faces cheaply. Sampling the rest costs a classification per point,
+        // about 0.2 s for a face with many holes, for each feature of a long body (ops#292 L5
+        // P4), so a planar face on the element's plane is taken whole
+        BRep_Builder builder;
+        TopoDS_Compound on;
+        builder.MakeCompound(on);
+        bool any = false;
+        for (TopExp_Explorer it(shape, isFace ? TopAbs_FACE : TopAbs_EDGE); it.More(); it.Next()) {
+            bool vertices = true;
+            for (TopExp_Explorer v(it.Current(), TopAbs_VERTEX); vertices && v.More(); v.Next()) {
+                vertices = onElement(BRep_Tool::Pnt(TopoDS::Vertex(v.Current())));
+            }
+            if (vertices && isFace && onPlane(it.Current())) {
+                builder.Add(on, it.Current());
+                any = true;
+                continue;
+            }
+            const std::vector<gp_Pnt> sample = vertices ? samplePoints(it.Current())
+                                                        : std::vector<gp_Pnt>();
+            if (!sample.empty() && std::ranges::all_of(sample, onElement)) {
+                builder.Add(on, it.Current());
+                any = true;
+            }
+        }
+        if (!any) {
+            return Presence::None;
+        }
+        // The part of the element they cover, against the element: a common of coplanar faces
+        // (collinear edges), measured
+        auto measure = [isFace](const TopoDS_Shape& piece) {
+            GProp_GProps props;
+            if (isFace) {
+                BRepGProp::SurfaceProperties(piece, props);
+            }
+            else {
+                BRepGProp::LinearProperties(piece, props);
+            }
+            return props.Mass();
+        };
+        TopTools_ListOfShape arguments;
+        TopTools_ListOfShape tools;
+        arguments.Append(element);
+        tools.Append(on);
+        BRepAlgoAPI_Common common;
+        common.SetArguments(arguments);
+        common.SetTools(tools);
+        common.SetFuzzyValue(tolerance);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors()) {
+            return std::nullopt;
+        }
+        // A common that warns (on a sphere or a torus, of a face with itself) may have dropped
+        // pieces, never added any: only all of the element can be told, and the points must
+        // agree (PR 287 verification, round 2, finding 3)
+        const bool warned = common.HasWarnings();
+        const double total = measure(element);
+        const double covered = measure(common.Shape());
+        // The allowance: a millionth of the element, and a length or area at model precision.
+        // Under the fuzzy tolerance a sliver narrower than that reads as all or none of the
+        // element by design: below model precision the shapes can't tell (round 2, finding 2).
+        const double slack = total * 1e-6 + Precision::Confusion();
+        if (total <= slack) {
+            return std::nullopt;
+        }
+        const bool whole = covered >= total - slack;
+        if (!whole && warned) {
+            return std::nullopt;
+        }
+        if (covered > slack && !whole) {
+            return Presence::Part;
+        }
+        // None moves birth one feature later, so an empty common, while faces (edges) of the
+        // shape lie on the element's surface (curve), must agree with the points: none of the
+        // element's lies on them, or it's unknown (a common that came back empty on a surface it
+        // handles badly; round 2, finding 3). A Whole from a common that warned: all of them do.
+        if (whole && !warned) {
+            return Presence::Whole;
+        }
+        std::vector<gp_Pnt> points;
+        if (isFace) {
+            points = insidePoints(TopoDS::Face(element));
+        }
+        else {
+            BRepAdaptor_Curve curve(TopoDS::Edge(element));
+            constexpr int steps = 8;
+            for (int i = 1; i < steps; ++i) {
+                const double t = curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * i / steps;
+                points.push_back(curve.Value(t));
+            }
+        }
+        if (points.empty()) {
+            return std::nullopt;
+        }
+        for (const gp_Pnt& point : points) {
+            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), on);
+            if (!distance.IsDone() || (distance.Value() <= tolerance) != whole) {
+                return std::nullopt;
+            }
+        }
+        return whole ? Presence::Whole : Presence::None;
     }
     catch (const Standard_Failure&) {
         return std::nullopt;
@@ -1341,38 +1531,99 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // profiles or using them in a role, and the same for each root of the candidate's own profile
     // (a pocket on a sibling binder of the sketch the candidate's binders bind: fork PR 267
     // round 2 verification) and of each object the candidate uses in a role (a pad down from a
-    // loft's section, against the loft: round 1 verification). Nothing tells them apart.
+    // loft's section, against the loft: round 1 verification). The history doesn't tell them
+    // apart; returns them, the candidate first, or nothing when there are none.
     auto rivalled = [&](App::DocumentObject* candidate,
                         const std::vector<App::DocumentObject*>& profiles,
                         const std::vector<App::DocumentObject*>& profiled) {
-        auto other = [&](App::DocumentObject* obj) {
-            return obj != candidate && mayTouch(obj);
+        std::vector<App::DocumentObject*> found {candidate};
+        auto add = [&](const std::vector<App::DocumentObject*>& objs) {
+            for (App::DocumentObject* obj : objs) {
+                if (std::ranges::find(found, obj) == found.end() && mayTouch(obj)) {
+                    found.push_back(obj);
+                }
+            }
         };
-        auto rivalOn = [&](App::DocumentObject* used) {
-            return std::ranges::any_of(rootsOf(used), [&](App::DocumentObject* root) {
+        auto addOn = [&](App::DocumentObject* used) {
+            for (App::DocumentObject* root : rootsOf(used)) {
                 auto [usedProfiles, usedProfiled] = profiledBy(root);
-                return std::ranges::any_of(usedProfiled, other)
-                    || std::ranges::any_of(roleUsers(usedProfiles), other);
-            });
+                add(usedProfiled);
+                add(roleUsers(usedProfiles));
+            }
         };
-        if (std::ranges::any_of(profiled, other)
-            || std::ranges::any_of(roleUsers(profiles), other)) {
-            return true;
+        add(profiled);
+        add(roleUsers(profiles));
+        if (auto based = freecad_cast<PartDesign::ProfileBased*>(candidate)) {
+            addOn(based->Profile.getValue());
         }
-        auto based = freecad_cast<PartDesign::ProfileBased*>(candidate);
-        if (based && rivalOn(based->Profile.getValue())) {
-            return true;
+        for (App::DocumentObject* used : roleLinks(candidate)) {
+            addOn(used);
         }
-        return std::ranges::any_of(roleLinks(candidate), rivalOn);
+        return found.size() > 1 ? found : std::vector<App::DocumentObject*>();
+    };
+    // Which of the features whose tools have the element made it (ops#292 L5, PLAN decision 56):
+    // the one after which the element is in the body's shape, unbroken up to the picked shape.
+    // Walking from the picked shape's feature down its bases, each feature's own result has all of
+    // the element, until one has none of it: the feature just above made it (a pocket's ceiling
+    // under a pad's bottom on one sketch: the pad's result had no face there; the pad's overhang
+    // that the pocket's tool only touches: the box had none). The body's first feature, with no
+    // base, made what it still has. Twins (a second pad of the same sketch) leave the first's faces
+    // as they were: the first made them. Nothing, so the pick refuses as before, when anything
+    // can't be told: a part of the element before (a face that grew from an older one), a failed
+    // test or feature, the body's BaseFeature having it, a shape outside the owner's body, or a
+    // feature that made it but isn't one of the given ones whose tool surely has it.
+    std::optional<App::DocumentObject*> born;
+    auto bornAt = [&](const std::vector<App::DocumentObject*>& touchers) -> App::DocumentObject* {
+        if (!born) {
+            born = nullptr;
+            auto top = freecad_cast<PartDesign::Feature*>(shape);
+            if (!ownerBody || !top || !ownerBody->hasObject(top)) {
+                return nullptr;
+            }
+            App::DocumentObject* above = nullptr;
+            for (App::DocumentObject* obj = top; obj;) {
+                auto feature = freecad_cast<PartDesign::Feature*>(obj);
+                if (feature && (feature->isError() || !ownerBody->hasObject(feature))) {
+                    return nullptr;
+                }
+                const Part::ShapeOptions shapeOptions
+                    = Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+                const auto presence = presenceIn(
+                    theElement(),
+                    Part::Feature::getTopoShape(obj, shapeOptions).getShape()
+                );
+                if (!presence || *presence == Presence::Part
+                    || (*presence == Presence::Whole && !feature)) {
+                    return nullptr;
+                }
+                if (*presence == Presence::None) {
+                    break;
+                }
+                above = obj;
+                obj = feature->BaseFeature.getValue();
+            }
+            born = above;
+        }
+        auto inBody = [&](App::DocumentObject* obj) {
+            return freecad_cast<PartDesign::Feature*>(obj) && ownerBody->hasObject(obj);
+        };
+        App::DocumentObject* maker = *born;
+        const bool sure = maker && std::ranges::all_of(touchers, inBody)
+            && std::ranges::find(touchers, maker) != touchers.end() && touches(maker)
+            && usable(maker);
+        return sure ? maker : nullptr;
     };
     // An origin that is a feature made the element, unless the tool of another feature on its
     // profile, or on a binder of what its profile binds, or using them in a role, or on what the
     // origin itself uses in a role, has it in its boundary too: nothing tells them apart (a pad's
     // bottom imprinted by a pocket below it, on a binder of the pad's binder, is named by the
     // pocket alone, ops#224; a loft's cap that a pad down from its section has too). The rivals on
-    // the roots of its profile are those rivalled looks for on the candidate's profile.
+    // the roots of its profile are those rivalled looks for on the candidate's profile. With
+    // rivals, the one that made it, if birth tells (a bore's wall that a Hole of its diameter
+    // redrilled, named by the Hole: the pad).
     if (usable(origin)) {
-        return rivalled(origin, {}, {}) ? nullptr : origin;
+        const auto rivals = rivalled(origin, {}, {});
+        return rivals.empty() ? origin : bornAt(rivals);
     }
     // In the history, from the shape towards the origin: the first item that uses the next one
     // (nearer the origin) as its profile. A pad and a pocket on one sketch: the one whose wall it
@@ -1381,7 +1632,8 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // its history too, so a candidate reached through a binder or from an item above the origin
     // must have the element in its tool's boundary, or the search goes on. Another candidate whose
     // tool has it too (a pocket's ceiling, a pad's bottom on the same sketch), or a feature using
-    // the profiles in a role whose tool has it: nothing tells them apart.
+    // the profiles in a role whose tool has it: the candidate if birth says it made the element
+    // too, else nothing tells them apart (two witnesses that disagree).
     // Once a candidate's tool didn't have the element (a fillet on the pad on the binder rounded
     // its edge down into the pad below: [fillet, pad, pad below, sketch]), the element may have
     // been changed by something its history doesn't tell: every later candidate, also a plain one,
@@ -1404,35 +1656,50 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             failed = true;
             continue;
         }
-        if ((plain && !touches(item->obj) && madePart(item->obj))
-            || rivalled(item->obj, family, candidates)) {
+        if (plain && !touches(item->obj) && madePart(item->obj)) {
+            return nullptr;
+        }
+        const auto rivals = rivalled(item->obj, family, candidates);
+        if (!rivals.empty() && bornAt(rivals) != item->obj) {
             return nullptr;
         }
         return item->obj;
     }
     const auto [profiles, candidates] = profiledBy(origin);
     // Not in the history: no guess unless it's a safe one (fork PR 196 review, ops#219). Several:
-    // those whose tool has the element in its boundary; one left, that one, otherwise nothing
-    // tells them apart (a face where a pad's bottom meets a pocket's ceiling). After a candidate
-    // in the history failed that test, a single one needs it too.
+    // those whose tool has the element in its boundary; one left, that one; several, the one that
+    // made it if birth tells (a pad's overhang that a pocket down from its sketch only touches),
+    // otherwise nothing tells them apart. After a candidate in the history failed that test, a
+    // single one needs it too.
     if (candidates.empty()) {
         return nullptr;
     }
     App::DocumentObject* guess = candidates.front();
+    App::DocumentObject* chosen = nullptr;  // the guess when birth chose it
     if (candidates.size() > 1 || failed) {
         std::vector<App::DocumentObject*> touching;
         std::ranges::copy_if(candidates, std::back_inserter(touching), mayTouch);
-        if (touching.size() != 1 || !touches(touching.front())) {
+        guess = touching.size() == 1 && touches(touching.front()) ? touching.front() : nullptr;
+        if (touching.size() > 1) {
+            guess = chosen = bornAt(touching);
+        }
+        if (!guess) {
             return nullptr;
         }
-        guess = touching.front();
     }
     // A feature that makes elements from the origin in a role, or from what the guess uses in a
     // role, whose tool may have the element: the history may have left it out (a single
-    // candidate is taken without the test above). Nor a single one whose tool made part of the
+    // candidate is taken without the test above); the one that made it if birth tells (a loft's
+    // side, which a pad down from its section after the loft has too: the loft). Nor a single one whose tool made part of the
     // element only (ops#292).
-    if ((!touches(guess) && madePart(guess)) || rivalled(guess, profiles, candidates)) {
+    if (!touches(guess) && madePart(guess)) {
         return nullptr;
+    }
+    if (const auto rivals = rivalled(guess, profiles, candidates); !rivals.empty()) {
+        guess = chosen = bornAt(rivals);
+        if (!guess) {
+            return nullptr;
+        }
     }
     // Every guess, also the single one: an origin that has solid faces of its own (the body's
     // base, a box cut into it, another body's feature) made the element itself: a pad on a binder
@@ -1467,7 +1734,8 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!freecad_cast<PartDesign::Feature*>(item.obj) || !body->hasObject(item.obj)) {
             return nullptr;
         }
-        if (makesFrom(item.obj)) {
+        // Not a guess that birth chose: it may make elements from the origin in a role
+        if (item.obj != chosen && makesFrom(item.obj)) {
             return nullptr;
         }
     }
