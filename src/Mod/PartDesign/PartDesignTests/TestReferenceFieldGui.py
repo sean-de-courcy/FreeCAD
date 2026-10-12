@@ -3781,6 +3781,82 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [bump.Name])
         self.assertIn("No feature", self.statusText(field))
 
+    def sliverCeilingAndOverhang(self, pocketRefine, bumpRefine):
+        """A pad and a pocket of one sketch x 9.8..12 at z 10 on the box: the pocket roofs a
+        sliver x 9.8..10 inside the box, the pad overhangs x 10..12. With the pocket or the bump
+        refined, the sliver's ceiling and the overhang are one face of area 4.4 that the pocket
+        and the pad made. Returns the bump and that face (ops#292 L5, PR 287 verification 1)."""
+        self.box()
+        sketch = models.sketch(
+            self.doc, "Shared", models.rectangle(9.8, 4, 12, 6), self.body, z=10
+        )
+        pad = models.pad(self.body, sketch, 3)
+        pad.Refine = False
+        self.doc.recompute()
+        pocket = models.pocket(self.body, sketch, 3)
+        pocket.Refine = pocketRefine
+        self.doc.recompute()
+        self.assertTrue(pad.isValid() and pocket.isValid())
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = bumpRefine
+        self.doc.recompute()
+        [merged] = face(contains=(11, 5, 10)).one(bump.Shape)
+        self.assertEqual(face(contains=(9.9, 5, 10)).one(bump.Shape), [merged])
+        self.assertAlmostEqual(bump.Shape.getElement(merged).Area, 4.4, places=6)
+        self.assertEqual(self.historyNames(bump, merged), [bump.Name, sketch.Name])
+        return bump, merged
+
+    def assertRefusedPick(self, bump, element):
+        pattern = self.pattern("PartDesign::LinearPattern", [bump])
+        [field] = self.edit(pattern)
+        self.arm(field, byFocus=False)
+        self.pick(bump, element)
+        self.assertEqual(self.originalNames(pattern), [bump.Name])
+        self.assertIn("No feature", self.statusText(field))
+
+    def testPatternOriginalsPickOfACeilingSliverMergedWithAnOverhang(self):
+        """ops#292 L5, a refusal kept: the pocket refined (sliverCeilingAndOverhang). The pad's
+        result has the overhang but not the sliver, a tenth of the face: a pick says no feature
+        made it. Birth read the face as all there after the pad, from points that missed the
+        sliver, and added the pad (PR 287 verification 1, V1)."""
+        self.assertRefusedPick(*self.sliverCeilingAndOverhang(True, False))
+
+    def testPatternOriginalsPickOfACeilingSliverMergedWithAnOverhangByTheBump(self):
+        """As ...CeilingSliverMergedWithAnOverhang, with the bump refined instead (V1c)."""
+        self.assertRefusedPick(*self.sliverCeilingAndOverhang(False, True))
+
+    def testPatternOriginalsPickOfATwinTopRefilledWhereAHoleWas(self):
+        """ops#292 L5, a refusal kept: two pads of one sketch x 2..8 at z 10 on the box, both 3
+        up; a hole r 0.5 at (5, 5) pocketed 1 down from their top and refilled by a refined pad:
+        the top is one face of area 36 again, which the first twin and the refill made. A pick
+        says no feature made it. Birth read the top as all there after the first twin, from
+        points that missed the hole, and added it (PR 287 verification 1, V2)."""
+        self.box()
+        sketch = models.sketch(self.doc, "Shared", models.rectangle(2, 2, 8, 8), self.body, z=10)
+        first = models.pad(self.body, sketch, 3, "First")
+        first.Refine = False
+        self.doc.recompute()
+        second = models.pad(self.body, sketch, 3, "Second")
+        second.Refine = False
+        self.doc.recompute()
+        hole = models.sketch(self.doc, "HoleSk", [models.circle(5, 5, 0.5)], self.body, z=13)
+        pocket = models.pocket(self.body, hole, 1, "HolePocket")
+        pocket.Refine = False
+        self.doc.recompute()
+        fill = models.sketch(self.doc, "FillSk", [models.circle(5, 5, 0.5)], self.body, z=12)
+        refill = models.pad(self.body, fill, 1, "Refill")
+        refill.Refine = True
+        self.doc.recompute()
+        self.assertTrue(all(f.isValid() for f in (first, second, pocket, refill)))
+        bump = self.bumpOn(1, 1, 10)
+        bump.Refine = False
+        self.doc.recompute()
+        [top] = face(contains=(3, 3, 13)).one(bump.Shape)
+        self.assertEqual(face(contains=(5, 5, 13)).one(bump.Shape), [top])
+        self.assertAlmostEqual(bump.Shape.getElement(top).Area, 36, places=6)
+        self.assertEqual(self.historyNames(bump, top), [bump.Name, first.Name, sketch.Name])
+        self.assertRefusedPick(bump, top)
+
     def testPatternOriginalsPickOfATopTwinPadsShare(self):
         """ops#292 L5: two pads of one sketch (x 2..4 at z 10 on the box), both 3 up: the second
         changes nothing. Both tools have the top and the sides, whose history names the first:

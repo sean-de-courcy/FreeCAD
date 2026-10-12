@@ -48,6 +48,8 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepGProp.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -58,12 +60,14 @@
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
+#include <GProp_GProps.hxx>
 #include <Inventor/SbBox3f.h>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 
@@ -423,11 +427,12 @@ enum class Presence
     Whole,
 };
 
-// How much of the element lies in the shape's boundary: its points (inside a face, along an edge)
-// all, some or none on the shape's faces on the element's surface (its edges on the element's
-// curve). A face that a feature made is in none of the shapes before it; one that grew from an
-// older face (a refined pad's bottom merged with it) is in part (ops#292 L5). Not for a vertex.
-// Nothing when that can't be told.
+// How much of the element lies in the shape's boundary: all, some or none of its area (length)
+// covered by the shape's faces on the element's surface (its edges on the element's curve). A
+// face that a feature made is in none of the shapes before it; one that grew from an older face
+// (a refined pad's bottom merged with it) is in part (ops#292 L5). Measured, not sampled: a
+// sliver or a small hole that sampled points missed read as all of it, and birth landed too early
+// (PR 287 verification 1). Not for a vertex. Nothing when that can't be told.
 std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Shape& shape)
 {
     if (element.IsNull()) {
@@ -445,7 +450,6 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
         // The projector is built once: a shape of hundreds of faces costs a projection per point
         GeomAPI_ProjectPointOnSurf onSurface;
         GeomAPI_ProjectPointOnCurve onCurve;
-        std::vector<gp_Pnt> points;
         if (isFace) {
             const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(element));
             if (surface.IsNull()) {
@@ -457,7 +461,6 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
             double v1 = 0;
             surface->Bounds(u0, u1, v0, v1);
             onSurface.Init(surface, u0, u1, v0, v1);
-            points = insidePoints(TopoDS::Face(element));
         }
         else {
             double first = 0;
@@ -467,13 +470,6 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
                 return std::nullopt;
             }
             onCurve.Init(curve, curve->FirstParameter(), curve->LastParameter());
-            constexpr int steps = 8;
-            for (int i = 1; i < steps; ++i) {
-                points.push_back(curve->Value(first + (last - first) * i / steps));
-            }
-        }
-        if (points.empty()) {
-            return std::nullopt;
         }
         auto onElement = [&](const gp_Pnt& point) {
             if (isFace) {
@@ -528,18 +524,40 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
         if (!any) {
             return Presence::None;
         }
-        std::size_t inside = 0;
-        for (const gp_Pnt& point : points) {
-            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), on);
-            if (!distance.IsDone()) {
-                return std::nullopt;
+        // The part of the element they cover, against the element: a common of coplanar faces
+        // (collinear edges), measured
+        auto measure = [isFace](const TopoDS_Shape& piece) {
+            GProp_GProps props;
+            if (isFace) {
+                BRepGProp::SurfaceProperties(piece, props);
             }
-            inside += distance.Value() <= tolerance ? 1 : 0;
+            else {
+                BRepGProp::LinearProperties(piece, props);
+            }
+            return props.Mass();
+        };
+        TopTools_ListOfShape arguments;
+        TopTools_ListOfShape tools;
+        arguments.Append(element);
+        tools.Append(on);
+        BRepAlgoAPI_Common common;
+        common.SetArguments(arguments);
+        common.SetTools(tools);
+        common.SetFuzzyValue(tolerance);
+        common.Build();
+        if (!common.IsDone() || common.HasErrors()) {
+            return std::nullopt;
         }
-        if (inside == points.size()) {
+        const double total = measure(element);
+        const double covered = measure(common.Shape());
+        const double slack = total * 1e-6 + Precision::Confusion();
+        if (total <= slack) {
+            return std::nullopt;
+        }
+        if (covered >= total - slack) {
             return Presence::Whole;
         }
-        return inside == 0 ? Presence::None : Presence::Part;
+        return covered <= slack ? Presence::None : Presence::Part;
     }
     catch (const Standard_Failure&) {
         return std::nullopt;
