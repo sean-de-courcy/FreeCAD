@@ -58,9 +58,12 @@ runs:
       run: |
         set +e
         mkdir -p "$(dirname "${{ inputs.logFile }}")"
+        # test_timings.py prints the slowest test modules at the end (ops#302); it comes before
+        # sed, whose output to a pipe is block-buffered, so its timestamps follow the tests.
+        # `|| cat` passes the rest through if Python fails to start or stops.
         {
           ${{ inputs.testCommand }}
-        } 2>&1 | sed -Ee "/[[:blank:]]*\\([[:digit:]]{1,3} %\\)[[:blank:]]*/d" | tee -a "${{ inputs.logFile }}"
+        } 2>&1 | { python .github/scripts/test_timings.py || cat; } | sed -Ee "/[[:blank:]]*\\([[:digit:]]{1,3} %\\)[[:blank:]]*/d" | tee -a "${{ inputs.logFile }}"
         status=${PIPESTATUS[0]}
         echo "exitCode=$status" >> "$GITHUB_OUTPUT"
         if [ -z "${{ inputs.knownFailuresPlatform }}" ]; then exit $status; fi

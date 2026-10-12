@@ -150,6 +150,13 @@ jobs:
         cache-write: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/integration' }}
         locked: true
 
+    # Identifiers named like <windows.h> macros (near, far, ...) pass this build but fail the
+    # Windows release build (ops#294), so they fail here, before the build.
+    - name: Check for identifiers named like windows.h macros
+      if: "!inputs.skipBuild"
+      shell: bash
+      run: pixi run python .github/scripts/check_windows_macros.py src
+
     - name: Restore Compiler Cache
       id: cache-restore
       if: "!inputs.skipBuild"
@@ -255,9 +262,10 @@ jobs:
       run: |
         pixi run install-${{ env.config }}
 
+    # macOS only. Green runs took 6.4-9.9 min on 2026-10-12, and 10 min timed out (ops#302).
     - name: FreeCAD CLI tests on install
       if: runner.os != 'Windows' && !cancelled() && steps.build.outcome == 'success'
-      timeout-minutes: 10
+      timeout-minutes: 20
       uses: ./.github/workflows/actions/runPythonTests
       with:
         testDescription: "CLI tests on install"
