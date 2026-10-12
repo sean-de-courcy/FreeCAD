@@ -379,6 +379,17 @@ class TestParkedMarkingGui(unittest.TestCase):
             {"reads 'BossA' and 'Sheet', which didn't come with it": 1},
         )
 
+    def testRefusedMoveSaysNothingDropped(self):
+        """PR 275 round 2: a move that would drop the marked line but is refused leaves it, and
+        doesn't say it dropped it."""
+        self.runAndCount(
+            "testParkedExpressionDropRefusedKeepsTheLine",
+            {
+                "reads 'Sheet', which didn't come with it": 1,
+                "isn't put back: it reads an object that stayed in another document": 0,
+            },
+        )
+
     def runAndCount(self, name, counts):
         """TestBodyReorderV2's test name run, passing, and the Report view's new lines holding
         each text of counts, as many as given."""

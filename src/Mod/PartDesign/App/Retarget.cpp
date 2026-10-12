@@ -19,6 +19,7 @@
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolverBatch.h>
 #include <App/Expression.h>
+#include <App/ExpressionParser.h>
 #include <App/MergeDocuments.h>
 #include <App/ObjectIdentifier.h>
 #include <App/PropertyExpressionEngine.h>
@@ -2090,8 +2091,8 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
                         if (!obj || obj == owner) {
                             // A name that resolves to nothing here is read as the owner's
                             // property (ObjectIdentifier); it is an object's name when the owner
-                            // has no such property (nor pseudo-property). Nothing that came with the paste has that
-                            // name or label, or it would resolve
+                            // has no such property (nor pseudo-property). Nothing that came with
+                            // the paste has that name or label, or it would resolve
                             const auto& components = id.getComponents();
                             if (!obj) {
                                 name = id.getDocumentObjectName().getString();
@@ -2127,6 +2128,37 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
                             && std::find(uncopied.begin(), uncopied.end(), name)
                                 == uncopied.end()) {
                             uncopied.push_back(name);
+                        }
+                    }
+                    // PR 275 round 2: what a name resolves to can't tell every name that didn't
+                    // come. A name the merge's file didn't save (an object deleted after the line
+                    // was parked) stays as written, and resolves to a copy renamed onto it; and the
+                    // owner renamed onto a name its text reads resolves it to the owner itself,
+                    // whose own property the identifier then is (the parse drops the name). The
+                    // text's own object names tell: one that no object came under, yet names a
+                    // copy here, is another object that didn't come; so is the owner's new name,
+                    // in a paste, if the owner had another (even when the object of that name
+                    // came too: the parse has already lost it; a false drop, said)
+                    const std::string ownerName = owner->getNameInDocument();
+                    const bool ownerRenamed = ownerName + suffix != source->name;
+                    const auto tokens = App::ExpressionParser::tokenize(item->text);
+                    for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+                        // An object's name: an identifier before a '.', not after a '.' (a
+                        // property's or a cell's) or a '#' (another document's object)
+                        const auto& text = std::get<2>(tokens[i]);
+                        const auto& before = i > 0 ? std::get<2>(tokens[i - 1]) : std::string();
+                        if (std::get<2>(tokens[i + 1]) != "." || before == "." || before == "#"
+                            || !App::ExpressionParser::isTokenAnIndentifier(text)) {
+                            continue;
+                        }
+                        auto named = doc->getObject(text.c_str());
+                        const bool came = saved.count(text + suffix) > 0;
+                        if (((!came && named && copies.count(named))
+                             || (!parseMaps && ownerRenamed && text == ownerName))
+                            && !sameDocument && !markedBefore
+                            && std::find(uncopied.begin(), uncopied.end(), text)
+                                == uncopied.end()) {
+                            uncopied.push_back(text);
                         }
                     }
                     // A merge's parse has renamed them already
