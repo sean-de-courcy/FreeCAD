@@ -2195,6 +2195,137 @@ class TestRevolve(unittest.TestCase):
                     change = tools[sideType] if kind == "Revolution" else 0
                     self.assertAlmostEqual(feature.Shape.Volume, base + change, delta=1e-3)
 
+    def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
+        """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of
+        a Part::Feature of `wallShape` at `placement`, recomputed."""
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        if placement is not None:
+            wall.Placement = placement
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        for item in geometry:
+            sketch.addGeometry(item, False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        return sketch, revolution
+
+    def assertFirstContactOrFails(self, sketch, revolution, outside, inside, expected):
+        """The Revolution fails, or holds what first contact gives: the volume `expected`, the
+        sketch point `inside` turned half a turn about Z inside, and `outside` outside."""
+        if not revolution.isValid():
+            return
+        placement = sketch.getGlobalPlacement()
+
+        def halfTurn(point):
+            moved = placement.multVec(FreeCAD.Vector(point[0], point[1], 0))
+            return FreeCAD.Vector(-moved.x, -moved.y, moved.z)
+
+        self.assertFalse(revolution.Shape.isInside(halfTurn(outside), 1e-7, True))
+        self.assertTrue(revolution.Shape.isInside(halfTurn(inside), 1e-7, True))
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, delta=1e-3 * expected)
+
+    @staticmethod
+    def midpointIntegral(function, low, high, steps=4000):
+        width = (high - low) / steps
+        return width * sum(function(low + (k + 0.5) * width) for k in range(steps))
+
+    @staticmethod
+    def sketchRectangle(x0, x1, y0, y1):
+        corners = [FreeCAD.Vector(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        return [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+
+    def testRevolutionUpToWallSliverStopsFirst(self):
+        """A D-shaped profile (an arc of radius 5 about (6.5, 1) from 101.25 to 281.25 degrees,
+        nearest the axis at x = 1.5, closed by a line) up to the face x = 0, y in [-9, 1.55]:
+        the thin part x <= 1.55 stops a quarter turn on, the rest passes the face's edge and
+        stops three quarters on. The part lies between the profile's samples, and BRepFeat took
+        it round too, with no error (the PR 273 round 5 verification's A)."""
+        arc = Part.ArcOfCircle(
+            Part.Circle(FreeCAD.Vector(6.5, 1, 0), FreeCAD.Vector(0, 0, 1), 5),
+            math.radians(101.25),
+            math.radians(281.25),
+        )
+        edge = 1.55
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-9, -6), (edge, -6), (edge, 8), (-9, 8))]
+        sketch, revolution = self.revolveSketchUpToWall(
+            Part.Face(Part.makePolygon(points + points[:1])),
+            [arc, Part.LineSegment(arc.EndPoint, arc.StartPoint)],
+        )
+        profile = Part.Face(sketch.Shape.Wires[0])
+        sliver = profile.common(Part.makeBox(edge, 2, 40, FreeCAD.Vector(0, -1, -20))).Faces[0]
+        expected = (
+            1.5 * math.pi * profile.Area * profile.CenterOfMass.x
+            - math.pi * sliver.Area * sliver.CenterOfMass.x
+        )
+        self.assertFirstContactOrFails(sketch, revolution, (1.52, 1), (3, 1), expected)
+
+    def testRevolutionUpToShiftedPeriodicWall(self):
+        """profileAcross()'s square up to a part of the cylinder of radius 10 about the vertical
+        line through (-10, 0), y in [-4, 2], z in [-1, 3], whose angle range lies away from
+        [0, 2 pi): the points with r up to about 2 stop at y = r, the others pass the face's edge.
+        The crossings came in [0, 2 pi) and classified outside the face, and the Revolution took
+        all the points past it, with no error (the PR 273 round 5 verification's B)."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 10
+        face = cylinder.toShape(-0.41152, 0.20136, -1, 3)
+        placement = FreeCAD.Placement(FreeCAD.Vector(-10, 0, 0), FreeCAD.Rotation())
+        if face.ParameterRange[0] < 0:
+            face = cylinder.toShape(-0.20136, 0.41152, -3, 1)
+            placement = FreeCAD.Placement(
+                FreeCAD.Vector(-10, 0, 0), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
+            )
+        sketch, revolution = self.revolveSketchUpToWall(
+            face, self.sketchRectangle(1, 3, 0, 2), placement
+        )
+
+        def stop(radius):
+            angle = math.acos(-radius / 20)
+            return angle if radius * math.sin(angle) <= 2 else 2 * math.pi - angle
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        self.assertFirstContactOrFails(sketch, revolution, (1.5, 1), (2.5, 1), expected)
+
+    def testRevolutionUpToSplineWallPartlyPastItsEdge(self):
+        """testRevolutionUpToWallPartlyPastItsEdge()'s wall as a B-spline face, whose surface
+        ends where the face does: first contact gives 9 pi (the PR 273 round 5 verification's
+        C)."""
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-4, -1), (2, -1), (2, 3), (-4, 3))]
+        wall = Part.Face(Part.makePolygon(points + points[:1])).toNurbs().Faces[0]
+        sketch, revolution = self.revolveSketchUpToWall(wall, self.sketchRectangle(1, 3, 0, 2))
+        self.assertFirstContactOrFails(sketch, revolution, (1.5, 1), (2.5, 1), 9 * math.pi)
+
+    def testRevolutionUpToHalfTubeCrossedLater(self):
+        """The square x in [1.5, 3.5], z in [0, 2] up to the half tube of radius 1.2 about the
+        line x = 0, z = 1 along Y, x <= 0, y in [-6, 2.5]: every point crosses the tube's
+        surface first at x > 0 (beside the face), then at x < 0, where it stops if that crossing
+        is on the face (y <= 2.5) and otherwise goes on to y < 0 (the PR 273 round 5
+        verification's D)."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 1.2
+        sketch, revolution = self.revolveSketchUpToWall(
+            cylinder.toShape(math.pi / 2, 3 * math.pi / 2, -6, 2.5),
+            self.sketchRectangle(1.5, 3.5, 0, 2),
+            FreeCAD.Placement(FreeCAD.Vector(0, 0, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)),
+        )
+
+        def stop(radius, z):
+            half = math.sqrt(1.44 - (z - 1) ** 2)
+            angle = math.acos(-half / radius)
+            return angle if math.sqrt(radius * radius - half * half) <= 2.5 else 2 * math.pi - angle
+
+        expected = self.midpointIntegral(
+            lambda z: self.midpointIntegral(lambda q: q * stop(q, z), 1.5, 3.5, 400), 0, 2, 100
+        )
+        self.assertFirstContactOrFails(sketch, revolution, (2, 1), (3.2, 1), expected)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error that says so and gives no solid."""

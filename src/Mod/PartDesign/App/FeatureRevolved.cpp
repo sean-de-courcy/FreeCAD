@@ -517,6 +517,29 @@ std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
     return points;
 }
 
+// Parameters on a face's surface moved into the face's own range where the surface is periodic:
+// intersections give them in the surface's base period, and a face on [5.87, 6.48] of a cylinder
+// then classified OUT where it held them (the PR 273 round 5 verification's B). Centred on the
+// face's range, so a point on its boundary stays on it.
+gp_Pnt2d intoFaceRange(const TopoDS_Face& face, const Handle(Geom_Surface)& surface, const gp_Pnt2d& uv)
+{
+    Standard_Real uMin = 0.0;
+    Standard_Real uMax = 0.0;
+    Standard_Real vMin = 0.0;
+    Standard_Real vMax = 0.0;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    gp_Pnt2d moved = uv;
+    if (surface->IsUPeriodic()) {
+        const double half = 0.5 * surface->UPeriod();
+        moved.SetX(ElCLib::InPeriod(uv.X(), 0.5 * (uMin + uMax) - half, 0.5 * (uMin + uMax) + half));
+    }
+    if (surface->IsVPeriodic()) {
+        const double half = 0.5 * surface->VPeriod();
+        moved.SetY(ElCLib::InPeriod(uv.Y(), 0.5 * (vMin + vMax) - half, 0.5 * (vMin + vMax) + half));
+    }
+    return moved;
+}
+
 // Where a circle surely meets a face: its parameters (angles from its X direction) at the points
 // where it crosses or touches the face's surface on the face (the face classifier says in or on,
 // within the tolerance). Quick, unlike the exact distance to a face of many edges (16 ms a circle
@@ -558,7 +581,7 @@ std::vector<double> circleContactsQuickly(
             }
         }
         for (const auto& [angle, uv] : candidates) {
-            BRepClass_FaceClassifier classifier(face, uv, tolerance);
+            BRepClass_FaceClassifier classifier(face, intoFaceRange(face, surface, uv), tolerance);
             if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
                 contacts.push_back(ElCLib::InPeriod(angle, 0.0, 2.0 * std::numbers::pi));
                 if (firstOnly) {
@@ -1024,7 +1047,11 @@ ProfileReach profileReach(
                 break;
             }
             // A point crossing at the face's edge (on its boundary) doesn't stop inside it
-            BRepClass_FaceClassifier classifier(face, firstUV, tolerance);
+            BRepClass_FaceClassifier classifier(
+                face,
+                intoFaceRange(face, surface, firstUV),
+                tolerance
+            );
             if (classifier.State() == TopAbs_IN) {
                 beside = false;
                 break;
@@ -1621,9 +1648,63 @@ bool holdsFirstContact(
         }
         return false;
     };
+    // The samples, and the points of the profile nearest the axis and farthest from it, on each
+    // edge and at each vertex, moved a little into the profile along the radius: first contact
+    // changes where the profile reaches the face's edge, and a thin part reaching past it there
+    // slipped between the samples (the PR 273 round 5 verification's A: the tip of a D-shaped
+    // profile nearest the axis).
+    std::vector<gp_Pnt> points = profileSamples(profile.getShape());
+    {
+        Bnd_Box box;
+        BRepBndLib::Add(profile.getShape(), box);
+        const double nudge = box.IsVoid() ? 0.0 : 1e-3 * std::sqrt(box.SquareExtent());
+        std::vector<gp_Pnt> extremes;
+        for (TopExp_Explorer vertices(profile.getShape(), TopAbs_VERTEX); vertices.More();
+             vertices.Next()) {
+            extremes.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
+        }
+        for (TopExp_Explorer edges(profile.getShape(), TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(edge);
+            constexpr int steps = 128;
+            gp_Pnt nearest = curve.Value(curve.FirstParameter());
+            gp_Pnt farthest = nearest;
+            for (int i = 1; i <= steps; ++i) {
+                const gp_Pnt point = curve.Value(
+                    curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * i / steps
+                );
+                if (line.Distance(point) < line.Distance(nearest)) {
+                    nearest = point;
+                }
+                if (line.Distance(point) > line.Distance(farthest)) {
+                    farthest = point;
+                }
+            }
+            extremes.push_back(nearest);
+            extremes.push_back(farthest);
+        }
+        for (const gp_Pnt& point : extremes) {
+            const double radius = line.Distance(point);
+            if (radius <= nudge) {
+                continue;
+            }
+            const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
+            const gp_Vec outward = gp_Vec(center, point) / radius;
+            for (double side : {1.0, -1.0}) {
+                const gp_Pnt moved = point.Translated(outward * (side * nudge));
+                if (inProfile(moved, false)) {
+                    points.push_back(moved);
+                }
+            }
+        }
+    }
     int checked = 0;
     try {
-        for (const gp_Pnt& point : profileSamples(profile.getShape())) {
+        for (const gp_Pnt& point : points) {
             const double radius = line.Distance(point);
             if (radius <= 10.0 * tolerance || !inProfile(point, false)) {
                 continue;
