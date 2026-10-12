@@ -1820,6 +1820,33 @@ class TestRevolve(unittest.TestCase):
                 self.assertTrue(revolution.isValid(), revolution.getStatusString())
                 self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
 
+    def testRevolutionUpToWallPartlyPastItsEdge(self):
+        """The square x in [1, 3], z in [0, 2] on XZ, revolved about Z up to the face x = 0,
+        y in [-4, 2], z in [-1, 3]: its points at radius up to 2 meet the face a quarter turn on,
+        at y = r, while those farther out pass the face's edge y = 2 and meet it only three
+        quarters of a turn on, at y = -r. BRepFeat took them all three quarters of a turn round,
+        12 pi instead of 9 pi by first contact, with no error (the PR 273 verification's item 6).
+        The Revolution now fails."""
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-4, -1), (2, -1), (2, 3), (-4, 3))]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Face(Part.makePolygon(points + points[:1]))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((1, 0), (3, 0), (3, 2), (1, 2))]
+        for start, end in zip(corners, corners[1:] + corners[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes the edge of the up-to face", revolution.getStatusString())
+
     def revolveUpToHoledSphere(self, holeAt):
         """profileAcross() revolved One side up to the whole sphere of radius 3.5 about
         (0, 4, 1), with a hole of radius 0.1 along its normal at the point `holeAt` of it. The
