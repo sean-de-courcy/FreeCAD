@@ -362,6 +362,8 @@ struct Strip
     /// The tool's faces on it
     std::vector<TopoDS_Shape> contacts;
     FarSide farSide;
+    /// The section's extent on the face, across the edge
+    double width = 0.0;
 };
 
 /** One piece of material removed (cut) or added (fused) (5.6, interface point 2).
@@ -720,6 +722,7 @@ Tool lineTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
     tool.volume = section.area * (range(ends[1].trim, centroid) - range(ends[0].trim, centroid));
     for (int k = 0; k < 2; ++k) {
         tool.strips[k].face = data.faces[k];
+        tool.strips[k].width = section.length[k];
         tool.strips[k].farSide.valid = true;
         tool.strips[k].farSide.lin = gp_Lin(section.ends[k], direction);
     }
@@ -794,6 +797,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     tool.volume = section.area * centroidRadius * span;
     for (int k = 0; k < 2; ++k) {
         tool.strips[k].face = data.faces[k];
+        tool.strips[k].width = section.length[k];
         tool.strips[k].farSide = circleAbout(axis, section.ends[k]);
     }
     TopoDS_Shape solid;
@@ -911,6 +915,15 @@ double areaToleranceOf(const TopoDS_Shape& face)
     return 10 * linearTolerance * perimeterOf(face);
 }
 
+/** A strip's areas this close are equal: its far side moved by a little over the linear
+ * tolerance, i.e. along its length on the edge (area over width). Not the perimeter, which on a
+ * short edge is mostly the strip's width and would let a far side run off its face unseen
+ */
+double areaToleranceOf(const TopoDS_Shape& contact, const Strip& strip)
+{
+    return 10 * linearTolerance * areaOf(contact) / strip.width;
+}
+
 /// The edge lies on the line or circle (exact for lines and circles: three points decide)
 bool liesOn(const TopoDS_Edge& edge, const FarSide& side)
 {
@@ -980,7 +993,8 @@ void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
             }
             for (const auto& contact : strip->contacts) {
                 double area = areaOf(contact);
-                if (area - areaOf(commonOf(group.face, contact)) > areaToleranceOf(contact)) {
+                double tolerance = areaToleranceOf(contact, *strip);
+                if (area - areaOf(commonOf(group.face, contact)) > tolerance) {
                     refuse("a tangent strip runs off its face");
                 }
                 covered += area;
@@ -990,7 +1004,10 @@ void checkStrips(const std::vector<Tool>& tools, bool limitOnly)
             for (size_t j = i + 1; j < group.strips.size(); ++j) {
                 for (const auto& mine : group.strips[i]->contacts) {
                     for (const auto& theirs : group.strips[j]->contacts) {
-                        double tolerance = std::min(areaToleranceOf(mine), areaToleranceOf(theirs));
+                        double tolerance = std::min(
+                            areaToleranceOf(mine, *group.strips[i]),
+                            areaToleranceOf(theirs, *group.strips[j])
+                        );
                         if (areaOf(commonOf(mine, theirs)) > tolerance) {
                             refuse("two tangent strips overlap");
                         }

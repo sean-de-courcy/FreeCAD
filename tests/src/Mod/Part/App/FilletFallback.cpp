@@ -980,6 +980,12 @@ TEST_F(FilletFallbackTest, refusesJustOverTheLimit)
         EXPECT_TRUE(refusedFor(base, {front, back}, chamfer(d), "overlap")) << d;
     }
     EXPECT_TRUE(refusedFor(base, {front}, chamfer(4.002), "runs off its face"));
+    // On a short edge the overhang's area is small next to the strip's perimeter: the tolerance
+    // goes with the strip's length along the edge
+    TopoShape sliver(box(0.01, 4, 20), 1L);
+    TopoShape shortEdge = edgeBetween(sliver, {0, 0, 20}, {0.01, 0, 20});
+    EXPECT_TRUE(exact(dressUp(sliver, {shortEdge}, chamfer(4)), 0.8 - 0.01 * 8));
+    EXPECT_TRUE(refusedFor(sliver, {shortEdge}, chamfer(4.0004), "runs off its face"));
 }
 
 TEST_F(FilletFallbackTest, refusesBelowTheLimit)
@@ -1018,6 +1024,18 @@ TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
         TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
         ASSERT_TRUE(occtFilletFails(base, {front}, 4, 4));
         EXPECT_TRUE(throwsOcctsError([&] { dressUp(base, {front}, fillet(4)); })) << angle;
+        // The reason: the contour, as the hook reads it after Add()
+        BRepFilletAPI_MakeFillet maker(base.getShape());
+        maker.Add(4, TopoDS::Edge(front.getShape()));
+        FF::Request request = fillet(4);
+        for (int i = 1; i <= maker.NbContours(); ++i) {
+            for (int j = 1; j <= maker.NbEdges(i); ++j) {
+                request.contour.push_back(maker.Edge(i, j));
+            }
+        }
+        std::string reason;
+        EXPECT_TRUE(forced(base, {front}, request, &reason).isNull()) << angle;
+        EXPECT_NE(reason.find("OCCT's contour"), std::string::npos) << reason;
     }
 }
 
