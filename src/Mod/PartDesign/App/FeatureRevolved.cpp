@@ -1639,7 +1639,9 @@ double largestTolerance(const TopoDS_Shape& shape)
 }
 
 // Whether a tool up to a face is built to the precision of its inputs: no vertex or edge
-// tolerance above 1e-4 of its size, or ten times its inputs' largest. Up to PartDesign's torus
+// tolerance above 1e-3 of its size, or ten times its inputs' largest. Correct tools up to
+// B-spline walls reach 1.7e-4 of their size (an intersection curve's approximation: 5.5e-4 on a
+// diagonal of 3.3, the PR 279 round 1 verification), so 1e-4 refused them. Up to PartDesign's torus
 // face Reversed, BRepFeat's tool and the sweep both had a vertex of tolerance 0.995 on a 2 x 2
 // profile, covering edges that don't meet: its points classify right, but its caps measure 10.82
 // and 5.86 where both are 7.05, and its volume 14.20 instead of 13.35, which no check of points
@@ -1651,7 +1653,7 @@ bool toleranceHolds(const TopoDS_Shape& tool, std::initializer_list<TopoDS_Shape
     if (box.IsVoid()) {
         return false;
     }
-    double limit = 1e-4 * std::sqrt(box.SquareExtent());
+    double limit = 1e-3 * std::sqrt(box.SquareExtent());
     for (const TopoDS_Shape& input : inputs) {
         limit = std::max(limit, 10.0 * largestTolerance(input));
     }
@@ -1690,9 +1692,13 @@ bool holdsFirstContact(
         return false;
     }
     const gp_Dir normal = plane.Axis().Direction();
-    auto inProfile = [&](const gp_Pnt& point, bool boundary) {
+    auto inProfile = [&](const gp_Pnt& point, bool boundary, double margin = 0.0) {
         for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
-            BRepClass_FaceClassifier classifier(TopoDS::Face(faces.Current()), point, tolerance);
+            BRepClass_FaceClassifier classifier(
+                TopoDS::Face(faces.Current()),
+                point,
+                std::max(tolerance, margin)
+            );
             if (classifier.State() == TopAbs_IN
                 || (boundary && classifier.State() == TopAbs_ON)) {
                 return true;
@@ -1701,15 +1707,67 @@ bool holdsFirstContact(
         return false;
     };
     // The samples, and the points of the profile nearest the axis and farthest from it, on each
-    // edge and at each vertex, moved a little into the profile along the radius: first contact
-    // changes where the profile reaches the face's edge, and a thin part reaching past it there
-    // slipped between the samples (the PR 273 round 5 verification's A: the tip of a D-shaped
-    // profile nearest the axis).
+    // edge and at each vertex, moved a little into the profile along the radius and across it:
+    // first contact changes where the profile reaches the face's edge, and a thin part reaching
+    // past it there slipped between the samples (the PR 273 round 5 verification's A: the tip of
+    // a D-shaped profile nearest the axis). Also points along each outer edge, moved into the
+    // profile a little and by the samples' spacing: the grid inside stays a sixth of the profile
+    // away from its outer edges, and a band along the nearest edge that passes the face's free
+    // end was never checked (the PR 279 round 1 verification: a Groove up to an open wavy wall
+    // removed 18.38 where first contact gives 16.5, with no error). Holes lie within the grid's
+    // span, and sampling along their edges too made 40 holes take 6 s. Every added point is at
+    // least half the nudge inside the profile: a hole's nearest point moved along the hole's edge
+    // was 2e-4 inside, its circle ran that close to the tool's tube, and the tool's classifier
+    // put it outside.
     std::vector<gp_Pnt> points = profileSamples(profile.getShape());
     {
         Bnd_Box box;
         BRepBndLib::Add(profile.getShape(), box);
-        const double nudge = box.IsVoid() ? 0.0 : 1e-3 * std::sqrt(box.SquareExtent());
+        const double size = box.IsVoid() ? 0.0 : std::sqrt(box.SquareExtent());
+        const double nudge = 1e-3 * size;
+        const double spacing = size / 16.0;
+        auto addInside = [&](const gp_Pnt& point, const gp_Vec& direction, double distance) {
+            const gp_Pnt moved = point.Translated(direction * distance);
+            if (!inProfile(moved, false, 0.5 * nudge)) {
+                return false;
+            }
+            points.push_back(moved);
+            return true;
+        };
+        TopoDS_Compound outerWires;
+        BRep_Builder builder;
+        builder.MakeCompound(outerWires);
+        for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+            builder.Add(outerWires, BRepTools::OuterWire(TopoDS::Face(faces.Current())));
+        }
+        for (TopExp_Explorer edges(outerWires, TopAbs_EDGE);
+             spacing > Precision::Confusion() && edges.More();
+             edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(edge);
+            const double length = GCPnts_AbscissaPoint::Length(curve);
+            const int samples = std::clamp(static_cast<int>(std::ceil(length / spacing)), 1, 8);
+            for (int i = 1; i <= samples; ++i) {
+                gp_Pnt point;
+                gp_Vec tangent;
+                curve.D1(
+                    curve.FirstParameter()
+                        + (curve.LastParameter() - curve.FirstParameter()) * i / (samples + 1),
+                    point,
+                    tangent
+                );
+                const gp_Vec across = gp_Vec(normal).Crossed(tangent);
+                if (across.Magnitude() <= gp::Resolution()) {
+                    continue;
+                }
+                for (double distance : {nudge, -nudge, spacing, -spacing}) {
+                    addInside(point, across.Normalized(), distance);
+                }
+            }
+        }
         std::vector<gp_Pnt> extremes;
         for (TopExp_Explorer vertices(profile.getShape(), TopAbs_VERTEX); vertices.More();
              vertices.Next()) {
@@ -1744,12 +1802,17 @@ bool holdsFirstContact(
             if (radius <= nudge) {
                 continue;
             }
+            // Along the radius; at a corner, where neither way is inside, across it and both
             const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
             const gp_Vec outward = gp_Vec(center, point) / radius;
-            for (double side : {1.0, -1.0}) {
-                const gp_Pnt moved = point.Translated(outward * (side * nudge));
-                if (inProfile(moved, false)) {
-                    points.push_back(moved);
+            const gp_Vec sideways = gp_Vec(normal).Crossed(outward);
+            const bool inward = addInside(point, -outward, nudge);
+            const bool radial = addInside(point, outward, nudge) || inward;
+            for (double along : {1.0, 0.0, -1.0}) {
+                for (double aside : {1.0, -1.0}) {
+                    if (!radial) {
+                        addInside(point, outward * along + sideways * aside, nudge);
+                    }
                 }
             }
         }

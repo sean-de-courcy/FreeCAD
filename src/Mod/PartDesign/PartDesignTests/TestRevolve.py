@@ -2344,6 +2344,49 @@ class TestRevolve(unittest.TestCase):
         )
         self.assertFirstContactOrFails(sketch, revolution, (2, 1), (3.2, 1), expected)
 
+    def testGrooveUpToOpenWavyWall(self):
+        """A Groove of profileAcross() in a box, up to an open wall along r = 2 + 1.5 sin 2t,
+        t in [0.3, 6.0], turned 45 degrees about Z and extruded along it. Circles of radius below
+        r(6.0) = 1.195 meet the wall's free end within 29 degrees; the rest pass it and meet the
+        wall at 120 to 150 degrees. Before, the check never sampled near the profile's nearest
+        edge, and the Groove removed 18.38 where first contact gives 16.52, with no error (the
+        PR 279 round 1 verification). It fails, or removes what first contact gives."""
+        points = []
+        for k in range(201):
+            t = 0.3 + k * 5.7 / 200
+            radius = 2 + 1.5 * math.sin(2 * t)
+            points.append(FreeCAD.Vector(radius * math.cos(t), radius * math.sin(t), -1))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wallShape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, 4))
+        wallShape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 45)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def stop(radius):
+            # The angles where the wall is at this radius, turned by 45 degrees: the first
+            s = (radius - 2) / 1.5
+            angles = []
+            for t in (math.asin(s) / 2, (math.pi - math.asin(s)) / 2):
+                for turns in range(-1, 4):
+                    u = t + turns * math.pi
+                    if 0.3 <= u <= 6.0:
+                        angles.append((u + math.pi / 4) % (2 * math.pi))
+            return min(angles)
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        removed = block.Shape.Volume - groove.Shape.Volume
+        self.assertAlmostEqual(removed, expected, delta=1e-3 * expected)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error that says so and gives no solid."""
