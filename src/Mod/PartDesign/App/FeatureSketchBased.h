@@ -293,9 +293,6 @@ private:
     bool isParallelPlane(const TopoDS_Shape&, const TopoDS_Shape&) const;
     bool isEqualGeometry(const TopoDS_Shape&, const TopoDS_Shape&) const;
     bool isQuasiEqual(const TopoDS_Shape&, const TopoDS_Shape&) const;
-
-    /// The last recompute failed on profileBodyElsewhere() (ops#308 T4)
-    bool failedForBodyElsewhere = false;
 };
 
 }  // namespace PartDesign

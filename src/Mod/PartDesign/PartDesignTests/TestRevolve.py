@@ -142,6 +142,7 @@ class TestRevolve(unittest.TestCase):
         wall="datum",
         scale=1,
         wallHeight=0,
+        valid=True,
     ):
         """A Revolution or Groove up to a wall, as the body's first solid or after a core cylinder
         (ops#191, ops#239). The profile is the rectangle x in [1, 3] * scale + offset,
@@ -209,6 +210,8 @@ class TestRevolve(unittest.TestCase):
             revolution.Type2 = "UpToFace"
             revolution.UpToFace2 = upToFace
         self.Doc.recompute()
+        if not valid:
+            return revolution
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertEqual(len(revolution.Shape.Solids), 1)
         return revolution
@@ -294,11 +297,12 @@ class TestRevolve(unittest.TestCase):
         self.assertAlmostEqual(revolution.Shape.Volume, 6 * math.pi, places=6)
 
     def testGrooveUpToFaceFirstSolid(self):
-        """A Groove with nothing to cut gives its tool as the body's first solid, as a Groove by
-        angle and a Pocket do (ops#239): the same quarter ring, 4 pi."""
-        groove = self.revolveUpToWall("One side", core=False, kind="Groove")
-        self.assertAlmostEqual(groove.Shape.Volume, 4 * math.pi, places=6)
-        self.assertQuarter(groove.Shape, positiveY=True)
+        """A Groove with nothing to cut fails and says so, as every subtractive feature does
+        (ops#308 F8). It gave its tool as the body's first solid (ops#239), which put material
+        where a cut was asked for."""
+        groove = self.revolveUpToWall("One side", core=False, kind="Groove", valid=False)
+        self.assertFalse(groove.isValid())
+        self.assertIn("Nothing to cut", groove.getStatusString())
 
     # Scaled by 10 (ops#239): a full turn sweeps 2 pi * 20 * 400 = 16000 pi, a quarter 4000 pi.
     # Without a base, BRepFeat trims the unbounded wall to a square set by the box it gets as its

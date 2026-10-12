@@ -418,7 +418,8 @@ DEF_STD_CMD_A(CmdPartDesignSubShapeBinder)
 // A pick in another Body comes as a path through it, (Body2, "PadB.Face5"): a binder of that
 // depends on the whole Body, so two Bodies with binders of each other make a cycle that never
 // settles (FreeCAD-CH ops#308 T2). The feature itself, (PadB, "Face5"), is bound instead; the
-// binder follows its Body's placement. A whole Body picked stays as it is.
+// binder follows its Body's placement. A whole Body picked stays as it is, and so does every pick
+// with no active Body: the binder is then made at the top level, where no cycle through a Body forms.
 static void bindFeaturesNotBodies(
     std::map<App::DocumentObject*, std::vector<std::string>>& values,
     const PartDesign::Body* active
@@ -427,7 +428,7 @@ static void bindFeaturesNotBodies(
     std::map<App::DocumentObject*, std::vector<std::string>> result;
     for (auto& [obj, subs] : values) {
         auto body = freecad_cast<PartDesign::Body*>(obj);
-        if (!body || body == active || subs.empty()) {
+        if (!active || !body || body == active || subs.empty()) {
             auto& kept = result[obj];
             kept.insert(kept.end(), subs.begin(), subs.end());
             continue;

@@ -272,6 +272,156 @@ class TestCrossBody(unittest.TestCase):
         self.assertFalse(pad.isValid())
         self.assertIn("placed elsewhere", pad.getStatusString())
 
+    def boxAndBinder(self, inLid=True):
+        """A box Body at (100, 50) padded 40 x 40 x 10, and a binder of the pad's top: in a Lid
+        Body at the origin, or at the document's top level."""
+        box = self.body("Box", V(100, 50, 0))
+        boxPad = self.pad(box, "BoxPad", self.sketch(box, "BoxSk", self.onXY(box),
+                                                     (0, 0, 40, 40)), 10)
+        self.doc.recompute()
+        if inLid:
+            binder = self.body("Lid").newObject("PartDesign::SubShapeBinder", "BoxTop")
+        else:
+            binder = self.doc.addObject("PartDesign::SubShapeBinder", "BoxTop")
+        binder.Support = [(boxPad, (self.topFace(boxPad, 10),))]
+        return box, binder
+
+    def assertBinderFollowsTheBox(self, box, binder):
+        self.doc.recompute()
+        self.assertTrue(binder.isValid(), binder.getStatusString())
+        self.assertBox(binder.Shape, 100, 50, 10, 140, 90, 10)
+        box.Placement.Base = V(-20, 0, 3)
+        self.doc.recompute()
+        self.assertBox(binder.Shape, -20, 0, 13, 20, 40, 13)
+
+    def testTopLevelBinderFollowsItsSourceBodysPlacement(self):
+        """F1: a binder at the document's top level, of a face of a feature in a Body at
+        (100, 50), lies on the box and follows it. It lay at the origin: with no parent to
+        resolve the path from, no container placement applied."""
+        self.assertBinderFollowsTheBox(*self.boxAndBinder(inLid=False))
+
+    def testAbsoluteBinderFollowsItsSourceBodysPlacement(self):
+        """F4: a binder with Relative off, in the Lid, lies on the box and follows it. It lay at
+        the origin: with Relative off, the face's own placement was dropped too."""
+        box, binder = self.boxAndBinder()
+        binder.Relative = False
+        self.assertBinderFollowsTheBox(box, binder)
+
+    def upper(self, at=V(0, 0, 50)):
+        """Upper, a Body at z 50 with a pad 20 x 10 x 15; Lower, a Body at the origin with a pad
+        20 x 10 x 5. Returns Upper, its pad, Lower and its pad."""
+        upper = self.body("Upper", at)
+        upperPad = self.pad(upper, "UpperPad", self.sketch(upper, "UpSk", self.onXY(upper),
+                                                           (0, 0, 20, 10)), 15)
+        lower = self.body("Lower")
+        lowerPad = self.pad(lower, "LowerPad", self.sketch(lower, "LowSk", self.onXY(lower),
+                                                           (0, 0, 20, 10)), 5)
+        self.doc.recompute()
+        return upper, upperPad, lower, lowerPad
+
+    def assertFailsUntilTheBodiesAgree(self, upper, feature, check):
+        """The feature fails while Upper is placed elsewhere; with Upper at the origin, check()
+        holds on it."""
+        self.doc.recompute()
+        self.assertFalse(feature.isValid())
+        self.assertIn("placed elsewhere", feature.getStatusString())
+        upper.Placement.Base = V(0, 0, 0)
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        check(feature.Shape)
+
+    def padUpTo(self, kind):
+        """A Pad in Lower, up to the top of Upper's pad (kind: UpToFace or UpToShape): it stopped
+        at z 15, where that top would be in Lower, silently. It now fails; with the Bodies placed
+        alike it stops at z 15."""
+        upper, upperPad, lower, lowerPad = self.upper()
+        sketch = self.sketch(lower, "UpSk", [(lowerPad, self.topFace(lowerPad, 5))], (2, 2, 6, 6))
+        pad = self.pad(lower, "UpTo", sketch, 1)
+        pad.Type = kind
+        setattr(pad, kind, (upperPad, [self.topFace(upperPad, 15)]))
+        self.assertFailsUntilTheBodiesAgree(
+            upper, pad, lambda shape: self.assertAlmostEqual(shape.BoundBox.ZMax, 15, places=6))
+
+    def testPadUpToAFaceOfABodyPlacedElsewhereFails(self):
+        """F2: UpToFace (padUpTo)."""
+        self.padUpTo("UpToFace")
+
+    def testPadUpToAShapeOfABodyPlacedElsewhereFails(self):
+        """F2: UpToShape (padUpTo)."""
+        self.padUpTo("UpToShape")
+
+    def testLoftToASectionInABodyPlacedElsewhereFails(self):
+        """F2: a Loft in Lower to a section sketched 20 above Upper's XY plane, Upper at z 50,
+        reached z 20, silently. It now fails; with the Bodies placed alike it reaches z 20."""
+        upper = self.body("Upper", V(0, 0, 50))
+        section = self.sketch(upper, "Section", self.onXY(upper), (0, 0, 10, 10))
+        section.AttachmentOffset = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+        lower = self.body("Lower")
+        loft = lower.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.sketch(lower, "Base", self.onXY(lower), (0, 0, 10, 10))
+        loft.Sections = [section]
+        self.assertFailsUntilTheBodiesAgree(
+            upper, loft, lambda shape: self.assertAlmostEqual(shape.Volume, 2000, places=6))
+
+    def testPipeAlongASpineInABodyPlacedElsewhereFails(self):
+        """F2: a Pipe in Lower along a spine sketched in Upper, Upper at z 50, ran from z 0 to
+        30, silently. It now fails; with the Bodies placed alike it runs from z 0 to 30."""
+        upper = self.body("Upper", V(0, 0, 50))
+        spine = upper.newObject("Sketcher::SketchObject", "Spine")
+        spine.AttachmentSupport = [(upper.Origin.OriginFeatures[4], "")]
+        spine.MapMode = "FlatFace"
+        spine.addGeometry(Part.LineSegment(V(0, 0, 0), V(0, 30, 0)))
+        lower = self.body("Lower")
+        pipe = lower.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = self.sketch(lower, "Prof", self.onXY(lower), (-2, -2, 2, 2))
+        pipe.Spine = (spine, ["Edge1"])
+        self.assertFailsUntilTheBodiesAgree(
+            upper, pipe, lambda shape: self.assertBox(shape, -2, -2, 0, 2, 2, 30))
+
+    def testProfileElsewhereClearsAfterReopening(self):
+        """F5: the Pocket's error, saved and reopened, clears once the Bodies agree. It stuck:
+        nothing touched the Pocket in the reopened file."""
+        import os
+        import tempfile
+
+        upper, pocket = self.stackedHole(V(5, 0, 10))
+        self.assertFalse(pocket.isValid())
+        path = os.path.join(tempfile.mkdtemp(), "elsewhere.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        self.doc.getObject("Upper").Placement.Base = V(0, 0, 0)
+        self.doc.recompute()
+        pocket = self.doc.getObject("HoleLower")
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(pocket.Shape.Volume, 16000 - 160, places=6)
+
+    def testSuppressedFeatureWithAProfileElsewhereSettles(self):
+        """F6: a suppressed Pocket whose profile is in a Body placed elsewhere doesn't fail, and
+        the next recompute has nothing to do. It was run on every recompute."""
+        upper, pocket = self.stackedHole(V(5, 0, 10))
+        pocket.Suppressed = True
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testFirstSubtractiveFeatureFails(self):
+        """F8: a Body's first Pocket, with nothing to cut, returned its tool as material (a first
+        Pocket on another Body's face does since T1). It now fails and says why. A first
+        subtractive box already failed, with its own message."""
+        body = self.body("Body")
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.sketch(body, "Sk", self.onXY(body), (2, 2, 6, 6))
+        pocket.Length = 2
+        self.doc.recompute()
+        self.assertFalse(pocket.isValid())
+        self.assertIn("Nothing to cut", pocket.getStatusString())
+        other = self.body("Other")
+        box = other.newObject("PartDesign::SubtractiveBox", "Box")
+        self.doc.recompute()
+        self.assertFalse(box.isValid())
+        self.assertIn("without base feature", box.getStatusString())
+
     # T5 ------------------------------------------------------------------------------------
 
     def placedFeatures(self):

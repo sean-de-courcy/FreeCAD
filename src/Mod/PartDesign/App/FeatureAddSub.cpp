@@ -131,6 +131,19 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
 {
     App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     auto body = getFeatureBody();
+    // A subtractive feature with nothing before it cut nothing and returned its tool as material
+    // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
+    // longer takes as a base). Checked after the run, so an input's error is reported first; the
+    // failure passes the (empty) base through. Not when suppressed or held: those pass their
+    // base through already.
+    if (result == StdReturn && addSubType == Type::Subtractive && !Suppressed.getValue()
+        && !(body && body->holds(this)) && getBaseTopoShape(true).isNull()) {
+        return new App::DocumentObjectExecReturn(
+            "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
+            "BaseFeature",
+            this
+        );
+    }
     if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
         || (body && body->holds(this))) {
         return result;

@@ -882,6 +882,14 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             continue;
         }
         auto res = mats.emplace(obj, Base::Matrix4D());
+        if (!parent && res.second) {
+            // No parent to resolve the path from (Relative off, or a binder at the document's top
+            // level): the support's shape is in its own container's coordinates, the binder's
+            // in its own. Map between them (FreeCAD-CH ops#308 F1, F4: such a binder of a face
+            // of a feature in a Body moved by (100, 50) stayed at the origin)
+            res.first->second =
+                (containerPlacement(this).inverse() * containerPlacement(obj)).toMatrix();
+        }
         if (parent && res.second) {
             std::string resolvedSub = parentSub;
             std::string linkSub;
@@ -1169,10 +1177,9 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             }
         }
 
-        if (shapes.size() == 1 && !Relative.getValue()) {
-            shapes.back().setPlacement(Base::Placement());
-        }
-        else {
+        // A single support with Relative off used to drop the shape's own placement, which
+        // left a face of a placed feature at the origin (ops#308 F4): it is mapped like the rest
+        {
             for (size_t i = 0; i < shapes.size(); ++i) {
                 auto& shape = shapes[i];
                 shape = shape.makeElementTransform(*shapeMats[i]);
@@ -1289,6 +1296,15 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
         }
         catch (...) {
         }
+    }
+
+    // With no Context, or Relative off, nothing connected the slot that follows a support's
+    // container when it moves (ops#308 F1, F4)
+    if (!connRecomputedObj.connected() && getDocument()) {
+        contextDoc = getDocument();
+        connRecomputedObj = contextDoc->signalRecomputedObject.connect(
+            [this](const App::DocumentObject& obj) { slotRecomputedObject(obj); }
+        );
     }
 }
 
