@@ -1694,6 +1694,70 @@ class TestRevolve(unittest.TestCase):
                 self.assertFalse(revolution.isValid())
                 self.assertIn("never meets the up-to face", revolution.getStatusString())
 
+    def testRevolutionUpToFaceWithHolePartlyInTheWay(self):
+        """A hole in the wall of revolveUpToHoledWall(), y in [1.55, 1.7], z in [1.95, 2.95],
+        that the profile's band z in [0, 2] reaches only along its bottom strip: the profile
+        points r in (1.55, 1.7), z in (1.95, 2) turn through it and never meet the face. No
+        sample of the hole lay in the strip, and the tool was 45.5 instead of 4 pi, with no error
+        (the PR 273 verification's M1). It fails now."""
+        _, revolution = self.revolveUpToHoledWall(((1.55, 1.7), (1.95, 2.95)))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithSlotInTheWay(self):
+        """A slot cut into the top of the wall of revolveUpToHoledWall(), y in [1.52, 1.62], from
+        z = 0.5 up through its edge z = 3: the profile points r in (1.52, 1.62), z in (0.5, 2]
+        turn through it and never meet the face. It lies between the profile's samples, and the
+        tool was 45.7 instead of 4 pi, with no error (ops#299, the PR 273 verification's M2).
+        It fails now."""
+        _, revolution = self.revolveUpToHoledWall(((1.52, 1.62), (0.5, 3.5)))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithSlotOutOfTheWay(self):
+        """A slot cut into the top of the wall of revolveUpToHoledWall() beyond the profile's
+        reach (y in [3.5, 3.6], z from 0.5 up through its edge): the Revolution is valid, the box
+        and the quarter ring from 0 to 90 degrees."""
+        cut, revolution = self.revolveUpToHoledWall(((3.5, 3.6), (0.5, 3.5)))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def revolveUpToLocatedCylinderWall(self, holeY):
+        """profileAcross() revolved One side up to a quarter of the cylinder of radius 4 about
+        the vertical line through (-4.5, 0), z in [-1, 3], from its +X side, with a hole of
+        radius 0.1 along X at y = `holeY`, z = 1 through it. The wall is a Part::Feature whose
+        placement lifts it by 5, so its face is located (the PR 273 verification's Low)."""
+        cylinder = Part.makeCylinder(
+            4, 4, FreeCAD.Vector(-4.5, 0, -6), FreeCAD.Vector(0, 0, 1), 90
+        ).cut(Part.makeCylinder(0.1, 20, FreeCAD.Vector(-10, holeY, -4), FreeCAD.Vector(1, 0, 0)))
+        [face] = [f for f in cylinder.Faces if abs(getattr(f.Surface, "Radius", 0) - 4) < 1e-9]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = face
+        wall.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 5), FreeCAD.Rotation())
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Doc.recompute()
+        return self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
+
+    def testRevolutionUpToLocatedCurvedFaceWithHoleOutOfTheWay(self):
+        """revolveUpToLocatedCylinderWall() with the hole at y = 3.2, at radius 3.8 from the axis,
+        beyond the profile's reach. The point at radius r meets the cylinder after the angle
+        acos(-(r^2 + 4.25) / (9 r)), so the Revolution is 2 * the integral of r times that from 1
+        to 3. The hole's check built its face on the moved surface from the face's own wire."""
+        revolution = self.revolveUpToLocatedCylinderWall(3.2)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        steps = 4000
+        width = 2 / steps
+        radii = [1 + (i + 0.5) * width for i in range(steps)]
+        expected = 2 * width * sum(r * math.acos(-(r**2 + 4.25) / (9 * r)) for r in radii)
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=5)
+
+    def testRevolutionUpToLocatedCurvedFaceWithHoleInTheWay(self):
+        """revolveUpToLocatedCylinderWall() with the hole at y = 2.2, at radius 2.5: the profile
+        points that turn through it never meet the face, and the Revolution fails."""
+        revolution = self.revolveUpToLocatedCylinderWall(2.2)
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
     def testRevolutionUpToFaceWithHoleOutOfTheWay(self):
         """A hole in the wall of revolveUpToHoledWall() beyond the profile's reach (y in
         [3.5, 3.6], radius > 3): the Revolution is valid, the box and the quarter ring from 0 to
