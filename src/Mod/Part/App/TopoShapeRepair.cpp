@@ -15,13 +15,19 @@
 #include <tuple>
 #include <vector>
 
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pnt.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 
 #include <App/ElementMap.h>
 #include <Base/Console.h>
@@ -436,6 +442,45 @@ bool onlySolids(const TopoDS_Shape& shape)
     }
 }
 
+// The faces outside the shape's solids, in loose shells or on their own
+TopoDS_Compound facesOutsideSolids(const TopoDS_Shape& shape)
+{
+    TopoDS_Compound faces;
+    BRep_Builder builder;
+    builder.MakeCompound(faces);
+    for (TopExp_Explorer it(shape, TopAbs_FACE, TopAbs_SOLID); it.More(); it.Next()) {
+        builder.Add(faces, it.Current());
+    }
+    return faces;
+}
+
+int faceCount(const TopoDS_Shape& shape)
+{
+    int count = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+// Whether the faces close up, enclosing a volume: every edge of theirs (but degenerate ones)
+// bounds two of them. A seam counts twice, so a lone closed face counts as closed.
+bool enclose(const TopoDS_Shape& faces)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(faces, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    if (edgeFaces.IsEmpty()) {
+        return false;
+    }
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        if (!BRep_Tool::Degenerated(TopoDS::Edge(edgeFaces.FindKey(i)))
+            && edgeFaces(i).Extent() < 2) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The shape's solids, with their names: the solid itself if there is one
 TopoShape solidsOf(const TopoShape& shape)
 {
@@ -473,14 +518,27 @@ bool checkDressUp(TopoShape& shape, const TopoShape& base)
     }
     // ShapeFix may move faces out of the solid into an open shell beside it (the fin of an
     // invalid base, ops#12): a valid compound whose volume counts the loose faces, wrong
-    // downstream. The solid alone is the result, and on a valid base nothing may move out. (A base
-    // that isn't solids only, a shell, keeps the checks below.)
-    if (onlySolids(base.getShape()) && !onlySolids(repaired.getShape())) {
-        if (base.isValid()) {
-            FC_WARN("Invalid dress-up result whose repair leaves shapes outside its solids");
-            return false;
+    // downstream. Judged on the result, not the base: OCCT drops a base's loose faces. The solids
+    // of a solids-only result are the repair if the base is invalid, unless the faces dropped
+    // enclose a volume; on a valid base nothing may move out. A result with faces outside its
+    // solids (a shell's) keeps them, and the repair may move no more out.
+    const auto outside = facesOutsideSolids(repaired.getShape());
+    if (onlySolids(shape.getShape())) {
+        if (!onlySolids(repaired.getShape())) {
+            if (base.isValid()) {
+                FC_WARN("Invalid dress-up result whose repair leaves shapes outside its solids");
+                return false;
+            }
+            if (enclose(outside)) {
+                FC_WARN("Invalid dress-up result whose repair leaves a closed shell outside its solids");
+                return false;
+            }
+            repaired = solidsOf(repaired);
         }
-        repaired = solidsOf(repaired);
+    }
+    else if (faceCount(outside) > faceCount(facesOutsideSolids(shape.getShape()))) {
+        FC_WARN("Invalid dress-up result whose repair moves faces out of its solids");
+        return false;
     }
     if (const char* why = repairChangesSurface(shape, repaired, base.isValid())) {
         FC_WARN("Invalid dress-up result whose repair " << why);

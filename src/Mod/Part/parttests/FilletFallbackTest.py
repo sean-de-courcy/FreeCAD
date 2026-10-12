@@ -339,6 +339,21 @@ class InvalidDressUpTest(unittest.TestCase):
                 self.assertEqual(len(shape.Faces), 7)
                 self.assertExact(shape, 1000 - removed[kind])
 
+    def testRepairDropsTheFinOfABaseWithALooseFace(self):
+        # The fin cube beside a loose square face: OCCT's result drops the face, a solid with the
+        # fin, and its repair is the same compound with the fin outside the solid
+        corners = [V(20, 0, 0), V(30, 0, 0), V(30, 10, 0), V(20, 10, 0)]
+        loose = Part.Face(Part.makePolygon(corners, True))
+        base = Part.Compound([cube_with_fin(), loose])
+        edge = edge_between(base, (0, 0, 10), (10, 0, 10))
+        for kind, removed in (("Fillet", fillet_section(1) * 10), ("Chamfer", 0.5 * 10)):
+            feature = self.dressUp(kind, base, [edge], [(1, 1)])
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            shape = feature.Shape
+            self.assertEqual(shape.ShapeType, "Solid")
+            self.assertEqual(len(shape.Faces), 7)
+            self.assertExact(shape, 1000 - removed)
+
     def testPartFeaturesAtTheLimit(self):
         # Part::Fillet and Part::Chamfer build what OCCT refuses as makeFillet does (ops#300)
         box = Part.makeBox(30, 4, 20)
