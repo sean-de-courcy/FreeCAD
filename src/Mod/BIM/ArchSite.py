@@ -638,6 +638,11 @@ class _Site(ArchIFC.IfcProduct):
                 QT_TRANSLATE_NOOP("App::Property", "The elevation of level 0 of this site"),
                 locked=True,
             )
+        if obj.getTypeIdOfProperty("Elevation") == "App::PropertyLength":
+            # FreeCAD-CH (ops#319): a site can lie below sea level. A PropertyLength now refuses
+            # a negative value instead of clamping it to 0; the status isn't saved, so it is set
+            # here, which also runs on restore.
+            obj.setPropertyStatus("Elevation", "AllowNegativeValues")
         if not "Url" in pl:
             obj.addProperty(
                 "App::PropertyString",
@@ -1919,7 +1924,8 @@ class _ViewProviderSite:
         siteRotation = math.degrees(
             vobj.Object.Placement.Rotation.Angle
         )  # This assumes Rotation.axis = (0,0,1)
-        vobj.Object.Declination = compassRotation + siteRotation
+        # FreeCAD-CH (ops#319): the sum can reach 720 deg, beyond the Angle property's 360.
+        vobj.Object.Declination = math.fmod(compassRotation + siteRotation, 360)
 
     def addTrueNorthRotation(self):
 

@@ -2197,7 +2197,9 @@ class _Stairs(ArchComponent.Component):
             else:
                 reslength = v_proj.Length
                 treadDepth = reslength / (numOfSteps - 1)
-            obj.TreadDepth = treadDepth
+            # FreeCAD-CH (ops#319): a Length refuses a negative value now instead of showing 0;
+            # TreadDepth only reports the value, so it keeps showing 0 (a landing too deep).
+            obj.TreadDepth = max(0.0, treadDepth)
             vLength = DraftVecUtils.scaleTo(v_proj, treadDepth)
         else:  # if obj.TreadDepthEnforce
             obj.TreadDepth = obj.TreadDepthEnforce
@@ -2221,7 +2223,8 @@ class _Stairs(ArchComponent.Component):
             else:
                 h = height
             hstep = h / numOfSteps
-            obj.RiserHeight = hstep
+            # FreeCAD-CH (ops#319): as TreadDepth above (a descending edge gives a negative step).
+            obj.RiserHeight = max(0.0, hstep)
 
         else:  # if obj.RiserHeightEnforce
             # h = obj.RiserHeightEnforce.Value * (obj.NumberOfSteps)

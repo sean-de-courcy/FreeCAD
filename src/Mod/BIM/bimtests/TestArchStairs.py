@@ -28,6 +28,23 @@ from bimtests import TestArchBase
 
 class TestArchStairs(TestArchBase.TestArchBase):
 
+    def test_descendingBaseLine(self):
+        """Stairs on a descending line still build (FreeCAD-CH ops#319).
+
+        The step is negative; RiserHeight, a PropertyLength that only reports it, now refuses a
+        negative value, so it keeps showing 0 as the clamp did.
+        """
+        import Draft
+        import FreeCAD as App
+
+        self.printTestMessage("stairs on a descending line...")
+        line = Draft.make_line(App.Vector(0, 0, 3000), App.Vector(4000, 0, 0))
+        stairs = Arch.makeStairs(baseobj=line, width=1000, steps=10)
+        self.document.recompute()
+        self.assertTrue(stairs.isValid(), stairs.getStatusString())
+        self.assertEqual(stairs.RiserHeight.Value, 0.0)
+        self.assertFalse(stairs.Shape.isNull())
+
     def test_makeStairs(self):
         """Test the makeStairs function."""
         operation = "Testing makeStairs function"

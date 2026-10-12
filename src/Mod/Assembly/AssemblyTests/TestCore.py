@@ -110,6 +110,25 @@ class TestCore(AssemblyTestBase):
 
         self.assertTrue(hasattr(joint, "JointType"), "'{}' failed".format(operation))
 
+    def test_migrate_negative_float_distances(self):
+        """A joint from FreeCAD 1.0 holds Distance and LengthMin as floats, possibly negative.
+
+        The migration retypes them to PropertyLength (FreeCAD-CH ops#319): a negative value
+        must survive it, not raise in onDocumentRestored.
+        """
+        _msg("  Test 'Migrate negative float distances'")
+        joint = self.jointgroup.newObject("App::FeaturePython", "oldJoint")
+        JointObject.Joint(joint, 0)
+        for name, group in (("Distance", "Joint"), ("LengthMin", "Limits")):
+            joint.setPropertyStatus(name, "-LockDynamic")
+            joint.removeProperty(name)
+            joint.addProperty("App::PropertyFloat", name, group)
+            setattr(joint, name, -5.0)
+        joint.Proxy.migrationScript6(joint)
+        self.assertEqual(joint.getTypeIdOfProperty("Distance"), "App::PropertyLength")
+        self.assertEqual(joint.Distance, App.Units.Quantity("-5 mm"))
+        self.assertEqual(joint.LengthMin, App.Units.Quantity("-5 mm"))
+
     def test_create_grounded_joint(self):
         """Create a grounded joint in an assembly."""
         operation = "Create Grounded Joint Object"
