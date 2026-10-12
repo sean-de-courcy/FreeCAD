@@ -246,7 +246,11 @@ TopoShape Feature::getSolid(const TopoShape& shape) const
     return shape;
 }
 
-void Feature::onBaseFeatureRerouted(App::DocumentObject* /*oldBase*/, App::DocumentObject* /*newBase*/)
+void Feature::onBaseFeatureRerouted(
+    App::DocumentObject* /*oldBase*/,
+    App::DocumentObject* /*newBase*/,
+    bool /*reorder*/
+)
 {}
 
 namespace
@@ -343,7 +347,9 @@ bool comesAfterOwner(const App::PropertyLinkSub& link, const App::DocumentObject
 }
 
 // The relink without the solver (upstream's): every reference must match exactly one element of
-// the new base by its name (V2) or its geometry (V1), or the link is left as it is
+// the new base by its name (V2) or its geometry (V1), or the link is left as it is. A name that
+// matches several elements (a face the new base split in two) is no match: taking the first was
+// a silent guess (fork PR 282 review, F3; ops#79's policy for the loose pass)
 bool relinkByName(
     App::PropertyLinkSub& link,
     Part::Feature* oldFeature,
@@ -408,17 +414,8 @@ bool relinkByName(
             std::vector<Data::MappedElement> foundNames
                 = Part::Feature::findSimilarNames(subMappedElement.name, newShape);
 
-            if (foundNames.size()) {
+            if (foundNames.size() == 1) {
                 names.push_back(foundNames.front().name.toString());
-            }
-
-            if (foundNames.size() > 1) {
-                FC_WARN(
-                    link.getFullName() << ": guessed the relinked reference "
-                                  << sub << " -> " << foundNames.front().index.toString()
-                                  << ", the first of " << foundNames.size()
-                                  << " matching elements of " << newFeature->getFullName()
-                );
             }
         }
 
@@ -438,7 +435,8 @@ bool relinkByName(
 bool Feature::relinkToMatchingSubelements(
     App::PropertyLinkSub& link,
     App::DocumentObject* oldBase,
-    App::DocumentObject* newBase
+    App::DocumentObject* newBase,
+    bool reorder
 )
 {
     if (!oldBase || link.getValue() != oldBase) {
@@ -446,15 +444,20 @@ bool Feature::relinkToMatchingSubelements(
     }
     // A reorder that moved the old base below the owner (ops#285): left there, the link would
     // make a dependency cycle, which the reorder's cycle check doesn't see because it plans this
-    // link on the new base (N1 3.5). A link left on an earlier object (insert at the bar, N1 2.2)
-    // stays as it is.
+    // link on the new base (N1 3.5).
     const bool cycle = comesAfterOwner(link, oldBase);
+    // Any other reorder (ops#291, PLAN decision 50): left on the old base, an earlier object, the
+    // link would point at an object no longer before the owner in the chain, which a re-pick can't
+    // tell from a link that works. A link left on an earlier object by an insert at the bar (N1
+    // 2.2, decision 48) stays as it is.
+    const bool follow = cycle || reorder;
 
     auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
     const Part::TopoShape oldShape = oldFeature ? oldFeature->Shape.getShape() : Part::TopoShape();
+    const bool solver = link.inSolverDocument();
     if (newFeature && !oldShape.isNull()) {
-        if (link.inSolverDocument()) {
+        if (solver) {
             // Also onto a new base without a shape yet (ops#127, N1 2.2)
             if (relinkAsMissing(link, oldShape, newBase, true)) {
                 return true;
@@ -463,24 +466,39 @@ bool Feature::relinkToMatchingSubelements(
         else if (relinkByName(link, oldFeature, newFeature)) {
             return true;
         }
-        else if (cycle && relinkAsMissing(link, oldShape, newBase, false)) {
-            // with its references missing, so the owner fails until they are re-picked
+    }
+    // A solver document's relink above needs the old base's shape: from an old base without one
+    // (a feature that never computed) the names come from the link's shadows here too, or the link
+    // stays on an object no longer before the owner (fork PR 282 round 2 verification, A)
+    if (newFeature && follow && (!solver || oldShape.isNull())) {
+        if (relinkAsMissing(link, oldShape, newBase, solver)) {
+            // With its references missing; also from an old base without a shape (one that
+            // failed), the names coming from the link's shadows (fork PR 282 review, F2). In a
+            // reorder the new base still has its shape from before the reorder, which can hold
+            // the owner's own result (a fillet's faces where its edge was): the name is looked up
+            // again when the new base recomputes, and a reference found then resolves (an edge
+            // the new base leaves alone); one that isn't makes the owner fail until it is
+            // re-picked, its error naming the reference (a log line here: review F6)
+            FC_LOG(link.getFullName() << ": moved by a reorder to " << newBase->getFullName());
             return true;
         }
     }
-    if (!cycle) {
+    // A solver document keeps its link outside a cycle, as before ops#291 (fork PR 282 review,
+    // F1): its relink above fails only on a reference without a name to carry
+    if (!cycle && (!follow || solver)) {
         return false;
     }
-    // No new base (the owner is now the first solid), an old base that never computed, or a
-    // reference without a name to carry: the link is cleared, so the owner fails until it is
-    // re-picked (fork PR 270 review, M1 and L3)
+    // No new base (the owner is now the first solid), or a reference without a name to carry
+    // (none in its shadow, and the old base has no shape to read it from): the link is cleared,
+    // so the owner fails until it is re-picked (fork PR 270 review, M1 and L3)
     std::string subs;
     for (const auto& sub : link.getSubValues()) {
         subs += (subs.empty() ? "" : ", ") + sub;
     }
     FC_WARN(
         link.getFullName() << ": cleared its link to " << oldBase->getFullName() << " (" << subs
-                           << "), which a reorder moved below it"
+                           << (cycle ? "), which a reorder moved below it"
+                                     : "), whose references a reorder couldn't carry")
     );
     link.setValue(nullptr);
     // A dress-up's BaseFeature follows its Base, so the clear has just nulled the BaseFeature the

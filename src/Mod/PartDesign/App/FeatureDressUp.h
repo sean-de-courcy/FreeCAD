@@ -71,7 +71,11 @@ public:
 protected:
     void onBeforeChange(const App::Property* prop) override;
     void onChanged(const App::Property* prop) override;
-    void onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase) override;
+    void onBaseFeatureRerouted(
+        App::DocumentObject* oldBase,
+        App::DocumentObject* newBase,
+        bool reorder
+    ) override;
 
 private:
     /// Base's object before its current change, recorded by onBeforeChange() and compared only

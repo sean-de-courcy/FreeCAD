@@ -641,9 +641,11 @@ class BodyReorderBase:
 
     def testDressUpBaseWithoutAShapeMovedBelowIt(self):
         """Boss A, with no shape (never computed), moved below the chamfer on its edge: there is no
-        element to carry to the block, the chamfer's new base, so the Base is cleared. The chamfer
-        stays on the block (BaseFeature), so the chain holds, and a re-pick of a block's edge
-        makes it compute (fork PR 270 round 1 verification)."""
+        element to carry to the block, the chamfer's new base. The Base goes to the block with its
+        reference missing, the name taken from the link's shadow (fork PR 282 review, F2; with the
+        solver since round 2 verification, A, where it was cleared before). The block has no such
+        edge: the chamfer fails. It stays on the block (BaseFeature), so the chain holds, and a
+        re-pick of a block's edge makes it compute (fork PR 270 round 1 verification)."""
         block = self.block()
         a = self.boss("BossA", 1, 1)
         self.recompute()
@@ -658,7 +660,9 @@ class BodyReorderBase:
         self.body.reorderObject([a], chamfer, True)
         self.doc.commitTransaction()
         self.assertChain(block, chamfer, a)
-        self.assertIsNone(chamfer.Base)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
         self.assertIs(chamfer.BaseFeature, block)
         self.recompute()
         self.assertFalse(chamfer.isValid())
@@ -669,6 +673,45 @@ class BodyReorderBase:
         self.assertChain(block, chamfer, a)
         self.assertValid(block, chamfer, a)
         self.assertBody(BLOCK - 0.5**2 / 2 * 10 + BOSS)
+
+    def testDressUpOnABaseWithoutAShapeMovedPastAFeature(self):
+        """A fillet (r 1) on the block's top front edge, through the hole, and a notch 3 x 3 x 2
+        away from that edge; the hole has no shape (never computed) and the fillet is moved below
+        the notch, not past its own base. The notch is the fillet's new base: the Base goes there
+        with its reference missing, the name taken from the link's shadow, also with the solver,
+        whose relink otherwise reads the old base's shape (fork PR 282 round 2 verification, A:
+        before, a solver document kept the link on the hole, no longer before the fillet, without a
+        word). The notch leaves the edge alone, so it resolves there: same body as before."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        fillet.Base = (hole, [edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))])
+        fillet.Radius = 1
+        self.recompute()
+        sketch = models.sketch(
+            self.doc, "NotchSketch", models.rectangle(14, 14, 17, 17), self.body, z=10
+        )
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(fillet, notch)
+        expected = BLOCK - HOLE - (1 - math.pi / 4) * 20 - 3 * 3 * 2
+        self.assertBody(expected)
+        hole.Shape = Part.Shape()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([fillet], notch, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.recompute()
+        self.assertValid(hole, notch, fillet)
+        target, [sub] = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(isTopFrontLine(notch.Shape.getElement(sub), 0, 20), sub)
+        self.assertBody(expected)
 
     def testSaveAndReopenWithARecord(self):
         """The hole moved above Pad2, saved and reopened: the support is still on the block with
@@ -2337,12 +2380,302 @@ class BodyReorderBase:
         self.recompute()
         self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
 
-class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
+def isFrontFace(face):
+    """A face on the block's front (y = 0), facing -y."""
+    return abs(face.normalAt(0, 0).y + 1) < TOL and abs(face.CenterOfMass.y) < TOL
+
+
+def facesWhere(shape, test):
+    return [f"Face{i + 1}" for i, f in enumerate(shape.Faces) if test(f)]
+
+
+def isTopFrontLine(edge, x0, x1):
+    """A line on the block's top front edge (y = 0, z = 10) from x0 to x1."""
+    if not isinstance(edge.Curve, Part.Line):
+        return False
+    xs = sorted(v.Point.x for v in edge.Vertexes)
+    return all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in edge.Vertexes) and (
+        abs(xs[0] - x0) < TOL and abs(xs[1] - x1) < TOL
+    )
+
+
+NOTCH = 4 * 3 * 2  # x 8 to 12, y 0 to 3 (its sketch reaches y = -1), 2 deep
+
+
+class SplitFace:
+    """A dress-up on a whole face that a later slot splits in two, moved below the slot (fork PR
+    282 review, F3): in both configurations."""
+
+    def dressUpOnASplitFace(self, typeName, recompute=True):
+        """The block, the hole, a dress-up on the block's whole front face (a 1 mm fillet, or a 2
+        degree draft about the XY plane), then a slot 4 wide through the block's height across
+        the front, which splits that face in two; the dress-up is moved below the slot (and the
+        document recomputed)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        [front] = facesWhere(hole.Shape, isFrontFace)
+        dressUp = self.body.newObject(typeName, typeName.split("::")[1])
+        if typeName == "PartDesign::Fillet":
+            dressUp.Radius = 1
+        else:
+            [xy] = [f for f in self.body.Origin.OriginFeatures if f.Role == "XY_Plane"]
+            dressUp.NeutralPlane = (xy, [""])
+            dressUp.Angle = 2
+        dressUp.Base = (hole, [front])
+        self.recompute()
+        sketch = models.sketch(
+            self.doc, "SlotSketch", models.rectangle(8, -1, 12, 3), self.body, z=10
+        )
+        slot = models.pocket(self.body, sketch, 10, "Slot")
+        self.recompute()
+        self.assertValid(hole, dressUp, slot)
+
+        self.body.reorderObject([dressUp], slot, True)
+        self.assertChain(block, hole, slot, dressUp)
+        if recompute:
+            self.recompute()
+            self.assertEqual(len(facesWhere(slot.Shape, isFrontFace)), 2)
+        return dressUp, slot
+
+
+class TestBodyReorderV2(SplitFace, BodyReorderBase, unittest.TestCase):
     solver = False
 
+    # -- without the solver, a reorder without a cycle (ops#291, PLAN decision 50) -------------
 
-class TestBodyReorderV2s(BodyReorderBase, unittest.TestCase):
+    def filletOnTheTopFrontEdge(self, notchOnTheEdge=True):
+        """The block, the hole, a 1 mm fillet on the top front edge (on the hole), then a notch
+        pocketed across that edge's middle (or, with notchOnTheEdge false, away from it)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        edge = edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))
+        mapped = hole.Shape.ElementReverseMap[edge]
+        mapped = mapped[0] if isinstance(mapped, (list, tuple)) else mapped
+        fillet.Base = (hole, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        rect = models.rectangle(8, -1, 12, 3) if notchOnTheEdge else models.rectangle(14, 14, 17, 17)
+        sketch = models.sketch(self.doc, "NotchSketch", rect, self.body, z=10)
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(hole, fillet, notch)
+        return block, hole, fillet, notch, edge, mapped
+
+    def testDressUpBaseFollowsAReorderWithoutAMatch(self):
+        """The fillet moved below the notch that cuts its edge in two: no element of the notch
+        has the edge's name. The Base goes to the notch with its reference missing, the edge's
+        name kept as the shadow, rather than staying on the hole, an earlier object the fillet
+        no longer follows; the fillet fails until a re-pick (ops#291)."""
+        block, hole, fillet, notch, edge, mapped = self.filletOnTheTopFrontEdge()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([fillet], notch, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        [shadow] = self.savedShadows(fillet, "Base")
+        self.assertIn(mapped, shadow)
+        self.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertIn("Invalid edge link", fillet.getStatusString())
+        self.assertValid(hole, notch)
+        self.assertAlmostEqual(notch.Shape.Volume, BLOCK - HOLE - NOTCH, delta=1e-4)
+        self.assertNotTouched(fillet, notch)
+
+        # re-picked: the edge's left piece on the notch
+        fillet.Base = (notch, [edgeWhere(notch.Shape, lambda e: isTopFrontLine(e, 0, 8))])
+        self.recompute()
+        self.assertValid(notch, fillet)
+        self.assertChain(block, hole, notch, fillet)
+
+        self.doc.undo()  # the reorder (the re-pick was outside a transaction)
+        self.assertChain(block, hole, fillet, notch)
+        self.assertEqual(fillet.Base, (hole, [edge]))
+        self.recompute()
+        self.assertValid(hole, fillet, notch)
+
+    def testDressUpBaseFollowsAReorderToAnEdgeItKeeps(self):
+        """The same with the notch away from the fillet's edge. At the reorder the notch still
+        has its shape from before, on the fillet's result, where the edge is gone, so the Base
+        goes to the notch with its reference missing; the notch's recompute finds the edge by its
+        name, which a notch away from it leaves alone, and the fillet stays valid, the same
+        solid (ops#291)."""
+        block, hole, fillet, notch, edge, mapped = self.filletOnTheTopFrontEdge(False)
+        volume = notch.Shape.Volume  # the body's solid, the tip
+
+        self.body.reorderObject([fillet], notch, True)
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.recompute()
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertEqual(len(subs), 1)
+        self.assertFalse(subs[0].startswith("?"), subs)
+        self.assertTrue(isTopFrontLine(notch.Shape.getElement(subs[0]), 0, 20), subs)
+        self.assertValid(notch, fillet)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume, delta=1e-4)
+
+    def testInsertAtTheBarKeepsTheDressUpLink(self):
+        """The same notch inserted at the bar before the fillet: the fillet's BaseFeature is the
+        notch, but its Base stays on the hole (N1 2.2, PLAN decision 48): only a reorder moves it
+        (ops#291)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        edge = edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))
+        fillet.Base = (hole, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        self.body.rollTo(hole)
+        sketch = models.sketch(self.doc, "NotchSketch", models.rectangle(8, -1, 12, 3), self.body, z=10)
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.body.rollToEnd()
+        self.assertChain(block, hole, notch, fillet)
+        self.assertEqual(fillet.Base, (hole, [edge]))
+
+    def testUnmovedDressUpFollowsAFeatureMovedInFrontOfIt(self):
+        """The notch away from the fillet's edge moved above the fillet, which stays: the
+        fillet's base changes all the same, and its Base goes to the notch, the edge found there
+        by its name when the notch recomputes (fork PR 282 review, F5)."""
+        block, hole, fillet, notch, edge, mapped = self.filletOnTheTopFrontEdge(False)
+        volume = notch.Shape.Volume  # the body's solid, the tip
+
+        self.body.reorderObject([notch], hole, True)
+        self.assertChain(block, hole, notch, fillet)
+        self.assertIs(fillet.Base[0], notch)
+        self.recompute()
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertEqual(len(subs), 1)
+        self.assertTrue(isTopFrontLine(notch.Shape.getElement(subs[0]), 0, 20), subs)
+        self.assertValid(notch, fillet)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume, delta=1e-4)
+
+    def testFaceProfileFollowsAReorder(self):
+        """A pad of the block's front face (on the hole), 1 long, moved below a notch away from
+        that face: its Profile goes to the notch, the face found there by its name when the notch
+        recomputes (ProfileBased, fork PR 282 review, F5)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        [front] = facesWhere(hole.Shape, isFrontFace)
+        pad = self.body.newObject("PartDesign::Pad", "FrontPad")
+        pad.Profile = (hole, [front])
+        pad.Length = 1
+        self.recompute()
+        sketch = models.sketch(
+            self.doc, "NotchSketch", models.rectangle(14, 14, 17, 17), self.body, z=10
+        )
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(hole, pad, notch)
+        volume = notch.Shape.Volume
+
+        self.body.reorderObject([pad], notch, True)
+        self.assertChain(block, hole, notch, pad)
+        self.assertIs(pad.Profile[0], notch)
+        self.recompute()
+        target, subs = pad.Profile
+        self.assertIs(target, notch)
+        self.assertEqual(len(subs), 1)
+        self.assertFalse(subs[0].startswith("?"), subs)
+        self.assertTrue(isFrontFace(notch.Shape.getElement(subs[0])), subs)
+        self.assertValid(notch, pad)
+        self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-4)
+
+    def testDressUpFailsWhenOneOfItsEdgesIsMissing(self):
+        """A fillet on the top front edge, which the notch cuts in two, and the top back edge,
+        which it leaves alone, moved below the notch: the back edge is found by its name, the
+        front one isn't, and the fillet fails rather than round the back edge alone (fork PR 282
+        review, F5)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+
+        def isTopBackLine(e):
+            return isinstance(e.Curve, Part.Line) and all(
+                abs(v.Point.y - 20) < TOL and abs(v.Point.z - 10) < TOL for v in e.Vertexes
+            )
+
+        front = edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))
+        back = edgeWhere(hole.Shape, isTopBackLine)
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        fillet.Base = (hole, [front, back])
+        fillet.Radius = 1
+        self.recompute()
+        sketch = models.sketch(
+            self.doc, "NotchSketch", models.rectangle(8, -1, 12, 3), self.body, z=10
+        )
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(hole, fillet, notch)
+
+        self.body.reorderObject([fillet], notch, True)
+        self.assertChain(block, hole, notch, fillet)
+        self.recompute()
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertEqual(sorted(s.startswith("?") for s in subs), [False, True], subs)
+        [kept] = [s for s in subs if not s.startswith("?")]
+        self.assertTrue(isTopBackLine(notch.Shape.getElement(kept)), subs)
+        self.assertFalse(fillet.isValid())
+        self.assertIn("Invalid edge link", fillet.getStatusString())
+        self.assertValid(hole, notch)
+
+    def testFilletOnASplitFaceFailsRatherThanGuess(self):
+        """Two elements of the slot's shape at the reorder have the face's name: the fillet's Base
+        goes to the slot with its reference missing, where the relink took the first of the two
+        (fork PR 282 review, F3), and the fillet fails."""
+        fillet, slot = self.dressUpOnASplitFace("PartDesign::Fillet", recompute=False)
+        target, subs = fillet.Base
+        self.assertIs(target, slot)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.recompute()
+        self.assertEqual(len(facesWhere(slot.Shape, isFrontFace)), 2)
+        target, subs = fillet.Base
+        self.assertIs(target, slot)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.assertFalse(fillet.isValid())
+        self.assertValid(slot)
+
+    def testDraftOnASplitFaceFails(self):
+        """The same with a draft: it fails, its face missing (fork PR 282 review, F3)."""
+        draft, slot = self.dressUpOnASplitFace("PartDesign::Draft")
+        target, subs = draft.Base
+        self.assertIs(target, slot)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.assertFalse(draft.isValid())
+        self.assertIn("Missing face reference", draft.getStatusString())
+        self.assertValid(slot)
+
+
+class TestBodyReorderV2s(SplitFace, BodyReorderBase, unittest.TestCase):
     solver = True
+
+    def testFilletOnASplitFaceTakesBothPieces(self):
+        """With the solver, the fillet on the face the slot splits takes both pieces, with a
+        warning (fork PR 282 review, F3: the solver's own policy, unchanged)."""
+        fillet, slot = self.dressUpOnASplitFace("PartDesign::Fillet")
+        self.assertSplitTaken(fillet, slot)
+
+    def testDraftOnASplitFaceTakesBothPieces(self):
+        """The same with a draft (fork PR 282 review, F3)."""
+        draft, slot = self.dressUpOnASplitFace("PartDesign::Draft")
+        self.assertSplitTaken(draft, slot)
+
+    def assertSplitTaken(self, dressUp, slot):
+        target, subs = dressUp.Base
+        self.assertIs(target, slot)
+        self.assertEqual(sorted(subs), sorted(facesWhere(slot.Shape, isFrontFace)))
+        self.assertValid(slot, dressUp)
+        self.assertIn("Warning", dressUp.getStatusString())
 
     def testRecordSurvivesTheSolver(self):
         """The hole's sketch on the block's front face, which a notch (Pad2's place taken by a

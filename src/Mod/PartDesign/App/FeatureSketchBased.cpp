@@ -817,12 +817,16 @@ void ProfileBased::onChanged(const App::Property* prop)
     FeatureAddSub::onChanged(prop);
 }
 
-void ProfileBased::onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase)
+void ProfileBased::onBaseFeatureRerouted(
+    App::DocumentObject* oldBase,
+    App::DocumentObject* newBase,
+    bool reorder
+)
 {
     // Sketches are independent objects with their own attachment; leave them
     // alone. Only redirect when Profile references the deleted base directly.
     if (Profile.getValue() && !Profile.getValue()->isDerivedFrom<Part::Part2DObject>()) {
-        relinkToMatchingSubelements(Profile, oldBase, newBase);
+        relinkToMatchingSubelements(Profile, oldBase, newBase, reorder);
     }
 }
 
