@@ -373,37 +373,37 @@ class TestNumberConstraints(ExpressionUnitsBase):
         self.assertEqual(varSet.P, 0)
 
     def testFloatConstraint(self):
-        varSet = self.addVarSet(F=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
+        varSet = self.addVarSet(Ratio=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
         with self.assertRaises(ValueError):
-            varSet.F = 50.0
+            varSet.Ratio = 50.0
         with self.assertRaises(ValueError):
-            varSet.F = 11
-        self.assertEqual(varSet.F, 5.0)
-        varSet.setExpression("F", "50")
+            varSet.Ratio = 11
+        self.assertEqual(varSet.Ratio, 5.0)
+        varSet.setExpression("Ratio", "50")
         self.doc.recompute()
         self.assertInvalid(varSet, "above the maximum")
-        self.assertEqual(varSet.F, 5.0)
-        varSet.setExpression("F", "2.5 * 4")
+        self.assertEqual(varSet.Ratio, 5.0)
+        varSet.setExpression("Ratio", "2.5 * 4")
         self.doc.recompute()
         self.assertTrue(varSet.isValid())
-        self.assertEqual(varSet.F, 10.0)
+        self.assertEqual(varSet.Ratio, 10.0)
 
     def testIntegerConstraint(self):
-        varSet = self.addVarSet(N=("App::PropertyIntegerConstraint", (3, 1, 10, 1)))
-        varSet.setExpression("N", "21 / 2")
+        varSet = self.addVarSet(Count=("App::PropertyIntegerConstraint", (3, 1, 10, 1)))
+        varSet.setExpression("Count", "21 / 2")
         self.doc.recompute()
         self.assertInvalid(varSet, "above the maximum")
-        self.assertEqual(varSet.N, 3)
-        varSet.setExpression("N", "19 / 2")
+        self.assertEqual(varSet.Count, 3)
+        varSet.setExpression("Count", "19 / 2")
         self.doc.recompute()
         self.assertTrue(varSet.isValid())
-        self.assertEqual(varSet.N, 10)  # 9.5 rounds to 10, the maximum
+        self.assertEqual(varSet.Count, 10)  # 9.5 rounds to 10, the maximum
 
     def testNewRangeStillFitsItsValue(self):
         # The tuple form sets a new range; its value is fitted into it, as before.
-        varSet = self.addVarSet(F=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
-        varSet.F = (50.0, 0.0, 20.0, 1.0)
-        self.assertEqual(varSet.F, 20.0)
+        varSet = self.addVarSet(Ratio=("App::PropertyFloatConstraint", (5.0, 0.0, 10.0, 0.5)))
+        varSet.Ratio = (50.0, 0.0, 20.0, 1.0)
+        self.assertEqual(varSet.Ratio, 20.0)
 
 
 class TestSubPathUnits(ExpressionUnitsBase):
@@ -437,15 +437,15 @@ class TestSubPathUnits(ExpressionUnitsBase):
         self.assertAlmostEqual(box.Placement.Rotation.Angle, 1.5707963267948966, places=12)
 
     def testVectorDistance(self):
-        varSet = self.addVarSet(V=("App::PropertyVectorDistance", FreeCAD.Vector(1, 2, 3)))
-        varSet.setExpression(".V.x", "30 deg")
+        varSet = self.addVarSet(Offset=("App::PropertyVectorDistance", FreeCAD.Vector(1, 2, 3)))
+        varSet.setExpression("Offset.x", "30 deg")
         self.doc.recompute()
         self.assertInvalid(varSet, "Unit mismatch")
-        self.assertEqual(varSet.V.x, 1.0)
-        varSet.setExpression(".V.x", "1 cm")
+        self.assertEqual(varSet.Offset.x, 1.0)
+        varSet.setExpression("Offset.x", "1 cm")
         self.doc.recompute()
         self.assertTrue(varSet.isValid())
-        self.assertEqual(varSet.V, FreeCAD.Vector(10, 2, 3))
+        self.assertEqual(varSet.Offset, FreeCAD.Vector(10, 2, 3))
 
     def addSketch(self):
         import Part
