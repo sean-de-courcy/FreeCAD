@@ -290,7 +290,8 @@ public:
      * among the kept ones (the external constraints' GeoIds move with it), with its kind from
      * `kinds` (parallel to `ids`, as externalGeometryKind gave them; ops#264). Returns how many
      * were replaced. With `typeGuessed` (externalTypeUndecided when it was parked), or parked
-     * geometry built from a guess, the link still waits for its type (ops#287).
+     * geometry that waits (TypeGuessed, TypeUndecided), the link still waits for its type
+     * (ops#287).
      */
     int unparkExternalGeometry(App::DocumentObject* obj,
                                const std::string& sub,
@@ -300,7 +301,8 @@ public:
                                const std::vector<int>& kinds = {},
                                bool typeGuessed = false);
     /// Whether entry `entry`'s type is still a guess that waits to be decided (ops#287): its key
-    /// waits, or any of its geometry was built from a guess (TypeGuessed)
+    /// waits, or any of its geometry was built from a guess (TypeGuessed) or is saved geometry an
+    /// open couldn't tell the type from (TypeUndecided)
     bool externalTypeUndecided(int entry) const;
     /** Gives the parked geometries `ids` (those still without a reference) the reference `ref`
      * of a link that no longer exists (ops#131: the projected object was deleted while parked),

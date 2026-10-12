@@ -1529,7 +1529,8 @@ void SketchObject::onUndoRedoFinished()
     // link whose saved geometry is missing waits again, as on a later open: a full rebuild
     // matches it with that geometry once its element is back. So does one with no saved
     // geometry, which the open can't decide either (PR 253 review L3), and one whose geometry was
-    // built from a guess (TypeGuessed, ops#287): it still waits, and keeps the flag
+    // built from a guess (TypeGuessed, ops#287) or saved geometry an open couldn't tell the type
+    // from (TypeUndecided, PR 277 round 7): it still waits, and keeps the flag
     externalTypeRepairPending = ExternalTypes.getSize() > ExternalGeometry.getSize();
     undecidedTypeKeys.clear();
     if (externalTypeRepairPending) {
@@ -1545,7 +1546,8 @@ void SketchObject::onUndoRedoFinished()
                         saved = true;
                         auto egf = ExternalGeometryFacade::getFacade(ExternalGeo[it->second]);
                         missing = missing || egf->testFlag(ExternalGeometryExtension::Missing);
-                        guessed = guessed || egf->testFlag(ExternalGeometryExtension::TypeGuessed);
+                        guessed = guessed || egf->testFlag(ExternalGeometryExtension::TypeGuessed)
+                            || egf->testFlag(ExternalGeometryExtension::TypeUndecided);
                     }
                 }
             }
@@ -1696,7 +1698,9 @@ void SketchObject::onSketchRestore()
                                     missing = missing
                                         || egf->testFlag(ExternalGeometryExtension::Missing);
                                     guessed = guessed
-                                        || egf->testFlag(ExternalGeometryExtension::TypeGuessed);
+                                        || egf->testFlag(ExternalGeometryExtension::TypeGuessed)
+                                        || egf->testFlag(
+                                            ExternalGeometryExtension::TypeUndecided);
                                 }
                             }
                         }
