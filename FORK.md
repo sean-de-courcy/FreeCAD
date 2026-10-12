@@ -302,7 +302,8 @@ names it.
 | `fix/252-sketcher-minors` | fix | ops#252 | - | `integration` `0ee3ee9a56` | `7e1d79cd66` (fork PR 269), 2026-10-11 | never (fork fix) |
 | `fix/276-migrate-element-links` | fix | ops#276 | - | `integration` `e4c9812861` | `1271eefb7b` (fork PR 274), 2026-10-11 | never (fork fix) |
 | `fix/171-paste-uncopied-expression` | fix | ops#171 | - | `integration` `e4c9812861` | `918f8ba271` (fork PR 275), 2026-10-11 | never (fork fix) |
-| `fix/292-refined-merged-side` | fix | ops#292 | - | `integration` `9e69e1564f` | (fork PR 276) | never (fork fix) |
+| `fix/292-refined-merged-side` | fix | ops#292 | - | `integration` `9e69e1564f` | `5c7276ebd4` (fork PR 276), 2026-10-11 | never (fork fix) |
+| `feat/300-fillet-fallback` | feat | ops#300 | - | `integration` `7e1d79cd66` | (fork PR 278) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

@@ -84,6 +84,7 @@ set(Part_tests
     parttests/TaskFaceAppearancesTest.py
     parttests/TopoShapeTest.py
     parttests/ElementReferenceTest.py
+    parttests/FilletFallbackTest.py
     parttests/ReferenceFingerprintTest.py
     parttests/InternNamesTest.py
     parttests/TestTangentMode3-0.21.FCStd
