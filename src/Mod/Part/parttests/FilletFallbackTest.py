@@ -318,7 +318,11 @@ class InvalidDressUpTest(unittest.TestCase):
             self.assertTrue(shape.isValid())
             self.assertEqual(len(shape.Solids), 1)
             self.assertEqual(len(shape.Faces), len(raw.Faces))
-            self.assertAlmostEqual(shape.Area, raw.Area, delta=1e-6 * raw.Area)
+            # raw is a second OCCT run, not the one the feature repaired: on macOS the chamfer's
+            # (planar) faces came out 1.1e-6 apart in total between the two, the repair accepted
+            # (each face within 1e-6 of the feature's own run). A wrong repair adds faces and
+            # about 1 % of the area (the notch)
+            self.assertAlmostEqual(shape.Area, raw.Area, delta=1e-5 * raw.Area)
             removed = 4000 / 3 - shape.Volume
             self.assertGreater(removed, bounds[kind][0])
             self.assertLess(removed, bounds[kind][1])
