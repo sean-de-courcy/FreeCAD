@@ -641,11 +641,11 @@ class BodyReorderBase:
 
     def testDressUpBaseWithoutAShapeMovedBelowIt(self):
         """Boss A, with no shape (never computed), moved below the chamfer on its edge: there is no
-        element to carry to the block, the chamfer's new base. Without the solver the Base goes
-        to the block with its reference missing, the name taken from the link's shadow (fork PR
-        282 review, F2); with the solver it is cleared. The chamfer stays on the block
-        (BaseFeature), so the chain holds, and a re-pick of a block's edge makes it compute (fork
-        PR 270 round 1 verification)."""
+        element to carry to the block, the chamfer's new base. The Base goes to the block with its
+        reference missing, the name taken from the link's shadow (fork PR 282 review, F2; with the
+        solver since round 2 verification, A, where it was cleared before). The block has no such
+        edge: the chamfer fails. It stays on the block (BaseFeature), so the chain holds, and a
+        re-pick of a block's edge makes it compute (fork PR 270 round 1 verification)."""
         block = self.block()
         a = self.boss("BossA", 1, 1)
         self.recompute()
@@ -660,12 +660,9 @@ class BodyReorderBase:
         self.body.reorderObject([a], chamfer, True)
         self.doc.commitTransaction()
         self.assertChain(block, chamfer, a)
-        if self.solver:
-            self.assertIsNone(chamfer.Base)
-        else:
-            target, subs = chamfer.Base
-            self.assertIs(target, block)
-            self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
         self.assertIs(chamfer.BaseFeature, block)
         self.recompute()
         self.assertFalse(chamfer.isValid())
@@ -676,6 +673,45 @@ class BodyReorderBase:
         self.assertChain(block, chamfer, a)
         self.assertValid(block, chamfer, a)
         self.assertBody(BLOCK - 0.5**2 / 2 * 10 + BOSS)
+
+    def testDressUpOnABaseWithoutAShapeMovedPastAFeature(self):
+        """A fillet (r 1) on the block's top front edge, through the hole, and a notch 3 x 3 x 2
+        away from that edge; the hole has no shape (never computed) and the fillet is moved below
+        the notch, not past its own base. The notch is the fillet's new base: the Base goes there
+        with its reference missing, the name taken from the link's shadow, also with the solver,
+        whose relink otherwise reads the old base's shape (fork PR 282 round 2 verification, A:
+        before, a solver document kept the link on the hole, no longer before the fillet, without a
+        word). The notch leaves the edge alone, so it resolves there: same body as before."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        fillet.Base = (hole, [edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))])
+        fillet.Radius = 1
+        self.recompute()
+        sketch = models.sketch(
+            self.doc, "NotchSketch", models.rectangle(14, 14, 17, 17), self.body, z=10
+        )
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(fillet, notch)
+        expected = BLOCK - HOLE - (1 - math.pi / 4) * 20 - 3 * 3 * 2
+        self.assertBody(expected)
+        hole.Shape = Part.Shape()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([fillet], notch, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        self.recompute()
+        self.assertValid(hole, notch, fillet)
+        target, [sub] = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(isTopFrontLine(notch.Shape.getElement(sub), 0, 20), sub)
+        self.assertBody(expected)
 
     def testSaveAndReopenWithARecord(self):
         """The hole moved above Pad2, saved and reopened: the support is still on the block with

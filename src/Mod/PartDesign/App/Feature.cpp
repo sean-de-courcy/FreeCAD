@@ -467,8 +467,11 @@ bool Feature::relinkToMatchingSubelements(
             return true;
         }
     }
-    if (newFeature && follow && !solver) {
-        if (relinkAsMissing(link, oldShape, newBase, false)) {
+    // A solver document's relink above needs the old base's shape: from an old base without one
+    // (a feature that never computed) the names come from the link's shadows here too, or the link
+    // stays on an object no longer before the owner (fork PR 282 round 2 verification, A)
+    if (newFeature && follow && (!solver || oldShape.isNull())) {
+        if (relinkAsMissing(link, oldShape, newBase, solver)) {
             // With its references missing; also from an old base without a shape (one that
             // failed), the names coming from the link's shadows (fork PR 282 review, F2). In a
             // reorder the new base still has its shape from before the reorder, which can hold
