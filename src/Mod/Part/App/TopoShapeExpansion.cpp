@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -95,6 +96,7 @@
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_Curve.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
+#include <StdFail_NotDone.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
@@ -111,6 +113,7 @@
 
 #include "modelRefine.h"
 #include "CrossSection.h"
+#include "FilletFallback.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
 #include "TopoShapeCache.h"
@@ -5819,6 +5822,41 @@ TopoShape& TopoShape::removeElementShape(const TopoShape& shape, const std::vect
     return *this;
 }
 
+namespace
+{
+/** Builds a fillet or chamfer maker: true when OCCT fails with StdFail_NotDone, the failure the
+ * exact construction may build instead (ops#300). Other exceptions propagate as before.
+ * @param error Receives what OCCT threw, if it threw
+ */
+bool buildDressUpFailed(BRepBuilderAPI_MakeShape& maker, std::exception_ptr& error)
+{
+    try {
+        maker.Build();
+    }
+    catch (const StdFail_NotDone&) {
+        error = std::current_exception();
+        return true;
+    }
+    return !maker.IsDone();
+}
+
+/** Raises OCCT's error for a maker that failed, as before the exact construction: what it threw,
+ * or StdFail_NotDone. The maker must not be built again: ChFi3d crashes on a second build after a
+ * failed one.
+ */
+[[noreturn]] void raiseDressUpError(
+    const BRepBuilderAPI_MakeShape& maker,
+    const std::exception_ptr& error
+)
+{
+    if (error) {
+        std::rethrow_exception(error);
+    }
+    maker.Check();
+    throw StdFail_NotDone("BRep_API: command not done");
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementFillet(
     const TopoShape& shape,
     const std::vector<TopoShape>& edges,
@@ -5847,6 +5885,17 @@ TopoShape& TopoShape::makeElementFillet(
             FC_THROWM(Base::CADKernelError, "edge does not belong to the shape");
         }
         mkFillet.Add(radius1, radius2, TopoDS::Edge(edge));
+    }
+    std::exception_ptr occtError;
+    if (buildDressUpFailed(mkFillet, occtError)) {
+        FilletFallback::Request request;
+        request.kind = FilletFallback::Kind::Fillet;
+        request.size1 = radius1;
+        request.size2 = radius2;
+        if (FilletFallback::build(*this, shape, edges, request, op)) {
+            return *this;
+        }
+        raiseDressUpError(mkFillet, occtError);
     }
     return makeElementShape(mkFillet, shape, op);
 }
@@ -5911,6 +5960,19 @@ TopoShape& TopoShape::makeElementChamfer(
         }
     }
     Part::SignalException sig;
+    std::exception_ptr occtError;
+    if (buildDressUpFailed(mkChamfer, occtError)) {
+        FilletFallback::Request request;
+        request.kind = FilletFallback::Kind::Chamfer;
+        request.size1 = radius1;
+        request.size2 = radius2;
+        request.chamferType = chamferType;
+        request.flipDirection = flipDirection;
+        if (FilletFallback::build(*this, shape, edges, request, op)) {
+            return *this;
+        }
+        raiseDressUpError(mkChamfer, occtError);
+    }
     return makeElementShape(mkChamfer, shape, op);
 }
 

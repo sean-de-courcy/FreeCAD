@@ -586,6 +586,8 @@ SET(Part_SRCS
     Services.h
     SignalException.cpp
     SignalException.h
+    FilletFallback.cpp
+    FilletFallback.h
     TopoShape.cpp
     TopoShape.h
     TopoShapeCache.cpp

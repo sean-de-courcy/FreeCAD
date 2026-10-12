@@ -258,10 +258,9 @@ class TestFillet(unittest.TestCase):
         self._assertValidFillet(bottom, volume1 - self._fillet_section(r) * path)
         self._assertBaseKept(rounded, tolerances)
 
-    def testFilletConsumingWholeFaceFails(self):
-        # Known OCCT limitation (checked on OCCT 8.0.1): two fillets whose radius is half the
-        # width of the face between them leave nothing of it, and OCCT fails. The feature must
-        # report the error rather than produce a shape. If this starts to pass, OCCT has changed.
+    def testFilletConsumingWholeFace(self):
+        # OCCT (8.0.1) fails when two fillets whose radius is half the width of the face between
+        # them leave nothing of it; the exact construction builds the full round (ops#300)
         body = self.Doc.addObject("PartDesign::Body", "Body")
         box = self._add_box(body, 30, 4, 20)
         edges = [
@@ -272,8 +271,9 @@ class TestFillet(unittest.TestCase):
         self._assertValidFillet(fillet, 30 * 4 * 20 - 2 * self._fillet_section(1.9) * 30)
         fillet.Radius = 2.0
         self.Doc.recompute()
-        self.assertFalse(fillet.isValid())
-        self.assertTrue(box.Shape.isValid())
+        self._assertValidFillet(fillet, 30 * 4 * 20 - 2 * self._fillet_section(2.0) * 30)
+        # One quarter cylinder per edge; refined, they merge into one half cylinder
+        self.assertEqual(len(fillet.Shape.Faces), 6 if fillet.Refine else 7)
 
     # Results that the full check rejects too (ops#12): the base is a 10 mm cube with a fin, a
     # face hanging inward at 45 degrees from the front bottom edge, so that three faces meet at

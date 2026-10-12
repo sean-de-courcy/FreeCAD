@@ -10,6 +10,7 @@ add_executable(Part_tests_run
         FeatureCompound.cpp
         FeatureExtrusion.cpp
         FeatureFillet.cpp
+        FilletFallback.cpp
         FeatureMirroring.cpp
         FeatureOffset.cpp
         FeaturePartBoolean.cpp
