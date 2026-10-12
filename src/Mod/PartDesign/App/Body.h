@@ -206,8 +206,9 @@ protected:
 private:
     /// Sets feature's BaseFeature to newBase (if it differs) and reroutes the references that
     /// follow the base (onBaseFeatureRerouted()); every change of the chain goes through it
-    /// (ops#127, notes/reorder-rollback-design.md 2.2)
-    void rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase);
+    /// (ops#127, notes/reorder-rollback-design.md 2.2). reorder: the change is a reorder's
+    /// (reorderObject()), not an insert or a delete (ops#291)
+    void rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase, bool reorder = false);
 
     fastsignals::scoped_connection connection;
     bool showTip = false;

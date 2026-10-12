@@ -118,7 +118,13 @@ public:
     /// Called by Body::removeObject() when this feature's BaseFeature is
     /// rerouted around a deleted feature. Subclasses may reroute only the
     /// subelement links that are known to follow BaseFeature.
-    virtual void onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase);
+    /// FreeCAD-CH: also by an insert and a reorder (ops#127); reorder is true for a reorder's
+    /// (Body::reorderObject(), ops#291)
+    virtual void onBaseFeatureRerouted(
+        App::DocumentObject* oldBase,
+        App::DocumentObject* newBase,
+        bool reorder
+    );
 
     App::DocumentObject* getSubObject(
         const char* subname,
@@ -145,7 +151,8 @@ protected:
     static bool relinkToMatchingSubelements(
         App::PropertyLinkSub& link,
         App::DocumentObject* oldBase,
-        App::DocumentObject* newBase
+        App::DocumentObject* newBase,
+        bool reorder
     );
 
     /**

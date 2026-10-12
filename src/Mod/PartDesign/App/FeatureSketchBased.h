@@ -280,7 +280,11 @@ protected:
     ) const;
 
     void onChanged(const App::Property* prop) override;
-    void onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase) override;
+    void onBaseFeatureRerouted(
+        App::DocumentObject* oldBase,
+        App::DocumentObject* newBase,
+        bool reorder
+    ) override;
 
 private:
     bool isParallelPlane(const TopoDS_Shape&, const TopoDS_Shape&) const;

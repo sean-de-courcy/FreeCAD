@@ -246,7 +246,11 @@ TopoShape Feature::getSolid(const TopoShape& shape) const
     return shape;
 }
 
-void Feature::onBaseFeatureRerouted(App::DocumentObject* /*oldBase*/, App::DocumentObject* /*newBase*/)
+void Feature::onBaseFeatureRerouted(
+    App::DocumentObject* /*oldBase*/,
+    App::DocumentObject* /*newBase*/,
+    bool /*reorder*/
+)
 {}
 
 namespace
@@ -438,7 +442,8 @@ bool relinkByName(
 bool Feature::relinkToMatchingSubelements(
     App::PropertyLinkSub& link,
     App::DocumentObject* oldBase,
-    App::DocumentObject* newBase
+    App::DocumentObject* newBase,
+    bool reorder
 )
 {
     if (!oldBase || link.getValue() != oldBase) {
@@ -446,9 +451,13 @@ bool Feature::relinkToMatchingSubelements(
     }
     // A reorder that moved the old base below the owner (ops#285): left there, the link would
     // make a dependency cycle, which the reorder's cycle check doesn't see because it plans this
-    // link on the new base (N1 3.5). A link left on an earlier object (insert at the bar, N1 2.2)
-    // stays as it is.
+    // link on the new base (N1 3.5).
     const bool cycle = comesAfterOwner(link, oldBase);
+    // Any other reorder (ops#291, PLAN decision 50): left on the old base, an earlier object, the
+    // link would point at an object no longer before the owner in the chain, which a re-pick can't
+    // tell from a link that works. A link left on an earlier object by an insert at the bar (N1
+    // 2.2, decision 48) stays as it is.
+    const bool follow = cycle || reorder;
 
     auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
@@ -463,12 +472,31 @@ bool Feature::relinkToMatchingSubelements(
         else if (relinkByName(link, oldFeature, newFeature)) {
             return true;
         }
-        else if (cycle && relinkAsMissing(link, oldShape, newBase, false)) {
-            // with its references missing, so the owner fails until they are re-picked
+        else if (follow && relinkAsMissing(link, oldShape, newBase, false)) {
+            // with its references missing. In a reorder the new base still has its shape from
+            // before the reorder, which can hold the owner's own result (a fillet's faces where
+            // its edge was): the name is looked up again when the new base recomputes, and a
+            // reference found then resolves (an edge the new base leaves alone); one that isn't
+            // makes the owner fail until it is re-picked
+            std::string missing;
+            for (const auto& sub : link.getSubValues()) {
+                if (Data::hasMissingElement(sub.c_str())) {
+                    missing += (missing.empty() ? "" : ", ") + sub;
+                }
+            }
+            if (!missing.empty()) {
+                FC_WARN(
+                    link.getFullName()
+                    << ": moved by a reorder to " << newBase->getFullName()
+                    << " with its references missing (" << missing
+                    << "): they are looked up by name when it recomputes, and those it doesn't "
+                       "have must be picked again"
+                );
+            }
             return true;
         }
     }
-    if (!cycle) {
+    if (!follow) {
         return false;
     }
     // No new base (the owner is now the first solid), an old base that never computed, or a
@@ -480,7 +508,8 @@ bool Feature::relinkToMatchingSubelements(
     }
     FC_WARN(
         link.getFullName() << ": cleared its link to " << oldBase->getFullName() << " (" << subs
-                           << "), which a reorder moved below it"
+                           << (cycle ? "), which a reorder moved below it"
+                                     : "), whose references a reorder couldn't carry")
     );
     link.setValue(nullptr);
     // A dress-up's BaseFeature follows its Base, so the clear has just nulled the BaseFeature the

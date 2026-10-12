@@ -8,8 +8,5 @@
 
 issue: ops#291
 
-reason: seed 2 step 6 (reorder F7Fillet down 2, after F4Hole): without the solver the fillet's Base stays on F2Hole instead of following to F4Hole
-cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2
-cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2multi
-cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V2i
+reason: seed 2 step 6 (reorder F7Fillet down 2, after F4Hole), V1 only since the fix: the fillet's Base goes to F4Hole with its edge missing and stays red, though the edge is there: V1 names carry the whole chain, so F2Hole's name (the shadow) doesn't match F4Hole's exactly
 cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V1

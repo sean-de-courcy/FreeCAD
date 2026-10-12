@@ -2312,8 +2312,118 @@ class BodyReorderBase:
         self.recompute()
         self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
 
+def isTopFrontLine(edge, x0, x1):
+    """A line on the block's top front edge (y = 0, z = 10) from x0 to x1."""
+    if not isinstance(edge.Curve, Part.Line):
+        return False
+    xs = sorted(v.Point.x for v in edge.Vertexes)
+    return all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in edge.Vertexes) and (
+        abs(xs[0] - x0) < TOL and abs(xs[1] - x1) < TOL
+    )
+
+
+NOTCH = 4 * 3 * 2  # x 8 to 12, y 0 to 3 (its sketch reaches y = -1), 2 deep
+
+
 class TestBodyReorderV2(BodyReorderBase, unittest.TestCase):
     solver = False
+
+    # -- without the solver, a reorder without a cycle (ops#291, PLAN decision 50) -------------
+
+    def filletOnTheTopFrontEdge(self, notchOnTheEdge=True):
+        """The block, the hole, a 1 mm fillet on the top front edge (on the hole), then a notch
+        pocketed across that edge's middle (or, with notchOnTheEdge false, away from it)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        edge = edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))
+        mapped = hole.Shape.ElementReverseMap[edge]
+        mapped = mapped[0] if isinstance(mapped, (list, tuple)) else mapped
+        fillet.Base = (hole, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        rect = models.rectangle(8, -1, 12, 3) if notchOnTheEdge else models.rectangle(14, 14, 17, 17)
+        sketch = models.sketch(self.doc, "NotchSketch", rect, self.body, z=10)
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.recompute()
+        self.assertValid(hole, fillet, notch)
+        return block, hole, fillet, notch, edge, mapped
+
+    def testDressUpBaseFollowsAReorderWithoutAMatch(self):
+        """The fillet moved below the notch that cuts its edge in two: no element of the notch
+        has the edge's name. The Base goes to the notch with its reference missing, the edge's
+        name kept as the shadow, rather than staying on the hole, an earlier object the fillet
+        no longer follows; the fillet fails until a re-pick (ops#291)."""
+        block, hole, fillet, notch, edge, mapped = self.filletOnTheTopFrontEdge()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([fillet], notch, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertTrue(subs and all(s.startswith("?") for s in subs), subs)
+        [shadow] = self.savedShadows(fillet, "Base")
+        self.assertIn(mapped, shadow)
+        self.recompute()
+        self.assertFalse(fillet.isValid())
+        self.assertValid(hole, notch)
+        self.assertAlmostEqual(notch.Shape.Volume, BLOCK - HOLE - NOTCH, delta=1e-4)
+        self.assertNotTouched(fillet, notch)
+
+        # re-picked: the edge's left piece on the notch
+        fillet.Base = (notch, [edgeWhere(notch.Shape, lambda e: isTopFrontLine(e, 0, 8))])
+        self.recompute()
+        self.assertValid(notch, fillet)
+        self.assertChain(block, hole, notch, fillet)
+
+        self.doc.undo()  # the reorder (the re-pick was outside a transaction)
+        self.assertChain(block, hole, fillet, notch)
+        self.assertEqual(fillet.Base, (hole, [edge]))
+        self.recompute()
+        self.assertValid(hole, fillet, notch)
+
+    def testDressUpBaseFollowsAReorderToAnEdgeItKeeps(self):
+        """The same with the notch away from the fillet's edge. At the reorder the notch still
+        has its shape from before, on the fillet's result, where the edge is gone, so the Base
+        goes to the notch with its reference missing; the notch's recompute finds the edge by its
+        name, which a notch away from it leaves alone, and the fillet stays valid, the same
+        solid (ops#291)."""
+        block, hole, fillet, notch, edge, mapped = self.filletOnTheTopFrontEdge(False)
+        volume = notch.Shape.Volume  # the body's solid, the tip
+
+        self.body.reorderObject([fillet], notch, True)
+        self.assertChain(block, hole, notch, fillet)
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.recompute()
+        target, subs = fillet.Base
+        self.assertIs(target, notch)
+        self.assertEqual(len(subs), 1)
+        self.assertFalse(subs[0].startswith("?"), subs)
+        self.assertTrue(isTopFrontLine(notch.Shape.getElement(subs[0]), 0, 20), subs)
+        self.assertValid(notch, fillet)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume, delta=1e-4)
+
+    def testInsertAtTheBarKeepsTheDressUpLink(self):
+        """The same notch inserted at the bar before the fillet: the fillet's BaseFeature is the
+        notch, but its Base stays on the hole (N1 2.2, PLAN decision 48): only a reorder moves it
+        (ops#291)."""
+        block = self.block()
+        hole = self.hole()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        edge = edgeWhere(hole.Shape, lambda e: isTopFrontLine(e, 0, 20))
+        fillet.Base = (hole, [edge])
+        fillet.Radius = 1
+        self.recompute()
+        self.body.rollTo(hole)
+        sketch = models.sketch(self.doc, "NotchSketch", models.rectangle(8, -1, 12, 3), self.body, z=10)
+        notch = models.pocket(self.body, sketch, 2, "Notch")
+        self.body.rollToEnd()
+        self.assertChain(block, hole, notch, fillet)
+        self.assertEqual(fillet.Base, (hole, [edge]))
 
 
 class TestBodyReorderV2s(BodyReorderBase, unittest.TestCase):

@@ -370,9 +370,13 @@ void DressUp::onChanged(const App::Property* prop)
     Feature::onChanged(prop);
 }
 
-void DressUp::onBaseFeatureRerouted(App::DocumentObject* oldBase, App::DocumentObject* newBase)
+void DressUp::onBaseFeatureRerouted(
+    App::DocumentObject* oldBase,
+    App::DocumentObject* newBase,
+    bool reorder
+)
 {
-    relinkToMatchingSubelements(Base, oldBase, newBase);
+    relinkToMatchingSubelements(Base, oldBase, newBase, reorder);
 }
 
 void DressUp::getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& subShape)

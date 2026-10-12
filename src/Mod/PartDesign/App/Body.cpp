@@ -265,7 +265,7 @@ void Body::rollToEnd()
     }
 }
 
-void Body::rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase)
+void Body::rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBase, bool reorder)
 {
     auto pd = freecad_cast<PartDesign::Feature*>(feature);
     if (!pd) {
@@ -276,7 +276,7 @@ void Body::rerouteBase(App::DocumentObject* feature, App::DocumentObject* newBas
         return;
     }
     pd->BaseFeature.setValue(newBase);
-    pd->onBaseFeatureRerouted(oldBase, newBase);
+    pd->onBaseFeatureRerouted(oldBase, newBase, reorder);
 }
 
 App::DocumentObject* Body::getPrevSolidFeature(App::DocumentObject* start)
@@ -604,8 +604,10 @@ void Body::reorderObject(const std::vector<App::DocumentObject*>& objs,
                          App::DocumentObject* target,
                          bool after)
 {
+    // a reorder's reroute: without the solver, a link that finds no match on its new base goes
+    // to it with its references missing (ops#291)
     reorderBody(*this, objs, target, after, [this](App::DocumentObject* f, App::DocumentObject* b) {
-        rerouteBase(f, b);
+        rerouteBase(f, b, true);
     });
 }
 
