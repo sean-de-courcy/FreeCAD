@@ -26,18 +26,21 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <numbers>
 #include <optional>
 #include <ranges>
 #include <string>
 #include <utility>
 #include <vector>
+#include <Bnd_Box.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -49,13 +52,17 @@
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ElementarySurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <GeomAPI_ExtremaCurveSurface.hxx>
+#include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GProp_GProps.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -297,18 +304,14 @@ TopoDS_Face reachableUpToFace(
         const double reach = elementary->Location().Distance(axis.Location())
             + 2.0 * (axis.Location().Distance(center) + bounds.CalcDiagonalLength() / 2.0);
         const double limit = 2.0 * reach + radius + 1.0;
+        // Only infinite bounds: a cylinder's or cone's periodic range, cut to the limit, lost
+        // part of the surface when the limit was under 2 pi (the PR 273 verification's Low).
         auto clamp = [limit](Standard_Real& low, Standard_Real& high) {
-            const Standard_Real clampedLow = std::max(low, -limit);
-            const Standard_Real clampedHigh = std::min(high, limit);
-            if (clampedLow < clampedHigh) {
-                low = clampedLow;
-                high = clampedHigh;
+            if (Precision::IsInfinite(low)) {
+                low = Precision::IsInfinite(high) ? -limit : std::min(-limit, high - 1.0);
             }
-            else if (Precision::IsInfinite(low)) {
-                low = high - 1.0;
-            }
-            else if (Precision::IsInfinite(high)) {
-                high = low + 1.0;
+            if (Precision::IsInfinite(high)) {
+                high = std::max(limit, low + 1.0);
             }
         };
         clamp(uMin, uMax);
@@ -381,11 +384,16 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
     return false;
 }
 
-// Points of the profile: its vertices, points along its edges, and points inside its faces (a
-// grid over each face's bounds, and the face classifier's own point).
+// Points of a profile or a face: its vertices, points along its edges (one per sixteenth of its
+// bounding box's diagonal, from one up to seven per edge: a profile of many short edges cost 7
+// distance checks per edge), and points inside its faces (a grid over each face's bounds, and the
+// face classifier's own point).
 std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
 {
     std::vector<gp_Pnt> points;
+    Bnd_Box box;
+    BRepBndLib::Add(profile, box);
+    const double spacing = box.IsVoid() ? 0.0 : std::sqrt(box.SquareExtent()) / 16.0;
     for (TopExp_Explorer vertices(profile, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
         points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current())));
     }
@@ -395,11 +403,15 @@ std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
             continue;
         }
         BRepAdaptor_Curve curve(edge);
-        constexpr int samples = 8;
-        for (int i = 1; i < samples; ++i) {
+        int samples = 7;
+        if (spacing > Precision::Confusion()) {
+            const double length = GCPnts_AbscissaPoint::Length(curve);
+            samples = std::clamp(static_cast<int>(std::ceil(length / spacing)), 1, 7);
+        }
+        for (int i = 1; i <= samples; ++i) {
             points.push_back(curve.Value(
                 curve.FirstParameter()
-                + (curve.LastParameter() - curve.FirstParameter()) * i / samples
+                + (curve.LastParameter() - curve.FirstParameter()) * i / (samples + 1)
             ));
         }
     }
@@ -438,12 +450,62 @@ std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
     return points;
 }
 
+// Whether a circle surely meets a face: a point where it crosses or touches the face's surface
+// lies on the face (the face classifier says in or on, within the tolerance). Quick, unlike the
+// exact distance to a face of many edges (16 ms a circle against 84 edges); false means only
+// "not shown", for the exact distance to settle.
+bool circleMeetsFaceQuickly(const gp_Circ& circle, const TopoDS_Face& face, double tolerance)
+{
+    try {
+        const Handle(Geom_Circle) curve = new Geom_Circle(circle);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        std::vector<gp_Pnt2d> candidates;
+        GeomAPI_IntCS crossing(curve, surface);
+        if (crossing.IsDone()) {
+            for (int i = 1; i <= crossing.NbPoints(); ++i) {
+                Standard_Real u = 0.0;
+                Standard_Real v = 0.0;
+                Standard_Real w = 0.0;
+                crossing.Parameters(i, u, v, w);
+                candidates.emplace_back(u, v);
+            }
+        }
+        GeomAPI_ExtremaCurveSurface touching(curve, surface);
+        if (!touching.Extrema().IsParallel()) {
+            for (int i = 1; i <= touching.NbExtrema(); ++i) {
+                if (touching.Distance(i) > tolerance) {
+                    continue;
+                }
+                Standard_Real w = 0.0;
+                Standard_Real u = 0.0;
+                Standard_Real v = 0.0;
+                touching.Parameters(i, w, u, v);
+                candidates.emplace_back(u, v);
+            }
+        }
+        for (const gp_Pnt2d& uv : candidates) {
+            BRepClass_FaceClassifier classifier(face, uv, tolerance);
+            if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
+                return true;
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        // Not shown: the exact distance decides.
+    }
+    return false;
+}
+
 // Whether a point of the profile never meets the up-to face as it turns about the axis: its
 // circle stays farther than the tolerance from the face. That part of the profile has nowhere to
 // stop, and BRepFeat revolved it all the way round or not at all, with no error: a face touching
 // the profile's boundary where the profile's nearer points never reach it, or a face trimmed
-// away from the profile plane (the PR 273 review's M3). The points are samples: a gap in the
-// face's reach that passes between them goes unnoticed.
+// away from the profile plane (the PR 273 review's M3). The points are samples of the profile,
+// plus the profile's points on the circles through samples inside each hole of the face (an
+// inner wire): BRepFeat keeps the hole, and a part of the profile that turns through a hole
+// smaller than the samples' spacing went on round the axis (the PR 273 verification's hole). A
+// gap in the face's reach from its outer boundary (a notch) that passes between the samples
+// still goes unnoticed.
 bool profileMissesFace(
     const TopoShape& profile,
     const TopoDS_Face& face,
@@ -452,27 +514,99 @@ bool profileMissesFace(
 )
 {
     const gp_Lin line(axis);
+    auto circleThrough = [&](const gp_Pnt& point) {
+        const double radius = line.Distance(point);
+        if (radius <= Precision::Confusion()) {
+            return BRepBuilderAPI_MakeVertex(point).Shape();
+        }
+        const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
+        return BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(center, axis.Direction()), radius)).Shape();
+    };
+    auto distanceTo = [](const TopoDS_Shape& probe, const TopoDS_Shape& shape) {
+        BRepExtrema_DistShapeShape distance(probe, shape);
+        if (!distance.IsDone()) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not check whether the profile meets the up-to face"
+            ));
+        }
+        return distance.Value();
+    };
+    // The range of distances from the axis and of heights along it that a set of points covers:
+    // a hole outside the profile's range has no profile point turning through it.
+    struct Range
+    {
+        double radiusMin = std::numeric_limits<double>::max();
+        double radiusMax = std::numeric_limits<double>::lowest();
+        double heightMin = std::numeric_limits<double>::max();
+        double heightMax = std::numeric_limits<double>::lowest();
+        void add(const gp_Pnt& point, const gp_Lin& axisLine)
+        {
+            const double radius = axisLine.Distance(point);
+            const double height = ElCLib::Parameter(axisLine, point);
+            radiusMin = std::min(radiusMin, radius);
+            radiusMax = std::max(radiusMax, radius);
+            heightMin = std::min(heightMin, height);
+            heightMax = std::max(heightMax, height);
+        }
+        bool overlaps(const Range& other, double margin) const
+        {
+            return radiusMin <= other.radiusMax + margin && other.radiusMin <= radiusMax + margin
+                && heightMin <= other.heightMax + margin && other.heightMin <= heightMax + margin;
+        }
+    };
     try {
+        Range profileRange;
         for (const gp_Pnt& point : profileSamples(profile.getShape())) {
+            profileRange.add(point, line);
             const double radius = line.Distance(point);
-            TopoDS_Shape probe;
-            if (radius <= Precision::Confusion()) {
-                probe = BRepBuilderAPI_MakeVertex(point).Shape();
-            }
-            else {
+            if (radius > Precision::Confusion()) {
                 const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
-                probe = BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(center, axis.Direction()), radius))
-                            .Shape();
+                const gp_Circ circle(gp_Ax2(center, axis.Direction()), radius);
+                if (circleMeetsFaceQuickly(circle, face, tolerance)) {
+                    continue;
+                }
             }
-            BRepExtrema_DistShapeShape distance(probe, face);
-            if (!distance.IsDone()) {
+            if (distanceTo(circleThrough(point), face) > tolerance) {
+                return true;
+            }
+        }
+        const TopoDS_Wire outer = BRepTools::OuterWire(face);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        for (TopExp_Explorer wires(face, TopAbs_WIRE); wires.More(); wires.Next()) {
+            const TopoDS_Wire& wire = TopoDS::Wire(wires.Current());
+            if (wire.IsSame(outer)) {
+                continue;
+            }
+            BRepBuilderAPI_MakeFace hole(surface, wire, Standard_True);
+            if (!hole.IsDone()) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not check whether the profile meets the up-to face"
                 ));
             }
-            if (distance.Value() > tolerance) {
-                return true;
+            const std::vector<gp_Pnt> holePoints = profileSamples(hole.Face());
+            Range holeRange;
+            for (const gp_Pnt& point : holePoints) {
+                holeRange.add(point, line);
+            }
+            // The samples of the profile and the hole stand for their whole extents to within
+            // a sixteenth of their size; the margin covers more than that.
+            Bnd_Box holeBox;
+            BRepBndLib::Add(hole.Face(), holeBox);
+            Bnd_Box profileBox;
+            BRepBndLib::Add(profile.getShape(), profileBox);
+            const double margin = tolerance
+                + (std::sqrt(holeBox.SquareExtent()) + std::sqrt(profileBox.SquareExtent())) / 4.0;
+            if (!holeRange.overlaps(profileRange, margin)) {
+                continue;
+            }
+            for (const gp_Pnt& point : holePoints) {
+                const TopoDS_Shape circle = circleThrough(point);
+                if (distanceTo(circle, profile.getShape()) <= tolerance
+                    && distanceTo(circle, face) > tolerance) {
+                    return true;
+                }
             }
         }
     }
@@ -749,8 +883,9 @@ TopoShape secondSideUpToFace(
         catch (const Base::Exception& error) {
             throw Base::RuntimeError(
                 std::string("Symmetric: the second side's check revolves the first side up to the "
-                            "up-to face's whole surface, and that failed: ")
-                + error.what() + ". Use Two sides."
+                            "whole surface of the up-to face, and that failed. Use Two sides. "
+                            "The reason, said of that surface: ")
+                + error.what()
             );
         }
         catch (const Standard_Failure&) {

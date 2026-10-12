@@ -1640,14 +1640,14 @@ class TestRevolve(unittest.TestCase):
         """The face x = 1 of the box x in [-6, 1], y in [-4, 4], z in [0, 2] touches the profile
         x in [1, 3], z in [0, 2] along its edge x = 1, from where every point reaches it: the
         point at radius r meets the plane x = 1 after the angle acos(1 / r). One side adds
-        2 * the integral of r * acos(1 / r) from 1 to 3, two sides twice that."""
+        2 * the integral of r * acos(1 / r) from 1 to 3, two sides and Symmetric twice that."""
 
         def antiderivative(r):
             # integral of r * acos(1 / r) dr
             return r**2 / 2 * math.acos(1 / r) - math.sqrt(r**2 - 1) / 2
 
         added = 2 * (antiderivative(3) - antiderivative(1))
-        for sideType, sides in (("One side", 1), ("Two sides", 2)):
+        for sideType, sides in (("One side", 1), ("Two sides", 2), ("Symmetric", 2)):
             with self.subTest(sideType=sideType):
                 body = self.Doc.addObject("PartDesign::Body", "Body")
                 block, face = self.boxUpTo(body, (-6, 1), (-4, 4), (0, 2), 1)
@@ -1656,6 +1656,106 @@ class TestRevolve(unittest.TestCase):
                 self.assertEqual(len(revolution.Shape.Solids), 1)
                 self.assertGreater(added, 8)
                 self.assertAlmostEqual(revolution.Shape.Volume, 112 + sides * added, places=6)
+
+    def revolveUpToHoledWall(self, hole):
+        """profileAcross() revolved One side up to the face x = 0 of the box x in [-1, 0],
+        y in [0, 4], z in [-1, 3], with a square hole y in hole[0], z in hole[1] through it.
+        Each point at radius r meets the plane x = 0 at y = r, a quarter turn on."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 1
+        block.Width = 4
+        block.Height = 4
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, 0, -1), FreeCAD.Rotation())
+        (y0, y1), (z0, z1) = hole
+        cut = body.newObject("PartDesign::SubtractiveBox", "Hole")
+        cut.Length = 3
+        cut.Width = y1 - y0
+        cut.Height = z1 - z0
+        cut.Placement = FreeCAD.Placement(FreeCAD.Vector(-2, y0, z0), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(cut.Shape.Faces)
+            if abs(f.BoundBox.XMin) < 1e-9 and abs(f.BoundBox.XMax) < 1e-9 and f.Area > 10
+        ]
+        revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (cut, [wall]))
+        return cut, revolution
+
+    def testRevolutionUpToFaceWithSmallHoleInTheWay(self):
+        """A 0.05 x 0.05 hole in the wall of revolveUpToHoledWall() where profile points turn
+        through it: they never meet the face (BRepFeat keeps the hole; the tool was 45.5, round
+        the axis, instead of the quarter ring 4 pi, with no error). Between the profile's samples
+        (y in [1.75, 1.8], z in [0.4, 0.45]) the check missed it; on a sample (y in [1.65, 1.7],
+        z in [0.3, 0.35]) it failed. Both fail now, with the same error."""
+        for hole in (((1.75, 1.8), (0.4, 0.45)), ((1.65, 1.7), (0.3, 0.35))):
+            with self.subTest(hole=hole):
+                _, revolution = self.revolveUpToHoledWall(hole)
+                self.assertFalse(revolution.isValid())
+                self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithHoleOutOfTheWay(self):
+        """A hole in the wall of revolveUpToHoledWall() beyond the profile's reach (y in
+        [3.5, 3.6], radius > 3): the Revolution is valid, the box and the quarter ring from 0 to
+        90 degrees."""
+        cut, revolution = self.revolveUpToHoledWall(((3.5, 3.6), (0.4, 0.5)))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def testRevolutionUpToWholeCylinderNearTheAxisThroughProfile(self):
+        """A small profile x in [0.1, 0.2], z in [0, 0.1] on XZ about Z, up to the whole cylinder
+        of radius 0.15 about Y through the origin, turned half a turn about Y: the cylinder
+        cuts through the profile where its angle is about pi. The check's face on an unbounded
+        surface cut the cylinder's angle range to [0, 2.06] (under 2 pi, the PR 273
+        verification's Low), and missed the crossing."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 0.15
+        cylinder.Axis = FreeCAD.Vector(0, 1, 0)
+        face = Part.Face(cylinder)
+        face.rotate(FreeCAD.Vector(), FreeCAD.Vector(0, 1, 0), 180)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = face
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(0.1, 0),
+            FreeCAD.Vector(0.2, 0),
+            FreeCAD.Vector(0.2, 0.1),
+            FreeCAD.Vector(0.1, 0.1),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def testGrooveUpToFaceTouchingProfileWithinReach(self):
+        """A Groove of profileAcross() inside the box x in [1, 6], y in [-4, 4], z in [-1, 3], up
+        to its face x = 1, which touches the profile along its edge x = 1: each point at radius r
+        meets the plane x = 1 after acos(1 / r), inside the box. It removes 2 * the integral of
+        r * acos(1 / r) from 1 to 3 on one side, twice that on two sides and Symmetric."""
+
+        def antiderivative(r):
+            # integral of r * acos(1 / r) dr
+            return r**2 / 2 * math.acos(1 / r) - math.sqrt(r**2 - 1) / 2
+
+        removed = 2 * (antiderivative(3) - antiderivative(1))
+        for sideType, sides in (("One side", 1), ("Two sides", 2), ("Symmetric", 2)):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (1, 6), (-4, 4), (-1, 3), 1)
+                groove = self.revolveProfileUpTo(body, "Groove", sideType, (block, [face]))
+                self.assertTrue(groove.isValid(), groove.getStatusString())
+                self.assertEqual(len(groove.Shape.Solids), 1)
+                self.assertAlmostEqual(groove.Shape.Volume, 160 - sides * removed, places=6)
 
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
