@@ -620,7 +620,9 @@ class BodyReorderBase:
         self.recompute()
         self.assertValid(chamfer)
 
+        self.doc.openTransaction("Move")
         self.body.reorderObject([block], chamfer, True)
+        self.doc.commitTransaction()
         self.assertChain(chamfer, block)
         self.assertIsNone(chamfer.Base)
         self.assertNotIn(block, chamfer.OutList)
@@ -629,6 +631,44 @@ class BodyReorderBase:
         self.assertValid(block)
         self.assertNotTouched(chamfer, block)
         self.assertBody(BLOCK)
+
+        self.doc.undo()
+        self.assertChain(block, chamfer)
+        target, subs = chamfer.Base
+        self.assertIs(target, block)
+        self.recompute()
+        self.assertValid(block, chamfer)
+
+    def testDressUpBaseWithoutAShapeMovedBelowIt(self):
+        """Boss A, with no shape (never computed), moved below the chamfer on its edge: there is no
+        element to carry to the block, the chamfer's new base, so the Base is cleared. The chamfer
+        stays on the block (BaseFeature), so the chain holds, and a re-pick of a block's edge
+        makes it compute (fork PR 270 round 1 verification)."""
+        block = self.block()
+        a = self.boss("BossA", 1, 1)
+        self.recompute()
+        chamfer = self.body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (a, [edgeWhere(a.Shape, lambda e: isVerticalLineAt(e, 5, 1))])
+        chamfer.Size = 0.5
+        self.recompute()
+        self.assertValid(a, chamfer)
+        a.Shape = Part.Shape()
+
+        self.doc.openTransaction("Move")
+        self.body.reorderObject([a], chamfer, True)
+        self.doc.commitTransaction()
+        self.assertChain(block, chamfer, a)
+        self.assertIsNone(chamfer.Base)
+        self.assertIs(chamfer.BaseFeature, block)
+        self.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertValid(block, a)
+
+        chamfer.Base = (block, [edgeWhere(block.Shape, lambda e: isVerticalLineAt(e, 20, 0))])
+        self.recompute()
+        self.assertChain(block, chamfer, a)
+        self.assertValid(block, chamfer, a)
+        self.assertBody(BLOCK - 0.5**2 / 2 * 10 + BOSS)
 
     def testSaveAndReopenWithARecord(self):
         """The hole moved above Pad2, saved and reopened: the support is still on the block with

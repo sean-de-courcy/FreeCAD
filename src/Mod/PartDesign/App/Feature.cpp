@@ -483,6 +483,13 @@ bool Feature::relinkToMatchingSubelements(
                            << "), which a reorder moved below it"
     );
     link.setValue(nullptr);
+    // A dress-up's BaseFeature follows its Base, so the clear has just nulled the BaseFeature the
+    // reroute set: put the new base back, or the owner is off the chain and a re-pick doesn't
+    // mend it (fork PR 270 round 1 verification)
+    auto owner = freecad_cast<Feature*>(link.getContainer());
+    if (newBase && owner && !owner->BaseFeature.getValue()) {
+        owner->BaseFeature.setValue(newBase);
+    }
     return true;
 }
 
