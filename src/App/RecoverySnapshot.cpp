@@ -94,6 +94,8 @@ void writeRecoverySnapshotContents(const App::Document& doc, WriterT& writer)
     // Save() numbers the file's name table entries; the maps, written by writeFiles(), refer to
     // them by index (ops#6 T2)
     Data::NameRefCollector collector;
+    // A newer document's snapshot keeps its newer record (ops#323, Document::Save())
+    writer.setMode("ForkRecovery");
     doc.Save(writer);
 
     // Special handling for Gui document state.

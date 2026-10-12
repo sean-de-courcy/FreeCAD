@@ -39,6 +39,9 @@
 #include <filesystem>
 #include <format>
 #include <optional>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/bimap.hpp>
@@ -318,7 +321,9 @@ bool App::hasNewerForkTokens(const std::string& elementMapVersion)
         const std::string token = elementMapVersion.substr(start, end - start);
         if (token.size() > 1 && (token[0] == 'F' || token[0] == 'N')
             && token.find_first_not_of("0123456789", 1) == std::string::npos) {
-            const int value = std::atoi(token.c_str() + 1);
+            // More digits than an int holds: newer, whatever the number (no overflow)
+            const int value = token.size() > 10 ? std::numeric_limits<int>::max()
+                                                : std::atoi(token.c_str() + 1);
             if (value > (token[0] == 'F' ? reportedNamingRevision() : internedNamesForm)) {
                 return true;
             }
@@ -501,23 +506,95 @@ void restoreNameTable(Base::XMLReader& reader,
                         << summary.identical << " already known");
 }
 
+/// A whole-number attribute of the `Document` element (ops#323)
+struct IntAttribute
+{
+    int value = 0;
+    /// False when it is there but not a whole number in int's range: a newer or damaged file
+    bool readable = true;
+    std::string raw;
+};
+
+/// The attribute \a name of the element \a reader is at, 0 when it is missing. Never throws
+/// (`getAttribute<int>` does on "", "v9" or a number out of range, which aborted the open of
+/// exactly the files that must open with a warning, PR 293 review).
+IntAttribute intAttribute(Base::XMLReader& reader, const char* name)
+{
+    IntAttribute attribute;
+    if (!reader.hasAttribute(name)) {
+        return attribute;
+    }
+    attribute.raw = reader.getAttribute<const char*>(name);
+    errno = 0;
+    char* end = nullptr;
+    const long long value = std::strtoll(attribute.raw.c_str(), &end, 10);
+    if (attribute.raw.empty() || *end != '\0' || errno == ERANGE
+        || value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        attribute.readable = false;
+        return attribute;
+    }
+    attribute.value = static_cast<int>(value);
+    return attribute;
+}
+
+/// The marker of an attribute that isn't a whole number: newer, since this build can't tell
+std::string unreadableMarker(const char* name, const IntAttribute& attribute)
+{
+    return std::string(name) + " \"" + attribute.raw + "\" (unreadable)";
+}
+
+/// What the recovery snapshot of a newer document writes (ops#323): its markers, joined by this,
+/// on the `Document` element as `NewerFormat`, so a recovered document is newer again.
+constexpr const char* newerFormatSeparator = "; ";
+
 /// Notes the markers on the `Document` element \a reader is at that are above this build's
 /// (ops#323): read before its `NameTable` element is.
 void noteNewerMarkers(Base::XMLReader& reader, const Document* doc)
 {
-    const int release = reader.getAttribute<int>("ForkRelease", 0);
-    if (release > ForkRelease) {
-        noteNewerFormat(doc, "ForkRelease " + std::to_string(release));
+    const auto release = intAttribute(reader, "ForkRelease");
+    if (!release.readable) {
+        noteNewerFormat(doc, unreadableMarker("ForkRelease", release));
+    }
+    else if (release.value > ForkRelease) {
+        noteNewerFormat(doc, "ForkRelease " + std::to_string(release.value));
     }
     // Format 1, below this build's, never shipped (restoreNameTable())
-    const int format = reader.getAttribute<int>("NamingFormat", 0);
-    if (format > namingFormat) {
-        noteNewerFormat(doc, "NamingFormat " + std::to_string(format));
+    const auto format = intAttribute(reader, "NamingFormat");
+    if (!format.readable) {
+        noteNewerFormat(doc, unreadableMarker("NamingFormat", format));
     }
-    const int revision = reader.getAttribute<int>("NamingRevision", 0);
-    if (revision > reportedNamingRevision()) {
-        noteNewerFormat(doc, "NamingRevision " + std::to_string(revision));
+    else if (format.value > namingFormat) {
+        noteNewerFormat(doc, "NamingFormat " + std::to_string(format.value));
     }
+    const auto revision = intAttribute(reader, "NamingRevision");
+    if (!revision.readable) {
+        noteNewerFormat(doc, unreadableMarker("NamingRevision", revision));
+    }
+    else if (revision.value > reportedNamingRevision()) {
+        noteNewerFormat(doc, "NamingRevision " + std::to_string(revision.value));
+    }
+    // A recovery snapshot of a newer document: the markers it had (writeNewerFormat())
+    if (reader.hasAttribute("NewerFormat")) {
+        const std::string markers = reader.getAttribute<const char*>("NewerFormat");
+        const std::string separator = newerFormatSeparator;
+        std::size_t start = 0;
+        while (start < markers.size()) {
+            std::size_t end = markers.find(separator, start);
+            if (end == std::string::npos) {
+                end = markers.size();
+            }
+            if (end > start) {
+                noteNewerFormat(doc, markers.substr(start, end - start));
+            }
+            start = end + separator.size();
+        }
+    }
+}
+
+/// The naming format to read the name table in: an unreadable one is read as no known format
+int namingFormatOf(const IntAttribute& format)
+{
+    return format.readable ? format.value : -1;
 }
 
 /// Reports what \a remap did to the names of a load once it has read them all (ops#6).
@@ -1662,8 +1739,23 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
              << writer.getFileVersion() << "\" StringHasher=\"1\"";
-    // The fork release of the build that writes it (ops#323)
-    startTag << " ForkRelease=\"" << ForkRelease << '"';
+    // The fork release of the build that writes it (ops#323). A recovery snapshot of a newer
+    // document keeps it newer (writer mode "ForkRecovery", set by RecoverySnapshot.cpp): the
+    // recovered document reopens at the original path, and its first save must still ask (PR 293
+    // review). Its file's release, and every marker, which noteNewerMarkers() reads back.
+    auto newer = documentForkReleases.find(this);
+    if (writer.getMode("ForkRecovery") && newer != documentForkReleases.end()
+        && !newer->second.newer.empty()) {
+        startTag << " ForkRelease=\"" << std::max(ForkRelease, newer->second.release) << '"';
+        std::string markers;
+        for (const auto& marker : newer->second.newer) {
+            markers += (markers.empty() ? "" : newerFormatSeparator) + marker;
+        }
+        startTag << " NewerFormat=\"" << Property::encodeAttribute(markers) << '"';
+    }
+    else {
+        startTag << " ForkRelease=\"" << ForkRelease << '"';
+    }
     // The naming revision of the names its references hold (ops#116)
     const int namingRevision = namingRevisionToSave(this);
     startTag << " NamingRevision=\"" << namingRevision << '"';
@@ -1755,13 +1847,19 @@ void Document::Restore(Base::XMLReader& reader)
         reader.FileVersion = 0;
     }
     // The naming revision of its references (ops#116): none in files saved before, so 0
+    // (an unreadable one is newer, noted below: no migration)
     auto& namingRevision = documentNamingRevisions[this];
-    namingRevision.revision = reader.getAttribute<int>("NamingRevision", 0);
+    const auto savedRevision = intAttribute(reader, "NamingRevision");
+    namingRevision.revision =
+        savedRevision.readable ? savedRevision.value : reportedNamingRevision();
     namingRevision.older = namingRevision.revision < reportedNamingRevision();
     // The fork release that saved it, 0 without one, and whether any marker is newer than this
-    // build (ops#323): reported once its shapes are read too (restore())
+    // build (ops#323): reported once its shapes are read too (restore()). A document restored
+    // again from its file (Revert) whose warning the GUI has shown isn't warned again.
+    const bool noticed = documentForkReleases.contains(this) && documentForkReleases[this].noticed;
     documentForkReleases[this] = {};
-    documentForkReleases[this].release = reader.getAttribute<int>("ForkRelease", 0);
+    documentForkReleases[this].release = intAttribute(reader, "ForkRelease").value;
+    documentForkReleases[this].noticed = noticed;
     noteNewerMarkers(reader, this);
 
     // The file's name table comes first (ops#6): it tells how to read the interned names in
@@ -1775,7 +1873,8 @@ void Document::Restore(Base::XMLReader& reader)
     if (!remap || remap->holdsFile()) {
         remap = &ownRemap.emplace();
     }
-    restoreNameTable(reader, reader.getAttribute<int>("NamingFormat", 0), *remap, getName());
+    const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
+    restoreNameTable(reader, format, *remap, getName());
 
     if (hasStringHasher) {
         d->Hasher->Restore(reader);
@@ -2530,10 +2629,34 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     // be resolved. Use a separate hasher instead of replacing the target
     // document's table.
     const bool hasStringHasher = reader.hasAttribute("StringHasher");
-    // Objects copied by a newer build make this document newer (ops#323)
+    // Objects copied by a newer build make this document newer (ops#323). A failed import leaves
+    // the document's record as it was (PR 293 review); new markers arm the GUI's warning again,
+    // also for a document already warned about.
+    struct KeepForkRelease
+    {
+        const Document* doc;
+        std::optional<DocumentForkRelease> before;
+        bool done = false;
+        ~KeepForkRelease()
+        {
+            if (done) {
+                return;
+            }
+            if (before) {
+                documentForkReleases[doc] = *before;
+            }
+            else {
+                documentForkReleases.erase(doc);
+            }
+        }
+    } keepForkRelease {this, {}};
+    if (auto it = documentForkReleases.find(this); it != documentForkReleases.end()) {
+        keepForkRelease.before = it->second;
+    }
     noteNewerMarkers(reader, this);
     // The entries of the imported interned names come first (ops#6)
-    restoreNameTable(reader, reader.getAttribute<int>("NamingFormat", 0), *remap, getName());
+    const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
+    restoreNameTable(reader, format, *remap, getName());
     if (hasStringHasher) {
         StringHasherRef sourceHasher = new StringHasher;
         sourceHasher->Restore(reader);
@@ -2569,6 +2692,13 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
 
     signalImportObjects(objs, reader);  // reads the files (MergeDocuments::importObject())
     reportNameRemap(*remap, getName());
+    keepForkRelease.done = true;
+    if (auto it = documentForkReleases.find(this); it != documentForkReleases.end()) {
+        const std::size_t before = keepForkRelease.before ? keepForkRelease.before->newer.size() : 0;
+        if (it->second.newer.size() > before) {
+            it->second.noticed = false;
+        }
+    }
     reportNewerFormat(this);
     remap.reset();
     DocumentP::checkStringHasher(reader);

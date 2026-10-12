@@ -32,6 +32,7 @@
 #include <mutex>
 #include <QApplication>
 #include <QCheckBox>
+#include <QDir>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QOpenGLWidget>
@@ -1856,6 +1857,21 @@ bool Document::saveAs()
         QFileInfo fi;
         fi.setFile(fn);
 
+        // Onto its own file, App::Document::saveAs() saves: a newer file asks as a Save does
+        // (ops#323, PR 293 review)
+        const QFileInfo own(QString::fromUtf8(getDocument()->FileName.getValue()));
+        if (getDocument()->isSaved() && own.exists() && fi.exists() && fi == own) {
+            switch (askBeforeSavingNewer({getDocument()}, true)) {
+                case NewerSave::Copy:
+                    saveCopy();
+                    return false;
+                case NewerSave::Cancel:
+                    return false;
+                case NewerSave::Save:
+                    break;
+            }
+        }
+
         const char* DocName = App::GetApplication().getDocumentName(getDocument());
 
         // save as new file name
@@ -1986,12 +2002,30 @@ bool Document::saveCopy()
             name += QStringLiteral(".FCStd");
         }
     }
+    // A newer file's copy (ops#323: the save guard's "Save a Copy…") is offered beside it, not
+    // over it
+    if (App::isNewerFormat(getDocument()) && !name.isEmpty()) {
+        QFileInfo file(name);
+        name = file.dir().filePath(
+            QObject::tr("%1 (copy)").arg(file.completeBaseName()) + QStringLiteral(".FCStd")
+        );
+    }
     QString fn = FileDialog::getSaveFileName(
         getMainWindow(),
         QObject::tr("Save %1 Document").arg(exe),
         name,
         FileDialog::FilterList {{QObject::tr("%1 document").arg(exe), {"*.FCStd"}}}
     );
+    // App::Document::saveCopy() doesn't write over the document's own file, and says nothing
+    const QFileInfo own(QString::fromUtf8(getDocument()->FileName.getValue()));
+    if (!fn.isEmpty() && own.exists() && QFileInfo(fn) == own) {
+        QMessageBox::warning(
+            getMainWindow(),
+            QObject::tr("Save a Copy"),
+            QObject::tr("A copy can't be saved over the document's own file. Choose another name.")
+        );
+        return false;
+    }
     if (!fn.isEmpty()) {
         const char* DocName = App::GetApplication().getDocumentName(getDocument());
 

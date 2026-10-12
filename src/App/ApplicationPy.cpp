@@ -1586,6 +1586,10 @@ PyObject* ApplicationPy::sGetForkRelease(PyObject* /*self*/, PyObject* args)
             return Py::new_reference_to(Py::Long(ForkRelease));
         }
         auto doc = static_cast<DocumentPy*>(pyDoc)->getDocumentPtr();
+        if (!doc) {
+            PyErr_SetString(PyExc_RuntimeError, "Invalid document");
+            return nullptr;
+        }
         return Py::new_reference_to(Py::Long(forkReleaseOf(doc)));
     }
     PY_CATCH;
@@ -1601,6 +1605,10 @@ PyObject* ApplicationPy::sGetNewerFormat(PyObject* /*self*/, PyObject* args)
     PY_TRY
     {
         auto doc = static_cast<DocumentPy*>(pyDoc)->getDocumentPtr();
+        if (!doc) {
+            PyErr_SetString(PyExc_RuntimeError, "Invalid document");
+            return nullptr;
+        }
         return Py::new_reference_to(Py::String(newerFormatMessage(doc)));
     }
     PY_CATCH;
