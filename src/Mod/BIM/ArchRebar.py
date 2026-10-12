@@ -505,7 +505,10 @@ class _Rebar(ArchComponent.Component):
                     )
                 placementlist.append(barplacement)
             if hasattr(obj, "Spacing"):
-                obj.Spacing = interval
+                # FreeCAD-CH (ops#319): offsets longer than the host give a negative interval; the
+                # distance between bars is its size (a Length refuses a negative value, it used to
+                # be clamped to 0).
+                obj.Spacing = abs(interval)
         # Calculate placement of bars from custom spacing.
         if spacinglist:
             placementlist[:] = []
