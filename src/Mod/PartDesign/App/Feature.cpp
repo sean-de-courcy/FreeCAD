@@ -29,13 +29,17 @@
 #include <BRepCheck_Status.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <Precision.hxx>
 #include <ShapeFix_Solid.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Builder.hxx>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <set>
 #include <vector>
@@ -718,6 +722,35 @@ Part::TopoShape Feature::getBaseTopoShape(bool silent) const
         result.setShape(TopoDS_Shape());
     }
     return result;
+}
+
+namespace
+{
+/// Whether two locations are the same transform: the translations within Confusion, the rotation
+/// parts within Angular
+bool isSameTransform(const TopLoc_Location& a, const TopLoc_Location& b)
+{
+    const gp_Trsf& ta = a.Transformation();
+    const gp_Trsf& tb = b.Transformation();
+    for (int row = 1; row <= 3; ++row) {
+        for (int col = 1; col <= 4; ++col) {
+            const double tolerance = col == 4 ? Precision::Confusion() : Precision::Angular();
+            if (std::abs(ta.Value(row, col) - tb.Value(row, col)) > tolerance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+}  // namespace
+
+TopLoc_Location Feature::getInverseLocation(const TopoShape& base) const
+{
+    TopLoc_Location location = getLocation();
+    if (!base.isNull() && isSameTransform(base.getShape().Location(), location)) {
+        return base.getShape().Location().Inverted();
+    }
+    return location.Inverted();
 }
 
 Part::TopoShape Feature::getTopoShapeInLocalCoordinates(const App::DocumentObject* object) const

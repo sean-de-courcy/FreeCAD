@@ -676,7 +676,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
 
     try {
         this->positionByPrevious();
-        auto invObjLoc = getLocation().Inverted();
+        auto invObjLoc = getInverseLocation(base);
 
         auto invTrsf = invObjLoc.Transformation();
 

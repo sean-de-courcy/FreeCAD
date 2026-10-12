@@ -412,7 +412,7 @@ void DressUp::getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& subShap
             Part::TopoShape baseShape;
             if (base) {
                 baseShape = base->getBaseTopoShape(true);
-                baseShape.move(base->getLocation().Inverted());
+                baseShape.move(base->getInverseLocation(baseShape));
                 if (base->getAddSubType() == Type::Additive) {
                     if (!baseShape.isNull() && baseShape.hasSubShape(TopAbs_SOLID)) {
                         shapes.emplace_back(shape.makeElementCut(baseShape.getShape()));
@@ -437,7 +437,7 @@ void DressUp::getAddSubShape(Part::TopoShape& addShape, Part::TopoShape& subShap
             }
             else {
                 baseShape = getBaseTopoShape();
-                baseShape.move(getLocation().Inverted());
+                baseShape.move(getInverseLocation(baseShape));
                 shapes.emplace_back(shape.makeElementCut(baseShape.getShape()));
                 shapes.emplace_back(baseShape.makeElementCut(shape.getShape()));
             }

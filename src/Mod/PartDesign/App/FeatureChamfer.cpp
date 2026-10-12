@@ -134,7 +134,7 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         return new App::DocumentObjectExecReturn(e.what());
     }
 
-    TopShape.setTransform(Base::Matrix4D());
+    TopShape.locate(TopLoc_Location());
 
     auto edges = UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
                                         : getContinuousEdges(TopShape);

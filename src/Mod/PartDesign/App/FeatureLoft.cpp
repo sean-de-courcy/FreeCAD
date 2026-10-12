@@ -191,7 +191,7 @@ App::DocumentObjectExecReturn* Loft::execute()
     try {
         // setup the location
         this->positionByPrevious();
-        auto invObjLoc = this->getLocation().Inverted();
+        auto invObjLoc = getInverseLocation(base);
         if (!base.isNull()) {
             base.move(invObjLoc);
         }

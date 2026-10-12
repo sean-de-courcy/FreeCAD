@@ -430,7 +430,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
 
     gp_Trsf trsfInv = supportShape.getShape().Location().Transformation().Inverted();
 
-    supportShape.setTransform(Base::Matrix4D());
+    supportShape.locate(TopLoc_Location());
 
     // V2 names each instance by content (ops#55): each copy gets a section with this feature's ID
     // and its instance number appended to every name, one number per step (instanceNumbers(),

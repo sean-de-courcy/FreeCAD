@@ -56,7 +56,7 @@ App::DocumentObjectExecReturn* Defeaturing::execute()
     catch (Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
     }
-    baseShape.setTransform(Base::Matrix4D());
+    baseShape.locate(TopLoc_Location());
 
     std::vector<Part::TopoShape> faces;
     try {
@@ -120,8 +120,8 @@ void Defeaturing::updatePreviewShape()
         return;
     }
 
-    baseShape.setTransform(Base::Matrix4D());
-    resultShape.setTransform(Base::Matrix4D());
+    baseShape.locate(TopLoc_Location());
+    resultShape.locate(TopLoc_Location());
 
     try {
         // Removed volume: material in base but not in result (e.g. defeature a fillet)
