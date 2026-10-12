@@ -25,6 +25,7 @@
 #pragma once
 
 #include <App/PropertyStandard.h>
+#include <App/PropertyUnits.h>
 #include <Base/Vector3D.h>
 
 #include <Mod/Part/PartGlobal.h>
@@ -46,7 +47,8 @@ public:
     App::PropertyVector Base;
     App::PropertyVector Axis;
     App::PropertyLinkSub AxisLink;
-    App::PropertyFloatConstraint Angle;
+    // FreeCAD-CH (ops#319): an Angle, not a Float, so an expression with degrees works.
+    App::PropertyAngle Angle;
     App::PropertyBool Symmetric;  // like "Midplane" in PartDesign
     App::PropertyBool Solid;
     App::PropertyString FaceMakerClass;
@@ -86,10 +88,15 @@ public:
     );
 
 private:
-    static App::PropertyFloatConstraint::Constraints angleRangeU;
+    static App::PropertyAngle::Constraints angleRangeU;
 
 protected:
     void setupObject() override;
+    void handleChangedPropertyType(
+        Base::XMLReader& reader,
+        const char* TypeName,
+        App::Property* prop
+    ) override;
 };
 
 }  // namespace Part
