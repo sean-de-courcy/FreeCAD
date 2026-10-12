@@ -87,7 +87,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
     catch (Base::Exception& e) {
         return new App::DocumentObjectExecReturn(e.what());
     }
-    baseShape.setTransform(Base::Matrix4D());
+    baseShape.locate(TopLoc_Location());
 
     auto edges = UseAllEdges.getValue() ? baseShape.getSubTopoShapes(TopAbs_EDGE)
                                         : getContinuousEdges(baseShape);

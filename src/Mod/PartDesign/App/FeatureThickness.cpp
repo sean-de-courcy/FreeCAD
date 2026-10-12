@@ -85,7 +85,7 @@ App::DocumentObjectExecReturn* Thickness::execute()
 
     // Set transform to identity so occ will perform this operation
     // in local coordinates
-    TopShape.setTransform(Base::Matrix4D());
+    TopShape.locate(TopLoc_Location());
     this->positionByBaseFeature();
 
     const std::vector<std::string>& subStrings = Base.getSubValues(true);

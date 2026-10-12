@@ -205,7 +205,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
     try {
         // setup the location
         this->positionByPrevious();
-        TopLoc_Location invObjLoc = this->getLocation().Inverted();
+        TopLoc_Location invObjLoc = getInverseLocation(base);
         if (!base.isNull()) {
             base.move(invObjLoc);
         }

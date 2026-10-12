@@ -150,7 +150,8 @@ void FeatureAddSub::updatePreviewShape()
 
     // for subtractive shapes we want to also showcase removed volume, not only the tool
     if (getBooleanMaker() != Part::OpCodes::Fuse) {
-        TopoShape base = getBaseTopoShape(true).moved(getLocation().Inverted());
+        TopoShape base = getBaseTopoShape(true);
+        base.move(getInverseLocation(base));
         const TopoShape& tool = AddSubShape.getShape();
 
         if (!tool.isEmpty()) {

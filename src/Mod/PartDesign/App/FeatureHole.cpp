@@ -1801,7 +1801,7 @@ App::DocumentObjectExecReturn* Hole::execute()
         double length = 0.0;
 
         this->positionByPrevious();
-        TopLoc_Location invObjLoc = this->getLocation().Inverted();
+        TopLoc_Location invObjLoc = getInverseLocation(base);
 
         base.move(invObjLoc);
         profileshape.move(invObjLoc);

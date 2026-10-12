@@ -739,7 +739,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     gp_Dir dir = Base::convertTo<gp_Dir>(v);
     gp_Pnt pnt = Base::convertTo<gp_Pnt>(Base.getValue());
     positionByPrevious();
-    auto invObjLoc = getLocation().Inverted();
+    auto invObjLoc = getInverseLocation(base);
     pnt.Transform(invObjLoc.Transformation());
     dir.Transform(invObjLoc.Transformation());
     base.move(invObjLoc);

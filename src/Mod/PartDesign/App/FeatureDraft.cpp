@@ -119,7 +119,7 @@ App::DocumentObjectExecReturn* Draft::execute()
 
     // create an untransformed copy of the base shape
     Part::TopoShape baseShape(TopShape);
-    baseShape.setTransform(Base::Matrix4D());
+    baseShape.locate(TopLoc_Location());
     // getFaces fails on a missing face, which SubVals doesn't list ("?Face3"): before the copy
     // below, which would take a draft whose faces are all missing for one with none (ops#60)
     std::vector<TopoShape> faces;

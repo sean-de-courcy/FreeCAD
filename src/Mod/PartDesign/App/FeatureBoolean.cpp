@@ -281,7 +281,7 @@ void Boolean::updatePreviewShape()
         TopoShape base;
         if (UseLegacyBodyPlacement.getValue()) {
             base = getBaseTopoShape(true);
-            base.move(getLocation().Inverted());
+            base.move(getInverseLocation(base));
         }
         else {
             base = getBooleanTopoShape(BaseFeature.getValue());
