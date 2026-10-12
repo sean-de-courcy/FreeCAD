@@ -1112,10 +1112,18 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             return std::ranges::find(profiles, used) != profiles.end();
         });
     };
-    // Up the binders to the object they bind (a binder with several supports is its own root)
-    auto rootOf = [](App::DocumentObject* obj) {
+    // Up the binders to the objects they bind, through every support of a binder with several
+    // (fork PR 267 round 3 verification); a binder with none is its own root
+    auto rootsOf = [](App::DocumentObject* obj) {
+        std::vector<App::DocumentObject*> roots;
         std::vector<App::DocumentObject*> bound;
-        while (obj && std::ranges::find(bound, obj) == bound.end()) {
+        std::vector<App::DocumentObject*> pending {obj};
+        while (!pending.empty()) {
+            obj = pending.back();
+            pending.pop_back();
+            if (!obj || std::ranges::find(bound, obj) != bound.end()) {
+                continue;
+            }
             bound.push_back(obj);
             std::vector<App::DocumentObject*> supports;
             if (auto binder = freecad_cast<PartDesign::ShapeBinder*>(obj)) {
@@ -1124,12 +1132,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             else if (auto binder = freecad_cast<PartDesign::SubShapeBinder*>(obj)) {
                 supports = binder->Support.getValues();
             }
-            if (supports.size() != 1) {
-                break;
+            if (supports.empty()) {
+                roots.push_back(obj);
             }
-            obj = supports.front();
+            pending.insert(pending.end(), supports.begin(), supports.end());
         }
-        return obj;
+        return roots;
     };
     // The features that make elements from the profiles in a role (a loft through one as a
     // section, a pipe along one, a pad up to one): the history can leave them out, so they are
@@ -1187,9 +1195,9 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         return onTool(obj).value_or(true);
     };
     // Whether a feature other than the candidate may have made the element too: one on the
-    // profiles or using them in a role, and the same for the root of the candidate's own profile
+    // profiles or using them in a role, and the same for each root of the candidate's own profile
     // (a pocket on a sibling binder of the sketch the candidate's binders bind: fork PR 267
-    // round 2 verification) and for each object the candidate uses in a role (a pad down from a
+    // round 2 verification) and of each object the candidate uses in a role (a pad down from a
     // loft's section, against the loft: round 1 verification). Nothing tells them apart.
     auto rivalled = [&](App::DocumentObject* candidate,
                         const std::vector<App::DocumentObject*>& profiles,
@@ -1198,13 +1206,11 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             return obj != candidate && mayTouch(obj);
         };
         auto rivalOn = [&](App::DocumentObject* used) {
-            App::DocumentObject* root = rootOf(used);
-            if (!root) {
-                return false;
-            }
-            auto [usedProfiles, usedProfiled] = profiledBy(root);
-            return std::ranges::any_of(usedProfiled, other)
-                || std::ranges::any_of(roleUsers(usedProfiles), other);
+            return std::ranges::any_of(rootsOf(used), [&](App::DocumentObject* root) {
+                auto [usedProfiles, usedProfiled] = profiledBy(root);
+                return std::ranges::any_of(usedProfiled, other)
+                    || std::ranges::any_of(roleUsers(usedProfiles), other);
+            });
         };
         if (std::ranges::any_of(profiled, other)
             || std::ranges::any_of(roleUsers(profiles), other)) {
@@ -1220,19 +1226,10 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // profile, or on a binder of what its profile binds, or using them in a role, or on what the
     // origin itself uses in a role, has it in its boundary too: nothing tells them apart (a pad's
     // bottom imprinted by a pocket below it, on a binder of the pad's binder, is named by the
-    // pocket alone, ops#224; a loft's cap that a pad down from its section has too)
+    // pocket alone, ops#224; a loft's cap that a pad down from its section has too). The rivals on
+    // the roots of its profile are those rivalled looks for on the candidate's profile.
     if (usable(origin)) {
-        auto based = freecad_cast<PartDesign::ProfileBased*>(origin);
-        App::DocumentObject* root = based ? rootOf(based->Profile.getValue()) : nullptr;
-        std::vector<App::DocumentObject*> profiles;
-        std::vector<App::DocumentObject*> profiled;
-        if (root) {
-            std::tie(profiles, profiled) = profiledBy(root);
-        }
-        if (rivalled(origin, profiles, profiled)) {
-            return nullptr;
-        }
-        return origin;
+        return rivalled(origin, {}, {}) ? nullptr : origin;
     }
     // In the history, from the shape towards the origin: the first item that uses the next one
     // (nearer the origin) as its profile. A pad and a pocket on one sketch: the one whose wall it
