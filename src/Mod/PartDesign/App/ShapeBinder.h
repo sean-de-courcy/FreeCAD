@@ -29,6 +29,7 @@
 #include <string>
 
 #include <App/PropertyLinks.h>
+#include <App/PropertyUnits.h>
 #include <App/DocumentObserver.h>
 #include <App/FeaturePython.h>
 #include <Mod/Part/App/DatumFeature.h>
@@ -157,7 +158,8 @@ public:
     App::PropertyInteger _Version;
     App::PropertyEnumeration BindCopyOnChange;
     App::PropertyBool Refine;
-    App::PropertyFloat Offset;
+    // FreeCAD-CH (ops#319): a Distance, not a Float, so an expression with a length works.
+    App::PropertyDistance Offset;
     App::PropertyEnumeration OffsetJoinType;
     App::PropertyBool OffsetFill;
     App::PropertyBool OffsetOpenResult;

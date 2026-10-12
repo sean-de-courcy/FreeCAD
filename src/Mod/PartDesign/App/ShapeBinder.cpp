@@ -1732,6 +1732,12 @@ void SubShapeBinder::handleChangedPropertyType(
     if (prop == &Support) {
         Support.upgrade(reader, TypeName);
     }
+    // FreeCAD-CH (ops#319): Offset was a PropertyFloat, saved as a Float like the Distance.
+    else if (prop == &Offset && strcmp(TypeName, "App::PropertyFloat") == 0) {
+        App::PropertyFloat value;
+        value.Restore(reader);
+        Offset.setValue(value.getValue());
+    }
     else {
         inherited::handleChangedPropertyType(reader, TypeName, prop);
     }
