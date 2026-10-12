@@ -132,7 +132,9 @@ private:
         Part::RevolMode revolMode,
         bool markSeam = false
     );
-    void setResult(const TopoShape& base, const TopoShape& revolved);
+    // With `checkVolume`, the base operation's volume must be possible for a correct fuse or
+    // cut of the two (an up-to-face tool, ops#293)
+    void setResult(const TopoShape& base, const TopoShape& revolved, bool checkVolume = false);
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,

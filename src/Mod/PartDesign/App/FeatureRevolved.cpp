@@ -42,11 +42,13 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Section.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepClass_FaceClassifier.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -79,6 +81,8 @@
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 
@@ -1460,6 +1464,238 @@ TopoShape ownNamesWhereNamed(const TopoShape& tool, long featureTag)
     return result;
 }
 
+double solidVolume(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return 0.0;
+    }
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+// The sweep of one profile face about the axis up to the up-to face, built without BRepFeat:
+// the face revolved a sliver short of a whole turn, split by the up-to face, and the pieces that
+// start at the profile. Each point of the profile goes as far as the face, the first time it
+// gets there. BRepFeat kept another piece when a circle of the profile crosses the face more
+// than once (a torus round the axis, a whole cylinder beside the profile): the part between the
+// crossings, or a broken shape that lost the base in the fuse, with no error (ops#293). Named
+// into `named` from the sweep, which is named from the profile, and the up-to face. Fails when a
+// piece that starts at the profile reaches the end of the turn: the face doesn't stop it.
+TopoShape sweepUpToFace(
+    TopoShape named,
+    const TopoShape& profile,
+    const TopoDS_Face& face,
+    const gp_Ax1& axis
+)
+{
+    auto fail = []() {
+        return Base::RuntimeError(
+            QT_TRANSLATE_NOOP("Exception", "Could not check the revolution up to the face")
+        );
+    };
+    // Empty, with the tag, hasher and history algorithm of `named`
+    const TopoShape blank(named);
+    // The sliver keeps the end of the turn apart from its start.
+    constexpr double sliver = 1e-4;
+    BRepPrimAPI_MakeRevol turn(profile.getShape(), axis, 2.0 * std::numbers::pi - sliver);
+    if (!turn.IsDone()) {
+        throw fail();
+    }
+    TopoShape sweep(blank);
+    sweep.makeElementShape(turn, profile, Part::OpCodes::Revolve);
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    arguments.Append(sweep.getShape());
+    TopTools_ListOfShape tools;
+    tools.Append(face);
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.Build();
+    if (!splitter.IsDone()) {
+        throw fail();
+    }
+    // The pieces of the start and end caps
+    auto piecesOf = [&](const TopoDS_Shape& cap) {
+        TopTools_IndexedMapOfShape pieces;
+        for (TopExp_Explorer faces(cap, TopAbs_FACE); faces.More(); faces.Next()) {
+            const TopTools_ListOfShape& modified = splitter.Modified(faces.Current());
+            if (modified.IsEmpty()) {
+                pieces.Add(faces.Current());
+            }
+            for (const TopoDS_Shape& piece : modified) {
+                pieces.Add(piece);
+            }
+        }
+        return pieces;
+    };
+    const TopTools_IndexedMapOfShape start = piecesOf(turn.FirstShape());
+    const TopTools_IndexedMapOfShape end = piecesOf(turn.LastShape());
+    named.makeElementShape(splitter, {sweep, TopoShape(face)}, Part::OpCodes::Revolve);
+    std::vector<TopoShape> kept;
+    for (const TopoShape& solid : named.getSubTopoShapes(TopAbs_SOLID)) {
+        bool atStart = false;
+        bool atEnd = false;
+        for (TopExp_Explorer faces(solid.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+            atStart = atStart || start.Contains(faces.Current());
+            atEnd = atEnd || end.Contains(faces.Current());
+        }
+        if (atStart && atEnd) {
+            throw fail();
+        }
+        if (atStart) {
+            kept.push_back(solid);
+        }
+    }
+    if (kept.empty()) {
+        throw fail();
+    }
+    if (kept.size() == 1) {
+        return kept.front();
+    }
+    TopoShape pieces(blank);
+    return pieces.makeElementCompound(kept);
+}
+
+// What a tool up to a face should hold, by first contact: each point of the profile turns until
+// its circle about the axis first meets the face (the sweep S). A generated tool is the part of S
+// outside the base, a removed volume the part inside it, and a sweep S itself.
+enum class FirstContactTool
+{
+    Generated,
+    Removed,
+    Sweep
+};
+
+// Where a point is in a shape's solids: in one of them, on one's boundary, or outside them all
+TopAbs_State solidState(const TopoDS_Shape& shape, const gp_Pnt& point, double tolerance)
+{
+    bool on = false;
+    for (TopExp_Explorer solids(shape, TopAbs_SOLID); solids.More(); solids.Next()) {
+        BRepClass3d_SolidClassifier classifier(solids.Current(), point, tolerance);
+        if (classifier.State() == TopAbs_IN) {
+            return TopAbs_IN;
+        }
+        on = on || classifier.State() == TopAbs_ON;
+    }
+    return on ? TopAbs_ON : TopAbs_OUT;
+}
+
+// Whether a tool up to a face holds what first contact gives, checked without booleans at points
+// of the profile's interior (ops#293). BRepFeat kept the part of the sweep between two crossings
+// when a profile circle crosses the face twice: a whole cylinder beside the profile (17.18 instead
+// of 16.54), a whole or half sphere (16.26 instead of 4.44), a torus (0.05 instead of 11.23), and
+// a Groove through empty space removed 33.8 instead of nothing (ops#296), and a wall crossed twice
+// Reversed gave 37.28 instead of 4 pi. For each point, its circle starts at the point and first
+// meets the face at the smallest angle where the quick contacts find the face: points of the arc
+// up to there are in S, and points from just past there to the next contact (or back to the
+// start) are not, unless the circle comes back to the profile. Points on a boundary decide
+// nothing. False when a point lies on the wrong side, or when no point could be checked.
+// It can't see a solid whose faces are wrong but whose points classify right: up to PartDesign's
+// torus face Reversed, the tool's caps measure 10.82 and 5.86 where both are 7.05, and its
+// volume 14.20 instead of 13.35 (ops#293).
+bool holdsFirstContact(
+    const TopoDS_Shape& tool,
+    FirstContactTool kind,
+    const TopoDS_Shape& base,
+    const TopoShape& profile,
+    const TopoDS_Face& face,
+    const gp_Ax1& axis,
+    double tolerance
+)
+{
+    constexpr double turn = 2.0 * std::numbers::pi;
+    const gp_Lin line(axis);
+    gp_Pln plane;
+    if (!profile.findPlane(plane)) {
+        return false;
+    }
+    const gp_Dir normal = plane.Axis().Direction();
+    auto inProfile = [&](const gp_Pnt& point, bool boundary) {
+        for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+            BRepClass_FaceClassifier classifier(TopoDS::Face(faces.Current()), point, tolerance);
+            if (classifier.State() == TopAbs_IN
+                || (boundary && classifier.State() == TopAbs_ON)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    int checked = 0;
+    try {
+        for (const gp_Pnt& point : profileSamples(profile.getShape())) {
+            const double radius = line.Distance(point);
+            if (radius <= 10.0 * tolerance || !inProfile(point, false)) {
+                continue;
+            }
+            const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
+            const gp_Circ circle(gp_Ax2(center, axis.Direction(), gp_Dir(gp_Vec(center, point))), radius);
+            const double slack = 0.5 * tolerance / radius;
+            std::vector<double> contacts = circleContactsQuickly(circle, face, tolerance);
+            std::erase_if(contacts, [&](double contact) {
+                return contact <= slack || contact >= turn - slack;
+            });
+            if (contacts.empty()) {
+                continue;
+            }
+            std::ranges::sort(contacts);
+            const double first = contacts.front();
+            const auto next = std::ranges::find_if(contacts, [&](double contact) {
+                return contact > first + 2.0 * slack;
+            });
+            const double after = next == contacts.end() ? turn : *next;
+            // The circle meets the profile's plane again at twice the angle of the plane's normal
+            // in the circle's frame: when it is in the profile there, the profile sweeps that
+            // circle from there too.
+            const gp_Ax2& frame = circle.Position();
+            const double again = 2.0
+                * std::atan2(
+                                     gp_Vec(frame.YDirection()).Dot(gp_Vec(normal)),
+                                     gp_Vec(frame.XDirection()).Dot(gp_Vec(normal))
+                );
+            const bool sweptTwice = inProfile(ElCLib::Value(again, circle), true);
+            // Before the contact: in S, so in the tool, except where the base decides
+            bool inS = kind == FirstContactTool::Sweep;
+            for (double fraction : {0.5, 0.9}) {
+                const gp_Pnt within = ElCLib::Value(fraction * first, circle);
+                if (kind != FirstContactTool::Sweep) {
+                    const TopAbs_State inBase = solidState(base, within, tolerance);
+                    inS = inBase != TopAbs_ON
+                        && (inBase == TopAbs_IN) == (kind == FirstContactTool::Removed);
+                }
+                if (!inS) {
+                    continue;
+                }
+                const TopAbs_State state = solidState(tool, within, tolerance);
+                if (state == TopAbs_OUT) {
+                    return false;
+                }
+                checked += state == TopAbs_IN ? 1 : 0;
+            }
+            // Past the contact, from just past it up to the next contact or back to the start:
+            // outside S, so outside the tool
+            if (sweptTwice) {
+                continue;
+            }
+            for (double fraction : {0.02, 0.1, 0.5, 0.9}) {
+                const double angle = first + fraction * (after - first);
+                if ((angle - first) * radius <= 10.0 * tolerance) {
+                    continue;
+                }
+                const TopAbs_State state = solidState(tool, ElCLib::Value(angle, circle), tolerance);
+                if (state == TopAbs_IN) {
+                    return false;
+                }
+                checked += state == TopAbs_OUT ? 1 : 0;
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    return checked > 0;
+}
+
 }  // namespace
 
 Revolved::Revolved()
@@ -1887,7 +2123,14 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         result.makeElementXor(revolutions, Part::OpCodes::Revolve);
     }
 
-    setResult(base, result);
+    // An up-to-face tool's fuse or cut with the base gave a wrong volume where a torus's seam
+    // runs (ops#293: 487.95 for 487.09)
+    setResult(
+        base,
+        result,
+        usesBRepFeatRevolution(method, revolMode)
+            || (sideType == "Two sides" && usesBRepFeatRevolution(method2, revolMode))
+    );
 
     // eventually disable some settings that are not valid for the current method
     updateProperties();
@@ -1895,7 +2138,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     return App::DocumentObject::StdReturn;
 }
 
-void Revolved::setResult(const TopoShape& base, const TopoShape& revolved)
+void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool checkVolume)
 {
     if (revolved.isNull()) {
         throw Base::RuntimeError(QT_TRANSLATE_NOOP("Exception", "Could not revolve the sketch!"));
@@ -1907,7 +2150,26 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved)
     this->AddSubShape.setValue(result);
 
     if (!base.isNull()) {
+        const TopoShape tool = result;
         result = makeShape(base, result);
+        // A correct fuse holds at least the larger of the two and at most both; a correct cut at
+        // least the base less the tool and at most the base
+        if (checkVolume) {
+            const double baseVolume = solidVolume(base.getShape());
+            const double toolVolume = solidVolume(tool.getShape());
+            const double volume = solidVolume(result.getShape());
+            const double slack = 1e-6 * (baseVolume + toolVolume) + Precision::Confusion();
+            const bool fuse = volume >= std::max(baseVolume, toolVolume) - slack
+                && volume <= baseVolume + toolVolume + slack;
+            const bool cut = volume >= baseVolume - toolVolume - slack
+                && volume <= baseVolume + slack;
+            if (!(getAddSubType() == FeatureAddSub::Type::Additive ? fuse : cut)) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result's volume is wrong"
+                ));
+            }
+        }
         // store shape before refinement
         this->rawShape = result;
         result = refineShapeIfActive(result);
@@ -1941,8 +2203,8 @@ TopoShape Revolved::tryToRevolveToFace(
     if (upToFace.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE) {
         throw Base::RuntimeError("Could not revolve the sketch!");
     }
+    const TopoDS_Face reachable = reachableUpToFace(upToFace, sketchshape, axis);
     {
-        const TopoDS_Face reachable = reachableUpToFace(upToFace, sketchshape, axis);
         const double tolerance = profileCheckTolerance(sketchshape.getShape(), reachable);
         if (cutsThroughProfile(sketchshape, reachable, tolerance)) {
             throw Base::RuntimeError(QT_TRANSLATE_NOOP(
@@ -2073,11 +2335,52 @@ TopoShape Revolved::tryToRevolveToFace(
         return tool;
     };
 
+    // BRepFeat's tool stands when it holds what first contact gives at the profile's points.
+    // Otherwise the sweep up to the face built without BRepFeat does, under the same check, and
+    // when neither holds it the revolution fails: never a wrong solid without an error (ops#293).
+    const double tolerance = profileCheckTolerance(sketchshape.getShape(), reachable);
+    auto firstContactChecked = [&](const TopoShape& tool, FirstContactTool kind) {
+        const TopoDS_Shape& kindBase = kind == FirstContactTool::Removed ? base.getShape()
+                                                                          : featureBase.getShape();
+        if (tool.isValid()
+            && holdsFirstContact(tool.getShape(), kind, kindBase, sketchshape, reachable, axis, tolerance)) {
+            return tool;
+        }
+        std::optional<TopoShape> sweep;
+        try {
+            sweep = sweepUpToFace(makeTopoShape(), sketchshape, reachable, axis);
+        }
+        catch (const Base::Exception&) {
+            // Refused below
+        }
+        catch (const Standard_Failure&) {
+            // Refused below
+        }
+        if (sweep && sweep->isValid()
+            && holdsFirstContact(
+                sweep->getShape(),
+                FirstContactTool::Sweep,
+                TopoDS_Shape(),
+                sketchshape,
+                reachable,
+                axis,
+                tolerance
+            )) {
+            return *sweep;
+        }
+        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not revolve up to the face: the result doesn't stop where the profile first "
+            "meets the face"
+        ));
+    };
+
     // When the first attempt fails, the later one that succeeds names its elements by index, not
     // from the profile (PR 235 review M1, ops#271).
     if (revolMode == Part::RevolMode::CutFromBase) {
+        std::optional<TopoShape> removed;
         try {
-            return makeRemovedVolume(makeRevolution(revolMode, Standard_True));
+            removed = makeRemovedVolume(makeRevolution(revolMode, Standard_True));
         }
         catch (const Base::Exception&) {
             // If the groove side removes no material, keep trying to return the cutter tool
@@ -2086,10 +2389,14 @@ TopoShape Revolved::tryToRevolveToFace(
         catch (const Standard_Failure&) {
             // Fall through to cutter generation below.
         }
+        if (removed) {
+            return firstContactChecked(*removed, FirstContactTool::Removed);
+        }
     }
 
+    std::optional<TopoShape> generated;
     try {
-        return makeGeneratedTool(makeRevolution(Part::RevolMode::None, Standard_False));
+        generated = makeGeneratedTool(makeRevolution(Part::RevolMode::None, Standard_False));
     }
     catch (const Base::Exception&) {
         // Some OCCT cases require a feature mode. Falling back keeps up-to-face usable.
@@ -2098,15 +2405,18 @@ TopoShape Revolved::tryToRevolveToFace(
         // Fall through to the feature mode below.
     }
 
-    try {
-        return makeGeneratedTool(makeRevolution(Part::RevolMode::FuseWithBase, Standard_True));
+    if (!generated) {
+        try {
+            generated = makeGeneratedTool(makeRevolution(Part::RevolMode::FuseWithBase, Standard_True));
+        }
+        catch (const Base::Exception&) {
+            throw Base::RuntimeError("Could not revolve the sketch!");
+        }
+        catch (const Standard_Failure&) {
+            throw Base::RuntimeError("Could not revolve the sketch!");
+        }
     }
-    catch (const Base::Exception&) {
-        throw Base::RuntimeError("Could not revolve the sketch!");
-    }
-    catch (const Standard_Failure&) {
-        throw Base::RuntimeError("Could not revolve the sketch!");
-    }
+    return firstContactChecked(*generated, FirstContactTool::Generated);
 }
 
 TopoShape Revolved::generateSingleRevolutionSide(
