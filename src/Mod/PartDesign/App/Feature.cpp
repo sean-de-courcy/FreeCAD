@@ -347,7 +347,9 @@ bool comesAfterOwner(const App::PropertyLinkSub& link, const App::DocumentObject
 }
 
 // The relink without the solver (upstream's): every reference must match exactly one element of
-// the new base by its name (V2) or its geometry (V1), or the link is left as it is
+// the new base by its name (V2) or its geometry (V1), or the link is left as it is. A name that
+// matches several elements (a face the new base split in two) is no match: taking the first was
+// a silent guess (fork PR 282 review, F3; ops#79's policy for the loose pass)
 bool relinkByName(
     App::PropertyLinkSub& link,
     Part::Feature* oldFeature,
@@ -412,17 +414,8 @@ bool relinkByName(
             std::vector<Data::MappedElement> foundNames
                 = Part::Feature::findSimilarNames(subMappedElement.name, newShape);
 
-            if (foundNames.size()) {
+            if (foundNames.size() == 1) {
                 names.push_back(foundNames.front().name.toString());
-            }
-
-            if (foundNames.size() > 1) {
-                FC_WARN(
-                    link.getFullName() << ": guessed the relinked reference "
-                                  << sub << " -> " << foundNames.front().index.toString()
-                                  << ", the first of " << foundNames.size()
-                                  << " matching elements of " << newFeature->getFullName()
-                );
             }
         }
 
@@ -462,8 +455,9 @@ bool Feature::relinkToMatchingSubelements(
     auto oldFeature = freecad_cast<Part::Feature*>(oldBase);
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
     const Part::TopoShape oldShape = oldFeature ? oldFeature->Shape.getShape() : Part::TopoShape();
+    const bool solver = link.inSolverDocument();
     if (newFeature && !oldShape.isNull()) {
-        if (link.inSolverDocument()) {
+        if (solver) {
             // Also onto a new base without a shape yet (ops#127, N1 2.2)
             if (relinkAsMissing(link, oldShape, newBase, true)) {
                 return true;
@@ -472,36 +466,28 @@ bool Feature::relinkToMatchingSubelements(
         else if (relinkByName(link, oldFeature, newFeature)) {
             return true;
         }
-        else if (follow && relinkAsMissing(link, oldShape, newBase, false)) {
-            // with its references missing. In a reorder the new base still has its shape from
-            // before the reorder, which can hold the owner's own result (a fillet's faces where
-            // its edge was): the name is looked up again when the new base recomputes, and a
-            // reference found then resolves (an edge the new base leaves alone); one that isn't
-            // makes the owner fail until it is re-picked
-            std::string missing;
-            for (const auto& sub : link.getSubValues()) {
-                if (Data::hasMissingElement(sub.c_str())) {
-                    missing += (missing.empty() ? "" : ", ") + sub;
-                }
-            }
-            if (!missing.empty()) {
-                FC_WARN(
-                    link.getFullName()
-                    << ": moved by a reorder to " << newBase->getFullName()
-                    << " with its references missing (" << missing
-                    << "): they are looked up by name when it recomputes, and those it doesn't "
-                       "have must be picked again"
-                );
-            }
+    }
+    if (newFeature && follow && !solver) {
+        if (relinkAsMissing(link, oldShape, newBase, false)) {
+            // With its references missing; also from an old base without a shape (one that
+            // failed), the names coming from the link's shadows (fork PR 282 review, F2). In a
+            // reorder the new base still has its shape from before the reorder, which can hold
+            // the owner's own result (a fillet's faces where its edge was): the name is looked up
+            // again when the new base recomputes, and a reference found then resolves (an edge
+            // the new base leaves alone); one that isn't makes the owner fail until it is
+            // re-picked, its error naming the reference (a log line here: review F6)
+            FC_LOG(link.getFullName() << ": moved by a reorder to " << newBase->getFullName());
             return true;
         }
     }
-    if (!follow) {
+    // A solver document keeps its link outside a cycle, as before ops#291 (fork PR 282 review,
+    // F1): its relink above fails only on a reference without a name to carry
+    if (!cycle && (!follow || solver)) {
         return false;
     }
-    // No new base (the owner is now the first solid), an old base that never computed, or a
-    // reference without a name to carry: the link is cleared, so the owner fails until it is
-    // re-picked (fork PR 270 review, M1 and L3)
+    // No new base (the owner is now the first solid), or a reference without a name to carry
+    // (none in its shadow, and the old base has no shape to read it from): the link is cleared,
+    // so the owner fails until it is re-picked (fork PR 270 review, M1 and L3)
     std::string subs;
     for (const auto& sub : link.getSubValues()) {
         subs += (subs.empty() ? "" : ", ") + sub;

@@ -1,0 +1,11 @@
+# V1 naming, without the reference solver: a reorder that changes a dress-up's base and finds no
+# match by name moves its Base to the new base with its references missing (ops#291), to be looked
+# up by name when the new base recomputes. V1 names carry the whole chain, so the old base's name
+# (the shadow) never equals the new base's for the same edge: the dress-up stays red though its
+# edge is there. Loud, not silent. V1 runs only in the six-configuration gate (ops#288). Remove the
+# entries when ops#307 re-matches a V1 reference geometrically.
+
+issue: ops#307
+
+reason: seed 2 step 6 (reorder F7Fillet down 2, after F4Hole): the fillet's Base goes to F4Hole with its edge missing and stays red, though the edge is there
+cli  PartDesignTests.TestNamingScenarios.RandomSequences.test_seed0002_V1
