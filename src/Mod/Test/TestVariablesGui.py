@@ -85,9 +85,9 @@ class TestVariablesGui(unittest.TestCase):
 
     # helpers
 
-    def boundSpinBox(self, obj, prop):
-        """A QuantitySpinBox bound to obj.<prop>, applying its expression as a task panel does."""
-        spin = Gui.UiLoader().createWidget("Gui::QuantitySpinBox")
+    def boundSpinBox(self, obj, prop, widgetClass="Gui::QuantitySpinBox"):
+        """A spin box bound to obj.<prop>, applying its expression as a task panel does."""
+        spin = Gui.UiLoader().createWidget(widgetClass)
         self.widgets.append(spin)
         binding = Gui.ExpressionBinding(spin)
         binding.bind(obj, prop)
@@ -157,6 +157,33 @@ class TestVariablesGui(unittest.TestCase):
         self.assertEqual(expressionText(self.box, "Length"), "VarSet.Width * 2")
         self.doc.recompute()
         self.assertAlmostEqual(self.box.Length.Value, 40)
+
+    def test_formula_dialog_number_refuses_unit(self):
+        """ops#319: the f(x) dialog of a Float refuses a value with a unit (it used to warn "unit
+        discarded" and let OK through), and takes the same value divided by its unit."""
+        self.varSet.addProperty("App::PropertyFloat", "Factor")
+        spin = self.boundSpinBox(self.varSet, "Factor", "Gui::DoubleSpinBox")
+        QTest.keyClicks(spin, "=")
+        dialog = waitFor(
+            lambda: widgetsOfClass(spin, QtWidgets.QDialog, "Gui::Dialog::DlgExpressionInput")
+        )
+        self.assertTrue(dialog, "the f(x) dialog didn't open")
+        dialog = dialog[0]
+        editor = dialog.findChild(QtWidgets.QPlainTextEdit, "expression")
+        ok = dialog.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.Ok)
+        message = dialog.findChild(QtWidgets.QLabel, "msg")
+
+        editor.setPlainText("3 mm")
+        pump(0.3)
+        self.assertIn("Unit mismatch", message.text())
+        self.assertFalse(ok.isEnabled())
+
+        editor.setPlainText("3 mm / 1 mm")
+        pump(0.3)
+        self.assertNotIn("Unit mismatch", message.text())
+        self.assertTrue(ok.isEnabled())
+        dialog.reject()
+        pump(0.2)
 
     def test_property_editor(self):
         """G12. The property editor's `value ( expr )` text."""
