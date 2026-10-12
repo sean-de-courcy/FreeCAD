@@ -352,6 +352,20 @@ class TestSketchCopyElementsGui(SketcherGuiTestCase):
         self.assertAlmostEqual(merged.Placement.Base.z, 5, delta=1e-7)
         self.assertEqual(self.expressions(merged), {})
 
+    def test_merge_says_a_sketch_placed_elsewhere_lands_in_the_first_ones_plane(self):
+        """ops#252: Dest stands 7 above Source. Merged after Source, its line keeps its sketch
+        coordinates in Source's plane, 7 below where it is: Merge says so. Sketches placed alike
+        give no such message."""
+        before = len(reportText())
+        self.merge(self.source, self.dest)
+        self.assertNotIn("is placed differently", reportText()[before:])
+        self.dest.Placement.Base.z = 7
+        self.doc.recompute()
+        before = len(reportText())
+        merged = self.merge(self.source, self.dest)
+        self.assertIn("'Dest' is placed differently from 'Source'", reportText()[before:])
+        self.assertAlmostEqual(merged.Placement.Base.z, 0, delta=1e-9)
+
     def test_carbon_copy_remaps_every_element(self):
         """Carbon copy of the Source into Dest: the Group's four elements name the copied lines
         (the old code left the fourth on GeoId 3, the third copied line)."""

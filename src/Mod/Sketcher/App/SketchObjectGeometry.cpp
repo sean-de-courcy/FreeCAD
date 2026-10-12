@@ -1594,10 +1594,11 @@ void SketchObject::getGeometryWithDependentParameters(
             geometrymap.emplace_back(geoid, Sketcher::PointPos::none);
         if (solvext->getStart() == SolverGeometryExtension::Dependent)
             geometrymap.emplace_back(geoid, Sketcher::PointPos::start);
+        // FreeCAD-CH (ops#252): end and mid were reported as start
         if (solvext->getEnd() == SolverGeometryExtension::Dependent)
-            geometrymap.emplace_back(geoid, Sketcher::PointPos::start);
+            geometrymap.emplace_back(geoid, Sketcher::PointPos::end);
         if (solvext->getMid() == SolverGeometryExtension::Dependent)
-            geometrymap.emplace_back(geoid, Sketcher::PointPos::start);
+            geometrymap.emplace_back(geoid, Sketcher::PointPos::mid);
     }
 }
 

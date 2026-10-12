@@ -492,6 +492,35 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         }
     }
 
+    // FreeCAD-CH (ops#252): a source link this sketch has already refuses the copy before
+    // anything changes. It was checked after the source's external geometries were written to
+    // ExternalGeo, which the refusal left there without their links
+    {
+        const auto& objects = ExternalGeometry.getValues();
+        const auto& subs = ExternalGeometry.getSubValues();
+        const auto& sObjects = psObj->ExternalGeometry.getValues();
+        const auto& sSubs = psObj->ExternalGeometry.getSubValues();
+        if (objects.size() != subs.size() || sObjects.size() != sSubs.size()) {
+            assert(0 /*counts of objects and subelements in external geometry links do not match*/);
+            Base::Console().error(
+                "Internal error: counts of objects and subelements in external "
+                "geometry links do not match\n"
+            );
+            return -1;
+        }
+        for (size_t si = 0; si < sObjects.size(); ++si) {
+            for (size_t i = 0; i < objects.size(); ++i) {
+                if (objects[i] == sObjects[si] && subs[i] == sSubs[si]) {
+                    Base::Console().error(
+                        "Link to %s already exists in this sketch. Delete the link and try again\n",
+                        sSubs[si].c_str()
+                    );
+                    return -1;
+                }
+            }
+        }
+    }
+
     // FreeCAD-CH (ops#280): an unaligned copy isn't flipped (xinv and yinv stay false), but a
     // source whose plane faces the other way still sees this sketch's own geometry mirrored
     const bool reversed = !xinv && !yinv
@@ -592,30 +621,9 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
         std::vector<DocumentObject*> sObjects = psObj->ExternalGeometry.getValues();
         std::vector<std::string> sSubElements = psObj->ExternalGeometry.getSubValues();
 
-        if (Objects.size() != SubElements.size() || sObjects.size() != sSubElements.size()) {
-            assert(0 /*counts of objects and subelements in external geometry links do not match*/);
-            Base::Console().error(
-                "Internal error: counts of objects and subelements in external "
-                "geometry links do not match\n"
-            );
-            return -1;
-        }
-
+        // (the counts and the duplicate links were checked above, before anything changed)
         int si = 0;
         for (auto& sobj : sObjects) {
-            int i = 0;
-            for (auto& obj : Objects) {
-                if (obj == sobj && SubElements[i] == sSubElements[si]) {
-                    Base::Console().error(
-                        "Link to %s already exists in this sketch. Delete the link and try again\n",
-                        sSubElements[si].c_str()
-                    );
-                    return -1;
-                }
-
-                i++;
-            }
-
             Objects.push_back(sobj);
             SubElements.push_back(sSubElements[si]);
             // the copied link keeps its type
@@ -1139,6 +1147,28 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
     return svals.size();
 }
 
+namespace
+{
+// Set while addExternal adds a face's or shape's edges one by one: an edge that gives nothing
+// is skipped quietly, the whole add fails (loudly) only when none gives anything (ops#252)
+thread_local int addingSubShapes = 0;
+
+// Raises addingSubShapes for its scope, also when the add throws (PR 269 round 2)
+struct AddingSubShapes
+{
+    AddingSubShapes()
+    {
+        ++addingSubShapes;
+    }
+    ~AddingSubShapes()
+    {
+        --addingSubShapes;
+    }
+    AddingSubShapes(const AddingSubShapes&) = delete;
+    AddingSubShapes& operator=(const AddingSubShapes&) = delete;
+};
+}  // namespace
+
 int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, bool defining, bool intersection)
 {
     // no need to check input data validity as this is an sketchobject managed operation.
@@ -1168,6 +1198,9 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         std::string element = Part::TopoShape::shapeName(shapeType);
         std::size_t elementNameSize = element.size();
         int geometryCount = ExternalGeometry.getSize();
+        // FreeCAD-CH (PR 269 round 2): whether any sub-shape's add made geometry. Counting links
+        // missed an add that only gave existing links the other kind (they become Both)
+        bool added = false;
 
         gp_Pln sketchPlane;
         if (intersection) {
@@ -1202,13 +1235,22 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
                 }
             }
             element += std::to_string(idx);
-            addExternal(Obj, element.c_str(), defining, intersection);
+            {
+                AddingSubShapes adding;
+                added = addExternal(Obj, element.c_str(), defining, intersection) >= 0 || added;
+            }
             element.resize(elementNameSize);
         }
-        if (ExternalGeometry.getSize() == geometryCount) {
+        if (!added) {
+            if (addingSubShapes == 0) {
+                Base::Console().error("%s gives no %s geometry in this sketch.\n",
+                                      SubName,
+                                      intersection ? "intersection" : "projection");
+            }
             return -1;
         }
-        return geometryCount;
+        return ExternalGeometry.getSize() > geometryCount ? geometryCount
+                                                          : ExternalGeometry.getSize() - 1;
     }
 
     // get the actual lists of the externals
@@ -1289,6 +1331,48 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         // revert to original values
         setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
         return -1;
+    }
+
+    // FreeCAD-CH (ops#252): a link, or the kind added to one, that gives no geometry is a
+    // failure. A new one was dropped by the rebuild, and the index returned was another link's,
+    // so the GUI committed an empty command with no message; an added kind with none made the
+    // link Both with nothing of that kind. Counted by kind (PR 269 review L1): the rebuild builds
+    // the link's other kind again, whose count can change too
+    {
+        const int kind = intersection ? 0 : 1;  // externalGeometryKind's
+        std::size_t ofKind = 0;
+        const auto& objects = ExternalGeometry.getValues();
+        const auto& subs = ExternalGeometry.getSubValues();
+        for (size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
+            if (objects[i] == Obj && subs[i] == SubName) {
+                for (long id : externalGeometryIds(static_cast<int>(i))) {
+                    ofKind += externalGeometryKind(id) == kind ? 1 : 0;
+                }
+                break;
+            }
+        }
+        if (ofKind == 0) {
+            if (addingSubShapes == 0) {
+                Base::Console().error(
+                    "Link to %s gives no %s geometry in this sketch.\n",
+                    SubName,
+                    intersection ? "intersection" : "projection"
+                );
+            }
+            if (ExternalGeometry.getValues() != originalObjects
+                || ExternalGeometry.getSubValues() != originalSubElements
+                || ExternalTypes.getValues() != originalTypes) {
+                setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
+                // the geometry as the links and types are again
+                try {
+                    rebuildExternalGeometry();
+                }
+                catch (const Base::Exception& e) {
+                    Base::Console().error("%s\n", e.what());
+                }
+            }
+            return -1;
+        }
     }
 
     acceptGeometry();  // This may need to be refactored into onChanged for ExternalGeometry

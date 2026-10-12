@@ -50,6 +50,7 @@ if(BUILD_GUI)
           SketcherTests/TestSketchCameraOnEditGui.py
           SketcherTests/TestAutoConstraintsGui.py
           SketcherTests/TestSketchCopyElementsGui.py
+          SketcherTests/TestSketchCommandsGui.py
     )
 endif(BUILD_GUI)
 

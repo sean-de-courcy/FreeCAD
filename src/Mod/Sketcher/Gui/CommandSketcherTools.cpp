@@ -899,7 +899,6 @@ void CmdSketcherSelectElementsAssociatedWithConstraints::activated(int iMsg)
 
     std::string doc_name = Obj->getDocument()->getName();
     std::string obj_name = Obj->getNameInDocument();
-    std::stringstream ss;
 
     std::vector<std::string> elementSubNames;
     // go through the selected subelements
@@ -910,69 +909,21 @@ void CmdSketcherSelectElementsAssociatedWithConstraints::activated(int iMsg)
             int ConstrId = getConstraintId(*it);
 
             if (ConstrId < static_cast<int>(vals.size())) {
-                if (vals[ConstrId]->First != GeoEnum::GeoUndef) {
-                    ss.str(std::string());
-
-                    switch (vals[ConstrId]->FirstPos) {
-                        case Sketcher::PointPos::NumPointPos:
-                            break;
-                        case Sketcher::PointPos::none:
-                            ss << "Edge" << vals[ConstrId]->First + 1;
-                            break;
-                        case Sketcher::PointPos::start:
-                        case Sketcher::PointPos::end:
-                        case Sketcher::PointPos::mid:
-                            int vertex = Obj->getVertexIndexGeoPos(vals[ConstrId]->First,
-                                                                   vals[ConstrId]->FirstPos);
-                            if (vertex > -1)
-                                ss << "Vertex" << vertex + 1;
-                            break;
+                // FreeCAD-CH (ops#252): each element named as the sketch names it (H_Axis,
+                // V_Axis, RootPoint, ExternalEdgeN), every element of the constraint; one with no
+                // name is skipped. Before, the axes became Edge0 and Edge-1, an external Edge-2,
+                // and a point without a vertex an empty name
+                const Sketcher::Constraint* constr = vals[ConstrId];
+                for (size_t i = 0; i < constr->getElementsSize(); ++i) {
+                    const int geoId = constr->getGeoId(i);
+                    if (geoId == GeoEnum::GeoUndef) {
+                        continue;
                     }
-                    elementSubNames.push_back(ss.str());
-                }
-
-                if (vals[ConstrId]->Second != GeoEnum::GeoUndef) {
-                    ss.str(std::string());
-
-                    switch (vals[ConstrId]->SecondPos) {
-                        case Sketcher::PointPos::NumPointPos:
-                            break;
-                        case Sketcher::PointPos::none:
-                            ss << "Edge" << vals[ConstrId]->Second + 1;
-                            break;
-                        case Sketcher::PointPos::start:
-                        case Sketcher::PointPos::end:
-                        case Sketcher::PointPos::mid:
-                            int vertex = Obj->getVertexIndexGeoPos(vals[ConstrId]->Second,
-                                                                   vals[ConstrId]->SecondPos);
-                            if (vertex > -1)
-                                ss << "Vertex" << vertex + 1;
-                            break;
+                    const Data::IndexedName name =
+                        Obj->shapeTypeFromGeoId(geoId, constr->getPosId(i));
+                    if (name) {
+                        elementSubNames.push_back(name.toString());
                     }
-
-                    elementSubNames.push_back(ss.str());
-                }
-
-                if (vals[ConstrId]->Third != GeoEnum::GeoUndef) {
-                    ss.str(std::string());
-
-                    switch (vals[ConstrId]->ThirdPos) {
-                        case Sketcher::PointPos::NumPointPos:
-                            break;
-                        case Sketcher::PointPos::none:
-                            ss << "Edge" << vals[ConstrId]->Third + 1;
-                            break;
-                        case Sketcher::PointPos::start:
-                        case Sketcher::PointPos::end:
-                        case Sketcher::PointPos::mid:
-                            int vertex = Obj->getVertexIndexGeoPos(vals[ConstrId]->Third,
-                                                                   vals[ConstrId]->ThirdPos);
-                            if (vertex > -1)
-                                ss << "Vertex" << vertex + 1;
-                            break;
-                    }
-
-                    elementSubNames.push_back(ss.str());
                 }
             }
         }

@@ -1445,6 +1445,35 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.flush_gui(150)
         self.assert_refused(count, links, geometries, types)
 
+    def test_d40_distance_tool_on_an_intersection_link_that_crosses_twice(self):
+        """D40 (PR 228 verification, follow-up 3; ops#252): D38 with the Distance tool (the
+        generic constraint tool's path): the pick is refused and the link stays as it was."""
+        cylinder = self.doc.addObject("Part::Cylinder", "Cylinder")
+        cylinder.Radius = 2
+        cylinder.Height = 4
+        cylinder.Placement = FreeCAD.Placement(V(20, 0, 0), FreeCAD.Rotation(V(1, 0, 0), -90))
+        self.doc.recompute()
+        edge = next(
+            "Edge%d" % (i + 1)
+            for i, e in enumerate(cylinder.Shape.Edges)
+            if isinstance(e.Curve, Part.Circle) and abs(e.CenterOfMass.y) < 1e-6
+        )
+        self.sketch.addExternal(cylinder.Name, edge, False, True)
+        self.doc.recompute()
+        geometries = len(self.sketch.ExternalGeo)
+        links = len(self.sketch.ExternalGeometry)
+        types = list(self.sketch.ExternalTypes)
+
+        self.start_edit()
+        FreeCADGui.Selection.clearSelection()
+        self.answer_fields([])
+        FreeCADGui.runCommand("Sketcher_ConstrainDistance")
+        self.flush_gui(100)
+        count = len(self.sketch.Constraints)
+        FreeCADGui.Selection.addSelection(self.doc.Name, cylinder.Name, edge)
+        self.flush_gui(150)
+        self.assert_refused(count, links, geometries, types)
+
     def test_d39_distance_tool_on_a_3d_edge_after_a_face_link(self):
         """D39 (PR 228 review): as D35 with the Distance tool (the generic constraint tool's
         path): the new Distance is on B's edge's projection."""

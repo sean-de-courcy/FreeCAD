@@ -25,12 +25,15 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <vector>
 
 #include <Precision.hxx>
 
 #include <Base/Vector3D.h>
+
+#include <boost/uuid/uuid.hpp>
 
 #include "Analyse.h"
 
@@ -107,6 +110,9 @@ public:
     void setMissingPointOnPointConstraints(std::vector<ConstraintIds>& cl)
     {
         vertexConstraints = cl;
+        vertexConstraintsGeometry = geometryTags();
+        vertexConstraintsPrecision = -1;  // set from outside: no detection to compare with
+        vertexConstraintsPositions.clear();
     }
     /// Point on Point constraint simple routine Make step (see constructor)
     void makeMissingPointOnPointCoincident();
@@ -191,11 +197,22 @@ private:
     Sketcher::SketchObject* sketch;
 
     std::vector<ConstraintIds> vertexConstraints;
+    /// The tags of the sketch's geometry when vertexConstraints was detected or set: its GeoIds
+    /// name that geometry, so Make refuses once the geometry list has changed (ops#252)
+    std::vector<boost::uuids::uuid> vertexConstraintsGeometry;
+    /// The precision they were detected with, which their points must still meet; negative when
+    /// they were set from outside (ops#252, PR 269 review L3)
+    double vertexConstraintsPrecision = -1;
+    /// Where each of their points was when detected: two points of one coincidence may be up to
+    /// twice the precision apart, so each is compared with its own (PR 269 round 2)
+    std::map<std::pair<int, Sketcher::PointPos>, Base::Vector3d> vertexConstraintsPositions;
     std::vector<ConstraintIds> verthorizConstraints;
     std::vector<ConstraintIds> lineequalityConstraints;
     std::vector<ConstraintIds> radiusequalityConstraints;
 
 private:
+    std::vector<boost::uuids::uuid> geometryTags() const;
+    bool vertexConstraintsStillApply(bool checkPositions = true);
     void autoDeleteAllConstraints();
     void autoHorizontalVerticalConstraints();
     void autoPointOnPointCoincident();

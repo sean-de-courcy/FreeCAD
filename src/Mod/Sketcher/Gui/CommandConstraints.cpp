@@ -2357,6 +2357,7 @@ public:
         if (key == SoKeyboardEvent::M && pressed && isToolKey(pressed, key)) {
             availableConstraint = nextConstraint(availableConstraint);
             makeAppropriateConstraint(previousOnSketchPos);
+            resetIfReferenceLost();
             updateHint();
         }
         else {
@@ -2379,8 +2380,15 @@ public:
         previousOnSketchPos = onSketchPos;
 
         //Change distance constraint based on position of mouse.
-        if (specialConstraint == SpecialConstraint::LineOr2PointsDistance)
-            updateDistanceType(onSketchPos);
+        if (specialConstraint == SpecialConstraint::LineOr2PointsDistance) {
+            try {
+                updateDistanceType(onSketchPos);
+            }
+            catch (const ExternalReferenceLost&) {
+                resetIfReferenceLost();
+                return;
+            }
+        }
 
         //Move constraints
         if (!cstrIndexes.empty()) {
@@ -2560,7 +2568,11 @@ public:
                 makeAppropriateConstraint(onSketchPos);
             }
             else {
-                restartCommand(QT_TRANSLATE_NOOP("Command", "Dimension"));
+                try {
+                    restartCommand(QT_TRANSLATE_NOOP("Command", "Dimension"));
+                }
+                catch (const ExternalReferenceLost&) {
+                }
             }
 
             if (selectInView) {
@@ -2569,6 +2581,7 @@ public:
             sketchgui->draw(false, false); // Redraw
         }
 
+        resetIfReferenceLost();
         updateHint();
         return true;
     }
@@ -2614,6 +2627,8 @@ protected:
 
     std::vector<std::string> initialSelection;
     std::vector<ExternalReference> externalReferences;
+    /// A reference wasn't restored on a restart (ExternalReferenceLost): the tool resets
+    bool referenceLost = false;
 
     std::vector<int> cstrIndexes;
     bool singleCircleReverseOrder;
@@ -2873,6 +2888,7 @@ protected:
         if (!selAllowed) {
             clearRefVectors();
         }
+        resetIfReferenceLost();
     }
 
     void filterCoincidentPoints()
@@ -2972,7 +2988,19 @@ protected:
         return selPoints.empty() && selLine.empty() && selCircleArc.empty() && selEllipseAndCo.empty();
     }
 
-    bool makeAppropriateConstraint(Base::Vector2d onSketchPos) {
+    /// false after an ExternalReferenceLost too: the caller pops what it pushed, then resets
+    /// (resetIfReferenceLost)
+    bool makeAppropriateConstraint(Base::Vector2d onSketchPos)
+    {
+        try {
+            return makeAppropriateConstraintFor(onSketchPos);
+        }
+        catch (const ExternalReferenceLost&) {
+            return false;
+        }
+    }
+
+    bool makeAppropriateConstraintFor(Base::Vector2d onSketchPos) {
         bool selAllowed = false;
 
         GeomSelectionSizes selection(selPoints.size(), selLine.size(), selCircleArc.size(), selEllipseAndCo.size(), selSplineAndCo.size());
@@ -3995,47 +4023,83 @@ protected:
         return externalGeoId;
     }
 
+    // Thrown by restoreExternalReferences when a reference isn't there again after the restart's
+    // abort; caught where the tool's handlers call into a restart, which then reset the tool
+    // (resetIfReferenceLost)
+    struct ExternalReferenceLost
+    {
+    };
+
     void restoreExternalReferences()
     {
-        bool restored = false;
         for (auto& reference : externalReferences) {
             bool linked = false;
-            const int geoId =
-                findExternalReference(Obj, reference.source, reference.subName, &linked);
-            if (geoId != GeoEnum::GeoUndef) {
-                reference.geoId = geoId;
-                continue;
-            }
-            if (linked) {
-                // none or several geometries: not added again (PR 228 review M1)
+            if (findExternalReference(Obj, reference.source, reference.subName, &linked)
+                    != GeoEnum::GeoUndef
+                || linked) {
+                // there, or linked with none or several geometries: not added again (PR 228
+                // review M1); the second is lost below
                 continue;
             }
 
-            if (addProjectedExternalReference(Obj, reference.source, reference.subName)
-                != GeoEnum::GeoUndef) {
-                restored = true;
+            // a link that gives no geometry now throws (PR 269 review L4)
+            try {
+                addProjectedExternalReference(Obj, reference.source, reference.subName);
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().warning("Dimension: external reference %s not restored: %s\n",
+                                        reference.subName.c_str(),
+                                        e.what());
             }
         }
 
-        if (!restored) {
-            return;
-        }
-
+        // FreeCAD-CH (ops#252, PR 228 review L6): every remap is applied in one pass. One after
+        // another, a selection moved by one could be moved again by the next (old -3 to -4, then
+        // -4 to -5)
+        std::map<int, int> remap;
         for (auto& reference : externalReferences) {
             const int restoredGeoId = findExternalReference(Obj, reference.source, reference.subName);
-            if (restoredGeoId != GeoEnum::GeoUndef) {
-                updateExternalReferenceGeoId(reference.geoId, restoredGeoId);
-                reference.geoId = restoredGeoId;
+            if (restoredGeoId == GeoEnum::GeoUndef) {
+                // FreeCAD-CH (PR 269 round 2): the selections naming its old GeoId would stay, and
+                // another reference's geometry may have that GeoId now: the dimension would go on
+                // it. Nothing is made; the tool starts over and says so
+                referenceLost = true;
+                throw ExternalReferenceLost();
             }
+            remap[reference.geoId] = restoredGeoId;
+            reference.geoId = restoredGeoId;
         }
+        updateExternalReferenceGeoIds(remap);
     }
 
-    void updateExternalReferenceGeoId(int oldGeoId, int newGeoId)
+    /// After an ExternalReferenceLost: the tool starts over, with nothing selected, and tells the
+    /// user. Returns whether it did
+    bool resetIfReferenceLost()
     {
-        auto updateGeoId = [oldGeoId, newGeoId](std::vector<SelIdPair>& selections) {
+        if (!referenceLost) {
+            return false;
+        }
+        referenceLost = false;
+        resetTool();
+        Gui::NotifyWarning(
+            sketchgui,
+            QT_TRANSLATE_NOOP("Notifications", "Warning"),
+            QT_TRANSLATE_NOOP(
+                "Notifications",
+                "An external geometry of the selection could not be added again. The selection "
+                "was cleared: select the geometry again."
+            )
+        );
+        return true;
+    }
+
+    void updateExternalReferenceGeoIds(const std::map<int, int>& remap)
+    {
+        auto updateGeoId = [&remap](std::vector<SelIdPair>& selections) {
             for (auto& selection : selections) {
-                if (selection.GeoId == oldGeoId) {
-                    selection.GeoId = newGeoId;
+                auto it = remap.find(selection.GeoId);
+                if (it != remap.end()) {
+                    selection.GeoId = it->second;
                 }
             }
         };

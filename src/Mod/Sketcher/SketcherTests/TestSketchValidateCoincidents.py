@@ -20,6 +20,7 @@
 #   <https://www.gnu.org/licenses/>.                                       *
 # **************************************************************************
 
+import math
 import unittest
 import FreeCAD
 import Part
@@ -213,6 +214,101 @@ class TestSketchValidateCoincidents(unittest.TestCase):
             self.assertEqual(
                 len(doc.Sketch001.ExternalGeo), 3
             )  # Two axis, plus one the reference to deleted geometry
+
+    def testMissingCoincidenceAfterTheGeometryChanged(self):
+        """ops#252: a coincidence found between line 0's end and line 1's start isn't made once
+        line 0 is deleted: its GeoIds would then join line 1's end (10, 10) and line 2's start
+        (20, 20), and the solver would pull them together. Nothing is added, with a warning."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(20, 20, 0), Vector(30, 30, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.delGeometry(0)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 0)
+        self.assertEqual(sketch.Geometry[1].StartPoint, Vector(20, 20, 0))
+        # detected again on the geometry as it is: nothing missing
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 0)
+
+    def testMissingCoincidenceAfterTheGeometryMoved(self):
+        """PR 269 review L3: line 1's start moves from (10, 0) to (12, 3) after the coincidence
+        with line 0's end is found. The geometry keeps its tags, but the points are no longer
+        within the precision they were found with: nothing is added, and the list stays (the
+        validation panel tells the user)."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.moveGeometry(1, 1, Vector(12, 3, 0))
+        self.assertLess((sketch.Geometry[1].StartPoint - Vector(12, 3, 0)).Length, 1e-6)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 0)
+        self.assertEqual(len(sketch.MissingPointOnPointConstraints), 1)
+
+    def testMissingCoincidencesOfAThreePointGroup(self):
+        """PR 269 round 2: three line starts at x = -0.08, 0 and 0.08 form one group at precision
+        0.1, each within it of the group's middle point, but the outer two are 0.16 apart. Both
+        coincidences found are made: each point is still where it was found."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(0, 10, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(0.08, 0, 0), Vector(10, -5, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(-0.08, 0, 0), Vector(-10, -5, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(0.1), 2)
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        made = sorted(
+            tuple(sorted(((c.First, c.FirstPos), (c.Second, c.SecondPos))))
+            for c in sketch.Constraints
+            if c.Type == "Coincident"
+        )
+        self.assertEqual(len(made), 2)
+        # the three starts end up joined
+        self.assertEqual({point for pair in made for point in pair}, {(0, 1), (1, 1), (2, 1)})
+
+    def testAutoconstraintMakesCoincidencesAfterHorizontalVertical(self):
+        """PR 269 round 2: autoconstraint() solves the horizontal/vertical constraints it finds
+        before it makes the coincidences it found earlier. A rectangle's bottom edge 3 degrees off
+        horizontal: making it horizontal moves its ends about 2.6, and the four corners are still
+        joined."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        rise = 100 * math.tan(math.radians(3))
+        corners = [Vector(0, 0, 0), Vector(100, rise, 0), Vector(100, 60, 0), Vector(0, 60, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        self.Doc.recompute()
+        sketch.autoconstraint()
+        self.Doc.recompute()
+        types = [c.Type for c in sketch.Constraints]
+        self.assertEqual(types.count("Horizontal"), 2)
+        self.assertEqual(types.count("Vertical"), 2)
+        self.assertEqual(types.count("Coincident"), 4)
+        bottom = sketch.Geometry[0]
+        self.assertAlmostEqual(bottom.StartPoint.y, bottom.EndPoint.y, places=6)
+        for i in range(4):
+            gap = sketch.Geometry[i].EndPoint - sketch.Geometry[(i + 1) % 4].StartPoint
+            self.assertLess(gap.Length, 1e-6)
+
+    def testMissingCoincidenceAfterARecompute(self):
+        """ops#252: a recompute between Detect and Make (the solver moves nothing here, and keeps
+        each geometry's tag) doesn't stop the coincidence from being made."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Sketch")
+        sketch.addGeometry(Part.LineSegment(Vector(0, 0, 0), Vector(10, 0, 0)))
+        sketch.addGeometry(Part.LineSegment(Vector(10, 0, 0), Vector(10, 10, 0)))
+        self.Doc.recompute()
+        self.assertEqual(sketch.detectMissingPointOnPointConstraints(), 1)
+        sketch.touch()
+        self.Doc.recompute()
+        sketch.makeMissingPointOnPointCoincident()
+        self.Doc.recompute()
+        self.assertEqual(sketch.ConstraintCount, 1)
+        c = sketch.Constraints[0]
+        self.assertEqual((c.Type, c.First, c.FirstPos, c.Second, c.SecondPos), ("Coincident", 0, 2, 1, 1))
 
     def tearDown(self):
         # closing doc

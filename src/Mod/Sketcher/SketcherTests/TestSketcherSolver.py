@@ -1178,6 +1178,23 @@ class TestSketcherSolver(unittest.TestCase):
             msg=msg or "The given shapes are not spaced by the expected distance.",
         )
 
+    def testGeometryWithDependentParametersNamesEachPoint(self):
+        """ops#252: a line whose start is fixed (DistanceX and DistanceY from the origin) has a
+        free end, and a circle of fixed radius a free centre. getGeometryWithDependentParameters
+        reports the line's end (2) and the circle's centre (3); both were reported as start (1)."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "Dependent")
+        sketch.addGeometry(Part.LineSegment(App.Vector(1, 2, 0), App.Vector(6, 4, 0)))
+        sketch.addGeometry(Part.Circle(App.Vector(20, 0, 0), App.Vector(0, 0, 1), 3))
+        sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 1, 1))
+        sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, 2))
+        sketch.addConstraint(Sketcher.Constraint("Radius", 1, 3))
+        self.Doc.recompute()
+        dependent = sketch.getGeometryWithDependentParameters()
+        self.assertIn((0, 2), dependent)
+        self.assertNotIn((0, 1), dependent)
+        self.assertIn((1, 3), dependent)
+        self.assertNotIn((1, 1), dependent)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("SketchSolverTest")

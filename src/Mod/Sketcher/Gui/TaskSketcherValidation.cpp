@@ -204,6 +204,20 @@ void SketcherValidation::onFixButtonClicked()
 
     Gui::cmdAppObjectArgs(sketch.get(), "makeMissingPointOnPointCoincident()");
 
+    // FreeCAD-CH (ops#252, PR 269 review L3): the make refuses coincidences found on geometry
+    // that has changed since, and leaves them listed. Say so here, with nothing committed and the
+    // points still shown
+    if (!sketch->getMissingPointOnPointConstraints().empty()) {
+        doc->abortTransaction();
+        Gui::TranslatedUserWarning(
+            *sketch,
+            tr("Missing coincidences"),
+            tr("The sketch has changed since the missing coincidences were found. Detect them "
+               "again.")
+        );
+        return;
+    }
+
     ui->fixButton->setEnabled(false);
     hidePoints();
 

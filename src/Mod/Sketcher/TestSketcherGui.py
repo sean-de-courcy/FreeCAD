@@ -14,6 +14,7 @@ from SketcherTests.TestAutoConstraintsGui import TestAutoConstraintsGui
 from SketcherTests.TestSketchCopyElementsGui import TestSketchCopyElementsGui
 from SketcherTests.TestSketchCopyElementsGui import TestMergeExternalPairingGui
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
+from SketcherTests.TestSketchCommandsGui import TestSketchCommandsGui
 
 # Use the module so that code checkers don't complain (flake8)
 (
@@ -32,5 +33,6 @@ from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypesGui
     and TestAutoConstraintsGui
     and TestSketchCopyElementsGui
     and TestMergeExternalPairingGui
+    and TestSketchCommandsGui
     else False
 )
