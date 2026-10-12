@@ -818,6 +818,9 @@ public:
             if (plan.linesChanged) {
                 writeParkedLines(owner, plan.lines);
             }
+            for (const auto& text : plan.dropWarnings) {
+                Base::Console().warning("%s", text.c_str());
+            }
             if (auto sketch = freecad_cast<Sketcher::SketchObject*>(owner)) {
                 for (const auto& item : plan.missingProjections) {
                     sketch->markExternalGeometryMissing(item.ids, projectionKey(item));
@@ -850,6 +853,8 @@ private:
         bool linesChanged = false;
         std::set<std::string> parkPaths;
         std::vector<RestoredExpression> restoreExprs;
+        // The warnings for the expression lines dropped (ops#171 B1), which apply() prints
+        std::vector<std::string> dropWarnings;
         // Parked projections whose object was deleted (ops#131): their geometries get the old
         // reference back, so the sketch shows them as missing instead of as silent fixed geometry
         std::vector<ParkedItem> missingProjections;
@@ -1336,16 +1341,20 @@ private:
             }
             else {
                 // FreeCAD-CH (ops#171 B1): dropped, as a line whose object was deleted is; said
-                // so, since the property stays at its value without the expression
-                Base::Console().warning(
-                    "%s: the expression of '%s' set aside by a reorder isn't put back: %s. The "
-                    "property keeps its value.\n",
-                    owner->getFullName().c_str(),
-                    item->property.c_str(),
-                    item->targetId == -1
-                        ? "it reads an object that stayed in another document when it was copied"
-                        : ("'" + item->target + "' was deleted").c_str()
-                );
+                // so, since the property stays at its value without the expression. apply() says
+                // it: the move can still be refused below, and then the line stays
+                std::ostringstream text;
+                text << owner->getFullName() << ": the expression of '" << item->property
+                     << "' set aside by a reorder isn't put back: ";
+                if (item->targetId == -1) {
+                    text << "it reads an object that stayed in another document when it was "
+                            "copied";
+                }
+                else {
+                    text << "'" << item->target << "' was deleted";
+                }
+                text << ". The property keeps its value.\n";
+                plan.dropWarnings.push_back(text.str());
             }
             plan.linesChanged = true;
         }
@@ -1929,6 +1938,17 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
         why = ss.str();
         return true;
     }
+    if (item->expression && item->targetId == -1) {
+        // Pasted, it reads an object that didn't come with it (ops#171 B1): never put back
+        ss << "the expression of '" << item->property
+           << "' reads an object that stayed in another document when it was copied: the next "
+              "reorder of the Body drops it, and the property keeps its value";
+        if (lines.size() > 1) {
+            ss << " (and " << lines.size() - 1 << " more set aside)";
+        }
+        why = ss.str();
+        return true;
+    }
     if (item->expression) {
         ss << "the expression of '" << item->property << "' reads '" << targetLabel << "'";
     }
@@ -1973,11 +1993,11 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
 {
     // The imported objects by the name each was saved under, with the ID it had there
     std::map<std::string, std::pair<App::DocumentObject*, long>> saved;
-    std::set<const App::DocumentObject*> imported;
+    std::set<const App::DocumentObject*> copies;
     for (auto obj : objs) {
         if (auto source = App::importedSource(obj)) {
             saved[source->name] = {obj, source->id};
-            imported.insert(obj);
+            copies.insert(obj);
         }
     }
     for (auto owner : objs) {
@@ -1993,6 +2013,12 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
         auto at = source->name.find('@');
         const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
         const bool sameDocument = App::importedWithin(*source, *doc);
+        // While the import's reader is active (Document::importObjects), the parse maps each name
+        // the text gives an object to the name of that object's copy (ObjectIdentifier's
+        // checkImport). A merge's names have no suffix, so its parse has mapped every object that
+        // came; a copy's names end in `@<document>`, which the text's names don't, so a paste's
+        // parse maps none
+        const bool parseMaps = suffix.empty();
         // The copy of the owner's object of that name, if it is that object (id; 0 takes any)
         auto copyOf = [&](const std::string& name, long id) -> App::DocumentObject* {
             auto it = saved.find(name + suffix);
@@ -2001,6 +2027,17 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
             }
             return it->second.first;
         };
+        // The copy of the owner's document's object of that label, if one came with it
+        auto copyByLabel = [&](const std::string& label) -> App::DocumentObject* {
+            for (const auto& [name, entry] : saved) {
+                auto nameAt = name.find('@');
+                if ((nameAt == std::string::npos ? "" : name.substr(nameAt)) == suffix
+                    && entry.first->Label.getStrValue() == label) {
+                    return entry.first;
+                }
+            }
+            return nullptr;
+        };
         auto lines = parkedLines(owner);
         bool changed = false;
         for (auto& line : lines) {
@@ -2008,6 +2045,9 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
             if (!item) {
                 continue;
             }
+            // A line already marked on an earlier paste was warned about there
+            const bool markedBefore = item->targetId == -1;
+            std::vector<std::string> uncopied;
             if (auto copy = copyOf(item->target, item->targetId)) {
                 item->setTarget(copy);
                 // The mapped name's tags are the source objects' IDs, which the copies don't
@@ -2016,59 +2056,89 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
             }
             else if (!sameDocument) {
                 item->targetId = -1;
+                if (item->expression && !markedBefore) {
+                    uncopied.push_back(item->target);
+                }
             }
             if (item->expression) {
                 try {
                     // The objects the text names without a document resolve here: to the copies
                     // that kept their names, or to this document's objects (or the originals,
-                    // within the document) where a copy was renamed. A reference into another
-                    // document stays as it is. The parse doesn't rename them
+                    // within the document) where a copy was renamed; in a merge, to the copies
+                    // (parseMaps). A reference into another document stays as it is
                     std::unique_ptr<App::Expression> expr(
                         App::Expression::parse(owner, item->text));
                     // FreeCAD-CH (ops#171 B1): pasted into another document, an object the text
                     // names without a document that didn't come with it would read whatever this
                     // document has under that name, silently. The line is marked as in another
-                    // document, as a projection's line is: the next move drops it, and says so
-                    if (!sameDocument && item->targetId != -1) {
-                        std::string uncopied;
-                        for (const auto& [id, hidden] : expr->getIdentifiers()) {
-                            (void)hidden;
-                            const std::string docName = id.getDocumentName().getString();
-                            if (!docName.empty() && docName != doc->getName()) {
-                                continue;  // another document's object
-                            }
-                            auto obj = id.getDocumentObject();
-                            if (obj == owner || (obj && obj->getDocument() != doc)
-                                || (obj && imported.count(obj))) {
-                                continue;  // the owner itself, or a copy that kept its name
-                            }
-                            const std::string name = obj
-                                ? std::string(obj->getNameInDocument())
-                                : id.getDocumentObjectName().getString();
-                            if (name.empty() || copyOf(name, 0)) {
-                                continue;  // copied under another name: renamed below
-                            }
-                            uncopied = name;
-                            break;
+                    // document, as a projection's line is: the next move drops it, and says so.
+                    // Whether it came goes by the name in the text (copyOf), not by what that
+                    // name resolves to here, which can be the copy of another object
+                    std::set<const App::DocumentObject*> byName, byLabel;
+                    for (const auto& entry : expr->getIdentifiers()) {
+                        const auto& id = entry.first;
+                        const std::string docName = id.getDocumentName().getString();
+                        if (id.isLocalProperty()
+                            || (!docName.empty() && docName != doc->getName())) {
+                            continue;  // the owner's, or another document's object
                         }
-                        if (!uncopied.empty()) {
-                            item->targetId = -1;
-                            Base::Console().warning(
-                                "%s: the expression of '%s' set aside by a reorder reads '%s', "
-                                "which wasn't copied with it. It won't be put back, so that it "
-                                "doesn't read another object of that name here: the property "
-                                "keeps its value.\n",
-                                owner->getFullName().c_str(),
-                                item->property.c_str(),
-                                uncopied.c_str()
-                            );
+                        auto obj = id.getDocumentObject();
+                        if (obj && obj->getDocument() != doc) {
+                            continue;
+                        }
+                        std::string name;
+                        if (!obj || obj == owner) {
+                            // A name that resolves to nothing here is read as the owner's
+                            // property (ObjectIdentifier); it is an object's name when the owner
+                            // has no such property (nor pseudo-property). Nothing that came with the paste has that
+                            // name or label, or it would resolve
+                            const auto& components = id.getComponents();
+                            if (!obj) {
+                                name = id.getDocumentObjectName().getString();
+                            }
+                            else if (!id.hasDocumentObjectName(true) && components.size() >= 2
+                                     && components[0].isSimple() && !id.getProperty()) {
+                                name = components[0].getName();
+                            }
+                            else {
+                                continue;  // the owner itself
+                            }
+                        }
+                        else {
+                            const auto written = id.getDocumentObjectName();
+                            if (written.isRealString()) {
+                                // A <<label>>: copied if it reads the copy of the owner's
+                                // document's object of that label
+                                byLabel.insert(obj);
+                                if (copyByLabel(written.getString()) == obj) {
+                                    continue;
+                                }
+                            }
+                            else {
+                                byName.insert(obj);
+                                if (parseMaps ? copies.count(obj) > 0
+                                              : copyOf(written.getString(), 0) != nullptr) {
+                                    continue;  // copied: kept its name, or renamed below
+                                }
+                            }
+                            name = written.getString();
+                        }
+                        if (!sameDocument && !markedBefore && !name.empty()
+                            && std::find(uncopied.begin(), uncopied.end(), name)
+                                == uncopied.end()) {
+                            uncopied.push_back(name);
                         }
                     }
+                    // A merge's parse has renamed them already
                     std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> renames;
                     for (const auto& dep : expr->getDeps(App::Expression::DepAll)) {
                         auto obj = dep.first;
-                        if (!obj || !obj->isAttachedToDocument() || obj->getDocument() != doc) {
+                        if (parseMaps || !obj || !obj->isAttachedToDocument()
+                            || obj->getDocument() != doc) {
                             continue;
+                        }
+                        if (!sameDocument && byLabel.count(obj) && !byName.count(obj)) {
+                            continue;  // read by its label, which the copy has, not by a name
                         }
                         auto copy = copyOf(obj->getNameInDocument(), 0);
                         if (copy && copy != obj) {
@@ -2096,6 +2166,22 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
                 catch (const Base::Exception& e) {
                     FC_WARN(owner->getFullName() << ": a parked expression could not be read on "
                                                     "import: " << e.what());
+                }
+                if (!uncopied.empty()) {
+                    item->targetId = -1;
+                    std::string names;
+                    for (std::size_t i = 0; i < uncopied.size(); ++i) {
+                        names += i == 0 ? "" : i + 1 == uncopied.size() ? " and " : ", ";
+                        names += "'" + uncopied[i] + "'";
+                    }
+                    Base::Console().warning(
+                        "%s: the expression of '%s' set aside by a reorder reads %s, which "
+                        "didn't come with it. It won't be put back, so that it doesn't read "
+                        "another object of that name here: the property keeps its value.\n",
+                        owner->getFullName().c_str(),
+                        item->property.c_str(),
+                        names.c_str()
+                    );
                 }
             }
             auto rewritten = item->line();

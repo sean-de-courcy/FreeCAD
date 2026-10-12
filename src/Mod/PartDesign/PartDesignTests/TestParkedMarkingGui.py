@@ -365,22 +365,37 @@ class TestParkedMarkingGui(unittest.TestCase):
         """ops#171 B1: TestBodyReorder's paste of a parked expression that reads a Sheet left
         behind, run here to read the Report view: the paste says once that the line won't be put
         back, and the move back says once that it isn't."""
+        pasted = "reads 'Sheet', which didn't come with it"
+        dropped = "isn't put back: it reads an object that stayed in another document"
+        self.runAndCount(
+            "testParkedExpressionReadingAnUncopiedObjectPasted", {pasted: 1, dropped: 1}
+        )
+
+    def testUncopiedTargetAndObjectWarnOnceAtThePaste(self):
+        """PR 275 review L3: the line's own target left behind is named at the paste too, with
+        the other object its text reads, in one warning."""
+        self.runAndCount(
+            "testParkedExpressionPastedWithoutItsTarget",
+            {"reads 'BossA' and 'Sheet', which didn't come with it": 1},
+        )
+
+    def runAndCount(self, name, counts):
+        """TestBodyReorderV2's test name run, passing, and the Report view's new lines holding
+        each text of counts, as many as given."""
         from PartDesignTests.TestBodyReorder import TestBodyReorderV2
 
         def lines(text):
             return [line for line in (reportText() or "").splitlines() if text in line]
 
         self.assertIsNotNone(reportText(), "no Report view")
-        pasted = len(lines("which wasn't copied with it"))
-        dropped = len(lines("reads an object that stayed in another document"))
+        before = {text: len(lines(text)) for text in counts}
         result = unittest.TestResult()
-        TestBodyReorderV2("testParkedExpressionReadingAnUncopiedObjectPasted").run(result)
+        TestBodyReorderV2(name).run(result)
         self.assertEqual(result.errors + result.failures, [])
         self.assertEqual(result.testsRun, 1)
         processEvents(0.2)
-        self.assertEqual(len(lines("which wasn't copied with it")), pasted + 1)
-        self.assertEqual(len(lines("reads an object that stayed in another document")), dropped + 1)
-
+        for text, count in counts.items():
+            self.assertEqual(len(lines(text)), before[text] + count, text)
 
 def reportText():
     """The Report view's text, where Console warnings go."""

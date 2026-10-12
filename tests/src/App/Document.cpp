@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include <zipios++/zipinputstream.h>
@@ -154,6 +155,19 @@ std::string documentXml(std::istream& zip)
 {
     zipios::ZipInputStream entry(zip);
     return {std::istreambuf_iterator<char>(entry), std::istreambuf_iterator<char>()};
+}
+
+// The space-separated words of the first attribute `name` of xml; none if it has none
+std::set<std::string> attributeWords(const std::string& xml, const std::string& name)
+{
+    const std::string start = ' ' + name + "=\"";
+    const auto begin = xml.find(start);
+    if (begin == std::string::npos) {
+        return {};
+    }
+    std::istringstream words(
+        xml.substr(begin + start.size(), xml.find('"', begin + start.size()) - begin - start.size()));
+    return {std::istream_iterator<std::string>(words), std::istream_iterator<std::string>()};
 }
 
 App::PropertyString* addNote(App::Document* document, const char* name, const std::string& note)
@@ -355,15 +369,17 @@ public:
 
 namespace
 {
-// For each import into `doc` while it lives: whether the first imported object's source is
+// For each object of each import into `doc` while it lives, in order: whether its source is
 // `doc` itself (importedWithin), as the import's slots see it
 struct WithinRecorder
 {
     explicit WithinRecorder(App::Document* doc)
         : connection(doc->signalImportObjects.connect(
               [doc, this](const std::vector<App::DocumentObject*>& objs, Base::XMLReader&) {
-                  auto source = objs.empty() ? std::nullopt : App::importedSource(objs.front());
-                  within.push_back(source && App::importedWithin(*source, *doc));
+                  for (auto obj : objs) {
+                      auto source = App::importedSource(obj);
+                      within.push_back(source && App::importedWithin(*source, *doc));
+                  }
               }))
     {}
     ~WithinRecorder()
@@ -409,6 +425,40 @@ TEST_F(DocumentTest, importedWithinGoesByTheDocumentsUuid)
         copied.seekg(0);
         App::MergeDocuments(sameName).importObjects(copied);
         EXPECT_EQ(recorder.within, std::vector<bool>({false}));
+    }
+    app.closeDocument(name.c_str());
+}
+
+// A copy made by a build with SourceDocument only (before SourceDocuments, PR 275) still goes by
+// it: its objects are within the document they came from, and not within another
+TEST_F(DocumentTest, importedWithinReadsACopyWithSourceDocumentOnly)
+{
+    auto& app = App::GetApplication();
+    const std::string name = app.getUniqueDocumentName("OldCopyTarget");
+    App::Document* other = app.newDocument(name.c_str(), "testUser");
+    doc()->addObject("App::DocumentObjectGroup", "Copied");
+    std::stringstream exported;
+    doc()->exportObjects({doc()->getObject("Copied")}, exported);
+    std::string xml = documentXml(exported);
+    const std::string attribute = " SourceDocuments=\"";
+    const auto begin = xml.find(attribute);
+    ASSERT_NE(begin, std::string::npos);
+    xml.erase(begin, xml.find('"', begin + attribute.size()) + 1 - begin);
+    ASSERT_EQ(xml.find("SourceDocuments="), std::string::npos);
+    ASSERT_NE(xml.find("SourceDocument=\"" + doc()->Uid.getValueStr() + "\""), std::string::npos);
+    std::stringstream old;
+    {
+        Base::ZipWriter writer(old);
+        writer.putNextEntry("Document.xml");
+        writer.Stream() << xml;
+    }
+
+    for (auto [into, within] : {std::pair {doc(), true}, std::pair {other, false}}) {
+        WithinRecorder recorder(into);
+        old.clear();
+        old.seekg(0);
+        App::MergeDocuments(into).importObjects(old);
+        EXPECT_EQ(recorder.within, std::vector<bool>({within})) << into->getName();
     }
     app.closeDocument(name.c_str());
 }
@@ -471,17 +521,17 @@ TEST_F(DocumentTest, importedWithinGoesByTheObjectsDocument)
     other->exportObjects({local, copied}, mixed);
     const std::string xml = documentXml(mixed);
     EXPECT_EQ(xml.find("SourceDocument="), std::string::npos);
-    EXPECT_NE(xml.find(std::string(other->getName()) + ':' + other->Uid.getValueStr()),
-              std::string::npos);
-    EXPECT_NE(xml.find(std::string(doc()->getName()) + ':' + doc()->Uid.getValueStr()),
-              std::string::npos);
+    EXPECT_EQ(attributeWords(xml, "SourceDocuments"),
+              std::set<std::string>(
+                  {std::string(other->getName()) + ':' + other->Uid.getValueStr(),
+                   std::string(doc()->getName()) + ':' + doc()->Uid.getValueStr()}));
     {
-        // the first object, Local, is other's own: within it (the list had no document before)
+        // Local is other's own: within it (the list had no document before); Copied is doc()'s
         WithinRecorder recorder(other);
         mixed.clear();
         mixed.seekg(0);
         App::MergeDocuments(other).importObjects(mixed);
-        EXPECT_EQ(recorder.within, std::vector<bool>({true}));
+        EXPECT_EQ(recorder.within, std::vector<bool>({true, false}));
     }
     app.closeDocument(name.c_str());
 }
