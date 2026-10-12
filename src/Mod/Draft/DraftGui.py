@@ -526,6 +526,9 @@ class DraftToolBar:
         self.layout.addLayout(fl)
         self.numFacesLabel = self._label("numfaceslabel", fl)
         self.numFaces = self._spinbox("numFaces", fl, 3)
+        # FreeCAD-CH (ops#319): a polygon has at least 3 sides; Part::RegularPolygon refuses fewer
+        # instead of fitting the value.
+        self.numFaces.setMinimum(3)
         ol = QtWidgets.QHBoxLayout()
         self.layout.addLayout(ol)
         rl = QtWidgets.QHBoxLayout()

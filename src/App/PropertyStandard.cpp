@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <limits>
 #include <memory>
@@ -76,6 +77,111 @@ double unitlessValue(const Property& prop, const Base::Quantity& q)
         ));
     }
     return q.getValue();
+}
+
+// The number an expression result gives a Float, as setPathValue() reads it.
+double floatFromAny(const Property& prop, const boost::any& value)
+{
+    if (value.type() == typeid(long)) {
+        return static_cast<double>(boost::any_cast<long>(value));
+    }
+    if (value.type() == typeid(unsigned long)) {
+        return static_cast<double>(boost::any_cast<unsigned long>(value));
+    }
+    if (value.type() == typeid(int)) {
+        return boost::any_cast<int>(value);
+    }
+    if (value.type() == typeid(double)) {
+        return boost::any_cast<double>(value);
+    }
+    if (value.type() == typeid(float)) {
+        return boost::any_cast<float>(value);
+    }
+    if (value.type() == typeid(Quantity)) {
+        return unitlessValue(prop, boost::any_cast<Quantity>(value));
+    }
+    throw bad_cast();
+}
+
+// The number an expression result gives an Integer: a double is rounded (`5/2` gives 3).
+long integerFromAny(const Property& prop, const boost::any& value)
+{
+    if (value.type() == typeid(long)) {
+        return boost::any_cast<long>(value);
+    }
+    if (value.type() == typeid(int)) {
+        return boost::any_cast<int>(value);
+    }
+    if (value.type() == typeid(double)) {
+        return static_cast<long>(boost::math::round(boost::any_cast<double>(value)));
+    }
+    if (value.type() == typeid(float)) {
+        return static_cast<long>(boost::math::round(boost::any_cast<float>(value)));
+    }
+    if (value.type() == typeid(Quantity)) {
+        return static_cast<long>(
+            boost::math::round(unitlessValue(prop, boost::any_cast<Quantity>(value)))
+        );
+    }
+    throw bad_cast();
+}
+
+// FreeCAD-CH (ops#319): a value outside a Float or Integer constraint (a Percent of 150) was
+// clamped silently from Python and stored unchecked from an expression. It is refused; within
+// rounding of a bound (relative 1e-9) a float counts as the bound, as for quantities.
+double checkedRange(const Property& prop, double value, double lower, double upper)
+{
+    const char* name = prop.getName();
+    auto tolerance = [](double bound) {
+        return 1e-9 * std::max(1.0, std::abs(bound));
+    };
+    if (value < lower) {
+        if (value >= lower - tolerance(lower)) {
+            return lower;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is below the minimum, {}", name ? name : "the property", value, lower
+        ));
+    }
+    if (value > upper) {
+        if (value <= upper + tolerance(upper)) {
+            return upper;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is above the maximum, {}", name ? name : "the property", value, upper
+        ));
+    }
+    return value;
+}
+
+long checkedRange(const Property& prop, long value, long lower, long upper)
+{
+    const char* name = prop.getName();
+    if (value < lower) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is below the minimum, {}", name ? name : "the property", value, lower
+        ));
+    }
+    if (value > upper) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is above the maximum, {}", name ? name : "the property", value, upper
+        ));
+    }
+    return value;
+}
+
+// FreeCAD-CH (ops#319): from Python, only a document object's value is refused. A view
+// provider's display setting (LineWidth, PointSize, Transparency) is still fitted into its range:
+// it changes nothing a document computes, and stock tools rely on the fit (a Draft layer's
+// LineWidth of 0, the style presets, an SVG stroke width).
+template<typename T>
+T fittedValue(const Property& prop, T value, T lower, T upper)
+{
+    auto container = prop.getContainer();
+    if (container && container->isDerivedFrom(DocumentObject::getClassTypeId())) {
+        return checkedRange(prop, value, lower, upper);
+    }
+    return value > upper ? upper : value < lower ? lower : value;
 }
 }  // namespace
 
@@ -164,25 +270,7 @@ void PropertyInteger::Paste(const Property& from)
 void PropertyInteger::setPathValue(const ObjectIdentifier& path, const boost::any& value)
 {
     verifyPath(path);
-
-    if (value.type() == typeid(long)) {
-        setValue(boost::any_cast<long>(value));
-    }
-    else if (value.type() == typeid(int)) {
-        setValue(boost::any_cast<int>(value));
-    }
-    else if (value.type() == typeid(double)) {
-        setValue(boost::math::round(boost::any_cast<double>(value)));
-    }
-    else if (value.type() == typeid(float)) {
-        setValue(boost::math::round(boost::any_cast<float>(value)));
-    }
-    else if (value.type() == typeid(Quantity)) {
-        setValue(boost::math::round(unitlessValue(*this, boost::any_cast<Quantity>(value))));
-    }
-    else {
-        throw bad_cast();
-    }
+    setValue(integerFromAny(*this, value));
 }
 
 
@@ -720,12 +808,7 @@ void PropertyIntegerConstraint::setPyObject(PyObject* value)
     if (PyLong_Check(value)) {
         long temp = PyLong_AsLong(value);
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -778,6 +861,8 @@ void PropertyIntegerConstraint::setPyObject(PyObject* value)
         c->LowerBound = valConstr[1];
         c->UpperBound = valConstr[2];
         c->StepSize = std::max<long>(1, valConstr[3]);
+        // A value with its own new range is fitted into it, as before (ops#319 refuses only a
+        // plain value outside the current range).
         if (valConstr[0] > c->UpperBound) {
             valConstr[0] = c->UpperBound;
         }
@@ -790,6 +875,22 @@ void PropertyIntegerConstraint::setPyObject(PyObject* value)
         _lValue = valConstr[0];
         hasSetValue();
     }
+}
+
+boost::any PropertyIntegerConstraint::checkPathValue(const ObjectIdentifier& path,
+                                                     const boost::any& value) const
+{
+    verifyPath(path);
+    long v = integerFromAny(*this, value);
+    if (_ConstStruct) {
+        v = checkedRange(*this, v, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
+    }
+    return v;
+}
+
+void PropertyIntegerConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyInteger::setPathValue(path, checkPathValue(path, value));
 }
 
 void PropertyIntegerConstraint::Save(Base::Writer& writer) const
@@ -1155,28 +1256,7 @@ void PropertyFloat::Paste(const Property& from)
 void PropertyFloat::setPathValue(const ObjectIdentifier& path, const boost::any& value)
 {
     verifyPath(path);
-
-    if (value.type() == typeid(long)) {
-        setValue(boost::any_cast<long>(value));
-    }
-    else if (value.type() == typeid(unsigned long)) {
-        setValue(boost::any_cast<unsigned long>(value));
-    }
-    else if (value.type() == typeid(int)) {
-        setValue(boost::any_cast<int>(value));
-    }
-    else if (value.type() == typeid(double)) {
-        setValue(boost::any_cast<double>(value));
-    }
-    else if (value.type() == typeid(float)) {
-        setValue(boost::any_cast<float>(value));
-    }
-    else if (value.type() == typeid(Quantity)) {
-        setValue(unitlessValue(*this, boost::any_cast<Quantity>(value)));
-    }
-    else {
-        throw bad_cast();
-    }
+    setValue(floatFromAny(*this, value));
 }
 
 const boost::any PropertyFloat::getPathValue(const ObjectIdentifier& path) const
@@ -1249,12 +1329,7 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
     if (PyFloat_Check(value)) {
         double temp = PyFloat_AsDouble(value);
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -1264,12 +1339,7 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
     else if (PyLong_Check(value)) {
         double temp = static_cast<double>(PyLong_AsLong(value));
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -1328,6 +1398,8 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         c->LowerBound = valConstr[1];
         c->UpperBound = valConstr[2];
         c->StepSize = stepSize;
+        // A value with its own new range is fitted into it, as before (ops#319 refuses only a
+        // plain value outside the current range).
         if (valConstr[0] > c->UpperBound) {
             valConstr[0] = c->UpperBound;
         }
@@ -1340,6 +1412,22 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         _dValue = valConstr[0];
         hasSetValue();
     }
+}
+
+boost::any PropertyFloatConstraint::checkPathValue(const ObjectIdentifier& path,
+                                                   const boost::any& value) const
+{
+    verifyPath(path);
+    double v = floatFromAny(*this, value);
+    if (_ConstStruct) {
+        v = checkedRange(*this, v, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
+    }
+    return v;
+}
+
+void PropertyFloatConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyFloat::setPathValue(path, checkPathValue(path, value));
 }
 
 void PropertyFloatConstraint::Save(Base::Writer& writer) const
