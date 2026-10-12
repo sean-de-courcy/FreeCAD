@@ -1261,6 +1261,7 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
     const std::vector<DocumentObject*> originalObjects = Objects;
     const std::vector<std::string> originalSubElements = SubElements;
     const std::vector<long> originalTypes = ExternalTypes.getValues();
+    std::string decidedKey;  // a link waiting for its type that this add decides
 
     if (Objects.size() != SubElements.size()) {
         assert(0 /*counts of objects and subelements in external geometry links do not match*/);
@@ -1305,6 +1306,11 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         // the rebuild keeps the existing geometry's Ids on it (ops#260)
         add = false;
         Types[i] = static_cast<int>(ExtType::Both);
+        // the user's choice: a link waiting for its type no longer does, and its geometry is no
+        // longer flagged as guessed (PR 277 review L5); a failed add below puts the key back
+        if (i < externalGeoRef.size() && undecidedTypeKeys.erase(externalGeoRef[i]) != 0) {
+            decidedKey = externalGeoRef[i];
+        }
     }
     if (add) {
         // add the new ones
@@ -1329,6 +1335,9 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         Base::Console().error("%s\n", e.what());
         // revert to original values
         setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
+        if (!decidedKey.empty()) {
+            undecidedTypeKeys.insert(decidedKey);
+        }
         return -1;
     }
 
@@ -1362,6 +1371,9 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
                 || ExternalGeometry.getSubValues() != originalSubElements
                 || ExternalTypes.getValues() != originalTypes) {
                 setExternalLinksAndTypes(originalObjects, originalSubElements, originalTypes);
+                if (!decidedKey.empty()) {
+                    undecidedTypeKeys.insert(decidedKey);
+                }
                 // the geometry as the links and types are again
                 try {
                     rebuildExternalGeometry();
@@ -3916,8 +3928,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             if (kind) {
                 setKind(geo.get(), *kind);
             }
-            // geometry from before the link waited keeps telling its type (an undo marks every
-            // link undecided); a decided link's geometry no longer counts as guessed (ops#287)
+            // geometry built before the link waited keeps telling its type, so it stays unflagged
+            // while the link waits (an undo marks undecided the links whose geometry is missing,
+            // absent or flagged, onUndoRedoFinished); a decided link's geometry no longer counts
+            // as guessed (ops#287)
             if (!guessed) {
                 ExternalGeometryFacade::getFacade(geo.get())
                     ->setFlag(ExternalGeometryExtension::TypeGuessed, false);
@@ -4595,6 +4609,16 @@ void SketchObject::updateGeometryRefs()
         }
     }
     undecidedTypeKeys.insert(renamedUndecided.begin(), renamedUndecided.end());
+    // a link that is gone no longer waits: added again, it is a new link, built with the type it
+    // is added with (PR 277 review M3: the key stayed, so the new link was flagged as guessed)
+    for (auto it = undecidedTypeKeys.begin(); it != undecidedTypeKeys.end();) {
+        if (std::find(externalGeoRef.begin(), externalGeoRef.end(), *it) == externalGeoRef.end()) {
+            it = undecidedTypeKeys.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
     bool touched = false;
     auto geos = ExternalGeo.getValues();
     if (!refMap.empty()) {

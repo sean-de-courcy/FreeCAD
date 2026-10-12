@@ -1528,26 +1528,28 @@ void SketchObject::onUndoRedoFinished()
     // decided, and the next rebuild with their element back kept the type at the index). Each
     // link whose saved geometry is missing waits again, as on a later open: a full rebuild
     // matches it with that geometry once its element is back. So does one with no saved
-    // geometry, which the open can't decide either (PR 253 review L3)
+    // geometry, which the open can't decide either (PR 253 review L3), and one whose geometry was
+    // built from a guess (TypeGuessed, ops#287): it still waits, and keeps the flag
     externalTypeRepairPending = ExternalTypes.getSize() > ExternalGeometry.getSize();
     undecidedTypeKeys.clear();
     if (externalTypeRepairPending) {
         for (const auto& key : externalGeoRef) {
             bool saved = false;
             bool missing = false;
+            bool guessed = false;
             auto refs = externalGeoRefMap.find(key);
             if (refs != externalGeoRefMap.end()) {
                 for (long id : refs->second) {
                     auto it = externalGeoMap.find(id);
                     if (it != externalGeoMap.end()) {
                         saved = true;
-                        missing = missing
-                            || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
-                                   ->testFlag(ExternalGeometryExtension::Missing);
+                        auto egf = ExternalGeometryFacade::getFacade(ExternalGeo[it->second]);
+                        missing = missing || egf->testFlag(ExternalGeometryExtension::Missing);
+                        guessed = guessed || egf->testFlag(ExternalGeometryExtension::TypeGuessed);
                     }
                 }
             }
-            if (!saved || missing) {
+            if (!saved || missing || guessed) {
                 undecidedTypeKeys.insert(key);
             }
         }
@@ -1665,6 +1667,18 @@ void SketchObject::onSketchRestore()
                         ExternalTypes.setValues(savedTypes);
                     }
                     externalTypeRepairPending = true;
+                    // a link whose saved geometry was built from a guess still waits: a full
+                    // rebuild keeps its flag, and the next open still can't tell it (PR 277
+                    // review L2)
+                    for (auto geo : ExternalGeo.getValues()) {
+                        auto egf = ExternalGeometryFacade::getFacade(geo);
+                        if (egf->testFlag(ExternalGeometryExtension::TypeGuessed)
+                            && std::find(externalGeoRef.begin(), externalGeoRef.end(),
+                                         egf->getRef())
+                                != externalGeoRef.end()) {
+                            undecidedTypeKeys.insert(egf->getRef());
+                        }
+                    }
                 };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);

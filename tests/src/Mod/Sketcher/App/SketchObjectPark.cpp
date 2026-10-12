@@ -995,6 +995,135 @@ TEST_F(SketchObjectParkTest, carbonCopyAfterTheUndecidedLinkIsDeleted)
     EXPECT_EQ(dest->ExternalGeometry.getSize(), 1);
 }
 
+namespace
+{
+bool typeGuessed(const Sketcher::SketchObject* sketch, int geoId)
+{
+    return ExternalGeometryFacade::getFacade(sketch->getGeometry(geoId))
+        ->testFlag(ExternalGeometryExtension::TypeGuessed);
+}
+
+// A carbon copy of `sketch` into a new sketch of its document: the result, and the errors
+std::pair<int, std::vector<std::string>> carbonCopyOf(App::Document* doc,
+                                                      Sketcher::SketchObject* sketch)
+{
+    auto* dest = static_cast<Sketcher::SketchObject*>(
+        doc->addObject("Sketcher::SketchObject", "Dest"));
+    WarningCollector collector;
+    const int result = dest->carbonCopy(sketch, false);
+    return {result, collector.errors};
+}
+}  // namespace
+
+// PR 277 review H1: an undo marks undecided only the links whose saved geometry is missing or
+// absent (onUndoRedoFinished); a link whose geometry was built from a guess still waits after
+// one: its flag stays through the next recompute, a carbon copy is still refused, and the next
+// open still says its type is undecided
+TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedThroughAnUndo)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    ASSERT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    doc->openTransaction("Line");
+    Part::GeomLineSegment line;
+    line.setPoints(Base::Vector3d(20, 0, 0), Base::Vector3d(30, 0, 0));
+    ASSERT_GE(sketch->addGeometry(&line), 0);
+    doc->commitTransaction();
+    ASSERT_TRUE(doc->undo());
+    doc->recompute();
+
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+}
+
+// PR 277 review M3: the advice works. A link waiting for its type, deleted and added again,
+// is a new link: its geometry isn't flagged, a carbon copy goes ahead, and the next open says
+// nothing about it (the deleted link's key no longer waits)
+TEST_F(SketchObjectParkTest, guessedLinkDeletedAndAddedAgainIsDecided)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    doc->recompute();
+    ASSERT_EQ(sketch->delExternal(0), 0);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 0);
+    ASSERT_GE(sketch->addExternal(box, edge.c_str(), false, false), 0);
+    doc->recompute();
+
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_FALSE(typeGuessed(sketch, GeoEnum::RefExt));
+    auto [copied, errors] = carbonCopyOf(doc, sketch);
+    EXPECT_GE(copied, 0) << (errors.empty() ? "" : errors[0]);
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(countContaining(warnings, "undecided"), 0U) << warnings.size() << " warnings";
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_FALSE(typeGuessed(sketch, GeoEnum::RefExt));
+}
+
+// PR 277 review L5: the other kind added to a link waiting for its type makes it Both, the
+// user's choice: it no longer waits, and its geometry isn't flagged
+TEST_F(SketchObjectParkTest, guessedLinkGivenBothKindsIsDecided)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, verticalEdge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    doc->recompute();
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    ASSERT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    ASSERT_GE(sketch->addExternal(box, verticalEdge.c_str(), false, true), 0);
+    doc->recompute();
+
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 1);
+    EXPECT_EQ(sketch->ExternalTypes.getValues()[0], static_cast<long>(ExtType::Both));
+    ASSERT_GT(sketch->ExternalGeo.getSize(), 3);
+    for (int geoId = GeoEnum::RefExt; -geoId <= sketch->ExternalGeo.getSize(); --geoId) {
+        EXPECT_FALSE(typeGuessed(sketch, geoId)) << geoId;
+    }
+    auto [copied, errors] = carbonCopyOf(doc, sketch);
+    EXPECT_GE(copied, 0) << (errors.empty() ? "" : errors[0]);
+}
+
+// PR 277 review: the flag goes through the XML of a copy. The sketch pasted into its document
+// keeps its geometry flagged and the mark, its link waits there too, and a carbon copy from the
+// copy is refused
+TEST_F(SketchObjectParkTest, guessedLinkStaysUndecidedInAPastedCopy)
+{
+    auto* sketch = getObject();
+    reopenWithoutSavedGeometry(doc, sketch, box, edge, {0, -1});
+    ASSERT_NE(sketch, nullptr);
+    doc->recompute();
+    std::vector<std::string> warnings;
+    std::vector<App::DocumentObject*> copies;
+    {
+        WarningCollector collector;
+        copies = doc->copyObject({sketch}, false);
+        warnings = collector.warnings;
+    }
+    ASSERT_EQ(copies.size(), 1U);
+    auto* copy = dynamic_cast<Sketcher::SketchObject*>(copies[0]);
+    ASSERT_NE(copy, nullptr);
+    doc->recompute();
+
+    EXPECT_EQ(copy->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    ASSERT_EQ(copy->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(copy, GeoEnum::RefExt));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+    EXPECT_EQ(carbonCopyOf(doc, copy).first, -1);
+}
+
 // ops#278: a Both entry put back on geometry without kinds (parked before ops#264, when parking
 // kept none) has its Ids split between projection and intersection by position at its next
 // rebuild, which moves constraints if the split moved while it was parked: unparking says so
