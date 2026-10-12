@@ -139,10 +139,14 @@ std::map<const Document*, DocumentNamingRevision> documentNamingRevisions;
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
 std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
-// The UUID of the document each running import's objects were copied from (exportObjects writes
-// it, ops#171); none for a saved project or a copy made by a build before it
-std::map<const Document*, std::string> importSourceDocuments;
+// The UUIDs of the documents each running import's objects were copied from, by document name
+// (exportObjects writes them, ops#171); under "" the one UUID of a copy of one document's objects
+// (SourceDocument). None for a saved project or a copy made by a build before ops#171
+std::map<const Document*, std::map<std::string, std::string>> importSourceDocuments;
 constexpr auto fcAttrSourceDocument {"SourceDocument"};
+// `<name>:<uuid>` of each exported object's document, separated by spaces: a copy of several
+// documents' objects tells each object's document (PR 266 verification L1)
+constexpr auto fcAttrSourceDocuments {"SourceDocuments"};
 }  // namespace
 
 std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
@@ -1805,28 +1809,44 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
     Base::ZipWriter writer(out);
     writer.putNextEntry("Document.xml");
     writer.Stream() << "<?xml version='1.0' encoding='utf-8'?>" << '\n';
-    // Which document the objects come from: a document's name can be taken by another one once it
-    // is closed (ops#171). That is the objects' own document, which needn't be this one
-    // (copyObject, moveObject and importLinks export from the destination; PR 266 review H1), and
-    // only when they all share one: a mixed list has none, so nothing in it counts as copied
-    // within the document it is pasted into
-    const Document* source = nullptr;
+    // Which documents the objects come from: a document's name can be taken by another one once
+    // it is closed (ops#171). That is each object's own document, which needn't be this one
+    // (copyObject, moveObject and importLinks export from the destination; PR 266 review H1).
+    // SourceDocuments names them all (PR 266 verification L1: a mixed list had none, so even the
+    // destination's own objects didn't count as copied within it); SourceDocument, which a build
+    // since ops#171 reads, only when they all share one
+    std::vector<const Document*> sources;
+    bool oneSource = !obj.empty();
     for (auto o : obj) {
         const Document* own = o ? o->getDocument() : nullptr;
-        if (!own || (source && own != source)) {
-            source = nullptr;
-            break;
+        if (!own) {
+            oneSource = false;
+            continue;
         }
-        source = own;
+        if (std::find(sources.begin(), sources.end(), own) == sources.end()) {
+            sources.push_back(own);
+        }
     }
+    oneSource = oneSource && sources.size() == 1;
     std::ostringstream startTag;
     startTag << R"(<Document SchemaVersion="4" ProgramVersion=")"
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << R"(" FileVersion="1")"
-             << " NamingRevision=\"" << namingRevisionToSave(this) << '"';  // ops#116
-    if (source) {
-        startTag << ' ' << fcAttrSourceDocument << "=\"" << source->Uid.getValueStr() << '"';
+             // ops#116. The exporting document's revision, not the objects' (PR 266 verification
+             // L2): an import doesn't read it from a copy today
+             << " NamingRevision=\"" << namingRevisionToSave(this) << '"';
+    if (oneSource) {
+        startTag << ' ' << fcAttrSourceDocument << "=\"" << sources.front()->Uid.getValueStr()
+                 << '"';
+    }
+    if (!sources.empty()) {
+        startTag << ' ' << fcAttrSourceDocuments << "=\"";
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            startTag << (i ? " " : "") << sources[i]->getName() << ':'
+                     << sources[i]->Uid.getValueStr();
+        }
+        startTag << '"';
     }
     // The exported objects' references to interned names carry their entries, as in Save()
     // (ops#6)
@@ -2159,11 +2179,25 @@ std::vector<DocumentObject*> Document::readObjects(Base::XMLReader& reader)
                 // the given name may already exist
                 reader.addName(name.c_str(), obj->getNameInDocument());
                 if (testStatus(Status::Importing)) {
-                    auto from = importSourceDocuments.find(this);
+                    // the UUID of the document the name's `@<document>` names, else the one
+                    // document's (a copy made by a build with SourceDocument only)
+                    std::string document;
+                    if (auto from = importSourceDocuments.find(this);
+                        from != importSourceDocuments.end()) {
+                        const auto at = name.find('@');
+                        auto it = at == std::string::npos ? from->second.end()
+                                                          : from->second.find(name.substr(at + 1));
+                        if (it == from->second.end()) {
+                            it = from->second.find(std::string());
+                        }
+                        if (it != from->second.end()) {
+                            document = it->second;
+                        }
+                    }
                     importedSources[this][obj] = {
                         name,
                         reader.hasAttribute("id") ? reader.getAttribute<long>("id") : 0,
-                        from != importSourceDocuments.end() ? from->second : std::string()};
+                        document};
                 }
 
                 // restore touch/error status flags
@@ -2275,7 +2309,7 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     {
         const Document* doc;
         std::map<const DocumentObject*, ImportedSource> outer;
-        std::optional<std::string> outerDocument;
+        std::optional<std::map<std::string, std::string>> outerDocument;
         ~ForgetSources()
         {
             importedSources.erase(doc);
@@ -2314,8 +2348,20 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     else {
         reader.FileVersion = 0;
     }
-    if (reader.hasAttribute(fcAttrSourceDocument)) {
-        importSourceDocuments[this] = reader.getAttribute<const char*>(fcAttrSourceDocument);
+    if (reader.hasAttribute(fcAttrSourceDocuments)) {
+        auto& sources = importSourceDocuments[this];
+        std::istringstream pairs(reader.getAttribute<const char*>(fcAttrSourceDocuments));
+        std::string pair;
+        while (pairs >> pair) {
+            const auto colon = pair.find(':');
+            if (colon != std::string::npos && colon > 0) {
+                sources[pair.substr(0, colon)] = pair.substr(colon + 1);
+            }
+        }
+    }
+    else if (reader.hasAttribute(fcAttrSourceDocument)) {
+        importSourceDocuments[this][std::string()] =
+            reader.getAttribute<const char*>(fcAttrSourceDocument);
     }
 
     // Imported objects may reference strings stored in the source document's

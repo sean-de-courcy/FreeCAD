@@ -300,7 +300,8 @@ names it.
 | `fix/272-symmetric-across-plane` | fix | ops#272 | - | `integration` `e4c9812861` | `119afa60c2` (fork PR 268), 2026-10-11 | never (fork fix) |
 | `fix/285-reorder-cycle-base` | fix | ops#285 | - | `integration` `0ee3ee9a56` | `9e69e1564f` (fork PR 270), 2026-10-11 | never (fork fix) |
 | `fix/252-sketcher-minors` | fix | ops#252 | - | `integration` `0ee3ee9a56` | `7e1d79cd66` (fork PR 269), 2026-10-11 | never (fork fix) |
-| `fix/276-migrate-element-links` | fix | ops#276 | - | `integration` `e4c9812861` | (fork PR 274) | never (fork fix) |
+| `fix/276-migrate-element-links` | fix | ops#276 | - | `integration` `e4c9812861` | `1271eefb7b` (fork PR 274), 2026-10-11 | never (fork fix) |
+| `fix/171-paste-uncopied-expression` | fix | ops#171 | - | `integration` `e4c9812861` | (fork PR 275) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

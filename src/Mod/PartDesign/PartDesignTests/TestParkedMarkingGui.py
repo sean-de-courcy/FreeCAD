@@ -358,3 +358,59 @@ class TestParkedMarkingGui(unittest.TestCase):
         self.close()
         self.doc.recompute()
         self.assertTrue(hole.isValid(), hole.getStatusString())
+
+    # -- the warnings of an expression that reads an uncopied object (ops#171 B1) -----------------
+
+    def testUncopiedExpressionWarnsOnceAtThePasteAndOnceAtTheMove(self):
+        """ops#171 B1: TestBodyReorder's paste of a parked expression that reads a Sheet left
+        behind, run here to read the Report view: the paste says once that the line won't be put
+        back, and the move back says once that it isn't."""
+        pasted = "reads 'Sheet', which didn't come with it"
+        dropped = "isn't put back: it reads an object that stayed in another document"
+        self.runAndCount(
+            "testParkedExpressionReadingAnUncopiedObjectPasted", {pasted: 1, dropped: 1}
+        )
+
+    def testUncopiedTargetAndObjectWarnOnceAtThePaste(self):
+        """PR 275 review L3: the line's own target left behind is named at the paste too, with
+        the other object its text reads, in one warning."""
+        self.runAndCount(
+            "testParkedExpressionPastedWithoutItsTarget",
+            {"reads 'BossA' and 'Sheet', which didn't come with it": 1},
+        )
+
+    def testRefusedMoveSaysNothingDropped(self):
+        """PR 275 round 2: a move that would drop the marked line but is refused leaves it, and
+        doesn't say it dropped it."""
+        self.runAndCount(
+            "testParkedExpressionDropRefusedKeepsTheLine",
+            {
+                "reads 'Sheet', which didn't come with it": 1,
+                "isn't put back: it reads an object that stayed in another document": 0,
+            },
+        )
+
+    def runAndCount(self, name, counts):
+        """TestBodyReorderV2's test name run, passing, and the Report view's new lines holding
+        each text of counts, as many as given."""
+        from PartDesignTests.TestBodyReorder import TestBodyReorderV2
+
+        def lines(text):
+            return [line for line in (reportText() or "").splitlines() if text in line]
+
+        self.assertIsNotNone(reportText(), "no Report view")
+        before = {text: len(lines(text)) for text in counts}
+        result = unittest.TestResult()
+        TestBodyReorderV2(name).run(result)
+        self.assertEqual(result.errors + result.failures, [])
+        self.assertEqual(result.testsRun, 1)
+        processEvents(0.2)
+        for text, count in counts.items():
+            self.assertEqual(len(lines(text)), before[text] + count, text)
+
+def reportText():
+    """The Report view's text, where Console warnings go."""
+    for edit in Gui.getMainWindow().findChildren(QtWidgets.QTextEdit):
+        if edit.metaObject().className() == "Gui::DockWnd::ReportOutput":
+            return edit.toPlainText()
+    return None

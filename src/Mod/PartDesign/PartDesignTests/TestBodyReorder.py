@@ -1802,7 +1802,7 @@ class BodyReorderBase:
         newcomer = other.getObject("Pad2")
         self.assertEqual(newcomer.Label, "Unrelated")
         # Doc1's Pad2 stayed behind: the copied line marks it as in another document, whatever
-        # ID the newcomer has here (PR 266 review H1: copyObject exports from the destination)
+        # ID the newcomer has here (the list mixes two documents' objects, PR 266 review H1)
         self.assertEqual([line.split("|")[2] for line in self.parked(sketch)], ["Pad2#-1"])
         self.recompute()
         self.assertIn("projects 'Pad2'", sketch.getStatusString())
@@ -1911,6 +1911,288 @@ class BodyReorderBase:
 
     def testParkedExpressionReadingAnotherDocumentMerged(self):
         self.parkedExpressionReadingAnotherDocument(self.mergeInto)
+
+    def spanSheet(self, doc, name, span, label=None, alias="Span"):
+        """A spreadsheet of doc whose cell A1, aliased Span (or alias), holds span."""
+        sheet = doc.addObject("Spreadsheet::Sheet", name)
+        self.assertEqual(sheet.Name, name)
+        if label:
+            sheet.Label = label
+        sheet.set("A1", str(span))
+        sheet.setAlias("A1", alias)
+        doc.recompute()
+        return sheet
+
+    def parkedReadingSheet(self, text, *sheets):
+        """RO9 with B's Length read by text from spreadsheets of self.doc, (name, span[, label])
+        each, so that B's Length is 5: B moved before A, its expression parked."""
+        block, a, b, c = self.chain()
+        made = [self.spanSheet(self.doc, *spec) for spec in sheets]
+        b.setExpression("Length", text)
+        self.recompute()
+        self.assertAlmostEqual(b.Length.Value, 5)
+        self.body.reorderObject([b], block, True)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.assertEqual(len(self.parked(b)), 1)
+        return block, a, b, made
+
+    def pastedBody(self, other, before):
+        """The copies of the Body, A and B in other; self.doc becomes other."""
+        self.doc = other
+        self.body, a, b = self.copiesIn(
+            other,
+            before,
+            ("PartDesign::Body", "Body"),
+            ("PartDesign::Pad", "BossA"),
+            ("PartDesign::Pad", "BossB"),
+        )
+        return a, b
+
+    def targetIds(self, obj):
+        """The target IDs of obj's parked lines, as written."""
+        return [line.split("|")[2].split("#")[-1] for line in self.parked(obj)]
+
+    def assertMovedBackDropped(self, a, b):
+        """B moved back after A: its parked expression is dropped, not put back, and B keeps
+        Length 5."""
+        self.recompute()
+        self.body.reorderObject([b], a, True)
+        self.assertEqual(self.parked(b), [])
+        self.assertEqual(b.ExpressionEngine, [])
+        self.recompute()
+        self.assertValid(a, b)
+        self.assertAlmostEqual(b.Length.Value, 5)
+
+    def assertMovedBackPutBack(self, a, b, sheet):
+        """B moved back after A: its parked expression is put back, reading sheet, and B has
+        Length 5."""
+        self.recompute()
+        self.body.reorderObject([b], a, True)
+        self.assertEqual(self.parked(b), [])
+        self.assertEqual(len(b.ExpressionEngine), 1)
+        self.assertIn(sheet.Name + ".Span", b.ExpressionEngine[0][1])
+        self.recompute()
+        self.assertValid(a, b)
+        self.assertAlmostEqual(b.Length.Value, 5)
+
+    def testParkedExpressionReadingAnUncopiedObjectPasted(self):
+        """ops#171 B1: RO9 with B's Length read as BossA.Length * Sheet.Span / 4 from a
+        spreadsheet of self.doc (Span = 4), which isn't copied with the Body. The other document
+        has a Sheet of its own with Span = 8. Pasted there, the copied line is marked as in another
+        document (its target field ends in #-1); moved back, the expression isn't put back (it
+        would read the other Sheet: Length 10), and B keeps Length 5."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.pasteInto(other, [self.body])
+        self.assertIsNone(other.getObject("Sheet001"))
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingTheNameOfARenamedCopyPasted(self):
+        """PR 275 review H1: B reads Sheet001.Span (Span 4); self.doc's Sheet (Span 16) is copied
+        with the Body into a document that has a Sheet (Span 8), so its copy is named Sheet001
+        there. The text's Sheet001 didn't come: the line is marked, and moved back, the expression
+        isn't put back (it would read the copy of Sheet: Length 20)."""
+        block, a, b, (sheet, sheet001) = self.parkedReadingSheet(
+            "BossA.Length * Sheet001.Span / 4", ("Sheet", 16), ("Sheet001", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.pasteInto(other, [self.body, sheet])
+        copy = other.getObject("Sheet001")
+        self.assertEqual(copy.get("Span"), 16)
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingANameMissingHerePasted(self):
+        """PR 275 review H2: B reads Sheet.Span, and the document pasted into has no Sheet at the
+        paste (the name resolves to nothing). The line is marked all the same: a Sheet (Span 8)
+        added there afterwards isn't read when B is moved back (Length 10)."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        before = self.pasteInto(other, [self.body])
+        self.assertIsNone(other.getObject("Sheet"))
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.spanSheet(other, "Sheet", 8)
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingALabelPasted(self):
+        """PR 275 review L1: B reads <<Dims>>.Span, the label of self.doc's Params (Span 4), which
+        stays; self.doc's Sheet (Span 16) is copied with the Body, as Sheet001, into a document
+        whose Sheet is labelled Dims (Span 8). The label didn't come with the paste: the line is
+        marked, and B isn't re-pointed to either sheet (Length 20 or 10)."""
+        block, a, b, (params, sheet) = self.parkedReadingSheet(
+            "BossA.Length * <<Dims>>.Span / 4", ("Params", 4, "Dims"), ("Sheet", 16)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8, "Dims")
+        before = self.pasteInto(other, [self.body, sheet])
+        self.assertEqual(other.getObject("Sheet001").get("Span"), 16)
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingASheetCopiedAlongPasted(self):
+        """PR 275 review: B reads Sheet.Span (Span 4), and the Sheet is copied with the Body into
+        a document that has a Sheet of its own (Span 8): the copy is Sheet001 there. The line
+        isn't marked, and moved back, B's expression reads the copy (Length 5)."""
+        block, a, b, (sheet,) = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.pasteInto(other, [self.body, sheet])
+        copy = other.getObject("Sheet001")
+        self.assertEqual(copy.get("Span"), 4)
+        a, b = self.pastedBody(other, before)
+        self.assertNotIn("-1", self.targetIds(b))
+        self.assertMovedBackPutBack(a, b, copy)
+
+    def pastedFromTwoDocuments(self, withOwnSheet):
+        """RO9 reading self.doc's Sheet (Span 4); self.doc's objects, with its Sheet or without,
+        pasted into another document together with a third document's Sheet (Span 8), listed
+        first. The copies of A and B, and the copy of self.doc's Sheet, or None."""
+        block, a, b, (sheet,) = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        third = models.newDocument(f"BodyReorder{type(self).__name__}Third")
+        foreign = self.spanSheet(third, "Sheet", 8)
+        other = self.otherDocument("BossA", "BossB")
+        objects = [o for o in self.doc.Objects if withOwnSheet or o != sheet]
+        before = self.pasteInto(other, [foreign] + objects, False)
+        copies = [o for o in other.Objects if o.Name not in before and o.TypeId == sheet.TypeId]
+        self.assertEqual(sorted(o.get("Span") for o in copies), [4, 8] if withOwnSheet else [8])
+        own = [o for o in copies if o.get("Span") == 4]
+        a, b = self.pastedBody(other, before)
+        return a, b, own[0] if own else None
+
+    def testParkedExpressionPastedWithAnotherDocumentsSheet(self):
+        """Sonnet review of PR 275: a paste of two documents' objects, in which only the third
+        document's Sheet comes. It may take the name Sheet there, but it isn't the Sheet B's
+        text names: the line is marked, and moved back, B doesn't read it (Length 10)."""
+        a, b, own = self.pastedFromTwoDocuments(False)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionPastedWithBothDocumentsSheets(self):
+        """As above, with self.doc's Sheet in the paste too: whichever copy is named Sheet there,
+        moved back, B reads the copy of its own Sheet (Length 5)."""
+        a, b, own = self.pastedFromTwoDocuments(True)
+        self.assertNotIn("-1", self.targetIds(b))
+        self.assertMovedBackPutBack(a, b, own)
+
+    def testParkedExpressionPastedWithoutItsTarget(self):
+        """PR 275 review L3: B pasted alone, without A (the line's target) or the Sheet: the line
+        is marked, with a warning at the paste naming both (TestParkedMarkingGui reads it)."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        before = self.pasteInto(other, [b], False)
+        (copy,) = [o for o in other.Objects if o.Name not in before]
+        self.assertEqual(self.targetIds(copy), ["-1"])
+
+    def ownersNewName(self, withSheet):
+        """B reads BossB001.Length2, the alias of a spreadsheet named BossB001 (4), so that its
+        Length is 5; the Body pasted, with that spreadsheet or without, into a document that has
+        a BossB: the copy of B takes the name BossB001 there. The copies of A and B."""
+        block, a, b, (sheet,) = self.parkedReadingSheet(
+            "BossA.Length * BossB001.Length2 / 4", ("BossB001", 4, None, "Length2")
+        )
+        other = self.otherDocument("BossA", "BossB")
+        before = self.pasteInto(other, [self.body] + ([sheet] if withSheet else []))
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(b.Name, "BossB001")
+        return a, b
+
+    def testParkedExpressionReadingTheOwnersNewNamePasted(self):
+        """PR 275 round 2 (Opus 1): the spreadsheet doesn't come. The text's BossB001 isn't B,
+        whose name it now is: the line is marked, and moved back, B doesn't read its own Length2
+        (the parse would take BossB001.Length2 for it)."""
+        a, b = self.ownersNewName(False)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingTheOwnersNewNameCopiedAlongPasted(self):
+        """PR 275 round 2 (Opus 1): as above, with the spreadsheet in the paste, after B, so its
+        copy is BossB002. The parse has already taken the text's BossB001 for B, so the line is
+        marked all the same (a false drop, said at the paste and at the move; accepted)."""
+        a, b = self.ownersNewName(True)
+        self.assertEqual(self.doc.getObject("BossB002").get("Length2"), 4)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingADeletedObjectMerged(self):
+        """PR 275 round 2 (Opus 2, Sonnet 1): B reads Sheet001.Span (4), and Sheet001 is deleted
+        after B was parked. Merged into a document that has a Sheet (8), the file's Sheet (16) is
+        named Sheet001 there; the text's Sheet001, which isn't in the file, would read it: the line
+        is marked, and moved back, B doesn't read it (Length 20)."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet001.Span / 4", ("Sheet", 16), ("Sheet001", 4)
+        )
+        self.doc.removeObject("Sheet001")
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.mergeInto(other)
+        self.assertEqual(other.getObject("Sheet001").get("Span"), 16)
+        a, b = self.pastedBody(other, before)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        self.assertMovedBackDropped(a, b)
+
+    def testParkedExpressionReadingARenamedChainMerged(self):
+        """PR 275 round 2 (Opus 6): B reads Sheet001.Span (4), and the document, with Sheet (16)
+        and Sheet001, is merged into one that has a Sheet (8): the file's Sheet takes the name
+        Sheet001 there, and its Sheet001 another. The merge's parse maps the text's name to that
+        copy, and nothing renames it again (Sheet001 -> Sheet002 -> ...): the line isn't marked,
+        and moved back, B reads the copy of Sheet001 (Length 5)."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet001.Span / 4", ("Sheet", 16), ("Sheet001", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.mergeInto(other)
+        copies = {
+            o.get("Span"): o
+            for o in other.Objects
+            if o.Name not in before and o.TypeId == "Spreadsheet::Sheet"
+        }
+        self.assertEqual(copies[16].Name, "Sheet001")
+        a, b = self.pastedBody(other, before)
+        self.assertNotIn("-1", self.targetIds(b))
+        self.assertMovedBackPutBack(a, b, copies[4])
+
+    def testParkedExpressionDropRefusedKeepsTheLine(self):
+        """PR 275 round 2 (Opus 5): the paste of testParkedExpressionReadingAnUncopiedObjectPasted,
+        then a move that would drop B's marked line but is refused: C reads B, and would have its
+        expression set aside into a ParkedReferences that isn't a string list. The line stays, and
+        nothing says it was dropped (TestParkedMarkingGui counts the warnings)."""
+        block, a, b, sheets = self.parkedReadingSheet(
+            "BossA.Length * Sheet.Span / 4", ("Sheet", 4)
+        )
+        other = self.otherDocument("BossA", "BossB")
+        self.spanSheet(other, "Sheet", 8)
+        before = self.pasteInto(other, [self.body])
+        a, b = self.pastedBody(other, before)
+        (c,) = self.copiesIn(other, before, ("PartDesign::Pocket", "HoleC"))
+        lines = self.parked(b)
+        self.assertEqual(self.targetIds(b), ["-1"])
+        c.setExpression("Length", f"{b.Name}.Length / 5")
+        c.addProperty("App::PropertyInteger", "ParkedReferences")
+        self.recompute()
+        with self.assertRaises(ValueError) as refused:
+            self.body.reorderObject([b], c, True)
+        self.assertIn("ParkedReferences", str(refused.exception))
+        self.assertEqual(self.parked(b), lines)
+        self.assertEqual(b.ExpressionEngine, [])
+        self.assertEqual([e[0] for e in c.ExpressionEngine], ["Length"])
 
 
     # -- re-target records and new objects, copies and merges (ops#165) --------------------------

@@ -94,8 +94,9 @@ struct ImportedSource
 /// objects' properties to signalFinishImportObjects); none for any other object
 AppExport std::optional<ImportedSource> importedSource(const DocumentObject* obj);
 
-/// Whether source's object was copied from doc itself (a paste within the document), by the
-/// document's UUID: a name can be another document's once the first is closed (ops#171)
+/// Whether source's object was copied from doc itself (a paste within the document): by the
+/// document's UUID and the `@<document>` name it was exported under, both doc's. A name can be
+/// another document's once the first is closed, and two open documents can share a UUID (ops#171)
 AppExport bool importedWithin(const ImportedSource& source, const Document& doc);
 
 }  // namespace App
