@@ -96,6 +96,12 @@ def _token(version, letter):
     return int(match.group(1)) if match else None
 
 
+def _markers(message):
+    """The markers a `getNewerFormat()` message lists, without the document's label."""
+    start = message.find("(newer: ")
+    return message[start:] if start >= 0 else ""
+
+
 def _boxModel(doc):
     """A box cut by a cylinder: names with embedded names, which an interned document holds in
     its name table (so the file has `NamingFormat`)."""
@@ -270,6 +276,101 @@ class ForkReleaseTest(unittest.TestCase):
         doc.mergeProject(newer)
         self.assertIn("ForkRelease 999", App.getNewerFormat(doc))
         self.assertEqual(App.getForkRelease(doc), App.getForkRelease(), "its own release stays")
+
+    def _recovered(self, doc, name):
+        """`doc`'s compressed recovery snapshot, copied out of its TransientDir."""
+        self.assertTrue(App.writeRecoverySnapshotToTransientDir(doc, compressed=True))
+        snapshot = os.path.join(doc.TransientDir, "fc_recovery_file.fcstd")
+        target = os.path.join(self.dir, name + ".FCStd")
+        shutil.copyfile(snapshot, target)
+        return target
+
+    def testRecoverySnapshotKeepsNewer(self):
+        """The recovery snapshot of a newer document is newer too (PR 293 review): it keeps the
+        file's release and every marker (`NewerFormat`), so the recovered document still asks
+        before its first save. A current document's snapshot is this build's, without
+        `NewerFormat`."""
+        path, xml = self._saved()
+        revision = _token(ELEMENT_MAP.findall(xml)[0], "F")
+        cases = {
+            "ForkRelease": (_setDocumentAttribute("ForkRelease", 999), 999),
+            "MapF": (_setMapToken("F", revision + 1), App.getForkRelease()),
+        }
+        for name, (rewrite, release) in cases.items():
+            with self.subTest(case=name):
+                doc = self._open(self._edited(path, "Snap" + name, rewrite))
+                markers = _markers(App.getNewerFormat(doc))
+                self.assertTrue(markers)
+                recovered = self._recovered(doc, "Recovered" + name)
+                snapshot = _documentXml(recovered)
+                self.assertEqual(FORK_RELEASE.findall(snapshot), [str(release)])
+                self.assertIn("NewerFormat=", snapshot)
+                again = self._open(recovered)
+                self.assertEqual(_markers(App.getNewerFormat(again)), markers, "each marker once")
+                self.assertEqual(App.getForkRelease(again), release)
+                App.closeDocument(again.Name)
+                App.closeDocument(doc.Name)
+        current = self._open(path)
+        snapshot = _documentXml(self._recovered(current, "RecoveredCurrent"))
+        self.assertEqual(FORK_RELEASE.findall(snapshot), [str(App.getForkRelease())])
+        self.assertNotIn("NewerFormat=", snapshot)
+
+    def testUnreadableMarkersOpenNewer(self):
+        """A `ForkRelease`, `NamingFormat` or `NamingRevision` that isn't a whole number in range
+        (a damaged file, or a later format) opens, recorded as newer with its raw value, instead
+        of aborting the open (PR 293 review)."""
+        path, _ = self._saved()
+        cases = [
+            ("ForkRelease", ""),
+            ("ForkRelease", "v9"),
+            ("ForkRelease", "99999999999"),
+            ("NamingFormat", "x"),
+            ("NamingRevision", "x"),
+        ]
+        for index, (attribute, value) in enumerate(cases):
+            with self.subTest(attribute=attribute, value=value):
+                unreadable = self._edited(
+                    path, f"Unreadable{index}", _setDocumentAttribute(attribute, value)
+                )
+                doc = self._open(unreadable)
+                self.assertIn(f'{attribute} "{value}" (unreadable)', App.getNewerFormat(doc))
+                self.assertTrue(doc.getObject("Cut").Shape.isValid())
+                if attribute == "ForkRelease":
+                    self.assertEqual(App.getForkRelease(doc), 0)
+                App.closeDocument(doc.Name)
+
+    def testFailedImportLeavesTheRecord(self):
+        """A merge of a newer file that fails after reading its markers leaves the target's
+        record as it was: a current document stays current, a newer one keeps its own markers
+        only (PR 293 review)."""
+        path, _ = self._saved()
+
+        def broken(text):
+            newer = _setDocumentAttribute("ForkRelease", 999)(text)
+            return newer.replace("<Objects ", "<Objects <", 1)
+
+        failing = self._edited(path, "Broken", broken)
+        current = self._new("FailedCurrent")
+        with self.assertRaises(Exception):
+            current.mergeProject(failing)
+        self.assertEqual(App.getNewerFormat(current), "")
+        newer = self._open(
+            self._edited(path, "FailedNewer", _setDocumentAttribute("NamingFormat", 3))
+        )
+        with self.assertRaises(Exception):
+            newer.mergeProject(failing)
+        message = App.getNewerFormat(newer)
+        self.assertIn("NamingFormat 3", message)
+        self.assertNotIn("ForkRelease 999", message)
+
+    def testClosedDocumentHandleRaises(self):
+        """A handle to a closed document raises, as its neighbours do (PR 293 review)."""
+        doc = self._new("Closed")
+        App.closeDocument(doc.Name)
+        with self.assertRaises(RuntimeError):
+            App.getForkRelease(doc)
+        with self.assertRaises(RuntimeError):
+            App.getNewerFormat(doc)
 
     def testConsoleErrorAndRehearsalAid(self):
         """In a child FreeCADCmd with FREECAD_TEST_NAMING_REVISION_OFFSET=1: the build reports

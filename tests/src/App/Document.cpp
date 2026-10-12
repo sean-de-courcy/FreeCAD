@@ -445,6 +445,9 @@ TEST_F(DocumentTest, newerForkTokensAreThoseAboveTheBuilds)
     EXPECT_TRUE(App::hasNewerForkTokens(version(revision + 1, 2)));
     EXPECT_TRUE(App::hasNewerForkTokens(version(revision, 3)));
     EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F" + std::to_string(revision + 10)));
+    // More digits than an int holds: newer, never an overflow (PR 293 review)
+    EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F99999999999.N2"));
+    EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F1.N4294967298"));
 }
 
 // ------------------------------------------------------------------------------------------------
