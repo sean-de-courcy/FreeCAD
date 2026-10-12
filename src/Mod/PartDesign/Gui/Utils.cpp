@@ -507,9 +507,10 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
             for (auto prop : properties) {
                 std::string valueStr;
                 // Before PropertyLink, which it derives from: its elements, as a PropertyLinkSub's
-                // (ops#276; the whole-object branch dropped them)
-                if (prop->isDerivedFrom(App::PropertyXLinkSub::getClassTypeId())) {
-                    auto propLink = static_cast<App::PropertyXLinkSub*>(prop);
+                // (ops#276; the whole-object branch dropped them). Also a plain PropertyXLink,
+                // which holds elements too (an App::Link's LinkedObject; fork PR 274 review, L3).
+                if (prop->isDerivedFrom(App::PropertyXLink::getClassTypeId())) {
+                    auto propLink = static_cast<App::PropertyXLink*>(prop);
                     if (propLink->getValue() != feature) {
                         continue;
                     }
@@ -519,7 +520,8 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                         })) {
                         continue;
                     }
-                    valueStr = buildLinkSubPythonStr(body, subs);
+                    valueStr = subs.empty() ? Gui::Command::getObjectCmd(body)
+                                            : buildLinkSubPythonStr(body, subs);
                 }
                 else if (prop->isDerivedFrom(App::PropertyLink::getClassTypeId())) {
                     App::PropertyLink* propLink = static_cast<App::PropertyLink*>(prop);

@@ -442,7 +442,7 @@ std::string buildLinkSubPythonStr(const App::DocumentObject* obj, const std::vec
     std::string result("[");
 
     for (const auto& sub : subs) {
-        result += "\"" + sub + "\",";
+        result += "\"" + Base::Tools::escapeEncodeString(sub) + "\",";
     }
     result += "]";
 

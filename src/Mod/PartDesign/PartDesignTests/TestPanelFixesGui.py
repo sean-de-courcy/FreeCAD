@@ -180,6 +180,26 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#276: Migrate relinks the links to a legacy feature ---------------------------------
 
+    def namedFace(self, shape, name):
+        """The face's centre and normal: what a link to it names, geometrically."""
+        found = shape.getElement(name)
+        return found.CenterOfMass, found.normalAt(0, 0)
+
+    def assertSameFace(self, shape, name, expected):
+        centre, normal = self.namedFace(shape, name)
+        self.assertLess((centre - expected[0]).Length, 1e-6, name)
+        self.assertLess((normal - expected[1]).Length, 1e-6, name)
+
+    def migrate(self):
+        """Runs Migrate, answering any modal; asserts none was shown."""
+        Gui.activateWorkbench("PartDesignWorkbench")
+        self.answerModals()
+        Gui.runCommand("PartDesign_Migrate")
+        pump()
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        self.doc.recompute()
+
     def testMigrateRelinksElementLinks(self):
         """ops#276 (fork PR 255 review): two legacy boxes outside a body, the second on the first,
         and a FeaturePython linking them by a PropertyLinkSubList, a PropertyLinkSub and two
@@ -187,7 +207,8 @@ class TestPanelFixesGui(unittest.TestCase):
         the chain: a body per box. Each link moves to its box's body with its element: the
         PropertyLinkSub was written without its object and refused (an error box, the link left on
         the box), and a PropertyXLinkSub, which derives from PropertyLink, moved as a whole object
-        and lost its element."""
+        and lost its element. Each element names the same face after a recompute (fork PR 274
+        review, M1)."""
         box1 = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
         box2 = self.doc.addObject("PartDesign::AdditiveBox", "Box2")
         box2.BaseFeature = box1
@@ -202,12 +223,13 @@ class TestPanelFixesGui(unittest.TestCase):
         user.Cross = (box1, ["Face2"])
         user.CrossLast = (box2, ["Face4"])
         self.doc.recompute()
-        Gui.activateWorkbench("PartDesignWorkbench")
-        self.answerModals()
-        Gui.runCommand("PartDesign_Migrate")
-        pump()
-        self.answering = False
-        self.assertEqual(self.modals, [])
+        before = {
+            "Face3": self.namedFace(box1.Shape, "Face3"),
+            "Face2": self.namedFace(box1.Shape, "Face2"),
+            "Face1": self.namedFace(box2.Shape, "Face1"),
+            "Face4": self.namedFace(box2.Shape, "Face4"),
+        }
+        self.migrate()
         body1 = self.doc.getObject("Box1Body")
         body2 = self.doc.getObject("Box2Body")
         self.assertIsNotNone(body1)
@@ -221,6 +243,51 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(
             (user.CrossLast[0].Name, list(user.CrossLast[1])), (body2.Name, ["Face4"])
         )
+        self.assertSameFace(body1.Shape, "Face3", before["Face3"])
+        self.assertSameFace(body1.Shape, "Face2", before["Face2"])
+        self.assertSameFace(body2.Shape, "Face1", before["Face1"])
+        self.assertSameFace(body2.Shape, "Face4", before["Face4"])
+
+    def testMigrateKeepsAnElementOfAFeatureBeforeTheLast(self):
+        """Fork PR 274 review, M2: a group's PropertyXLinkSub names Face3 of the first of two
+        legacy boxes, the second on the first. A group doesn't split the chain, so both boxes go
+        into one body, whose shape is the second box's: its Face3 would be another face. The link
+        stays on the first box, naming the same face, with a warning."""
+        box1 = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        box2 = self.doc.addObject("PartDesign::AdditiveBox", "Box2")
+        box2.BaseFeature = box1
+        box2.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation())
+        group = self.doc.addObject("App::DocumentObjectGroupPython", "Group")
+        group.addProperty("App::PropertyXLinkSub", "Cross")
+        group.Cross = (box1, ["Face3"])
+        self.doc.recompute()
+        before = self.namedFace(box1.Shape, "Face3")
+        self.migrate()
+        body = box1.getParentGeoFeatureGroup()
+        self.assertIsNotNone(body)
+        self.assertIs(box2.getParentGeoFeatureGroup(), body)
+        self.assertEqual((group.Cross[0].Name, list(group.Cross[1])), (box1.Name, ["Face3"]))
+        self.assertSameFace(box1.Shape, "Face3", before)
+        report = reportText()
+        if report is not None:
+            self.assertIn("Group.Cross keeps its link to", report)
+
+    def testMigrateRelinksAnAppLinkToAnElement(self):
+        """Fork PR 274 review, L3: an App::Link whose LinkedObject (a plain PropertyXLink) names
+        Face1 of a legacy box. Migrate moves it to the box's body with its element, which names
+        the same face; it became a link to the whole body, without a message."""
+        box = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        link = self.doc.addObject("App::Link", "Lnk")
+        link.LinkedObject = (box, ["Face1"])
+        self.doc.recompute()
+        before = self.namedFace(box.Shape, "Face1")
+        self.migrate()
+        body = box.getParentGeoFeatureGroup()
+        self.assertIsNotNone(body)
+        target, subs = link.LinkedObject
+        subs = [subs] if isinstance(subs, str) else list(subs)
+        self.assertEqual((target.Name, subs), (body.Name, ["Face1"]))
+        self.assertSameFace(body.Shape, "Face1", before)
 
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 
