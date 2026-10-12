@@ -304,7 +304,8 @@ names it.
 | `fix/171-paste-uncopied-expression` | fix | ops#171 | - | `integration` `e4c9812861` | `918f8ba271` (fork PR 275), 2026-10-11 | never (fork fix) |
 | `fix/292-refined-merged-side` | fix | ops#292 | - | `integration` `9e69e1564f` | `5c7276ebd4` (fork PR 276), 2026-10-11 | never (fork fix) |
 | `feat/300-fillet-fallback` | feat | ops#300 | - | `integration` `7e1d79cd66` | `6f8eb7477e` (fork PR 278), 2026-10-12 | never (fork feature) |
-| `infra/302-ci-timeout-near-guard` | infra | ops#302, ops#294 | - | `integration` `5c7276ebd4` | (fork PR 280) | never |
+| `infra/302-ci-timeout-near-guard` | infra | ops#302, ops#294 | - | `integration` `5c7276ebd4` | `e52e7f0bcd` (fork PR 280), 2026-10-12 | never |
+| `fix/287-undecided-type-settled` | fix | ops#287 | - | `integration` `7e1d79cd66` | (fork PR 277) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

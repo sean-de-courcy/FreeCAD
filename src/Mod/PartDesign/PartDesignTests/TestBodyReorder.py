@@ -928,6 +928,31 @@ class BodyReorderBase:
         self.body.reorderObject([hole], pad2, True)
         self.assertRestoredState(block, pad2, sketch, hole, before, counts)
 
+    def testTopDropMoveBackKeepsAWaitingTypeWaiting(self):
+        """ops#287 (PR 277 verification 5.2): a projection parked while its type waits to be
+        decided (a type list saved before ops#140) has `g` after the type in its line. Every
+        parked geometry can be deleted while parked, so the line alone tells it: moved back, the
+        link still waits (the type list keeps the mark, its geometry is flagged as built from a
+        guess). Before, it came back with the guess as a decided type."""
+        block, pad2, sketch, hole = self.projecting()
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        lines = self.parked(sketch)
+        self.assertEqual(len(lines), 1)
+        fields = lines[0].split("|")
+        self.assertEqual(fields[8], "0")
+        fields[8] = "0g"
+        sketch.ParkedReferences = ["|".join(fields)]
+        self.body.reorderObject([hole], pad2, True)
+        self.assertChain(block, pad2, hole)
+        self.assertEqual(self.parked(sketch), [])
+        self.recompute()
+        self.assertIs(sketch.ExternalGeometry[-1][0], pad2)
+        self.assertEqual(list(sketch.ExternalTypes), [0, -1])
+        self.assertTrue(
+            Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("TypeGuessed")
+        )
+
     def testEditWhileParked(self):
         """RO11d: while parked the user adds a construction line with a constraint and deletes the
         construction line before the circle; moved back, the edits stay and the projection keeps its

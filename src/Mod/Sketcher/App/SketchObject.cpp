@@ -90,6 +90,12 @@ namespace bgi = boost::geometry::index;
 // NOLINTNEXTLINE
 BOOST_GEOMETRY_REGISTER_POINT_3D(Base::Vector3d, double, bg::cs::cartesian, x, y, z)
 
+namespace Sketcher
+{
+// in SketchObjectExternal.cpp (PR 277 round 8)
+std::set<std::string> waitingTypeRefs(const std::vector<Part::Geometry*>& geos);
+}
+
 class SketchObject::GeoHistory
 {
 private:
@@ -1528,29 +1534,40 @@ void SketchObject::onUndoRedoFinished()
     // decided, and the next rebuild with their element back kept the type at the index). Each
     // link whose saved geometry is missing waits again, as on a later open: a full rebuild
     // matches it with that geometry once its element is back. So does one with no saved
-    // geometry, which the open can't decide either (PR 253 review L3)
+    // geometry, which the open can't decide either (PR 253 review L3), and one whose geometry was
+    // built from a guess (TypeGuessed, ops#287) or saved geometry an open couldn't tell the type
+    // from (TypeUndecided, PR 277 round 7): it still waits, and keeps the flag
     externalTypeRepairPending = ExternalTypes.getSize() > ExternalGeometry.getSize();
     undecidedTypeKeys.clear();
     if (externalTypeRepairPending) {
         for (const auto& key : externalGeoRef) {
             bool saved = false;
             bool missing = false;
+            bool guessed = false;
             auto refs = externalGeoRefMap.find(key);
             if (refs != externalGeoRefMap.end()) {
                 for (long id : refs->second) {
                     auto it = externalGeoMap.find(id);
                     if (it != externalGeoMap.end()) {
                         saved = true;
-                        missing = missing
-                            || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
-                                   ->testFlag(ExternalGeometryExtension::Missing);
+                        auto egf = ExternalGeometryFacade::getFacade(ExternalGeo[it->second]);
+                        missing = missing || egf->testFlag(ExternalGeometryExtension::Missing);
+                        guessed = guessed || egf->testFlag(ExternalGeometryExtension::TypeGuessed)
+                            || egf->testFlag(ExternalGeometryExtension::TypeUndecided);
                     }
                 }
             }
-            if (!saved || missing) {
+            if (!saved || missing || guessed) {
                 undecidedTypeKeys.insert(key);
             }
         }
+    }
+    // FreeCAD-CH (PR 277 round 8): and every link whose geometry says it waits, a dropped link's
+    // too (its geometry remains), with the mark in the restored list or not: the flags are the
+    // truth, and a link that lost its key would be formed again as decided, its flags cleared
+    for (const auto& ref : waitingTypeRefs(ExternalGeo.getValues())) {
+        undecidedTypeKeys.insert(ref);
+        externalTypeRepairPending = true;
     }
 
     acceptGeometry();
@@ -1657,14 +1674,57 @@ void SketchObject::onSketchRestore()
                 const auto savedTypes = ExternalTypes.getValues();
                 auto failed = [&](const std::string& why) {
                     FC_ERR("Failed to repair the external link types of "
-                           << getFullName() << " (" << why << "); until the file is opened "
-                           << "again, each link reads the type at its index, which can be "
-                           << "another link's");
-                    undecidedTypeKeys.clear();
+                           << getFullName() << " (" << why << "); each link it was to "
+                           << "decide waits for its type and reads the type at its index, "
+                           << "which can be another link's. Geometry rebuilt meanwhile is "
+                           << "marked as built from a guess; the next open repairs the others "
+                           << "again");
                     if (ExternalTypes.getValues() != savedTypes) {
                         ExternalTypes.setValues(savedTypes);
                     }
+                    // the links the repair would have decided wait: a full rebuild before the
+                    // next open builds each from the type at its index and flags it, so the open
+                    // doesn't take that geometry as evidence of the type (PR 277 review L2,
+                    // verification 2). On a first open (no mark saved) that is every link, as
+                    // without saved geometry above; on a later open only those whose saved
+                    // geometry is absent, missing or flagged, as after an undo
+                    // (onUndoRedoFinished): an earlier open decided the others (verification 2.6)
+                    const auto links = static_cast<std::size_t>(ExternalGeometry.getSize());
+                    const bool laterOpen = savedTypes.size() > links
+                        && std::find(savedTypes.begin() + static_cast<std::ptrdiff_t>(links),
+                                     savedTypes.end(), pendingTypeRepairMark)
+                            != savedTypes.end();
                     externalTypeRepairPending = true;
+                    undecidedTypeKeys.clear();
+                    for (const auto& key : externalGeoRef) {
+                        bool saved = false;
+                        bool missing = false;
+                        bool guessed = false;
+                        auto refs = externalGeoRefMap.find(key);
+                        if (laterOpen && refs != externalGeoRefMap.end()) {
+                            for (long id : refs->second) {
+                                auto it = externalGeoMap.find(id);
+                                if (it != externalGeoMap.end()) {
+                                    saved = true;
+                                    auto egf = ExternalGeometryFacade::getFacade(
+                                        ExternalGeo[it->second]);
+                                    missing = missing
+                                        || egf->testFlag(ExternalGeometryExtension::Missing);
+                                    guessed = guessed
+                                        || egf->testFlag(ExternalGeometryExtension::TypeGuessed)
+                                        || egf->testFlag(
+                                            ExternalGeometryExtension::TypeUndecided);
+                                }
+                            }
+                        }
+                        if (!saved || missing || guessed) {
+                            undecidedTypeKeys.insert(key);
+                        }
+                    }
+                    // and a dropped link whose geometry waits (PR 277 round 8)
+                    for (const auto& ref : waitingTypeRefs(ExternalGeo.getValues())) {
+                        undecidedTypeKeys.insert(ref);
+                    }
                 };
                 try {
                     rebuildExternalGeometry(std::nullopt, true);
@@ -1692,6 +1752,13 @@ void SketchObject::onSketchRestore()
                     FC_WARN("Failed to record which external geometry of " << getFullName()
                             << " is projected and which intersections; at its next rebuild "
                             << "the Ids of geometry saved without it go by position");
+                    // the same pass repairs a link whose geometry says it waits (PR 277 round 8):
+                    // it still waits
+                    const auto waiting = waitingTypeRefs(ExternalGeo.getValues());
+                    if (!waiting.empty()) {
+                        undecidedTypeKeys = waiting;
+                        externalTypeRepairPending = true;
+                    }
                 }
             }
         }

@@ -289,14 +289,21 @@ public:
      * one: that projection comes back as new geometry, at its place in the projection order
      * among the kept ones (the external constraints' GeoIds move with it), with its kind from
      * `kinds` (parallel to `ids`, as externalGeometryKind gave them; ops#264). Returns how many
-     * were replaced.
+     * were replaced. With `typeGuessed` (externalTypeUndecided when it was parked), or parked
+     * geometry that waits (TypeGuessed, TypeUndecided), the link still waits for its type
+     * (ops#287).
      */
     int unparkExternalGeometry(App::DocumentObject* obj,
                                const std::string& sub,
                                App::PropertyLinkBase::ShadowSub&& shadow,
                                int type,
                                const std::vector<long>& ids,
-                               const std::vector<int>& kinds = {});
+                               const std::vector<int>& kinds = {},
+                               bool typeGuessed = false);
+    /// Whether entry `entry`'s type is still a guess that waits to be decided (ops#287): its key
+    /// waits, or any of its geometry was built from a guess (TypeGuessed) or is saved geometry an
+    /// open couldn't tell the type from (TypeUndecided)
+    bool externalTypeUndecided(int entry) const;
     /** Gives the parked geometries `ids` (those still without a reference) the reference `ref`
      * of a link that no longer exists (ops#131: the projected object was deleted while parked),
      * so the next rebuild flags them missing and names the reference, as for a live projection
