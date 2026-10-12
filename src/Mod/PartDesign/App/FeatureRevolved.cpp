@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -62,11 +63,13 @@
 #include <GeomAPI_ExtremaCurveSurface.hxx>
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAdaptor_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cone.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
@@ -451,16 +454,23 @@ std::vector<gp_Pnt> profileSamples(const TopoDS_Shape& profile)
     return points;
 }
 
-// Whether a circle surely meets a face: a point where it crosses or touches the face's surface
-// lies on the face (the face classifier says in or on, within the tolerance). Quick, unlike the
-// exact distance to a face of many edges (16 ms a circle against 84 edges); false means only
-// "not shown", for the exact distance to settle.
-bool circleMeetsFaceQuickly(const gp_Circ& circle, const TopoDS_Face& face, double tolerance)
+// Where a circle surely meets a face: its parameters (angles from its X direction) at the points
+// where it crosses or touches the face's surface on the face (the face classifier says in or on,
+// within the tolerance). Quick, unlike the exact distance to a face of many edges (16 ms a circle
+// against 84 edges); none found means only "not shown", for the exact distance to settle. With
+// `firstOnly`, the first one found: whether the circle meets the face at all.
+std::vector<double> circleContactsQuickly(
+    const gp_Circ& circle,
+    const TopoDS_Face& face,
+    double tolerance,
+    bool firstOnly = false
+)
 {
+    std::vector<double> contacts;
     try {
         const Handle(Geom_Circle) curve = new Geom_Circle(circle);
         const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
-        std::vector<gp_Pnt2d> candidates;
+        std::vector<std::pair<double, gp_Pnt2d>> candidates;
         GeomAPI_IntCS crossing(curve, surface);
         if (crossing.IsDone()) {
             for (int i = 1; i <= crossing.NbPoints(); ++i) {
@@ -468,7 +478,7 @@ bool circleMeetsFaceQuickly(const gp_Circ& circle, const TopoDS_Face& face, doub
                 Standard_Real v = 0.0;
                 Standard_Real w = 0.0;
                 crossing.Parameters(i, u, v, w);
-                candidates.emplace_back(u, v);
+                candidates.emplace_back(w, gp_Pnt2d(u, v));
             }
         }
         GeomAPI_ExtremaCurveSurface touching(curve, surface);
@@ -481,80 +491,279 @@ bool circleMeetsFaceQuickly(const gp_Circ& circle, const TopoDS_Face& face, doub
                 Standard_Real u = 0.0;
                 Standard_Real v = 0.0;
                 touching.Parameters(i, w, u, v);
-                candidates.emplace_back(u, v);
+                candidates.emplace_back(w, gp_Pnt2d(u, v));
             }
         }
-        for (const gp_Pnt2d& uv : candidates) {
+        for (const auto& [angle, uv] : candidates) {
             BRepClass_FaceClassifier classifier(face, uv, tolerance);
             if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
-                return true;
+                contacts.push_back(ElCLib::InPeriod(angle, 0.0, 2.0 * std::numbers::pi));
+                if (firstOnly) {
+                    break;
+                }
             }
         }
     }
     catch (const Standard_Failure&) {
         // Not shown: the exact distance decides.
     }
-    return false;
+    return contacts;
 }
 
-// The gaps in a face's reach on its own surface: what the rectangle of its parameter bounds holds
-// beyond the face. Its holes (inner wires), and notches or slots cut into its outer boundary.
-// A null shape when there are none, which the areas tell at once. The rectangle is built on the
-// surface as BRep_Tool gives it, already moved for a located face; a hole's own face built on that
-// copy from the face's inner wire, whose curves are on the original surface, made the classifier
-// refuse a valid case (the PR 273 verification's Low).
-TopoDS_Shape faceGaps(const TopoDS_Face& face)
+// The parameter rectangle on a face's surface that holds the face and every point of the sweep
+// (whose bounding box is `sweep`) on that surface (the PR 273 verification's item 1: a profile
+// edge poking past the face's outer edge between the samples slipped when the rectangle was only
+// the face's bounds). A plane: the face's bounds and the sweep's box projected. A cylinder or
+// cone: a whole turn, and along the axis the sweep's box (a cone stops at its apex, on the face's
+// side). A sphere or torus: the whole surface. Another surface: one period where it is periodic,
+// its bounds where they are finite, and where they aren't (a length along an extrusion or an
+// offset) the face's bounds widened by the size of the face and the sweep together.
+void sweepRectangle(
+    const TopoDS_Face& face,
+    const Bnd_Box& sweep,
+    Standard_Real& uMin,
+    Standard_Real& uMax,
+    Standard_Real& vMin,
+    Standard_Real& vMax
+)
 {
+    constexpr double turn = 2.0 * std::numbers::pi;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    const GeomAdaptor_Surface adaptor(surface);
+    std::vector<gp_Pnt> corners;
+    if (!sweep.IsVoid()) {
+        Standard_Real x[2];
+        Standard_Real y[2];
+        Standard_Real z[2];
+        sweep.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
+        for (int i = 0; i < 8; ++i) {
+            corners.emplace_back(x[i & 1], y[(i >> 1) & 1], z[(i >> 2) & 1]);
+        }
+    }
+    auto widen = [](Standard_Real value, Standard_Real& low, Standard_Real& high) {
+        low = std::min(low, value);
+        high = std::max(high, value);
+    };
+    switch (adaptor.GetType()) {
+        case GeomAbs_Plane:
+            for (const gp_Pnt& corner : corners) {
+                Standard_Real u = 0.0;
+                Standard_Real v = 0.0;
+                ElSLib::Parameters(adaptor.Plane(), corner, u, v);
+                widen(u, uMin, uMax);
+                widen(v, vMin, vMax);
+            }
+            return;
+        case GeomAbs_Cylinder:
+            uMax = uMin + turn;
+            for (const gp_Pnt& corner : corners) {
+                Standard_Real u = 0.0;
+                Standard_Real v = 0.0;
+                ElSLib::Parameters(adaptor.Cylinder(), corner, u, v);
+                widen(v, vMin, vMax);
+            }
+            return;
+        case GeomAbs_Cone: {
+            uMax = uMin + turn;
+            const gp_Cone cone = adaptor.Cone();
+            const double faceVMin = vMin;
+            const double faceVMax = vMax;
+            // A point at height h along the axis has v = h / cos(semi-angle)
+            for (const gp_Pnt& corner : corners) {
+                const double height = gp_Vec(cone.Location(), corner)
+                                          .Dot(gp_Vec(cone.Axis().Direction()));
+                widen(height / std::cos(cone.SemiAngle()), vMin, vMax);
+            }
+            if (std::abs(std::sin(cone.SemiAngle())) > Precision::Angular()) {
+                const double apex = -cone.RefRadius() / std::sin(cone.SemiAngle());
+                if (faceVMin >= apex - Precision::Confusion()) {
+                    vMin = std::max(vMin, apex);
+                }
+                else if (faceVMax <= apex + Precision::Confusion()) {
+                    vMax = std::min(vMax, apex);
+                }
+            }
+            return;
+        }
+        case GeomAbs_Sphere:
+            uMax = uMin + turn;
+            vMin = -std::numbers::pi / 2.0;
+            vMax = std::numbers::pi / 2.0;
+            return;
+        case GeomAbs_Torus:
+            uMax = uMin + turn;
+            vMax = vMin + turn;
+            return;
+        default:
+            break;
+    }
+    Standard_Real boundUMin = 0.0;
+    Standard_Real boundUMax = 0.0;
+    Standard_Real boundVMin = 0.0;
+    Standard_Real boundVMax = 0.0;
+    surface->Bounds(boundUMin, boundUMax, boundVMin, boundVMax);
+    Bnd_Box both = sweep;
+    BRepBndLib::Add(face, both);
+    const double reach = both.IsVoid() ? 0.0 : std::sqrt(both.SquareExtent());
+    auto cover = [reach](
+                     bool periodic,
+                     double period,
+                     Standard_Real boundLow,
+                     Standard_Real boundHigh,
+                     Standard_Real& low,
+                     Standard_Real& high
+                 ) {
+        if (periodic) {
+            high = low + period;
+            return;
+        }
+        low = Precision::IsInfinite(boundLow) ? low - reach : boundLow;
+        high = Precision::IsInfinite(boundHigh) ? high + reach : boundHigh;
+    };
+    cover(
+        surface->IsUPeriodic(),
+        surface->IsUPeriodic() ? surface->UPeriod() : 0.0,
+        boundUMin,
+        boundUMax,
+        uMin,
+        uMax
+    );
+    cover(
+        surface->IsVPeriodic(),
+        surface->IsVPeriodic() ? surface->VPeriod() : 0.0,
+        boundVMin,
+        boundVMax,
+        vMin,
+        vMax
+    );
+}
+
+// The gaps in the face's reach on its own surface: what sweepRectangle() holds beyond the face.
+// Within the face's own parameter bounds, the rectangle less the face: its holes (inner wires),
+// and notches or slots cut into its outer boundary. Beyond them, the strips up to the sweep's
+// rectangle, which hold none of the face and need no boolean: a Cut of a whole turn of a
+// cylinder came back empty. A null shape within when the face fills its bounds, which the areas
+// tell at once, and no strips where the sweep stays within them. The rectangle is built on the surface as BRep_Tool gives it, already moved for a located face; a
+// hole's own face built on that copy from the face's inner wire, whose curves are on the
+// original surface, made the classifier refuse a valid case (the PR 273 verification's Low). The
+// Cut fails closed: its area must be the rectangle's less the face's (the PR 273 verification's
+// item 3).
+struct FaceGaps
+{
+    TopoDS_Shape within;
+    std::vector<TopoDS_Face> beyond;
+};
+
+FaceGaps faceGaps(const TopoDS_Face& face, const Bnd_Box& sweep)
+{
+    auto checkFailed = []() {
+        return Base::RuntimeError(
+            QT_TRANSLATE_NOOP("Exception", "Could not check whether the profile meets the up-to face")
+        );
+    };
     Standard_Real uMin = 0.0;
     Standard_Real uMax = 0.0;
     Standard_Real vMin = 0.0;
     Standard_Real vMax = 0.0;
     BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
-    BRepBuilderAPI_MakeFace rectangle(
-        BRep_Tool::Surface(face),
-        uMin,
-        uMax,
-        vMin,
-        vMax,
-        Precision::Confusion()
-    );
-    if (!rectangle.IsDone()) {
-        throw Base::RuntimeError(
-            QT_TRANSLATE_NOOP("Exception", "Could not check whether the profile meets the up-to face")
-        );
+    Standard_Real wideUMin = 0.0;
+    Standard_Real wideUMax = 0.0;
+    Standard_Real wideVMin = 0.0;
+    Standard_Real wideVMax = 0.0;
+    sweepRectangle(face, sweep, wideUMin, wideUMax, wideVMin, wideVMax);
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    // An elementary surface's trim would refuse the strips beyond it
+    Handle(Geom_Surface) wideSurface = surface;
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+        !trimmed.IsNull()
+        && trimmed->BasisSurface()->IsKind(STANDARD_TYPE(Geom_ElementarySurface))) {
+        wideSurface = trimmed->BasisSurface();
     }
-    const double rectangleArea = faceArea(rectangle.Face());
-    if (rectangleArea - faceArea(face) <= 1e-9 * rectangleArea) {
-        return {};
+    auto rectangle = [&](const Handle(Geom_Surface)& on,
+                         Standard_Real u0,
+                         Standard_Real u1,
+                         Standard_Real v0,
+                         Standard_Real v1) {
+        BRepBuilderAPI_MakeFace maker(on, u0, u1, v0, v1, Precision::Confusion());
+        if (!maker.IsDone()) {
+            throw checkFailed();
+        }
+        return maker.Face();
+    };
+    FaceGaps gaps;
+    const TopoDS_Face own = rectangle(surface, uMin, uMax, vMin, vMax);
+    const double ownArea = faceArea(own);
+    const double inside = ownArea - faceArea(face);
+    if (inside > 1e-9 * ownArea) {
+        BRepAlgoAPI_Cut cut(own, face);
+        if (!cut.IsDone() || cut.Shape().IsNull()
+            || std::abs(faceArea(cut.Shape()) - inside) > 1e-6 * ownArea) {
+            throw checkFailed();
+        }
+        gaps.within = cut.Shape();
     }
-    BRepAlgoAPI_Cut gaps(rectangle.Face(), face);
-    if (!gaps.IsDone()) {
-        throw Base::RuntimeError(
-            QT_TRANSLATE_NOOP("Exception", "Could not check whether the profile meets the up-to face")
-        );
+    const std::array<std::array<Standard_Real, 4>, 4> strips {{
+        {wideUMin, uMin, wideVMin, wideVMax},
+        {uMax, wideUMax, wideVMin, wideVMax},
+        {uMin, uMax, wideVMin, vMin},
+        {uMin, uMax, vMax, wideVMax},
+    }};
+    for (const auto& [u0, u1, v0, v1] : strips) {
+        if (u1 - u0 <= Precision::PConfusion() || v1 - v0 <= Precision::PConfusion()) {
+            continue;
+        }
+        const TopoDS_Face strip = rectangle(wideSurface, u0, u1, v0, v1);
+        if (faceArea(strip) <= 1e-9 * ownArea) {
+            continue;
+        }
+        gaps.beyond.push_back(strip);
     }
-    return gaps.Shape();
+    return gaps;
 }
 
-// Whether a point of the profile never meets the up-to face as it turns about the axis: its
-// circle stays farther than the tolerance from the face. That part of the profile has nowhere to
-// stop, and BRepFeat revolved it all the way round or not at all, with no error: a face touching
-// the profile's boundary where the profile's nearer points never reach it, or a face trimmed
-// away from the profile plane (the PR 273 review's M3). The points are samples of the profile,
-// and samples of the face's gaps (faceGaps(): holes, notches, slots) where the profile's points
-// turn through them: BRepFeat keeps a hole, and a part of the profile that turned through a gap
-// narrower than the samples' spacing, or only partly in the profile's way, went on round the
-// axis (the PR 273 verifications). Each gap point checked is on a profile point's circle, so a
-// refusal is never wrong. Left out (ops#299): a circle that crosses the face's surface twice,
-// through a gap and on the face, where only part of the gap's circles miss the face.
-bool profileMissesFace(
+// How the profile meets the up-to face as it turns about the axis (profileReach())
+enum class ProfileReach
+{
+    MeetsFace,
+    // Part of the profile never meets the face
+    MissesFace,
+    // Part of the profile turns through a gap in the face before it first meets the face
+    CrossesGapFirst,
+};
+
+// How the profile meets the up-to face as it turns about the axis, in the revolution's direction
+// (positive about the axis, as BRepFeat turns). A point of the profile whose circle stays farther
+// than the tolerance from the face has nowhere to stop, and BRepFeat revolved it all the way
+// round or not at all, with no error: a face touching the profile's boundary where the profile's
+// nearer points never reach it, or a face trimmed away from the profile plane (the PR 273
+// review's M3). A point that turns through a gap within the face's bounds (faceGaps(): holes,
+// notches, slots) before it first meets the face went on past where it should have stopped:
+// BRepFeat keeps a hole, and gave 29.07 instead of 12.58 for a wall through the axis with a hole
+// where the profile's points meet the wall's far half later (the PR 273 verification's item 2,
+// ops#299). The points are samples of the profile, and samples of the gaps where the profile's
+// points turn through them (the gaps within the profile revolved a whole turn): a gap narrower
+// than the profile samples' spacing, or only partly in the profile's way, slipped between them
+// (the PR 273 verifications), and so did a profile edge poking past the face's outer edge (item
+// 1: the strips beyond the face's bounds). Each gap point checked is on a profile point's
+// circle, and is refused only when its whole circle, or within the face's bounds the arc from
+// the profile to it, stays clear of the face, so a refusal is never wrong. Both booleans fail
+// closed (item 3).
+ProfileReach profileReach(
     const TopoShape& profile,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
     double tolerance
 )
 {
+    constexpr double turn = 2.0 * std::numbers::pi;
     const gp_Lin line(axis);
+    auto checkFailed = []() {
+        return Base::RuntimeError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Could not check whether the profile meets the up-to face"
+        ));
+    };
     // Whether the circle through a point, about the axis, stays farther than the tolerance from
     // the face.
     auto circleMisses = [&](const gp_Pnt& point) {
@@ -566,61 +775,202 @@ bool profileMissesFace(
         }
         else {
             const gp_Circ curve(gp_Ax2(center, axis.Direction()), radius);
-            if (circleMeetsFaceQuickly(curve, face, tolerance)) {
+            if (!circleContactsQuickly(curve, face, tolerance, true).empty()) {
                 return false;
             }
             circle = BRepBuilderAPI_MakeEdge(curve).Shape();
         }
         BRepExtrema_DistShapeShape distance(circle, face);
         if (!distance.IsDone()) {
-            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Could not check whether the profile meets the up-to face"
-            ));
+            throw checkFailed();
         }
         return distance.Value() > tolerance;
+    };
+    gp_Pln plane;
+    const bool planar = profile.findPlane(plane);
+    // The profile's reach, from its bounding box's corners: a radius from the axis up to the
+    // largest corner's, a position along the axis between theirs. A point beyond either isn't
+    // swept, and needs no classifying against the profile (a profile of 100 edges made a wall
+    // of 20 holes out of reach take three times as long).
+    double reachRadius = 0.0;
+    double reachLow = std::numeric_limits<double>::max();
+    double reachHigh = std::numeric_limits<double>::lowest();
+    {
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(profile.getShape(), box, Standard_False, Standard_False);
+        if (!box.IsVoid()) {
+            Standard_Real x[2];
+            Standard_Real y[2];
+            Standard_Real z[2];
+            box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
+            for (int i = 0; i < 8; ++i) {
+                const gp_Pnt corner(x[i & 1], y[(i >> 1) & 1], z[(i >> 2) & 1]);
+                reachRadius = std::max(reachRadius, line.Distance(corner));
+                const double along = ElCLib::Parameter(line, corner);
+                reachLow = std::min(reachLow, along);
+                reachHigh = std::max(reachHigh, along);
+            }
+        }
+    }
+    // The circle through a point, about the axis, that starts on the profile: its X direction
+    // points at where it meets the profile, so a point's parameter on it is the angle the profile
+    // turns through to reach the point. Whether that start is inside the profile, not on its
+    // boundary. Nothing for a point the profile doesn't sweep through, or on the axis.
+    struct Swept
+    {
+        gp_Circ circle;
+        bool inside;
+    };
+    auto sweptCircle = [&](const gp_Pnt& point) -> std::optional<Swept> {
+        const double radius = line.Distance(point);
+        const double along = ElCLib::Parameter(line, point);
+        if (!planar || radius <= Precision::Confusion() || radius > reachRadius + tolerance
+            || along < reachLow - tolerance || along > reachHigh + tolerance) {
+            return std::nullopt;
+        }
+        const gp_Ax2 frame(ElCLib::Value(along, line), axis.Direction());
+        // The circle meets the profile plane where a cos(t) + b sin(t) = -d / radius
+        const gp_Vec normal(plane.Axis().Direction());
+        const double a = gp_Vec(frame.XDirection()).Dot(normal);
+        const double b = gp_Vec(frame.YDirection()).Dot(normal);
+        const double d = gp_Vec(plane.Location(), frame.Location()).Dot(normal);
+        const double amplitude = std::hypot(a, b);
+        if (amplitude * radius <= Precision::Confusion()) {
+            return std::nullopt;
+        }
+        const double ratio = -d / (amplitude * radius);
+        if (std::abs(ratio) > 1.0 + tolerance / radius) {
+            return std::nullopt;
+        }
+        const double phase = std::atan2(b, a);
+        const double offset = std::acos(std::clamp(ratio, -1.0, 1.0));
+        for (double angle : {phase + offset, phase - offset}) {
+            const gp_Dir start(
+                gp_Vec(frame.XDirection()) * std::cos(angle)
+                + gp_Vec(frame.YDirection()) * std::sin(angle)
+            );
+            const gp_Pnt onPlane = frame.Location().Translated(gp_Vec(start) * radius);
+            for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More();
+                 faces.Next()) {
+                BRepClass_FaceClassifier classifier(
+                    TopoDS::Face(faces.Current()),
+                    onPlane,
+                    tolerance
+                );
+                if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
+                    return Swept {
+                        gp_Circ(gp_Ax2(frame.Location(), axis.Direction(), start), radius),
+                        classifier.State() == TopAbs_IN
+                    };
+                }
+            }
+        }
+        return std::nullopt;
+    };
+    // How the profile point on a gap point's circle reaches the gap point: the face first, or the
+    // gap. A gap point on the profile itself only checks that its circle meets the face.
+    auto gapReach = [&](const gp_Pnt& point, const gp_Circ& circle) {
+        const double angle = ElCLib::Parameter(circle, point);
+        const double slack = 0.5 * tolerance / circle.Radius();
+        if (angle <= slack) {
+            return circleMisses(point) ? ProfileReach::MissesFace : ProfileReach::MeetsFace;
+        }
+        const std::vector<double> contacts = circleContactsQuickly(circle, face, tolerance);
+        if (std::ranges::any_of(contacts, [&](double contact) {
+                return contact <= angle + slack || contact >= turn - slack;
+            })) {
+            return ProfileReach::MeetsFace;
+        }
+        // Not shown: the exact distance from the arc up to the point
+        BRepBuilderAPI_MakeEdge arc(circle, 0.0, angle - slack);
+        if (!arc.IsDone()) {
+            throw checkFailed();
+        }
+        BRepExtrema_DistShapeShape distance(arc.Edge(), face);
+        if (!distance.IsDone()) {
+            throw checkFailed();
+        }
+        if (distance.Value() <= tolerance) {
+            return ProfileReach::MeetsFace;
+        }
+        if (!contacts.empty() || !circleMisses(point)) {
+            return ProfileReach::CrossesGapFirst;
+        }
+        return ProfileReach::MissesFace;
     };
     try {
         for (const gp_Pnt& point : profileSamples(profile.getShape())) {
             if (circleMisses(point)) {
-                return true;
+                return ProfileReach::MissesFace;
             }
         }
-        const TopoDS_Shape gaps = faceGaps(face);
-        if (gaps.IsNull()) {
-            return false;
+        BRepPrimAPI_MakeRevol sweep(profile.getShape(), axis, turn);
+        if (!sweep.IsDone()) {
+            throw checkFailed();
         }
-        // The part of the gaps that the profile's points turn through: the gaps within the
-        // profile revolved a whole turn.
-        BRepPrimAPI_MakeRevol turn(profile.getShape(), axis, 2.0 * std::numbers::pi);
-        if (!turn.IsDone()) {
-            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Could not check whether the profile meets the up-to face"
-            ));
+        Bnd_Box sweepBox;
+        BRepBndLib::AddOptimal(sweep.Shape(), sweepBox, Standard_False, Standard_False);
+        const FaceGaps gaps = faceGaps(face, sweepBox);
+        // Within the face's bounds, a gap point is refused when the profile reaches it before
+        // the face. Beyond them, only when its circle never meets the face: a part of the profile
+        // that turns past the face's outer edge and meets the face later is what BRepFeat handles
+        // (testRevolutionTwoFacesAcrossTheAxis: the far face's profile passes the wall's plane
+        // beside the wall, and meets the wall three quarters of a turn on).
+        // Each strip on its own: strips touching along their edges in one argument made the
+        // Common warn (an acquired self-intersection).
+        std::vector<std::pair<TopoDS_Shape, bool>> regions;
+        if (!gaps.within.IsNull()) {
+            regions.emplace_back(gaps.within, true);
         }
-        BRepAlgoAPI_Common reached(gaps, turn.Shape());
-        if (!reached.IsDone()) {
-            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Could not check whether the profile meets the up-to face"
-            ));
+        for (const TopoDS_Face& strip : gaps.beyond) {
+            regions.emplace_back(strip, false);
         }
-        for (TopExp_Explorer pieces(reached.Shape(), TopAbs_FACE); pieces.More(); pieces.Next()) {
-            for (const gp_Pnt& point : profileSamples(pieces.Current())) {
-                if (circleMisses(point)) {
-                    return true;
+        for (const auto& [region, firstContact] : regions) {
+            auto reach = [&](const gp_Pnt& point, const std::optional<Swept>& swept) {
+                if (swept && firstContact) {
+                    return gapReach(point, swept->circle);
                 }
+                return circleMisses(point) ? ProfileReach::MissesFace : ProfileReach::MeetsFace;
+            };
+            // The region's own samples that the profile turns through, and whether one is inside
+            // the sweep: the Common below must then give a face.
+            bool reachesRegion = false;
+            for (const gp_Pnt& point : profileSamples(region)) {
+                if (const std::optional<Swept> swept = sweptCircle(point)) {
+                    reachesRegion = reachesRegion || swept->inside;
+                    if (const ProfileReach found = reach(point, swept);
+                        found != ProfileReach::MeetsFace) {
+                        return found;
+                    }
+                }
+            }
+            BRepAlgoAPI_Common reached(region, sweep.Shape());
+            if (!reached.IsDone() || reached.HasWarnings()) {
+                throw checkFailed();
+            }
+            bool pieces = false;
+            for (TopExp_Explorer piece(reached.Shape(), TopAbs_FACE); piece.More();
+                 piece.Next()) {
+                pieces = true;
+                // A point of the Common is swept; one whose start isn't found (on the sweep's
+                // boundary, within the tolerance) only checks that its circle meets the face.
+                for (const gp_Pnt& point : profileSamples(piece.Current())) {
+                    if (const ProfileReach found
+                        = reach(point, firstContact ? sweptCircle(point) : std::nullopt);
+                        found != ProfileReach::MeetsFace) {
+                        return found;
+                    }
+                }
+            }
+            if (reachesRegion && !pieces) {
+                throw checkFailed();
             }
         }
     }
     catch (const Standard_Failure&) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Could not check whether the profile meets the up-to face"
-        ));
+        throw checkFailed();
     }
-    return false;
+    return ProfileReach::MeetsFace;
 }
 
 // The whole surface a face lies on: an unbounded plane, or a cylinder or cone unbounded along
@@ -1464,11 +1814,20 @@ TopoShape Revolved::tryToRevolveToFace(
                 "up to it"
             ));
         }
-        if (profileMissesFace(sketchshape, reachable, axis, tolerance)) {
-            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Part of the profile never meets the up-to face as it revolves about the axis"
-            ));
+        switch (profileReach(sketchshape, reachable, axis, tolerance)) {
+            case ProfileReach::MeetsFace:
+                break;
+            case ProfileReach::MissesFace:
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Part of the profile never meets the up-to face as it revolves about the axis"
+                ));
+            case ProfileReach::CrossesGapFirst:
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Part of the profile passes through a gap in the up-to face before it meets "
+                    "the face as it revolves about the axis"
+                ));
         }
     }
     TopExp_Explorer Ex(supportface.getShape(), TopAbs_WIRE);

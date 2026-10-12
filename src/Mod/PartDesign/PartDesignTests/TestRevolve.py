@@ -1213,8 +1213,10 @@ class TestRevolve(unittest.TestCase):
         z in [0.75, 0.95], on the first side's half of its face x = 0: the first side's sweep
         passes through it, so the face's whole plane would not stop the second side where the
         first one's mirror ends. The feature was valid with the two sides unequal, silently (the
-        PR 268 review's M2: the old check sampled points the window missed). It fails now,
-        naming Two sides."""
+        PR 268 review's M2: the old check sampled points the window missed). It failed naming
+        Two sides; the first side's points that turn through the window meet the wall's other
+        half later, so it now fails earlier, at the first side's check of the gaps it crosses
+        before the face (the PR 273 verification's item 2)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = 4
@@ -1227,7 +1229,11 @@ class TestRevolve(unittest.TestCase):
         window.Height = 0.2
         window.Placement = FreeCAD.Placement(FreeCAD.Vector(-5, 1.7, 0.75), FreeCAD.Rotation())
         self.Doc.recompute()
-        self.assertSymmetricFails(body, (window, [self.wallAtXZero(window)]))
+        revolution = self.revolveProfileUpTo(
+            body, "Revolution", "Symmetric", (window, [self.wallAtXZero(window)])
+        )
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
 
     def trimmedTubeWall(self, trimmed):
         """The part of the tube of radius 2 about the vertical line x = -1, y = 1.5 from 60 to
@@ -1657,16 +1663,16 @@ class TestRevolve(unittest.TestCase):
                 self.assertGreater(added, 8)
                 self.assertAlmostEqual(revolution.Shape.Volume, 112 + sides * added, places=6)
 
-    def revolveUpToHoledWall(self, hole):
+    def revolveUpToHoledWall(self, hole, ys=(0, 4)):
         """profileAcross() revolved One side up to the face x = 0 of the box x in [-1, 0],
-        y in [0, 4], z in [-1, 3], with a square hole y in hole[0], z in hole[1] through it.
+        y in `ys`, z in [-1, 3], with a square hole y in hole[0], z in hole[1] through it.
         Each point at radius r meets the plane x = 0 at y = r, a quarter turn on."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = 1
-        block.Width = 4
+        block.Width = ys[1] - ys[0]
         block.Height = 4
-        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, 0, -1), FreeCAD.Rotation())
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, ys[0], -1), FreeCAD.Rotation())
         (y0, y1), (z0, z1) = hole
         cut = body.newObject("PartDesign::SubtractiveBox", "Hole")
         cut.Length = 3
@@ -1765,6 +1771,87 @@ class TestRevolve(unittest.TestCase):
         cut, revolution = self.revolveUpToHoledWall(((3.5, 3.6), (0.4, 0.5)))
         self.assertTrue(revolution.isValid(), revolution.getStatusString())
         self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def testRevolutionUpToFaceUnderProfileTopBetweenSamples(self):
+        """A circle of radius 0.5 about x = 2, z = 2.52 on XZ (its arc starting at 22.5 degrees)
+        revolved about Z up to the face x = 0 of the box x in [-1, 0], y in [0, 4], z in [-1, 3]:
+        the circle's top, up to z = 3.02, passes over the wall and never meets the face. The
+        circle's samples reach z = 2.98 at most, and the face has no gap within its own bounds,
+        so the check missed it, and BRepFeat failed with only "Could not revolve the sketch!".
+        The gaps now take in the face's surface as far as the profile's whole turn reaches (the
+        PR 273 verification's item 1), and the Revolution fails with the check's error."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block, face = self.boxUpTo(body, (-1, 0), (0, 4), (-1, 3), 0)
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        start = math.radians(22.5)
+        circle = Part.Circle(FreeCAD.Vector(2, 2.52, 0), FreeCAD.Vector(0, 0, 1), 0.5)
+        sketch.addGeometry(Part.ArcOfCircle(circle, start, start + 2 * math.pi), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [face])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToWallThroughAxisWithHoleInTheWay(self):
+        """revolveUpToHoledWall() with the wall y in [-4, 4], through the axis, and the hole
+        y in [1.75, 1.8], z in [0.4, 0.45]: the profile points that turn through the hole meet
+        the wall again at y = -r, so their circles do meet the face, but only after the gap. The
+        tool was 29.07, where the first contact gives 12.58, with no error (the PR 273
+        verification's item 2). The check now asks where each circle first meets the face, and
+        the Revolution fails."""
+        _, revolution = self.revolveUpToHoledWall(((1.75, 1.8), (0.4, 0.45)), ys=(-4, 4))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToWallThroughAxisWithHoleReachedLater(self):
+        """revolveUpToHoledWall() with the wall y in [-4, 4], through the axis, and holes the
+        profile's points reach only after they meet the wall: y in [-1.8, -1.75] (past the first
+        contact, at three quarters of a turn) and y in [3.5, 3.6] (beyond their reach). The
+        Revolution is valid, the box and the quarter ring from 0 to 90 degrees."""
+        for hole in (((-1.8, -1.75), (0.4, 0.45)), ((3.5, 3.6), (0.4, 0.5))):
+            with self.subTest(hole=hole):
+                cut, revolution = self.revolveUpToHoledWall(hole, ys=(-4, 4))
+                self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def revolveUpToHoledSphere(self, holeAt):
+        """profileAcross() revolved One side up to the whole sphere of radius 3.5 about
+        (0, 4, 1), with a hole of radius 0.1 along its normal at the point `holeAt` of it. The
+        sphere is turned about its vertical axis so that its seam runs through the point where
+        the profile's point at radius 2, z = 1 first meets it. The point at radius r and height z
+        meets the sphere after the angle asin((r^2 + 3.75 + (z - 1)^2) / (8 r)), under a quarter
+        turn, and leaves it again after pi less that. (Without a hole in the way BRepFeat keeps
+        the part between the two crossings, 16.26 instead of 4.44: ops#293.)"""
+        center = FreeCAD.Vector(0, 4, 1)
+        sphere = Part.makeSphere(3.5, center)
+        contact = math.asin(7.75 / 16)
+        seam = math.degrees(math.atan2(2 * math.sin(contact) - 4, 2 * math.cos(contact)))
+        sphere.rotate(center, FreeCAD.Vector(0, 0, 1), seam)
+        normal = (holeAt - center).normalize()
+        sphere = sphere.cut(Part.makeCylinder(0.1, 1, holeAt - normal * 0.5, normal))
+        [face] = [f for f in sphere.Faces if f.Surface.TypeId == "Part::GeomSphere"]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = face
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Doc.recompute()
+        return self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
+
+    def testRevolutionUpToSphereWithHoleInTheWay(self):
+        """revolveUpToHoledSphere() with the hole where the profile's point at radius 2, z = 1
+        first meets the sphere, across its seam: the points that turn through it meet the sphere
+        again on its far side, after the gap, and the Revolution fails (a periodic face's gaps,
+        the PR 273 verification's item 8)."""
+        contact = math.asin(7.75 / 16)
+        holeAt = FreeCAD.Vector(2 * math.cos(contact), 2 * math.sin(contact), 1)
+        revolution = self.revolveUpToHoledSphere(holeAt)
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
 
     def testRevolutionUpToWholeCylinderNearTheAxisThroughProfile(self):
         """A small profile x in [0.1, 0.2], z in [0, 0.1] on XZ about Z, up to the whole cylinder
