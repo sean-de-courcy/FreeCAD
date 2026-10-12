@@ -2387,6 +2387,115 @@ class TestRevolve(unittest.TestCase):
         removed = block.Shape.Volume - groove.Shape.Volume
         self.assertAlmostEqual(removed, expected, delta=1e-3 * expected)
 
+    def testGrooveUpToOpenWavyWallOfLooseTolerance(self):
+        """As testGrooveUpToOpenWavyWall, with the wall's free end at r = 1.1 (t past the trough
+        at 7 pi / 4) and the wall's tolerance raised to 5e-4. The checks take ten times that as
+        the boundary, and the points they add 1e-3 of the profile's size (0.0028) inside its
+        edges were dropped: the Groove removed 18.38 where first contact gives 17.10, with no
+        error (the PR 279 round 2 verification's 1). It fails, or removes what first contact
+        gives."""
+        end = 7 * math.pi / 4 + 0.5 * math.acos((2 - 1.1) / 1.5)
+        points = []
+        for k in range(201):
+            t = 0.3 + k * (end - 0.3) / 200
+            radius = 2 + 1.5 * math.sin(2 * t)
+            points.append(FreeCAD.Vector(radius * math.cos(t), radius * math.sin(t), -1))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wallShape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, 4))
+        wallShape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 45)
+        wallShape.fixTolerance(5e-4)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def stop(radius):
+            # The angles where the wall is at this radius, turned by 45 degrees: the first
+            s = (radius - 2) / 1.5
+            angles = []
+            for t in (math.asin(s) / 2, (math.pi - math.asin(s)) / 2):
+                for turns in range(-1, 4):
+                    u = t + turns * math.pi
+                    if 0.3 <= u <= end:
+                        angles.append((u + math.pi / 4) % (2 * math.pi))
+            return min(angles)
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        removed = block.Shape.Volume - groove.Shape.Volume
+        self.assertAlmostEqual(removed, expected, delta=1e-3 * expected)
+
+    def testGrooveUpToWallWhoseEndEntersBetweenSamples(self):
+        """A Groove of profileAcross() in a box, up to a B-spline surface along the wall
+        r = 2 + 1.5 sin 2t of testGrooveUpToOpenWavyWall, from t = pi / 4 (r = 3.5) to an end
+        past the trough at 7 pi / 4, turned 45 degrees about Z. The end lies at r = 0.9, inside
+        the profile's nearest edge, except near z = 0.555, where it bulges out to r = 1.15. Only
+        there, circles of radius 1 to 1.15 meet the wall's end within 30 degrees; elsewhere they
+        pass it and meet the wall at 120 to 150 degrees. The bulge lay between the profile's
+        samples, and the Groove removed those circles round to 150 degrees, with no error (the
+        PR 279 round 2 verification's 2). It fails, or leaves them past where they meet the
+        wall."""
+        wave = lambda t: 2 + 1.5 * math.sin(2 * t)
+
+        def endAt(radius):
+            # The t past the trough where the wall is at this radius
+            return 7 * math.pi / 4 + 0.5 * math.acos((2 - radius) / 1.5)
+
+        rows = sorted({-1 + 0.25 * k for k in range(17)} | {0.375 + 0.015 * k for k in range(25)})
+        grid = []
+        for z in rows:
+            bulge = math.cos(0.5 * math.pi * (z - 0.555) / 0.18) ** 2 if abs(z - 0.555) < 0.18 else 0
+            end = endAt(0.9 + 0.25 * bulge)
+            row = []
+            for k in range(61):
+                t = math.pi / 4 + (end - math.pi / 4) * k / 60
+                row.append(
+                    FreeCAD.Vector(
+                        wave(t) * math.cos(t + math.pi / 4), wave(t) * math.sin(t + math.pi / 4), z
+                    )
+                )
+            grid.append(row)
+        surface = Part.BSplineSurface()
+        surface.interpolate(grid)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Face(surface)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def arc(radius, z, low, high):
+            center = FreeCAD.Vector(0, 0, z)
+            return Part.ArcOfCircle(
+                Part.Circle(center, FreeCAD.Vector(0, 0, 1), radius),
+                math.radians(low),
+                math.radians(high),
+            ).toShape()
+
+        for radius in (1.02, 1.05, 1.08):
+            # The wall stops the circle within 30 degrees by the bulge, and past 110 away from it
+            self.assertAlmostEqual(arc(radius, 0.555, 0, 30).distToShape(wall.Shape)[0], 0, 6)
+            self.assertGreater(arc(radius, 1.5, 0, 110).distToShape(wall.Shape)[0], 0.01)
+            for degrees in (45, 65, 85, 105):
+                angle = math.radians(degrees)
+                point = FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), 0.555)
+                self.assertTrue(groove.Shape.isInside(point, 1e-7, False), (radius, degrees))
+            angle = math.radians(65)
+            point = FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), 1.5)
+            self.assertFalse(groove.Shape.isInside(point, 1e-7, False), radius)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error that says so and gives no solid."""

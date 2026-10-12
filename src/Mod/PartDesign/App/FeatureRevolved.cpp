@@ -541,6 +541,73 @@ gp_Pnt2d intoFaceRange(const TopoDS_Face& face, const Handle(Geom_Surface)& surf
     return moved;
 }
 
+// A face's surface trimmed to the face's parameter bounds, widened by a hundredth of them and
+// kept within the surface's own bounds; a periodic direction the face nearly fills stays whole.
+// GeomAPI_IntCS against a whole extruded surface, unbounded along the extrusion, found none or
+// one of the five points where a circle crosses an open wavy wall, and all five against the
+// trimmed one: a check that misses the first contact expects the tool to go on to a later one
+// (the PR 279 round 2 verification's 4: a correct Revolution refused).
+Handle(Geom_Surface) trimmedToFace(const TopoDS_Face& face, const Handle(Geom_Surface)& surface)
+{
+    Standard_Real uMin = 0.0;
+    Standard_Real uMax = 0.0;
+    Standard_Real vMin = 0.0;
+    Standard_Real vMax = 0.0;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    Standard_Real uLow = 0.0;
+    Standard_Real uHigh = 0.0;
+    Standard_Real vLow = 0.0;
+    Standard_Real vHigh = 0.0;
+    surface->Bounds(uLow, uHigh, vLow, vHigh);
+    // Whether to trim one direction, and to what
+    auto widen = [](Standard_Real& low, Standard_Real& high, double boundLow, double boundHigh,
+                    bool periodic, double period) {
+        const double margin = 0.01 * (high - low);
+        if (periodic) {
+            if (high - low + 2.0 * margin >= period) {
+                return false;
+            }
+            low -= margin;
+            high += margin;
+            return true;
+        }
+        low = std::max(low - margin, boundLow);
+        high = std::min(high + margin, boundHigh);
+        return high - low > Precision::PConfusion();
+    };
+    const bool trimU = widen(
+        uMin,
+        uMax,
+        uLow,
+        uHigh,
+        surface->IsUPeriodic(),
+        surface->IsUPeriodic() ? surface->UPeriod() : 0.0
+    );
+    const bool trimV = widen(
+        vMin,
+        vMax,
+        vLow,
+        vHigh,
+        surface->IsVPeriodic(),
+        surface->IsVPeriodic() ? surface->VPeriod() : 0.0
+    );
+    try {
+        if (trimU && trimV) {
+            return new Geom_RectangularTrimmedSurface(surface, uMin, uMax, vMin, vMax);
+        }
+        if (trimU) {
+            return new Geom_RectangularTrimmedSurface(surface, uMin, uMax, Standard_True);
+        }
+        if (trimV) {
+            return new Geom_RectangularTrimmedSurface(surface, vMin, vMax, Standard_False);
+        }
+    }
+    catch (const Standard_Failure&) {
+        // The whole surface
+    }
+    return surface;
+}
+
 // Where a circle surely meets a face: its parameters (angles from its X direction) at the points
 // where it crosses or touches the face's surface on the face (the face classifier says in or on,
 // within the tolerance). Quick, unlike the exact distance to a face of many edges (16 ms a circle
@@ -558,7 +625,7 @@ std::vector<double> circleContactsQuickly(
         const Handle(Geom_Circle) curve = new Geom_Circle(circle);
         const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
         std::vector<std::pair<double, gp_Pnt2d>> candidates;
-        GeomAPI_IntCS crossing(curve, surface);
+        GeomAPI_IntCS crossing(curve, trimmedToFace(face, surface));
         if (crossing.IsDone()) {
             for (int i = 1; i <= crossing.NbPoints(); ++i) {
                 Standard_Real u = 0.0;
@@ -1724,7 +1791,12 @@ bool holdsFirstContact(
         Bnd_Box box;
         BRepBndLib::Add(profile.getShape(), box);
         const double size = box.IsVoid() ? 0.0 : std::sqrt(box.SquareExtent());
-        const double nudge = 1e-3 * size;
+        // Past the tolerance, which the checks below take as the boundary: up to a face of
+        // tolerance 5e-4 the tolerance was 0.005, every point 1e-3 of the profile's size inside
+        // (0.0028) was dropped, and a Groove up to a wall whose free end lay that close to the
+        // profile's edge removed 18.38 where first contact gives 17.10, with no error (the PR 279
+        // round 2 verification's 1).
+        const double nudge = std::max(1e-3 * size, 3.0 * tolerance);
         const double spacing = size / 16.0;
         auto addInside = [&](const gp_Pnt& point, const gp_Vec& direction, double distance) {
             const gp_Pnt moved = point.Translated(direction * distance);
@@ -1812,6 +1884,88 @@ bool holdsFirstContact(
                 for (double aside : {1.0, -1.0}) {
                     if (!radial) {
                         addInside(point, outward * along + sideways * aside, nudge);
+                    }
+                }
+            }
+        }
+        // Points on both sides of where the up-to face's boundary, turned about the axis, lies
+        // in the profile. First contact jumps there: the circles on one side meet the face by
+        // its edge, those on the other pass the edge and meet the face much later or never. A
+        // wall's free end that entered the profile's turn only over a band narrower than the
+        // samples' spacing slipped between them (the PR 279 round 2 verification's 2: a B-spline
+        // wall whose end reaches r 1.15 only at z 0.555 +- 0.1; 6 of 18 tools valid and wrong,
+        // with no error). The parts of the boundary inside the profile's whole turn come from a
+        // boolean, so a short one isn't missed between points along its edge. Seams aren't
+        // boundaries: the face goes on across them.
+        TopoDS_Compound boundary;
+        builder.MakeCompound(boundary);
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (!BRep_Tool::Degenerated(edge) && !BRep_Tool::IsClosed(edge, face)) {
+                builder.Add(boundary, edge);
+            }
+        }
+        TopoDS_Shape inside = boundary;
+        try {
+            BRepPrimAPI_MakeRevol turned(profile.getShape(), axis, turn);
+            if (turned.IsDone()) {
+                BRepAlgoAPI_Common common(boundary, turned.Shape());
+                if (common.IsDone()) {
+                    inside = common.Shape();
+                }
+            }
+        }
+        catch (const Standard_Failure&) {
+            // The whole boundary: its points outside the profile's turn land outside the profile.
+        }
+        // The points of the profile's plane on the circle through a point about the axis
+        auto ontoPlane = [&](const gp_Pnt& point) {
+            std::vector<gp_Pnt> found;
+            const gp_Pnt center = ElCLib::Value(ElCLib::Parameter(line, point), line);
+            const double radius = center.Distance(point);
+            if (radius <= nudge) {
+                return found;
+            }
+            const gp_Circ circle(gp_Ax2(center, axis.Direction(), gp_Dir(gp_Vec(center, point))), radius);
+            const gp_Vec across(normal);
+            const double offset = gp_Vec(plane.Location(), center).Dot(across);
+            const double x = radius * gp_Vec(circle.XAxis().Direction()).Dot(across);
+            const double y = radius * gp_Vec(circle.YAxis().Direction()).Dot(across);
+            const double amplitude = std::hypot(x, y);
+            if (amplitude <= gp::Resolution() || std::abs(offset) > amplitude) {
+                return found;
+            }
+            const double phase = std::atan2(y, x);
+            const double spread = std::acos(-offset / amplitude);
+            found.push_back(ElCLib::Value(phase + spread, circle));
+            if (spread > Precision::Angular()) {
+                found.push_back(ElCLib::Value(phase - spread, circle));
+            }
+            return found;
+        };
+        // Along the axis and across it in the plane: one of them crosses any line
+        const gp_Vec lengthwise = gp_Vec(axis.Direction())
+            - gp_Vec(normal) * gp_Vec(axis.Direction()).Dot(gp_Vec(normal));
+        if (lengthwise.Magnitude() > gp::Resolution() && spacing > Precision::Confusion()) {
+            const gp_Vec alongAxis = lengthwise.Normalized();
+            const gp_Vec outward = gp_Vec(normal).Crossed(alongAxis);
+            for (TopExp_Explorer edges(inside, TopAbs_EDGE); edges.More(); edges.Next()) {
+                const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+                if (BRep_Tool::Degenerated(edge)) {
+                    continue;
+                }
+                BRepAdaptor_Curve curve(edge);
+                const double length = GCPnts_AbscissaPoint::Length(curve);
+                const int samples = std::clamp(static_cast<int>(std::ceil(length / spacing)), 1, 8);
+                for (int i = 1; i <= samples; ++i) {
+                    const gp_Pnt onFace = curve.Value(
+                        curve.FirstParameter()
+                        + (curve.LastParameter() - curve.FirstParameter()) * i / (samples + 1)
+                    );
+                    for (const gp_Pnt& point : ontoPlane(onFace)) {
+                        for (const gp_Vec& direction : {alongAxis, -alongAxis, outward, -outward}) {
+                            addInside(point, direction, nudge);
+                        }
                     }
                 }
             }
