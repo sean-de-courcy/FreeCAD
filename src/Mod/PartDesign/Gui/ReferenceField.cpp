@@ -28,6 +28,7 @@
 #include <list>
 #include <map>
 #include <optional>
+#include <string_view>
 #include <tuple>
 
 #include <QAction>
@@ -87,6 +88,8 @@
 #include <Mod/Part/Gui/ViewProviderExt.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
+#include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
@@ -1179,10 +1182,49 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         "UpToShape2",
         "StartReference",
     };
+    // Whether the feature's current type reads its link in the role: one left set after a change
+    // of type (UpToFace after Type -> Length, StartReference after StartType -> Offset) makes
+    // nothing (fork PR 267 review, L6; the rules of the features' execute())
+    auto inUse = [](App::DocumentObject* obj, std::string_view role) {
+        auto is = [obj](const char* name, const char* value) {
+            auto prop = freecad_cast<App::PropertyEnumeration*>(obj->getPropertyByName(name));
+            const char* current = prop ? prop->getValueAsString() : nullptr;
+            return current && std::strcmp(current, value) == 0;
+        };
+        if (role == "StartReference") {
+            return is("StartType", "Reference");
+        }
+        if (role == "AuxiliarySpine") {
+            return is("Mode", "Auxiliary");
+        }
+        if (!role.starts_with("UpTo")) {
+            return true;  // a loft's or pipe's Sections, a pipe's Spine
+        }
+        // Read by a pad, pocket, revolution or groove only (a hole or pipe has the properties
+        // too); the second side's in two sides only, and a revolution or groove reads no shape
+        const bool revolved = obj->isDerivedFrom<PartDesign::Revolved>();
+        if (!revolved && !obj->isDerivedFrom<PartDesign::FeatureExtrude>()) {
+            return false;
+        }
+        const bool second = role.ends_with('2');
+        const bool twoSides = is("SideType", "Two sides");
+        if ((second && !twoSides) || (revolved && role.starts_with("UpToShape"))) {
+            return false;
+        }
+        // A groove through all on either of two sides reads neither face
+        if (revolved && twoSides && (is("Type", "ThroughAll") || is("Type2", "ThroughAll"))) {
+            return false;
+        }
+        const char* type = role.starts_with("UpToFace") ? "UpToFace" : "UpToShape";
+        return is(second ? "Type2" : "Type", type);
+    };
     // What the feature links in those roles
-    auto roleLinks = [](App::DocumentObject* obj) {
+    auto roleLinks = [&inUse](App::DocumentObject* obj) {
         std::vector<App::DocumentObject*> linked;
         for (const char* role : roles) {
+            if (!inUse(obj, role)) {
+                continue;
+            }
             if (auto link = freecad_cast<App::PropertyLinkBase*>(obj->getPropertyByName(role))) {
                 link->getLinks(linked, true);
             }
