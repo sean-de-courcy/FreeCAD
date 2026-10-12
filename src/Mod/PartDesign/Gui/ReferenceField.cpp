@@ -53,6 +53,10 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <Inventor/SbBox3f.h>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
@@ -346,29 +350,61 @@ std::optional<bool> liesOn(const TopoDS_Shape& element, const TopoDS_Shape& tool
     }
 }
 
-// Whether the tool's boundary has part of a face and not the rest: some of the points inside it
-// lie on the tool's faces and some don't. A refined feature merges its side with a coplanar side
-// of a feature below into one face, which names only the one below (ops#292); a fillet's rounding
-// of a feature's edge has no point on that feature's tool. Not for an edge or a vertex. Nothing
-// when that can't be told.
-std::optional<bool> partlyOn(const TopoDS_Shape& element, const TopoDS_Shape& tool)
+// Whether a face or an edge of the tool lies on the element's surface (a face) or curve (an edge):
+// every point that shows where it lies is on it. Then the tool made the element, or part of it, on
+// that surface: one that the tool doesn't have whole was made in part by another feature (a
+// refined pad's side merged with a coplanar side of the pad below it, whatever their shares;
+// collinear edges merged likewise: ops#292). A fillet's rounding or a chamfer's face is a new
+// surface, which no face of the pad's tool lies on. Not for a vertex. Nothing when that can't be
+// told.
+std::optional<bool> sharesGeometry(const TopoDS_Shape& element, const TopoDS_Shape& tool)
 {
-    if (element.IsNull() || element.ShapeType() != TopAbs_FACE || tool.IsNull()) {
-        return element.IsNull() ? std::nullopt : std::optional<bool>(false);
+    if (element.IsNull()) {
+        return std::nullopt;
+    }
+    if (tool.IsNull()) {
+        return false;
     }
     try {
-        const TopoDS_Compound faces = toolFaces(tool);
         const double tolerance = toleranceOf(element);
-        bool on = false;
-        bool off = false;
-        for (const gp_Pnt& point : insidePoints(TopoDS::Face(element))) {
-            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), faces);
-            if (!distance.IsDone()) {
+        if (element.ShapeType() == TopAbs_FACE) {
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(element));
+            if (surface.IsNull()) {
                 return std::nullopt;
             }
-            (distance.Value() > tolerance ? off : on) = true;
+            auto onSurface = [&](const gp_Pnt& point) {
+                GeomAPI_ProjectPointOnSurf projection(point, surface);
+                return projection.NbPoints() > 0 && projection.LowerDistance() <= tolerance;
+            };
+            for (TopExp_Explorer it(tool, TopAbs_FACE); it.More(); it.Next()) {
+                const std::vector<gp_Pnt> points = samplePoints(it.Current());
+                if (!points.empty() && std::ranges::all_of(points, onSurface)) {
+                    return true;
+                }
+            }
+            return false;
         }
-        return on && off;
+        if (element.ShapeType() == TopAbs_EDGE) {
+            double first = 0;
+            double last = 0;
+            const Handle(Geom_Curve) curve
+                = BRep_Tool::Curve(TopoDS::Edge(element), first, last);
+            if (curve.IsNull()) {
+                return std::nullopt;
+            }
+            auto onCurve = [&](const gp_Pnt& point) {
+                GeomAPI_ProjectPointOnCurve projection(point, curve);
+                return projection.NbPoints() > 0 && projection.LowerDistance() <= tolerance;
+            };
+            for (TopExp_Explorer it(tool, TopAbs_EDGE); it.More(); it.Next()) {
+                const std::vector<gp_Pnt> points = samplePoints(it.Current());
+                if (!points.empty() && std::ranges::all_of(points, onCurve)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
     }
     catch (const Standard_Failure&) {
         return std::nullopt;
@@ -1243,12 +1279,13 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         tested[obj] = result;
         return result;
     };
-    // Whether the feature's tool has part of the face and not the rest: another feature made the
-    // rest, which the history doesn't name (a refined pad's side merged with the pad's below it,
-    // ops#292). Also when that can't be told: the candidate would be taken without its tool's test.
+    // Whether the feature's tool, which doesn't have the element, has a face on its surface (an
+    // edge on its curve): another feature made the rest, which the history doesn't name (a refined
+    // pad's side merged with the pad's below it, whatever their shares; ops#292 and fork PR 276
+    // review). Also when that can't be told: the candidate would be taken without its tool's test.
     auto madePart = [&](App::DocumentObject* obj) {
         return !freecad_cast<PartDesign::FeatureAddSub*>(obj)
-            || partlyOn(theElement(), toolOf(obj)).value_or(true);
+            || sharesGeometry(theElement(), toolOf(obj)).value_or(true);
     };
     // A candidate is taken when its tool has the element; another feature rules it out when its
     // tool may have it (also when that can't be told)
@@ -1307,8 +1344,8 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     // its edge down into the pad below: [fillet, pad, pad below, sketch]), the element may have
     // been changed by something its history doesn't tell: every later candidate, also a plain one,
     // needs it too. A plain one whose tool doesn't have it is taken (a pad under a fillet: the
-    // rounding has no point on the pad's tool), unless its tool has part of it: another feature
-    // made the rest (ops#292).
+    // rounding is a surface of its own), unless a face of its tool lies on the element's surface:
+    // it made part of it, another feature the rest (ops#292).
     bool failed = false;
     for (auto item = history.begin(); item != history.end(); ++item) {
         auto next = std::next(item);
@@ -1350,7 +1387,7 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
     }
     // A feature that makes elements from the origin in a role, or from what the guess uses in a
     // role, whose tool may have the element: the history may have left it out (a single
-    // candidate is taken without the test above). Nor a single one whose tool has part of the
+    // candidate is taken without the test above). Nor a single one whose tool made part of the
     // element only (ops#292).
     if ((!touches(guess) && madePart(guess)) || rivalled(guess, profiles, candidates)) {
         return nullptr;
