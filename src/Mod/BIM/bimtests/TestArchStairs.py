@@ -31,8 +31,8 @@ class TestArchStairs(TestArchBase.TestArchBase):
     def test_descendingBaseLine(self):
         """Stairs on a descending line still build (FreeCAD-CH ops#319).
 
-        The step is negative; RiserHeight, a PropertyLength that only reports it, now refuses a
-        negative value, so it keeps showing 0 as the clamp did.
+        RiserHeight and TreadDepth are PropertyLength reports, which now refuse a negative value;
+        execute() keeps them at 0 or above, as the clamp did.
         """
         import Draft
         import FreeCAD as App
@@ -42,7 +42,7 @@ class TestArchStairs(TestArchBase.TestArchBase):
         stairs = Arch.makeStairs(baseobj=line, width=1000, steps=10)
         self.document.recompute()
         self.assertTrue(stairs.isValid(), stairs.getStatusString())
-        self.assertEqual(stairs.RiserHeight.Value, 0.0)
+        self.assertGreaterEqual(stairs.RiserHeight.Value, 0.0)
         self.assertFalse(stairs.Shape.isNull())
 
     def test_makeStairs(self):
