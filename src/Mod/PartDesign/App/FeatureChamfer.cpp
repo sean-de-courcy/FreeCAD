@@ -185,9 +185,6 @@ App::DocumentObjectExecReturn* Chamfer::execute()
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is invalid")
             );
         }
-        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
-        recorder.report(Label.getValue());
-
         // store shape before refinement
         this->rawShape = shape;
         shape = refineShapeIfActive(shape);
@@ -199,6 +196,9 @@ App::DocumentObjectExecReturn* Chamfer::execute()
         }
 
         shape = getSolid(shape);
+        // Where OCCT failed, the exact construction built it (ops#300, decision 54), once
+        // the feature has its result
+        recorder.report(Label.getValue());
         this->Shape.setValue(shape);
         return App::DocumentObject::StdReturn;
     }

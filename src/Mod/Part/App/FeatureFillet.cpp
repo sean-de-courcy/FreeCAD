@@ -160,7 +160,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         if (!Part::checkDressUp(res, baseTopoShape)) {
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
-        // Where OCCT refused, the exact construction built it (ops#300, decision 54)
+        // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);
         return Part::FilletBase::execute();
