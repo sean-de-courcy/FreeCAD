@@ -1560,47 +1560,187 @@ TEST_F(SketchObjectParkTest, guessedLinkDroppedAndAddedAgainIsDecided)
     EXPECT_FALSE(typeGuessed(sketch, GeoEnum::RefExt));
 }
 
-// Verification 4.7: a first open of a type list saved before ops#140 that can't tell a link
-// whose element is absent flagged its saved geometry as guessed, so once the element was back
-// the geometry was never matched and the link waited for good. It is marked missing instead:
-// the rebuild that finds the element matches the saved line and decides the link
-TEST_F(SketchObjectParkTest, linkAnOpenCouldntTellWithItsElementAbsentIsDecidedWhenItIsBack)
+namespace
 {
-    auto* sketch = getObject();
-    // a rod above the plane: its projection is the line (0, 0)-(10, 0)
+// A rod above the sketch's plane, its projection the line (0, 0)-(10, 0), linked as a projection
+// in a file with a type list saved before ops#140 that the rod saved without its edge (gone
+// before the sketch's rebuild): the open can't tell the link's type from its saved line, the
+// element is absent. Returns the rod (`box` too)
+App::DocumentObject* openWithItsElementAbsent(App::Document*& doc,
+                                              Sketcher::SketchObject*& sketch,
+                                              App::DocumentObject*& box)
+{
     auto* rod = static_cast<Part::Feature*>(doc->addObject("Part::Feature", "Rod"));
     rod->Shape.setValue(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
     doc->recompute();
-    ASSERT_GE(sketch->addExternal(rod, "Edge1", false, false), 0);
+    EXPECT_GE(sketch->addExternal(rod, "Edge1", false, false), 0);
     doc->recompute();
-    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
-    // the rod loses its edge before the sketch is recomputed, in a file with a type list saved
-    // before ops#140: a saved line can't tell its type from its geometry alone
+    EXPECT_EQ(sketch->ExternalGeo.getSize(), 3);
     rod->Shape.setValue(BRepBuilderAPI_MakeVertex(gp_Pnt(0, 0, 5)).Shape());
     sketch->ExternalTypes.setValues({0, 0});
     doc->purgeTouched();
     auto warnings = saveAndReopen(doc, sketch, box);
-    ASSERT_NE(sketch, nullptr);
-    ASSERT_EQ(countContaining(warnings, "its type can't be told"), 1U)
+    box = doc ? doc->getObject("Rod") : nullptr;
+    if (!sketch || !box) {
+        return nullptr;
+    }
+    EXPECT_EQ(countContaining(warnings, "its type can't be told"), 1U)
         << warnings.size() << " warnings";
-    ASSERT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    return box;
+}
+
+void giveTheRodItsEdge(App::DocumentObject* rod)
+{
+    static_cast<Part::Feature*>(rod)->Shape.setValue(
+        BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+}
+}  // namespace
+
+// Verification 4.7 and 5.1: a first open of a type list saved before ops#140 that can't tell a
+// link whose element is absent flags its saved geometry as built from a guess, as when the
+// element is there, and marks it missing. Marked missing alone (round 5), a freeze, a park or a
+// drop cleared the mark and the link settled silently (the tests below). Once the element is
+// back the link still waits, without the ops#237 "element is back" settle, until it is added again
+TEST_F(SketchObjectParkTest, linkAnOpenCouldntTellWithItsElementAbsentWaitsWhenItIsBack)
+{
+    auto* sketch = getObject();
+    auto* rod = openWithItsElementAbsent(doc, sketch, box);
+    ASSERT_NE(rod, nullptr);
     ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
-    EXPECT_FALSE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
     EXPECT_TRUE(missing(sketch, GeoEnum::RefExt));
 
-    rod = static_cast<Part::Feature*>(doc->getObject("Rod"));
-    ASSERT_NE(rod, nullptr);
-    rod->Shape.setValue(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 5), gp_Pnt(10, 0, 5)).Edge());
+    giveTheRodItsEdge(rod);
     sketch->touch();
-    doc->recompute();
+    std::vector<std::string> warnings;
+    {
+        WarningCollector collector;
+        doc->recompute();
+        warnings = collector.warnings;
+    }
 
-    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0}));
+    EXPECT_EQ(countContaining(warnings, "its element is back"), 0U);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
     ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
-    EXPECT_FALSE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
     EXPECT_FALSE(missing(sketch, GeoEnum::RefExt));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
     warnings = saveAndReopen(doc, sketch, box);
     ASSERT_NE(sketch, nullptr);
-    EXPECT_EQ(countContaining(warnings, "undecided"), 0U) << warnings.size() << " warnings";
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+}
+
+// Verification 5.1a: the link above frozen. The rebuild skips it and clears its missing mark;
+// the next open read its saved line as decided, kept the type at its index and dropped the mark,
+// silently. It still waits
+TEST_F(SketchObjectParkTest, linkAnOpenCouldntTellWithItsElementAbsentStillWaitsWhenFrozen)
+{
+    auto* sketch = getObject();
+    ASSERT_NE(openWithItsElementAbsent(doc, sketch, box), nullptr);
+    ASSERT_EQ(sketch->toggleExternalGeometryFlag({GeoEnum::RefExt},
+                                                 {ExternalGeometryExtension::Frozen}),
+              0);
+    ASSERT_TRUE(ExternalGeometryFacade::getFacade(sketch->getGeometry(GeoEnum::RefExt))
+                    ->testFlag(ExternalGeometryExtension::Frozen));
+
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+}
+
+// Verification 5.1b: the link above parked (parking clears the missing mark and drops the key),
+// its element back, and put back with the type at its index: it came back decided, and the next
+// open settled the guess silently. It still waits
+TEST_F(SketchObjectParkTest, linkAnOpenCouldntTellWithItsElementAbsentStillWaitsWhenParked)
+{
+    auto* sketch = getObject();
+    auto* rod = openWithItsElementAbsent(doc, sketch, box);
+    ASSERT_NE(rod, nullptr);
+    const auto ids = sketch->externalGeometryIds(0);
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 0);
+    giveTheRodItsEdge(rod);
+    EXPECT_EQ(sketch->unparkExternalGeometry(rod, sub, std::move(shadow), 0, ids), 0);
+    doc->recompute();
+
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({0, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
+}
+
+// Verification 5.2: a waiting link parked, its parked geometry deleted, then put back (a reorder
+// and its undo): no parked geometry is left to carry the flag, so only the word the parked record
+// keeps (externalTypeUndecided when it was parked) tells that the link waits. Without it the link
+// came back with the type at its index as a decided type
+TEST_F(SketchObjectParkTest, guessedLinkParkedWithItsGeometryDeletedStillWaits)
+{
+    auto* sketch = getObject();
+    auto* rod = guessedIntersection(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    ASSERT_NE(rod, nullptr);
+    const auto ids = sketch->externalGeometryIds(0);
+    const int type = sketch->externalType(0);
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    const bool undecided = sketch->externalTypeUndecided(0);
+    EXPECT_TRUE(undecided);
+    sketch->parkExternalGeometry({0});
+    ASSERT_EQ(sketch->delExternal(0), 0);
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 2);
+    EXPECT_EQ(sketch->unparkExternalGeometry(rod, sub, std::move(shadow), type, ids, {}, undecided),
+              1);
+    doc->recompute();
+
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({1, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
+}
+
+// Verification 5.4: a waiting link parked, the file saved and opened again (no link left, so the
+// type list has lost the mark), then put back: its parked geometry's flag gives the list the mark
+// again (pendingTypeRepair on a list no longer than the links), and the link still waits
+TEST_F(SketchObjectParkTest, guessedLinkParkedSavedAndPutBackStillWaits)
+{
+    auto* sketch = getObject();
+    guessedIntersection(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    const auto ids = sketch->externalGeometryIds(0);
+    const int type = sketch->externalType(0);
+    const std::string sub = sketch->ExternalGeometry.getSubValues()[0];
+    auto shadow = sketch->ExternalGeometry.getShadowSubs()[0];
+    sketch->parkExternalGeometry({0});
+    doc->recompute();
+    saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    ASSERT_NE(box, nullptr);
+    ASSERT_EQ(sketch->ExternalGeometry.getSize(), 0);
+    EXPECT_EQ(sketch->unparkExternalGeometry(box, sub, std::move(shadow), type, ids), 0);
+    doc->recompute();
+
+    EXPECT_EQ(sketch->externalGeometryIds(0), ids);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({1, -1}));
+    ASSERT_EQ(sketch->ExternalGeo.getSize(), 3);
+    EXPECT_TRUE(typeGuessed(sketch, GeoEnum::RefExt));
+    EXPECT_EQ(carbonCopyOf(doc, sketch).first, -1);
+    auto warnings = saveAndReopen(doc, sketch, box);
+    ASSERT_NE(sketch, nullptr);
+    EXPECT_EQ(sketch->ExternalTypes.getValues(), std::vector<long>({1, -1}));
+    EXPECT_EQ(countContaining(warnings, "its type is still undecided"), 1U)
+        << warnings.size() << " warnings";
 }
 
 // ops#278: a Both entry put back on geometry without kinds (parked before ops#264, when parking

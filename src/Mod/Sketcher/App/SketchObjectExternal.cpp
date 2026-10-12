@@ -3217,12 +3217,12 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     }
     // the kinds found on open for saved geometry without them, by index in ExternalGeo
     std::map<std::size_t, bool> savedKinds;
-    // the indexes in ExternalGeo of saved geometry an open leaves undecided while its element is
-    // there: flagged as guessed, so a later open doesn't take it as evidence (verification 3.8)
+    // the indexes in ExternalGeo of saved geometry an open leaves undecided: flagged as guessed,
+    // so a later open doesn't take it as evidence (verification 3.8). Also while its element is
+    // absent: marked missing alone, a freeze, a park or a drop clears the mark and the link
+    // settles silently (PR 277 verification 5.1); it waits until it is added again
     std::set<std::size_t> savedUndecided;
-    // and of saved geometry an open leaves undecided while its element is absent: marked missing,
-    // so the rebuild that finds the element again matches it with this geometry (flagged as
-    // guessed, it would never be matched and the link would wait for good; verification 4.7)
+    // those whose element is absent, marked missing as well
     std::set<std::size_t> savedAbsent;
     const bool laterOpen = openRepair
         && std::find(Types.begin() + static_cast<std::ptrdiff_t>(linkCount), Types.end(),
@@ -3716,13 +3716,16 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                     // saved geometry left as it is (no full rebuild on open) would look decided
                     // on the next open if the file is saved before a rebuild: present, not
                     // missing, unflagged, it keeps the index type and drops the mark, silently.
-                    // Flagged as guessed when the element is there (a type built it), else
-                    // marked missing (verification 4.7)
+                    // Flagged as guessed, and marked missing when the element is absent (no
+                    // type built it)
                     if (!saved.empty() && !savedMissing && !savedGuessed) {
                         for (long id : externalGeoRefMap[key]) {
                             auto it = externalGeoMap.find(id);
                             if (it != externalGeoMap.end()) {
-                                (built ? savedUndecided : savedAbsent).insert(it->second);
+                                savedUndecided.insert(it->second);
+                                if (!built) {
+                                    savedAbsent.insert(it->second);
+                                }
                             }
                         }
                     }
@@ -3739,10 +3742,12 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                                 << " ops#140; it keeps type " << indexType);
                     }
                 }
-                else if (built) {
+                else if (built && !savedGuessed) {
                     // FreeCAD-CH (ops#237): the element is back, but no type gives the saved
                     // geometry: built with the type at its index, the link's saved geometry is
-                    // replaced, and nothing could tell its type any more
+                    // replaced, and nothing could tell its type any more. Geometry built from a
+                    // guess was no evidence to begin with: the link goes on waiting (PR 277
+                    // verification 5.1)
                     FC_WARN("External link " << key << " in " << getFullName()
                             << ": its element is back, but no type gives its saved geometry, so"
                             << " its type can't be told from a type list saved before ops#140;"
@@ -4427,6 +4432,27 @@ int SketchObject::externalType(int entry) const
     return static_cast<int>(types[entry]);
 }
 
+bool SketchObject::externalTypeUndecided(int entry) const
+{
+    if (entry < 0 || entry >= static_cast<int>(externalGeoRef.size())) {
+        return false;
+    }
+    const std::string& key = externalGeoRef[entry];
+    if (externalTypeRepairPending && undecidedTypeKeys.count(key) != 0) {
+        return true;
+    }
+    auto ids = externalGeoRefMap.find(key);
+    if (ids == externalGeoRefMap.end()) {
+        return false;
+    }
+    return std::any_of(ids->second.begin(), ids->second.end(), [this](long id) {
+        auto it = externalGeoMap.find(id);
+        return it != externalGeoMap.end() && it->second >= 0 && it->second < ExternalGeo.getSize()
+            && ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                   ->testFlag(ExternalGeometryExtension::TypeGuessed);
+    });
+}
+
 std::optional<std::string> SketchObject::externalGeometryRefOf(long id) const
 {
     auto it = externalGeoMap.find(id);
@@ -4461,6 +4487,9 @@ void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
     // without one, the solver keeps it fixed, and its Id, GeoId and constraints don't change
     auto geos = ExternalGeo.getValues();
     for (int entry : parked) {
+        // a link that waits for its type takes that along on its geometry, which no longer
+        // names its key (ops#287, PR 277 verification 5.1)
+        const bool undecided = externalTypeUndecided(entry);
         for (long id : externalGeometryIds(entry)) {
             auto it = externalGeoMap.find(id);
             if (it == externalGeoMap.end()) {
@@ -4471,6 +4500,9 @@ void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
             auto egf = ExternalGeometryFacade::getFacade(geo);
             egf->setRef(std::string());
             egf->setFlag(ExternalGeometryExtension::Missing, false);
+            if (undecided) {
+                egf->setFlag(ExternalGeometryExtension::TypeGuessed, true);
+            }
         }
     }
 
@@ -4497,7 +4529,8 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
                                          App::PropertyLinkBase::ShadowSub&& shadow,
                                          int type,
                                          const std::vector<long>& ids,
-                                         const std::vector<int>& kinds)
+                                         const std::vector<int>& kinds,
+                                         bool typeGuessed)
 {
     auto objs = ExternalGeometry.getValues();
     auto subs = ExternalGeometry.getSubValues();
@@ -4512,7 +4545,9 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     // (TypeGuessed) puts back a link that still waits for its type, whatever `type` is (the
     // type at its index when it was parked, a guess): its key waits again and the type list
     // keeps the mark, or the rebuild would clear the flag and the next open settle the guess.
-    // Parking dropped the key with the link's last referenced geometry (verification 4.4)
+    // Parking dropped the key with the link's last referenced geometry (verification 4.4). So does
+    // `typeGuessed`, the parked record's word: when every parked geometry was deleted while
+    // parked, nothing else tells it (verification 5.2)
     std::vector<const Part::Geometry*> parkedGeos;
     for (long id : ids) {
         auto it = externalGeoMap.find(id);
@@ -4521,7 +4556,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             parkedGeos.push_back(ExternalGeo[it->second]);
         }
     }
-    const bool guessed = formedAgain(parkedGeos).guessed;
+    const bool guessed = typeGuessed || formedAgain(parkedGeos).guessed;
     if (guessed) {
         externalTypeRepairPending = true;
     }

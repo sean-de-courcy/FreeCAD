@@ -147,7 +147,8 @@ std::string unescapeField(const std::string& text)
 /// One parked item: a link entry (`link|<property>|<T>|<sub>|<shadow new>|<shadow old>|<fp>|
 /// <position>`, then `|<guess>|<orig>|<alt>[|<orig fp>]` when it has a guess record), a sketch's
 /// projection parked in place (`extgeo|`, the same fields, then `|<type>|<ids>` before the guess
-/// fields, ops#131; each Id followed by its kind, `p` or `i`, when it has one, ops#264) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
+/// fields, ops#131; each Id followed by its kind, `p` or `i`, when it has one, ops#264; the type
+/// followed by `g` while it waits to be decided, ops#287) or an expression (`expr|<path>|<T>|<text>`). `<T>` is the object's name and,
 /// since ops#158, its ID: `Pad2#17` (object names have no `#`; a line without the ID still reads)
 struct ParkedItem
 {
@@ -166,6 +167,7 @@ struct ParkedItem
     std::string text;  // the expression
     App::GuessRecord guess;  // the entry's guess record (ops#127, N1 3.2), put back with it
     int type = 0;            // extgeo: the projection's type (ExternalTypes)
+    bool typeGuessed = false;  // extgeo: that type is a guess that waits to be decided (ops#287)
     std::vector<long> ids;   // extgeo: the Ids of its geometries, in projection order
     std::vector<int> kinds;  // extgeo: each Id's kind (1 projection, 0 intersection, -1 none)
 
@@ -182,7 +184,8 @@ struct ParkedItem
                << escapeField(shadowNew)
                << '|' << escapeField(shadowOld) << '|' << escapeField(fp) << '|' << position;
             if (extgeo) {
-                ss << '|' << type << '|';
+                // a build before reads the number and stops at the letter
+                ss << '|' << type << (typeGuessed ? "g" : "") << '|';
                 for (std::size_t i = 0; i < ids.size(); ++i) {
                     ss << (i ? "," : "") << ids[i];
                     // a build before reads the number and stops at the letter
@@ -274,7 +277,9 @@ struct ParkedItem
             }
             if (item.extgeo) {
                 try {
-                    item.type = std::stoi(fields[8]);
+                    std::size_t used = 0;
+                    item.type = std::stoi(fields[8], &used);
+                    item.typeGuessed = fields[8].substr(used) == "g";
                     std::size_t start = 0;
                     while (start < fields[9].size()) {
                         auto comma = fields[9].find(',', start);
@@ -400,6 +405,7 @@ struct Unit
     std::vector<long> ids;
     std::vector<int> kinds;  // each Id's kind when it was read (ops#264, PR 241 review H1)
     int type = 0;
+    bool typeGuessed = false;  // that type waits to be decided (ops#287, PR 277 verification 5.2)
 
     /// Every sub carries a re-target record to the same object
     bool allRecorded() const
@@ -523,6 +529,7 @@ std::optional<PropertyState> readState(App::DocumentObject* owner, App::Property
                 unit.kinds.push_back(sketch->externalGeometryKind(id));
             }
             unit.type = sketch->externalType(unit.origin);
+            unit.typeGuessed = sketch->externalTypeUndecided(unit.origin);
         }
     }
     else if (auto xlist = freecad_cast<App::PropertyXLinkSubList*>(p)) {
@@ -1051,6 +1058,7 @@ private:
         if (state.kind == Kind::External) {
             item.extgeo = true;
             item.type = unit.type;
+            item.typeGuessed = unit.typeGuessed;
             item.ids = unit.ids;
             item.kinds = unit.kinds;
         }
@@ -1121,6 +1129,7 @@ private:
             unit.ids = item.ids;
             unit.kinds = item.kinds;
             unit.type = item.type;
+            unit.typeGuessed = item.typeGuessed;
             auto sketch = static_cast<const Sketcher::SketchObject*>(state.owner);
             if (!item.ids.empty()
                 && std::all_of(item.ids.begin(), item.ids.end(), [&](long id) {
@@ -1451,7 +1460,7 @@ private:
             ShadowSub shadow = u.subs.front().shadow;
             int replaced =
                 sketch->unparkExternalGeometry(u.obj, u.subs.front().sub, std::move(shadow), u.type,
-                                               u.ids, u.kinds);
+                                               u.ids, u.kinds, u.typeGuessed);
             if (replaced > 0) {
                 Base::Console().warning(
                     "%s: %d geometr%s projected from '%s' had been deleted while the projection "
