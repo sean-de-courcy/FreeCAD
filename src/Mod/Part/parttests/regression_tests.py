@@ -883,6 +883,45 @@ class RegressionTests(unittest.TestCase):
                 self.Doc.recompute()
                 self.assertEqual(rounded.EdgeLinks[1], subs)
 
+    def test_refine_keeps_location_free_input(self):
+        """Refine leaves its input as it was, with or without a location (ops#316).
+
+        Designed geometry: a cylinder R = 10, H = 8 with a square 1 x 1 thread on it. The profile
+        (x 10..11, z 0..1 on XZ) touches the cylinder and is piped (Frenet) along a helix through
+        its centre (pitch 2, height 5), broken at each turn as PartDesign's Helix does. Refine
+        fails to merge the cylinder faces between the turns. On a location-free input that failed
+        merge used to rewrite pcurves of the input's own edges: the input became invalid, and
+        PartDesign, which then keeps the input unrefined, returned an invalid solid with the
+        wrong volume. Expected: the input stays valid with its volume, and a refined result, if
+        any, is valid with the same volume.
+        """
+        helix = Part.makeHelix(2, 5, 10.5).Edges[0]
+        first, last = helix.ParameterRange
+        turn = (last - first) / 2.5
+        path = helix.split([first + turn, first + 2 * turn])
+        corners = [Vector(10, 0, 0), Vector(11, 0, 0), Vector(11, 0, 1), Vector(10, 0, 1)]
+        thread = path.makePipe(Part.Face(Part.makePolygon(corners + corners[:1]))).Solids[0]
+        if thread.Volume < 0:
+            thread.reverse()
+        fused = Part.makeCylinder(10, 8).fuse(thread)
+        self.assertEqual(len(fused.Solids), 1)
+        for located in (False, True):
+            with self.subTest(located=located):
+                shape = fused.Solids[0].copy()
+                if located:
+                    shape.Placement = FreeCAD.Placement()  # an identity datum
+                self.assertTrue(shape.isValid())
+                volume = shape.Volume
+                try:
+                    refined = shape.removeSplitter()
+                except Part.OCCError:
+                    refined = None
+                self.assertTrue(shape.isValid(), "refine changed its input")
+                self.assertAlmostEqual(shape.Volume, volume, delta=1e-7 * volume)
+                if refined is not None:
+                    self.assertTrue(refined.isValid())
+                    self.assertAlmostEqual(refined.Volume, volume, delta=1e-7 * volume)
+
     def tearDown(self):
         """Clean up our test, optionally preserving the test document"""
         # This flag allows doing something like this:
