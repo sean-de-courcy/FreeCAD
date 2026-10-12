@@ -269,8 +269,41 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual((group.Cross[0].Name, list(group.Cross[1])), (box1.Name, ["Face3"]))
         self.assertSameFace(box1.Shape, "Face3", before)
         report = reportText()
-        if report is not None:
-            self.assertIn("Group.Cross keeps its link to", report)
+        self.assertIsNotNone(report, "no Report view")
+        self.assertIn("Group.Cross keeps its link to", report)
+
+    def testMigrateKeepsAWholeLinkToAFeatureBeforeTheLast(self):
+        """Fork PR 274 round 1 verification: a group's PropertyLink, PropertyXLink (without
+        elements) and PropertyLinkList name the first of two legacy boxes, the second on the
+        first. A group doesn't split the chain, so both boxes go into one body, whose shape is the
+        second box's: on the body, each link would name both boxes. They stay on the first box,
+        whose shape is as before, with a warning each."""
+        box1 = self.doc.addObject("PartDesign::AdditiveBox", "Box1")
+        box2 = self.doc.addObject("PartDesign::AdditiveBox", "Box2")
+        box2.BaseFeature = box1
+        box2.Placement = App.Placement(App.Vector(5, 0, 0), App.Rotation())
+        group = self.doc.addObject("App::DocumentObjectGroupPython", "Group")
+        group.addProperty("App::PropertyLink", "Whole")
+        group.addProperty("App::PropertyXLink", "WholeX")
+        group.addProperty("App::PropertyLinkList", "Several")
+        group.Whole = box1
+        group.WholeX = box1
+        group.Several = [box1]
+        self.doc.recompute()
+        self.assertAlmostEqual(box1.Shape.Volume, 1000, places=6)
+        self.migrate()
+        body = box1.getParentGeoFeatureGroup()
+        self.assertIsNotNone(body)
+        self.assertIs(box2.getParentGeoFeatureGroup(), body)
+        self.assertAlmostEqual(body.Shape.Volume, 1500, places=6)
+        self.assertIs(group.Whole, box1)
+        self.assertIs(group.WholeX, box1)
+        self.assertEqual(group.Several, [box1])
+        self.assertAlmostEqual(group.Whole.Shape.Volume, 1000, places=6)
+        report = reportText()
+        self.assertIsNotNone(report, "no Report view")
+        for name in ("Whole", "WholeX", "Several"):
+            self.assertIn(f"Group.{name} keeps its link to", report)
 
     def testMigrateRelinksAnAppLinkToAnElement(self):
         """Fork PR 274 review, L3: an App::Link whose LinkedObject (a plain PropertyXLink) names

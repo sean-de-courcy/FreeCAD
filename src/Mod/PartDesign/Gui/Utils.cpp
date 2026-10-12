@@ -31,6 +31,7 @@
 
 #include <App/Origin.h>
 #include <App/Datums.h>
+#include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
@@ -487,10 +488,25 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
     }
 
     // FreeCAD-CH (PR 255 review M1): an element of a feature before the chain's last is kept on
-    // the feature, said: on the body it would name another element of the last feature's shape
-    auto keptElement = [&](App::DocumentObject* obj, const App::Property* prop, const std::string& sub) {
-        if (last || sub.empty()) {
+    // the feature, said: on the body it would name another element of the last feature's shape.
+    // So is a link to the whole feature (an empty sub): the body's shape is the last feature's
+    // (fork PR 274 round 1 verification), but not a group's own list of its members.
+    auto kept = [&](App::DocumentObject* obj, const App::Property* prop, const std::string& sub) {
+        if (last) {
             return false;
+        }
+        if (sub.empty()) {
+            auto group = obj->getExtensionByType<App::GroupExtension>(true);
+            if (group && prop == &group->Group) {
+                return false;
+            }
+            FC_WARN(
+                obj->getFullName() << "." << prop->getName() << " keeps its link to "
+                                   << feature->getFullName()
+                                   << ": it isn't the body's last feature, so the body would be "
+                                      "another shape"
+            );
+            return true;
         }
         FC_WARN(
             obj->getFullName() << "." << prop->getName() << " keeps its link to "
@@ -499,6 +515,16 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                                << " would be another element"
         );
         return true;
+    };
+    auto keptAny = [&](App::DocumentObject* obj,
+                       const App::Property* prop,
+                       const std::vector<std::string>& subs) {
+        if (subs.empty()) {
+            return kept(obj, prop, "");
+        }
+        return std::ranges::any_of(subs, [&](const std::string& sub) {
+            return kept(obj, prop, sub);
+        });
     };
     for (const auto& obj : doc->getObjects()) {
         if (!isPartDesignAwareObjecta(obj)) {
@@ -515,9 +541,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                         continue;
                     }
                     const auto subs = propLink->getSubValues();
-                    if (std::ranges::any_of(subs, [&](const std::string& sub) {
-                            return keptElement(obj, prop, sub);
-                        })) {
+                    if (keptAny(obj, prop, subs)) {
                         continue;
                     }
                     valueStr = subs.empty() ? Gui::Command::getObjectCmd(body)
@@ -525,7 +549,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                 }
                 else if (prop->isDerivedFrom(App::PropertyLink::getClassTypeId())) {
                     App::PropertyLink* propLink = static_cast<App::PropertyLink*>(prop);
-                    if (propLink->getValue() != feature) {
+                    if (propLink->getValue() != feature || kept(obj, prop, "")) {
                         continue;
                     }
                     valueStr = Gui::Command::getObjectCmd(body);
@@ -536,9 +560,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                         continue;
                     }
                     const auto& subs = propLink->getSubValues();
-                    if (std::ranges::any_of(subs, [&](const std::string& sub) {
-                            return keptElement(obj, prop, sub);
-                        })) {
+                    if (keptAny(obj, prop, subs)) {
                         continue;
                     }
                     valueStr = buildLinkSubPythonStr(body, propLink->getSubValues());
@@ -548,7 +570,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                     std::vector<App::DocumentObject*> linkList = propLink->getValues();
                     bool valueChanged = false;
                     for (auto& link : linkList) {
-                        if (link == feature) {
+                        if (link == feature && !kept(obj, prop, "")) {
                             link = body;
                             valueChanged = true;
                         }
@@ -567,7 +589,7 @@ void relinkToBody(PartDesign::Feature* feature, bool last)
                     const std::vector<std::string> subs = propLink->getSubValues();
                     bool valueChanged = false;
                     for (std::size_t index = 0; index < linkList.size(); ++index) {
-                        if (linkList[index] == feature && !keptElement(obj, prop, subs[index])) {
+                        if (linkList[index] == feature && !kept(obj, prop, subs[index])) {
                             linkList[index] = body;
                             valueChanged = true;
                         }

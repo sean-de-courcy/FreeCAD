@@ -463,7 +463,8 @@ std::string buildLinkSingleSubPythonStr(
         return Gui::Command::getObjectCmd(obj, "(", ", [''])");
     }
     else {
-        return Gui::Command::getObjectCmd(obj, "(", ", ['") + subs.front() + "'])";
+        return Gui::Command::getObjectCmd(obj, "(", ", ['")
+            + Base::Tools::escapeEncodeString(subs.front()) + "'])";
     }
 }
 
@@ -522,7 +523,7 @@ std::string buildLinkSubListPythonStr(
             result += '(';
             result += Gui::Command::getObjectCmd(objs[i]);
             result += ",\"";
-            result += subs[i];
+            result += Base::Tools::escapeEncodeString(subs[i]);
             result += "\"),";
         }
     }
