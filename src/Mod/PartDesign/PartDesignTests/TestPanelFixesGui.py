@@ -1599,6 +1599,15 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
         self.assertAlmostEqual(revolution.Shape.Volume, 24 * math.pi, places=3)
 
+    def otherBody(self):
+        """The copy tests' other body, in its own App::Part: another studio than a body at the
+        document's top level, so a pick in it still asks for a copy (ops#325). Two bodies at the
+        top level are one studio, and a pick links directly."""
+        part = self.doc.addObject("App::Part", "OtherPart")
+        other = models.body(self.doc)
+        part.addObject(other)
+        return other
+
     def runNewSketchOnCopiedFace(self, feature, face, choice="radioIndependent"):
         """Runs New Sketch on `face` of feature (in another body) and answers the copy dialog with
         `choice` (Make independent copy), and any message box; the answers go to self.modals."""
@@ -1644,7 +1653,7 @@ class TestPanelFixesGui(unittest.TestCase):
         resolved by geometry, with a Warning. Model: a 10 mm box at the origin in the other body;
         its Face1, the face picked, is the plane x = 0, so the sketch's normal is along X at
         x = 0."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -1662,11 +1671,43 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertAlmostEqual(abs(normal.x), 1, places=6)
         self.assertAlmostEqual(sketch.Placement.Base.x, 0, places=6)
 
+    def testNewSketchOnASiblingBodysFaceLinksDirectly(self):
+        """ops#325 (B+ Stage 1, D-t1 through the Gui): New Sketch on the top face of a box in
+        another body at the document's top level, the active body's studio. No copy dialog: the
+        sketch is made in the active body, attached to the box's face itself, and no copy is
+        made. Model: a 10 mm box at the origin; its top face is the plane z = 10."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.runNewSketchOnCopiedFace(box, top)
+        self.assertTrue(
+            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0), f"no sketch in edit; {self.modals}"
+        )
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        guiDoc.resetEdit()
+        pump(0.3)
+        [sketch] = [o for o in self.body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(sketch.AttachmentSupport, [(box, (top,))])
+        self.assertEqual(
+            [o.Name for o in self.doc.Objects if o.Name.startswith(("Copy", "Reference"))], []
+        )
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertNotIn("Warning", sketch.State)
+        normal = sketch.getGlobalPlacement().Rotation.multVec(Z)
+        self.assertAlmostEqual(abs(normal.z), 1, places=6)
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 10, places=6)
+
     def primitivesOnABase(self):
         """Another body: Base, a 20 x 20 x 10 box at (-5, -5, 0); Box, a 10 x 10 x 20 box at the
         origin on it; Cut, a 2 mm subtractive box at the origin on Box. The fused shape's Face1
         is the plane x = -5 (the base's side), the bare box's Face1 the plane x = 0."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = other.newObject("PartDesign::AdditiveBox", "Base")
         base.Length = 20
         base.Width = 20
@@ -1777,7 +1818,7 @@ class TestPanelFixesGui(unittest.TestCase):
         the sketch went on the copy's Face1 (the plane x = 0) whatever face was picked, valid and
         silent. It links the picked face, which the recomputed copy has under the same index.
         Model: a 10 mm box at the origin; its top face is the plane z = 10."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -1801,7 +1842,7 @@ class TestPanelFixesGui(unittest.TestCase):
         face (the end x = 10) was another face on it. The copy, a shape binder, takes the box's
         shape as shown (x 0..10): the sketch is on the picked face, and the Report view says that
         the box isn't up to date. The box's recompute leaves the copy as it is."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -1845,7 +1886,7 @@ class TestPanelFixesGui(unittest.TestCase):
         widened to 20 and not recomputed. New Sketch on the pad's top face (z = 10), Make
         independent copy (a shape binder of that face), says that the pad isn't up to date: the
         warning isn't the primitives' alone, and it reads what the pad is made from."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         square = models.sketch(self.doc, "Square", models.rectangle(0, 0, 10, 10), other)
         pad = models.pad(other, square, 10)
         self.body = models.body(self.doc)
@@ -1869,7 +1910,7 @@ class TestPanelFixesGui(unittest.TestCase):
         recompute enforced: touch("")): a recompute wouldn't execute it, so New Sketch on its top
         face, Make independent copy, says nothing about it being out of date. A box without a
         base: no note about one either."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -1923,7 +1964,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """A 10 mm box at the origin in another body, and in this one the Ring profile (x 1..3,
         z 0..2 on XZ) turned about its own V axis; returns the box, the revolution and the box's
         edge x = 10, y = 0 along Z."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
@@ -1985,7 +2026,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def revolutionBesideAnAxisSketch(self):
         """revolutionBesideABox with a sketch in the other body instead of the box: Axis, the
         line x = 10, z 0..10 (on XZ). Returns the sketch and the revolution."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         axis = models.sketch(self.doc, "Axis", [line(10, 0, 10, 10)], other, placement=XZ)
         self.body = models.body(self.doc)
         ring = models.sketch(self.doc, "Ring", models.rectangle(1, 0, 3, 2), self.body, placement=XZ)
@@ -2242,7 +2283,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """PR 224 review M2: New Sketch on the end face x = 20 of a 20 x 10 x 10 box in another
         body moved by (5, 0, 0), Make independent copy: the sketch is on the picked plane,
         globally x = 25 (the copy sat at x = 0 in its own body, so the sketch went on x = 20)."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         other.Placement.Base = V(5, 0, 0)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
@@ -2266,7 +2307,7 @@ class TestPanelFixesGui(unittest.TestCase):
         turned 30 degrees about X). The shape binder's face is where the box's face is,
         globally, and stays there when either body moves afterwards. It took the box's place in
         its own body: the face shifted by the bodies' difference, silently."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
@@ -2828,7 +2869,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """ops#244 L7: the Revolution's axis picked on a vertical edge (x = 10, y = 0) of a 10 x
         10 x 10 pad in another body, Make independent copy: the copy is a shape binder of that
         edge, and the axis is its Edge1, the same line. Checked at the pick."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = models.sketch(self.doc, "Base", models.rectangle(0, 0, 10, 10), other)
         pad = other.newObject("PartDesign::Pad", "Pad")
         pad.Profile = base
@@ -2880,7 +2921,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def datumPlaneInAPlacedBody(self):
         """A datum plane at z = 4 in another body moved by (0, 0, 6): globally the plane z = 10;
         this body at the origin."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         other.Placement.Base = V(0, 0, 6)
         plane = other.newObject("PartDesign::Plane", "DatumPlane")
         plane.Placement.Base = V(0, 0, 4)
