@@ -85,6 +85,7 @@
 #include "MergeDocuments.h"
 #include "NameTable.h"
 #include "ElementReferences.h"
+#include "ForkRelease.h"
 #include "NamingRevision.h"
 #include "RecomputeContinuation.h"
 #include "StringHasher.h"
@@ -127,14 +128,54 @@ namespace
 // between them).
 constexpr int ForkNamingRevision = 2;
 
+// The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
+// references are indices into the file's table (NamingFormat 2).
+constexpr int internedNamesForm = 2;
+
+/** The naming revision this build reports in `.F<n>` and `NamingRevision`: ForkNamingRevision,
+ * raised by the rehearsal test aid FREECAD_TEST_NAMING_REVISION_OFFSET (ops#323,
+ * notes/beta-compatibility.md 3.4). At 1, every saved file looks older and takes the full naming
+ * migration at its open. Read once. A local test aid, never set in CI's environment: a test sets
+ * it for a child FreeCADCmd.
+ */
+int reportedNamingRevision()
+{
+    static const int revision = [] {
+        const char* value = std::getenv("FREECAD_TEST_NAMING_REVISION_OFFSET");
+        const int offset = value ? std::atoi(value) : 0;
+        if (offset != 0) {
+            Base::Console().warning("Test aid FREECAD_TEST_NAMING_REVISION_OFFSET=%d: this build "
+                                    "reports naming revision %d\n",
+                                    offset,
+                                    ForkNamingRevision + offset);
+        }
+        return ForkNamingRevision + offset;
+    }();
+    return revision;
+}
+
 // The naming revision of each document's references (ops#116, NamingRevision.h): read from the
 // file, or written by its last save. `older` until the pass at the end of the open has run.
 struct DocumentNamingRevision
 {
-    int revision = ForkNamingRevision;
+    int revision = reportedNamingRevision();
     bool older = false;
 };
 std::map<const Document*, DocumentNamingRevision> documentNamingRevisions;
+
+// The fork release each document was opened from, and what makes it newer than this build
+// (ops#323, ForkRelease.h). No entry: a new document, or saved to its own file since.
+struct DocumentForkRelease
+{
+    int release = ForkRelease;
+    /// The markers above this build's, in the order they were read, each once
+    std::vector<std::string> newer;
+    /// How many of them reportNewerFormat() has reported
+    std::size_t reported = 0;
+    /// Whether the GUI has shown its warning (takeNewerFormatNotice())
+    bool noticed = false;
+};
+std::map<const Document*, DocumentForkRelease> documentForkReleases;
 
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
@@ -178,13 +219,13 @@ bool App::importedWithin(const ImportedSource& source, const Document& doc)
 
 int App::forkNamingRevision()
 {
-    return ForkNamingRevision;
+    return reportedNamingRevision();
 }
 
 int App::namingRevisionOf(const Document* doc)
 {
     auto it = documentNamingRevisions.find(doc);
-    return it == documentNamingRevisions.end() ? ForkNamingRevision : it->second.revision;
+    return it == documentNamingRevisions.end() ? reportedNamingRevision() : it->second.revision;
 }
 
 bool App::openedWithOlderNaming(const Document* doc)
@@ -210,6 +251,97 @@ void App::endOpenedWithOlderNaming()
         }
     }
 }
+
+int App::forkReleaseOf(const Document* doc)
+{
+    auto it = documentForkReleases.find(doc);
+    return it == documentForkReleases.end() ? ForkRelease : it->second.release;
+}
+
+void App::noteNewerFormat(const Document* doc, const std::string& marker)
+{
+    auto& newer = documentForkReleases[doc].newer;
+    if (std::find(newer.begin(), newer.end(), marker) == newer.end()) {
+        newer.push_back(marker);
+    }
+}
+
+bool App::isNewerFormat(const Document* doc)
+{
+    auto it = documentForkReleases.find(doc);
+    return it != documentForkReleases.end() && !it->second.newer.empty();
+}
+
+std::string App::newerFormatMessage(const Document* doc)
+{
+    auto it = documentForkReleases.find(doc);
+    if (!doc || it == documentForkReleases.end() || it->second.newer.empty()) {
+        return {};
+    }
+    const auto& entry = it->second;
+    std::ostringstream text;
+    text << '\'' << doc->Label.getValue() << "' ";
+    if (entry.release > ForkRelease) {
+        text << "was saved by fork release " << entry.release << "; this build is release "
+             << ForkRelease;
+    }
+    else {
+        text << "holds data of a newer fork build than this one (release " << ForkRelease << ')';
+    }
+    text << ": objects or settings it doesn't know may be missing or wrong, and saving it here "
+            "loses them (newer: ";
+    for (std::size_t i = 0; i < entry.newer.size(); ++i) {
+        text << (i ? ", " : "") << entry.newer[i];
+    }
+    text << ')';
+    return text.str();
+}
+
+bool App::takeNewerFormatNotice(const Document* doc)
+{
+    auto it = documentForkReleases.find(doc);
+    if (it == documentForkReleases.end() || it->second.newer.empty() || it->second.noticed) {
+        return false;
+    }
+    it->second.noticed = true;
+    return true;
+}
+
+bool App::hasNewerForkTokens(const std::string& elementMapVersion)
+{
+    std::size_t start = 0;
+    while (start < elementMapVersion.size()) {
+        std::size_t end = elementMapVersion.find('.', start);
+        if (end == std::string::npos) {
+            end = elementMapVersion.size();
+        }
+        const std::string token = elementMapVersion.substr(start, end - start);
+        if (token.size() > 1 && (token[0] == 'F' || token[0] == 'N')
+            && token.find_first_not_of("0123456789", 1) == std::string::npos) {
+            const int value = std::atoi(token.c_str() + 1);
+            if (value > (token[0] == 'F' ? reportedNamingRevision() : internedNamesForm)) {
+                return true;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+namespace
+{
+/// Reports \a doc's newer markers to the console as an error, if any came since the last report
+/// (ops#323): once at an open, again only if an import brings more.
+void reportNewerFormat(const Document* doc)
+{
+    auto it = documentForkReleases.find(doc);
+    if (it == documentForkReleases.end() || it->second.reported == it->second.newer.size()) {
+        return;
+    }
+    it->second.reported = it->second.newer.size();
+    Base::Console().error("%s\n", newerFormatMessage(doc).c_str());
+}
+}  // namespace
 
 #if FC_DEBUG
 #define FC_LOGFEATUREUPDATE
@@ -367,6 +499,25 @@ void restoreNameTable(Base::XMLReader& reader,
     }
     FC_LOG(documentName << ": name table, " << summary.inserted << " entries loaded, "
                         << summary.identical << " already known");
+}
+
+/// Notes the markers on the `Document` element \a reader is at that are above this build's
+/// (ops#323): read before its `NameTable` element is.
+void noteNewerMarkers(Base::XMLReader& reader, const Document* doc)
+{
+    const int release = reader.getAttribute<int>("ForkRelease", 0);
+    if (release > ForkRelease) {
+        noteNewerFormat(doc, "ForkRelease " + std::to_string(release));
+    }
+    // Format 1, below this build's, never shipped (restoreNameTable())
+    const int format = reader.getAttribute<int>("NamingFormat", 0);
+    if (format > namingFormat) {
+        noteNewerFormat(doc, "NamingFormat " + std::to_string(format));
+    }
+    const int revision = reader.getAttribute<int>("NamingRevision", 0);
+    if (revision > reportedNamingRevision()) {
+        noteNewerFormat(doc, "NamingRevision " + std::to_string(revision));
+    }
 }
 
 /// Reports what \a remap did to the names of a load once it has read them all (ops#6).
@@ -1456,6 +1607,7 @@ Document::~Document()
 
     d->clearDocument();
     documentNamingRevisions.erase(this);
+    documentForkReleases.erase(this);
 
     // Remark: The API of Py::Object has been changed to set whether the wrapper owns the passed
     // Python object or not. In the constructor we forced the wrapper to own the object so we need
@@ -1510,6 +1662,8 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
              << writer.getFileVersion() << "\" StringHasher=\"1\"";
+    // The fork release of the build that writes it (ops#323)
+    startTag << " ForkRelease=\"" << ForkRelease << '"';
     // The naming revision of the names its references hold (ops#116)
     const int namingRevision = namingRevisionToSave(this);
     startTag << " NamingRevision=\"" << namingRevision << '"';
@@ -1603,7 +1757,12 @@ void Document::Restore(Base::XMLReader& reader)
     // The naming revision of its references (ops#116): none in files saved before, so 0
     auto& namingRevision = documentNamingRevisions[this];
     namingRevision.revision = reader.getAttribute<int>("NamingRevision", 0);
-    namingRevision.older = namingRevision.revision < ForkNamingRevision;
+    namingRevision.older = namingRevision.revision < reportedNamingRevision();
+    // The fork release that saved it, 0 without one, and whether any marker is newer than this
+    // build (ops#323): reported once its shapes are read too (restore())
+    documentForkReleases[this] = {};
+    documentForkReleases[this].release = reader.getAttribute<int>("ForkRelease", 0);
+    noteNewerMarkers(reader, this);
 
     // The file's name table comes first (ops#6): it tells how to read the interned names in
     // everything that follows. Document::restore() keeps the remap until the maps are read.
@@ -1835,7 +1994,8 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
              << Application::Config()["BuildRevision"] << R"(" FileVersion="1")"
              // ops#116. The exporting document's revision, not the objects' (PR 266 verification
              // L2): an import doesn't read it from a copy today
-             << " NamingRevision=\"" << namingRevisionToSave(this) << '"';
+             << " NamingRevision=\"" << namingRevisionToSave(this) << '"'
+             << " ForkRelease=\"" << ForkRelease << '"';  // ops#323
     if (oneSource) {
         startTag << ' ' << fcAttrSourceDocument << "=\"" << sources.front()->Uid.getValueStr()
                  << '"';
@@ -2370,6 +2530,8 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     // be resolved. Use a separate hasher instead of replacing the target
     // document's table.
     const bool hasStringHasher = reader.hasAttribute("StringHasher");
+    // Objects copied by a newer build make this document newer (ops#323)
+    noteNewerMarkers(reader, this);
     // The entries of the imported interned names come first (ops#6)
     restoreNameTable(reader, reader.getAttribute<int>("NamingFormat", 0), *remap, getName());
     if (hasStringHasher) {
@@ -2407,6 +2569,7 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
 
     signalImportObjects(objs, reader);  // reads the files (MergeDocuments::importObject())
     reportNameRemap(*remap, getName());
+    reportNewerFormat(this);
     remap.reset();
     DocumentP::checkStringHasher(reader);
     afterRestore(objs, true);
@@ -2539,11 +2702,17 @@ bool Document::save()
             LastModifiedBy.setValue(Author.c_str());
         }
 
+        // A newer file (ops#323): the GUI asked first; a script saves, with a warning
+        if (isNewerFormat(this)) {
+            FC_WARN("Saving " << newerFormatMessage(this));
+        }
         bool result = saveToFile(FileName.getValue());
         if (result) {
             d->programVersion = Application::Config()["BuildVersionMajor"] + "."
                 + Application::Config()["BuildVersionMinor"] + "R"
                 + Application::Config()["BuildRevision"];
+            // Its file is this build's now
+            documentForkReleases.erase(this);
         }
         return result;
     }
@@ -2737,13 +2906,13 @@ const std::string& Document::getCorrectElementMapVersion() {
         // and its first recompute re-derives the references into each rebuilt shape from their
         // geometry (GeoFeature::updateElementReference()). V2 only: V1 files come from FreeCAD.
         if (selectedHistoryAlgorithm == App::HistoryAlgorithm::V2) {
-            ss << ".F" << std::dec << ForkNamingRevision;
+            ss << ".F" << std::dec << reportedNamingRevision();
         }
         // Interned maps hold names in another form: a build or a document that expects the other
         // form sees a different version and asks for a recompute (ops#6). N2: their files hold
         // the references as indices into the file's table (NamingFormat 2).
         if (isInternNamesOn()) {
-            ss << ".N2";
+            ss << ".N" << std::dec << internedNamesForm;
         }
         
         elementMapVersion = ss.str();
@@ -2842,6 +3011,7 @@ void Document::restore(const char* filename,
     reader.readFiles(zipstream);
     reportNameRemap(*remap, getName());
     remap.reset();
+    reportNewerFormat(this);
 
     DocumentP::checkStringHasher(reader);
 

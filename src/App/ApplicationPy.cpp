@@ -40,6 +40,7 @@
 #include <App/ComplexGeoData.h>
 #include <App/ElementSolver.h>
 #include <App/ElementSolverBatch.h>
+#include <App/ForkRelease.h>
 #include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/ReferenceReport.h>
@@ -1568,6 +1569,39 @@ PyObject* ApplicationPy::sMarkReferenceBroken(PyObject* /*self*/, PyObject* args
         auto [prop, localIndex] = referenceSlot(obj, property, index);
         App::markReferenceBroken(prop, localIndex);
         Py_Return;
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sGetForkRelease(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyDoc = nullptr;
+    if (!PyArg_ParseTuple(args, "|O!", &DocumentPy::Type, &pyDoc)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        if (!pyDoc) {
+            return Py::new_reference_to(Py::Long(ForkRelease));
+        }
+        auto doc = static_cast<DocumentPy*>(pyDoc)->getDocumentPtr();
+        return Py::new_reference_to(Py::Long(forkReleaseOf(doc)));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sGetNewerFormat(PyObject* /*self*/, PyObject* args)
+{
+    PyObject* pyDoc = nullptr;
+    if (!PyArg_ParseTuple(args, "O!", &DocumentPy::Type, &pyDoc)) {
+        return nullptr;
+    }
+
+    PY_TRY
+    {
+        auto doc = static_cast<DocumentPy*>(pyDoc)->getDocumentPtr();
+        return Py::new_reference_to(Py::String(newerFormatMessage(doc)));
     }
     PY_CATCH;
 }

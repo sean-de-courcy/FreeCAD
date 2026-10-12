@@ -102,6 +102,8 @@ public:
     static PyObject *sRepairReference        (PyObject *self,PyObject *args);
     static PyObject *sAcceptReference        (PyObject *self,PyObject *args);
     static PyObject *sMarkReferenceBroken    (PyObject *self,PyObject *args);
+    static PyObject *sGetForkRelease         (PyObject *self,PyObject *args);
+    static PyObject *sGetNewerFormat         (PyObject *self,PyObject *args);
     // clang-format on
 };
 

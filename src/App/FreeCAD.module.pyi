@@ -435,3 +435,19 @@ def markReferenceBroken(obj: DocumentObject, property: str, index: int, /) -> No
     Raises ValueError for a reference without a record.
     """
     ...
+
+def getForkRelease(doc: Document | None = None, /) -> int:
+    """Without `doc`: this build's fork release (ops#323), which every save writes as the
+    `ForkRelease` attribute of the file's `Document` element. With `doc`: the `ForkRelease` the
+    document was opened from, 0 for a file without one; this build's for a new document and after
+    a save to its own file.
+    """
+    ...
+
+def getNewerFormat(doc: Document, /) -> str:
+    """What makes `doc` newer than this build (ops#323): the console error's text, naming the
+    file's fork release and each marker above this build's (`ForkRelease`, `NamingFormat`,
+    `NamingRevision`, a shape's element map version). Empty when it isn't newer, and again once it
+    is saved to its own file.
+    """
+    ...

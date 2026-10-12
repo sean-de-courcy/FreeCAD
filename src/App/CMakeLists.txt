@@ -301,6 +301,7 @@ SET(Properties_HPP_SRCS
     ElementRetarget.h
     ElementRecords.h
     NamingRevision.h
+    ForkRelease.h
     ReferenceReport.h
     ReferenceRepair.h
     PropertyPythonObject.h

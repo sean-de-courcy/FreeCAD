@@ -44,6 +44,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/DocumentObjectGroup.h>
+#include <App/ForkRelease.h>
 #include <App/Transactions.h>
 #include <App/ElementNamingUtils.h>
 #include <App/NameTable.h>
@@ -1571,6 +1572,52 @@ bool Document::askIfSavingFailed(const QString& error)
     return false;
 }
 
+namespace
+{
+/// What a save does with documents opened from a newer fork release (ops#323)
+enum class NewerSave
+{
+    Save,
+    Copy,
+    Cancel
+};
+
+/** Asks before \a docs, about to be saved over their own files, overwrite a file of a newer fork
+ * release (ops#323): what this build dropped or misread in it would be lost for good. "Save a
+ * Copy" is offered with \a canCopy (the one document a Save saves). Saves without a GUI or a
+ * newer document; FreeCADCmd's save warns on its own (App::Document::save()).
+ */
+NewerSave askBeforeSavingNewer(const std::vector<App::Document*>& docs, bool canCopy)
+{
+    QStringList newer;
+    for (auto doc : docs) {
+        if (App::isNewerFormat(doc)) {
+            newer << QString::fromStdString(App::newerFormatMessage(doc));
+        }
+    }
+    if (newer.isEmpty() || !getMainWindow()) {
+        return NewerSave::Save;
+    }
+    QMessageBox box(getMainWindow());
+    box.setWindowTitle(QObject::tr("File from a Newer FreeCAD-CH Build"));
+    box.setIcon(QMessageBox::Warning);
+    box.setText(
+        newer.join(QStringLiteral("\n\n")) + QStringLiteral("\n\n")
+        + QObject::tr("Saving over it loses what this build doesn't know for good.")
+    );
+    QPushButton* copyButton =
+        canCopy ? box.addButton(QObject::tr("Save a Copy…"), QMessageBox::ActionRole) : nullptr;
+    QPushButton* saveButton = box.addButton(QObject::tr("Save Anyway"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (copyButton && box.clickedButton() == copyButton) {
+        return NewerSave::Copy;
+    }
+    return box.clickedButton() == saveButton ? NewerSave::Save : NewerSave::Cancel;
+}
+}  // namespace
+
 bool Document::warnIfOlderVersion()
 {
     // Skip warning if no GUI (headless/scripted mode)
@@ -1663,6 +1710,17 @@ bool Document::warnIfOlderVersion()
 bool Document::save()
 {
     if (d->_pcDocument->isSaved()) {
+        // A file of a newer fork release (ops#323)
+        switch (askBeforeSavingNewer({getDocument()}, true)) {
+            case NewerSave::Copy:
+                saveCopy();
+                return false;
+            case NewerSave::Cancel:
+                return false;
+            case NewerSave::Save:
+                break;
+        }
+
         // Warn if this document was created with an older FreeCAD version
         if (!warnIfOlderVersion()) {
             return false;
@@ -1717,6 +1775,18 @@ bool Document::save()
             }
 
             if (!checkCanonicalPath(dmap)) {
+                return false;
+            }
+
+            // Dependent files of a newer fork release (ops#323); this one was asked above
+            std::vector<App::Document*> dependents;
+            std::copy_if(
+                docs.begin(),
+                docs.end(),
+                std::back_inserter(dependents),
+                [this](App::Document* doc) { return doc != getDocument(); }
+            );
+            if (askBeforeSavingNewer(dependents, false) != NewerSave::Save) {
                 return false;
             }
 
@@ -1853,6 +1923,17 @@ void Document::saveAll()
     }
 
     if (!checkCanonicalPath(dmap)) {
+        return;
+    }
+
+    // Files of a newer fork release (ops#323)
+    std::vector<App::Document*> saved;
+    for (const auto& entry : dmap) {
+        if (entry.first->isSaved()) {
+            saved.push_back(entry.first);
+        }
+    }
+    if (askBeforeSavingNewer(saved, false) != NewerSave::Save) {
         return;
     }
 

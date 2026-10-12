@@ -54,6 +54,7 @@
 
 #include <App/Document.h>
 #include <App/DocumentObjectPy.h>
+#include <App/ForkRelease.h>
 #include <App/MainThreadSignal.h>
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
@@ -1206,6 +1207,27 @@ void Application::slotShowHidden(const App::Document& Doc)
 
 void Application::checkForRecomputes()
 {
+    // Files of a newer fork release (ops#323): warned once per document, before the recompute is
+    // offered
+    QStringList newer;
+    for (auto doc : App::GetApplication().getDocuments()) {
+        if (App::takeNewerFormatNotice(doc)) {
+            newer << QString::fromStdString(App::newerFormatMessage(doc));
+        }
+    }
+    if (!newer.isEmpty() && getMainWindow()) {
+        QMessageBox::warning(
+            getMainWindow(),
+            QObject::tr("File from a newer FreeCAD-CH build"),
+            newer.join(QStringLiteral("\n\n"))
+                + QStringLiteral("\n\n")
+                + QObject::tr(
+                    "Open it in a newer build to work on it. Saving it here can lose what "
+                    "this build doesn't know for good: save a copy instead."
+                )
+        );
+    }
+
     std::vector<App::Document*> docs;
     for (auto doc : App::GetApplication().getDocuments()) {
         if (doc->testStatus(App::Document::RecomputeOnRestore)) {
