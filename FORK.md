@@ -296,7 +296,8 @@ names it.
 | `fix/255-followups` | fix | ops#255 | - | `integration` `d9a3826388` | `e4c9812861` (fork PR 264), 2026-10-11 | never (fork fix) |
 | `fix/134-round2-nits` | fix | ops#134 | - | `integration` `e4c9812861` | `ce536037cf` (fork PR 271), 2026-10-11 | never (fork fix) |
 | `fix/near-macro-release` | fix | ops#294 | - | `551ce8b8a7` | `0d04aa4856` (fork PR 272), 2026-10-11 | never (fork fix) |
-| `fix/224-originals-pick-followups` | fix | ops#224 | none (fork code, ops#150; App `getOutList` flag: upstream code) | `integration` `551ce8b8a7` | (fork PR 267) | never (fork code) |
+| `fix/224-originals-pick-followups` | fix | ops#224 | none (fork code, ops#150; App `getOutList` flag: upstream code) | `integration` `551ce8b8a7` | `4ab57a8148` (fork PR 267), 2026-10-11 | never (fork code) |
+| `fix/272-symmetric-across-plane` | fix | ops#272 | - | `integration` `e4c9812861` | (fork PR 268) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 

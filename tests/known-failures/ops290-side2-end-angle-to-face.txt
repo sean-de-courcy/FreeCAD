@@ -1,0 +1,9 @@
+# Two sides by angles builds one solid; up to a face builds each side apart, and side 2's names
+# carry CPY;2 (ops#255). A reference on side 2's end then breaks in V2s ("no top agreement") when
+# side 1 switches from an angle to up to a face, where V2 follows it (ops#290). Loud, not silent.
+# Remove the entries when ops#290 is fixed.
+
+issue: ops#290
+
+reason: the fillet on the top edge of side 2's end (the profile face across the axis, at 150 degrees) breaks in V2s at the switch to up to the wall
+cli  PartDesignTests.TestNamingScenarios.RevolutionAcrossTheAxisStartFaceAngleToFace.test_start_top_V2s

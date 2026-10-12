@@ -25,22 +25,37 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <ranges>
 #include <utility>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepTools.hxx>
+#include <BOPTools_AlgoTools3D.hxx>
+#include <ElSLib.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <Geom_ElementarySurface.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GProp_GProps.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
+#include <IntTools_Context.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
@@ -201,16 +216,274 @@ bool coversSamePoints(const TopoShape& face, const TopoShape& other)
     }
 }
 
-// The up-to face of Symmetric's second side, given the first side's face and its mirror image in
-// the profile plane. A face across the profile plane has an image on its own plane or surface:
-// BRepFeat then revolved the second side the long way round, from the face at the first side's
-// end to the image at its own, silently (ops#254).
+// Whether a bounded face reaches a plane: it crosses the plane or touches it.
+bool reachesPlane(const TopoShape& face, const gp_Pln& plane)
+{
+    const Base::BoundBox3d box = face.getBoundBox();
+    const gp_Pnt center(box.GetCenter().x, box.GetCenter().y, box.GetCenter().z);
+    Standard_Real u = 0.0;
+    Standard_Real v = 0.0;
+    ElSLib::Parameters(plane, center, u, v);
+    // The face's points project within its diagonal of its centre's projection.
+    const double reach = box.CalcDiagonalLength() + 1.0;
+    const TopoDS_Face planeFace
+        = BRepBuilderAPI_MakeFace(plane, u - reach, u + reach, v - reach, v + reach).Face();
+    BRepExtrema_DistShapeShape distance(face.getShape(), planeFace);
+    if (!distance.IsDone()) {
+        throw Base::RuntimeError(
+            "Symmetric: could not measure the up-to face's distance to the profile plane"
+        );
+    }
+    return distance.Value() <= Precision::Confusion();
+}
+
+// The whole surface a face lies on: an unbounded plane, or a cylinder or cone unbounded along
+// its axis, taken from the surface itself, not a trimmed surface's trim. Other surfaces fail.
+// B-spline, Bezier, offset surfaces and extrusions or revolutions of a curve often end where the
+// face ends (a loft, a sweep, a Pad of a spline), so their image lost the second side as before
+// (the PR 268 review's High). A whole sphere as the second side's face gave less than the mirror
+// of the first side, silently (probed).
+TopoShape wholeSurface(const TopoDS_Face& face)
+{
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    for (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+         !trimmed.IsNull();
+         trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+        surface = trimmed->BasisSurface();
+    }
+    if (auto plane = Handle(Geom_Plane)::DownCast(surface); !plane.IsNull()) {
+        return TopoShape(BRepBuilderAPI_MakeFace(plane->Pln()).Face());
+    }
+    if (Handle(Geom_CylindricalSurface)::DownCast(surface).IsNull()
+        && Handle(Geom_ConicalSurface)::DownCast(surface).IsNull()) {
+        throw Base::RuntimeError(
+            "Symmetric: the up-to face crosses the profile plane, and its surface can't stop the "
+            "second side at the face's mirror image. Use Two sides."
+        );
+    }
+    BRepBuilderAPI_MakeFace maker(surface, Precision::Confusion());
+    if (!maker.IsDone()) {
+        throw Base::RuntimeError("Symmetric: could not extend the up-to face to its whole surface");
+    }
+    return TopoShape(maker.Face());
+}
+
+// Whether two solids are the same: neither has volume outside the other, within 1e-6 of the
+// larger volume.
+bool sameSolid(const TopoShape& shape, const TopoShape& other)
+{
+    if (shape.isNull() || shape.getShape().IsNull() || other.isNull()
+        || other.getShape().IsNull()) {
+        return false;
+    }
+    try {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape.getShape(), props);
+        GProp_GProps otherProps;
+        BRepGProp::VolumeProperties(other.getShape(), otherProps);
+        const double tolerance = std::max(
+            std::max(std::fabs(props.Mass()), std::fabs(otherProps.Mass())) * 1e-6,
+            Precision::Confusion()
+        );
+        for (const auto& [from, cut] : {std::pair {&shape, &other}, std::pair {&other, &shape}}) {
+            BRepAlgoAPI_Cut difference(from->getShape(), cut->getShape());
+            if (!difference.IsDone()) {
+                return false;
+            }
+            GProp_GProps rest;
+            BRepGProp::VolumeProperties(difference.Shape(), rest);
+            if (std::fabs(rest.Mass()) > tolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// Whether a face lies on a surface: its vertices, points along its edges, and points inside it
+// (a grid over its bounds and a point the face classifier finds). A face whose inside yields no
+// point (a thin ring or crescent can miss every grid point, the PR 268 round 2 verification's
+// finding 1) is judged by its boundary alone, never skipped: its callers then check that it lies
+// within the up-to face, by area, which a face off the surface fails.
+bool liesOnSurface(const TopoDS_Face& face, const Handle(Geom_Surface)& surface)
+{
+    const double faceTolerance = BRep_Tool::Tolerance(face);
+    auto onSurface = [&](const gp_Pnt& point, double shapeTolerance) {
+        const double tolerance = std::max(
+            10.0 * Precision::Confusion(),
+            2.0 * std::max(faceTolerance, shapeTolerance)
+        );
+        GeomAPI_ProjectPointOnSurf projection(point, surface);
+        return projection.NbPoints() > 0 && projection.LowerDistance() <= tolerance;
+    };
+    for (TopExp_Explorer vertices(face, TopAbs_VERTEX); vertices.More(); vertices.Next()) {
+        const TopoDS_Vertex& vertex = TopoDS::Vertex(vertices.Current());
+        if (!onSurface(BRep_Tool::Pnt(vertex), BRep_Tool::Tolerance(vertex))) {
+            return false;
+        }
+    }
+    for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        constexpr int samples = 8;
+        for (int i = 1; i < samples; ++i) {
+            const double parameter = curve.FirstParameter()
+                + (curve.LastParameter() - curve.FirstParameter()) * i / samples;
+            if (!onSurface(curve.Value(parameter), BRep_Tool::Tolerance(edge))) {
+                return false;
+            }
+        }
+    }
+    Standard_Real uMin = 0.0;
+    Standard_Real uMax = 0.0;
+    Standard_Real vMin = 0.0;
+    Standard_Real vMax = 0.0;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    BRepAdaptor_Surface faceSurface(face);
+    constexpr int steps = 4;
+    for (int i = 1; i < steps; ++i) {
+        for (int j = 1; j < steps; ++j) {
+            const gp_Pnt2d uv(uMin + (uMax - uMin) * i / steps, vMin + (vMax - vMin) * j / steps);
+            BRepClass_FaceClassifier classifier(face, uv, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN
+                && !onSurface(faceSurface.Value(uv.X(), uv.Y()), 0.0)) {
+                return false;
+            }
+        }
+    }
+    try {
+        gp_Pnt point;
+        gp_Pnt2d uv;
+        if (BOPTools_AlgoTools3D::PointInFace(face, point, uv, new IntTools_Context) == 0
+            && !onSurface(point, 0.0)) {
+            return false;
+        }
+    }
+    catch (const Standard_Failure&) {
+        // No point found inside: the boundary decides.
+    }
+    return true;
+}
+
+// Whether a face lies within another face on the same surface: their common area is its own.
+bool liesWithin(const TopoDS_Face& face, const TopoDS_Face& other)
+{
+    try {
+        const double area = faceArea(face);
+        BRepAlgoAPI_Common common(face, other);
+        if (!common.IsDone()) {
+            return false;
+        }
+        return std::fabs(faceArea(common.Shape()) - area)
+            <= std::max(area * 1e-6, Precision::Confusion());
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// Whether the first side meets the face's whole surface first on the face: the sweep of the
+// first side's profile up to the whole surface, with no base (only the clearance box), ends only
+// on the face, and taking the base into account gives the first side's tool. A comparison of the
+// tools alone passed when the first side ran through the base (a Revolution) or through empty
+// space (a Groove) between the surface's first hit and the face: the second side then stopped at
+// the mirror of that first hit, and where the base isn't symmetric, the result lost material
+// silently (the PR 268 verification's High).
+bool firstSideEndsOnFace(
+    const TopoShape& upToFace,
+    const TopoShape& whole,
+    const TopoShape& firstSide,
+    const TopoShape& base,
+    bool groove,
+    const std::function<TopoShape(const TopoShape&)>& sweepUpTo
+)
+{
+    TopoShape sweep;
+    try {
+        sweep = sweepUpTo(whole);
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+    if (sweep.isNull() || sweep.getShape().IsNull()) {
+        return false;
+    }
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(whole.getShape()));
+    const TopoDS_Face& face = TopoDS::Face(upToFace.getShape());
+    bool ends = false;
+    for (TopExp_Explorer faces(sweep.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& end = TopoDS::Face(faces.Current());
+        if (!liesOnSurface(end, surface)) {
+            continue;
+        }
+        if (!liesWithin(end, face)) {
+            return false;
+        }
+        ends = true;
+    }
+    if (!ends) {
+        return false;
+    }
+    if (base.isNull()) {
+        return sameSolid(firstSide, sweep);
+    }
+    try {
+        TopoDS_Shape tool;
+        if (groove) {
+            BRepAlgoAPI_Common removed(base.getShape(), sweep.getShape());
+            if (!removed.IsDone()) {
+                return false;
+            }
+            tool = removed.Shape();
+        }
+        else {
+            BRepAlgoAPI_Cut added(sweep.getShape(), base.getShape());
+            if (!added.IsDone()) {
+                return false;
+            }
+            tool = added.Shape();
+        }
+        return sameSolid(firstSide, TopoShape(tool));
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// The up-to face of Symmetric's second side, given the first side's face, its mirror image in the
+// profile plane, the first side's tool, the base and whether the feature removes material, and a
+// way to sweep the first side's profile up to another face with no base. A face across the
+// profile plane crosses its own image there, and BRepFeat then lost the second side or revolved
+// it the long way round, silently, whenever the face was a face of the base: across the plane it
+// isn't symmetric about (a wall turned by any angle, a pipe longer on one side), and earlier
+// across the plane it is (ops#254, ops#272).
 // - An image that covers the face's points (a wall or a disk across the plane, an unbounded
 //   plane through it) gives way to the face itself, which Two sides passes for both sides.
-// - An image that only shares the face's plane (a hole on one side of a wall across it) gives way
-//   to the unbounded plane: the second side meets it first where the image lies.
-// - Any other image stays.
-TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrored)
+// - The image of any other face that reaches the plane (touching it included), or that shares
+//   the face's plane (a hole on one side of a wall across it), gives way to its whole
+//   surface. The second side meets that first where the image lies if the first side meets the
+//   face's whole surface first on the face (firstSideEndsOnFace). If it doesn't (the surface is
+//   met first off the face, or through a hole in it), or the surface can't be extended, the
+//   feature fails rather than stop the second side elsewhere.
+// - Any other image stays: that of a face off the plane.
+TopoShape secondSideUpToFace(
+    const TopoShape& upToFace,
+    const TopoShape& mirrored,
+    const gp_Pln& profilePlane,
+    const TopoShape& firstSide,
+    const TopoShape& base,
+    bool groove,
+    const std::function<TopoShape(const TopoShape&)>& sweepUpTo
+)
 {
     if (upToFace.isNull() || mirrored.isNull() || upToFace.getShape().ShapeType() != TopAbs_FACE
         || mirrored.getShape().ShapeType() != TopAbs_FACE) {
@@ -225,8 +498,15 @@ TopoShape secondSideUpToFace(const TopoShape& upToFace, const TopoShape& mirrore
     if (coversSamePoints(upToFace, mirrored)) {
         return upToFace;
     }
-    if (samePlane) {
-        return TopoShape(BRepBuilderAPI_MakeFace(BRepAdaptor_Surface(image).Plane()).Face());
+    if (samePlane || reachesPlane(upToFace, profilePlane)) {
+        const TopoShape whole = wholeSurface(face);
+        if (!firstSideEndsOnFace(upToFace, whole, firstSide, base, groove, sweepUpTo)) {
+            throw Base::RuntimeError(
+                "Symmetric: the profile meets the up-to face's surface before the face itself, "
+                "so the second side can't mirror the first. Use Two sides."
+            );
+        }
+        return wholeSurface(image);
     }
     return mirrored;
 }
@@ -661,8 +941,24 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                     continue;
                 }
                 addRevolution(perFace(markSeam(side.makeElementCopy())));
-                TopoShape mirroredUpToFace
-                    = secondSideUpToFace(upToFace, upToFace.makeElementMirror(mirrorPlane));
+                TopoShape mirroredUpToFace = secondSideUpToFace(
+                    upToFace,
+                    upToFace.makeElementMirror(mirrorPlane),
+                    sketchPlane,
+                    side,
+                    base,
+                    revolMode == Part::RevolMode::CutFromBase,
+                    [&](const TopoShape& face) {
+                        return tryToRevolveToFace(
+                            face,
+                            axis,
+                            TopoShape(),
+                            supportface,
+                            faces[i].makeElementCopy(),
+                            Part::RevolMode::None
+                        );
+                    }
+                );
                 addRevolution(perFace(tryToRevolveToFace(
                     mirroredUpToFace,
                     gp_Ax1(pnt, dir2),

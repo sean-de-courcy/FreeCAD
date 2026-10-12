@@ -742,3 +742,63 @@ class RevolutionTwoRingsStartFaceOfOneSideToSymmetric(
 ):
     __doc__ = RevolutionStartFaceOfOneSideToSymmetric.__doc__ + "\n\n" + InnerRing.__doc__
     REFS = RevolutionStartFaceOfOneSideToSymmetric.REFS + InnerRing.INNER_REFS
+
+
+class RevolutionAcrossTheAxisStartFaceAngleToFace(Scenario):
+    """ops#263 follow-up (PR 259 verification 1, L2; decision 44's edit case): a profile of two
+    faces on opposite sides of the Z axis, A x 10..20 and B x -25..-15, z 5..10, on the plate and
+    wall (`slab(90, 5)`) of RevolvedUpToFaceEdit, Refine off. Two sides by angles, 90 and 30: one
+    solid, whose side 2 ends at -30 degrees for A and at 150 for B. A fillet (radius 1) on the top
+    edge of B's side 2 end (z = 10, at 150). Side 1 then goes up to the wall's face, so each face
+    is revolved on its own (B from 180 through 270 to 90, across A's side 2 at radii 15..20), then
+    back to 90 degrees, then side 2 widens to 40: the fillet follows B's end each time."""
+
+    area = "RevolutionUpToFace"
+    MULTI = True
+    REFS = ("start_top",)
+    steps = ("upToWall", "backToAngle", "wider")
+    startAngle = 150
+
+    def startTop(self):
+        return edge("line", contains=ray(self.startAngle, 20, 10))
+
+    def followedStartTop(self):
+        """The edge, held plainly in V2: a warned guess doesn't pass."""
+        expected = self.startTop()
+        return Settled(expected) if self.mode == "V2" else expected
+
+    def build(self, doc):
+        body = m.body(doc)
+        plate = m.sketch(doc, "Plate", m.rectangle(-30, -30, 30, 30), body)
+        m.pad(body, plate, 5, name="PlatePad")
+        wallSketch = m.sketch(doc, "Wall", m.polygon(slab(90, 5)), body, z=5)
+        self.wallPad = m.pad(body, wallSketch, 10, "WallPad")
+        doc.recompute()
+        geometry = m.rectangle(10, 5, 20, 10) + m.rectangle(-25, 5, -15, 10)
+        profile = m.sketch(doc, "Profile", geometry, body, placement=XZ)
+        revolved = body.newObject("PartDesign::Revolution", "Revolved")
+        revolved.Profile = profile
+        revolved.ReferenceAxis = (m.originFeature(body, "Z_Axis"), [""])
+        revolved.Refine = False
+        revolved.SideType = "Two sides"
+        revolved.Type = "Angle"
+        revolved.Angle = 90
+        revolved.Type2 = "Angle"
+        revolved.Angle2 = 30
+        doc.recompute()
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (revolved, self.names(revolved, self.startTop()))
+        fillet.Radius = 1
+        self.ref("start_top", fillet, "Base", self.followedStartTop, Filleted(1))
+
+    def upToWall(self, doc):
+        revolved = doc.Revolved
+        revolved.Type = "UpToFace"
+        revolved.UpToFace = (self.wallPad, self.names(self.wallPad, wallFace(90, 10)))
+
+    def backToAngle(self, doc):
+        doc.Revolved.Type = "Angle"
+
+    def wider(self, doc):
+        doc.Revolved.Angle2 = 40
+        self.startAngle = 140
