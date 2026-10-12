@@ -169,6 +169,9 @@ std::vector<App::DocumentObject*> placersOf(const ProfileBased& feature)
     }
     return placers;
 }
+
+// The words that mark the failure of ProfileBased::recompute() below
+constexpr const char* placedElsewhere = "placed elsewhere than this feature's Body";
 }  // namespace
 
 // A profile in another Body is read in its own Body's coordinates, as if it were in the feature's,
@@ -202,21 +205,17 @@ short ProfileBased::mustExecute() const
         return 1;
     }
     // Moving another Body touches neither what this feature reads of it nor this feature: run
-    // while the Bodies are placed apart, and again after a failure, also in a reopened file, so
-    // the error clears once they agree (ops#308 F5). Not when suppressed or held: then recompute()
-    // doesn't fail, and nothing would ever settle (F6).
+    // when the Bodies come apart, and again after that failure once they agree, also in a
+    // reopened file (the error is saved with it), so the error clears (ops#308 F5). Only on that
+    // failure: any other reran on every recompute (R2-2), and so did this one while the Bodies
+    // stayed apart. Not when suppressed or held: then recompute() doesn't fail, and nothing
+    // would ever settle (F6).
     auto body = getFeatureBody();
     if (body && !Suppressed.getValue() && !body->holds(this)) {
-        if (profileBodyElsewhere()) {
+        const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
+        const bool failedElsewhere = why && std::strstr(why, placedElsewhere);
+        if ((profileBodyElsewhere() != nullptr) != failedElsewhere) {
             return 1;
-        }
-        if (isError()) {
-            for (auto obj : placersOf(*this)) {
-                auto other = obj ? Body::findBodyOf(obj) : nullptr;
-                if (other && other != body) {
-                    return 1;
-                }
-            }
         }
     }
     return PartDesign::FeatureAddSub::mustExecute();
@@ -231,7 +230,7 @@ App::DocumentObjectExecReturn* ProfileBased::recompute()
             std::string("The profile, a section, spine, up-to face or shape, or axis of this "
                         "feature, or what it is attached to, is in Body ")
                 + other->Label.getValue()
-                + ", placed elsewhere than this feature's Body: bind it with a Sub-Shape Binder",
+                + ", " + placedElsewhere + ": bind it with a Sub-Shape Binder",
             this
         );
     }

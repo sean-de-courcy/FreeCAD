@@ -25,6 +25,9 @@
 
 #pragma once
 
+#include <map>
+#include <string>
+
 #include <App/PropertyLinks.h>
 #include <App/DocumentObserver.h>
 #include <App/FeaturePython.h>
@@ -188,6 +191,9 @@ public:
 
     /// Fails on a support that depends on this binder, before anything else (FreeCAD-CH ops#308 T2)
     App::DocumentObjectExecReturn* recompute() override;
+    /// Also when a support's mapping into the binder changed, e.g. its Body in another document
+    /// moved (FreeCAD-CH ops#308 R2-1)
+    short mustExecute() const override;
 
 protected:
     App::DocumentObjectExecReturn* execute() override;
@@ -221,6 +227,19 @@ protected:
 
     App::PropertyXLinkSub _CopiedLink;
     std::vector<App::DocumentObjectT> _CopiedObjs;
+
+private:
+    App::DocumentObject* resolveParent(std::string& parentSub) const;
+    std::map<const App::DocumentObject*, Base::Matrix4D> supportMatrices(
+        App::DocumentObject* parent,
+        const std::string& parentSub,
+        bool report
+    ) const;
+    std::string cacheName(const App::DocumentObject* obj) const;
+
+    // The matrices the last update() mapped the supports with, by cache name; not saved, so
+    // mustExecute() reads the Cache_ properties before the first update (FreeCAD-CH ops#308)
+    std::map<std::string, Base::Matrix4D> lastMats;
 };
 
 using SubShapeBinderPython = App::FeaturePythonT<SubShapeBinder>;

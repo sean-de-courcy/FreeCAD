@@ -829,6 +829,163 @@ void SubShapeBinder::clearCopiedObjects()
     _CopiedLink.setValue(nullptr);
 }
 
+// The parent that the supports' paths are resolved from, and the path to the binder in it;
+// nullptr with Relative off, or with no parent. update() stores it as the Context
+App::DocumentObject* SubShapeBinder::resolveParent(std::string& parentSub) const
+{
+    auto parent = Context.getValue();
+    parentSub = Context.getSubName(false);
+    if (!Relative.getValue()) {
+        return nullptr;
+    }
+    if (parent && parent->getSubObject(parentSub.c_str()) == this) {
+        auto parents = parent->getParents();
+        if (!parents.empty()) {
+            parent = parents.begin()->first;
+            parentSub = parents.begin()->second + parentSub;
+        }
+    }
+    else {
+        parent = nullptr;
+    }
+    if (!parent && parentSub.empty()) {
+        auto parents = getParents();
+        if (!parents.empty()) {
+            parent = parents.begin()->first;
+            parentSub = parents.begin()->second;
+        }
+    }
+    return parent;
+}
+
+// The matrix that maps each support's shape into the binder's coordinates. report: log what
+// can't be resolved (update() does; mustExecute() doesn't)
+std::map<const App::DocumentObject*, Base::Matrix4D> SubShapeBinder::supportMatrices(
+    App::DocumentObject* parent,
+    const std::string& parentSub,
+    bool report
+) const
+{
+    std::map<const App::DocumentObject*, Base::Matrix4D> mats;
+    for (auto& l : Support.getSubListValues()) {
+        auto obj = l.getValue();
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
+        auto res = mats.emplace(obj, Base::Matrix4D());
+        if (!res.second) {
+            continue;
+        }
+        if (!parent) {
+            // No parent to resolve the path from (Relative off, or a binder at the document's top
+            // level): the support's shape is in its own container's coordinates, the binder's
+            // in its own. Map between them (FreeCAD-CH ops#308 F1, F4: such a binder of a face
+            // of a feature in a Body moved by (100, 50) stayed at the origin)
+            res.first->second =
+                (containerPlacement(this).inverse() * containerPlacement(obj)).toMatrix();
+            continue;
+        }
+        std::string resolvedSub = parentSub;
+        std::string linkSub;
+        auto link = obj;
+        auto resolved = parent->resolveRelativeLink(resolvedSub, link, linkSub);
+        // Not found under the binder's parent (two Bodies at the document's top level, or
+        // under one App::Part): the path stays as it was, and the support's shape is in its
+        // own container's coordinates, not the document's (FreeCAD-CH ops#308 T4: a binder
+        // of a face of a feature in a Body moved by (100, 50) stayed at the origin)
+        const bool outside = resolved == parent && resolvedSub == parentSub && obj != parent;
+        if (!resolved) {
+            if (!link && report) {
+                FC_WARN(
+                    getFullName() << " cannot resolve relative link of " << parent->getFullName()
+                                  << '.' << parentSub << " -> " << obj->getFullName()
+                );
+            }
+            continue;
+        }
+        Base::Matrix4D mat;
+        auto sobj = resolved->getSubObject(resolvedSub.c_str(), nullptr, &mat);
+        if (sobj != this) {
+            if (report) {
+                FC_LOG(
+                    getFullName()
+                    << " skip invalid parent " << resolved->getFullName() << '.' << resolvedSub
+                );
+            }
+        }
+        else if (_Version.getValue() == 0) {
+            // For existing legacy SubShapeBinder, the support's mapping cancels the
+            // Placement. (Upstream stored the first support's adjustment in the Placement
+            // instead, behind a flag that was never set.)
+            mat.inverseGauss();
+            res.first->second = mat;
+        }
+        else {
+            // For newer SubShapeBinder, the Placement property is free
+            // to use by the user to add additional offset to the
+            // binding object
+            mat.inverseGauss();
+            res.first->second = Placement.getValue().toMatrix() * mat;
+            if (outside) {
+                res.first->second = res.first->second * containerPlacement(obj).toMatrix();
+            }
+        }
+    }
+    return mats;
+}
+
+// The name of the property that caches a support's matrix
+std::string SubShapeBinder::cacheName(const App::DocumentObject* obj) const
+{
+    std::string name = "Cache_";
+    name += obj->getNameInDocument();
+    if (obj->getDocument() != getDocument()) {
+        name += "_";
+        name += obj->getDocument()->getName();
+    }
+    return name;
+}
+
+short SubShapeBinder::mustExecute() const
+{
+    if (short ret = inherited::mustExecute()) {
+        return ret;
+    }
+    // A support whose mapping changed with nothing touching the binder: its Body in another
+    // document moved, which the slot that follows a support's container doesn't hear, since it
+    // listens to the binder's own document (FreeCAD-CH ops#308 R2-1: such a binder stayed
+    // where the Body had been). Compared with the matrix the last update used, so a failed one
+    // isn't rerun until the mapping changes again; before any, with the saved cache, so a
+    // support document moved while this one was closed counts as well. Only a synchronized
+    // binder follows its supports.
+    if (BindMode.getValue() != 0 || isRestoring() || !getDocument()) {
+        return 0;
+    }
+    try {
+        std::string parentSub;
+        auto parent = resolveParent(parentSub);
+        for (const auto& [obj, mat] : supportMatrices(parent, parentSub, false)) {
+            const std::string name = cacheName(obj);
+            const Base::Matrix4D* last = nullptr;
+            if (auto it = lastMats.find(name); it != lastMats.end()) {
+                last = &it->second;
+            }
+            else if (auto prop = freecad_cast<App::PropertyMatrix*>(
+                         getDynamicPropertyByName(name.c_str())
+                     )) {
+                last = &prop->getValue();
+            }
+            if (last && *last != mat) {
+                return 1;
+            }
+        }
+    }
+    catch (...) {
+        // whatever can't be resolved now, the recompute reports
+    }
+    return 0;
+}
+
 void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
 {
     Part::TopoShape result = makeTopoShape(false);
@@ -844,36 +1001,17 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
 
     std::string errMsg;
     std::string missing;  // the subs that resolve to nothing, as "Label.Face3, ..."
-    auto parent = Context.getValue();
-    std::string parentSub = Context.getSubName(false);
-    if (!Relative.getValue()) {
-        parent = nullptr;
-    }
-    else {
-        if (parent && parent->getSubObject(parentSub.c_str()) == this) {
-            auto parents = parent->getParents();
-            if (!parents.empty()) {
-                parent = parents.begin()->first;
-                parentSub = parents.begin()->second + parentSub;
-            }
-        }
-        else {
-            parent = nullptr;
-        }
-        if (!parent && parentSub.empty()) {
-            auto parents = getParents();
-            if (!parents.empty()) {
-                parent = parents.begin()->first;
-                parentSub = parents.begin()->second;
-            }
-        }
-        if (parent && (parent != Context.getValue() || parentSub != Context.getSubName(false))) {
-            Context.setValue(parent, parentSub.c_str());
-        }
+    std::string parentSub;
+    auto parent = resolveParent(parentSub);
+    if (parent && (parent != Context.getValue() || parentSub != Context.getSubName(false))) {
+        Context.setValue(parent, parentSub.c_str());
     }
 
-    bool first = false;
-    std::unordered_map<const App::DocumentObject*, Base::Matrix4D> mats;
+    auto mats = supportMatrices(parent, parentSub, true);
+    lastMats.clear();
+    for (const auto& [obj, mat] : mats) {
+        lastMats.emplace(cacheName(obj), mat);
+    }
     int idx = -1;
     for (auto& l : Support.getSubListValues()) {
         ++idx;
@@ -881,69 +1019,7 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
         if (!obj || !obj->isAttachedToDocument()) {
             continue;
         }
-        auto res = mats.emplace(obj, Base::Matrix4D());
-        if (!parent && res.second) {
-            // No parent to resolve the path from (Relative off, or a binder at the document's top
-            // level): the support's shape is in its own container's coordinates, the binder's
-            // in its own. Map between them (FreeCAD-CH ops#308 F1, F4: such a binder of a face
-            // of a feature in a Body moved by (100, 50) stayed at the origin)
-            res.first->second =
-                (containerPlacement(this).inverse() * containerPlacement(obj)).toMatrix();
-        }
-        if (parent && res.second) {
-            std::string resolvedSub = parentSub;
-            std::string linkSub;
-            auto link = obj;
-            auto resolved = parent->resolveRelativeLink(resolvedSub, link, linkSub);
-            // Not found under the binder's parent (two Bodies at the document's top level, or
-            // under one App::Part): the path stays as it was, and the support's shape is in its
-            // own container's coordinates, not the document's (FreeCAD-CH ops#308 T4: a binder
-            // of a face of a feature in a Body moved by (100, 50) stayed at the origin)
-            const bool outside = resolved == parent && resolvedSub == parentSub && obj != parent;
-            if (!resolved) {
-                if (!link) {
-                    FC_WARN(
-                        getFullName() << " cannot resolve relative link of " << parent->getFullName()
-                                      << '.' << parentSub << " -> " << obj->getFullName()
-                    );
-                }
-            }
-            else {
-                Base::Matrix4D mat;
-                auto sobj = resolved->getSubObject(resolvedSub.c_str(), nullptr, &mat);
-                if (sobj != this) {
-                    FC_LOG(
-                        getFullName()
-                        << " skip invalid parent " << resolved->getFullName() << '.' << resolvedSub
-                    );
-                }
-                else if (_Version.getValue() == 0) {
-                    // For existing legacy SubShapeBinder, we use its Placement
-                    // to store the position adjustment of the first Support
-                    if (first) {
-                        auto pla = Placement.getValue() * Base::Placement(mat).inverse();
-                        Placement.setValue(pla);
-                        first = false;
-                    }
-                    else {
-                        // The remaining support will cancel the Placement
-                        mat.inverseGauss();
-                        res.first->second = mat;
-                    }
-                }
-                else {
-                    // For newer SubShapeBinder, the Placement property is free
-                    // to use by the user to add additional offset to the
-                    // binding object
-                    mat.inverseGauss();
-                    res.first->second = Placement.getValue().toMatrix() * mat;
-                    if (outside) {
-                        res.first->second = res.first->second
-                            * containerPlacement(obj).toMatrix();
-                    }
-                }
-            }
-        }
+        auto res = mats.find(obj);
         if (init) {
             continue;
         }
@@ -1056,7 +1132,7 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
                 if (!shape.isNull()) {
                     shapes.push_back(shape);
                     shapeOwners.emplace_back(sidx, subidx);
-                    shapeMats.push_back(&res.first->second);
+                    shapeMats.push_back(&res->second);
                     // Keyed by the support's own document, not a copy-on-change copy's
                     // temporary one, whose name depends on the session: a support in this
                     // document gives 0
@@ -1092,18 +1168,6 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
         }
     }
 
-    std::string objName;
-    // lambda function for generating matrix cache property
-    auto cacheName = [this, &objName](const App::DocumentObject* obj) {
-        objName = "Cache_";
-        objName += obj->getNameInDocument();
-        if (obj->getDocument() != getDocument()) {
-            objName += "_";
-            objName += obj->getDocument()->getName();
-        }
-        return objName.c_str();
-    };
-
     if (!init) {
 
         if (!errMsg.empty()) {
@@ -1136,7 +1200,7 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
             bool hit = true;
             for (auto& v : mats) {
                 auto prop = freecad_cast<App::PropertyMatrix*>(
-                    getDynamicPropertyByName(cacheName(v.first))
+                    getDynamicPropertyByName(cacheName(v.first).c_str())
                 );
                 if (!prop || prop->getValue() != v.second) {
                     hit = false;
@@ -1277,7 +1341,8 @@ void SubShapeBinder::update(SubShapeBinder::UpdateOption options)
 
     // update transformation matrix cache
     for (auto& v : mats) {
-        const char* name = cacheName(v.first);
+        const std::string cache = cacheName(v.first);
+        const char* name = cache.c_str();
         auto prop = getDynamicPropertyByName(name);
         if (!prop || !prop->isDerivedFrom<App::PropertyMatrix>()) {
             if (prop) {

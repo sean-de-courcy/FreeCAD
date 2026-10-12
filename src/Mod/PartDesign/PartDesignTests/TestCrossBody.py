@@ -307,6 +307,95 @@ class TestCrossBody(unittest.TestCase):
         binder.Relative = False
         self.assertBinderFollowsTheBox(box, binder)
 
+    def assertGlobalBox(self, obj, *box):
+        """obj's shape, in the document's coordinates, has this bounding box."""
+        shape = obj.Shape.copy()
+        container = obj.getParentGeoFeatureGroup()
+        if container:
+            shape = shape.transformed(container.getGlobalPlacement().toMatrix())
+        self.assertBox(shape, *box)
+
+    def bindersInAnotherDocument(self, folder):
+        """A box Body at (100, 50) padded 40 x 40 x 10 in a second document, both documents
+        saved in folder, and four binders of the pad's top in this one: at the top level with
+        Relative on and off, and in a Lid Body at (0, 0, 20) with Relative on and off. Returns
+        the second document and the binders."""
+        import os
+
+        other = FreeCAD.newDocument("PartDesignTestCrossBodyOther")
+        box = other.addObject("PartDesign::Body", "Box")
+        box.Placement.Base = V(100, 50, 0)
+        boxPad = self.pad(box, "BoxPad", self.sketch(box, "BoxSk", self.onXY(box),
+                                                     (0, 0, 40, 40)), 10)
+        other.recompute()
+        other.saveAs(os.path.join(folder, "CrossBodyOther.FCStd"))
+        self.doc.saveAs(os.path.join(folder, "CrossBodyMain.FCStd"))
+        lid = self.body("Lid", V(0, 0, 20))
+        face = self.topFace(boxPad, 10)
+        binders = []
+        for container, relative in ((None, True), (None, False), (lid, True), (lid, False)):
+            if container:
+                binder = container.newObject("PartDesign::SubShapeBinder", "BoxTop")
+            else:
+                binder = self.doc.addObject("PartDesign::SubShapeBinder", "BoxTop")
+            binder.Support = [(boxPad, (face,))]
+            binder.Relative = relative
+            binders.append(binder)
+        self.doc.recompute()
+        for binder in binders:
+            self.assertTrue(binder.isValid(), binder.getStatusString())
+            self.assertGlobalBox(binder, 100, 50, 10, 140, 90, 10)
+        return other, binders
+
+    def closeIfOpen(self, name):
+        if name in FreeCAD.listDocuments():
+            FreeCAD.closeDocument(name)
+
+    def testBinderFollowsABodyInAnotherDocument(self):
+        """R2-1: binders (bindersInAnotherDocument) of a face of a Body in another document
+        follow that Body to the origin once both documents recompute, and the next recompute
+        has nothing to do. They stayed at (100, 50): only the binder's own document was heard
+        when a support's Body recomputed."""
+        import tempfile
+
+        other, binders = self.bindersInAnotherDocument(tempfile.mkdtemp())
+        try:
+            other.getObject("Box").Placement.Base = V(0, 0, 0)
+            other.recompute()
+            self.doc.recompute()
+            for binder in binders:
+                self.assertTrue(binder.isValid(), binder.getStatusString())
+                self.assertGlobalBox(binder, 0, 0, 10, 40, 40, 10)
+            self.assertEqual(self.doc.recompute(), 0)
+        finally:
+            self.closeIfOpen(other.Name)
+
+    def testBinderFollowsABodyMovedInAnotherDocumentWhileClosed(self):
+        """R2-1: the Body of bindersInAnotherDocument moves while this document is closed, and
+        its document stays open. This document, reopened and recomputed, puts its binders on
+        the moved Body; they stayed at (100, 50), since nothing touched them. (When reopening
+        this document opens the other, the binders already follow.)"""
+        import os
+        import tempfile
+
+        folder = tempfile.mkdtemp()
+        other, _ = self.bindersInAnotherDocument(folder)
+        try:
+            self.doc.save()
+            FreeCAD.closeDocument(self.doc.Name)
+            other.getObject("Box").Placement.Base = V(0, 0, 0)
+            other.recompute()
+            self.doc = FreeCAD.openDocument(os.path.join(folder, "CrossBodyMain.FCStd"))
+            self.doc.recompute()
+            binders = [o for o in self.doc.Objects if o.isDerivedFrom("PartDesign::SubShapeBinder")]
+            self.assertEqual(len(binders), 4)
+            for binder in binders:
+                self.assertTrue(binder.isValid(), binder.getStatusString())
+                self.assertGlobalBox(binder, 0, 0, 10, 40, 40, 10)
+            self.assertEqual(self.doc.recompute(), 0)
+        finally:
+            self.closeIfOpen(other.Name)
+
     def upper(self, at=V(0, 0, 50)):
         """Upper, a Body at z 50 with a pad 20 x 10 x 15; Lower, a Body at the origin with a pad
         20 x 10 x 5. Returns Upper, its pad, Lower and its pad."""
@@ -403,6 +492,27 @@ class TestCrossBody(unittest.TestCase):
         pocket.Suppressed = True
         self.doc.recompute()
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testFeatureWithAProfileElsewhereSettles(self):
+        """R2-2: a Pocket whose profile is in a Body placed elsewhere fails, and the next
+        recompute has nothing to do while the Bodies stay apart. It was run on every recompute."""
+        upper, pocket = self.stackedHole(V(5, 0, 10))
+        self.assertFalse(pocket.isValid())
+        self.assertEqual(self.doc.recompute(), 0)
+        self.assertFalse(pocket.isValid())
+        self.assertIn("placed elsewhere", pocket.getStatusString())
+
+    def testFeatureFailingOnAProfileInAnotherBodySettles(self):
+        """R2-2: a Pad of length zero on a sketch in another Body placed alike fails for its own
+        reason, and the next recompute has nothing to do. Any failed feature that read another
+        Body was run on every recompute."""
+        source = self.body("Source")
+        sketch = self.sketch(source, "Sk", self.onXY(source), (0, 0, 5, 5))
+        pad = self.pad(self.body("Body"), "Pad", sketch, 0)
+        self.doc.recompute()
+        self.assertFalse(pad.isValid())
+        self.assertNotIn("placed elsewhere", pad.getStatusString())
         self.assertEqual(self.doc.recompute(), 0)
 
     def testFirstSubtractiveFeatureFails(self):
