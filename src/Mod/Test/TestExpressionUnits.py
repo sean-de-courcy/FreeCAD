@@ -29,6 +29,8 @@ value is fixed up front.
 """
 
 import ctypes
+import math
+import sys
 import unittest
 
 import FreeCAD
@@ -626,6 +628,123 @@ class TestLargeIntegers(ExpressionUnitsBase):
         # The same through Quantity arithmetic in Python
         self.assertEqual((FreeCAD.Units.Quantity("1 mm") * 2**40).Value, float(2**40))
         self.assertEqual((FreeCAD.Units.Quantity(1) + 2**40).Value, float(2**40 + 1))
+
+    def testQuantityProperties(self):
+        # Round 5: a quantity property converted a Python int with PyLong_AsLong, so 2**31 on a
+        # Distance was stored as -1 mm, and a Length refused it as "-1.00 mm"
+        varSet = self.addVarSet(
+            Dist=("App::PropertyDistance", "1 mm"),
+            Len=("App::PropertyLength", "1 mm"),
+            Qty=("App::PropertyQuantity", 1.0),
+            Ang=("App::PropertyAngle", "1 deg"),
+        )
+        for name in ("Dist", "Len", "Qty"):
+            for value in self.VALUES:
+                if name == "Len" and value < 0:
+                    continue
+                setattr(varSet, name, value)
+                self.assertEqual(getattr(varSet, name).Value, float(value), name)
+            before = getattr(varSet, name)
+            with self.assertRaises(OverflowError) as cm:
+                setattr(varSet, name, 2**1100)
+            self.assertIn(str(2**1100), str(cm.exception))
+            self.assertEqual(getattr(varSet, name), before)
+        # Above the angle's maximum: refused, not stored as -1 deg
+        with self.assertRaises(ValueError):
+            varSet.Ang = 2**31
+        self.assertEqual(varSet.Ang.Value, 1.0)
+        # No error is left pending
+        varSet.Dist = 5
+        self.assertEqual(varSet.Dist.Value, 5.0)
+
+
+class TestNonFiniteValues(ExpressionUnitsBase):
+    """ops#319 round 5: NaN passed every range check (it compares false with both bounds) and
+    was stored, from Python and from `=sqrt(-1)`. Infinity was stored on a Distance or a
+    Quantity and cut to the largest double on a Length. Both are refused now; a plain Float
+    still takes them, and so does a FloatConstraint whose own bound is infinite."""
+
+    NAN = float("nan")
+    INF = float("inf")
+
+    def addQuantities(self):
+        return self.addVarSet(
+            Len=("App::PropertyLength", "2 mm"),
+            Dist=("App::PropertyDistance", "-2 mm"),
+            Qty=("App::PropertyQuantity", 2.0),
+            Ang=("App::PropertyAngle", "2 deg"),
+            Ratio=("App::PropertyFloatConstraint", (0.5, -5.0, 5.0, 1.0)),
+            Wide=(
+                "App::PropertyFloatConstraint",
+                (0.5, -sys.float_info.max, sys.float_info.max, 1.0),
+            ),
+        )
+
+    def values(self, varSet):
+        return {
+            name: getattr(varSet, name)
+            for name in ("Len", "Dist", "Qty", "Ang", "Ratio", "Wide")
+        }
+
+    def testNanFromPython(self):
+        varSet = self.addQuantities()
+        before = self.values(varSet)
+        for name in before:
+            with self.assertRaises(ValueError) as cm:
+                setattr(varSet, name, self.NAN)
+            self.assertIn("nan", str(cm.exception))
+        with self.assertRaises(ValueError):
+            varSet.Len = FreeCAD.Units.Quantity(self.NAN, FreeCAD.Units.Length)
+        self.assertEqual(self.values(varSet), before)
+
+    def testInfinityFromPython(self):
+        varSet = self.addQuantities()
+        before = self.values(varSet)
+        for name in before:
+            for value in (self.INF, -self.INF):
+                with self.assertRaises(ValueError) as cm:
+                    setattr(varSet, name, value)
+                self.assertIn("inf", str(cm.exception))
+        self.assertEqual(self.values(varSet), before)
+
+    def testWhereStillAllowed(self):
+        varSet = self.addVarSet(
+            F=("App::PropertyFloat", 1.0),
+            Open=("App::PropertyFloatConstraint", (0.0, 0.0, self.INF, 1.0)),
+        )
+        varSet.F = self.INF
+        self.assertEqual(varSet.F, self.INF)
+        varSet.F = self.NAN
+        self.assertTrue(math.isnan(varSet.F))
+        varSet.Open = self.INF
+        self.assertEqual(varSet.Open, self.INF)
+        with self.assertRaises(ValueError):
+            varSet.Open = self.NAN
+
+    def testByExpression(self):
+        for expr in ("sqrt(-1)", "1e308 * 10", "-1e308 * 10"):
+            varSet = self.addQuantities()
+            before = self.values(varSet)
+            for name in before:
+                varSet.setExpression(name, expr)
+            self.doc.recompute()
+            self.assertFalse(varSet.isValid(), expr)
+            for name in before:
+                varSet.setExpression(name, None)
+            self.assertEqual(self.values(varSet), before, expr)
+            self.doc.removeObject(varSet.Name)
+
+    def testByExpressionOneAtATime(self):
+        # Each property is refused by itself, with a message naming it
+        for name in ("Len", "Dist", "Qty", "Ang", "Ratio", "Wide"):
+            for expr, word in (("sqrt(-1)", "nan"), ("1e308 * 10", "inf")):
+                varSet = self.addQuantities()
+                before = getattr(varSet, name)
+                varSet.setExpression(name, expr)
+                self.doc.recompute()
+                self.assertInvalid(varSet, name, word)
+                self.assertEqual(getattr(varSet, name), before, f"{name} = {expr}")
+                self.doc.removeObject(varSet.Name)
 
 
 class TestWhitespaceCharacters(ExpressionUnitsBase):
