@@ -206,6 +206,23 @@ bool Body::holds(const App::DocumentObject* obj) const
     for (std::size_t i = 0; i < features.size(); ++i) {
         position.emplace(features[i], i);
     }
+    // A user outside this Body: held only by its own Body's bar (the in-list holds a member's
+    // Body, as in FailureContinuation's bodyOf())
+    auto heldElsewhere = [this](const App::DocumentObject* user) {
+        const Body* other = nullptr;
+        if (auto feature = freecad_cast<const PartDesign::Feature*>(user)) {
+            other = feature->getFeatureBody();
+        }
+        for (auto in : user->getInList()) {
+            if (other) {
+                break;
+            }
+            if (auto body = freecad_cast<const Body*>(in); body && body->hasObject(user)) {
+                other = body;
+            }
+        }
+        return other && other != this && other->holds(user);
+    };
     // Memo per call: 1 held, 0 not, absent unknown; the graph is acyclic
     std::map<const App::DocumentObject*, bool> memo;
     std::function<bool(const App::DocumentObject*)> held = [&](const App::DocumentObject* o) {
@@ -220,14 +237,16 @@ bool Body::holds(const App::DocumentObject* obj) const
                 result = true;
             }
             else {
-                // B1: held only when every member that uses it is held
+                // B1: held only when every member that uses it is held. B1x (FreeCAD-CH ops#325):
+                // a user outside this Body (another Body's feature, a Part feature, a link) reads
+                // it too, so it isn't held unless that user's own Body holds the user
                 memo[o] = true;  // a cycle (shouldn't exist) counts as held
                 result = true;
                 for (auto user : o->getInList()) {
-                    if (user == this || !position.count(user)) {
+                    if (user == this) {
                         continue;
                     }
-                    if (!held(user)) {
+                    if (position.count(user) ? !held(user) : !heldElsewhere(user)) {
                         result = false;
                         break;
                     }

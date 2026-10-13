@@ -72,8 +72,13 @@ bool followsBase(const App::DocumentObject* owner, const App::Property* prop)
             return true;
         }
     }
+    // A solid of the owner's own Body only: a face of another Body's solid (FreeCAD-CH ops#325)
+    // is an input like any other, so its edge stays in the cycle check
     if (auto profileBased = freecad_cast<const PartDesign::ProfileBased*>(owner)) {
-        if (prop == &profileBased->Profile && Body::isSolidFeature(profileBased->Profile.getValue())) {
+        auto profile = profileBased->Profile.getValue();
+        auto body = profileBased->getFeatureBody();
+        if (prop == &profileBased->Profile && Body::isSolidFeature(profile) && body
+            && body->hasObject(profile)) {
             return true;
         }
     }

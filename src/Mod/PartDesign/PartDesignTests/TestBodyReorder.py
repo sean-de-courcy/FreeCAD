@@ -1523,6 +1523,64 @@ class BodyReorderBase:
         self.assertEqual(sketch.AttachmentSupport, support)
         self.assertEqual(self.savedRetargets(), [])
 
+    def testCycleThroughAnotherBodysFaceIsRefused(self):
+        """ops#325 round 2 (reorder across Bodies): Other's Second pad has as Profile the top face
+        of Lid, a pad in this Body on a sketch attached to the top of Other's First pad. Moved to
+        the top of Other, Second would become First's base: Second -> Lid -> LidSketch -> First ->
+        Second. The cycle check took any solid Profile as base-following and dropped Second's
+        edge: the move went through. It is refused, and nothing changes."""
+        other = models.body(self.doc)
+        firstSketch = models.sketch(self.doc, "FirstSketch", models.rectangle(0, 0, 20, 20), other)
+        first = models.pad(other, firstSketch, 10, "First")
+        self.recompute()
+        top = faceWhere(first.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        lidSketch = self.doc.addObject("Sketcher::SketchObject", "LidSketch")
+        self.body.addObject(lidSketch)
+        lidSketch.AttachmentSupport = [(first, top)]
+        lidSketch.MapMode = "FlatFace"
+        lidSketch.addGeometry(models.rectangle(5, 5, 15, 15), False)
+        lid = models.pad(self.body, lidSketch, 2, "Lid")
+        self.recompute()
+        lidTop = faceWhere(lid.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 12)))
+        second = other.newObject("PartDesign::Pad", "Second")
+        second.Profile = (lid, [lidTop])
+        second.Length = 3
+        self.recompute()
+        self.assertValid(first, lid, second)
+        group = list(other.Group)
+        bases = [o.BaseFeature for o in group if o.isDerivedFrom("PartDesign::Feature")]
+        with self.assertRaises(ValueError) as refused:
+            other.reorderObject([second], None, True)
+        self.assertIn("cycle", str(refused.exception))
+        self.assertEqual(list(other.Group), group)
+        self.assertEqual(
+            [o.BaseFeature for o in other.Group if o.isDerivedFrom("PartDesign::Feature")], bases
+        )
+        self.assertIs(other.Tip, second)
+
+    def testSketchUsedByAnotherBodyIsNotHeld(self):
+        """ops#325 round 2 (B1x): Shared, a sketch after BossA, used only by a pad in another
+        Body. Rolled back to the block, this Body held it (its only user wasn't a member), so the
+        other pad computed on the stale sketch, silently. It isn't held: an edit reaches the other
+        Body. With the other Body rolled back past its pad too, nothing reads it: held."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        shared = models.sketch(self.doc, "Shared", models.rectangle(30, 0, 34, 4), self.body)
+        other = models.body(self.doc)
+        otherPad = models.pad(other, shared, 5, "OtherPad")
+        self.recompute()
+        self.assertValid(otherPad)
+        self.body.rollTo(block)
+        self.assertFalse(self.body.holds(shared))
+        models.moveRectangle(shared, 40, 0, 44, 4)
+        self.recompute()
+        self.assertValid(shared, otherPad)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.XMin, 40, places=6)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.XMax, 44, places=6)
+        other.rollTo(None)
+        self.assertTrue(other.holds(otherPad))
+        self.assertTrue(self.body.holds(shared))
+
     def testOtherBodyWaitsWhileRolledBack(self):
         """A binder in another body bound to this Body: rolled back and edited, the Body keeps its
         shape and the binder doesn't change; rolled to the end, it follows once (RO14)."""
