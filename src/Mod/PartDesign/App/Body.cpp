@@ -49,8 +49,9 @@
 namespace App
 {
 // App/DocumentObject.cpp (FreeCAD-CH ops#325): the readers of obj through a subname path of a
-// container holding it, which aren't in obj's in-list
-AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj);
+// container holding it or of a link showing one, which aren't in obj's in-list
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links = nullptr);
 }  // namespace App
 
 using namespace PartDesign;

@@ -1889,6 +1889,50 @@ class BodyReorderBase:
         self.assertAlmostEqual(onBoss.Shape.BoundBox.ZMin, 25, places=6)
         self.assertReadsHeld(onBoss, False)
 
+    def testPathReadersThroughACachingLinkFollow(self):
+        """ops#325 round 6 (review r5 1): binders in a second document reading the Body through an
+        App::Link there, (XL, "Shared.") and (XL, "Block.FaceN"), were rerun under the bar but
+        kept x 30 and z 10: the link answered from its shape cache, which only its own run clears,
+        and it didn't run while the Body was held. A link that scales keeps one too (Scaled, x 2,
+        in the Body's document). These links run too: the binders follow."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        shared = models.sketch(self.doc, "Shared", models.rectangle(30, 0, 34, 4), self.body)
+        self.recompute()
+        blockTop = faceWhere(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        self.assertIsNotNone(blockTop)
+        self.tempDir = tempfile.mkdtemp()
+        self.doc.saveAs(os.path.join(self.tempDir, "studio.FCStd"))
+        other = models.newDocument(f"BodyReorderOther{type(self).__name__}")
+        other.saveAs(os.path.join(self.tempDir, "reader.FCStd"))
+        link = other.addObject("App::Link", "XL")
+        link.LinkedObject = self.body
+        onShared = other.addObject("PartDesign::SubShapeBinder", "OnShared")
+        onShared.Support = [(link, (f"{shared.Name}.",))]
+        onBlock = other.addObject("PartDesign::SubShapeBinder", "OnBlock")
+        onBlock.Support = [(link, (f"{block.Name}.{blockTop}",))]
+        scaled = self.doc.addObject("App::Link", "Scaled")
+        scaled.LinkedObject = self.body
+        scaled.ScaleVector = V(2, 2, 2)
+        onScaled = self.linkedBinder("OnScaled", scaled, f"{shared.Name}.")
+        self.recompute()
+        other.recompute()
+        self.assertValid(onShared, onBlock, onScaled)
+        self.assertAlmostEqual(onShared.Shape.BoundBox.XMin, 30, places=6)
+        self.assertAlmostEqual(onScaled.Shape.BoundBox.XMin, 60, places=6)
+        self.body.rollTo(block)
+        self.recompute()
+        other.recompute()
+        self.assertFalse(self.body.holds(shared))
+        models.moveRectangle(shared, 40, 0, 44, 4)
+        block.Length = 20
+        self.recompute()
+        other.recompute()
+        self.assertValid(shared, block, link, onShared, onBlock, onScaled)
+        self.assertAlmostEqual(onShared.Shape.BoundBox.XMin, 40, places=6)
+        self.assertAlmostEqual(onBlock.Shape.BoundBox.ZMin, 20, places=6)
+        self.assertAlmostEqual(onScaled.Shape.BoundBox.XMin, 80, places=6)
+
     def testExpressionReaderOfAHeldSolidWarns(self):
         """ops#325 round 4 (review r3 3): an expression reads a held solid's property, current
         when it ran, but a held solid doesn't rerun its readers when it changes: edited under the

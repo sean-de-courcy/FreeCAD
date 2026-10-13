@@ -192,9 +192,12 @@ namespace App
 // FreeCAD-CH (ops#325): the objects that read @p obj through a subname path of a container holding
 // it or of a link showing one of those (SubShapeBinder Support = (Studio, "A.Shared."), (LinkA,
 // "Shared."), (Outer, "LinkA.Shared.")), found in their in-lists, not in obj's. Document::recompute passes obj's change on to them when a container on the way is held
-// (a rolled-back Body) and so doesn't run; PartDesign's Body counts them as users. Declared where
-// used, to keep App's headers unchanged: move it to DocumentObject.h with the next header change
-AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj)
+// (a rolled-back Body) and so doesn't run; PartDesign's Body counts them as users. @p links, if
+// given, gets the links on the way (a link in another document keeps a shape cache that only its
+// own run clears). Declared where used, to keep App's headers unchanged: move it to
+// DocumentObject.h with the next header change
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links)
 {
     std::vector<DocumentObject*> res;
     std::set<const DocumentObject*> seen {obj};
@@ -208,6 +211,9 @@ AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* 
             bool container = group && group->hasObject(levels[i]);
             if (container || isLinkType(in)) {
                 levels.push_back(in);
+                if (!container && links) {
+                    links->push_back(in);
+                }
             }
             if (!container && i > 0) {
                 auto reads = pathReads(in);
