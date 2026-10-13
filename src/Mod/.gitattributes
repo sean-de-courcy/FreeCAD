@@ -93,6 +93,9 @@ Mesh/** -text
 MeshPart/** -text
 Part/** -text
 PartDesign/** -text
+# the CI reopen gate's generations (ops#323): byte for byte on every platform, their MANIFEST
+# holds each file's SHA-256 (already so by the line above; stated for when it changes)
+PartDesign/PartDesignTests/Compat/gen*/** -text
 Plot/** -text
 Points/** -text
 ReverseEngineering/** -text

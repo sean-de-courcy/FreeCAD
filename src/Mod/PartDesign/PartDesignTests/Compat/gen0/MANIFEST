@@ -1,0 +1,65 @@
+{
+ "build": "26 3 0 49655 (Git) git://github.com/sean-de-courcy/FreeCAD.git 2026/10/12 23:40:09 infra/323-fork-release-r1 364e2214f0c29e2a50ab469992aea198b79e2b44",
+ "date": "2026-10-13 00:32 UTC",
+ "files": {
+  "DatumPlane.FCStd": "161eacc9ed201612bafc0d626a7271797d2b534bb5b3515f57f832512a4f8521",
+  "DatumPlane.oracle.json": "99efe395b612538f2f8c2edbed9806559d2faf8342a9e0d29fd325a32f4a93ed",
+  "ExternalGeometry.FCStd": "b8f449ebfa3616231c2771a30c1f79feb2983157450dac4237c993c19154ae9d",
+  "ExternalGeometry.oracle.json": "f90df76dd85f1fe6e1d328046bfabb9c8fcd338f198c03b1bcbd5cbeb70b699a",
+  "FilletChamfer.FCStd": "9ffe69163822418ae8fdcb45a38ba6efa4827ac94aacdfb798ecb5b20fa6de86",
+  "FilletChamfer.oracle.json": "49722342e08c4f9c1840dfaccd4da9b745af7e448e6c785402c0b4afa9dd54d9",
+  "GuessRecord.FCStd": "75cb09499d725ed83c366b07cf288a7b050c7509d7e8a5a49b7fe057ea9503cb",
+  "GuessRecord.oracle.json": "bb0d995be630b791b1b470d97384fd1d9f1201766a1237f74199f638d869a6a6",
+  "PadPocket.FCStd": "2d1b0384961e987869a581d8fc8787f308bd579407c55a5736cab60060a66255",
+  "PadPocket.oracle.json": "cfbac373eff64022fefd84bbd9051b3a6ef3cfe139841262ebdace39c27cfea3",
+  "Patterns.FCStd": "ccb84a5f5b8c6b67c0f0423d50df83574e40976bdf61986ddfbaec1dd5b06088",
+  "Patterns.oracle.json": "18eb142535fa569af0a131652243f927e921192efb63b878364351e42fe94008",
+  "ReorderBar.FCStd": "81cc2d542481ce6e78a2c0751e010f24e112698ef4bdcb69cd33d6c5ae794529",
+  "ReorderBar.oracle.json": "bf3047e18d0931fcdda718eb309aa6a690f591b12be3299b2b3dc13d0a4a10b5",
+  "SubShapeBinder.FCStd": "3b48baf47e8e5161de3fd84784dd4a3aa61bac546a6585510f82dfee9ad03dd7",
+  "SubShapeBinder.oracle.json": "f0dbe167a6878a96ec934ae9d72b0837f34506752d8ecb0de69acf7df0a897c1",
+  "TwoDocuments.FCStd": "ac6215228d234893821db40bf471030d4875d3c10249483eef41ba09d43a071f",
+  "TwoDocuments.oracle.json": "761e8150b70bd0fe937c03dd974a668e751831dcbc50be747fff6bd090c1f553",
+  "TwoDocumentsPart.FCStd": "1ee341c2a0252431911fb86089a350b1ee6c5c7e293a1a57b9634d5a605eb930",
+  "VarSetDriven.FCStd": "d1e37bd009e43dba1679ee7fc7597bfd27cd4b048699a56a6a11344f1e22752c",
+  "VarSetDriven.oracle.json": "1c505df80dbd2d132c5c5976164a9ed03daafcc7b061be085b5015e8f0b22ae5"
+ },
+ "forkRelease": 8,
+ "format": 1,
+ "generation": 0,
+ "models": {
+  "DatumPlane": [
+   "DatumPlane"
+  ],
+  "ExternalGeometry": [
+   "ExternalGeometry"
+  ],
+  "FilletChamfer": [
+   "FilletChamfer"
+  ],
+  "GuessRecord": [
+   "GuessRecord"
+  ],
+  "PadPocket": [
+   "PadPocket"
+  ],
+  "Patterns": [
+   "Patterns"
+  ],
+  "ReorderBar": [
+   "ReorderBar"
+  ],
+  "SubShapeBinder": [
+   "SubShapeBinder"
+  ],
+  "TwoDocuments": [
+   "TwoDocumentsPart",
+   "TwoDocuments"
+  ],
+  "VarSetDriven": [
+   "VarSetDriven"
+  ]
+ },
+ "namingRevision": 2,
+ "platform": "win32"
+}
