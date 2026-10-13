@@ -89,10 +89,13 @@
 #include <TColGeom_Array2OfBezierSurface.hxx>
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColStd_Array2OfReal.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopTools_DataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 
@@ -1587,6 +1590,82 @@ double solidVolume(const TopoDS_Shape& shape)
     return props.Mass();
 }
 
+// The history of the sweep up to the face (sweepUpToFace()), for the kept solids only: pieces in
+// the solids left out don't count, so a side face that keeps one piece keeps its name, as BRepFeat
+// named it. The far end's edges and vertices, where the faces and edges that the profile's edges
+// and vertices generate meet the up-to face, are those profile elements' projections (PRJ), as a
+// revolution by angle names its end face's and as BRepFeat named them. Generated from the side
+// faces instead, a far edge had the profile edge in its ancestry, and the solver took it for the
+// profile's own edge silently (ops#334).
+class UpToFaceSweepMapper: public Part::MapperMaker
+{
+public:
+    UpToFaceSweepMapper(
+        BRepAlgoAPI_Splitter& splitter,
+        BRepPrimAPI_MakeRevol& turn,
+        const TopoDS_Shape& profile,
+        const TopoDS_Shape& result
+    )
+        : MapperMaker(splitter)
+    {
+        for (TopAbs_ShapeEnum type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopExp::MapShapes(result, type, kept);
+        }
+        // In the profile's order (ops#19: names are written in a defined order)
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(profile, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                const TopoDS_Shape& element = elements(i);
+                TopTools_ListOfShape farEnds;
+                for (const TopoDS_Shape& side : turn.Generated(element)) {
+                    for (const TopoDS_Shape& meeting : splitter.Generated(side)) {
+                        if (meeting.ShapeType() == type && kept.Contains(meeting)
+                            && farEnd.Add(meeting)) {
+                            farEnds.Append(meeting);
+                        }
+                    }
+                }
+                if (!farEnds.IsEmpty()) {
+                    projections.Bind(turn.FirstShape(element), farEnds);
+                }
+            }
+        }
+    }
+
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        std::erase_if(_res, [this](const TopoDS_Shape& piece) { return !kept.Contains(piece); });
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::generated(s);
+        std::erase_if(_res, [this](const TopoDS_Shape& shape) {
+            return !kept.Contains(shape) || farEnd.Contains(shape);
+        });
+        return _res;
+    }
+
+    const std::vector<TopoDS_Shape>& projected(const TopoDS_Shape& s) const override
+    {
+        _res.clear();
+        if (const TopTools_ListOfShape* farEnds = projections.Seek(s)) {
+            for (const TopoDS_Shape& shape : *farEnds) {
+                _res.push_back(shape);
+            }
+        }
+        return _res;
+    }
+
+private:
+    TopTools_IndexedMapOfShape kept;
+    TopTools_MapOfShape farEnd;
+    TopTools_DataMapOfShapeListOfShape projections;
+};
+
 // The sweep of one profile face about the axis up to the up-to face, built without BRepFeat:
 // the face revolved a sliver short of a whole turn, split by the up-to face, and the pieces that
 // start at the profile. Each point of the profile goes as far as the face, the first time it
@@ -1648,12 +1727,11 @@ TopoShape sweepUpToFace(
     const TopTools_IndexedMapOfShape start = piecesOf(turn.FirstShape());
     const TopTools_IndexedMapOfShape end = piecesOf(turn.LastShape());
     faceParts = piecesOf(face);
-    named.makeElementShape(splitter, {sweep, TopoShape(face)}, Part::OpCodes::Revolve);
-    std::vector<TopoShape> kept;
-    for (const TopoShape& solid : named.getSubTopoShapes(TopAbs_SOLID)) {
+    std::vector<TopoDS_Shape> kept;
+    for (TopExp_Explorer solids(splitter.Shape(), TopAbs_SOLID); solids.More(); solids.Next()) {
         bool atStart = false;
         bool atEnd = false;
-        for (TopExp_Explorer faces(solid.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
             atStart = atStart || start.Contains(faces.Current());
             atEnd = atEnd || end.Contains(faces.Current());
         }
@@ -1665,17 +1743,29 @@ TopoShape sweepUpToFace(
             ));
         }
         if (atStart) {
-            kept.push_back(solid);
+            kept.push_back(solids.Current());
         }
     }
     if (kept.empty()) {
         throw fail();
     }
-    if (kept.size() == 1) {
-        return kept.front();
+    TopoDS_Shape result = kept.front();
+    if (kept.size() > 1) {
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& solid : kept) {
+            builder.Add(compound, solid);
+        }
+        result = compound;
     }
-    TopoShape pieces(blank);
-    return pieces.makeElementCompound(kept);
+    named.makeShapeWithElementMap(
+        result,
+        UpToFaceSweepMapper(splitter, turn, profile.getShape(), result),
+        {sweep, TopoShape(face)},
+        Part::OpCodes::Revolve
+    );
+    return named;
 }
 
 // Where points are in a shape's solids: in one of them, on one's boundary, or outside them all.
