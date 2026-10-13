@@ -615,14 +615,17 @@ class TestLargeIntegers(ExpressionUnitsBase):
     def testLargeIntegralResults(self):
         # An integral result beyond a C long is a number like any other on a Float or a Length
         varSet = self.addVarSet(
-            F=("App::PropertyFloat", 1.0), Len=("App::PropertyLength", "1 mm")
+            Num=("App::PropertyFloat", 1.0), Len=("App::PropertyLength", "1 mm")
         )
-        varSet.setExpression("F", "2^40")
+        varSet.setExpression("Num", "2^40")
         varSet.setExpression("Len", "2^40 * 1 mm")
         self.doc.recompute()
         self.assertTrue(varSet.isValid(), varSet.getStatusString())
-        self.assertEqual(varSet.F, float(2**40))
+        self.assertEqual(varSet.Num, float(2**40))
         self.assertEqual(varSet.Len.Value, float(2**40))
+        # The same through Quantity arithmetic in Python
+        self.assertEqual((FreeCAD.Units.Quantity("1 mm") * 2**40).Value, float(2**40))
+        self.assertEqual((FreeCAD.Units.Quantity(1) + 2**40).Value, float(2**40 + 1))
 
 
 class TestWhitespaceCharacters(ExpressionUnitsBase):
