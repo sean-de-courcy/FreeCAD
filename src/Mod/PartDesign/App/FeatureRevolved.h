@@ -114,10 +114,7 @@ private:
     TopoShape tryToRevolveToFace(
         const TopoShape& upToFace,
         const gp_Ax1& axis,
-        const TopoShape& base,
-        TopoShape supportface,
-        const TopoShape& sketchshape,
-        Part::RevolMode revolMode
+        const TopoShape& sketchshape
     ) const;
     TopoShape generateSingleRevolutionSide(
         RevolMethod method,
