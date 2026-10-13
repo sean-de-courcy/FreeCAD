@@ -37,6 +37,36 @@ class TestArchPanel(TestArchBase.TestArchBase):
         self.assertIsNotNone(panel, "makePanel failed to create a panel object.")
         self.assertEqual(panel.Label, "TestPanel", "Panel label is incorrect.")
 
+    def test_panelSheetOverfullFillRatio(self):
+        """Pieces whose areas add up to more than the sheet give a FillRatio of 100 (ops#319)."""
+        import Part
+        from FreeCAD import Vector
+
+        operation = "Testing the FillRatio of an overfull panel sheet"
+        self.printTestMessage(operation)
+
+        # Two 80 x 80 mm squares on a 100 x 100 mm sheet: 128 % of its area
+        pieces = []
+        for i in range(2):
+            piece = self.document.addObject("Part::Feature", f"Piece{i}")
+            piece.Shape = Part.makePolygon(
+                [
+                    Vector(-40, -40, 0),
+                    Vector(40, -40, 0),
+                    Vector(40, 40, 0),
+                    Vector(-40, 40, 0),
+                    Vector(-40, -40, 0),
+                ]
+            )
+            pieces.append(piece)
+        sheet = Arch.makePanelSheet(pieces, name="OverfullSheet")
+        sheet.Width = 100
+        sheet.Height = 100
+        self.document.recompute()
+
+        self.assertNotIn("Invalid", sheet.State, "The overfull panel sheet failed to recompute.")
+        self.assertEqual(sheet.FillRatio, 100, "FillRatio is not capped at 100.")
+
     # TODO: remove NOT_ prefix once it is understood why Arch.makePanelCut fails
     def NOT_test_makePanelCut(self):
         """Test the makePanelCut function."""

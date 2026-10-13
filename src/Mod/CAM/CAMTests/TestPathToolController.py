@@ -97,3 +97,19 @@ class TestPathToolController(PathTestBase):
         # self.assertEqual(tc0.Tool.Name, tc1.Tool.Name)
         # self.assertEqual(tc0.Tool.Label, tc1.Tool.Label)
         self.assertRoughly(tc0.Tool.Diameter, tc1.Tool.Diameter)
+
+    def test02(self):
+        """Verify large tool numbers fit, and a negative one is refused (ops#319)."""
+        t = self.createTool("T2")
+
+        # Above the old limit of 10000, and the tool bit editor's largest number
+        for toolNumber in (20000, 99999999):
+            tc = PathToolController.Create("TC%d" % toolNumber, t, toolNumber)
+            self.assertEqual(tc.ToolNumber, toolNumber)
+
+            tc1 = PathToolController.FromTemplate(tc.Proxy.templateAttrs(tc))
+            self.assertEqual(tc1.ToolNumber, toolNumber)
+
+        with self.assertRaises(ValueError):
+            tc.ToolNumber = -1
+        self.assertEqual(tc.ToolNumber, 99999999)
