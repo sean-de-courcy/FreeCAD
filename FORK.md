@@ -316,7 +316,8 @@ names it.
 | `fix/292-originals-birth` | fix | ops#292 | - | `fix/292-stale-role-links` (fork PR 284) | `4a00e641fc` (fork PR 287), 2026-10-12 | never (fork fix) |
 | `fix/316-refine-locations` | fix | ops#316 | - | `integration` `4a00e641fc` | `09569c55bf` (fork PR 290), 2026-10-12 | never (fork fix) |
 | `fix/310-partdesign-location-chains` | fix | ops#310 | - | `fix/316-refine-locations` (fork PR 290) | `746cbb6f2b` (fork PR 291), 2026-10-12 | never (fork fix) |
-| `fix/308-cross-body-traps` | fix | ops#308 | - | `integration` `e76ce293b2` | (fork PR 289) | never (fork fix) |
+| `fix/308-cross-body-traps` | fix | ops#308 | - | `integration` `e76ce293b2` | `d624c532ae` (fork PR 289), 2026-10-12 | never (fork fix) |
+| `infra/323-fork-release` | infra | ops#323 | - | `integration` `746cbb6f2b` | (fork PR 293) | never |
 
 ## Fork-only commits in carried topics
 

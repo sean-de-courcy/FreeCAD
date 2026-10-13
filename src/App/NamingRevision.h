@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "FCGlobal.h"
+
 namespace App
 {
 
@@ -19,8 +21,9 @@ class Document;
  * Defined in Document.cpp, except namingRevisionToSave() (PropertyLinks.cpp).
  */
 
-/// This build's naming revision.
-int forkNamingRevision();
+/// This build's naming revision, raised by the rehearsal test aid
+/// FREECAD_TEST_NAMING_REVISION_OFFSET (Document.cpp).
+AppExport int forkNamingRevision();
 
 /// The revision \a doc's references were last resolved under: the file's when it was opened, the
 /// one its last save wrote, or this build's for a new document.

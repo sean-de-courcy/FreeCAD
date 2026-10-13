@@ -18,12 +18,15 @@
 #include "App/Application.h"
 #include "App/Document.h"
 #include "App/FeatureTest.h"
+#include "App/ForkRelease.h"
+#include "App/NamingRevision.h"
 #include "App/MergeDocuments.h"
 #include "App/MappedName.h"
 #include "App/NameTable.h"
 #include "App/PropertyStandard.h"
 #include "App/RecomputeContinuation.h"
 #include "App/StringHasher.h"
+#include "Base/Console.h"
 #include "Base/Writer.h"
 #include <src/App/InitApplication.h>
 
@@ -319,6 +322,132 @@ TEST_F(DocumentTest, saveAndExportCarryTheEntriesOfTheSourcesNames)
     EXPECT_EQ(documentXml(withoutSource).find("<NameTable"), std::string::npos);
     file.close();
     std::remove(doc()->getFileName());
+}
+
+// ------------------------------------------------------------------------------------------------
+// The fork release stamp and newer files (ops#323). Opening saved files with edited markers is
+// tested in Python (parttests/ForkReleaseTest.py).
+
+namespace
+{
+// Counts the console errors that hold `text` while it is attached
+class ErrorCounter final: public Base::ILogger
+{
+public:
+    explicit ErrorCounter(std::string text)
+        : _text(std::move(text))
+    {
+        Base::Console().attachObserver(this);
+    }
+    ~ErrorCounter() override
+    {
+        Base::Console().detachObserver(this);
+    }
+    ErrorCounter(const ErrorCounter&) = delete;
+    ErrorCounter(ErrorCounter&&) = delete;
+    ErrorCounter& operator=(const ErrorCounter&) = delete;
+    ErrorCounter& operator=(ErrorCounter&&) = delete;
+
+    void sendLog(
+        const std::string& /*notifiername*/,
+        const std::string& msg,
+        Base::LogStyle level,
+        Base::IntendedRecipient /*recipient*/,
+        Base::ContentType /*content*/
+    ) override
+    {
+        if (level == Base::LogStyle::Error && msg.find(_text) != std::string::npos) {
+            ++count;
+        }
+    }
+    const char* name() override
+    {
+        return "ErrorCounter";
+    }
+
+    int count = 0;
+
+private:
+    std::string _text;
+};
+}  // namespace
+
+TEST_F(DocumentTest, saveAndExportWriteTheForkRelease)
+{
+    addNote(doc(), "Stamped", "Pad.Face1");
+    const std::set<std::string> release {std::to_string(App::ForkRelease)};
+    EXPECT_EQ(App::forkReleaseOf(doc()), App::ForkRelease);
+    EXPECT_FALSE(App::isNewerFormat(doc()));
+
+    std::stringstream exported;
+    doc()->exportObjects({doc()->getObject("Stamped")}, exported);
+    EXPECT_EQ(attributeWords(documentXml(exported), "ForkRelease"), release);
+
+    const std::string path = App::Application::getTempFileName();
+    ASSERT_TRUE(doc()->saveAs(path.c_str()));
+    std::ifstream file(doc()->getFileName(), std::ios::in | std::ios::binary);
+    ASSERT_TRUE(file.is_open());
+    EXPECT_EQ(attributeWords(documentXml(file), "ForkRelease"), release);
+    EXPECT_EQ(App::forkReleaseOf(doc()), App::ForkRelease);
+    file.close();
+    std::remove(doc()->getFileName());
+}
+
+TEST_F(DocumentTest, importOfANewerCopyMakesTheDocumentNewer)
+{
+    // Arrange: a copy whose ForkRelease is above this build's
+    addNote(doc(), "Copied", "Pad.Face1");
+    std::stringstream exported;
+    doc()->exportObjects({doc()->getObject("Copied")}, exported);
+    std::string xml = documentXml(exported);
+    const std::string stamp = "ForkRelease=\"" + std::to_string(App::ForkRelease) + "\"";
+    const auto at = xml.find(stamp);
+    ASSERT_NE(at, std::string::npos);
+    const std::string newer = std::to_string(App::ForkRelease + 1);
+    xml.replace(at, stamp.size(), "ForkRelease=\"" + newer + "\"");
+    std::stringstream copy;
+    {
+        Base::ZipWriter writer(copy);
+        writer.putNextEntry("Document.xml");
+        writer.Stream() << xml;
+    }
+    auto& app = App::GetApplication();
+    const std::string name = app.getUniqueDocumentName("NewerTarget");
+    App::Document* target = app.newDocument(name.c_str(), "testUser");
+
+    // Act
+    ErrorCounter errors("ForkRelease " + newer);
+    App::MergeDocuments(target).importObjects(copy);
+
+    // Assert: one console error; the document keeps its own release, and only it is newer
+    EXPECT_EQ(errors.count, 1);
+    EXPECT_TRUE(App::isNewerFormat(target));
+    EXPECT_NE(App::newerFormatMessage(target).find("ForkRelease " + newer), std::string::npos);
+    EXPECT_EQ(App::forkReleaseOf(target), App::ForkRelease);
+    EXPECT_TRUE(App::takeNewerFormatNotice(target));
+    EXPECT_FALSE(App::takeNewerFormatNotice(target)) << "the GUI warns once";
+    EXPECT_FALSE(App::isNewerFormat(doc()));
+    app.closeDocument(name.c_str());
+}
+
+TEST_F(DocumentTest, newerForkTokensAreThoseAboveTheBuilds)
+{
+    const int revision = App::forkNamingRevision();
+    auto version = [](int f, int n) {
+        return "15.70200.1.5.F" + std::to_string(f) + ".N" + std::to_string(n);
+    };
+    EXPECT_FALSE(App::hasNewerForkTokens(version(revision, 2)));
+    EXPECT_FALSE(App::hasNewerForkTokens(version(revision - 1, 2)));
+    EXPECT_FALSE(App::hasNewerForkTokens("15.70200.1.5.F" + std::to_string(revision)));
+    EXPECT_FALSE(App::hasNewerForkTokens("15.70200.1.5"));
+    EXPECT_FALSE(App::hasNewerForkTokens("15.70200.1.5.X1"));
+    EXPECT_FALSE(App::hasNewerForkTokens(""));
+    EXPECT_TRUE(App::hasNewerForkTokens(version(revision + 1, 2)));
+    EXPECT_TRUE(App::hasNewerForkTokens(version(revision, 3)));
+    EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F" + std::to_string(revision + 10)));
+    // More digits than an int holds: newer, never an overflow (PR 293 review)
+    EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F99999999999.N2"));
+    EXPECT_TRUE(App::hasNewerForkTokens("15.70200.1.5.F1.N4294967298"));
 }
 
 // ------------------------------------------------------------------------------------------------

@@ -32,6 +32,7 @@
 #include <mutex>
 #include <QApplication>
 #include <QCheckBox>
+#include <QDir>
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QOpenGLWidget>
@@ -44,6 +45,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/DocumentObjectGroup.h>
+#include <App/ForkRelease.h>
 #include <App/Transactions.h>
 #include <App/ElementNamingUtils.h>
 #include <App/NameTable.h>
@@ -1571,6 +1573,52 @@ bool Document::askIfSavingFailed(const QString& error)
     return false;
 }
 
+namespace
+{
+/// What a save does with documents opened from a newer fork release (ops#323)
+enum class NewerSave
+{
+    Save,
+    Copy,
+    Cancel
+};
+
+/** Asks before \a docs, about to be saved over their own files, overwrite a file of a newer fork
+ * release (ops#323): what this build dropped or misread in it would be lost for good. "Save a
+ * Copy" is offered with \a canCopy (the one document a Save saves). Saves without a GUI or a
+ * newer document; FreeCADCmd's save warns on its own (App::Document::save()).
+ */
+NewerSave askBeforeSavingNewer(const std::vector<App::Document*>& docs, bool canCopy)
+{
+    QStringList newer;
+    for (auto doc : docs) {
+        if (App::isNewerFormat(doc)) {
+            newer << QString::fromStdString(App::newerFormatMessage(doc));
+        }
+    }
+    if (newer.isEmpty() || !getMainWindow()) {
+        return NewerSave::Save;
+    }
+    QMessageBox box(getMainWindow());
+    box.setWindowTitle(QObject::tr("File from a Newer FreeCAD-CH Build"));
+    box.setIcon(QMessageBox::Warning);
+    box.setText(
+        newer.join(QStringLiteral("\n\n")) + QStringLiteral("\n\n")
+        + QObject::tr("Saving over it loses what this build doesn't know for good.")
+    );
+    QPushButton* copyButton =
+        canCopy ? box.addButton(QObject::tr("Save a Copy…"), QMessageBox::ActionRole) : nullptr;
+    QPushButton* saveButton = box.addButton(QObject::tr("Save Anyway"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (copyButton && box.clickedButton() == copyButton) {
+        return NewerSave::Copy;
+    }
+    return box.clickedButton() == saveButton ? NewerSave::Save : NewerSave::Cancel;
+}
+}  // namespace
+
 bool Document::warnIfOlderVersion()
 {
     // Skip warning if no GUI (headless/scripted mode)
@@ -1663,6 +1711,17 @@ bool Document::warnIfOlderVersion()
 bool Document::save()
 {
     if (d->_pcDocument->isSaved()) {
+        // A file of a newer fork release (ops#323)
+        switch (askBeforeSavingNewer({getDocument()}, true)) {
+            case NewerSave::Copy:
+                saveCopy();
+                return false;
+            case NewerSave::Cancel:
+                return false;
+            case NewerSave::Save:
+                break;
+        }
+
         // Warn if this document was created with an older FreeCAD version
         if (!warnIfOlderVersion()) {
             return false;
@@ -1717,6 +1776,18 @@ bool Document::save()
             }
 
             if (!checkCanonicalPath(dmap)) {
+                return false;
+            }
+
+            // Dependent files of a newer fork release (ops#323); this one was asked above
+            std::vector<App::Document*> dependents;
+            std::copy_if(
+                docs.begin(),
+                docs.end(),
+                std::back_inserter(dependents),
+                [this](App::Document* doc) { return doc != getDocument(); }
+            );
+            if (askBeforeSavingNewer(dependents, false) != NewerSave::Save) {
                 return false;
             }
 
@@ -1785,6 +1856,21 @@ bool Document::saveAs()
     if (!fn.isEmpty()) {
         QFileInfo fi;
         fi.setFile(fn);
+
+        // Onto its own file, App::Document::saveAs() saves: a newer file asks as a Save does
+        // (ops#323, PR 293 review)
+        const QFileInfo own(QString::fromUtf8(getDocument()->FileName.getValue()));
+        if (getDocument()->isSaved() && own.exists() && fi.exists() && fi == own) {
+            switch (askBeforeSavingNewer({getDocument()}, true)) {
+                case NewerSave::Copy:
+                    saveCopy();
+                    return false;
+                case NewerSave::Cancel:
+                    return false;
+                case NewerSave::Save:
+                    break;
+            }
+        }
 
         const char* DocName = App::GetApplication().getDocumentName(getDocument());
 
@@ -1856,6 +1942,17 @@ void Document::saveAll()
         return;
     }
 
+    // Files of a newer fork release (ops#323)
+    std::vector<App::Document*> saved;
+    for (const auto& entry : dmap) {
+        if (entry.first->isSaved()) {
+            saved.push_back(entry.first);
+        }
+    }
+    if (askBeforeSavingNewer(saved, false) != NewerSave::Save) {
+        return;
+    }
+
     for (auto doc : docs) {
         if (doc->testStatus(App::Document::PartialDoc) || doc->testStatus(App::Document::TempDoc)) {
             continue;
@@ -1905,12 +2002,30 @@ bool Document::saveCopy()
             name += QStringLiteral(".FCStd");
         }
     }
+    // A newer file's copy (ops#323: the save guard's "Save a Copy…") is offered beside it, not
+    // over it
+    if (App::isNewerFormat(getDocument()) && !name.isEmpty()) {
+        QFileInfo file(name);
+        name = file.dir().filePath(
+            QObject::tr("%1 (copy)").arg(file.completeBaseName()) + QStringLiteral(".FCStd")
+        );
+    }
     QString fn = FileDialog::getSaveFileName(
         getMainWindow(),
         QObject::tr("Save %1 Document").arg(exe),
         name,
         FileDialog::FilterList {{QObject::tr("%1 document").arg(exe), {"*.FCStd"}}}
     );
+    // App::Document::saveCopy() doesn't write over the document's own file, and says nothing
+    const QFileInfo own(QString::fromUtf8(getDocument()->FileName.getValue()));
+    if (!fn.isEmpty() && own.exists() && QFileInfo(fn) == own) {
+        QMessageBox::warning(
+            getMainWindow(),
+            QObject::tr("Save a Copy"),
+            QObject::tr("A copy can't be saved over the document's own file. Choose another name.")
+        );
+        return false;
+    }
     if (!fn.isEmpty()) {
         const char* DocName = App::GetApplication().getDocumentName(getDocument());
 

@@ -40,6 +40,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementMapOrder.h>
+#include <App/ForkRelease.h>
 #include <App/GeoFeature.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
@@ -787,14 +788,21 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
                     }
                     owner->getDocument()->addRecomputeObject(owner);
 
+                    // Names of a newer fork build make the document newer (ops#323)
+                    const bool newer = App::hasNewerForkTokens(_Ver);
+                    if (newer) {
+                        App::noteNewerFormat(owner->getDocument(), "element map " + _Ver);
+                    }
                     auto feature = freecad_cast<Part::Feature*>(owner);
                     if (owner->getDocument()->testStatus(App::Document::Importing)
                         || !onlyForkTokensDiffer(_Ver, correctVersion) || !feature
-                        || feature->getPropertyOfGeometry() != this) {
+                        || feature->getPropertyOfGeometry() != this || newer) {
                         // Pasted or merged objects (ops#103, Q7), files of another encoding,
                         // algorithm or OCCT (FreeCAD's own version changes, whose old names don't
-                        // resolve), and shapes no migration rebuilds (another kind of owner, or
-                        // not its geometry): their references resolve by name. Marked current.
+                        // resolve), shapes no migration rebuilds (another kind of owner, or not
+                        // its geometry), and names of a newer fork build, which a migration
+                        // mustn't re-derive from (ops#323): their references resolve by name.
+                        // Marked current.
                         _Ver = correctVersion;
                     }
                     else {

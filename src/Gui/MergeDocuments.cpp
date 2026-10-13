@@ -23,15 +23,19 @@
 
 #include <stack>
 
+#include <QMessageBox>
+
 
 #include <zipios++/zipinputstream.h>
 
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ForkRelease.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 #include <Gui/Application.h>
 #include <Gui/Document.h>
+#include <Gui/MainWindow.h>
 #include <Gui/ViewProvider.h>
 
 #include "MergeDocuments.h"
@@ -112,6 +116,20 @@ std::vector<App::DocumentObject*> MergeDocuments::importObjects(std::istream& in
 
     delete this->stream;
     this->stream = nullptr;
+
+    // Objects of a newer fork release (ops#323, decision 71 Q2 B): warned when they come in, not at
+    // the next open
+    if (App::takeNewerFormatNotice(appdoc) && getMainWindow()) {
+        QMessageBox::warning(
+            getMainWindow(),
+            QObject::tr("Objects from a newer FreeCAD-CH build"),
+            QString::fromStdString(App::newerFormatMessage(appdoc)) + QStringLiteral("\n\n")
+                + QObject::tr(
+                    "The pasted or merged objects come from a newer build. Saving the document "
+                    "here can lose what this build doesn't know for good."
+                )
+        );
+    }
 
     return objs;
 }
