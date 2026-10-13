@@ -50,6 +50,7 @@
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyLinks.h"
+#include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
 #include "private/DocumentP.h"
 
@@ -103,6 +104,32 @@ DocumentObject::~DocumentObject()
         obj->setInvalid();
     }
 }
+
+namespace
+{
+// FreeCAD-CH (ops#325): an input that the recompute's continuation rule holds (PartDesign: a solid
+// after its Body's roll-back bar) isn't recomputed, so @p obj reads its last result, which may be
+// out of date: say so. A group's own members and a group as input (a Body) aren't read as shapes.
+std::string heldInputWarning(const DocumentObject* obj)
+{
+    auto rule = recomputeContinuation();
+    if (!rule) {
+        return {};
+    }
+    auto group = obj->getExtensionByType<GroupExtension>(true);
+    for (auto in : obj->getOutList()) {
+        if (!in || in == obj || in->hasExtension(GroupExtension::getExtensionClassTypeId())
+            || (group && group->hasObject(in)) || !rule->holds(in)) {
+            continue;
+        }
+        return std::string("reads ") + in->Label.getValue()
+            + ", which a roll-back bar holds: it isn't recomputed, so this uses its last result, "
+              "which may be out of date. Roll its Body forward past it, or use something before "
+              "the bar";
+    }
+    return {};
+}
+}  // namespace
 
 void DocumentObject::printInvalidLinks() const
 {
@@ -175,6 +202,10 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
                 return new DocumentObjectExecReturn(outcome.fatal, this);
             }
             doc->setWarning(this, outcome.warning);
+        }
+        if (auto held = heldInputWarning(this); !held.empty()) {
+            auto prior = doc->getWarningDescription(this);
+            doc->setWarning(this, prior && *prior ? std::string(prior) + "\n" + held : held);
         }
     }
 

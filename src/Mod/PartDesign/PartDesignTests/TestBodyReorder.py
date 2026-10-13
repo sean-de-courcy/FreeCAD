@@ -1581,6 +1581,118 @@ class BodyReorderBase:
         self.assertTrue(other.holds(otherPad))
         self.assertTrue(self.body.holds(shared))
 
+    def testHoldsEndsOnACycleThroughTwoBodies(self):
+        """ops#325 round 3 (review r2 M1): B1x asks the other Body whether it holds a user, and
+        that Body may ask this one back. Two sketches after the bars of two rolled-back Bodies
+        linked to each other (a cycle Python doesn't refuse) recursed without end: a stack
+        overflow, from the tree's status pass too. A question already open counts as held."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        here = models.sketch(self.doc, "Here", models.rectangle(30, 0, 34, 4), self.body)
+        other = models.body(self.doc)
+        otherSketch = models.sketch(self.doc, "OtherSketch", models.rectangle(50, 0, 60, 10), other)
+        otherBlock = models.pad(other, otherSketch, 5, "OtherBlock")
+        topSketch = models.sketch(self.doc, "TopSketch", models.rectangle(52, 2, 54, 4), other, z=5)
+        models.pad(other, topSketch, 2, "OtherTop")
+        there = models.sketch(self.doc, "There", models.rectangle(70, 0, 74, 4), other)
+        self.recompute()
+        self.body.rollTo(block)
+        other.rollTo(otherBlock)
+        for sk, target in ((here, there), (there, here)):
+            sk.addProperty("App::PropertyLink", "Ref")
+            sk.Ref = target
+        self.assertIn(there, here.InList)
+        self.assertIn(here, there.InList)
+        self.assertTrue(self.body.holds(here))
+        self.assertTrue(other.holds(there))
+        # the control: with the other Body rolled to the end, There runs and reads Here
+        other.rollToEnd()
+        self.assertFalse(other.holds(there))
+        self.assertFalse(self.body.holds(here))
+        here.Ref = None
+        there.Ref = None
+
+    def onBossATop(self, bossA):
+        """A sketch attached to BossA's top face (z 15), as another reader would take it."""
+        top = faceWhere(bossA.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 15)))
+        self.assertIsNotNone(top)
+        return [(bossA, top)]
+
+    def attachedBoss(self, block):
+        """BossA, 4 x 4 x 5 on the block's top: its sketch's height is the block's length."""
+        sketch = models.sketch(self.doc, "BossASketch", models.rectangle(1, 1, 5, 5), self.body)
+        sketch.setExpression("Placement.Base.z", f"{block.Name}.Length")
+        return models.pad(self.body, sketch, 5, "BossA")
+
+    def assertReadsHeld(self, obj, held):
+        status = obj.getStatusString()
+        self.assertEqual("roll-back bar holds" in status, held, f"{obj.Name}: {status}")
+        if held:
+            self.assertIn("BossA", status)
+
+    def testHeldSolidReadByAnotherBodyWarns(self):
+        """ops#325 round 3 (review r2 M2): a solid after the bar isn't recomputed. Another Body's
+        sketch on its top face read its last result silently, also after the block under it grew.
+        It still reads it (the bar holds the solid), with a warning naming it; rolled to the end,
+        the solid recomputes, the sketch follows, and the warning goes."""
+        block = self.block()
+        self.recompute()
+        bossA = self.attachedBoss(block)
+        self.recompute()
+        other = models.body(self.doc)
+        onTop = models.sketch(self.doc, "OnTop", models.rectangle(2, 2, 4, 4), other)
+        onTop.AttachmentSupport = self.onBossATop(bossA)
+        onTop.MapMode = "FlatFace"
+        otherPad = models.pad(other, onTop, 2, "OtherPad")
+        self.recompute()
+        self.assertValid(bossA, onTop, otherPad)
+        self.assertReadsHeld(onTop, False)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertTrue(self.body.holds(bossA))
+        self.assertValid(onTop, otherPad)
+        self.assertReadsHeld(onTop, True)
+        block.Length = 20
+        self.recompute()
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 15, places=6)
+        self.assertReadsHeld(onTop, True)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(bossA, onTop, otherPad)
+        self.assertReadsHeld(onTop, False)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 25, places=6)
+
+    def testSketchOnAHeldSolidUsedByAnotherBodyWarns(self):
+        """ops#325 round 3 (review r2 low 3): Shared, a sketch after the bar on BossA's top face,
+        used by another Body's pad. B1x doesn't hold Shared (the pad reads it), so it recomputes,
+        but against BossA's last result: BossA is held. It says so; rolled to the end, the warning
+        goes and the pad follows the block."""
+        block = self.block()
+        self.recompute()
+        bossA = self.attachedBoss(block)
+        self.recompute()
+        shared = models.sketch(self.doc, "Shared", models.rectangle(2, 2, 4, 4), self.body)
+        shared.AttachmentSupport = self.onBossATop(bossA)
+        shared.MapMode = "FlatFace"
+        other = models.body(self.doc)
+        otherPad = models.pad(other, shared, 2, "OtherPad")
+        self.recompute()
+        self.assertValid(shared, otherPad)
+        self.assertReadsHeld(shared, False)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertFalse(self.body.holds(shared))
+        self.assertReadsHeld(shared, True)
+        block.Length = 20
+        self.recompute()
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 15, places=6)
+        self.assertReadsHeld(shared, True)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(shared, otherPad)
+        self.assertReadsHeld(shared, False)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 25, places=6)
+
     def testOtherBodyWaitsWhileRolledBack(self):
         """A binder in another body bound to this Body: rolled back and edited, the Body keeps its
         shape and the binder doesn't change; rolled to the end, it follows once (RO14)."""

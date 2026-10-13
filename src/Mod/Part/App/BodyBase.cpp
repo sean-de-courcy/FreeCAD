@@ -31,6 +31,7 @@
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/GroupExtension.h>
+#include <App/Link.h>
 #include <App/Part.h>
 
 #include "BodyBase.h"
@@ -81,9 +82,18 @@ Base::Type assemblyType()
     return type;
 }
 
-// Whether a link (an App::Link or anything else whose linked object is another) shows @p body,
-// a container holding it or one of its features: a pick through it would ignore the link's
-// placement, and a selection gate sees only the resolved object (ops#325). Any such link counts.
+// A link of any kind: an App::Link, a link array or its element, an App::LinkGroup, or anything
+// else whose linked object is another (ops#325)
+bool isLinkType(const App::DocumentObject* obj)
+{
+    return obj->getLinkedObject(false) != obj
+        || obj->hasExtension(App::LinkBaseExtension::getExtensionClassTypeId());
+}
+
+// Whether a link shows @p body, a container holding it, its Origin or one of their features: a
+// pick through it would ignore the link's placement, and a selection gate sees only the resolved
+// object (ops#325). Any link-type user counts, whatever it resolves to: a sub-link (Studio, "B.")
+// sits in the Studio's in-list and resolves to B, a LinkGroup holding B resolves to itself.
 bool isShownThroughALink(const BodyBase* body)
 {
     std::vector<const App::DocumentObject*> shown {body};
@@ -101,9 +111,18 @@ bool isShownThroughALink(const BodyBase* body)
     for (auto member : body->Group.getValues()) {
         shown.push_back(member);
     }
+    if (auto origin = freecad_cast<App::LocalCoordinateSystem*>(body->Origin.getValue())) {
+        shown.push_back(origin);
+        for (auto feature : origin->OriginFeatures.getValues()) {
+            shown.push_back(feature);
+        }
+    }
     for (auto obj : shown) {
+        if (!obj) {
+            continue;
+        }
         for (auto user : obj->getInList()) {
-            if (user && user != obj && user->getLinkedObject(false) == obj) {
+            if (user && user != obj && isLinkType(user)) {
                 return true;
             }
         }
@@ -182,8 +201,14 @@ bool BodyBase::areStudioSiblings(const BodyBase* one, const BodyBase* other)
     // Bodies placed apart don't share an origin: every reader takes the target's geometry in the
     // owner's frame, so the reference would land elsewhere, silently. Until the one-origin check
     // (session 1b), such a pick goes through the copy, which places it right (ops#325)
-    if (!App::GeoFeature::getGlobalPlacement(one)
-             .isSame(App::GeoFeature::getGlobalPlacement(other), Precision::Confusion())) {
+    try {
+        if (!App::GeoFeature::getGlobalPlacement(one)
+                 .isSame(App::GeoFeature::getGlobalPlacement(other), Precision::Confusion())) {
+            return false;
+        }
+    }
+    catch (const Base::Exception&) {
+        // A container recomputing has no global placement yet: not known to be one origin
         return false;
     }
     return !isShownThroughALink(other);
@@ -206,7 +231,7 @@ bool BodyBase::isStudioPick(
         }
     }
     for (auto obj : path) {
-        if (!obj || obj->getLinkedObject(false) != obj) {
+        if (!obj || isLinkType(obj)) {
             return false;
         }
     }

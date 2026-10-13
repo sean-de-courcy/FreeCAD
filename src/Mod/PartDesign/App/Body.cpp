@@ -24,8 +24,12 @@
 
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
+#include <set>
+#include <utility>
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
@@ -197,6 +201,22 @@ bool Body::holds(const App::DocumentObject* obj) const
     if (!isRolledBack()) {
         return false;
     }
+    // The questions open on this thread, across Bodies: B1x asks another Body, which may ask this
+    // one back. A cycle of links (possible from Python or an expression) would recurse without
+    // end; a question already open counts as held, as a cycle within one Body does (ops#325)
+    thread_local std::set<std::pair<const Body*, const App::DocumentObject*>> open;
+    const auto question = std::make_pair(this, obj);
+    if (!open.insert(question).second) {
+        return true;
+    }
+    struct Close
+    {
+        std::pair<const Body*, const App::DocumentObject*> question;
+        ~Close()
+        {
+            open.erase(question);
+        }
+    } close {question};
     const auto& features = Group.getValues();
     std::size_t firstHeld = firstHeldSolid(features, effectiveBar());
     if (firstHeld >= features.size()) {
@@ -705,8 +725,42 @@ void Body::onSettingDocument()
     Part::BodyBase::onSettingDocument();
 }
 
+namespace
+{
+// A reader of a solid the bar holds (in another Body, or a member B1x lets go) gets a warning when
+// it recomputes (DocumentObject::recompute, FreeCAD-CH ops#325): it reads the solid's last result.
+// A bar move changes what is held, so rerun the readers whose warning no longer matches
+void touchHeldSolidReaders(const Body& body)
+{
+    auto doc = body.getDocument();
+    for (auto feature : body.Group.getValues()) {
+        if (!Body::isSolidFeature(feature)) {
+            continue;
+        }
+        std::optional<bool> held;
+        for (auto reader : feature->getInList()) {
+            if (!reader || reader == &body) {
+                continue;
+            }
+            if (!held) {
+                held = body.holds(feature);
+            }
+            auto warning = doc ? doc->getWarningDescription(reader) : nullptr;
+            bool warned = warning && std::strstr(warning, "which a roll-back bar holds");
+            // A member the bar holds doesn't run (a member B1x lets go does, as a reader outside)
+            if (*held != warned && !(body.hasObject(reader) && body.holds(reader))) {
+                reader->enforceRecompute();
+            }
+        }
+    }
+}
+}  // namespace
+
 void Body::onChanged(const App::Property* prop)
 {
+    if (prop == &Tip && !isRestoring() && getDocument()) {
+        touchHeldSolidReaders(*this);
+    }
     if (prop == &Tip && !isRestoring() && getDocument() && !isRolledBack()) {
         // Tip has Output status (ops#127, R7): a bar move touches the Body only when rolling to
         // the end gives a shape the Body hasn't copied (also on undo)

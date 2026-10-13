@@ -322,6 +322,79 @@ class TestStudio(unittest.TestCase):
         self.assertFalse(PartDesign.isStudioPick(padU, padL, "Face1"))
         self.assertFalse(PartDesign.isStudioPick(padL, padU, "Face1"))
 
+    def assertLowerRefused(self, padU, padL, lower, refused=True):
+        """Upper may (refused False) or may not (True) use Lower directly, as the gates ask."""
+        self.assertEqual(PartDesign.isStudioPick(padU, padL, "Face1"), not refused)
+        self.assertEqual(PartDesign.isStudioProfile(padU, lower.getObject("LowSk")), not refused)
+        origin = PartDesign.studioOriginFeature(padU, lower.Origin.OriginFeatures[3])
+        self.assertEqual(origin is None, refused)
+
+    def testSubLinkIsRefused(self):
+        """Round 3 (review r2, silent wrong): a link to the App::Part with a subname, (Part,
+        "Lower.") or (Part, "Lower.LowerPad."), shows Lower elsewhere. It sits in the Part's
+        in-list and resolves to Lower or its pad, not to the Part, so the rule missed it: a gate
+        linked Lower's face 100 mm from the face picked. Any link-type user of what shows Lower
+        counts, whatever it resolves to."""
+        part = self.doc.addObject("App::Part", "Part")
+        lower, upper, padL, padU = self.twoBodies(part)
+        self.assertLowerRefused(padU, padL, lower, refused=False)
+        for sub in ("Lower.", "Lower.LowerPad."):
+            link = self.doc.addObject("App::Link", "SubLink")
+            link.LinkedObject = (part, sub)
+            link.Placement = App.Placement(V(100, 0, 0), App.Rotation())
+            self.doc.recompute()
+            self.assertEqual(link.getLinkedObject(False), lower if sub == "Lower." else padL)
+            self.assertLowerRefused(padU, padL, lower)
+            self.assertFalse(PartDesign.isStudioPick(padU, link, "LowerPad.Face1"))
+            self.doc.removeObject(link.Name)
+            self.doc.recompute()
+            self.assertLowerRefused(padU, padL, lower, refused=False)
+
+    def testLinkArrayIsRefused(self):
+        """Round 3: a link array of Lower, and its elements."""
+        lower, upper, padL, padU = self.twoBodies()
+        self.assertLowerRefused(padU, padL, lower, refused=False)
+        array = self.doc.addObject("App::Link", "Array")
+        array.LinkedObject = lower
+        array.ElementCount = 3
+        array.ShowElement = True
+        self.doc.recompute()
+        self.assertLowerRefused(padU, padL, lower)
+        self.assertFalse(PartDesign.isStudioPick(padU, array, "1.LowerPad.Face1"))
+
+    def testLinkGroupHoldingABodyIsRefused(self):
+        """Round 3 (review r2, p8): an App::LinkGroup holding Lower, placed at z 100, shows it
+        there. It resolves to itself and is no group of Lower's, so neither the resolved pick nor
+        the pick's path through it was refused. It is now, both ways."""
+        lower, upper, padL, padU = self.twoBodies()
+        self.assertLowerRefused(padU, padL, lower, refused=False)
+        group = self.doc.addObject("App::LinkGroup", "LinkGroup")
+        group.ElementList = [lower]
+        group.Placement = App.Placement(V(0, 0, 100), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(group.getLinkedObject(False), group)
+        self.assertLowerRefused(padU, padL, lower)
+        self.assertFalse(PartDesign.isStudioPick(padU, group, "Lower.LowerPad.Face1"))
+        group.ElementList = []
+        self.doc.removeObject(group.Name)
+        self.doc.recompute()
+        self.assertLowerRefused(padU, padL, lower, refused=False)
+
+    def testLinkToAnOriginIsRefused(self):
+        """Round 3 (review r2, p5): a link to Lower's Origin, or to one of its planes, shows
+        Lower's frame elsewhere: Lower's origin (and Lower) are no pick."""
+        lower, upper, padL, padU = self.twoBodies()
+        for target in (lower.Origin, lower.Origin.OriginFeatures[3]):
+            self.assertLowerRefused(padU, padL, lower, refused=False)
+            link = self.doc.addObject("App::Link", "OriginLink")
+            link.LinkedObject = target
+            link.Placement = App.Placement(V(0, 0, 50), App.Rotation())
+            self.doc.recompute()
+            self.assertLowerRefused(padU, padL, lower)
+            self.doc.removeObject(link.Name)
+            self.doc.recompute()
+        self.assertLowerRefused(padU, padL, lower, refused=False)
+
     def testAssemblyIsNoStudioWhateverLoadsFirst(self):
         """Review S2: the Assembly type was looked up once, at the first call. Asked before the
         Assembly module loaded, it stayed unknown, and Bodies placed directly in an Assembly
@@ -679,6 +752,25 @@ class TestStudio(unittest.TestCase):
         other = self.doc.addObject("App::Part", "Other")
         other.addObject(lower)
         self.assertTrue(outOfScope(self.doc, [holeL]))
+
+    def testALinkShownSiblingIsOutOfScope(self):
+        """Round 3 (review r2, low 5): App's scope rule follows the gates: a link into a Body that
+        a link shows elsewhere is out of scope (here a sub-link (Part, "Upper.")), and back in
+        scope once the link goes."""
+        part = self.doc.addObject("App::Part", "Part")
+        lower, upper, padL, padU = self.twoBodies(part)
+        holeSk = sketch(upper, "HoleSk", xyPlane(upper), (18, 18, 22, 22), z=15)
+        holeL = lower.newObject("PartDesign::Pocket", "HoleLower")
+        holeL.Profile = holeSk
+        holeL.Type = "ThroughAll"
+        self.assertSettled()
+        self.assertFalse(outOfScope(self.doc, [holeL]))
+        link = self.doc.addObject("App::Link", "SubLink")
+        link.LinkedObject = (part, "Upper.")
+        link.Placement = App.Placement(V(100, 0, 0), App.Rotation())
+        self.assertTrue(outOfScope(self.doc, [holeL]))
+        self.doc.removeObject(link.Name)
+        self.assertFalse(outOfScope(self.doc, [holeL]))
 
     def testMovesCarryTheirLinksAsBefore(self):
         """D-t3: what moves together with an object is unchanged. A Body moved into an App::Part
