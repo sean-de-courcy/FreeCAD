@@ -392,13 +392,23 @@ class SetupSheet:
         Path.Log.track(obj.Label, opName)
         try:
             op = _RegisteredOps[opName]
-            for prop in op.properties():
-                propName = OpPropertyName(opName, prop)
-                if hasattr(self.obj, propName):
-                    obj.setExpression(prop, None)  # clear any bound expression first
-                    setattr(obj, prop, getattr(self.obj, propName))
+            props = op.properties()
         except Exception:
             Path.Log.info("SetupSheet has no support for {}".format(opName))
+            return
+        for prop in props:
+            propName = OpPropertyName(opName, prop)
+            if hasattr(self.obj, propName):
+                # A default the operation refuses (e.g. out of its range) skips only itself
+                try:
+                    obj.setExpression(prop, None)  # clear any bound expression first
+                    setattr(obj, prop, getattr(self.obj, propName))
+                except Exception as e:
+                    Path.Log.warning(
+                        "SetupSheet default {} not applied to {}: {}".format(
+                            propName, obj.Label, e
+                        )
+                    )
 
     def onDocumentRestored(self, obj):
 
