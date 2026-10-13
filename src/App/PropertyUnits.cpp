@@ -58,6 +58,21 @@ const char* nameOf(const Property& prop)
     const char* name = prop.getName();
     return name ? name : "the property";
 }
+
+// FreeCAD-CH (ops#319): NaN and infinity were stored from Python and from expressions
+// (`=sqrt(-1)` gave a nan mm Distance, inf on a Length was cut to the largest double). No
+// quantity property takes them now.
+void checkFinite(const Property& prop, const Base::Unit& unit, double value)
+{
+    if (std::isnan(value)) {
+        throw Base::ValueError(fmt::format("{}: nan is not a number", nameOf(prop)));
+    }
+    if (std::isinf(value)) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is not a finite value", nameOf(prop), Base::Quantity(value, unit).getUserString()
+        ));
+    }
+}
 }  // namespace
 
 //**************************************************************************
@@ -94,7 +109,16 @@ Base::Quantity PropertyQuantity::createQuantityFromPy(PyObject* value)
         quant = Quantity(PyFloat_AsDouble(value), _Unit);
     }
     else if (PyLong_Check(value)) {
-        quant = Quantity(double(PyLong_AsLong(value)), _Unit);
+        // FreeCAD-CH (ops#319): PyLong_AsLong gave -1 for an int beyond a C long (2**31 on
+        // Windows) and left an OverflowError pending, so a Distance stored -1 mm.
+        double number = PyLong_AsDouble(value);
+        if (number == -1.0 && PyErr_Occurred()) {
+            PyErr_Clear();
+            throw Base::OverflowError(fmt::format("{}: {} is out of range for a float",
+                                                  nameOf(*this),
+                                                  Py::Object(value).as_string()));
+        }
+        quant = Quantity(number, _Unit);
     }
     else if (PyObject_TypeCheck(value, &(QuantityPy::Type))) {
         Base::QuantityPy* pcObject = static_cast<Base::QuantityPy*>(value);
@@ -124,6 +148,7 @@ void PropertyQuantity::setPyObject(PyObject* value)
     }
     else {
         Base::Quantity quant = createQuantityFromPy(value);
+        checkFinite(*this, _Unit, quant.getValue());
 
         if (quant.isDimensionless()) {
             PropertyFloat::setValue(quant.getValue());
@@ -160,6 +185,7 @@ void PropertyQuantity::setPathValue(const ObjectIdentifier& /*path*/, const boos
 {
     auto q = App::anyToQuantity(value);
     checkPathUnit(q);
+    checkFinite(*this, _Unit, q.getValue());
     aboutToSetValue();
     if (!q.isDimensionless() && q.getUnit() != _Unit) {
         _Unit = q.getUnit();
@@ -227,6 +253,7 @@ double PropertyQuantityConstraint::getStepSize() const
 // (`2*pi rad` on an angle limited to 360 deg) the value counts as the bound.
 double PropertyQuantityConstraint::checkedValue(double value) const
 {
+    checkFinite(*this, _Unit, value);
     if (!_ConstStruct) {
         return value;
     }

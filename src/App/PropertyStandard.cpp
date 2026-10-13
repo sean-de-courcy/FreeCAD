@@ -145,15 +145,20 @@ long integerFromAny(const Property& prop, const boost::any& value)
 
 // FreeCAD-CH (ops#319): a value outside a Float or Integer constraint (a Percent of 150) was
 // clamped silently from Python and stored unchecked from an expression. It is refused; within
-// rounding of a bound (relative 1e-9) a float counts as the bound, as for quantities.
+// rounding of a bound (relative 1e-9) a float counts as the bound, as for quantities. NaN is
+// refused (it compares false with both bounds), and so is an infinity, unless the bound itself
+// is infinite: the tolerance of a bound near the largest double overflowed, which fitted inf.
 double checkedRange(const Property& prop, double value, double lower, double upper)
 {
     const char* name = prop.getName();
+    if (std::isnan(value)) {
+        throw Base::ValueError(fmt::format("{}: nan is not a number", name ? name : "the property"));
+    }
     auto tolerance = [](double bound) {
         return 1e-9 * std::max(1.0, std::abs(bound));
     };
     if (value < lower) {
-        if (value >= lower - tolerance(lower)) {
+        if (std::isfinite(value) && value >= lower - tolerance(lower)) {
             return lower;
         }
         throw Base::ValueError(fmt::format(
@@ -161,7 +166,7 @@ double checkedRange(const Property& prop, double value, double lower, double upp
         ));
     }
     if (value > upper) {
-        if (value <= upper + tolerance(upper)) {
+        if (std::isfinite(value) && value <= upper + tolerance(upper)) {
             return upper;
         }
         throw Base::ValueError(fmt::format(
