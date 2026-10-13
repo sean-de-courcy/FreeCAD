@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 import FreeCAD
@@ -813,6 +814,67 @@ class TestAttachAcrossContainers(unittest.TestCase):
         # Read unmapped: the face's z in the document, not in PA (-40)
         self.assertIn("RESULT 10.000000000", lines, lines)
         self.assertTrue(any("is gone" in line and "Attached" in line for line in lines), lines)
+
+    # Review round 2 --------------------------------------------------------------------------
+
+    def testFramesOfACancelledCalculationAreNotCarried(self):
+        """Review round 2: the frames computed for an attachment were handed to its engine before
+        the base attachment ran. A base attachment that cancels (the hidden Base* properties, read
+        at open, with no links) left them on the engine, and a copy of it (obj.Attacher) used them
+        for links of its own: a plane read through a copy, set to a box in the document, came out
+        in the frame of the App::Part its own support is in, 50 too high."""
+        part = self.doc.addObject("App::Part", "PA")
+        part.Placement = P(V(0, 0, 50), R())
+        inside = part.newObject("Part::Box", "Inside")
+        outside = self.doc.addObject("Part::Box", "Outside")
+        outside.Placement = P(V(100, 0, 0), R())
+        plane = self.doc.addObject("Part::Plane", "Attached")
+        plane.AttachmentSupport = [(inside, "Face6")]
+        plane.MapMode = "FlatFace"
+        for kind, name in (("App::PropertyString", "BaseAttacherType"),
+                           ("App::PropertyLinkSubListHidden", "BaseAttachment"),
+                           ("App::PropertyEnumeration", "BaseMapMode"),
+                           ("App::PropertyBool", "BaseMapReversed"),
+                           ("App::PropertyFloat", "BaseMapPathParameter")):
+            plane.addProperty(kind, name, "Attachment")
+        plane.BaseAttacherType = "Attacher::AttachEngine3D"
+        plane.BaseMapMode = plane.getEnumerationsOfProperty("MapMode")
+        plane.BaseMapMode = "FlatFace"
+        self.doc.recompute()
+        doc = self.reopen(self.doc, "baseCancels")
+        engine = doc.getObject("Attached").Attacher
+        engine.References = [(doc.getObject("Outside"), "Face6")]
+        placement = engine.calculateAttachedPlacement(P())
+        # On the box's top face, read in the document (the plane is in no container)
+        self.assertLess(abs(placement.Base.z - 10), 1e-9, placement)
+        self.assertLess((axis(placement) - V(0, 0, 1)).Length, 1e-9, placement)
+
+    def testAskedBesideARecomputeOnAnotherThread(self):
+        """Review round 2: while a recompute runs on the worker thread, the GUI asks every object
+        mustExecute() from the main thread. Comparing the frames there walked in-lists, groups and
+        links the recompute was changing (a crash risk). Asked from another thread while the
+        document recomputes, the answer is now no, without the walk; the recompute's own thread
+        still compares, and the moved sketch is placed anew."""
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["BothRotated"])
+        source[0].Placement = P(V(-20, 0, 9), R(V(1, 1, 1), 40))
+        self.assertTrue(sketch.MustExecute)
+        answers = []
+
+        class Observer:
+            def slotBeforeRecomputeDocument(self, doc):
+                beside = threading.Thread(target=lambda: answers.append(sketch.MustExecute))
+                beside.start()
+                beside.join()
+                answers.append(sketch.MustExecute)
+
+        observer = Observer()
+        FreeCAD.addDocumentObserver(observer)
+        try:
+            self.doc.recompute()
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+        self.assertEqual(answers, [False, True])
+        self.assertAllOnFace(source, sketch, pad)
 
     # B-t4 ------------------------------------------------------------------------------------
 
