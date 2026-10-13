@@ -195,6 +195,39 @@ set(PartDesign_NamingGolden
     PartDesignTests/NamingGolden/TwoSidesOnePrimitive.V2i-ids.txt
 )
 
+# The CI reopen gate (FreeCAD-CH, ops#323): its scripts and the committed generations
+set(PartDesign_Compat
+    PartDesignTests/Compat/__init__.py
+    PartDesignTests/Compat/make_generation.py
+    PartDesignTests/Compat/models.py
+    PartDesignTests/Compat/TestCompatCorpus.py
+)
+
+set(PartDesign_CompatGen0
+    PartDesignTests/Compat/gen0/MANIFEST
+    PartDesignTests/Compat/gen0/DatumPlane.FCStd
+    PartDesignTests/Compat/gen0/DatumPlane.oracle.json
+    PartDesignTests/Compat/gen0/ExternalGeometry.FCStd
+    PartDesignTests/Compat/gen0/ExternalGeometry.oracle.json
+    PartDesignTests/Compat/gen0/FilletChamfer.FCStd
+    PartDesignTests/Compat/gen0/FilletChamfer.oracle.json
+    PartDesignTests/Compat/gen0/GuessRecord.FCStd
+    PartDesignTests/Compat/gen0/GuessRecord.oracle.json
+    PartDesignTests/Compat/gen0/PadPocket.FCStd
+    PartDesignTests/Compat/gen0/PadPocket.oracle.json
+    PartDesignTests/Compat/gen0/Patterns.FCStd
+    PartDesignTests/Compat/gen0/Patterns.oracle.json
+    PartDesignTests/Compat/gen0/ReorderBar.FCStd
+    PartDesignTests/Compat/gen0/ReorderBar.oracle.json
+    PartDesignTests/Compat/gen0/SubShapeBinder.FCStd
+    PartDesignTests/Compat/gen0/SubShapeBinder.oracle.json
+    PartDesignTests/Compat/gen0/TwoDocuments.FCStd
+    PartDesignTests/Compat/gen0/TwoDocuments.oracle.json
+    PartDesignTests/Compat/gen0/TwoDocumentsPart.FCStd
+    PartDesignTests/Compat/gen0/VarSetDriven.FCStd
+    PartDesignTests/Compat/gen0/VarSetDriven.oracle.json
+)
+
 set(PartDesign_GearScripts
     fcgear/__init__.py
     fcgear/fcgear.py
@@ -227,6 +260,8 @@ add_custom_target(PartDesignScripts ALL SOURCES
     ${PartDesign_TestFixtures}
     ${PartDesign_TestScenarios}
     ${PartDesign_NamingGolden}
+    ${PartDesign_Compat}
+    ${PartDesign_CompatGen0}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -240,6 +275,8 @@ fc_target_copy_resource(PartDesignScripts
     ${PartDesign_TestFixtures}
     ${PartDesign_TestScenarios}
     ${PartDesign_NamingGolden}
+    ${PartDesign_Compat}
+    ${PartDesign_CompatGen0}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -284,6 +321,20 @@ INSTALL(
         ${PartDesign_NamingGolden}
     DESTINATION
         Mod/PartDesign/PartDesignTests/NamingGolden
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_Compat}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Compat
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_CompatGen0}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Compat/gen0
        )
 
 INSTALL(

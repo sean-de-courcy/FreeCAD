@@ -12,6 +12,7 @@ if(BUILD_GUI)
 endif(BUILD_GUI)
 
 set(Part_Scripts
+    CompatRecord.py
     Init.py
     JoinFeatures.py
     MakeBottle.py
