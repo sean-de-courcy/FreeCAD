@@ -564,6 +564,79 @@ class TestAttachAcrossContainers(unittest.TestCase):
         self.assertIn("Sk2", lines[0])
         self.assertIn("1 object", lines[0])
 
+    def oldDatumFile(self, kind):
+        """oldFile() with F3's chain: a datum D2 (`kind`) in Body2 on the top of Body1's pad, Sk2
+        on D2, Pad2 on Sk2. A Part::Datum positions itself at restore before the attachment's own
+        restore step (Datum::onDocumentRestored touches AttachmentSupport)."""
+        first, second = PAIRS["Body1Moved"][0], P(V(30, 0, 7), R())
+        source = self.source(self.doc, first)
+        body = self.doc.addObject("PartDesign::Body", "Body2")
+        body.Placement = first
+        datum = body.newObject(kind, "D2")
+        datum.AttachmentSupport = [(source[1], topFace(source[1], 5))]
+        datum.MapMode = "FlatFace"
+        sketch = body.newObject("Sketcher::SketchObject", "Sk2")
+        sketch.AttachmentSupport = [(datum, "")]
+        sketch.MapMode = "FlatFace" if kind == "PartDesign::Plane" else "ObjectXY"
+        rectangle(sketch, 2, 2, 8, 8)
+        pad = body.newObject("PartDesign::Pad", "Pad2")
+        pad.Profile = sketch
+        pad.Length = 3
+        self.doc.recompute()
+        body.Placement = second
+        self.doc.purgeTouched()
+        path = os.path.join(tempfile.mkdtemp(), "oldDatum.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        return path
+
+    def testOldFileWithADatumIsQueuedForRecomputeAtOpen(self):
+        """A-t8, review round 1: a datum plane or coordinate system in Body2 on Body1's face moves
+        at open and is queued; after the recompute the Pad on its sketch stands on the face. It
+        moved unqueued, and the Pad stayed off the face after the recompute."""
+        for kind in ("PartDesign::Plane", "PartDesign::CoordinateSystem"):
+            with self.subTest(kind=kind):
+                self.doc = self.newDocument()
+                doc = FreeCAD.openDocument(self.oldDatumFile(kind))
+                self.docs.append(doc.Name)
+                datum = doc.getObject("D2")
+                self.assertIn("Touched", datum.State)
+                doc.recompute()
+                face = globalElement(doc.getObject("Pad1"), topFace(doc.getObject("Pad1"), 5))
+                self.assertOnFace(datum, face)
+                self.assertOnFace(doc.getObject("Sk2"), face)
+                pad = doc.getObject("Pad2")
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertStandsOnFace(pad, face, 3)
+                self.assertEqual([o.Name for o in doc.Objects if "Touched" in o.State], [])
+                FreeCAD.closeDocument(doc.Name)
+
+    def testOldFileWithADatumLogsIt(self):
+        """A-t8, review round 1: opening the old file with the datum logs it."""
+        path = self.oldDatumFile("PartDesign::Plane")
+        script = "import FreeCAD\nFreeCAD.openDocument(%r)\n" % path
+        lines = [line for line in runChild(os.path.dirname(path), script)
+                 if "attached across containers" in line]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("D2", lines[0])
+        self.assertIn("moved at open", lines[0])
+
+    def testCopiedInIsNotLoggedAsOpened(self):
+        """Review round 1: Body2 copied into another document with what it depends on (Pad1, but
+        not Body1, which lands in the document there, so Sk2 moves) is logged as moved when
+        copied in, not at open."""
+        path = self.oldFile()
+        script = ("import FreeCAD\n"
+                  "doc = FreeCAD.openDocument(%r)\n"
+                  "copy = FreeCAD.newDocument('Copy')\n"
+                  "copy.copyObject(doc.getObject('Body2'), True)\n" % path)
+        lines = [line for line in runChild(os.path.dirname(path), script)
+                 if "attached across containers" in line]
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("moved at open", lines[0])
+        self.assertIn("moved when copied in", lines[1])
+        self.assertIn("Sk2", lines[1])
+
     def testSameBodyFileSavedStaleReopensUntouched(self):
         """A-t8: a same-Body sketch saved off its face (the pad changed without a recompute)
         reopens untouched, as before: it moves at open, as it always did."""
@@ -683,6 +756,64 @@ class TestAttachAcrossContainers(unittest.TestCase):
                          tuple(before.Base) + tuple(before.Rotation.Q))
         self.assertAllOnFace(source, sketch, pad)
 
+    def partSketchOnABox(self):
+        """A Part::Box Cube (10 x 10 x 10) and a sketch Sk on its top face, both in the document,
+        attached with nothing in between (the frames are the identity)."""
+        box = self.doc.addObject("Part::Box", "Cube")
+        self.doc.recompute()
+        sketch = self.doc.addObject("Sketcher::SketchObject", "Sk")
+        sketch.AttachmentSupport = [(box, "Face6")]
+        sketch.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertOnFace(sketch, globalElement(box, "Face6"))
+        return box, sketch
+
+    def testSupportMovedIntoAContainer(self):
+        """Review round 1: the box moved into an App::Part placed elsewhere after attaching; the
+        sketch, in the document, follows the face on the next recompute. Nothing re-ran it: its
+        frames were kept only for links across containers, and this one wasn't."""
+        box, sketch = self.partSketchOnABox()
+        part = self.doc.addObject("App::Part", "PA")
+        part.Placement = P(V(100, 50, 0), R(V(1, 0, 0), 30))
+        part.addObject(box)
+        self.doc.recompute()
+        self.assertOnFace(sketch, globalElement(box, "Face6"))
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+
+    def testOwnerMovedIntoAContainer(self):
+        """Review round 1: the sketch moved into an App::Part placed elsewhere after attaching;
+        it stays on the box's face."""
+        box, sketch = self.partSketchOnABox()
+        part = self.doc.addObject("App::Part", "PB")
+        part.Placement = P(V(30, 0, 7), R(V(0, 1, 0), 45))
+        part.addObject(sketch)
+        self.doc.recompute()
+        self.assertOnFace(sketch, globalElement(box, "Face6"))
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+
+    def testEngineWithAGoneOwnerWarns(self):
+        """Review round 1: a Python AttachEngine read from a feature that is then deleted can't map
+        the links into the feature's container any more: it reads them as before, and says so."""
+        script = ("import FreeCAD, Part\n"
+                "doc = FreeCAD.newDocument('Gone')\n"
+                "part = doc.addObject('App::Part', 'PA')\n"
+                "part.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 50), FreeCAD.Rotation())\n"
+                "box = doc.addObject('Part::Box', 'Cube')\n"
+                "doc.recompute()\n"
+                "plane = part.newObject('Part::Plane', 'Attached')\n"
+                "plane.AttachmentSupport = [(box, 'Face6')]\n"
+                "plane.MapMode = 'FlatFace'\n"
+                "doc.recompute()\n"
+                "engine = Part.AttachEngine('Attacher::AttachEngine3D')\n"
+                "engine.readParametersFromFeature(plane)\n"
+                "doc.removeObject('Attached')\n"
+                "z = engine.calculateAttachedPlacement(FreeCAD.Placement()).Base.z\n"
+                "print('RESULT %.9f' % z)\n")
+        lines = runChild(tempfile.mkdtemp(), script)
+        # Read unmapped: the face's z in the document, not in PA (-40)
+        self.assertIn("RESULT 10.000000000", lines, lines)
+        self.assertTrue(any("is gone" in line and "Attached" in line for line in lines), lines)
+
     # B-t4 ------------------------------------------------------------------------------------
 
     def testMovedSavedAndReopened(self):
@@ -695,6 +826,16 @@ class TestAttachAcrossContainers(unittest.TestCase):
         doc = self.reopen(self.doc, "moved")
         self.assertEqual([o.Name for o in doc.Objects if "Touched" in o.State], [])
         self.assertTrue(doc.getObject("Sk2").getGlobalPlacement().isSame(frame, 1e-9))
+
+
+def runChild(folder, script):
+    """The output lines of `script` run by FreeCADCmd in `folder`."""
+    path = os.path.join(folder, "child.py")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    run = subprocess.run([freecadCmd(), path], cwd=folder, timeout=600, check=False,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return [line.strip() for line in run.stdout.decode("utf-8", "replace").splitlines()]
 
 
 def freecadCmd():
