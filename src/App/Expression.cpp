@@ -443,6 +443,16 @@ static Py::Object _pyObjectFromAny(const App::any &value, const Expression *e) {
     _EXPR_THROW("Unknown type", e);
 }
 
+// A Python int as a double; one beyond a double's range is an error, with nothing left pending.
+static double pyLongToDouble(PyObject *value) {
+    double d = PyLong_AsDouble(value);
+    if (d == -1.0 && PyErr_Occurred()) {
+        PyErr_Clear();
+        FC_THROWM(Base::OverflowError, "Integer too large for a number: " << Py::Object(value).as_string());
+    }
+    return d;
+}
+
 namespace App {
 Py::Object pyObjectFromAny(const App::any &value) {
     return _pyObjectFromAny(value,nullptr);
@@ -466,8 +476,16 @@ App::any pyObjectToAny(Py::Object value, bool check) {
     }
     if (PyFloat_Check(pyvalue))
         return App::any(PyFloat_AsDouble(pyvalue));
-    if (PyLong_Check(pyvalue))
-        return App::any(PyLong_AsLong(pyvalue));
+    if (PyLong_Check(pyvalue)) {
+        // FreeCAD-CH (ops#319): an int beyond a C long (32 bits on Windows, e.g. `2^40`) was
+        // -1 with an OverflowError left pending; it is kept as a double instead.
+        int overflow = 0;
+        long l = PyLong_AsLongAndOverflow(pyvalue, &overflow);
+        if (overflow == 0 && !(l == -1 && PyErr_Occurred()))
+            return App::any(l);
+        PyErr_Clear();
+        return App::any(pyLongToDouble(pyvalue));
+    }
     else if (PyUnicode_Check(pyvalue)) {
         const char* utf8value = PyUnicode_AsUTF8(pyvalue);
         if (!utf8value) {
@@ -486,7 +504,7 @@ bool pyToQuantity(Quantity &q, const Py::Object &pyobj) {
     else if (PyFloat_Check(*pyobj))
         q = Quantity(PyFloat_AsDouble(*pyobj));
     else if (PyLong_Check(*pyobj))
-        q = Quantity(PyLong_AsLong(*pyobj));
+        q = Quantity(pyLongToDouble(*pyobj));
     else
         return false;
     return true;

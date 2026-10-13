@@ -612,6 +612,18 @@ class TestLargeIntegers(ExpressionUnitsBase):
             self.assertInvalid(varSet, "out of range")
             self.assertEqual(varSet.Count, 3)
 
+    def testLargeIntegralResults(self):
+        # An integral result beyond a C long is a number like any other on a Float or a Length
+        varSet = self.addVarSet(
+            F=("App::PropertyFloat", 1.0), Len=("App::PropertyLength", "1 mm")
+        )
+        varSet.setExpression("F", "2^40")
+        varSet.setExpression("Len", "2^40 * 1 mm")
+        self.doc.recompute()
+        self.assertTrue(varSet.isValid(), varSet.getStatusString())
+        self.assertEqual(varSet.F, float(2**40))
+        self.assertEqual(varSet.Len.Value, float(2**40))
+
 
 class TestWhitespaceCharacters(ExpressionUnitsBase):
     """ops#320 round 2: characters without a rule that count as whitespace."""
