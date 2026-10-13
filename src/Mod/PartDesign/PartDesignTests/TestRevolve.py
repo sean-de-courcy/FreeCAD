@@ -1588,6 +1588,75 @@ class TestRevolve(unittest.TestCase):
                     self.assertFalse(revolution.isValid())
                     self.assertIn("cuts through the profile", revolution.getStatusString())
 
+    def testRevolutionUpToFaceAlongBulgingProfileEdge(self):
+        """The profile x in [3, 5], z in [0, 2] on XZ about Z, whose edge on x = 3 is a B-spline
+        that bulges in to x = 2.5 over a short range of z and leaves the line tangentially; the
+        up-to face the plane x + y = 3, whose trace in the profile's plane is the line x = 3:
+        along the edge, and inside the profile where the edge bulges. Every point of the profile
+        meets the plane as it turns. The face cuts through the profile, and the Revolution or
+        Groove fails with that error. Before (ops#293 round 1), with the bulge over z in
+        [0.65, 0.85] the section with the profile was one line along the whole edge, and neither
+        its three points (z = 0.5, 1, 1.5) nor the middle of its common with the profile were
+        inside: the feature was valid. With the bulge over z in [1.15, 1.35] the section was
+        empty, and the check passed it too. Without the bulge the feature is valid: the face then
+        only touches the profile."""
+        normal = FreeCAD.Vector(1, 1, 0).normalize()
+        along = FreeCAD.Vector(-1, 1, 0).normalize()
+        up = FreeCAD.Vector(0, 0, 1)
+        corners = [
+            FreeCAD.Vector(3, 0, 0) + along * (12 * a) + up * (12 * b)
+            for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+        self.assertAlmostEqual(corners[0].dot(normal), 3 / math.sqrt(2))
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(Part.makePolygon(corners + corners[:1]))
+        for bulge in ((0.65, 0.85), (1.15, 1.35), None):
+            for kind in ("Revolution", "Groove"):
+                for reversed_ in (False, True):
+                    with self.subTest(bulge=bulge, kind=kind, reversed=reversed_):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        if kind == "Groove":
+                            block = body.newObject("PartDesign::AdditiveBox", "Block")
+                            block.Length = 16
+                            block.Width = 16
+                            block.Height = 4
+                            block.Placement = FreeCAD.Placement(
+                                FreeCAD.Vector(-8, -8, -1), FreeCAD.Rotation()
+                            )
+                        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+                        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+                        sketch.AttachmentSupport = (xz, [""])
+                        sketch.MapMode = "FlatFace"
+                        # Poles on x = 3 every 0.05 in z, those in the bulge at x = 2.5: the cubic
+                        # B-spline is on the line wherever only poles on it are active.
+                        poles = []
+                        for i in range(41):
+                            z = i / 20
+                            inBulge = bulge is not None and bulge[0] <= z <= bulge[1]
+                            poles.append(FreeCAD.Vector(2.5 if inBulge else 3, z, 0))
+                        edge = Part.BSplineCurve()
+                        edge.buildFromPoles(poles, False, 3)
+                        sketch.addGeometry(edge, False)
+                        for start, end in (((3, 2), (5, 2)), ((5, 2), (5, 0)), ((5, 0), (3, 0))):
+                            sketch.addGeometry(
+                                Part.LineSegment(
+                                    FreeCAD.Vector(*start, 0), FreeCAD.Vector(*end, 0)
+                                ),
+                                False,
+                            )
+                        revolution = body.newObject("PartDesign::" + kind, kind)
+                        revolution.Profile = sketch
+                        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                        revolution.Type = "UpToFace"
+                        revolution.UpToFace = (wall, ["Face1"])
+                        revolution.Reversed = reversed_
+                        self.Doc.recompute()
+                        if bulge is None:
+                            self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                        else:
+                            self.assertFalse(revolution.isValid())
+                            self.assertIn("cuts through the profile", revolution.getStatusString())
+
     def boxUpTo(self, body, xs, ys, zs, faceX):
         """A box x in `xs`, y in `ys`, z in `zs`, and its face on the plane x = `faceX`."""
         block = body.newObject("PartDesign::AdditiveBox", "Block")

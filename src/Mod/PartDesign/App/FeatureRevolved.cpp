@@ -66,6 +66,7 @@
 #include <GeomAdaptor_Surface.hxx>
 #include <GProp_GProps.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
+#include <GCPnts_UniformAbscissa.hxx>
 #include <gp.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -350,34 +351,69 @@ double profileCheckTolerance(const TopoDS_Shape& profile, const TopoDS_Face& fac
 // then revolved nothing, with no error, on one side, two sides and Symmetric (ops#289). A face
 // that only touches the profile's boundary doesn't cut through it. A section that fails throws:
 // the revolution mustn't go on unchecked (the PR 273 review's M1).
+// The face is sectioned with the profile's plane, not with the profile: where the face runs along
+// a profile edge that leaves it tangentially, the section with the profile came back as one edge
+// along the whole boundary, or empty (ops#293 round 1). The section's common with the profile is
+// then classified at points every size / 1024 along it, the resolution of the certificate
+// (tryToRevolveToFace): not exactly. A stretch inside the profile shorter than that can slip
+// through. Three points per section edge, or one per piece of the common, missed a section that
+// runs along the boundary and inside it where the edge bulges out.
 bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, double tolerance)
 {
-    TopoDS_Shape crossing;
-    try {
-        BRepAlgoAPI_Section section(profile.getShape(), face);
-        if (!section.IsDone()) {
-            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Could not check whether the up-to face cuts through the profile"
-            ));
-        }
-        crossing = section.Shape();
-    }
-    catch (const Standard_Failure&) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+    auto checkFailed = []() {
+        return Base::RuntimeError(QT_TRANSLATE_NOOP(
             "Exception",
             "Could not check whether the up-to face cuts through the profile"
         ));
+    };
+    const Base::BoundBox3d box = profile.getBoundBox();
+    const double size = box.CalcDiagonalLength();
+    TopoDS_Shape inside;
+    try {
+        TopoDS_Shape carrier = profile.getShape();
+        gp_Pln plane;
+        if (profile.findPlane(plane)) {
+            // A face on the profile's plane that holds the profile with a margin.
+            const gp_Pnt center(box.GetCenter().x, box.GetCenter().y, box.GetCenter().z);
+            Standard_Real u = 0.0;
+            Standard_Real v = 0.0;
+            ElSLib::Parameters(plane, center, u, v);
+            const double reach = size + 1.0;
+            carrier = BRepBuilderAPI_MakeFace(plane, u - reach, u + reach, v - reach, v + reach)
+                          .Face();
+        }
+        BRepAlgoAPI_Section section(carrier, face);
+        if (!section.IsDone()) {
+            throw checkFailed();
+        }
+        if (!TopExp_Explorer(section.Shape(), TopAbs_EDGE).More()) {
+            return false;
+        }
+        BRepAlgoAPI_Common common(section.Shape(), profile.getShape());
+        if (!common.IsDone()) {
+            throw checkFailed();
+        }
+        inside = common.Shape();
     }
-    for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
-        const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
-        for (TopExp_Explorer edges(crossing, TopAbs_EDGE); edges.More(); edges.Next()) {
-            BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
-            for (double fraction : {0.25, 0.5, 0.75}) {
-                const gp_Pnt point = curve.Value(
-                    curve.FirstParameter()
-                    + fraction * (curve.LastParameter() - curve.FirstParameter())
-                );
+    catch (const Standard_Failure&) {
+        throw checkFailed();
+    }
+    const double step = std::max(size / 1024.0, 2.0 * tolerance);
+    for (TopExp_Explorer edges(inside, TopAbs_EDGE); edges.More(); edges.Next()) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const double length = GCPnts_AbscissaPoint::Length(curve);
+        const int count = std::max(3, static_cast<int>(std::ceil(length / step)) + 1);
+        GCPnts_UniformAbscissa points(curve, count, first, last);
+        for (int i = 1; i <= count; ++i) {
+            const double parameter = points.IsDone()
+                ? points.Parameter(i)
+                : first + (last - first) * (i - 1) / (count - 1);
+            const gp_Pnt point = curve.Value(parameter);
+            for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More();
+                 faces.Next()) {
+                const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
                 BRepClass_FaceClassifier classifier(profileFace, point, tolerance);
                 if (classifier.State() == TopAbs_IN) {
                     return true;
