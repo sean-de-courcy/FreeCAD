@@ -259,17 +259,19 @@ class _Step:
         lines, drifts = [], []
         for stem, doc in docs.items():
 
-            def only(record):
+            def only(record, touched=None):
                 objects = {}
                 for name in held:
                     entry = dict(record["objects"][name])
-                    entry.pop("touched", None)
+                    if touched is not None:
+                        entry["touched"] = touched
                     objects[name] = entry
                 return {"objects": objects}
 
+            # recomputed by the step: no longer Touched (a step that recomputes nothing is red)
             actual = only(CompatRecord.record(doc, names=names))
             found, drift = CompatRecord.compare(
-                only(self.saved[stem]), actual, "recompute", names=names
+                only(self.saved[stem], touched=False), actual, "recompute", names=names
             )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
@@ -543,6 +545,17 @@ class TestCompatCorpus(unittest.TestCase):
             self.assertEqual(
                 set(info["files"]), ofModels, f"{gen}: listed files and its models' files differ"
             )
+        # A model not yet in any generation is pinned by the next one (a release's partial
+        # generation, 3.5), so it isn't a failure: said, so a model dropped from every
+        # generation shows (PR C's merge guard refuses that).
+        from PartDesignTests.Compat import models
+
+        pinned = set()
+        for folder in gens.values():
+            if os.path.isfile(os.path.join(folder, "MANIFEST")):
+                pinned |= set(manifest(folder)["models"])
+        for model in sorted(set(models.MODELS) - pinned):
+            print(f"COMPAT-UNPINNED {model}: in models.py, in no generation yet")
 
     def testConsoleSegments(self):
         """The child's log is split at its markers, and a lost reference's line is found in its

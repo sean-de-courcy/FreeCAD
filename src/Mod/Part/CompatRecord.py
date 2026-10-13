@@ -241,13 +241,15 @@ OPAQUE_ALLOWED = set()
 
 
 def opaqueValues(rec):
-    """ "object.property" of each value recorded by its type alone ({"py": <type>}) and not in
-    OPAQUE_ALLOWED."""
+    """ "object.property" of each value recorded by its type alone ({"py": <type>}) or not read
+    at all ({"error": <exception>}), and not in OPAQUE_ALLOWED."""
     found = []
 
     def opaque(value):
         if isinstance(value, dict):
-            return set(value) == {"py"} or any(opaque(v) for v in value.values())
+            if set(value) in ({"py"}, {"error"}):  # no plain form, or unreadable
+                return True
+            return any(opaque(v) for v in value.values())
         if isinstance(value, list):
             return any(opaque(v) for v in value)
         return False
