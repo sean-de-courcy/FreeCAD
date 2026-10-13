@@ -103,6 +103,25 @@ double floatFromAny(const Property& prop, const boost::any& value)
     throw bad_cast();
 }
 
+// A rounded expression result that doesn't fit a long (`2^40`, or not finite) was cast
+// unchecked, which stored an unrelated number.
+long roundedLong(const Property& prop, double value)
+{
+    double rounded = std::round(value);  // boost's round throws on NaN and infinity
+    // The upper limit as a double is 2^63 or 2^31 exactly, one above the largest long
+    if (!std::isfinite(rounded)
+        || rounded < static_cast<double>(std::numeric_limits<long>::lowest())
+        || rounded >= -static_cast<double>(std::numeric_limits<long>::lowest())) {
+        const char* name = prop.getName();
+        throw Base::OverflowError(fmt::format("{}: {} is out of range for an integer ({} to {})",
+                                              name ? name : "the property",
+                                              value,
+                                              std::numeric_limits<long>::lowest(),
+                                              std::numeric_limits<long>::max()));
+    }
+    return static_cast<long>(rounded);
+}
+
 // The number an expression result gives an Integer: a double is rounded (`5/2` gives 3).
 long integerFromAny(const Property& prop, const boost::any& value)
 {
@@ -113,15 +132,13 @@ long integerFromAny(const Property& prop, const boost::any& value)
         return boost::any_cast<int>(value);
     }
     if (value.type() == typeid(double)) {
-        return static_cast<long>(boost::math::round(boost::any_cast<double>(value)));
+        return roundedLong(prop, boost::any_cast<double>(value));
     }
     if (value.type() == typeid(float)) {
-        return static_cast<long>(boost::math::round(boost::any_cast<float>(value)));
+        return roundedLong(prop, boost::any_cast<float>(value));
     }
     if (value.type() == typeid(Quantity)) {
-        return static_cast<long>(
-            boost::math::round(unitlessValue(prop, boost::any_cast<Quantity>(value)))
-        );
+        return roundedLong(prop, unitlessValue(prop, boost::any_cast<Quantity>(value)));
     }
     throw bad_cast();
 }
@@ -168,6 +185,45 @@ long checkedRange(const Property& prop, long value, long lower, long upper)
         ));
     }
     return value;
+}
+
+// FreeCAD-CH (ops#319): a Python int that doesn't fit the property. PyLong_AsLong returns -1
+// for it (a C long is 32 bits on Windows) and leaves an OverflowError pending, so 2**31 was
+// stored as -1, or refused as "-1 is below the minimum".
+[[noreturn]] void throwIntOverflow(const Property& prop, PyObject* value, const char* range)
+{
+    PyErr_Clear();
+    const char* name = prop.getName();
+    throw Base::OverflowError(fmt::format("{}: {} is out of range for {}",
+                                          name ? name : "the property",
+                                          Py::Object(value).as_string(),
+                                          range));
+}
+
+long checkedLong(const Property& prop, PyObject* value)
+{
+    int overflow = 0;
+    long result = PyLong_AsLongAndOverflow(value, &overflow);
+    if (overflow != 0 || (result == -1 && PyErr_Occurred())) {
+        throwIntOverflow(
+            prop,
+            value,
+            fmt::format("an integer ({} to {})",
+                        std::numeric_limits<long>::lowest(),
+                        std::numeric_limits<long>::max())
+                .c_str()
+        );
+    }
+    return result;
+}
+
+double checkedDouble(const Property& prop, PyObject* value)
+{
+    double result = PyLong_AsDouble(value);
+    if (result == -1.0 && PyErr_Occurred()) {
+        throwIntOverflow(prop, value, "a float");
+    }
+    return result;
 }
 
 // FreeCAD-CH (ops#319): from Python, only a document object's value is refused. A view
@@ -229,8 +285,9 @@ PyObject* PropertyInteger::getPyObject()
 void PropertyInteger::setPyObject(PyObject* value)
 {
     if (PyLong_Check(value)) {
+        long temp = checkedLong(*this, value);
         aboutToSetValue();
-        _lValue = PyLong_AsLong(value);
+        _lValue = temp;
         hasSetValue();
     }
     else {
@@ -806,7 +863,7 @@ long PropertyIntegerConstraint::getStepSize() const
 void PropertyIntegerConstraint::setPyObject(PyObject* value)
 {
     if (PyLong_Check(value)) {
-        long temp = PyLong_AsLong(value);
+        long temp = checkedLong(*this, value);
         if (_ConstStruct) {
             temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
@@ -1215,8 +1272,9 @@ void PropertyFloat::setPyObject(PyObject* value)
         hasSetValue();
     }
     else if (PyLong_Check(value)) {
+        double temp = checkedDouble(*this, value);
         aboutToSetValue();
-        _dValue = PyLong_AsLong(value);
+        _dValue = temp;
         hasSetValue();
     }
     else {
@@ -1337,7 +1395,7 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         hasSetValue();
     }
     else if (PyLong_Check(value)) {
-        double temp = static_cast<double>(PyLong_AsLong(value));
+        double temp = checkedDouble(*this, value);
         if (_ConstStruct) {
             temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
