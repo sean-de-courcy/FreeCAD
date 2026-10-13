@@ -97,9 +97,15 @@ public:
     static bool studioOf(const BodyBase* body, App::Part*& studio);
 
     /** True when @p owner may link @p target directly, with no binder or copy: both are in one
-     * Body, or in two Bodies of one studio (ops#325)
+     * Body, or @p target is in a studio sibling of @p owner's Body (areStudioSiblings()). Another
+     * Body itself is refused: a link to it would depend on all of it
      */
     static bool isInOneStudio(const App::DocumentObject* owner, const App::DocumentObject* target);
+
+    /** Two Bodies of one studio (ops#325) placed alike (one origin), @p other shown by no link
+     * (neither it, a container holding it, nor one of its features)
+     */
+    static bool areStudioSiblings(const BodyBase* one, const BodyBase* other);
 
     /** isInOneStudio() for a pick: @p subname is the path from @p topParent to the picked object.
      * A path through an App::Link is refused: the reference would ignore the Link's placement.

@@ -72,9 +72,18 @@ public:
     }
 
 private:
+    // A deleted object, or one no longer in a document, raises ReferenceError
     static App::DocumentObject* objectArg(PyObject* obj)
     {
-        return static_cast<App::DocumentObjectPy*>(obj)->getDocumentObjectPtr();
+        auto pyObj = static_cast<App::DocumentObjectPy*>(obj);
+        // PyObjectBase's isValid(): DocumentObjectPy hides it with the Python method
+        App::DocumentObject* object =
+            pyObj->Base::PyObjectBase::isValid() ? pyObj->getDocumentObjectPtr() : nullptr;
+        if (!object || !object->isAttachedToDocument() || !object->getDocument()) {
+            PyErr_SetString(PyExc_ReferenceError, "The object is deleted or not in a document");
+            throw Py::Exception();
+        }
+        return object;
     }
 
     // FreeCAD-CH (ops#325): the studio predicates, for the tests and for scripts

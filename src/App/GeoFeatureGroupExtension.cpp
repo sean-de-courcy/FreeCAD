@@ -31,6 +31,7 @@
 #include "Link.h"
 #include "Origin.h"
 #include "Datums.h"
+#include "GeoFeature.h"
 #include "OriginGroupExtension.h"
 #include "Part.h"
 
@@ -40,22 +41,41 @@ using namespace App;
 namespace
 {
 // FreeCAD-CH (ops#325, B+): two Bodies of one studio, the App::Part holding them (not an
-// Assembly) or the document's top level, share one origin, so a Local link between them is in
-// scope. Part::BodyBase::studioOf() is the same rule, for the pick gates; App doesn't link Part
-// or Assembly, so the types are looked up by name.
+// Assembly) or the document's top level, placed alike, share one origin, so a Local link between
+// them is in scope. Part::BodyBase::isInOneStudio() is the same rule, for the pick gates; App
+// doesn't link Part or Assembly, so the types are looked up by name, and not kept while bad: the
+// modules can load after the first call.
+Base::Type typeNamed(Base::Type& type, const char* name)
+{
+    if (type.isBad()) {
+        type = Base::Type::fromName(name);
+    }
+    return type;
+}
+
 bool isStudioSibling(const DocumentObject* group, const DocumentObject* other)
 {
-    static const Base::Type bodyType = Base::Type::fromName("Part::BodyBase");
-    static const Base::Type assemblyType = Base::Type::fromName("Assembly::AssemblyObject");
+    static Base::Type body = Base::Type::BadType;
+    static Base::Type assembly = Base::Type::BadType;
+    const Base::Type bodyType = typeNamed(body, "Part::BodyBase");
+    const Base::Type assemblyType = typeNamed(assembly, "Assembly::AssemblyObject");
     if (!group || !other || bodyType.isBad() || !group->isDerivedFrom(bodyType)
-        || !other->isDerivedFrom(bodyType)) {
+        || !other->isDerivedFrom(bodyType) || !group->getDocument()
+        || group->getDocument() != other->getDocument()) {
         return false;
     }
     auto studio = App::Part::getPartOfObject(group, /*recursive=*/true);
     if (studio && !assemblyType.isBad() && studio->isDerivedFrom(assemblyType)) {
         return false;
     }
-    return studio == App::Part::getPartOfObject(other, /*recursive=*/true);
+    if (studio != App::Part::getPartOfObject(other, /*recursive=*/true)) {
+        return false;
+    }
+    // placed apart, they don't share an origin (Precision::Confusion(); App doesn't link OCCT)
+    return GeoFeature::getGlobalPlacement(group).isSame(
+        GeoFeature::getGlobalPlacement(other),
+        1e-7
+    );
 }
 }  // namespace
 

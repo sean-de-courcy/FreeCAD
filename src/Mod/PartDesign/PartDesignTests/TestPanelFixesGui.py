@@ -1602,7 +1602,9 @@ class TestPanelFixesGui(unittest.TestCase):
     def otherBody(self):
         """The copy tests' other body, in its own App::Part: another studio than a body at the
         document's top level, so a pick in it still asks for a copy (ops#325). Two bodies at the
-        top level are one studio, and a pick links directly."""
+        top level are one studio, and a pick links directly, unless they are placed differently
+        (no shared origin): the placed tests keep the other body at the top level, beside this
+        one, where the copy places the pick right."""
         part = self.doc.addObject("App::Part", "OtherPart")
         other = models.body(self.doc)
         part.addObject(other)
@@ -1702,6 +1704,64 @@ class TestPanelFixesGui(unittest.TestCase):
         normal = sketch.getGlobalPlacement().Rotation.multVec(Z)
         self.assertAlmostEqual(abs(normal.z), 1, places=6)
         self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 10, places=6)
+
+    def testNewSketchOnAWholeSiblingBodyUsesItsTip(self):
+        """ops#325 round 2 (Sonnet M3): New Sketch on the top face of a sibling body picked whole
+        (the body shows its Tip's shape). A support on the body would depend on all of it, its
+        features that use this body included: the sketch is attached to its Tip's face, as for
+        the active body, with no dialog. Model: a 10 mm box; the top face is the plane z = 10."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        self.doc.recompute()
+        self.assertIs(other.Tip, box)
+        top = self.boxElement(box, "Face", lambda p: abs(p.z - 10) < 1e-6)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.runNewSketchOnCopiedFace(other, top)
+        self.assertTrue(
+            waitFor(lambda: guiDoc.getInEdit() is not None, 10.0), f"no sketch in edit; {self.modals}"
+        )
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        guiDoc.resetEdit()
+        pump(0.3)
+        [sketch] = [o for o in self.body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(sketch.AttachmentSupport, [(box, (top,))])
+        self.doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual(sketch.getGlobalPlacement().Base.z, 10, places=6)
+
+    def testPipeOnASiblingEdgeInABodyWithoutSolid(self):
+        """ops#325 round 2 (Sonnet M4): Additive Pipe with this body's square selected, then a
+        vertical edge of a box in a sibling body as the spine, in a body with no solid yet. The
+        first-feature rule is for the profile alone: the spine was refused, with a message about
+        a face. The pipe is made with the box's edge as its spine. Model: a 10 mm box; the edge
+        x = 10, y = 0 along Z; the square 2 x 2 around it at z = 0."""
+        other = models.body(self.doc)
+        box = other.newObject("PartDesign::AdditiveBox", "Box")
+        self.body = models.body(self.doc)
+        square = models.sketch(self.doc, "Square", models.rectangle(9, -1, 11, 1), self.body)
+        self.doc.recompute()
+        edge = self.boxElement(
+            box, "Edge", lambda p: abs(p.x - 10) < 1e-6 and abs(p.y) < 1e-6 and abs(p.z - 5) < 1e-6
+        )
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.addSelection(self.doc.Name, square.Name)
+        Gui.Selection.addSelection(self.doc.Name, box.Name, edge)
+        self.answerModals()
+        Gui.runCommand("PartDesign_AdditivePipe")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), f"no task dialog; {self.modals}")
+        pump(0.3)
+        self.answering = False
+        self.assertEqual(self.modals, [])
+        [pipe] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::AdditivePipe"]
+        self.assertIs(pipe.Profile[0], square)
+        self.assertEqual(pipe.Spine, (box, [edge]))
 
     def primitivesOnABase(self):
         """Another body: Base, a 20 x 20 x 10 box at (-5, -5, 0); Box, a 10 x 10 x 20 box at the
@@ -2283,7 +2343,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """PR 224 review M2: New Sketch on the end face x = 20 of a 20 x 10 x 10 box in another
         body moved by (5, 0, 0), Make independent copy: the sketch is on the picked plane,
         globally x = 25 (the copy sat at x = 0 in its own body, so the sketch went on x = 20)."""
-        other = self.otherBody()
+        other = models.body(self.doc)
         other.Placement.Base = V(5, 0, 0)
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
@@ -2307,7 +2367,7 @@ class TestPanelFixesGui(unittest.TestCase):
         turned 30 degrees about X). The shape binder's face is where the box's face is,
         globally, and stays there when either body moves afterwards. It took the box's place in
         its own body: the face shifted by the bodies' difference, silently."""
-        other = self.otherBody()
+        other = models.body(self.doc)
         other.Placement = App.Placement(V(5, 0, 0), App.Rotation(Z, 90))
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Length = 20
@@ -2921,7 +2981,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def datumPlaneInAPlacedBody(self):
         """A datum plane at z = 4 in another body moved by (0, 0, 6): globally the plane z = 10;
         this body at the origin."""
-        other = self.otherBody()
+        other = models.body(self.doc)
         other.Placement.Base = V(0, 0, 6)
         plane = other.newObject("PartDesign::Plane", "DatumPlane")
         plane.Placement.Base = V(0, 0, 4)

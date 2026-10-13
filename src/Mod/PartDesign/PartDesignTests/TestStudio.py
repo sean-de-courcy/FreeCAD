@@ -9,7 +9,9 @@ studioOriginFeature; Sketcher's isExternalAllowed). Every model is designed: the
 come from volumes, bounding boxes and point membership.
 """
 
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -80,8 +82,11 @@ def inside(shape, point):
 
 
 def outOfScope(doc, objects):
-    """Whether recomputing objects warns "links are out of scope" (DocumentObject::recompute).
-    The warning goes through the console's std observer to stderr: fd 2 is caught meanwhile."""
+    """Whether recomputing objects warns "links are out of scope" (DocumentObject::recompute,
+    GeoFeatureGroupExtension::isLinkValid). The warning goes through the console's std observer
+    to stderr: fd 2 is caught meanwhile. Every test that expects no warning also has a control
+    that expects one, so a capture that fails can't pass unseen. (The dependency graph's orange
+    edges don't show these links: its edges join property nodes.)"""
     observers = App.Console.GetObservers()
     if "Console" not in observers:
         raise unittest.SkipTest("no console observer to catch the warning")
@@ -100,6 +105,83 @@ def outOfScope(doc, objects):
             App.Console.SetStatus("Console", "Wrn", bool(status))
         caught.seek(0)
         return b"links are out of scope" in caught.read()
+
+
+def globalBox(feature, shape=None):
+    """The bounding box of feature's shape (or of shape, in feature's Body), placed globally, as
+    (xmin, ymin, zmin, xmax, ymax, zmax) rounded to 1e-6."""
+    shape = (shape if shape is not None else feature.Shape).copy()
+    body = feature.getParentGeoFeatureGroup()
+    shape.Placement = body.getGlobalPlacement().multiply(shape.Placement)
+    box = shape.BoundBox
+    return tuple(
+        round(v, 6) + 0.0 for v in (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax)
+    )
+
+
+CHILD_ASSEMBLY = """\
+import json, os, sys, traceback
+out = {}
+try:
+    import FreeCAD as App
+    import Part
+    import PartDesign
+    import Sketcher
+
+    def body(doc, name, container=None):
+        b = doc.addObject("PartDesign::Body", name)
+        if container is not None:
+            container.addObject(b)
+        s = b.newObject("Sketcher::SketchObject", name + "Sk")
+        s.AttachmentSupport = [(b.Origin.OriginFeatures[3], "")]
+        s.MapMode = "FlatFace"
+        for a, c in (((0, 0), (10, 0)), ((10, 0), (10, 10)), ((10, 10), (0, 10)), ((0, 10), (0, 0))):
+            s.addGeometry(Part.LineSegment(App.Vector(*a, 0), App.Vector(*c, 0)))
+        p = b.newObject("PartDesign::Pad", name + "Pad")
+        p.Profile = s
+        p.Length = 10
+        return b, s, p
+
+    out["assemblyLoadedAtStart"] = "AssemblyApp" in sys.modules
+    doc = App.newDocument("Child")
+    one, oneSk, onePad = body(doc, "One")
+    two, twoSk, twoPad = body(doc, "Two")
+    doc.recompute()
+    # the predicates and App's scope rule, asked before the Assembly module loads
+    out["earlyPick"] = PartDesign.isStudioPick(onePad, twoPad, "Face1")
+    out["earlyStudio"] = PartDesign.studioOf(one) is not None
+    oneCross = one.newObject("PartDesign::Pad", "OneCross")
+    oneCross.Profile = twoSk
+    oneCross.Length = 2
+    doc.recompute()
+    asm = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    x, xSk, xPad = body(doc, "X", asm)
+    y, ySk, yPad = body(doc, "Y", asm)
+    cross = x.newObject("PartDesign::Pad", "Cross")
+    cross.Profile = ySk
+    cross.Length = 2
+    doc.recompute()
+    out["assemblyStudio"] = PartDesign.studioOf(x) is not None
+    out["assemblyPick"] = PartDesign.isStudioPick(xPad, yPad, "Face1")
+    # App's scope rule: the warning of the Cross pad's recompute, caught on fd 2
+    import tempfile
+    App.Console.SetStatus("Console", "Wrn", True)
+    saved = os.dup(2)
+    with tempfile.TemporaryFile() as caught:
+        os.dup2(caught.fileno(), 2)
+        try:
+            cross.touch()
+            doc.recompute()
+        finally:
+            os.dup2(saved, 2)
+        caught.seek(0)
+        out["assemblyOutOfScope"] = b"links are out of scope" in caught.read()
+except Exception:
+    out["error"] = traceback.format_exc()
+with open(os.environ["FC_STUDIO_CHILD_OUT"], "w") as fh:
+    json.dump(out, fh)
+os._exit(0)
+"""
 
 
 class TestStudio(unittest.TestCase):
@@ -203,19 +285,176 @@ class TestStudio(unittest.TestCase):
         self.assertTrue(PartDesign.isStudioPick(padU, padL, "Face1"))
 
     def testPickThroughALinkIsRefused(self):
-        """D-t6: a pick through an App::Link would ignore the Link's placement."""
+        """D-t6: a pick through an App::Link would ignore the Link's placement. Round 2 (review
+        H1): the selection gates see only the resolved object, so a Body that any link shows (it,
+        a container holding it, or one of its features) is no studio pick at all."""
         part = self.doc.addObject("App::Part", "Part")
         lower, upper, padL, padU = self.twoBodies(part)
+        self.assertTrue(PartDesign.isStudioPick(padU, part, "Lower.LowerPad.Face1"))
+        self.assertTrue(PartDesign.isStudioPick(padU, padL, "Face1"))
         link = self.doc.addObject("App::Link", "Link")
         link.LinkedObject = lower
         link.Placement = App.Placement(V(100, 0, 0), App.Rotation())
         part.addObject(link)
         self.doc.recompute()
-        self.assertTrue(PartDesign.isStudioPick(padU, part, "Lower.LowerPad.Face1"))
+        self.assertFalse(PartDesign.isStudioPick(padU, part, "Lower.LowerPad.Face1"))
         self.assertFalse(PartDesign.isStudioPick(padU, part, "Link.LowerPad.Face1"))
         self.assertFalse(PartDesign.isStudioPick(padU, link, "LowerPad.Face1"))
         self.assertFalse(PartDesign.isStudioPick(padU, link, ""))
         self.assertFalse(PartDesign.isStudioProfile(padU, link, "LowerPad.Face1"))
+        # the resolved pick, as the gates see it
+        self.assertFalse(PartDesign.isStudioPick(padU, padL, "Face1"))
+        self.assertFalse(PartDesign.isStudioProfile(padU, lower.getObject("LowSk")))
+        self.assertIsNone(PartDesign.studioOriginFeature(padU, lower.Origin.OriginFeatures[3]))
+        # Upper isn't shown by a link: Lower may still use it
+        self.assertTrue(PartDesign.isStudioPick(padL, padU, "Face1"))
+        # a link to one of Lower's features counts too
+        link.LinkedObject = padL
+        self.doc.recompute()
+        self.assertFalse(PartDesign.isStudioPick(padU, padL, "Face1"))
+        # and one to the App::Part holding both: neither may use the other
+        self.doc.removeObject(link.Name)
+        self.assertTrue(PartDesign.isStudioPick(padU, padL, "Face1"))
+        partLink = self.doc.addObject("App::Link", "PartLink")
+        partLink.LinkedObject = part
+        partLink.Placement = App.Placement(V(0, 100, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertFalse(PartDesign.isStudioPick(padU, padL, "Face1"))
+        self.assertFalse(PartDesign.isStudioPick(padL, padU, "Face1"))
+
+    def testAssemblyIsNoStudioWhateverLoadsFirst(self):
+        """Review S2: the Assembly type was looked up once, at the first call. Asked before the
+        Assembly module loaded, it stayed unknown, and Bodies placed directly in an Assembly
+        (moved by its joints) counted as one studio. In a child FreeCADCmd that has loaded no
+        Assembly: a pick between two top-level Bodies first, then an Assembly."""
+        from PartDesignTests.TestNamingDump import _freecadCmd
+
+        workDir = tempfile.mkdtemp(prefix="studio-child-")
+        script = os.path.join(workDir, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(CHILD_ASSEMBLY)
+        out = os.path.join(workDir, "out.json")
+        env = dict(os.environ, FC_STUDIO_CHILD_OUT=out)
+        with open(os.path.join(workDir, "child.log"), "w") as log:
+            subprocess.run(
+                [_freecadCmd(), script], env=env, stdout=log, stderr=subprocess.STDOUT,
+                cwd=workDir, timeout=300,
+            )
+        self.assertTrue(os.path.isfile(out), f"no result from the child ({workDir})")
+        with open(out, encoding="utf-8") as fh:
+            result = json.load(fh)
+        if "error" in result and "Assembly" in result["error"]:
+            self.skipTest("the Assembly module isn't available")
+        self.assertNotIn("error", result)
+        self.assertFalse(result["assemblyLoadedAtStart"])
+        self.assertTrue(result["earlyPick"])
+        self.assertTrue(result["earlyStudio"])
+        self.assertFalse(result["assemblyStudio"])
+        self.assertFalse(result["assemblyPick"])
+        self.assertTrue(result["assemblyOutOfScope"])
+
+    def testAWholeBodyIsNoPick(self):
+        """Review M3: another Body picked whole (it shows its Tip's shape). A link to it would
+        depend on all of it, a cycle once its features use the owner. Its features are picked
+        instead; the owner's own Body is fine."""
+        lower, upper, padL, padU = self.twoBodies()
+        self.assertFalse(PartDesign.isStudioPick(padU, lower, "Face1"))
+        self.assertFalse(PartDesign.isStudioProfile(upper, lower, "Face1"))
+        self.assertTrue(PartDesign.isStudioPick(padU, padL, "Face1"))
+        self.assertTrue(PartDesign.isStudioPick(padU, upper, "Face1"))
+
+    def testDatumOfAnotherPart(self):
+        """Review M5: a datum plane of another part is a pick like its faces: a sketch on it lands
+        where it is. Placed differently, the Bodies are no studio for it either."""
+        lower, upper, padL, padU = self.twoBodies()
+        datum = lower.newObject("PartDesign::Plane", "DatumL")
+        datum.AttachmentSupport = [(padL, faceAt(padL, 10))]
+        datum.MapMode = "FlatFace"
+        self.doc.recompute()
+        self.assertTrue(PartDesign.isStudioPick(padU, datum, ""))
+        onDatum = sketch(upper, "OnDatum", [(datum, "")], (0, 0, 5, 5))
+        self.assertSettled()
+        self.assertAlmostEqual(onDatum.getGlobalPlacement().Base.z, 10, places=6)
+        upper.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        self.assertFalse(PartDesign.isStudioPick(padU, datum, ""))
+
+    # ---------------------------------------------------------------- one origin (review S1)
+
+    def placedSiblings(self, where):
+        """Review probe p1's model at the top level: A, a 10 mm cube pad at A's origin, and B at
+        `where`. Returns A, B, A's sketch, A's pad and the pad's top face."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        b = self.doc.addObject("PartDesign::Body", "B")
+        b.Placement = App.Placement(where, App.Rotation())
+        sa = sketch(a, "SA", xyPlane(a), (0, 0, 10, 10))
+        padA = pad(a, "PadA", sa, 10)
+        self.doc.recompute()
+        return a, b, sa, padA, faceAt(padA, 10)
+
+    def testPlacedSiblingsAreNoStudio(self):
+        """Review S1: B placed at (30, 0, 3). Every reader takes A's geometry in B's frame: a
+        sketch of B on A's top face sat at (30, 0, 13), not z = 10, external geometry 30 off, a
+        pad of A's sketch at x 30..40, all silently. The predicates refuse such picks (the copy
+        places them right); a pad of A's sketch set from Python fails loudly (ops#308). Placed
+        alike, the Bodies are one studio."""
+        a, b, sa, padA, top = self.placedSiblings(V(30, 0, 3))
+        sb = b.newObject("Sketcher::SketchObject", "SB")
+        self.assertFalse(PartDesign.isStudioPick(sb, padA, top))
+        self.assertFalse(PartDesign.isStudioProfile(b, sa))
+        self.assertFalse(PartDesign.isStudioProfile(b, padA, top))
+        self.assertIsNone(PartDesign.studioOriginFeature(sb, a.Origin.OriginFeatures[3]))
+        sx = sketch(b, "SX", xyPlane(b))
+        self.doc.recompute()
+        with self.assertRaises(ValueError):
+            sx.addExternal(padA.Name, edgeAt(padA, (0, 0, 0), (10, 0, 0)))
+        padB = b.newObject("PartDesign::Pad", "PadB")
+        padB.Profile = sa
+        padB.Length = 2
+        # the same link set from Python fails loudly (ops#308), before any scope warning
+        self.doc.recompute()
+        self.assertFalse(padB.isValid())
+        self.assertIn("placed elsewhere", padB.getStatusString())
+        a.Placement = b.Placement
+        self.assertTrue(PartDesign.isStudioPick(sb, padA, top))
+        self.assertTrue(PartDesign.isStudioProfile(b, sa))
+        self.assertFalse(outOfScope(self.doc, [padB]))
+        self.assertTrue(padB.isValid(), padB.getStatusString())
+
+    def testSiblingsAtOneOriginLandRight(self):
+        """Review S1's oracles, p1's model with B at A's origin: B's sketch on A's top face and
+        its pad, a datum plane on that face, a pad up to it, a pad of A's sketch and external
+        geometry from A all land where A's geometry is (placed apart, p1 found them at z 13,
+        x 32..38, 30 off)."""
+        a, b, sa, padA, top = self.placedSiblings(V(0, 0, 0))
+        sb = b.newObject("Sketcher::SketchObject", "SB")
+        self.assertTrue(PartDesign.isStudioPick(sb, padA, top))
+        sb.AttachmentSupport = [(padA, top)]
+        sb.MapMode = "FlatFace"
+        rect(sb, 2, 2, 8, 8)
+        padB = pad(b, "PadB", sb, 5)
+        datum = b.newObject("PartDesign::Plane", "DP")
+        datum.AttachmentSupport = [(padA, top)]
+        datum.MapMode = "FlatFace"
+        su = sketch(b, "SU", xyPlane(b), (5, 20, 10, 25))
+        upTo = b.newObject("PartDesign::Pad", "PadU")
+        upTo.Profile = su
+        upTo.Type = "UpToFace"
+        upTo.UpToFace = (padA, [top])
+        self.assertTrue(PartDesign.isStudioProfile(b, sa))
+        padP = pad(b, "PadP", sa, 2)
+        sx = sketch(b, "SX", xyPlane(b), z=20)
+        self.assertSettled()
+        sx.addExternal(padA.Name, edgeAt(padA, (0, 0, 0), (10, 0, 0)))
+        self.assertSettled()
+        self.assertAlmostEqual(sb.getGlobalPlacement().Base.z, 10, places=6)
+        self.assertAlmostEqual(datum.getGlobalPlacement().Base.z, 10, places=6)
+        self.assertEqual(globalBox(padB, padB.AddSubShape), (2, 2, 10, 8, 8, 15))
+        self.assertEqual(globalBox(upTo, upTo.AddSubShape), (5, 20, 0, 10, 25, 10))
+        self.assertEqual(globalBox(padP, padP.AddSubShape), (0, 0, 0, 10, 10, 2))
+        line = sx.ExternalGeo[2]
+        ends = sorted((round(p.x, 6), round(p.y, 6)) for p in (line.StartPoint, line.EndPoint))
+        self.assertEqual(ends, [(0, 0), (10, 0)])
+        self.assertFalse(outOfScope(self.doc, [padB, upTo, padP, sx]))
 
     # ---------------------------------------------------------------- D-t1: the opened gates
 
@@ -396,11 +635,18 @@ class TestStudio(unittest.TestCase):
         lower, upper, padL, padU = self.twoBodies(part)
         ext = self.externalEdge(upper, lower, padL)
         self.assertFalse(outOfScope(self.doc, [ext]))
+        # the control: Lower in another App::Part
+        other = self.doc.addObject("App::Part", "Other")
+        other.addObject(lower)
+        self.assertTrue(outOfScope(self.doc, [ext]))
 
     def testExternalGeometryAtTheTopLevel(self):
         lower, upper, padL, padU = self.twoBodies()
         ext = self.externalEdge(upper, lower, padL)
         self.assertFalse(outOfScope(self.doc, [ext]))
+        # the control: Lower placed elsewhere
+        lower.Placement = App.Placement(V(0, 0, 1), App.Rotation())
+        self.assertTrue(outOfScope(self.doc, [ext]))
 
     def testExternalGeometryFromAnotherAppPartIsRefused(self):
         lower, upper, padL, padU = self.twoBodies()

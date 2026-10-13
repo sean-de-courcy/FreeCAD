@@ -23,8 +23,14 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+
+#include <Precision.hxx>
+
 #include <App/Datums.h>
 #include <App/Document.h>
+#include <App/GeoFeature.h>
+#include <App/GroupExtension.h>
 #include <App/Part.h>
 
 #include "BodyBase.h"
@@ -62,6 +68,50 @@ BodyBase* BodyBase::findBodyOf(const App::DocumentObject* f)
     return nullptr;
 }
 
+namespace
+{
+// Assembly::AssemblyObject derives from App::Part; looked up by name, as Part doesn't link the
+// Assembly module. A bad type isn't kept: the module can load after the first pick (ops#325)
+Base::Type assemblyType()
+{
+    static Base::Type type = Base::Type::BadType;
+    if (type.isBad()) {
+        type = Base::Type::fromName("Assembly::AssemblyObject");
+    }
+    return type;
+}
+
+// Whether a link (an App::Link or anything else whose linked object is another) shows @p body,
+// a container holding it or one of its features: a pick through it would ignore the link's
+// placement, and a selection gate sees only the resolved object (ops#325). Any such link counts.
+bool isShownThroughALink(const BodyBase* body)
+{
+    std::vector<const App::DocumentObject*> shown {body};
+    // every group holding it, up to the top: App::Part and plain groups alike
+    // (GroupExtension::getGroupOfObject() finds plain groups only)
+    for (std::size_t i = 0; i < shown.size(); ++i) {
+        for (auto user : shown[i]->getInList()) {
+            auto group = user ? user->getExtensionByType<App::GroupExtension>(true) : nullptr;
+            if (group && group->hasObject(shown[i])
+                && std::find(shown.begin(), shown.end(), user) == shown.end()) {
+                shown.push_back(user);
+            }
+        }
+    }
+    for (auto member : body->Group.getValues()) {
+        shown.push_back(member);
+    }
+    for (auto obj : shown) {
+        for (auto user : obj->getInList()) {
+            if (user && user != obj && user->getLinkedObject(false) == obj) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+}  // namespace
+
 BodyBase* BodyBase::bodyOfObject(const App::DocumentObject* obj)
 {
     if (!obj) {
@@ -94,15 +144,14 @@ bool BodyBase::studioOf(const BodyBase* body, App::Part*& studio)
         return false;
     }
     studio = App::Part::getPartOfObject(body, /*recursive=*/true);
-    // Assembly::AssemblyObject derives from App::Part; looked up by name, as Part doesn't link
-    // the Assembly module
-    static const Base::Type assemblyType = Base::Type::fromName("Assembly::AssemblyObject");
-    return !(studio && !assemblyType.isBad() && studio->isDerivedFrom(assemblyType));
+    const Base::Type assembly = assemblyType();
+    return !(studio && !assembly.isBad() && studio->isDerivedFrom(assembly));
 }
 
 bool BodyBase::isInOneStudio(const App::DocumentObject* owner, const App::DocumentObject* target)
 {
-    if (!owner || !target || owner->getDocument() != target->getDocument()) {
+    if (!owner || !target || !owner->getDocument()
+        || owner->getDocument() != target->getDocument()) {
         return false;
     }
     BodyBase* ownerBody = bodyOfObject(owner);
@@ -113,10 +162,31 @@ bool BodyBase::isInOneStudio(const App::DocumentObject* owner, const App::Docume
     if (ownerBody == targetBody) {
         return true;
     }
-    App::Part* ownerStudio = nullptr;
-    App::Part* targetStudio = nullptr;
-    return studioOf(ownerBody, ownerStudio) && studioOf(targetBody, targetStudio)
-        && ownerStudio == targetStudio;
+    // Another Body itself (picked whole, shown as its Tip): the link would depend on all of it,
+    // features that use the owner included, a cycle (ops#325). Its features are linked instead
+    if (target == targetBody) {
+        return false;
+    }
+    return areStudioSiblings(ownerBody, targetBody);
+}
+
+bool BodyBase::areStudioSiblings(const BodyBase* one, const BodyBase* other)
+{
+    App::Part* oneStudio = nullptr;
+    App::Part* otherStudio = nullptr;
+    if (!one || !other || one == other || !one->getDocument()
+        || one->getDocument() != other->getDocument() || !studioOf(one, oneStudio)
+        || !studioOf(other, otherStudio) || oneStudio != otherStudio) {
+        return false;
+    }
+    // Bodies placed apart don't share an origin: every reader takes the target's geometry in the
+    // owner's frame, so the reference would land elsewhere, silently. Until the one-origin check
+    // (session 1b), such a pick goes through the copy, which places it right (ops#325)
+    if (!App::GeoFeature::getGlobalPlacement(one)
+             .isSame(App::GeoFeature::getGlobalPlacement(other), Precision::Confusion())) {
+        return false;
+    }
+    return !isShownThroughALink(other);
 }
 
 bool BodyBase::isStudioPick(
@@ -151,8 +221,8 @@ App::DocumentObject* BodyBase::studioOriginFeature(
     auto datum = freecad_cast<const App::DatumElement*>(feature);
     BodyBase* ownerBody = bodyOfObject(owner);
     BodyBase* featureBody = bodyOfObject(feature);
-    if (!datum || !datum->getLCS() || !ownerBody || !featureBody || ownerBody == featureBody
-        || !isInOneStudio(ownerBody, featureBody)) {
+    if (!datum || !datum->getLCS() || !ownerBody || !featureBody
+        || !areStudioSiblings(ownerBody, featureBody)) {
         return nullptr;
     }
     auto origin = freecad_cast<App::LocalCoordinateSystem*>(ownerBody->Origin.getValue());
