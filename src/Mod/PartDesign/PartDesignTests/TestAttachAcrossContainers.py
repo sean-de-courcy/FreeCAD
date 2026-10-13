@@ -251,6 +251,20 @@ class TestAttachAcrossContainers(unittest.TestCase):
         """A-t1: both Bodies at one rotated placement: right before and after."""
         self.checkSketchOnFace("EqualRotated")
 
+    def testFirstFeatureIsPlacedAsItsSupport(self):
+        """Pad2, Body2's first feature, on Sk2 attached to Body1's pad (turned Bodies), is placed
+        as that pad, mapped into Body2: an attachment to Pad2 as a whole gets Pad1's global
+        frame. Pad2 had Pad1's placement taken as Body2's (design note 7)."""
+        first, second = PAIRS["BothRotated"]
+        source, body, _, pad = self.attachedSketch(self.doc, first, second)
+        expected = source[1].getGlobalPlacement()
+        self.assertTrue(pad.getGlobalPlacement().isSame(expected, 1e-9), pad.getGlobalPlacement())
+        cs = body.newObject("PartDesign::CoordinateSystem", "OnPad2")
+        cs.AttachmentSupport = [(pad, "")]
+        cs.MapMode = "ObjectXY"
+        self.doc.recompute()
+        self.assertTrue(cs.getGlobalPlacement().isSame(expected, 1e-9), cs.getGlobalPlacement())
+
     # A-t2 ------------------------------------------------------------------------------------
 
     def checkMode(self, mode):

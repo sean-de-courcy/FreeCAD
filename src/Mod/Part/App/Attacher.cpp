@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -65,6 +67,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/Datums.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <Base/Console.h>
 
 #include "Attacher.h"
@@ -88,6 +91,67 @@ Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
     auto element = dynamic_cast<const App::DatumElement*>(obj);
     auto lcs = element ? element->getLCS() : nullptr;
     return lcs ? lcs->Placement.getValue() : Base::Placement();
+}
+
+// The group holding obj (a Body, an App::Part, a coordinate system), or nullptr at the top
+const App::DocumentObject* groupOf(const App::DocumentObject* obj)
+{
+    for (auto parent : obj->getInList()) {
+        auto group = parent->getExtensionByType<App::GeoFeatureGroupExtension>(true);
+        if (group && group->hasObject(obj)) {
+            return parent;
+        }
+    }
+    return nullptr;
+}
+
+// The frame obj's placement is in: a bare element's coordinate system (ops#200), else its group
+const App::DocumentObject* frameOf(const App::DocumentObject* obj)
+{
+    auto element = dynamic_cast<const App::DatumElement*>(obj);
+    if (auto lcs = element ? element->getLCS() : nullptr) {
+        return lcs;
+    }
+    return groupOf(obj);
+}
+
+// The frame and the groups above it, innermost first
+std::vector<const App::DocumentObject*> framesUp(const App::DocumentObject* frame)
+{
+    std::vector<const App::DocumentObject*> frames;
+    // The bound guards against a cycle in a broken file
+    while (frame && frames.size() < 100
+           && std::find(frames.begin(), frames.end(), frame) == frames.end()) {
+        frames.push_back(frame);
+        frame = groupOf(frame);
+    }
+    return frames;
+}
+
+Base::Placement placementOf(const App::DocumentObject* frame)
+{
+    auto prop = frame->getPropertyByName<App::PropertyPlacement>("Placement");
+    return prop ? prop->getValue() : Base::Placement();
+}
+
+// The placements of `frames` up to (not including) `common`, composed outermost first, as
+// `composed`; false if there are none. The first is taken as it is, so one coordinate system
+// gives exactly its placement.
+bool composeDown(
+    const std::vector<const App::DocumentObject*>& frames,
+    const App::DocumentObject* common,
+    Base::Placement& composed
+)
+{
+    bool any = false;
+    for (auto frame : frames) {
+        if (frame == common) {
+            break;
+        }
+        composed = any ? placementOf(frame) * composed : placementOf(frame);
+        any = true;
+    }
+    return any;
 }
 
 struct PlanarFaceInfo
@@ -448,11 +512,65 @@ void AttachEngine::setUp(const AttachEngine& another)
     this->surfU = another.surfU;
     this->surfV = another.surfV;
     this->attachmentOffset = another.attachmentOffset;
+    this->ownerObject = another.ownerObject;
 }
 
 void AttachEngine::setOffset(const Base::Placement& offset)
 {
     this->attachmentOffset = offset;
+}
+
+void AttachEngine::setOwner(const App::DocumentObject* obj)
+{
+    ownerObject = App::DocumentObjectT(obj);
+}
+
+App::DocumentObject* AttachEngine::getOwner() const
+{
+    return ownerObject.getObject();
+}
+
+// A link reads its object's shape and placement in the frame of the object's container (with a
+// path, the first object's). They were used as if in the attached object's container, so an
+// attachment to another Body's face was off by the Bodies' difference (ops#318). The frames are
+// composed relatively, from the lowest common container down to each, so a link in the owner's
+// container gives the identity, not G^-1 * G, which isn't exactly the identity for a turned
+// Body. Only raw Placement values are read: a container's global placement throws while it
+// recomputes, and this also runs at restore.
+Base::Placement AttachEngine::linkFrame(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* obj,
+    bool* across
+)
+{
+    if (across) {
+        *across = false;
+    }
+    if (!obj) {
+        return {};
+    }
+    if (!owner) {
+        return coordinateSystemOf(obj);
+    }
+    const auto ownerFrames = framesUp(frameOf(owner));
+    const auto linkFrames = framesUp(frameOf(obj));
+    const App::DocumentObject* common = nullptr;
+    bool outside = false;  // a container between the common one and the link's frame
+    for (auto frame : linkFrames) {
+        if (std::find(ownerFrames.begin(), ownerFrames.end(), frame) != ownerFrames.end()) {
+            common = frame;
+            break;
+        }
+        outside = outside || !frame->isDerivedFrom<App::LocalCoordinateSystem>();
+    }
+    Base::Placement down;
+    Base::Placement up;
+    composeDown(linkFrames, common, down);
+    const bool ownerBelow = composeDown(ownerFrames, common, up);
+    if (across) {
+        *across = outside || ownerBelow;
+    }
+    return ownerBelow ? up.inverse() * down : down;
 }
 
 Base::Placement AttachEngine::placementFactory(
@@ -587,7 +705,7 @@ void AttachEngine::suggestMapModes(SuggestResult& result) const
     std::vector<TopoShape> shapeStorage;
     std::vector<eRefType> typeStr;
     try {
-        readLinks(getRefObjects(), subnames, shapes, shapeStorage, typeStr);
+        readLinks(getRefObjects(), subnames, shapes, shapeStorage, typeStr, getOwner());
     }
     catch (Base::Exception& err) {
         result.references_Types = typeStr;
@@ -1080,7 +1198,8 @@ void AttachEngine::readLinks(
     const std::vector<std::string>& subs,
     std::vector<const TopoShape*>& shapes,
     std::vector<TopoShape>& storage,
-    std::vector<eRefType>& types
+    std::vector<eRefType>& types,
+    const App::DocumentObject* owner
 )
 {
     storage.reserve(objs.size());
@@ -1115,7 +1234,7 @@ void AttachEngine::readLinks(
             }
         }
 
-        const Base::Placement container = coordinateSystemOf(objs[i]);
+        const Base::Placement container = linkFrame(owner, objs[i]);
         if (!container.isIdentity()) {
             shape.move(Tools::fromPlacement(container));
         }
@@ -1482,7 +1601,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
     std::vector<const TopoShape*> shapes;
     std::vector<TopoShape> copiedShapeStorage;
     std::vector<eRefType> types;
-    readLinks(objs, subs, shapes, copiedShapeStorage, types);
+    readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
 
     if (shapes.empty()) {
         throw ExceptionCancel();
@@ -1490,7 +1609,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
     // common stuff for all map modes
     App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-    Base::Placement Place = coordinateSystemOf(objs[0])
+    Base::Placement Place = linkFrame(objs[0])
         * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
     Base::Vector3d vec = Place.getPosition();
     gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
@@ -2268,7 +2387,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
             // special case for planes
             if (auto plane = dynamic_cast<App::Plane*>(objs[0])) {
-                return coordinateSystemOf(plane) * plane->Placement.getValue() * attachmentOffset;
+                return linkFrame(plane) * plane->Placement.getValue() * attachmentOffset;
             }
 
             auto shape = shapes.front();
@@ -2611,7 +2730,7 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
         std::vector<const TopoShape*> shapes;
         std::vector<TopoShape> copiedShapeStorage;
         std::vector<eRefType> types;
-        readLinks(objs, subs, shapes, copiedShapeStorage, types);
+        readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
 
         if (shapes.empty()) {
             throw ExceptionCancel();
@@ -2620,7 +2739,7 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
 
         // common stuff for all map modes
         App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-        Base::Placement Place = coordinateSystemOf(objs[0])
+        Base::Placement Place = linkFrame(objs[0])
             * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
         Base::Vector3d vec = Place.getPosition();
         gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
@@ -3014,7 +3133,7 @@ Base::Placement AttachEnginePoint::_calculateAttachedPlacement(
         std::vector<const TopoShape*> shapes;
         std::vector<TopoShape> copiedShapeStorage;
         std::vector<eRefType> types;
-        readLinks(objs, subs, shapes, copiedShapeStorage, types);
+        readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
 
         if (shapes.empty()) {
             throw ExceptionCancel();

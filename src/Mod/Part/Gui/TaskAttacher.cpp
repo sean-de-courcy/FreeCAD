@@ -480,9 +480,9 @@ void TaskAttacher::findCorrectObjAndSubInThisContext(App::DocumentObject*& rootO
     // - - - Cube
     // - - Part3
     // - - - Sketch
-    // In this example it's not possible because Sketch has Part3 placement. So it should be
-    // rejected because we cannot guarantee attacher will find the correct placement. But we still
-    // allow because of some workflow see https://github.com/FreeCAD/FreeCAD/issues/29714
+    // In this example the path is kept as it is, from the root. The attacher reads each link in
+    // its own container and maps it into the sketch's by the containers' placements, here Part1
+    // and Part3 (FreeCAD-CH ops#318), so the placement comes out right.
 
     std::vector<std::string> names = Base::Tools::splitSubName(sub);
     if (!rootObj || names.size() < 2) {

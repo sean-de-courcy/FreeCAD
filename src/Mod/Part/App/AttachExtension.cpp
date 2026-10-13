@@ -23,15 +23,19 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <optional>
 
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
 #include <Base/Console.h>
 #include <Base/ProgramVersion.h>
 #include <Base/Tools.h>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/Datums.h>
 #include <App/ObjectIdentifier.h>
@@ -92,6 +96,58 @@ void restoreAttacherEngine(AttachExtension* self)
     if (strcmp(mode, type) != 0) {
         self->AttacherEngine.setValue(classToEnum(type));
     }
+}
+
+// Objects attached across containers that moved at open, per document, logged in one line when
+// its restore ends (ops#318)
+std::map<std::string, std::vector<std::string>> movedAtOpen;
+
+void logMovedAtOpen(const std::string& document, const std::vector<std::string>& names)
+{
+    std::string list;
+    for (const auto& name : names) {
+        list += (list.empty() ? "" : ", ") + name;
+    }
+    const bool one = names.size() == 1;
+    Base::Console().warning(
+        "Document '%s': %d %s attached across containers moved at open, to %s support%s with "
+        "both containers' placements counted; recompute to update what depends on %s: %s\n",
+        document.c_str(),
+        static_cast<int>(names.size()),
+        one ? "object" : "objects",
+        one ? "its" : "their",
+        one ? "" : "s",
+        one ? "it" : "them",
+        list.c_str()
+    );
+}
+
+// It moved because its links are now read where they are, while what depends on it keeps the
+// shapes saved with it: queue it for recompute (the GUI then asks for one), and log it. A touch
+// would be purged when the restore ends.
+void reportMovedAtOpen(App::DocumentObject* obj)
+{
+    auto doc = obj->getDocument();
+    doc->addRecomputeObject(obj);
+    if (doc->testStatus(App::Document::Importing)) {
+        logMovedAtOpen(doc->getName(), {obj->getNameInDocument()});
+        return;
+    }
+    static auto started = App::GetApplication().signalStartRestoreDocument.connect(
+        [](const App::Document& restoring) { movedAtOpen.erase(restoring.getName()); }
+    );
+    static auto finished = App::GetApplication().signalFinishRestoreDocument.connect(
+        [](const App::Document& restored) {
+            auto it = movedAtOpen.find(restored.getName());
+            if (it != movedAtOpen.end()) {
+                logMovedAtOpen(it->first, it->second);
+                movedAtOpen.erase(it);
+            }
+        }
+    );
+    (void)started;
+    (void)finished;
+    movedAtOpen[doc->getName()].emplace_back(obj->getNameInDocument());
 }
 }  // namespace
 
@@ -393,10 +449,16 @@ bool AttachExtension::positionBySupport()
         );
     }
     updateAttacherVals();
+    _linkFrames.clear();
     Base::Placement plaOriginal = getPlacement().getValue();
     try {
         if (_props.attacher->mapMode == mmDeactivated) {
             return false;
+        }
+        bool across = false;
+        auto frames = currentLinkFrames(&across);
+        if (across) {
+            _linkFrames = std::move(frames);
         }
         bool subChanged = false;
 
@@ -461,7 +523,29 @@ bool AttachExtension::isAttacherActive() const
 
 short int AttachExtension::extensionMustExecute()
 {
+    // Moving a container touches neither this object nor what it links: run when a link's frame
+    // has changed since (ops#318). Nothing is kept for links in this object's own container.
+    if (!_linkFrames.empty() && currentLinkFrames() != _linkFrames) {
+        return 1;
+    }
     return DocumentObjectExtension::extensionMustExecute();
+}
+
+std::vector<Base::Placement> AttachExtension::currentLinkFrames(bool* across) const
+{
+    std::vector<Base::Placement> frames;
+    if (across) {
+        *across = false;
+    }
+    auto owner = getExtendedObject();
+    for (auto obj : AttachmentSupport.getValues()) {
+        bool outside = false;
+        frames.push_back(AttachEngine::linkFrame(owner, obj, &outside));
+        if (across && outside) {
+            *across = true;
+        }
+    }
+    return frames;
 }
 
 
@@ -778,7 +862,15 @@ void AttachExtension::onExtendedDocumentRestored()
             handleLegacyTangentPlaneOrientation();
         }
 
+        const Base::Placement restored = getPlacement().getValue();
         bool bAttached = positionBySupport();
+        if (bAttached && !_linkFrames.empty()) {
+            const Base::Placement placement = getPlacement().getValue();
+            if (!placement.getPosition().IsEqual(restored.getPosition(), Precision::Confusion())
+                || !placement.getRotation().isSame(restored.getRotation(), Precision::Angular())) {
+                reportMovedAtOpen(getExtendedObject());
+            }
+        }
 
         updateSinglePropertyStatus(bAttached);
     }
@@ -845,6 +937,11 @@ void AttachExtension::updateAttacherVals(bool base) const
         0.0,
         0.0
     );
+    // The base attacher's result is this object's own shape frame, not a container's: it keeps
+    // reading its links as before (ops#318)
+    if (!base) {
+        attacher(base).setOwner(getExtendedObject());
+    }
 }
 
 AttachExtension::Properties AttachExtension::getProperties(bool base) const

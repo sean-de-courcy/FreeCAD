@@ -401,6 +401,35 @@ public:  // helper functions that may be useful outside of the class
     }
 
     /**
+     * @brief setOwner names the attached object. The result is a placement in the frame of its
+     * container (its Body or App::Part, or the document), and each link is read in its own
+     * (FreeCAD-CH ops#318). An engine without an owner reads every link as if it were in the
+     * frame of the result, as before. Copied by setUp(const AttachEngine&) only.
+     */
+    void setOwner(const App::DocumentObject* obj);
+    App::DocumentObject* getOwner() const;
+
+    /**
+     * @brief linkFrame is the placement that maps what a link reads (the shape and placement of
+     * obj, with obj's own placement applied) into the frame of the owner's container. It is
+     * composed of the containers' placements between the two, through their lowest common
+     * container, so a link in the owner's container gives the identity and an element of a
+     * coordinate system there exactly that coordinate system's placement.
+     * @param across (output, optional) whether the link is outside the owner's container, so
+     * that the result depends on containers' placements; never for an element of a coordinate
+     * system in the owner's container.
+     */
+    static Base::Placement linkFrame(
+        const App::DocumentObject* owner,
+        const App::DocumentObject* obj,
+        bool* across = nullptr
+    );
+    Base::Placement linkFrame(const App::DocumentObject* obj) const
+    {
+        return linkFrame(getOwner(), obj);
+    }
+
+    /**
      * @brief verifyReferencesAreSafe: checks if pointers in references still
      * point to objects contained in open documents. This guarantees the links
      * are valid. Throws Base::Exception if invalid links are found.
@@ -434,6 +463,9 @@ public:  // members
 
     std::vector<refTypeStringList> modeRefTypes;  // a complete data structure, containing info on
                                                   // which modes support what selection
+
+    /// The attached object (setOwner)
+    App::DocumentObjectT ownerObject;
 
 protected:
     refTypeString cat(eRefType rt1)
@@ -472,7 +504,8 @@ protected:
 
         std::vector<const Part::TopoShape*>& shapes,
         std::vector<Part::TopoShape>& storage,
-        std::vector<eRefType>& types
+        std::vector<eRefType>& types,
+        const App::DocumentObject* owner = nullptr
     );
 
     static void throwWrongMode(eMapMode mmode);

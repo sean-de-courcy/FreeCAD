@@ -166,6 +166,12 @@ private:
     _Properties _baseProps;
 
     mutable int _active = -1;
+
+    // Each link's frame (AttachEngine::linkFrame) at the last positionBySupport(), when a link is
+    // outside this object's container; else empty. A container's move changes one of them, and
+    // extensionMustExecute() then runs the attachment again (ops#318).
+    std::vector<Base::Placement> _linkFrames;
+    std::vector<Base::Placement> currentLinkFrames(bool* across = nullptr) const;
 };
 
 
