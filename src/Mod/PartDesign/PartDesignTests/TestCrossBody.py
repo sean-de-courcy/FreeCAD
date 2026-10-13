@@ -260,17 +260,18 @@ class TestCrossBody(unittest.TestCase):
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertAlmostEqual(pocket.Shape.Volume, 16000 - 160, places=6)
 
-    def testPadOnASketchAttachedInABodyPlacedElsewhereFails(self):
+    def testPadOnASketchAttachedInABodyPlacedElsewhere(self):
         """T4: a Pad on a sketch attached to the top of a pad in another Body placed at
-        (100, 50): the attachment reads that face in its own Body's coordinates, so the Pad sat
-        at the origin, silently. The Pad now fails and says why."""
+        (100, 50): the attachment read that face in its own Body's coordinates, so the Pad sat
+        at the origin, silently, and then failed here. The attachment now maps the face
+        (ops#318): the Pad stands on it, from the support's origin."""
         _, source = self.plate(at=V(100, 50, 0))
         body = self.body("Body")
         sketch = self.sketch(body, "Sk", [(source, self.topFace(source, 5))], (2, 2, 8, 8))
         pad = self.pad(body, "Pad", sketch, 3)
         self.doc.recompute()
-        self.assertFalse(pad.isValid())
-        self.assertIn("placed elsewhere", pad.getStatusString())
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertBox(pad.Shape, 102, 52, 5, 108, 58, 8)
 
     def boxAndBinder(self, inLid=True):
         """A box Body at (100, 50) padded 40 x 40 x 10, and a binder of the pad's top: in a Lid
