@@ -53,6 +53,15 @@ from PartDesignTests.Scenarios import models as m
 FORMAT = 1
 VOLUME_TOLERANCE = 1e-7  # relative: the stated volumes are exact
 
+# Where the saving build's reopened record may differ from its live one, each with the reason:
+# (object type, "props", property) or (object type, field). Anything else refuses the model, so a
+# restore defect of the saving build never becomes an expectation.
+OPENED_DELTA_ALLOWED = {
+    # The restore sizes Spacings2 to the second direction's occurrences ([-1.0]); the live
+    # document leaves it empty until that direction is used, and a recompute empties it again.
+    ("PartDesign::LinearPattern", "props", "Spacings2"): "sized at the restore",
+}
+
 
 def sha256(path):
     with open(path, "rb") as fh:
@@ -96,15 +105,38 @@ def _find(docs, key):
 
 
 def check(model, docs, expected):
-    """Raises unless every object is valid and every stated volume is met."""
+    """Raises unless every object is valid, every PartDesign feature is one solid (or none) and
+    every stated volume is met."""
     for doc in docs:
         for obj in doc.Objects:
             if "Invalid" in obj.State:
                 raise AssertionError(f"{model}: {_stem(doc)}#{obj.Name} is invalid")
+            if obj.isDerivedFrom("PartDesign::Feature") and len(obj.Shape.Solids) > 1:
+                raise AssertionError(
+                    f"{model}: {_stem(doc)}#{obj.Name} has {len(obj.Shape.Solids)} solids"
+                )
     for key, volume in (expected or {}).get("volumes", {}).items():
         actual = _find(docs, key).Shape.Volume
         if abs(actual - volume) > VOLUME_TOLERANCE * max(abs(volume), 1.0):
             raise AssertionError(f"{model}: {key} volume {actual}, expected {volume}")
+
+
+def unexpectedDeltas(name, stem, record, changes):
+    """The reopened record's differences that OPENED_DELTA_ALLOWED doesn't list, as lines."""
+    lines = []
+    for obj, changed in changes.items():
+        if changed is None or "new" in changed:
+            lines.append(f"{stem}#{obj}: {'gone' if changed is None else 'new'} at the reopen")
+            continue
+        kind = record["objects"][obj]["type"]
+        for field, value in changed.items():
+            if field == "props":
+                for prop in value:
+                    if (kind, "props", prop) not in OPENED_DELTA_ALLOWED:
+                        lines.append(f"{stem}#{obj}.{prop} ({kind}) differs at the reopen")
+            elif (kind, field) not in OPENED_DELTA_ALLOWED:
+                lines.append(f"{stem}#{obj}.{field} ({kind}) differs at the reopen")
+    return lines
 
 
 def _closeAll(docs):
@@ -114,13 +146,23 @@ def _closeAll(docs):
 
 
 def reopened(folder, stems):
-    """{stem: record} of the saved files as this build reopens them, in order, with no
-    recompute."""
+    """The saved files as this build reopens them, in order: ({stem: record} with no recompute,
+    {stem: [objects still Touched after touching every object and recomputing]}). The second is
+    what the gate's recompute pass expects: features held below the reorder bar stay Touched."""
     docs = []
     try:
         for stem in stems:
             docs.append(App.openDocument(os.path.join(folder, stem + ".FCStd")))
-        return {_stem(doc): CompatRecord.record(doc) for doc in docs}
+        records = {_stem(doc): CompatRecord.record(doc) for doc in docs}
+        for doc in docs:
+            for obj in doc.Objects:
+                obj.touch()
+        for doc in docs:
+            doc.recompute()
+        touched = {
+            _stem(doc): sorted(o.Name for o in doc.Objects if "Touched" in o.State) for doc in docs
+        }
+        return records, touched
     finally:
         _closeAll(docs)
 
@@ -132,7 +174,9 @@ def buildModel(name, folder):
     (what a recompute must give), and the saved file as this build reopens it (what an open must
     give: a restore can set a property the live document left alone, e.g. a LinearPattern's
     Spacings2), kept as `openedDelta` over `records` (`CompatRecord.delta`; nearly always
-    small). `restoreDifferences` lists where they differ, for reading."""
+    small). `stillTouched`: the objects a touch-all recompute of the reopened file leaves
+    Touched (held below the reorder bar). `restoreDifferences` lists where the two records
+    differ, for reading."""
     docs = []
     try:
         expected = models.MODELS[name](lambda stem: newModelDocument(folder, stem, docs))
@@ -142,6 +186,11 @@ def buildModel(name, folder):
         records = {}
         for doc in docs:
             records[_stem(doc)] = CompatRecord.record(doc)
+            opaque = CompatRecord.opaqueValues(records[_stem(doc)])
+            if opaque:
+                raise AssertionError(
+                    f"{name}: values with no plain form (CompatRecord.OPAQUE_ALLOWED): {opaque}"
+                )
         for doc in docs:
             doc.save()
         stems = [_stem(doc) for doc in docs]
@@ -151,13 +200,20 @@ def buildModel(name, folder):
         for backup in os.listdir(folder):
             if backup.startswith(stem + ".") and backup.endswith(".FCBak"):
                 os.remove(os.path.join(folder, backup))
-    opened = reopened(folder, stems)
+    opened, stillTouched = reopened(folder, stems)
     differences = []
     deltas = {}
     for stem in stems:
         lines, _ = CompatRecord.compare(records[stem], opened[stem], "open")
         differences += [f"{stem}: {line}" for line in lines]
         deltas[stem] = CompatRecord.delta(records[stem], opened[stem])
+        unexpected = unexpectedDeltas(name, stem, records[stem], deltas[stem])
+        if unexpected:
+            raise AssertionError(
+                f"{name}: the reopened file differs from the saved document (a restore defect of "
+                f"this build, or add it to OPENED_DELTA_ALLOWED with its reason):\n"
+                + "\n".join(unexpected)
+            )
         rebuilt = CompatRecord.applyDelta(records[stem], deltas[stem])
         if CompatRecord.compare(opened[stem], rebuilt, "open")[0]:
             raise AssertionError(f"{name}: {stem}'s reopened record isn't its delta's")
@@ -168,6 +224,7 @@ def buildModel(name, folder):
             "documents": stems,
             "records": records,
             "openedDelta": deltas,
+            "stillTouched": stillTouched,
             "restoreDifferences": differences,
         },
         os.path.join(folder, name + ".oracle.json"),

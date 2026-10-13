@@ -31,10 +31,12 @@ use this module, so one comparison serves both.
 `record(doc)` works on a live document and on a restored one alike: it reads only what the
 document holds now. One entry per object:
 
-- `type`, `id` (the object id: creation order, 5.1), `invalid`;
+- `type`, `id` (the object id: creation order, 5.1), `invalid`, `touched` (still to recompute);
 - `props`: every saved property (not transient, not a shape) as `[type, value]`, the value in a
-  plain form (numbers, strings, vectors, placements, lists, links by object name). A link-sub
-  property holds its targets only: its sub-elements are compared by geometry, in `refs`;
+  plain form (numbers, strings, vectors, placements, lists, links by object name, a material by
+  its UUID). A link-sub property holds its targets only: its sub-elements are compared by
+  geometry, in `refs`. A value with no plain form is recorded as `{"py": <type>}`, which
+  make_generation refuses (`opaqueValues`);
 - `refs`: every sub-element reference, from every link-sub property and from
   `Part::PropertyFilletEdges` (edge indices into the base's shape): the target, the sub as saved,
   and the element's geometric key (kind, centre, mass; a planar face's normal; a line's ends; a
@@ -51,7 +53,7 @@ document holds now. One entry per object:
 largest float deviations seen (for calibrating the tolerances). The stages:
 - "open": everything but `dof`, at the tight tolerance (values from the same BRep);
 - "recompute": everything, at the recompute tolerance;
-- "rehearsal": a forced naming migration, so no names and no guesses.
+- "rehearsal": a forced naming migration, so no names (guess records are compared).
 
 `delta(base, other)` and `applyDelta(base, delta)` keep one record as a small overlay of another
 (a generation's records as reopened, over its records as saved).
@@ -101,7 +103,13 @@ def record(doc, names=True):
 
 
 def _object(obj, doc, masker, names):
-    entry = {"type": obj.TypeId, "id": obj.ID, "invalid": "Invalid" in obj.State}
+    entry = {
+        "type": obj.TypeId,
+        "id": obj.ID,
+        "invalid": "Invalid" in obj.State,
+        # still to recompute: after a touch-all recompute, only what the saving build left so
+        "touched": "Touched" in obj.State,
+    }
     props = {}
     refs = {}
     for name in obj.PropertiesList:
@@ -217,7 +225,35 @@ def _plain(value, doc, depth=0):
     constraint = _constraint(value)
     if constraint is not None:
         return constraint
+    if type(value).__name__ == "Material" and hasattr(value, "UUID"):
+        return {"material": value.UUID}
+    # A value with no plain form: compared by its type alone, so make_generation refuses a record
+    # holding one (`opaqueValues`) unless OPAQUE_ALLOWED lists it.
     return {"py": type(value).__name__}
+
+
+# (object type, property) whose value may be recorded by its type alone. Empty: every saved value
+# has a plain form.
+OPAQUE_ALLOWED = set()
+
+
+def opaqueValues(rec):
+    """ "object.property" of each value recorded by its type alone ({"py": <type>}) and not in
+    OPAQUE_ALLOWED."""
+    found = []
+
+    def opaque(value):
+        if isinstance(value, dict):
+            return set(value) == {"py"} or any(opaque(v) for v in value.values())
+        if isinstance(value, list):
+            return any(opaque(v) for v in value)
+        return False
+
+    for name, entry in rec.get("objects", {}).items():
+        for prop, (kind, value) in entry.get("props", {}).items():
+            if (entry["type"], prop) not in OPAQUE_ALLOWED and opaque(value):
+                found.append(f"{name}.{prop}")
+    return found
 
 
 def _constraint(value):
@@ -556,7 +592,7 @@ class _Comparison:
     def value(self, where, expected, actual):
         """Compares two plain values, floats with the tolerance."""
         if isinstance(expected, bool) or isinstance(actual, bool):
-            if expected != actual:
+            if type(expected) is not type(actual) or expected != actual:
                 self.differ(where, expected, actual)
             return
         if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
@@ -598,14 +634,15 @@ def _short(value, limit=160):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def compare(expected, actual, stage, tolerance=None, names=None):
+def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
     """The differences between two records as lines, and the drift (largest float deviations).
 
     Objects, their types and ids must match. A saved property that is gone or whose type
     changed is a difference; a property that only the actual record has (a later build added
-    it) is not. Names and guesses are compared unless `names` is False (by default, in every
-    stage but "rehearsal"); a caller turns them off when the file's naming revision isn't the
-    build's."""
+    it) is not. Names are compared unless `names` is False (by default, in every stage but
+    "rehearsal"); a caller turns them off when the file's naming revision isn't the build's.
+    Guess records are compared in every stage. `touched=False` leaves out which objects are
+    Touched (a forced naming migration touches every migrated object at the open)."""
     c = _Comparison(tolerance or TOLERANCE[stage])
     if names is None:
         names = stage != "rehearsal"
@@ -616,7 +653,7 @@ def compare(expected, actual, stage, tolerance=None, names=None):
         c.lines.append(f"{name}: new object ({aobjs[name].get('type')})")
     for name in sorted(set(eobjs) & set(aobjs)):
         e, a = eobjs[name], aobjs[name]
-        for field in ("type", "id", "invalid"):
+        for field in ("type", "id", "invalid") + (("touched",) if touched else ()):
             if e.get(field) != a.get(field):
                 c.differ(f"{name}.{field}", e.get(field), a.get(field))
         eprops, aprops = e.get("props", {}), a.get("props", {})
@@ -642,8 +679,8 @@ def compare(expected, actual, stage, tolerance=None, names=None):
         c.value(f"{name}.geometry", e.get("geometry"), a.get("geometry"))
         if names:
             _compareNames(c, name, e.get("names"), a.get("names"))
-            if e.get("guesses", []) != a.get("guesses", []):
-                c.differ(f"{name}.guesses", e.get("guesses", []), a.get("guesses", []))
+        if e.get("guesses", []) != a.get("guesses", []):
+            c.differ(f"{name}.guesses", e.get("guesses", []), a.get("guesses", []))
         if stage != "open" and e.get("dof") != a.get("dof"):
             c.differ(f"{name}.dof", e.get("dof"), a.get("dof"))
     return c.lines, c.drift.asDict()

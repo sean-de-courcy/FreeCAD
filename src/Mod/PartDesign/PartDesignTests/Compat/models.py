@@ -388,8 +388,10 @@ def DatumPlane(make):
     """An attached datum plane with an offset, and a sketch and a Pad on it.
 
     A 30 x 30 x 10 block (0..30); a datum plane attached to its top face, offset 5 up and turned
-    15 degrees about its x axis; on it a circle, radius 4, at (15, 15), padded 8 towards the
-    block (reversed), into it."""
+    15 degrees about its x axis (origin (0, 0, 15)); on it a circle, radius 4, at (15, 15),
+    padded 12 towards the block (reversed), into it. The post's axis meets the top face at
+    t = (5 + 15 sin 15) / cos 15 from the datum plane, and the oblique cut lies wholly within the
+    post (t +- 4 tan 15 is within 0..12), so the post adds 16 pi t above the block."""
     doc = make("DatumPlane")
     body = m.body(doc)
     base = attachedSketch(body, "Sketch", plane(body, "XY_Plane"), m.rectangle(0, 0, 30, 30))
@@ -402,10 +404,12 @@ def DatumPlane(make):
     datum.AttachmentOffset = App.Placement(V(0, 0, 5), App.Rotation(V(1, 0, 0), 15))
     doc.recompute()
     sketch = attachedSketch(body, "Sketch001", datum, [m.circle(15, 15, 4)])
-    post = m.pad(body, sketch, 8, "Post")
+    post = m.pad(body, sketch, 12, "Post")
     post.Reversed = True
     doc.recompute()
-    return {"volumes": {}}
+    a = math.radians(15)
+    t = (5 + 15 * math.sin(a)) / math.cos(a)
+    return {"volumes": {"Post": 30 * 30 * 10 + 16 * math.pi * t}}
 
 
 def TwoDocuments(make):
@@ -433,6 +437,22 @@ def TwoDocuments(make):
     m.pad(body2, sketch, 4)
     assembly.recompute()
     return {"volumes": {"TwoDocumentsPart#Pad": 1000, "TwoDocuments#Pad": math.pi * 9 * 4}}
+
+
+def ReorderBarRollForward(docs):
+    """ReorderBar's held features, recomputed: the bar moved to the end. Returns their names,
+    which the gate compares with the saved record (their shapes as computed before the bar was
+    rolled back)."""
+    doc = docs["ReorderBar"]
+    body = doc.getObject("Body")
+    body.rollTo(doc.getObject("HoleC"))
+    doc.recompute()
+    return ["BossBSketch", "BossB", "HoleCSketch", "HoleC"]
+
+
+# Models with features the recompute pass can't reach (held below the reorder bar): after that
+# pass, the gate calls the step and compares the objects it names (TestCompatCorpus).
+ROLL_FORWARD = {"ReorderBar": ReorderBarRollForward}
 
 
 # The B1 models, in generation order.

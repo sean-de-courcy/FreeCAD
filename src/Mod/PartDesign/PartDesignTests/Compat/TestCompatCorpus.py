@@ -27,7 +27,9 @@ and compared with the records saved with it (`<model>.oracle.json`, Part's `Comp
 
 1. **open:** at the open, no recompute: properties, references by geometry, shapes, names;
 2. **recompute:** after touching every object and recomputing: the full record, sketches'
-   degrees of freedom included;
+   degrees of freedom included, and which objects are still Touched (only those the saving build
+   left so: features held below the reorder bar, which a model's roll-forward step then
+   recomputes and compares, `models.ROLL_FORWARD`);
 3. **round trip:** saved (in a temporary copy) and reopened: the file has this build's
    `ForkRelease`, and the record matches again;
 4. (upgrades: once an upgrade registry exists, beta-compatibility.md 2.4.)
@@ -85,8 +87,8 @@ MIGRATION = re.compile(
     r"naming change: (\d+) moved back to their element, (\d+) broken"
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-PASSES = ("open", "recompute", "roundtrip")
-CHILD_TIMEOUT = 900
+# One deadline for both children (they run in parallel): well inside CI's test step limits.
+CHILD_TIMEOUT = 600
 
 
 def corpusFolder():
@@ -94,12 +96,13 @@ def corpusFolder():
 
 
 def generations():
-    """{"gen<k>": folder} of the corpus's generations, those with a MANIFEST."""
+    """{"gen<k>": folder} of the corpus's generations: every gen<k> folder, so one that lost its
+    MANIFEST fails instead of dropping out."""
     found = {}
     folder = corpusFolder()
     for name in sorted(os.listdir(folder)):
         path = os.path.join(folder, name)
-        if re.fullmatch(r"gen\d+", name) and os.path.isfile(os.path.join(path, "MANIFEST")):
+        if re.fullmatch(r"gen\d+", name) and os.path.isdir(path):
             found[name] = path
     return found
 
@@ -166,7 +169,18 @@ class _Step:
             stem: CompatRecord.applyDelta(record, deltas.get(stem))
             for stem, record in self.saved.items()
         }
+        # After a touch-all recompute, with what the saving build left Touched: as saved, and as
+        # reopened after a save (the file keeps an object's Touched state).
+        self.recomputed = json.loads(json.dumps(self.saved))
+        self.roundTripped = json.loads(json.dumps(self.opened))
+        for stem, names in oracle.get("stillTouched", {}).items():
+            for name in names:
+                self.recomputed[stem]["objects"][name]["touched"] = True
+                self.roundTripped[stem]["objects"][name]["touched"] = True
         self.result = {}
+        from PartDesignTests.Compat import models
+
+        self.rollForward = models.ROLL_FORWARD.get(model)
 
     def open(self):
         """Opens the documents in order; {stem: document} of the ones opened by name."""
@@ -177,12 +191,14 @@ class _Step:
             docs[stem] = doc
         return docs
 
-    def compare(self, passName, docs, expected, stage, names):
+    def compare(self, passName, docs, expected, stage, names, touched=True):
         t0 = time.perf_counter()
         lines, drifts = [], []
         for stem, doc in docs.items():
             actual = CompatRecord.record(doc, names=names)
-            found, drift = CompatRecord.compare(expected[stem], actual, stage, names=names)
+            found, drift = CompatRecord.compare(
+                expected[stem], actual, stage, names=names, touched=touched
+            )
             lines += [f"{stem}: {line}" for line in found]
             drifts.append(drift)
             if found:
@@ -202,7 +218,8 @@ class _Step:
         _mark(self.label + "/open")
         docs = self.open()
         openSeconds = time.perf_counter() - t0
-        self.compare("open", docs, self.opened, stage, names)
+        # a forced naming migration touches what it migrates at the open
+        self.compare("open", docs, self.opened, stage, names, touched=stage != "rehearsal")
         _mark(self.label + "/recompute")
         t1 = time.perf_counter()
         everything = list(App.listDocuments().values())
@@ -215,7 +232,7 @@ class _Step:
             doc.recompute()
         recomputed = time.perf_counter()
         recomputeStage = "recompute" if stage == "open" else stage
-        self.compare("recompute", docs, self.saved, recomputeStage, names)
+        self.compare("recompute", docs, self.recomputed, recomputeStage, names)
         self.result["seconds"] = {"open": openSeconds, "recompute": recomputed - t1}
         if roundTrip:
             _mark(self.label + "/roundtrip")
@@ -225,10 +242,42 @@ class _Step:
                 releases[stem] = _documentAttribute(doc.FileName, "ForkRelease")
             _closeAll()
             docs = self.open()
-            self.compare("roundtrip", docs, self.opened, "recompute", names)
+            self.compare("roundtrip", docs, self.roundTripped, "recompute", names)
             self.result["roundtrip"]["releases"] = releases
+            if self.rollForward:
+                self.rollForwardPass(docs, names)
         _mark(self.label + "/end")
         _closeAll()
+
+    def rollForwardPass(self, docs, names):
+        """Features the recompute pass can't reach (held below the reorder bar) recomputed by
+        the model's step (`models.ROLL_FORWARD`), and compared with the saved record: their
+        shapes as computed before the bar was rolled back. `touched` is left out (they were
+        held when saved)."""
+        _mark(self.label + "/rollforward")
+        held = self.rollForward(docs)
+        lines, drifts = [], []
+        for stem, doc in docs.items():
+
+            def only(record):
+                objects = {}
+                for name in held:
+                    entry = dict(record["objects"][name])
+                    entry.pop("touched", None)
+                    objects[name] = entry
+                return {"objects": objects}
+
+            actual = only(CompatRecord.record(doc, names=names))
+            found, drift = CompatRecord.compare(
+                only(self.saved[stem]), actual, "recompute", names=names
+            )
+            lines += [f"{stem}: {line}" for line in found]
+            drifts.append(drift)
+        self.result["rollforward"] = {
+            "differences": lines,
+            "drift": max(drifts, key=lambda d: d["abs"]) if drifts else None,
+            "objects": held,
+        }
 
 
 def childMain(outPath):
@@ -237,7 +286,9 @@ def childMain(outPath):
     FREECAD_COMPAT_CHILD=gate runs the open, recompute and round-trip passes; =rehearsal runs
     open and recompute with the naming migration forced (the parent sets the test aid)."""
     kind = os.environ.get("FREECAD_COMPAT_CHILD", "gate")
-    work = os.path.realpath(tempfile.mkdtemp(prefix=f"compat-{kind}-"))
+    work = os.path.realpath(
+        tempfile.mkdtemp(prefix=f"{kind}-", dir=os.environ.get("FREECAD_COMPAT_WORK"))
+    )
     report = os.environ.get("FREECAD_COMPAT_REPORT") or work
     os.makedirs(report, exist_ok=True)
     result = {
@@ -246,11 +297,21 @@ def childMain(outPath):
         "report": report,
         "forkRelease": App.getForkRelease(),
         "namingRevision": buildNamingRevision(work),
+        "namesSkipped": [],
         "steps": {},
     }
     for gen, genFolder in generations().items():
-        info = manifest(genFolder)
+        try:
+            info = manifest(genFolder)
+        except Exception as e:
+            result["steps"][gen] = {"error": f"{gen}: no readable MANIFEST ({e})"}
+            continue
         names = kind == "gate" and info.get("namingRevision") == result["namingRevision"]
+        if kind == "gate" and not names:
+            result["namesSkipped"].append(
+                f"{gen} (naming revision {info.get('namingRevision')}, this build's "
+                f"{result['namingRevision']})"
+            )
         stage = "open" if kind == "gate" else "rehearsal"
         for model, stems in info["models"].items():
             orders = ["ordered"]
@@ -264,6 +325,9 @@ def childMain(outPath):
                     step.run(stage, names, roundTrip=kind == "gate")
                     step.result["names"] = names
                     result["steps"][label] = step.result
+                    passes = [v for v in step.result.values() if isinstance(v, dict)]
+                    if not any(p.get("differences") for p in passes):
+                        shutil.rmtree(step.folder, ignore_errors=True)
                 except Exception:
                     _mark(label + "/end")
                     partial = step.result if step else {}
@@ -325,7 +389,8 @@ def children():
     global _children
     if _children is not None:
         return _children
-    work = os.path.realpath(tempfile.mkdtemp(prefix="compat-gate-"))
+    global _work
+    _work = work = os.path.realpath(tempfile.mkdtemp(prefix="compat-gate-"))
     script = os.path.join(work, "child.py")
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(CHILD_SCRIPT)
@@ -334,6 +399,7 @@ def children():
         env = dict(os.environ)
         env.pop("FREECAD_TEST_NAMING_REVISION_OFFSET", None)
         env["FREECAD_COMPAT_CORPUS"] = corpusFolder()
+        env["FREECAD_COMPAT_WORK"] = work
         env["FREECAD_COMPAT_CHILD"] = kind
         if kind == "rehearsal":
             env["FREECAD_TEST_NAMING_REVISION_OFFSET"] = "1"
@@ -346,11 +412,15 @@ def children():
         )
         runs[kind] = (proc, out, log, logPath)
     _children = {}
+    deadline = time.monotonic() + CHILD_TIMEOUT
     for kind, (proc, out, log, logPath) in runs.items():
+        timedOut = False
         try:
-            proc.wait(timeout=CHILD_TIMEOUT)
+            proc.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
+            timedOut = True
         log.close()
         with open(logPath, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
@@ -359,7 +429,13 @@ def children():
                 result = json.load(fh)
         else:
             error = out + ".error"
-            reason = open(error).read() if os.path.isfile(error) else f"no output ({logPath})"
+            if os.path.isfile(error):
+                reason = open(error).read()
+            else:
+                markers = [l for l in text.splitlines() if l.startswith(MARKER)]
+                last = markers[-1][len(MARKER) :] if markers else "before the first model"
+                how = f"timed out after {CHILD_TIMEOUT} s" if timedOut else "crashed"
+                reason = f"{how} (exit {proc.returncode}) in step {last} (log {logPath})"
             result = {"ERROR": reason}
         result["console"] = segments(text)
         result["log"] = logPath
@@ -368,8 +444,32 @@ def children():
     return _children
 
 
+_work = None
+
+
 def _badLines(lines):
     return [line for line in lines if any(bad in line for bad in BAD_LINES)]
+
+
+def _allClean():
+    """Whether both children ran and every step passed (then the temporary folder goes)."""
+    for result in (_children or {}).values():
+        if "ERROR" in result:
+            return False
+        for label, step in result["steps"].items():
+            if "error" in step:
+                return False
+            for passName, found in step.items():
+                if isinstance(found, dict) and found.get("differences"):
+                    return False
+                if _badLines(result["console"].get(f"{label}/{passName}", [])):
+                    return False
+    return True
+
+
+def tearDownModule():
+    if _work and _allClean() and not os.environ.get("FREECAD_COMPAT_KEEP"):
+        shutil.rmtree(_work, ignore_errors=True)
 
 
 def _printDrift(kind, passName, steps):
@@ -395,10 +495,16 @@ class TestCompatCorpus(unittest.TestCase):
         self.assertTrue(result["steps"], f"{kind} child ran no model ({result['log']})")
         return result
 
-    def checkPass(self, kind, passName):
+    def checkPass(self, kind, passName, optional=False):
+        """Fails for each step whose pass differs or logged a lost reference. `optional`: only
+        the steps that ran the pass (returns how many did)."""
         result = self.child(kind)
         _printDrift(kind, passName, result["steps"])
+        ran = 0
         for label, step in result["steps"].items():
+            if optional and "error" not in step and passName not in step:
+                continue
+            ran += 1
             with self.subTest(model=label, passName=passName):
                 self.assertNotIn("error", step, f"{label}: {step.get('error')}")
                 found = step.get(passName)
@@ -413,14 +519,17 @@ class TestCompatCorpus(unittest.TestCase):
                         f"{label}, {passName}: {len(problems)} differences (records in "
                         f"{result['report']}, log {result['log']}):\n" + "\n".join(problems)
                     )
+        return ran
 
     def testGenerationsAreIntact(self):
-        """Every generation's files are the ones its MANIFEST lists, byte for byte (3.5): a
-        committed file or record is never edited."""
+        """Every gen<k> folder has a MANIFEST; its files are exactly the ones of its models, byte
+        for byte (3.5): a committed file or record is never edited, and no model drops out."""
         gens = generations()
         self.assertTrue(gens, f"no generation in {corpusFolder()}")
         for gen, folder in gens.items():
+            self.assertTrue(os.path.isfile(os.path.join(folder, "MANIFEST")), f"{gen}: no MANIFEST")
             info = manifest(folder)
+            self.assertTrue(info["models"], f"{gen}: no model in its MANIFEST")
             listed = set(info["files"]) | {"MANIFEST"}
             present = {f for f in os.listdir(folder) if not f.startswith(".")}
             self.assertEqual(present, listed, f"{gen}: files not in its MANIFEST, or missing")
@@ -428,9 +537,12 @@ class TestCompatCorpus(unittest.TestCase):
                 with open(os.path.join(folder, fileName), "rb") as fh:
                     actual = hashlib.sha256(fh.read()).hexdigest()
                 self.assertEqual(actual, digest, f"{gen}/{fileName} changed since it was saved")
+            ofModels = set()
             for model, stems in info["models"].items():
-                for name in [s + ".FCStd" for s in stems] + [model + ".oracle.json"]:
-                    self.assertIn(name, info["files"], f"{gen}: {model}'s {name} not listed")
+                ofModels |= {s + ".FCStd" for s in stems} | {model + ".oracle.json"}
+            self.assertEqual(
+                set(info["files"]), ofModels, f"{gen}: listed files and its models' files differ"
+            )
 
     def testConsoleSegments(self):
         """The child's log is split at its markers, and a lost reference's line is found in its
@@ -461,6 +573,14 @@ class TestCompatCorpus(unittest.TestCase):
     def testOpen(self):
         """Pass 1: at the open, before any recompute, every record matches."""
         self.checkPass("gate", "open")
+        for skipped in self.child("gate").get("namesSkipped", []):
+            print(f"COMPAT-NAMES not compared in {skipped}")
+
+    def testRollForward(self):
+        """Features held below the reorder bar (the recompute pass leaves them Touched), rolled
+        forward and recomputed, match their saved record."""
+        ran = self.checkPass("gate", "rollforward", optional=True)
+        self.assertGreater(ran, 0, "no model rolled forward (models.ROLL_FORWARD)")
 
     def testRecompute(self):
         """Pass 2: after touching every object and recomputing, every record matches."""
