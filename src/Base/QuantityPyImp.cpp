@@ -356,7 +356,12 @@ static Quantity& pyToQuantity(Quantity& q, PyObject* pyobj)
         q = Quantity(PyFloat_AsDouble(pyobj));
     }
     else if (PyLong_Check(pyobj)) {
-        q = Quantity(PyLong_AsLong(pyobj));
+        // As a double: PyLong_AsLong gives -1 for an int beyond a C long (32 bits on Windows)
+        double d = PyLong_AsDouble(pyobj);
+        if (d == -1.0 && PyErr_Occurred()) {
+            throw Py::Exception();
+        }
+        q = Quantity(d);
     }
     else {
         PyErr_Format(PyExc_TypeError, "Cannot convert %s to Quantity", Py_TYPE(pyobj)->tp_name);
@@ -489,7 +494,10 @@ PyObject* QuantityPy::number_remainder_handler(PyObject* self, PyObject* other)
         d2 = PyFloat_AsDouble(other);
     }
     else if (PyLong_Check(other)) {
-        d2 = (double)PyLong_AsLong(other);
+        d2 = PyLong_AsDouble(other);
+        if (d2 == -1.0 && PyErr_Occurred()) {
+            return nullptr;
+        }
     }
     else {
         PyErr_SetString(PyExc_TypeError, "Expected quantity or number");
@@ -539,7 +547,10 @@ PyObject* QuantityPy::number_power_handler(PyObject* self, PyObject* other, PyOb
         }
         if (PyLong_Check(other)) {
             Quantity* a = static_cast<QuantityPy*>(self)->getQuantityPtr();
-            double b = (double)PyLong_AsLong(other);
+            double b = PyLong_AsDouble(other);
+            if (b == -1.0 && PyErr_Occurred()) {
+                return nullptr;
+            }
             return new QuantityPy(new Quantity(a->pow(b)));
         }
         PyErr_SetString(PyExc_TypeError, "Expected quantity or number");
