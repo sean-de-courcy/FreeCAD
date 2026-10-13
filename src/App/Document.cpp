@@ -83,6 +83,7 @@
 #include "ElementSolverBatch.h"
 #include "ExpressionParser.h"
 #include "GeoFeature.h"
+#include "GroupExtension.h"
 #include "License.h"
 #include "Link.h"
 #include "MergeDocuments.h"
@@ -678,6 +679,34 @@ void setNewDocumentSwitches(Document& doc, bool restoring)
     }
 }
 
+}  // namespace
+
+namespace App
+{
+
+// DocumentObject.cpp (FreeCAD-CH ops#325)
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj);
+
+}  // namespace App
+
+namespace
+{
+// FreeCAD-CH (ops#325): @p obj has run. A container holding it that the rule holds (a rolled-back
+// Body) doesn't run, so its in-list isn't enforced, and a reader of obj through a subname path
+// (Support = (Studio, "A.Shared.")), in no in-list of obj's, would keep obj's old result: enforce
+// those readers
+void enforcePathReadersPastHeld(const DocumentObject* obj, const RecomputeContinuation& rule)
+{
+    for (auto in : obj->getInList()) {
+        auto group = in ? in->getExtensionByType<GroupExtension>(true) : nullptr;
+        if (group && group->hasObject(obj) && rule.holds(in)) {
+            for (auto reader : subnamePathReaders(obj)) {
+                reader->enforceRecompute();
+            }
+            return;
+        }
+    }
+}
 }  // namespace
 
 namespace App
@@ -4009,6 +4038,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             for (auto inObj : obj->getInList()) {
                                 inObj->enforceRecompute();
                             }
+                            enforcePathReadersPastHeld(obj, *continuation);
                             continue;
                         }
                         // if something happened filter all object in its
@@ -4048,6 +4078,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         for (auto inObjIt : obj->getInList()) {
                             inObjIt->enforceRecompute();
                         }
+                    }
+                    if (continuation) {
+                        enforcePathReadersPastHeld(obj, *continuation);
                     }
                 }
                 if (seq) {

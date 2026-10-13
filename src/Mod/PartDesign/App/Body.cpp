@@ -46,6 +46,13 @@
 #include "Retarget.h"
 #include "ShapeBinder.h"
 
+namespace App
+{
+// App/DocumentObject.cpp (FreeCAD-CH ops#325): the readers of obj through a subname path of a
+// container holding it, which aren't in obj's in-list
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj);
+}  // namespace App
+
 using namespace PartDesign;
 
 
@@ -260,9 +267,13 @@ bool Body::holds(const App::DocumentObject* obj) const
                 // B1: held only when every member that uses it is held. B1x (FreeCAD-CH ops#325):
                 // a user outside this Body (another Body's feature, a Part feature, a link) reads
                 // it too, so it isn't held unless that user's own Body holds the user
+                // A reader through a subname path (Support = (Studio, "A.Shared.")) is a user too
                 memo[o] = true;  // a cycle (shouldn't exist) counts as held
                 result = true;
-                for (auto user : o->getInList()) {
+                auto users = o->getInList();
+                auto pathReaders = App::subnamePathReaders(o);
+                users.insert(users.end(), pathReaders.begin(), pathReaders.end());
+                for (auto user : users) {
                     if (user == this) {
                         continue;
                     }
@@ -729,7 +740,8 @@ namespace
 {
 // A reader of a solid the bar holds (in another Body, or a member B1x lets go) gets a warning when
 // it recomputes (DocumentObject::recompute, FreeCAD-CH ops#325): it reads the solid's last result.
-// A bar move changes what is held, so rerun the readers whose warning no longer matches
+// A bar move changes what is held, so rerun the readers whose warning no longer matches: those in
+// its in-list and those reading it through a subname path
 void touchHeldSolidReaders(const Body& body)
 {
     auto doc = body.getDocument();
@@ -738,7 +750,10 @@ void touchHeldSolidReaders(const Body& body)
             continue;
         }
         std::optional<bool> held;
-        for (auto reader : feature->getInList()) {
+        auto readers = feature->getInList();
+        auto pathReaders = App::subnamePathReaders(feature);
+        readers.insert(readers.end(), pathReaders.begin(), pathReaders.end());
+        for (auto reader : readers) {
             if (!reader || reader == &body) {
                 continue;
             }

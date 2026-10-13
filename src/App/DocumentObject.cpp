@@ -23,6 +23,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <stack>
 #include <memory>
 #include <map>
@@ -47,6 +48,7 @@
 #include "ElementReferences.h"
 #include "GeoFeatureGroupExtension.h"
 #include "Link.h"
+#include "OriginGroupExtension.h"
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyLinks.h"
@@ -107,9 +109,43 @@ DocumentObject::~DocumentObject()
 
 namespace
 {
-// FreeCAD-CH (ops#325): an input that the recompute's continuation rule holds (PartDesign: a solid
-// after its Body's roll-back bar) isn't recomputed, so @p obj reads its last result, which may be
-// out of date: say so. A group's own members and a group as input (a Body) aren't read as shapes.
+// FreeCAD-CH (ops#325): the objects @p reader reads through a subname path: Support = (Studio,
+// "A.BossA.Face3") reads A and BossA, though only Studio is in its out-list. Expressions are in
+// the out-list already
+std::vector<DocumentObject*> pathReads(const DocumentObject* reader)
+{
+    std::vector<DocumentObject*> res;
+    std::vector<Property*> props;
+    reader->getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<PropertyLinkBase*>(prop);
+        if (!link || prop->isDerivedFrom<PropertyExpressionContainer>()) {
+            continue;
+        }
+        std::vector<DocumentObject*> objs;
+        std::vector<std::string> subs;
+        link->getLinks(objs, true, &subs, false);
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            // One object with all the subnames (PropertyLinkSub), or one object per subname
+            auto top = objs.size() == 1 ? objs[0] : objs.size() == subs.size() ? objs[i] : nullptr;
+            if (!top || subs[i].find('.') == std::string::npos) {
+                continue;
+            }
+            for (auto on : top->getSubObjectList(subs[i].c_str())) {
+                if (on && on != top) {
+                    res.push_back(on);
+                }
+            }
+        }
+    }
+    return res;
+}
+
+// An input that the recompute's continuation rule holds (PartDesign: a solid after its Body's
+// roll-back bar) isn't recomputed, and its readers aren't rerun when it changes: @p obj may be out
+// of date, whether it reads the input's shape (its last result) or a property by an expression
+// (current when obj ran): say so. Read directly or through a subname path; a container as input
+// (a Body, a Part) and a group's own members don't count.
 std::string heldInputWarning(const DocumentObject* obj)
 {
     auto rule = recomputeContinuation();
@@ -117,19 +153,56 @@ std::string heldInputWarning(const DocumentObject* obj)
         return {};
     }
     auto group = obj->getExtensionByType<GroupExtension>(true);
-    for (auto in : obj->getOutList()) {
-        if (!in || in == obj || in->hasExtension(GroupExtension::getExtensionClassTypeId())
+    auto inputs = obj->getOutList();
+    auto throughPaths = pathReads(obj);
+    inputs.insert(inputs.end(), throughPaths.begin(), throughPaths.end());
+    for (auto in : inputs) {
+        if (!in || in == obj || in->hasExtension(OriginGroupExtension::getExtensionClassTypeId())
             || (group && group->hasObject(in)) || !rule->holds(in)) {
             continue;
         }
-        return std::string("reads ") + in->Label.getValue()
-            + ", which a roll-back bar holds: it isn't recomputed, so this uses its last result, "
-              "which may be out of date. Roll its Body forward past it, or use something before "
-              "the bar";
+        std::string name = in->Label.getValue();
+        return "reads " + name + ", which a roll-back bar holds: " + name
+            + " isn't recomputed, and this isn't rerun when it changes, so this may be out of "
+              "date. Roll its Body forward past "
+            + name + ", or use something before the bar";
     }
     return {};
 }
 }  // namespace
+
+namespace App
+{
+// FreeCAD-CH (ops#325): the objects that read @p obj through a subname path of a container holding
+// it (SubShapeBinder Support = (Studio, "A.Shared.")), found in the containers' in-lists, not in
+// obj's. Document::recompute passes obj's change on to them when a container on the way is held
+// (a rolled-back Body) and so doesn't run; PartDesign's Body counts them as users. Declared where
+// used, to keep App's headers unchanged: move it to DocumentObject.h with the next header change
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj)
+{
+    std::vector<DocumentObject*> res;
+    std::set<const DocumentObject*> seen {obj};
+    std::vector<const DocumentObject*> levels {obj};
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+        for (auto in : levels[i]->getInList()) {
+            if (!in || !seen.insert(in).second) {
+                continue;
+            }
+            auto group = in->getExtensionByType<GroupExtension>(true);
+            if (group && group->hasObject(levels[i])) {
+                levels.push_back(in);
+            }
+            else if (i > 0) {
+                auto reads = pathReads(in);
+                if (std::find(reads.begin(), reads.end(), obj) != reads.end()) {
+                    res.push_back(in);
+                }
+            }
+        }
+    }
+    return res;
+}
+}  // namespace App
 
 void DocumentObject::printInvalidLinks() const
 {

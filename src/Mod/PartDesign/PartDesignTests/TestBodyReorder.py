@@ -1624,11 +1624,11 @@ class BodyReorderBase:
         sketch.setExpression("Placement.Base.z", f"{block.Name}.Length")
         return models.pad(self.body, sketch, 5, "BossA")
 
-    def assertReadsHeld(self, obj, held):
+    def assertReadsHeld(self, obj, held, name="BossA"):
         status = obj.getStatusString()
         self.assertEqual("roll-back bar holds" in status, held, f"{obj.Name}: {status}")
         if held:
-            self.assertIn("BossA", status)
+            self.assertIn(name, status)
 
     def testHeldSolidReadByAnotherBodyWarns(self):
         """ops#325 round 3 (review r2 M2): a solid after the bar isn't recomputed. Another Body's
@@ -1692,6 +1692,165 @@ class BodyReorderBase:
         self.assertValid(shared, otherPad)
         self.assertReadsHeld(shared, False)
         self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 25, places=6)
+
+    def testHeldBooleanReadByAnotherBodyWarns(self):
+        """ops#325 round 4 (review r3 1): the warning skipped every input with a group extension,
+        so another Body's sketch on a held Boolean's top face read its last result silently after
+        the tool grew. A Boolean is a solid like any other: it says so; rolled to the end, the
+        sketch follows the tool."""
+        block = self.block()
+        tool = models.body(self.doc)
+        toolSketch = models.sketch(self.doc, "ToolSketch", models.rectangle(0, 0, 10, 10), tool)
+        toolPad = models.pad(tool, toolSketch, 20, "ToolPad")
+        self.recompute()
+        fuse = self.body.newObject("PartDesign::Boolean", "Fuse")
+        fuse.Type = "Fuse"
+        fuse.addObject(tool)
+        self.recompute()
+        top = faceWhere(fuse.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 20)))
+        self.assertIsNotNone(top)
+        other = models.body(self.doc)
+        onTop = models.sketch(self.doc, "OnTop", models.rectangle(2, 2, 4, 4), other)
+        onTop.AttachmentSupport = [(fuse, top)]
+        onTop.MapMode = "FlatFace"
+        otherPad = models.pad(other, onTop, 2, "OtherPad")
+        self.recompute()
+        self.assertValid(fuse, onTop, otherPad)
+        self.assertReadsHeld(onTop, False)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertTrue(self.body.holds(fuse))
+        toolPad.Length = 30
+        self.recompute()
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 20, places=6)
+        self.assertReadsHeld(onTop, True, "Fuse")
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(fuse, onTop, otherPad)
+        self.assertReadsHeld(onTop, False)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMin, 30, places=6)
+
+    def studioPathBinder(self, name, path):
+        """The Body in a studio (an App::Part), and a binder in a Body outside it reading the
+        studio through a subname path (Studio, "Body.<path>"), as a binder across studios is
+        made."""
+        studio = self.doc.getObject("Studio")
+        if not studio:
+            studio = self.doc.addObject("App::Part", "Studio")
+            studio.addObject(self.body)
+        reader = models.body(self.doc)
+        binder = reader.newObject("PartDesign::SubShapeBinder", name)
+        binder.Support = [(studio, (f"{self.body.Name}.{path}",))]
+        return binder
+
+    def testPathReaderOfAHeldSolidWarns(self):
+        """ops#325 round 4 (review r3 2): a binder of BossA's top face through the studio's path
+        (Studio, "Body.BossA.FaceN") is in the studio's in-list only. It read BossA's last result
+        without a warning. It warns from the bar move on; rolled to the end, it follows the
+        block."""
+        block = self.block()
+        self.recompute()
+        bossA = self.attachedBoss(block)
+        self.recompute()
+        top = self.onBossATop(bossA)[0][1]
+        binder = self.studioPathBinder("TopBinder", f"{bossA.Name}.{top}")
+        self.recompute()
+        self.assertNotIn(binder, bossA.InList)
+        self.assertValid(binder)
+        self.assertAlmostEqual(binder.Shape.BoundBox.ZMin, 15, places=6)
+        self.assertReadsHeld(binder, False)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertReadsHeld(binder, True)
+        block.Length = 20
+        self.recompute()
+        self.assertAlmostEqual(binder.Shape.BoundBox.ZMin, 15, places=6)
+        self.assertReadsHeld(binder, True)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(binder)
+        self.assertReadsHeld(binder, False)
+        self.assertAlmostEqual(binder.Shape.BoundBox.ZMin, 25, places=6)
+
+    def testSketchReadThroughAPathIsNotHeld(self):
+        """ops#325 round 4 (review r3 2): Shared, a sketch after the bar read only by binders
+        through a subname path, of the studio (Studio, "Body.Shared.") or of the Body (Body,
+        "Shared."). B1x didn't see them: Shared stayed held and the binders kept its old place.
+        They are users: Shared runs and they follow it. Without them, it is held."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        shared = models.sketch(self.doc, "Shared", models.rectangle(30, 0, 34, 4), self.body)
+        self.recompute()
+        self.body.rollTo(block)
+        self.assertTrue(self.body.holds(shared))
+        self.body.rollToEnd()
+        viaStudio = self.studioPathBinder("ViaStudio", shared.Name + ".")
+        reader = models.body(self.doc)
+        viaBody = reader.newObject("PartDesign::SubShapeBinder", "ViaBody")
+        viaBody.Support = [(self.body, (shared.Name + ".",))]
+        self.recompute()
+        self.assertValid(viaStudio, viaBody)
+        self.assertNotIn(viaStudio, shared.InList)
+        self.assertNotIn(viaBody, shared.InList)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertFalse(self.body.holds(shared))
+        models.moveRectangle(shared, 40, 0, 44, 4)
+        self.recompute()
+        self.assertValid(shared, viaStudio, viaBody)
+        for binder in (viaStudio, viaBody):
+            self.assertAlmostEqual(binder.Shape.BoundBox.XMin, 40, places=6)
+            self.assertReadsHeld(binder, False)
+
+    def testPathReaderOfAMemberBeforeTheBarFollows(self):
+        """ops#325 round 4: a member before the bar runs, but the rolled-back Body holding it
+        doesn't, so it didn't pass the change on: a binder of the block's top face through the
+        studio's path kept the old height. It follows, with no warning."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        self.recompute()
+        top = faceWhere(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        self.assertIsNotNone(top)
+        binder = self.studioPathBinder("BlockTop", f"{block.Name}.{top}")
+        self.recompute()
+        self.body.rollTo(block)
+        self.recompute()
+        block.Length = 20
+        self.recompute()
+        self.assertValid(block, binder)
+        self.assertAlmostEqual(binder.Shape.BoundBox.ZMin, 20, places=6)
+        self.assertReadsHeld(binder, False)
+
+    def testExpressionReaderOfAHeldSolidWarns(self):
+        """ops#325 round 4 (review r3 3): an expression reads a held solid's property, current
+        when it ran, but a held solid doesn't rerun its readers when it changes: edited under the
+        bar, the reader keeps the old value. A spreadsheet and another Body's pad warn in words
+        that fit them; rolled to the end, they follow and the warning goes."""
+        block = self.block()
+        bossA = self.boss("BossA", 1, 1)
+        sheet = self.doc.addObject("Spreadsheet::Sheet", "Sheet")
+        sheet.set("A1", f"={bossA.Name}.Length")
+        other = models.body(self.doc)
+        otherSketch = models.sketch(self.doc, "OtherSketch", models.rectangle(50, 0, 54, 4), other)
+        otherPad = models.pad(other, otherSketch, 1, "OtherPad")
+        otherPad.setExpression("Length", f"{bossA.Name}.Length")
+        self.recompute()
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertTrue(self.body.holds(bossA))
+        for reader in (sheet, otherPad):
+            self.assertReadsHeld(reader, True)
+            self.assertIn("isn't rerun when it changes", reader.getStatusString())
+        bossA.Length = 7
+        self.recompute()
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMax, 5, places=6)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(sheet, otherPad)
+        self.assertAlmostEqual(getattr(sheet.get("A1"), "Value", sheet.get("A1")), 7, places=6)
+        self.assertAlmostEqual(otherPad.Shape.BoundBox.ZMax, 7, places=6)
+        self.assertReadsHeld(sheet, False)
+        self.assertReadsHeld(otherPad, False)
 
     def testOtherBodyWaitsWhileRolledBack(self):
         """A binder in another body bound to this Body: rolled back and edited, the Body keeps its
