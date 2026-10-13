@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <utility>
 
 #include <Precision.hxx>
@@ -39,6 +40,7 @@
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/Datums.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
@@ -155,6 +157,70 @@ void reportMovedAtOpen(App::DocumentObject* obj)
     (void)started;
     (void)finished;
     movedAtOpen[doc->getName()].emplace_back(obj->getNameInDocument());
+}
+
+// Objects with links outside their container, per document (ops#318 4 (d)). A container placed by
+// an expression moves during the recompute, maybe after such an object ran in it: when a
+// container has recomputed, the objects whose link frames it changed are touched, and the
+// recompute's second pass runs them and what depends on them. Names, so a deleted object is just
+// not found; entries without such links any more are dropped when found.
+struct Watched
+{
+    fastsignals::connection recomputed;
+    std::set<std::string> names;
+};
+std::map<const App::Document*, Watched> watchedByDocument;
+
+void containerRecomputed(const App::Document* doc, const App::DocumentObject& recomputed)
+{
+    if (!recomputed.hasExtension(App::GeoFeatureGroupExtension::getExtensionClassTypeId())
+        || doc->testStatus(App::Document::Restoring) || doc->isPerformingTransaction()) {
+        return;
+    }
+    auto it = watchedByDocument.find(doc);
+    if (it == watchedByDocument.end()) {
+        return;
+    }
+    auto& names = it->second.names;
+    for (auto name = names.begin(); name != names.end();) {
+        auto obj = doc->getObject(name->c_str());
+        auto attached = obj ? obj->getExtensionByType<AttachExtension>(true) : nullptr;
+        if (!attached || !attached->linkFramesAcross()) {
+            name = names.erase(name);
+            continue;
+        }
+        // On the main thread with the worker blocked, or on the recompute's own thread: the
+        // check for a recompute beside it doesn't apply
+        if (!obj->isTouched() && attached->linkFramesDiffer()) {
+            obj->touch();
+        }
+        ++name;
+    }
+}
+
+void watchContainers(App::DocumentObject* obj)
+{
+    auto doc = obj->getDocument();
+    if (!doc || !obj->getNameInDocument()) {
+        return;
+    }
+    static auto deleted = App::GetApplication().signalDeleteDocument.connect(
+        [](const App::Document& gone) {
+            auto it = watchedByDocument.find(&gone);
+            if (it != watchedByDocument.end()) {
+                it->second.recomputed.disconnect();
+                watchedByDocument.erase(it);
+            }
+        }
+    );
+    (void)deleted;
+    auto& watched = watchedByDocument[doc];
+    if (!watched.recomputed.connected()) {
+        watched.recomputed = doc->signalRecomputedObject.connect(
+            [doc](const App::DocumentObject& recomputed) { containerRecomputed(doc, recomputed); }
+        );
+    }
+    watched.names.emplace(obj->getNameInDocument());
 }
 }  // namespace
 
@@ -476,6 +542,9 @@ bool AttachExtension::positionBySupport()
         // compares them (ops#318)
         auto frames = AttachEngine::linkFrames(getExtendedObject(), AttachmentSupport.getValues());
         _props.attacher->setLinkFrames(frames.frames);
+        if (frames.across) {
+            watchContainers(getExtendedObject());
+        }
         keepLinkFrames(std::move(frames));
         bool subChanged = false;
 
