@@ -28,6 +28,7 @@ it doesn't know (`!true` was `true`). Every model here is built by the test, and
 value is fixed up front.
 """
 
+import ctypes
 import unittest
 
 import FreeCAD
@@ -534,6 +535,82 @@ class TestRetypedProperties(ExpressionUnitsBase):
         import math
 
         self.assertAlmostEqual(binder.Shape.Area, 180 + 4 * math.pi, places=4)
+
+
+class TestLargeIntegers(ExpressionUnitsBase):
+    """ops#319 round 4: a Python int or an expression result that doesn't fit a C long (32 bits
+    on Windows) was stored as -1 or an unrelated number. It is stored exactly when it fits, and
+    refused naming the value when it doesn't."""
+
+    LONG_MAX = 2 ** (8 * ctypes.sizeof(ctypes.c_long) - 1) - 1
+    VALUES = (2**31, 2**40, -(2**40))
+
+    def assertSetExactlyOrRefused(self, obj, name, value, errors):
+        before = getattr(obj, name)
+        if -self.LONG_MAX - 1 <= value <= self.LONG_MAX:
+            setattr(obj, name, value)
+            self.assertEqual(getattr(obj, name), value)
+            setattr(obj, name, before)
+            return
+        with self.assertRaises(errors) as cm:
+            setattr(obj, name, value)
+        self.assertIn(str(value), str(cm.exception))
+        self.assertEqual(getattr(obj, name), before)
+
+    def testPlainInteger(self):
+        varSet = self.addVarSet(Count=("App::PropertyInteger", 3))
+        for value in self.VALUES + (2**70, -(2**70)):
+            self.assertSetExactlyOrRefused(varSet, "Count", value, OverflowError)
+        # No error is left pending: the next calls work
+        varSet.Count = 4
+        self.assertEqual(varSet.Count, 4)
+
+    def testConstrainedInteger(self):
+        # -1 is inside the range: the old conversion's -1 passed the check
+        varSet = self.addVarSet(Count=("App::PropertyIntegerConstraint", (3, -5, 5, 1)))
+        for value in self.VALUES + (2**70,):
+            with self.assertRaises((OverflowError, ValueError)) as cm:
+                varSet.Count = value
+            self.assertIn(str(value), str(cm.exception))
+            self.assertEqual(varSet.Count, 3)
+        varSet.Count = -1
+        self.assertEqual(varSet.Count, -1)
+
+    def testPercent(self):
+        varSet = self.addVarSet(P=("App::PropertyPercent", 50))
+        with self.assertRaises((OverflowError, ValueError)) as cm:
+            varSet.P = 2**40
+        self.assertIn(str(2**40), str(cm.exception))
+        self.assertEqual(varSet.P, 50)
+
+    def testFloats(self):
+        varSet = self.addVarSet(
+            F=("App::PropertyFloat", 1.0),
+            Ratio=("App::PropertyFloatConstraint", (0.0, -1.0, 1e15, 1.0)),
+        )
+        for value in self.VALUES:
+            varSet.F = value
+            self.assertEqual(varSet.F, float(value))
+        varSet.Ratio = 2**40
+        self.assertEqual(varSet.Ratio, float(2**40))
+        with self.assertRaises(OverflowError):
+            varSet.F = 10**400
+        self.assertEqual(varSet.F, float(-(2**40)))
+
+    def testIntegerByExpression(self):
+        varSet = self.addVarSet(Count=("App::PropertyInteger", 3))
+        varSet.setExpression("Count", "2^70")
+        self.doc.recompute()
+        self.assertInvalid(varSet, "out of range")
+        self.assertEqual(varSet.Count, 3)
+        varSet.setExpression("Count", "2^40")
+        self.doc.recompute()
+        if 2**40 <= self.LONG_MAX:
+            self.assertTrue(varSet.isValid())
+            self.assertEqual(varSet.Count, 2**40)
+        else:
+            self.assertInvalid(varSet, "out of range")
+            self.assertEqual(varSet.Count, 3)
 
 
 class TestWhitespaceCharacters(ExpressionUnitsBase):
