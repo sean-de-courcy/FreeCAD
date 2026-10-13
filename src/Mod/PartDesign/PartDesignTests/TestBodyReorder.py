@@ -1821,6 +1821,74 @@ class BodyReorderBase:
         self.assertAlmostEqual(binder.Shape.BoundBox.ZMin, 20, places=6)
         self.assertReadsHeld(binder, False)
 
+    def linkedBinder(self, name, top, sub):
+        """A binder in a Body of its own reading `top` through the subname path `sub`."""
+        reader = models.body(self.doc)
+        binder = reader.newObject("PartDesign::SubShapeBinder", name)
+        binder.Support = [(top, (sub,))]
+        return binder
+
+    def testSketchReadThroughALinkIsNotHeld(self):
+        """ops#325 round 5 (review r4 1): a path through a link to the Body, (LinkA, "Shared."),
+        or through a link inside an outer App::Part, (Outer, "LinkB.Shared."), as a pick through
+        a linked Body in the 3D view makes. The climb from Shared went through containers only,
+        so B1x held Shared and the binders kept x 30. They are users: Shared runs, they follow."""
+        block = self.block()
+        self.boss("BossA", 1, 1)
+        shared = models.sketch(self.doc, "Shared", models.rectangle(30, 0, 34, 4), self.body)
+        linkA = self.doc.addObject("App::Link", "LinkA")
+        linkA.LinkedObject = self.body
+        outer = self.doc.addObject("App::Part", "Outer")
+        linkB = self.doc.addObject("App::Link", "LinkB")
+        linkB.LinkedObject = self.body
+        outer.addObject(linkB)
+        viaLink = self.linkedBinder("ViaLink", linkA, shared.Name + ".")
+        viaOuter = self.linkedBinder("ViaOuter", outer, f"LinkB.{shared.Name}.")
+        self.recompute()
+        self.assertValid(viaLink, viaOuter)
+        self.body.rollTo(block)
+        self.recompute()
+        self.assertFalse(self.body.holds(shared))
+        models.moveRectangle(shared, 40, 0, 44, 4)
+        self.recompute()
+        self.assertValid(shared, viaLink, viaOuter)
+        for binder in (viaLink, viaOuter):
+            self.assertAlmostEqual(binder.Shape.BoundBox.XMin, 40, places=6, msg=binder.Name)
+            self.assertReadsHeld(binder, False)
+
+    def testPathReadersThroughALinkFollowAndWarn(self):
+        """ops#325 round 5 (review r4 1): through a link to the Body, a binder of the block's top
+        (LinkA, "Block.FaceN") kept z 10 when the block grew under the bar, and a binder of
+        BossA's top (LinkA, "BossA.FaceN") had no warning. The first follows; the second warns
+        from the bar move and follows at the end."""
+        block = self.block()
+        self.recompute()
+        bossA = self.attachedBoss(block)
+        self.recompute()
+        blockTop = faceWhere(block.Shape, lambda f: isPlaneFacing(f, V(0, 0, 1), V(0, 0, 10)))
+        self.assertIsNotNone(blockTop)
+        bossTop = self.onBossATop(bossA)[0][1]
+        linkA = self.doc.addObject("App::Link", "LinkA")
+        linkA.LinkedObject = self.body
+        onBlock = self.linkedBinder("OnBlock", linkA, f"{block.Name}.{blockTop}")
+        onBoss = self.linkedBinder("OnBoss", linkA, f"{bossA.Name}.{bossTop}")
+        self.recompute()
+        self.assertValid(onBlock, onBoss)
+        self.body.rollTo(block)
+        self.recompute()
+        block.Length = 20
+        self.recompute()
+        self.assertValid(block, onBlock)
+        self.assertAlmostEqual(onBlock.Shape.BoundBox.ZMin, 20, places=6)
+        self.assertReadsHeld(onBlock, False)
+        self.assertAlmostEqual(onBoss.Shape.BoundBox.ZMin, 15, places=6)
+        self.assertReadsHeld(onBoss, True)
+        self.body.rollToEnd()
+        self.recompute()
+        self.assertValid(onBlock, onBoss)
+        self.assertAlmostEqual(onBoss.Shape.BoundBox.ZMin, 25, places=6)
+        self.assertReadsHeld(onBoss, False)
+
     def testExpressionReaderOfAHeldSolidWarns(self):
         """ops#325 round 4 (review r3 3): an expression reads a held solid's property, current
         when it ran, but a held solid doesn't rerun its readers when it changes: edited under the

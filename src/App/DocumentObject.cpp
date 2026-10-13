@@ -109,7 +109,15 @@ DocumentObject::~DocumentObject()
 
 namespace
 {
-// FreeCAD-CH (ops#325): the objects @p reader reads through a subname path: Support = (Studio,
+// FreeCAD-CH (ops#325): a link of any kind (App::Link with or without a subname, a LinkGroup, a
+// link element): a subname path may go through it as through a container
+bool isLinkType(const DocumentObject* obj)
+{
+    return obj->getLinkedObject(false) != obj
+        || obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
+}
+
+// The objects @p reader reads through a subname path: Support = (Studio,
 // "A.BossA.Face3") reads A and BossA, though only Studio is in its out-list. Expressions are in
 // the out-list already
 std::vector<DocumentObject*> pathReads(const DocumentObject* reader)
@@ -125,9 +133,12 @@ std::vector<DocumentObject*> pathReads(const DocumentObject* reader)
         std::vector<DocumentObject*> objs;
         std::vector<std::string> subs;
         link->getLinks(objs, true, &subs, false);
+        // One object with all its subnames (PropertyLinkSub, PropertyXLink), or one object per
+        // subname (the lists; one with a detached entry drops its object, not its subnames: skipped)
+        bool single = prop->isDerivedFrom<PropertyLinkSub>() || prop->isDerivedFrom<PropertyXLink>();
         for (std::size_t i = 0; i < subs.size(); ++i) {
-            // One object with all the subnames (PropertyLinkSub), or one object per subname
-            auto top = objs.size() == 1 ? objs[0] : objs.size() == subs.size() ? objs[i] : nullptr;
+            auto top = single ? (objs.size() == 1 ? objs[0] : nullptr)
+                              : (objs.size() == subs.size() ? objs[i] : nullptr);
             if (!top || subs[i].find('.') == std::string::npos) {
                 continue;
             }
@@ -154,8 +165,13 @@ std::string heldInputWarning(const DocumentObject* obj)
     }
     auto group = obj->getExtensionByType<GroupExtension>(true);
     auto inputs = obj->getOutList();
-    auto throughPaths = pathReads(obj);
-    inputs.insert(inputs.end(), throughPaths.begin(), throughPaths.end());
+    // A subname path starts at a group or a link: read paths only then (most objects link neither)
+    if (std::any_of(inputs.begin(), inputs.end(), [](auto in) {
+            return in && (in->hasExtension(GroupExtension::getExtensionClassTypeId()) || isLinkType(in));
+        })) {
+        auto throughPaths = pathReads(obj);
+        inputs.insert(inputs.end(), throughPaths.begin(), throughPaths.end());
+    }
     for (auto in : inputs) {
         if (!in || in == obj || in->hasExtension(OriginGroupExtension::getExtensionClassTypeId())
             || (group && group->hasObject(in)) || !rule->holds(in)) {
@@ -174,8 +190,8 @@ std::string heldInputWarning(const DocumentObject* obj)
 namespace App
 {
 // FreeCAD-CH (ops#325): the objects that read @p obj through a subname path of a container holding
-// it (SubShapeBinder Support = (Studio, "A.Shared.")), found in the containers' in-lists, not in
-// obj's. Document::recompute passes obj's change on to them when a container on the way is held
+// it or of a link showing one of those (SubShapeBinder Support = (Studio, "A.Shared."), (LinkA,
+// "Shared."), (Outer, "LinkA.Shared.")), found in their in-lists, not in obj's. Document::recompute passes obj's change on to them when a container on the way is held
 // (a rolled-back Body) and so doesn't run; PartDesign's Body counts them as users. Declared where
 // used, to keep App's headers unchanged: move it to DocumentObject.h with the next header change
 AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj)
@@ -189,10 +205,11 @@ AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* 
                 continue;
             }
             auto group = in->getExtensionByType<GroupExtension>(true);
-            if (group && group->hasObject(levels[i])) {
+            bool container = group && group->hasObject(levels[i]);
+            if (container || isLinkType(in)) {
                 levels.push_back(in);
             }
-            else if (i > 0) {
+            if (!container && i > 0) {
                 auto reads = pathReads(in);
                 if (std::find(reads.begin(), reads.end(), obj) != reads.end()) {
                     res.push_back(in);

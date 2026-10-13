@@ -697,14 +697,20 @@ namespace
 // those readers
 void enforcePathReadersPastHeld(const DocumentObject* obj, const RecomputeContinuation& rule)
 {
-    for (auto in : obj->getInList()) {
-        auto group = in ? in->getExtensionByType<GroupExtension>(true) : nullptr;
-        if (group && group->hasObject(obj) && rule.holds(in)) {
-            for (auto reader : subnamePathReaders(obj)) {
-                reader->enforceRecompute();
+    try {
+        for (auto in : obj->getInList()) {
+            auto group = in ? in->getExtensionByType<GroupExtension>(true) : nullptr;
+            if (group && group->hasObject(obj) && rule.holds(in)) {
+                for (auto reader : subnamePathReaders(obj)) {
+                    reader->enforceRecompute();
+                }
+                return;
             }
-            return;
         }
+    }
+    catch (...) {
+        // getSubObject() may run a Python proxy: the recompute goes on, without these readers
+        FC_ERR("Path readers of " << obj->getFullName() << " not found");
     }
 }
 }  // namespace
