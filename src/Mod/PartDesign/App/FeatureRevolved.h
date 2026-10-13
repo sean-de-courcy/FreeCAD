@@ -102,7 +102,6 @@ protected:
 private:
     App::DocumentObjectExecReturn* tryExecuteRevolved(Part::RevolMode revolMode);
     TopoShape tryGetBaseShape() const;
-    TopoShape tryGetSupportShape() const;
     TopoShape getRevolutionUpToFace(
         RevolMethod method,
         const App::PropertyLinkSub& upToFaceProp,
@@ -122,7 +121,6 @@ private:
         App::PropertyLinkSub& upToFaceProp,
         const TopoShape& sketchshape,
         const TopoShape& base,
-        TopoShape supportface,
         const gp_Pnt& pnt,
         const gp_Dir& dir,
         const TopLoc_Location& invObjLoc,

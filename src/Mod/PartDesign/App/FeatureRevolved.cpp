@@ -2746,9 +2746,6 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
 
     // Generate the revolution tool first; PartDesign applies the final base operation below.
     TopoShape result = makeTopoShape(false);
-    TopoShape supportface = tryGetSupportShape();
-
-    supportface.move(invObjLoc);
 
     std::vector<TopoShape> revolutions;
     auto addRevolution = [&revolutions](TopoShape&& revolution) {
@@ -2803,7 +2800,6 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 UpToFace,
                 sketchshape.makeElementCopy(),
                 base,
-                supportface,
                 pnt,
                 dir,
                 invObjLoc,
@@ -2844,7 +2840,6 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 UpToFace,
                 sketchshape.makeElementCopy(),
                 base,
-                supportface,
                 pnt,
                 dir,
                 invObjLoc,
@@ -2860,7 +2855,6 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 UpToFace2,
                 secondSideProfile(),
                 base,
-                supportface,
                 pnt,
                 dir2,
                 invObjLoc,
@@ -2928,7 +2922,6 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             UpToFace,
             sketchshape,
             base,
-            supportface,
             pnt,
             dir,
             invObjLoc,
@@ -3106,7 +3099,6 @@ TopoShape Revolved::generateSingleRevolutionSide(
     App::PropertyLinkSub& upToFaceProp,
     const TopoShape& sketchshape,
     const TopoShape& base,
-    TopoShape supportface,
     const gp_Pnt& pnt,
     const gp_Dir& dir,
     const TopLoc_Location& invObjLoc,
@@ -3205,19 +3197,6 @@ TopoShape Revolved::tryGetBaseShape() const
     }
 
     return base;
-}
-
-TopoShape Revolved::tryGetSupportShape() const
-{
-    TopoShape supportface = makeTopoShape(false);
-    try {
-        supportface = getSupportFace();
-    }
-    catch (...) {
-        // do nothing, null shape is handled later
-    }
-
-    return supportface;
 }
 
 bool Revolved::suggestReversed()
