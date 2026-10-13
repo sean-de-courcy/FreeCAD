@@ -237,6 +237,9 @@ class ToolControllerEditor(object):
         self.controller.tcNumber.installEventFilter(self.blockScrollWheel)
         self.controller.spindleDirection.installEventFilter(self.blockScrollWheel)
         self.controller.tcNumber.setReadOnly(disableToolNumber)
+        # The property's own limit: a smaller one would show a larger number cut down,
+        # and accepting the panel would then store the cut-down number
+        self.controller.tcNumber.setMaximum(PathToolController.MaxToolNumber)
 
         self._injectFeedsSpeedsButton()
 

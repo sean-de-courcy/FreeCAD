@@ -22,7 +22,11 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
+
+#include <fmt/format.h>
 
 #include <Base/QuantityPy.h>
 #include <Base/UnitPy.h>
@@ -39,6 +43,37 @@ using namespace std;
 const PropertyQuantityConstraint::Constraints LengthStandard = {
     0.0, std::numeric_limits<double>::max(), 1.0};
 const PropertyQuantityConstraint::Constraints AngleStandard = {-360, 360, 1.0};
+
+namespace
+{
+// "Length (mm)", or "mm^-1" for a unit without a name.
+std::string describeUnit(const Base::Unit& unit)
+{
+    std::string type = unit.getTypeString();
+    return type.empty() ? unit.getString() : fmt::format("{} ({})", type, unit.getString());
+}
+
+const char* nameOf(const Property& prop)
+{
+    const char* name = prop.getName();
+    return name ? name : "the property";
+}
+
+// FreeCAD-CH (ops#319): NaN and infinity were stored from Python and from expressions
+// (`=sqrt(-1)` gave a nan mm Distance, inf on a Length was cut to the largest double). No
+// quantity property takes them now.
+void checkFinite(const Property& prop, const Base::Unit& unit, double value)
+{
+    if (std::isnan(value)) {
+        throw Base::ValueError(fmt::format("{}: nan is not a number", nameOf(prop)));
+    }
+    if (std::isinf(value)) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is not a finite value", nameOf(prop), Base::Quantity(value, unit).getUserString()
+        ));
+    }
+}
+}  // namespace
 
 //**************************************************************************
 // PropertyQuantity
@@ -74,7 +109,16 @@ Base::Quantity PropertyQuantity::createQuantityFromPy(PyObject* value)
         quant = Quantity(PyFloat_AsDouble(value), _Unit);
     }
     else if (PyLong_Check(value)) {
-        quant = Quantity(double(PyLong_AsLong(value)), _Unit);
+        // FreeCAD-CH (ops#319): PyLong_AsLong gave -1 for an int beyond a C long (2**31 on
+        // Windows) and left an OverflowError pending, so a Distance stored -1 mm.
+        double number = PyLong_AsDouble(value);
+        if (number == -1.0 && PyErr_Occurred()) {
+            PyErr_Clear();
+            throw Base::OverflowError(fmt::format("{}: {} is out of range for a float",
+                                                  nameOf(*this),
+                                                  Py::Object(value).as_string()));
+        }
+        quant = Quantity(number, _Unit);
     }
     else if (PyObject_TypeCheck(value, &(QuantityPy::Type))) {
         Base::QuantityPy* pcObject = static_cast<Base::QuantityPy*>(value);
@@ -99,10 +143,12 @@ void PropertyQuantity::setPyObject(PyObject* value)
         Base::Unit unit = *(pcObject->getUnitPtr());
         aboutToSetValue();
         _Unit = unit;
+        _unitAdopted = false;
         hasSetValue();
     }
     else {
         Base::Quantity quant = createQuantityFromPy(value);
+        checkFinite(*this, _Unit, quant.getValue());
 
         if (quant.isDimensionless()) {
             PropertyFloat::setValue(quant.getValue());
@@ -117,12 +163,33 @@ void PropertyQuantity::setPyObject(PyObject* value)
     }
 }
 
+// FreeCAD-CH (ops#319): an expression result took over the property's unit unchecked, so a
+// Length set to `30 deg` built a 30 mm box. A unit set by the property's class (or by setUnit)
+// is now checked; a property without one (a plain PropertyQuantity) still takes the result's.
+// A result without a unit takes the property's, as before.
+void PropertyQuantity::checkPathUnit(const Base::Quantity& q) const
+{
+    if (q.isDimensionless() || q.getUnit() == _Unit || _unitAdopted || _Unit == Base::Unit::One) {
+        return;
+    }
+    throw Base::UnitsMismatchError(fmt::format(
+        "Unit mismatch: {} needs {}, but the value {} has {}",
+        nameOf(*this),
+        describeUnit(_Unit),
+        q.getUserString(),
+        describeUnit(q.getUnit())
+    ));
+}
+
 void PropertyQuantity::setPathValue(const ObjectIdentifier& /*path*/, const boost::any& value)
 {
     auto q = App::anyToQuantity(value);
+    checkPathUnit(q);
+    checkFinite(*this, _Unit, q.getValue());
     aboutToSetValue();
-    if (!q.isDimensionless()) {
+    if (!q.isDimensionless() && q.getUnit() != _Unit) {
         _Unit = q.getUnit();
+        _unitAdopted = true;
     }
     _dValue = q.getValue();
     setValue(q.getValue());
@@ -181,31 +248,65 @@ double PropertyQuantityConstraint::getStepSize() const
     return 1.0;
 }
 
+// FreeCAD-CH (ops#319): a value outside the constraints was clamped silently (`Length = -5` stored
+// 0 mm). It is refused now, from Python and from expressions alike. Within rounding of a bound
+// (`2*pi rad` on an angle limited to 360 deg) the value counts as the bound.
+double PropertyQuantityConstraint::checkedValue(double value) const
+{
+    checkFinite(*this, _Unit, value);
+    if (!_ConstStruct) {
+        return value;
+    }
+    const double lower = _ConstStruct->LowerBound;
+    const double upper = _ConstStruct->UpperBound;
+    auto tolerance = [](double bound) {
+        return 1e-9 * std::max(1.0, std::abs(bound));
+    };
+    auto shown = [this](double v) {
+        return Base::Quantity(v, _Unit).getUserString();
+    };
+    if (value < lower) {
+        if (value >= lower - tolerance(lower)) {
+            return lower;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is below the minimum, {}", nameOf(*this), shown(value), shown(lower)
+        ));
+    }
+    if (value > upper) {
+        if (value <= upper + tolerance(upper)) {
+            return upper;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is above the maximum, {}", nameOf(*this), shown(value), shown(upper)
+        ));
+    }
+    return value;
+}
+
 void PropertyQuantityConstraint::setPyObject(PyObject* value)
 {
     Base::Quantity quant = createQuantityFromPy(value);
 
-    double temp = quant.getValue();
-    if (_ConstStruct) {
-        if (temp > _ConstStruct->UpperBound) {
-            temp = _ConstStruct->UpperBound;
-        }
-        else if (temp < _ConstStruct->LowerBound) {
-            temp = _ConstStruct->LowerBound;
-        }
-    }
-    quant.setValue(temp);
-
-    if (quant.isDimensionless()) {
-        PropertyFloat::setValue(quant.getValue());  // clazy:exclude=skipped-base-method
-        return;
-    }
-
-    if (_Unit != quant.getUnit()) {
+    if (!quant.isDimensionless() && _Unit != quant.getUnit()) {
         throw Base::UnitsMismatchError("Not matching Unit!");
     }
 
-    PropertyFloat::setValue(quant.getValue());  // clazy:exclude=skipped-base-method
+    PropertyFloat::setValue(checkedValue(quant.getValue()));  // clazy:exclude=skipped-base-method
+}
+
+boost::any PropertyQuantityConstraint::checkPathValue(const ObjectIdentifier& /*path*/,
+                                                      const boost::any& value) const
+{
+    auto q = App::anyToQuantity(value);
+    checkPathUnit(q);
+    q.setValue(checkedValue(q.getValue()));
+    return q;
+}
+
+void PropertyQuantityConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyQuantity::setPathValue(path, checkPathValue(path, value));
 }
 
 // ------------------------------------------------------

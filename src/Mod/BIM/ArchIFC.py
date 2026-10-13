@@ -99,6 +99,32 @@ class IfcRoot:
             )
 
         self.migrateDeprecatedAttributes(obj)
+        self.allowNegativeIfcLengths(obj)
+
+    def allowNegativeIfcLengths(self, obj):
+        """Let IFC length attributes stored as PropertyLength hold negative values.
+
+        FreeCAD-CH (ops#319): IfcLengthMeasure attributes (a storey's Elevation, a space's
+        ElevationWithFlooring, a site's RefElevation) were made as PropertyLength, which now
+        refuses a negative value instead of clamping it to 0. New ones are PropertyDistance
+        (Presets/ifc_types_*.json). The status isn't saved, so it is set again whenever the
+        object is set up, which includes a restore.
+        """
+
+        if "IfcData" not in obj.PropertiesList or "attributes" not in obj.IfcData:
+            return
+        try:
+            attributes = json.loads(obj.IfcData["attributes"])
+        except ValueError:
+            return
+        for name, attribute in attributes.items():
+            if (
+                isinstance(attribute, dict)
+                and attribute.get("type") == "IfcLengthMeasure"
+                and name in obj.PropertiesList
+                and obj.getTypeIdOfProperty(name) == "App::PropertyLength"
+            ):
+                obj.setPropertyStatus(name, "AllowNegativeValues")
 
     def onChanged(self, obj, prop):
         """Method called when the object has a property changed.

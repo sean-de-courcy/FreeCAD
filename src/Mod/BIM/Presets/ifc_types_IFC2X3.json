@@ -237,7 +237,7 @@
     },
     "IfcLengthMeasure": {
         "base": "xs:double",
-        "property": "PropertyLength"
+        "property": "PropertyDistance"
     },
     "IfcLinearForceMeasure": {
         "base": "xs:double",

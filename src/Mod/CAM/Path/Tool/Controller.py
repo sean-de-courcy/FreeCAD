@@ -39,6 +39,10 @@ else:
 
 translate = FreeCAD.Qt.translate
 
+# The largest tool number a controller takes: the largest the property can hold, so
+# numbers from tool libraries, templates and the job's tool table all fit
+MaxToolNumber = 2147483647
+
 
 class ToolControllerTemplate:
     """Attribute and sub element strings for template export/import."""
@@ -144,7 +148,7 @@ class ToolController:
             "Tool",
             QT_TRANSLATE_NOOP("App::Property", "The active tool"),
         )
-        obj.ToolNumber = (0, 0, 10000, 1)
+        obj.ToolNumber = (0, 0, MaxToolNumber, 1)
         obj.addProperty(
             "App::PropertyFloat",
             "SpindleSpeed",

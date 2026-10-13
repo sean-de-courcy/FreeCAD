@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <cstring>
+
 #include <BRepAdaptor_Curve.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Circ.hxx>
@@ -38,7 +40,7 @@
 
 using namespace Part;
 
-App::PropertyFloatConstraint::Constraints Revolution::angleRangeU = {-360.0, 360.0, 1.0};
+App::PropertyAngle::Constraints Revolution::angleRangeU = {-360.0, 360.0, 1.0};
 
 PROPERTY_SOURCE(Part::Revolution, Part::Feature)
 
@@ -100,6 +102,23 @@ short Revolution::mustExecute() const
         return 1;
     }
     return 0;
+}
+
+// FreeCAD-CH (ops#319): Angle was a PropertyFloatConstraint, saved as a Float like the Angle.
+void Revolution::handleChangedPropertyType(
+    Base::XMLReader& reader,
+    const char* TypeName,
+    App::Property* prop
+)
+{
+    if (prop == &Angle && strcmp(TypeName, "App::PropertyFloatConstraint") == 0) {
+        App::PropertyFloatConstraint value;
+        value.Restore(reader);
+        Angle.setValue(value.getValue());
+    }
+    else {
+        Part::Feature::handleChangedPropertyType(reader, TypeName, prop);
+    }
 }
 
 void Revolution::onChanged(const App::Property* prop)

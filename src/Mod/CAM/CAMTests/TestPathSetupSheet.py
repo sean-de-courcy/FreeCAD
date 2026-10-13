@@ -54,6 +54,26 @@ class SomeOp(object):
         return obj
 
 
+class TwoPropOp(object):
+    """An operation whose first setup property has a range (1 to 99)."""
+
+    def __init__(self, obj):
+        obj.addProperty("App::PropertyIntegerConstraint", "Passes", "Base", "Passes")
+        obj.Passes = (1, 1, 99, 1)
+        obj.addProperty("App::PropertyPercent", "StepOver", "Base", "Step over")
+
+    @classmethod
+    def SetupProperties(cls):
+        return ["Passes", "StepOver"]
+
+    @classmethod
+    def Create(cls, name, obj=None, parentJob=None):
+        if obj is None:
+            obj = FreeCAD.ActiveDocument.addObject("Path::FeaturePython", name)
+        obj.Proxy = TwoPropOp(obj)
+        return obj
+
+
 class TestPathSetupSheet(PathTestBase):
     def setUp(self):
         self.doc = FreeCAD.newDocument("TestPathSetupSheet")
@@ -326,4 +346,25 @@ class TestPathSetupSheet(PathTestBase):
         op = SomeOp.Create(opname)
         self.assertEqual(op.StepOver, 0)
         o2.Proxy.setOperationProperties(op, opname)
+        self.assertEqual(op.StepOver, 75)
+
+    def test21(self):
+        """Verify a default the operation refuses skips only itself (ops#319)."""
+
+        opname = "whoopTwo"
+        PathSetupSheet.RegisterOperation(opname, TwoPropOp.Create, TwoPropOp.SetupProperties)
+
+        # The setup sheet's copy of Passes has no range, so it takes 0
+        o1 = PathSetupSheet.Create()
+        passes = PathSetupSheet.OpPropertyName(opname, "Passes")
+        stepOver = PathSetupSheet.OpPropertyName(opname, "StepOver")
+        group = PathSetupSheet.OpPropertyGroup(opname)
+        o1.addProperty("App::PropertyIntegerConstraint", passes, group, "")
+        o1.addProperty("App::PropertyPercent", stepOver, group, "")
+        setattr(o1, passes, 0)
+        setattr(o1, stepOver, 75)
+
+        op = TwoPropOp.Create(opname)
+        o1.Proxy.setOperationProperties(op, opname)
+        self.assertEqual(op.Passes, 1)
         self.assertEqual(op.StepOver, 75)

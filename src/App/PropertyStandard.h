@@ -337,6 +337,9 @@ public:
         return "Gui::PropertyEditor::PropertyIntegerConstraintItem";
     }
     void setPyObject(PyObject* py) override;
+    void setPathValue(const App::ObjectIdentifier& path, const boost::any& value) override;
+    boost::any checkPathValue(const App::ObjectIdentifier& path,
+                              const boost::any& value) const override;
 
     void Save(Base::Writer& writer) const override;
     void Restore(Base::XMLReader& reader) override;
@@ -687,6 +690,9 @@ public:
     }
 
     void setPyObject(PyObject* py) override;
+    void setPathValue(const App::ObjectIdentifier& path, const boost::any& value) override;
+    boost::any checkPathValue(const App::ObjectIdentifier& path,
+                              const boost::any& value) const override;
 
     void Save(Base::Writer& writer) const override;
     void Restore(Base::XMLReader& reader) override;

@@ -1197,7 +1197,8 @@ class PanelSheet(Draft.DraftObject):
             base.scale(obj.Scale, FreeCAD.Vector())
             obj.Shape = base
             obj.Placement = pl
-            obj.FillRatio = int((subarea / area) * 100)
+            # Cuts that overlap or exceed the sheet can add up to more than its area
+            obj.FillRatio = min(100, int((subarea / area) * 100))
 
     def getOutlines(self, obj, transform=False):
         """getOutlines(obj,transform=False): returns a list of compounds whose wires define the

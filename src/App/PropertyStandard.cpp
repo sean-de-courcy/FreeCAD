@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <limits>
 #include <memory>
@@ -33,6 +34,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/math/special_functions/round.hpp>
+#include <fmt/format.h>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -58,6 +60,191 @@
 using namespace App;
 using namespace Base;
 using namespace std;
+
+namespace
+{
+// FreeCAD-CH (ops#319): a value with a unit lost it silently on a property without one (`3 mm` on
+// a Float gave 3, `30 deg` on an Integer gave 30). It is refused; `expr / 1 mm` gives a number.
+double unitlessValue(const Property& prop, const Base::Quantity& q)
+{
+    if (!q.isDimensionless()) {
+        const char* name = prop.getName();
+        throw Base::UnitsMismatchError(fmt::format(
+            "Unit mismatch: {} is a number without a unit, but the value {} has one (divide by "
+            "the unit for a number)",
+            name ? name : "the property",
+            q.getUserString()
+        ));
+    }
+    return q.getValue();
+}
+
+// The number an expression result gives a Float, as setPathValue() reads it.
+double floatFromAny(const Property& prop, const boost::any& value)
+{
+    if (value.type() == typeid(long)) {
+        return static_cast<double>(boost::any_cast<long>(value));
+    }
+    if (value.type() == typeid(unsigned long)) {
+        return static_cast<double>(boost::any_cast<unsigned long>(value));
+    }
+    if (value.type() == typeid(int)) {
+        return boost::any_cast<int>(value);
+    }
+    if (value.type() == typeid(double)) {
+        return boost::any_cast<double>(value);
+    }
+    if (value.type() == typeid(float)) {
+        return boost::any_cast<float>(value);
+    }
+    if (value.type() == typeid(Quantity)) {
+        return unitlessValue(prop, boost::any_cast<Quantity>(value));
+    }
+    throw bad_cast();
+}
+
+// A rounded expression result that doesn't fit a long (`2^40`, or not finite) was cast
+// unchecked, which stored an unrelated number.
+long roundedLong(const Property& prop, double value)
+{
+    double rounded = std::round(value);  // boost's round throws on NaN and infinity
+    // The upper limit as a double is 2^63 or 2^31 exactly, one above the largest long
+    if (!std::isfinite(rounded)
+        || rounded < static_cast<double>(std::numeric_limits<long>::lowest())
+        || rounded >= -static_cast<double>(std::numeric_limits<long>::lowest())) {
+        const char* name = prop.getName();
+        throw Base::OverflowError(fmt::format("{}: {} is out of range for an integer ({} to {})",
+                                              name ? name : "the property",
+                                              value,
+                                              std::numeric_limits<long>::lowest(),
+                                              std::numeric_limits<long>::max()));
+    }
+    return static_cast<long>(rounded);
+}
+
+// The number an expression result gives an Integer: a double is rounded (`5/2` gives 3).
+long integerFromAny(const Property& prop, const boost::any& value)
+{
+    if (value.type() == typeid(long)) {
+        return boost::any_cast<long>(value);
+    }
+    if (value.type() == typeid(int)) {
+        return boost::any_cast<int>(value);
+    }
+    if (value.type() == typeid(double)) {
+        return roundedLong(prop, boost::any_cast<double>(value));
+    }
+    if (value.type() == typeid(float)) {
+        return roundedLong(prop, boost::any_cast<float>(value));
+    }
+    if (value.type() == typeid(Quantity)) {
+        return roundedLong(prop, unitlessValue(prop, boost::any_cast<Quantity>(value)));
+    }
+    throw bad_cast();
+}
+
+// FreeCAD-CH (ops#319): a value outside a Float or Integer constraint (a Percent of 150) was
+// clamped silently from Python and stored unchecked from an expression. It is refused; within
+// rounding of a bound (relative 1e-9) a float counts as the bound, as for quantities. NaN is
+// refused (it compares false with both bounds), and so is an infinity, unless the bound itself
+// is infinite: the tolerance of a bound near the largest double overflowed, which fitted inf.
+double checkedRange(const Property& prop, double value, double lower, double upper)
+{
+    const char* name = prop.getName();
+    if (std::isnan(value)) {
+        throw Base::ValueError(fmt::format("{}: nan is not a number", name ? name : "the property"));
+    }
+    auto tolerance = [](double bound) {
+        return 1e-9 * std::max(1.0, std::abs(bound));
+    };
+    if (value < lower) {
+        if (std::isfinite(value) && value >= lower - tolerance(lower)) {
+            return lower;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is below the minimum, {}", name ? name : "the property", value, lower
+        ));
+    }
+    if (value > upper) {
+        if (std::isfinite(value) && value <= upper + tolerance(upper)) {
+            return upper;
+        }
+        throw Base::ValueError(fmt::format(
+            "{}: {} is above the maximum, {}", name ? name : "the property", value, upper
+        ));
+    }
+    return value;
+}
+
+long checkedRange(const Property& prop, long value, long lower, long upper)
+{
+    const char* name = prop.getName();
+    if (value < lower) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is below the minimum, {}", name ? name : "the property", value, lower
+        ));
+    }
+    if (value > upper) {
+        throw Base::ValueError(fmt::format(
+            "{}: {} is above the maximum, {}", name ? name : "the property", value, upper
+        ));
+    }
+    return value;
+}
+
+// FreeCAD-CH (ops#319): a Python int that doesn't fit the property. PyLong_AsLong returns -1
+// for it (a C long is 32 bits on Windows) and leaves an OverflowError pending, so 2**31 was
+// stored as -1, or refused as "-1 is below the minimum".
+[[noreturn]] void throwIntOverflow(const Property& prop, PyObject* value, const char* range)
+{
+    PyErr_Clear();
+    const char* name = prop.getName();
+    throw Base::OverflowError(fmt::format("{}: {} is out of range for {}",
+                                          name ? name : "the property",
+                                          Py::Object(value).as_string(),
+                                          range));
+}
+
+long checkedLong(const Property& prop, PyObject* value)
+{
+    int overflow = 0;
+    long result = PyLong_AsLongAndOverflow(value, &overflow);
+    if (overflow != 0 || (result == -1 && PyErr_Occurred())) {
+        throwIntOverflow(
+            prop,
+            value,
+            fmt::format("an integer ({} to {})",
+                        std::numeric_limits<long>::lowest(),
+                        std::numeric_limits<long>::max())
+                .c_str()
+        );
+    }
+    return result;
+}
+
+double checkedDouble(const Property& prop, PyObject* value)
+{
+    double result = PyLong_AsDouble(value);
+    if (result == -1.0 && PyErr_Occurred()) {
+        throwIntOverflow(prop, value, "a float");
+    }
+    return result;
+}
+
+// FreeCAD-CH (ops#319): from Python, only a document object's value is refused. A view
+// provider's display setting (LineWidth, PointSize, Transparency) is still fitted into its range:
+// it changes nothing a document computes, and stock tools rely on the fit (a Draft layer's
+// LineWidth of 0, the style presets, an SVG stroke width).
+template<typename T>
+T fittedValue(const Property& prop, T value, T lower, T upper)
+{
+    auto container = prop.getContainer();
+    if (container && container->isDerivedFrom(DocumentObject::getClassTypeId())) {
+        return checkedRange(prop, value, lower, upper);
+    }
+    return value > upper ? upper : value < lower ? lower : value;
+}
+}  // namespace
 
 
 //**************************************************************************
@@ -103,8 +290,9 @@ PyObject* PropertyInteger::getPyObject()
 void PropertyInteger::setPyObject(PyObject* value)
 {
     if (PyLong_Check(value)) {
+        long temp = checkedLong(*this, value);
         aboutToSetValue();
-        _lValue = PyLong_AsLong(value);
+        _lValue = temp;
         hasSetValue();
     }
     else {
@@ -144,25 +332,7 @@ void PropertyInteger::Paste(const Property& from)
 void PropertyInteger::setPathValue(const ObjectIdentifier& path, const boost::any& value)
 {
     verifyPath(path);
-
-    if (value.type() == typeid(long)) {
-        setValue(boost::any_cast<long>(value));
-    }
-    else if (value.type() == typeid(int)) {
-        setValue(boost::any_cast<int>(value));
-    }
-    else if (value.type() == typeid(double)) {
-        setValue(boost::math::round(boost::any_cast<double>(value)));
-    }
-    else if (value.type() == typeid(float)) {
-        setValue(boost::math::round(boost::any_cast<float>(value)));
-    }
-    else if (value.type() == typeid(Quantity)) {
-        setValue(boost::math::round(boost::any_cast<Quantity>(value).getValue()));
-    }
-    else {
-        throw bad_cast();
-    }
+    setValue(integerFromAny(*this, value));
 }
 
 
@@ -698,14 +868,9 @@ long PropertyIntegerConstraint::getStepSize() const
 void PropertyIntegerConstraint::setPyObject(PyObject* value)
 {
     if (PyLong_Check(value)) {
-        long temp = PyLong_AsLong(value);
+        long temp = checkedLong(*this, value);
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -758,6 +923,8 @@ void PropertyIntegerConstraint::setPyObject(PyObject* value)
         c->LowerBound = valConstr[1];
         c->UpperBound = valConstr[2];
         c->StepSize = std::max<long>(1, valConstr[3]);
+        // A value with its own new range is fitted into it, as before (ops#319 refuses only a
+        // plain value outside the current range).
         if (valConstr[0] > c->UpperBound) {
             valConstr[0] = c->UpperBound;
         }
@@ -770,6 +937,22 @@ void PropertyIntegerConstraint::setPyObject(PyObject* value)
         _lValue = valConstr[0];
         hasSetValue();
     }
+}
+
+boost::any PropertyIntegerConstraint::checkPathValue(const ObjectIdentifier& path,
+                                                     const boost::any& value) const
+{
+    verifyPath(path);
+    long v = integerFromAny(*this, value);
+    if (_ConstStruct) {
+        v = checkedRange(*this, v, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
+    }
+    return v;
+}
+
+void PropertyIntegerConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyInteger::setPathValue(path, checkPathValue(path, value));
 }
 
 void PropertyIntegerConstraint::Save(Base::Writer& writer) const
@@ -1094,8 +1277,9 @@ void PropertyFloat::setPyObject(PyObject* value)
         hasSetValue();
     }
     else if (PyLong_Check(value)) {
+        double temp = checkedDouble(*this, value);
         aboutToSetValue();
-        _dValue = PyLong_AsLong(value);
+        _dValue = temp;
         hasSetValue();
     }
     else {
@@ -1135,28 +1319,7 @@ void PropertyFloat::Paste(const Property& from)
 void PropertyFloat::setPathValue(const ObjectIdentifier& path, const boost::any& value)
 {
     verifyPath(path);
-
-    if (value.type() == typeid(long)) {
-        setValue(boost::any_cast<long>(value));
-    }
-    else if (value.type() == typeid(unsigned long)) {
-        setValue(boost::any_cast<unsigned long>(value));
-    }
-    else if (value.type() == typeid(int)) {
-        setValue(boost::any_cast<int>(value));
-    }
-    else if (value.type() == typeid(double)) {
-        setValue(boost::any_cast<double>(value));
-    }
-    else if (value.type() == typeid(float)) {
-        setValue(boost::any_cast<float>(value));
-    }
-    else if (value.type() == typeid(Quantity)) {
-        setValue((boost::any_cast<Quantity>(value)).getValue());
-    }
-    else {
-        throw bad_cast();
-    }
+    setValue(floatFromAny(*this, value));
 }
 
 const boost::any PropertyFloat::getPathValue(const ObjectIdentifier& path) const
@@ -1229,12 +1392,7 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
     if (PyFloat_Check(value)) {
         double temp = PyFloat_AsDouble(value);
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -1242,14 +1400,9 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         hasSetValue();
     }
     else if (PyLong_Check(value)) {
-        double temp = static_cast<double>(PyLong_AsLong(value));
+        double temp = checkedDouble(*this, value);
         if (_ConstStruct) {
-            if (temp > _ConstStruct->UpperBound) {
-                temp = _ConstStruct->UpperBound;
-            }
-            else if (temp < _ConstStruct->LowerBound) {
-                temp = _ConstStruct->LowerBound;
-            }
+            temp = fittedValue(*this, temp, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
         }
 
         aboutToSetValue();
@@ -1308,6 +1461,8 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         c->LowerBound = valConstr[1];
         c->UpperBound = valConstr[2];
         c->StepSize = stepSize;
+        // A value with its own new range is fitted into it, as before (ops#319 refuses only a
+        // plain value outside the current range).
         if (valConstr[0] > c->UpperBound) {
             valConstr[0] = c->UpperBound;
         }
@@ -1320,6 +1475,22 @@ void PropertyFloatConstraint::setPyObject(PyObject* value)
         _dValue = valConstr[0];
         hasSetValue();
     }
+}
+
+boost::any PropertyFloatConstraint::checkPathValue(const ObjectIdentifier& path,
+                                                   const boost::any& value) const
+{
+    verifyPath(path);
+    double v = floatFromAny(*this, value);
+    if (_ConstStruct) {
+        v = checkedRange(*this, v, _ConstStruct->LowerBound, _ConstStruct->UpperBound);
+    }
+    return v;
+}
+
+void PropertyFloatConstraint::setPathValue(const ObjectIdentifier& path, const boost::any& value)
+{
+    PropertyFloat::setPathValue(path, checkPathValue(path, value));
 }
 
 void PropertyFloatConstraint::Save(Base::Writer& writer) const
@@ -2320,7 +2491,7 @@ void PropertyBool::setPathValue(const ObjectIdentifier& path, const boost::any& 
         setValue(boost::math::round(boost::any_cast<float>(value)));
     }
     else if (value.type() == typeid(Quantity)) {
-        setValue(boost::any_cast<Quantity>(value).getValue() != 0);
+        setValue(unitlessValue(*this, boost::any_cast<Quantity>(value)) != 0);
     }
     else {
         throw bad_cast();

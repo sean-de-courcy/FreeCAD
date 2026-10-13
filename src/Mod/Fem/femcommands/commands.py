@@ -1088,8 +1088,11 @@ class _SolverCalculixContextManager:
         FreeCADGui.doCommand(
             "{}.AnalysisType = {}".format(self.cli_name, ccx_prefs.GetInt("AnalysisType", 0))
         )
+        # The preference spin box used to allow 0, which the property (1 to 100) refuses
         FreeCADGui.doCommand(
-            "{}.EigenmodesCount = {}".format(self.cli_name, ccx_prefs.GetInt("EigenmodesCount", 10))
+            "{}.EigenmodesCount = {}".format(
+                self.cli_name, min(100, max(1, ccx_prefs.GetInt("EigenmodesCount", 10)))
+            )
         )
         FreeCADGui.doCommand(
             "{}.EigenmodeLowLimit = {}".format(

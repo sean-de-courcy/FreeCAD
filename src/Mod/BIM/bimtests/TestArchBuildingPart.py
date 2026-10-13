@@ -92,6 +92,55 @@ class TestArchBuildingPart(TestArchBase.TestArchBase):
         site = Arch.makeSite([building])
         self.assertTrue(site, "Arch Site failed")
 
+    def test_storeyBelowZero(self):
+        """A storey below 0 keeps its IFC Elevation (FreeCAD-CH ops#319).
+
+        Elevation (IfcLengthMeasure) follows Placement.Base.z. It was a PropertyLength, which now
+        refuses a negative value; it is a PropertyDistance.
+        """
+        self.printTestMessage("storey below zero...")
+        floor = Arch.makeFloor(name="Basement")
+        self.assertEqual(floor.getTypeIdOfProperty("Elevation"), "App::PropertyDistance")
+        floor.Placement.Base.z = -3000
+        self.document.recompute()
+        self.assertTrue(floor.isValid(), floor.getStatusString())
+        self.assertAlmostEqual(floor.Elevation.Value, -3000.0, places=6)
+
+    def test_storeyBelowZeroLengthAttribute(self):
+        """A storey saved with a PropertyLength Elevation accepts a negative one once restored."""
+        import os
+        import tempfile
+
+        self.printTestMessage("storey below zero, Elevation a PropertyLength...")
+        floor = Arch.makeFloor(name="Basement")
+        floor.setExpression("Elevation", None)
+        floor.removeProperty("Elevation")
+        floor.addProperty("App::PropertyLength", "Elevation", "IFC Attributes")
+        floor.setExpression("Elevation", "Placement.Base.z")
+        self.document.recompute()
+        path = os.path.join(tempfile.mkdtemp(), "storey_length_elevation.FCStd")
+        self.document.saveAs(path)
+        name = floor.Name
+        App.closeDocument(self.document.Name)
+
+        self.document = App.openDocument(path)
+        floor = self.document.getObject(name)
+        self.assertEqual(floor.getTypeIdOfProperty("Elevation"), "App::PropertyLength")
+        floor.Placement.Base.z = -3000
+        self.document.recompute()
+        self.assertTrue(floor.isValid(), floor.getStatusString())
+        self.assertAlmostEqual(floor.Elevation.Value, -3000.0, places=6)
+
+    def test_siteBelowSeaLevel(self):
+        """A site's Elevation may be negative (FreeCAD-CH ops#319)."""
+        self.printTestMessage("site below sea level...")
+        site = Arch.makeSite(name="Site")
+        site.Elevation = -5000
+        self.document.recompute()
+        self.assertTrue(site.isValid(), site.getStatusString())
+        self.assertAlmostEqual(site.Elevation.Value, -5000.0, places=6)
+        self.assertAlmostEqual(site.RefElevation.Value, -5000.0, places=6)
+
     def test_makeBuildingPart(self):
         """Test the makeBuildingPart function."""
         operation = "Testing makeBuildingPart function"

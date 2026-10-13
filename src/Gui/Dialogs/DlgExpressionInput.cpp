@@ -23,6 +23,9 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <cmath>
+
 #include <QApplication>
 #include <QMenu>
 #include <QMouseEvent>
@@ -37,6 +40,7 @@
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
 #include <App/ExpressionTokenizer.h>
+#include <App/PropertyUnits.h>
 #include <App/VarSet.h>
 #include <Base/Console.h>
 #include <Base/Tools.h>
@@ -301,7 +305,13 @@ void NumberRange::throwIfOutOfRange(const Base::Quantity& value) const
         return QString::fromStdString(v.getUserString());
     };
 
-    if (value.getValue() < minimum || value.getValue() > maximum) {
+    // FreeCAD-CH (ops#319): within rounding of a bound (relative 1e-9, `2*pi rad` on 360 deg)
+    // the value counts as the bound, as the property itself takes it.
+    auto tolerance = [](double bound) {
+        return 1e-9 * std::max(1.0, std::abs(bound));
+    };
+    if (value.getValue() < minimum - tolerance(minimum)
+        || value.getValue() > maximum + tolerance(maximum)) {
         Base::Quantity minVal(minimum, value.getUnit());
         Base::Quantity maxVal(maximum, value.getUnit());
 
@@ -413,7 +423,22 @@ void DlgExpressionInput::checkExpression(const QString& text)
 
                     value.setUnit(impliedUnit);
                 }
-                else if (!value.isDimensionless()) {
+                else if (!value.isDimensionless()
+                         // FreeCAD-CH (ops#319): a quantity without a unit of its own takes the
+                         // result's, so nothing is discarded.
+                         && !typePath.isDerivedFrom(App::PropertyQuantity::getClassTypeId())) {
+                    // FreeCAD-CH (ops#319): a number property refuses a value with a unit.
+                    if (typePath.isDerivedFrom(App::PropertyFloat::getClassTypeId())
+                        || typePath.isDerivedFrom(App::PropertyInteger::getClassTypeId())
+                        || typePath.isDerivedFrom(App::PropertyBool::getClassTypeId())) {
+                        THROWMT(
+                            Base::UnitsMismatchError,
+                            QT_TRANSLATE_NOOP(
+                                "Exceptions",
+                                "Unit mismatch: the property is a number without a unit"
+                            )
+                        );
+                    }
                     msg += tr(" (Warning: unit discarded)");
 
                     QPalette p(ui->msg->palette());

@@ -59,6 +59,7 @@ public:
     void setUnit(const Base::Unit& u)
     {
         _Unit = u;
+        _unitAdopted = false;
     }
     const Base::Unit& getUnit() const
     {
@@ -98,8 +99,14 @@ public:
 
 protected:
     Base::Quantity createQuantityFromPy(PyObject* value);
+    /// FreeCAD-CH (ops#319): throws a UnitsMismatchError when an expression result's unit can't
+    /// be this property's.
+    void checkPathUnit(const Base::Quantity& q) const;
     Base::Unit _Unit;
     Base::QuantityFormat _Format;
+    /// FreeCAD-CH (ops#319): the unit came from an expression result, not from setUnit(). Only
+    /// such a unit (or none) may be replaced by the next result's; a set unit is checked.
+    bool _unitAdopted {false};
 };
 
 /** Float with Unit property
@@ -139,8 +146,14 @@ public:
 
     const char* getEditorName() const override;
     void setPyObject(PyObject*) override;
+    void setPathValue(const App::ObjectIdentifier& path, const boost::any& value) override;
+    boost::any checkPathValue(const App::ObjectIdentifier& path,
+                              const boost::any& value) const override;
 
 private:
+    /// FreeCAD-CH (ops#319): the value, or a ValueError when it is outside the constraints.
+    double checkedValue(double value) const;
+
     const Constraints* _ConstStruct {nullptr};
 };
 

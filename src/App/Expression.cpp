@@ -443,6 +443,16 @@ static Py::Object _pyObjectFromAny(const App::any &value, const Expression *e) {
     _EXPR_THROW("Unknown type", e);
 }
 
+// A Python int as a double; one beyond a double's range is an error, with nothing left pending.
+static double pyLongToDouble(PyObject *value) {
+    double d = PyLong_AsDouble(value);
+    if (d == -1.0 && PyErr_Occurred()) {
+        PyErr_Clear();
+        FC_THROWM(Base::OverflowError, "Integer too large for a number: " << Py::Object(value).as_string());
+    }
+    return d;
+}
+
 namespace App {
 Py::Object pyObjectFromAny(const App::any &value) {
     return _pyObjectFromAny(value,nullptr);
@@ -466,8 +476,16 @@ App::any pyObjectToAny(Py::Object value, bool check) {
     }
     if (PyFloat_Check(pyvalue))
         return App::any(PyFloat_AsDouble(pyvalue));
-    if (PyLong_Check(pyvalue))
-        return App::any(PyLong_AsLong(pyvalue));
+    if (PyLong_Check(pyvalue)) {
+        // FreeCAD-CH (ops#319): an int beyond a C long (32 bits on Windows, e.g. `2^40`) was
+        // -1 with an OverflowError left pending; it is kept as a double instead.
+        int overflow = 0;
+        long l = PyLong_AsLongAndOverflow(pyvalue, &overflow);
+        if (overflow == 0 && !(l == -1 && PyErr_Occurred()))
+            return App::any(l);
+        PyErr_Clear();
+        return App::any(pyLongToDouble(pyvalue));
+    }
     else if (PyUnicode_Check(pyvalue)) {
         const char* utf8value = PyUnicode_AsUTF8(pyvalue);
         if (!utf8value) {
@@ -486,7 +504,7 @@ bool pyToQuantity(Quantity &q, const Py::Object &pyobj) {
     else if (PyFloat_Check(*pyobj))
         q = Quantity(PyFloat_AsDouble(*pyobj));
     else if (PyLong_Check(*pyobj))
-        q = Quantity(PyLong_AsLong(*pyobj));
+        q = Quantity(pyLongToDouble(*pyobj));
     else
         return false;
     return true;
@@ -3607,6 +3625,49 @@ static std::map<std::string, FunctionExpression::Function> registered_functions;
 static int last_column;
 static int column;
 
+/// FreeCAD-CH (ops#320): the first character that no rule of Expression.l matches. Flex's default
+/// rule hands such characters to ECHO, which printed and dropped them (`!true` parsed as `true`).
+static std::string unmatchedChar;
+static bool unmatchedComplete = false;
+static const char* unmatchedEnd = nullptr;
+
+// Characters without a rule that count as whitespace: \r, \f, \v, the no-break space U+00A0 and
+// the narrow no-break space U+202F (some locales group digits with them).
+static bool isExtraWhitespace(const std::string& ch)
+{
+    return ch == "\r" || ch == "\f" || ch == "\v" || ch == "\xC2\xA0" || ch == "\xE2\x80\xAF";
+}
+
+static void noteUnmatched(const char* text, std::size_t len)
+{
+    // The default rule matches one byte: collect the bytes of a UTF-8 character until complete.
+    // A byte that doesn't directly follow the collected ones, or isn't a continuation byte, ends
+    // the character (an invalid sequence, reported as such).
+    for (std::size_t i = 0; i < len && !unmatchedComplete; ++i) {
+        auto byte = static_cast<unsigned char>(text[i]);
+        if (!unmatchedChar.empty() && (text + i != unmatchedEnd || (byte & 0xC0) != 0x80)) {
+            unmatchedComplete = true;
+            break;
+        }
+        unmatchedChar.push_back(text[i]);
+        unmatchedEnd = text + i + 1;
+        auto lead = static_cast<unsigned char>(unmatchedChar[0]);
+        std::size_t need = lead < 0xC0 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        if (unmatchedChar.size() >= need) {
+            if (isExtraWhitespace(unmatchedChar)) {
+                unmatchedChar.clear();
+            }
+            else {
+                unmatchedComplete = true;
+            }
+        }
+    }
+}
+
+// <termios.h> defines ECHO on Linux and BSD; the generated lexer only defines it when it isn't.
+#undef ECHO
+#define ECHO noteUnmatched(yytext, static_cast<std::size_t>(yyleng))
+
 // show the parser the lexer method
 #define yylex ExpressionParserlex
 int ExpressionParserlex();
@@ -3672,6 +3733,9 @@ static void initParser(const App::DocumentObject *owner)
     labels = std::stack<std::string>();
     column = 0;
     unitExpression = valueExpression = false;
+    unmatchedChar.clear();
+    unmatchedComplete = false;
+    unmatchedEnd = nullptr;
 
     if (!has_registered_functions) {
         registered_functions["abs"] = FunctionExpression::ABS;
@@ -3934,6 +3998,37 @@ std::string rewriteVariableRefs(const App::DocumentObject* owner, const char* bu
     return out;
 }
 
+// FreeCAD-CH (ops#320): a character the lexer had to drop makes the expression an error.
+void throwIfUnmatched(const char* original)
+{
+    const std::string& ch = App::ExpressionParser::unmatchedChar;
+    if (ch.empty()) {
+        return;
+    }
+    auto [cp, len] = codePointAt(ch, 0);
+    auto lead = static_cast<unsigned char>(ch[0]);
+    if (len != ch.size() || (len == 1 && lead >= 0x80)) {
+        // Not a whole UTF-8 character: name the byte, and keep the message valid UTF-8.
+        std::string text(original);
+        std::string shown;
+        for (std::size_t i = 0; i < text.size();) {
+            auto n = codePointAt(text, i).second;
+            bool invalid = n == 1 && static_cast<unsigned char>(text[i]) >= 0x80;
+            shown += invalid ? std::string("\xEF\xBF\xBD") : text.substr(i, n);
+            i += n;
+        }
+        throw ParserError(
+            fmt::format("Invalid UTF-8 byte 0x{:02X} in expression '{}'", lead, shown)
+        );
+    }
+    throw ParserError(fmt::format(
+        "Unexpected character '{}' (U+{:04X}) in expression '{}'",
+        ch,
+        static_cast<unsigned>(cp),
+        original
+    ));
+}
+
 }  // namespace
 
 ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, const char* buffer)
@@ -3951,6 +4046,11 @@ ExpressionPtr App::ExpressionParser::parse(const App::DocumentObject* owner, con
 
     // run the parser
     int result = ExpressionParser::ExpressionParser_yyparse ();
+
+    if (!unmatchedChar.empty()) {
+        ScanResult.reset();
+        throwIfUnmatched(original);
+    }
 
     if (result != 0) {
         throw ParserError(fmt::format("Failed to parse expression '{}'", original));
@@ -3980,6 +4080,11 @@ std::unique_ptr<UnitExpression> ExpressionParser::parseUnit(
 
     // run the parser
     int result = ExpressionParser::ExpressionParser_yyparse ();
+
+    if (!unmatchedChar.empty()) {
+        ScanResult.reset();
+        throwIfUnmatched(buffer);
+    }
 
     if (result != 0)
         throw ParserError("Failed to parse expression.");

@@ -1910,8 +1910,10 @@ class PathAdaptive(PathOp.ObjectOp):
             )
             obj.HelixMinDiameterPercent = 10
             if hasattr(obj, "ToolController"):
-                obj.HelixMaxDiameterPercent = int(
-                    75 if oldD == 0 else 100 * oldD / obj.ToolController.Tool.Diameter.Value
+                # FreeCAD-CH (ops#319): a Percent refuses a value above 100 instead of fitting it.
+                obj.HelixMaxDiameterPercent = min(
+                    100,
+                    int(75 if oldD == 0 else 100 * oldD / obj.ToolController.Tool.Diameter.Value),
                 )
 
         if hasattr(obj, "HelixAngle"):

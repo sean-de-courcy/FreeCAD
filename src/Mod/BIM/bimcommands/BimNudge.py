@@ -265,11 +265,13 @@ class BIM_Nudge_Shrink(BIM_Nudge):
             if nudge:
                 for obj in sel:
                     if hasattr(obj, "Height"):
+                        # FreeCAD-CH (ops#319): a Height (a Length) refuses a negative value
+                        # now instead of clamping it, so shrinking stops at 0 here.
                         FreeCADGui.doCommand(
                             "FreeCAD.ActiveDocument."
                             + obj.Name
                             + ".Height="
-                            + str(obj.Height.Value - nudge)
+                            + str(max(0.0, obj.Height.Value - nudge))
                         )
                         FreeCADGui.doCommand("FreeCAD.ActiveDocument.recompute()")
 

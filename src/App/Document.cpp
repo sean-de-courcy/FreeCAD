@@ -3225,12 +3225,28 @@ bool Document::afterRestore(const std::vector<DocumentObject*>& objArray, bool c
                 prop->onContainerRestored();
             }
             bool touched = false;
-            auto returnCode =
-                obj->ExpressionEngine.execute(PropertyExpressionEngine::ExecuteOnRestore, &touched);
-            if (returnCode != DocumentObject::StdReturn) {
+            // FreeCAD-CH (ops#319): a value the expression engine refuses (a wrong unit, out of
+            // range) is logged on the object; it must not skip onDocumentRestored().
+            try {
+                auto returnCode = obj->ExpressionEngine.execute(
+                    PropertyExpressionEngine::ExecuteOnRestore,
+                    &touched
+                );
+                if (returnCode != DocumentObject::StdReturn) {
+                    FC_ERR("Expression engine failed to restore " << obj->getFullName() << ": "
+                                                                  << returnCode->Why);
+                    d->addRecomputeLog(returnCode);
+                }
+            }
+            catch (const Base::Exception& e) {
+                d->addRecomputeLog(e.what(), obj);
                 FC_ERR("Expression engine failed to restore " << obj->getFullName() << ": "
-                                                              << returnCode->Why);
-                d->addRecomputeLog(returnCode);
+                                                              << e.what());
+            }
+            catch (std::exception& e) {
+                d->addRecomputeLog(e.what(), obj);
+                FC_ERR("Expression engine failed to restore " << obj->getFullName() << ": "
+                                                              << e.what());
             }
             obj->onDocumentRestored();
             if (touched) {

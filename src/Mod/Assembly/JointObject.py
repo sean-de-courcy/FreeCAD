@@ -403,6 +403,9 @@ class Joint:
             ),
             locked=True,
         )
+        # FreeCAD-CH (ops#319): set here too, so a value assigned right after (the 1.0 migration)
+        # may be negative: a Length refuses a negative value now instead of clamping it.
+        joint.setPropertyStatus("Distance", "AllowNegativeValues")
 
     def addDistance2Property(self, joint):
         joint.addProperty(
@@ -415,6 +418,9 @@ class Joint:
             ),
             locked=True,
         )
+        # FreeCAD-CH (ops#319): set here too, so a value assigned right after (the 1.0 migration)
+        # may be negative: a Length refuses a negative value now instead of clamping it.
+        joint.setPropertyStatus("Distance2", "AllowNegativeValues")
 
     def addLengthMinProperty(self, joint):
         joint.addProperty(
@@ -427,6 +433,9 @@ class Joint:
             ),
             locked=True,
         )
+        # FreeCAD-CH (ops#319): set here too, so a value assigned right after (the 1.0 migration)
+        # may be negative: a Length refuses a negative value now instead of clamping it.
+        joint.setPropertyStatus("LengthMin", "AllowNegativeValues")
 
     def addLengthMaxProperty(self, joint):
         joint.addProperty(
@@ -439,6 +448,9 @@ class Joint:
             ),
             locked=True,
         )
+        # FreeCAD-CH (ops#319): set here too, so a value assigned right after (the 1.0 migration)
+        # may be negative: a Length refuses a negative value now instead of clamping it.
+        joint.setPropertyStatus("LengthMax", "AllowNegativeValues")
 
     def addAngleMinProperty(self, joint):
         joint.addProperty(

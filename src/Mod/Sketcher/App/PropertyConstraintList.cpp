@@ -542,8 +542,36 @@ void PropertyConstraintList::setPathValue(const ObjectIdentifier& path, const bo
         throw std::bad_cast();
     }
 
+    // FreeCAD-CH (ops#319): a value with another unit than the constraint's lost it silently (a
+    // Distance set to `30 deg` gave 30 mm, an Angle set to `10 mm` gave 10 deg). It is refused;
+    // a number without a unit takes the constraint's, as before.
+    auto checkUnit = [&value, &path](const Constraint* constraint) {
+        if (value.type() != typeid(Quantity)) {
+            return;
+        }
+        const auto& q = App::any_cast<const Quantity&>(value);
+        Base::Unit unit = constraint->getPresentationValue().getUnit();
+        if (q.isDimensionless() || q.getUnit() == unit) {
+            return;
+        }
+        auto describe = [](const Base::Unit& u) {
+            std::string type = u.getTypeString();
+            if (u == Base::Unit::One) {
+                return std::string("a number without a unit");
+            }
+            return type.empty() ? u.getString() : type + " (" + u.getString() + ")";
+        };
+        FC_THROWM(
+            Base::UnitsMismatchError,
+            "Unit mismatch: constraint " << path.toString() << " needs " << describe(unit)
+                                         << ", but the value " << q.getUserString() << " has "
+                                         << describe(q.getUnit())
+        );
+    };
+
     if (c1.isArray()) {
         size_t index = c1.getIndex(_lValueList.size());
+        checkUnit(_lValueList[index]);
         switch (_lValueList[index]->Type) {
             case Angle:
                 dvalue = Base::toRadians<double>(dvalue);
@@ -563,6 +591,7 @@ void PropertyConstraintList::setPathValue(const ObjectIdentifier& path, const bo
             int index = it - _lValueList.begin();
 
             if ((*it)->Name == c1.getName()) {
+                checkUnit(*it);
                 switch (_lValueList[index]->Type) {
                     case Angle:
                         dvalue = Base::toRadians<double>(dvalue);

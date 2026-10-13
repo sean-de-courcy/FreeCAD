@@ -81,16 +81,23 @@ class DocumentBasicCases(unittest.TestCase):
         obj.ConstraintFloat = (50.0, 0.0, 100.0, 1.0)
         self.Doc = self.saveAndRestore()
         obj = self.Doc.getObject("Object")
+        # FreeCAD-CH (ops#319): the restored range refuses a value outside it (it was clamped).
         # int
-        obj.ConstraintInt = -1
-        self.assertEqual(obj.ConstraintInt, 0)
-        obj.ConstraintInt = 101
+        with self.assertRaises(ValueError):
+            obj.ConstraintInt = -1
+        with self.assertRaises(ValueError):
+            obj.ConstraintInt = 101
+        self.assertEqual(obj.ConstraintInt, 50)
+        obj.ConstraintInt = 100
         self.assertEqual(obj.ConstraintInt, 100)
         # float
-        obj.ConstraintFloat = -1.0
+        with self.assertRaises(ValueError):
+            obj.ConstraintFloat = -1.0
+        with self.assertRaises(ValueError):
+            obj.ConstraintFloat = 101.0
+        self.assertEqual(obj.ConstraintFloat, 50.0)
+        obj.ConstraintFloat = 0.0
         self.assertEqual(obj.ConstraintFloat, 0.0)
-        obj.ConstraintFloat = 101.0
-        self.assertEqual(obj.ConstraintFloat, 100.0)
 
     def testAccessByNameOrID(self):
         obj = self.Doc.addObject("App::DocumentObject", "MyName")
@@ -215,13 +222,17 @@ class DocumentBasicCases(unittest.TestCase):
         # test the constraint types ( both are constraint to percent range)
         self.assertTrue(L1.ConstraintInt == 5)
         self.assertTrue(L1.ConstraintFloat - 5.0 < 0.001)
-        L1.ConstraintInt = 500
-        L1.ConstraintFloat = 500.0
+        # FreeCAD-CH (ops#319): a value outside the range is refused (it was clamped).
+        for value in (500, -500):
+            with self.assertRaises(ValueError):
+                L1.ConstraintInt = value
+            with self.assertRaises(ValueError):
+                L1.ConstraintFloat = float(value)
+        self.assertTrue(L1.ConstraintInt == 5)
+        self.assertTrue(L1.ConstraintFloat - 5.0 < 0.001)
+        L1.ConstraintInt = 100
+        L1.ConstraintFloat = 0.0
         self.assertTrue(L1.ConstraintInt == 100)
-        self.assertTrue(L1.ConstraintFloat - 100.0 < 0.001)
-        L1.ConstraintInt = -500
-        L1.ConstraintFloat = -500.0
-        self.assertTrue(L1.ConstraintInt == 0)
         self.assertTrue(L1.ConstraintFloat - 0.0 < 0.001)
 
         # test enum property
