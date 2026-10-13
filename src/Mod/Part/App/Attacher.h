@@ -404,7 +404,8 @@ public:  // helper functions that may be useful outside of the class
      * @brief setOwner names the attached object. The result is a placement in the frame of its
      * container (its Body or App::Part, or the document), and each link is read in its own
      * (FreeCAD-CH ops#318). An engine without an owner reads every link as if it were in the
-     * frame of the result, as before. Copied by setUp(const AttachEngine&) only.
+     * frame of the result, as before. Copied by setUp(const AttachEngine&) only. An owner that
+     * can't be found any more (getOwner) is warned about, and its links are read as without one.
      */
     void setOwner(const App::DocumentObject* obj);
     App::DocumentObject* getOwner() const;
@@ -424,10 +425,35 @@ public:  // helper functions that may be useful outside of the class
         const App::DocumentObject* obj,
         bool* across = nullptr
     );
-    Base::Placement linkFrame(const App::DocumentObject* obj) const
+
+    /// The frames of all the links of one attachment (linkFrames)
+    struct LinkFrames
     {
-        return linkFrame(getOwner(), obj);
-    }
+        /// linkFrame(owner, link) per link
+        std::vector<Base::Placement> frames;
+        /// Whether any link is outside the owner's container (linkFrame's `across`)
+        bool across = false;
+
+        bool operator==(const LinkFrames& other) const
+        {
+            return across == other.across && frames == other.frames;
+        }
+    };
+
+    /**
+     * @brief linkFrames is linkFrame for each of objs, with the owner's containers found once.
+     */
+    static LinkFrames linkFrames(
+        const App::DocumentObject* owner,
+        const std::vector<App::DocumentObject*>& objs
+    );
+
+    /**
+     * @brief setLinkFrames hands the next calculateAttachedPlacement() the frames of its links,
+     * linkFrames(getOwner(), getRefObjects()).frames, when the caller has them already, so they
+     * are computed once. The call uses them up.
+     */
+    void setLinkFrames(std::vector<Base::Placement> frames);
 
     /**
      * @brief verifyReferencesAreSafe: checks if pointers in references still
@@ -468,6 +494,11 @@ public:  // members
     App::DocumentObjectT ownerObject;
 
 protected:
+    /// The frames of the links objs (setLinkFrames' when given, else linkFrames' for the owner)
+    std::vector<Base::Placement> linkFramesOf(const std::vector<App::DocumentObject*>& objs) const;
+    /// setLinkFrames' frames, until the end of the next calculation
+    std::vector<Base::Placement> givenLinkFrames;
+
     refTypeString cat(eRefType rt1)
     {
         refTypeString ret;
@@ -505,7 +536,7 @@ protected:
         std::vector<const Part::TopoShape*>& shapes,
         std::vector<Part::TopoShape>& storage,
         std::vector<eRefType>& types,
-        const App::DocumentObject* owner = nullptr
+        const std::vector<Base::Placement>* frames = nullptr
     );
 
     static void throwWrongMode(eMapMode mmode);

@@ -102,7 +102,11 @@ void restoreAttacherEngine(AttachExtension* self)
 // its restore ends (ops#318)
 std::map<std::string, std::vector<std::string>> movedAtOpen;
 
-void logMovedAtOpen(const std::string& document, const std::vector<std::string>& names)
+void logMovedAtOpen(
+    const std::string& document,
+    const std::vector<std::string>& names,
+    bool copied = false
+)
 {
     std::string list;
     for (const auto& name : names) {
@@ -110,11 +114,12 @@ void logMovedAtOpen(const std::string& document, const std::vector<std::string>&
     }
     const bool one = names.size() == 1;
     Base::Console().warning(
-        "Document '%s': %d %s attached across containers moved at open, to %s support%s with "
+        "Document '%s': %d %s attached across containers moved %s, to %s support%s with "
         "both containers' placements counted; recompute to update what depends on %s: %s\n",
         document.c_str(),
         static_cast<int>(names.size()),
         one ? "object" : "objects",
+        copied ? "when copied in" : "at open",
         one ? "its" : "their",
         one ? "" : "s",
         one ? "it" : "them",
@@ -130,7 +135,7 @@ void reportMovedAtOpen(App::DocumentObject* obj)
     auto doc = obj->getDocument();
     doc->addRecomputeObject(obj);
     if (doc->testStatus(App::Document::Importing)) {
-        logMovedAtOpen(doc->getName(), {obj->getNameInDocument()});
+        logMovedAtOpen(doc->getName(), {obj->getNameInDocument()}, true);
         return;
     }
     static auto started = App::GetApplication().signalStartRestoreDocument.connect(
@@ -449,17 +454,17 @@ bool AttachExtension::positionBySupport()
         );
     }
     updateAttacherVals();
-    _linkFrames.clear();
     Base::Placement plaOriginal = getPlacement().getValue();
     try {
         if (_props.attacher->mapMode == mmDeactivated) {
+            keepLinkFrames(std::nullopt);
             return false;
         }
-        bool across = false;
-        auto frames = currentLinkFrames(&across);
-        if (across) {
-            _linkFrames = std::move(frames);
-        }
+        // The links' frames, computed once: the attacher reads them, extensionMustExecute()
+        // compares them (ops#318)
+        auto frames = AttachEngine::linkFrames(getExtendedObject(), AttachmentSupport.getValues());
+        _props.attacher->setLinkFrames(frames.frames);
+        keepLinkFrames(std::move(frames));
         bool subChanged = false;
 
         getPlacement().setValue(Base::Placement());
@@ -523,29 +528,44 @@ bool AttachExtension::isAttacherActive() const
 
 short int AttachExtension::extensionMustExecute()
 {
-    // Moving a container touches neither this object nor what it links: run when a link's frame
-    // has changed since (ops#318). Nothing is kept for links in this object's own container.
-    if (!_linkFrames.empty() && currentLinkFrames() != _linkFrames) {
+    // Moving a container, or moving this object or a support into another container, touches
+    // neither this object nor what it links: run when a link's frame has changed since (ops#318)
+    if (linkFramesChanged()) {
         return 1;
     }
     return DocumentObjectExtension::extensionMustExecute();
 }
 
-std::vector<Base::Placement> AttachExtension::currentLinkFrames(bool* across) const
+void AttachExtension::keepLinkFrames(std::optional<AttachEngine::LinkFrames> frames)
 {
-    std::vector<Base::Placement> frames;
-    if (across) {
-        *across = false;
+    std::lock_guard lock(_linkFramesMutex);
+    _linkFrames = std::move(frames);
+}
+
+bool AttachExtension::linkFramesChanged() const
+{
+    // While it recomputes it is placed anew; its links may be rewritten meanwhile
+    if (getExtendedObject()->isRecomputing()) {
+        return false;
     }
-    auto owner = getExtendedObject();
-    for (auto obj : AttachmentSupport.getValues()) {
-        bool outside = false;
-        frames.push_back(AttachEngine::linkFrame(owner, obj, &outside));
-        if (across && outside) {
-            *across = true;
+    {
+        std::lock_guard lock(_linkFramesMutex);
+        if (!_linkFrames) {
+            return false;
         }
     }
-    return frames;
+    // Outside the lock, which guards only the kept frames. Same container: the walk up to the
+    // common container and identity frames.
+    const auto current
+        = AttachEngine::linkFrames(getExtendedObject(), AttachmentSupport.getValues());
+    std::lock_guard lock(_linkFramesMutex);
+    return _linkFrames && !(*_linkFrames == current);
+}
+
+bool AttachExtension::linkFramesAcross() const
+{
+    std::lock_guard lock(_linkFramesMutex);
+    return _linkFrames && _linkFrames->across;
 }
 
 
@@ -570,6 +590,10 @@ App::DocumentObjectExecReturn* AttachExtension::extensionExecute()
 
 void AttachExtension::extensionOnChanged(const App::Property* prop)
 {
+    if (getExtendedObject()->isRestoring() && prop->isDerivedFrom<App::PropertyPlacement>()
+        && prop == getExtendedObject()->getPropertyByName("Placement")) {
+        _restoredPlacement = static_cast<const App::PropertyPlacement*>(prop)->getValue();
+    }
     if (!getExtendedObject()->isRestoring()) {
         // If we change anything that affects our position, update it immediately so you can see it
         // interactively.
@@ -862,9 +886,11 @@ void AttachExtension::onExtendedDocumentRestored()
             handleLegacyTangentPlaneOrientation();
         }
 
-        const Base::Placement restored = getPlacement().getValue();
+        // As the file has it: a Part::Datum has been positioned already (_restoredPlacement)
+        const Base::Placement restored = _restoredPlacement.value_or(getPlacement().getValue());
+        _restoredPlacement.reset();
         bool bAttached = positionBySupport();
-        if (bAttached && !_linkFrames.empty()) {
+        if (bAttached && linkFramesAcross()) {
             const Base::Placement placement = getPlacement().getValue();
             if (!placement.getPosition().IsEqual(restored.getPosition(), Precision::Confusion())
                 || !placement.getRotation().isSame(restored.getRotation(), Precision::Angular())) {

@@ -28,6 +28,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <optional>
+
 #include <App/DocumentObjectExtension.h>
 #include <App/ExtensionPython.h>
 #include <App/PropertyLinks.h>
@@ -157,6 +160,11 @@ public:
     // This update only _props if base = false
     void updateSinglePropertyStatus(bool attached, bool base = false);
 
+    /// Whether some link's frame differs from the one the last positionBySupport() used (ops#318)
+    bool linkFramesChanged() const;
+    /// Whether the last positionBySupport() read a link outside this object's container (ops#318)
+    bool linkFramesAcross() const;
+
 private:
     struct _Properties: Properties
     {
@@ -167,11 +175,18 @@ private:
 
     mutable int _active = -1;
 
-    // Each link's frame (AttachEngine::linkFrame) at the last positionBySupport(), when a link is
-    // outside this object's container; else empty. A container's move changes one of them, and
-    // extensionMustExecute() then runs the attachment again (ops#318).
-    std::vector<Base::Placement> _linkFrames;
-    std::vector<Base::Placement> currentLinkFrames(bool* across = nullptr) const;
+    // The links' frames (AttachEngine::linkFrames) the last positionBySupport() used, for every
+    // attachment; none when deactivated. A container's move, or this object or a support moved
+    // into another container, changes one of them without touching anything here, and
+    // extensionMustExecute() then runs the attachment again (ops#318). Guarded by the mutex: the
+    // GUI asks mustExecute() while a recompute on the worker thread runs positionBySupport().
+    std::optional<Attacher::AttachEngine::LinkFrames> _linkFrames;
+    mutable std::mutex _linkFramesMutex;
+    void keepLinkFrames(std::optional<Attacher::AttachEngine::LinkFrames> frames);
+
+    // The Placement read from the file, kept until onExtendedDocumentRestored(): a Part::Datum
+    // positions itself earlier, when its onDocumentRestored() touches AttachmentSupport (ops#318)
+    std::optional<Base::Placement> _restoredPlacement;
 };
 
 

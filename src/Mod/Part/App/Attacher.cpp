@@ -154,6 +154,57 @@ bool composeDown(
     return any;
 }
 
+// Maps links into the frame of one owner's container (AttachEngine::linkFrame), with the owner's
+// frames found once
+class FrameMapper
+{
+public:
+    explicit FrameMapper(const App::DocumentObject* attached)
+        : owner(attached)
+    {
+        if (owner) {
+            ownerFrames = framesUp(frameOf(owner));
+        }
+    }
+
+    Base::Placement map(const App::DocumentObject* obj, bool& across) const
+    {
+        across = false;
+        if (!obj) {
+            return {};
+        }
+        if (!owner) {
+            return coordinateSystemOf(obj);
+        }
+        // The link's frames below the lowest one the owner is in too, innermost first. The bound
+        // guards against a cycle in a broken file
+        std::vector<const App::DocumentObject*> linkFrames;
+        const App::DocumentObject* common = nullptr;
+        bool outside = false;  // a container between the common one and the link's frame
+        for (auto frame = frameOf(obj); frame && linkFrames.size() < 100; frame = groupOf(frame)) {
+            if (std::find(ownerFrames.begin(), ownerFrames.end(), frame) != ownerFrames.end()) {
+                common = frame;
+                break;
+            }
+            if (std::find(linkFrames.begin(), linkFrames.end(), frame) != linkFrames.end()) {
+                break;
+            }
+            linkFrames.push_back(frame);
+            outside = outside || !frame->isDerivedFrom<App::LocalCoordinateSystem>();
+        }
+        Base::Placement down;
+        Base::Placement up;
+        composeDown(linkFrames, nullptr, down);
+        const bool ownerBelow = composeDown(ownerFrames, common, up);
+        across = outside || ownerBelow;
+        return ownerBelow ? up.inverse() * down : down;
+    }
+
+private:
+    const App::DocumentObject* owner;
+    std::vector<const App::DocumentObject*> ownerFrames;
+};
+
 struct PlanarFaceInfo
 {
     gp_Pln plane;
@@ -513,6 +564,8 @@ void AttachEngine::setUp(const AttachEngine& another)
     this->surfV = another.surfV;
     this->attachmentOffset = another.attachmentOffset;
     this->ownerObject = another.ownerObject;
+    // An engine set up from this one inside a calculation (a Line or Point engine's 3D one)
+    this->givenLinkFrames = another.givenLinkFrames;
 }
 
 void AttachEngine::setOffset(const Base::Placement& offset)
@@ -522,12 +575,54 @@ void AttachEngine::setOffset(const Base::Placement& offset)
 
 void AttachEngine::setOwner(const App::DocumentObject* obj)
 {
-    ownerObject = App::DocumentObjectT(obj);
+    // By name, without reading the object's Label: this runs on the recompute worker too
+    const char* name = obj ? obj->getNameInDocument() : nullptr;
+    ownerObject = name ? App::DocumentObjectT(obj->getDocument(), name) : App::DocumentObjectT();
 }
 
 App::DocumentObject* AttachEngine::getOwner() const
 {
-    return ownerObject.getObject();
+    auto owner = ownerObject.getObject();
+    if (!owner && !ownerObject.getObjectName().empty()) {
+        Base::Console().warning(
+            "Attacher: the attached object %s#%s is gone: its links are read as if in its "
+            "container, which is wrong where they are in another one (ops#318)\n",
+            ownerObject.getDocumentName().c_str(),
+            ownerObject.getObjectName().c_str()
+        );
+    }
+    return owner;
+}
+
+void AttachEngine::setLinkFrames(std::vector<Base::Placement> frames)
+{
+    givenLinkFrames = std::move(frames);
+}
+
+std::vector<Base::Placement> AttachEngine::linkFramesOf(
+    const std::vector<App::DocumentObject*>& objs
+) const
+{
+    if (!givenLinkFrames.empty() && givenLinkFrames.size() == objs.size()) {
+        return givenLinkFrames;
+    }
+    return linkFrames(getOwner(), objs).frames;
+}
+
+AttachEngine::LinkFrames AttachEngine::linkFrames(
+    const App::DocumentObject* owner,
+    const std::vector<App::DocumentObject*>& objs
+)
+{
+    LinkFrames result;
+    result.frames.reserve(objs.size());
+    const FrameMapper mapper(owner);
+    for (auto obj : objs) {
+        bool across = false;
+        result.frames.push_back(mapper.map(obj, across));
+        result.across = result.across || across;
+    }
+    return result;
 }
 
 // A link reads its object's shape and placement in the frame of the object's container (with a
@@ -543,34 +638,12 @@ Base::Placement AttachEngine::linkFrame(
     bool* across
 )
 {
+    bool outside = false;
+    auto frame = FrameMapper(owner).map(obj, outside);
     if (across) {
-        *across = false;
+        *across = outside;
     }
-    if (!obj) {
-        return {};
-    }
-    if (!owner) {
-        return coordinateSystemOf(obj);
-    }
-    const auto ownerFrames = framesUp(frameOf(owner));
-    const auto linkFrames = framesUp(frameOf(obj));
-    const App::DocumentObject* common = nullptr;
-    bool outside = false;  // a container between the common one and the link's frame
-    for (auto frame : linkFrames) {
-        if (std::find(ownerFrames.begin(), ownerFrames.end(), frame) != ownerFrames.end()) {
-            common = frame;
-            break;
-        }
-        outside = outside || !frame->isDerivedFrom<App::LocalCoordinateSystem>();
-    }
-    Base::Placement down;
-    Base::Placement up;
-    composeDown(linkFrames, common, down);
-    const bool ownerBelow = composeDown(ownerFrames, common, up);
-    if (across) {
-        *across = outside || ownerBelow;
-    }
-    return ownerBelow ? up.inverse() * down : down;
+    return frame;
 }
 
 Base::Placement AttachEngine::placementFactory(
@@ -705,7 +778,9 @@ void AttachEngine::suggestMapModes(SuggestResult& result) const
     std::vector<TopoShape> shapeStorage;
     std::vector<eRefType> typeStr;
     try {
-        readLinks(getRefObjects(), subnames, shapes, shapeStorage, typeStr, getOwner());
+        const auto objs = getRefObjects();
+        const auto frames = linkFramesOf(objs);
+        readLinks(objs, subnames, shapes, shapeStorage, typeStr, &frames);
     }
     catch (Base::Exception& err) {
         result.references_Types = typeStr;
@@ -1199,7 +1274,7 @@ void AttachEngine::readLinks(
     std::vector<const TopoShape*>& shapes,
     std::vector<TopoShape>& storage,
     std::vector<eRefType>& types,
-    const App::DocumentObject* owner
+    const std::vector<Base::Placement>* frames
 )
 {
     storage.reserve(objs.size());
@@ -1234,7 +1309,9 @@ void AttachEngine::readLinks(
             }
         }
 
-        const Base::Placement container = linkFrame(owner, objs[i]);
+        // Each link moved into the frame of the result (linkFramesOf), or without them by its
+        // coordinate system only, as before (ops#318)
+        const Base::Placement container = frames ? frames->at(i) : coordinateSystemOf(objs[i]);
         if (!container.isIdentity()) {
             shape.move(Tools::fromPlacement(container));
         }
@@ -1394,6 +1471,15 @@ Base::Placement AttachEngine::calculateAttachedPlacement(
     bool* subChanged
 )
 {
+    // setLinkFrames' frames serve this call only
+    struct UseUp
+    {
+        std::vector<Base::Placement>& frames;
+        ~UseUp()
+        {
+            frames.clear();
+        }
+    } useUp {givenLinkFrames};
     std::map<int, std::pair<std::string, std::string>> subChanges;
     int i = -1;
     auto objs = getRefObjects();
@@ -1601,7 +1687,8 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
     std::vector<const TopoShape*> shapes;
     std::vector<TopoShape> copiedShapeStorage;
     std::vector<eRefType> types;
-    readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
+    const auto frames = linkFramesOf(objs);
+    readLinks(objs, subs, shapes, copiedShapeStorage, types, &frames);
 
     if (shapes.empty()) {
         throw ExceptionCancel();
@@ -1609,7 +1696,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
     // common stuff for all map modes
     App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-    Base::Placement Place = linkFrame(objs[0])
+    Base::Placement Place = frames[0]
         * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
     Base::Vector3d vec = Place.getPosition();
     gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
@@ -2387,7 +2474,7 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
 
             // special case for planes
             if (auto plane = dynamic_cast<App::Plane*>(objs[0])) {
-                return linkFrame(plane) * plane->Placement.getValue() * attachmentOffset;
+                return frames[0] * plane->Placement.getValue() * attachmentOffset;
             }
 
             auto shape = shapes.front();
@@ -2730,7 +2817,8 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
         std::vector<const TopoShape*> shapes;
         std::vector<TopoShape> copiedShapeStorage;
         std::vector<eRefType> types;
-        readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
+        const auto frames = linkFramesOf(objs);
+        readLinks(objs, subs, shapes, copiedShapeStorage, types, &frames);
 
         if (shapes.empty()) {
             throw ExceptionCancel();
@@ -2739,7 +2827,7 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
 
         // common stuff for all map modes
         App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
-        Base::Placement Place = linkFrame(objs[0])
+        Base::Placement Place = frames[0]
             * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
         Base::Vector3d vec = Place.getPosition();
         gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
@@ -3133,7 +3221,8 @@ Base::Placement AttachEnginePoint::_calculateAttachedPlacement(
         std::vector<const TopoShape*> shapes;
         std::vector<TopoShape> copiedShapeStorage;
         std::vector<eRefType> types;
-        readLinks(objs, subs, shapes, copiedShapeStorage, types, getOwner());
+        const auto frames = linkFramesOf(objs);
+        readLinks(objs, subs, shapes, copiedShapeStorage, types, &frames);
 
         if (shapes.empty()) {
             throw ExceptionCancel();
