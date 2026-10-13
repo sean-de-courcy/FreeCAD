@@ -496,7 +496,7 @@ public:  // members
 protected:
     /// The frames of the links objs (setLinkFrames' when given, else linkFrames' for the owner)
     std::vector<Base::Placement> linkFramesOf(const std::vector<App::DocumentObject*>& objs) const;
-    /// setLinkFrames' frames, until the end of the next calculation
+    /// setLinkFrames' frames, until the end of the next calculation; not copied by setUp()
     std::vector<Base::Placement> givenLinkFrames;
 
     refTypeString cat(eRefType rt1)

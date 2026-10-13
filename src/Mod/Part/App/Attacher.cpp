@@ -564,8 +564,8 @@ void AttachEngine::setUp(const AttachEngine& another)
     this->surfV = another.surfV;
     this->attachmentOffset = another.attachmentOffset;
     this->ownerObject = another.ownerObject;
-    // An engine set up from this one inside a calculation (a Line or Point engine's 3D one)
-    this->givenLinkFrames = another.givenLinkFrames;
+    // Not givenLinkFrames: they serve the calculation they were handed to. A copy, or an engine
+    // set up from this one with other links, computes its own (ops#318)
 }
 
 void AttachEngine::setOffset(const Base::Placement& offset)
@@ -2701,6 +2701,7 @@ Base::Placement AttachEnginePlane::_calculateAttachedPlacement(
     AttachEngine3D attacher3D;
     attacher3D.precision = precision;
     attacher3D.setUp(*this);
+    attacher3D.setLinkFrames(givenLinkFrames);
     plm = attacher3D._calculateAttachedPlacement(objs, subs, origPlacement);
     return plm;
 }
@@ -3133,6 +3134,7 @@ Base::Placement AttachEngineLine::_calculateAttachedPlacement(
     else {  // reuse 3d mode
         AttachEngine3D attacher3D;
         attacher3D.setUp(*this);
+        attacher3D.setLinkFrames(givenLinkFrames);
         attacher3D.mapMode = mmode;
         attacher3D.attachmentOffset
             = Base::Placement();  // AttachmentOffset is applied separately here, afterwards. So we
@@ -3348,6 +3350,7 @@ Base::Placement AttachEnginePoint::_calculateAttachedPlacement(
     else {  // reuse 3d mode
         AttachEngine3D attacher3D;
         attacher3D.setUp(*this);
+        attacher3D.setLinkFrames(givenLinkFrames);
         attacher3D.mapMode = mmode;
         attacher3D.attachmentOffset
             = Base::Placement();  // AttachmentOffset is applied separately here, afterwards. So we

@@ -160,8 +160,13 @@ public:
     // This update only _props if base = false
     void updateSinglePropertyStatus(bool attached, bool base = false);
 
-    /// Whether some link's frame differs from the one the last positionBySupport() used (ops#318)
+    /// Whether some link's frame differs from the one the last positionBySupport() used (ops#318).
+    /// False while the object recomputes, and when asked beside a recompute of its document on
+    /// another thread (the GUI's poll during a recompute on the worker)
     bool linkFramesChanged() const;
+    /// linkFramesChanged() without those exceptions: only for a caller that knows the recompute
+    /// is held while it reads (a slot run on the main thread with the worker blocked)
+    bool linkFramesDiffer() const;
     /// Whether the last positionBySupport() read a link outside this object's container (ops#318)
     bool linkFramesAcross() const;
 

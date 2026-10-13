@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
@@ -41,6 +42,7 @@
 #include <App/ObjectIdentifier.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
+#include <App/RecomputeThread.h>
 
 #include "AttachExtension.h"
 #include "AttachExtensionPy.h"
@@ -455,6 +457,16 @@ bool AttachExtension::positionBySupport()
     }
     updateAttacherVals();
     Base::Placement plaOriginal = getPlacement().getValue();
+    // The frames handed to the attacher serve this call only: a calculation that fails before
+    // using them (the base attacher's) leaves none for the next one or a copy (ops#318)
+    struct DropLinkFrames
+    {
+        AttachEngine& attacher;
+        ~DropLinkFrames()
+        {
+            attacher.setLinkFrames({});
+        }
+    } dropLinkFrames {*_props.attacher};
     try {
         if (_props.attacher->mapMode == mmDeactivated) {
             keepLinkFrames(std::nullopt);
@@ -548,6 +560,19 @@ bool AttachExtension::linkFramesChanged() const
     if (getExtendedObject()->isRecomputing()) {
         return false;
     }
+    // Asked beside a recompute on another thread (the GUI's poll while the worker recomputes):
+    // the walk would read in-lists, groups and links the recompute changes. The recompute asks
+    // again itself, on its own thread
+    auto doc = getExtendedObject()->getDocument();
+    if (doc && doc->testStatus(App::Document::Recomputing)
+        && !App::isRecomputingOnThisThread(doc)) {
+        return false;
+    }
+    return linkFramesDiffer();
+}
+
+bool AttachExtension::linkFramesDiffer() const
+{
     {
         std::lock_guard lock(_linkFramesMutex);
         if (!_linkFrames) {
@@ -869,6 +894,8 @@ void AttachExtension::handleLegacyTangentPlaneOrientation()
 
 void AttachExtension::onExtendedDocumentRestored()
 {
+    // Whatever happens below, nothing read at this restore stays for a later one
+    const std::optional<Base::Placement> restoredPlacement = std::exchange(_restoredPlacement, {});
     try {
         initBase(false);
         if (_baseProps.attachment) {
@@ -887,8 +914,7 @@ void AttachExtension::onExtendedDocumentRestored()
         }
 
         // As the file has it: a Part::Datum has been positioned already (_restoredPlacement)
-        const Base::Placement restored = _restoredPlacement.value_or(getPlacement().getValue());
-        _restoredPlacement.reset();
+        const Base::Placement restored = restoredPlacement.value_or(getPlacement().getValue());
         bool bAttached = positionBySupport();
         if (bAttached && linkFramesAcross()) {
             const Base::Placement placement = getPlacement().getValue();
