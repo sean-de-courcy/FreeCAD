@@ -68,12 +68,15 @@ import sys
 
 FORMAT = 1
 
-# Tolerances (relative, absolute floor in mm), by stage. The first values are the design note's
-# (3.2); tightened from both CI platforms' drift on gen0, see TestCompatCorpus.
+# Tolerances (relative, absolute floor in mm), by stage: about ten times the largest drift both
+# CI platforms showed on gen0 (fork PR 295, run 38327969727: macOS 9.1e-13 abs / 2.8e-16 rel,
+# Windows 4.5e-13 / 1.6e-16, the same in every stage; the design note started at 1e-9 for the
+# open and 1e-6 / 1e-5 mm after a recompute). B2's BSpline models (Loft, Pipe) recalibrate them
+# from the COMPAT-DRIFT lines; a looser bound is a `compat-neutral` change.
 TOLERANCE = {
-    "open": (1e-9, 1e-9),
-    "recompute": (1e-6, 1e-5),
-    "rehearsal": (1e-6, 1e-5),
+    "open": (1e-14, 1e-11),
+    "recompute": (1e-14, 1e-11),
+    "rehearsal": (1e-14, 1e-11),
 }
 
 # Properties left out of the record: derived, not content.
