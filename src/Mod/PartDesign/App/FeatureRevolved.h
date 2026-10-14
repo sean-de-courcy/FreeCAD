@@ -102,7 +102,6 @@ protected:
 private:
     App::DocumentObjectExecReturn* tryExecuteRevolved(Part::RevolMode revolMode);
     TopoShape tryGetBaseShape() const;
-    TopoShape tryGetSupportShape() const;
     TopoShape getRevolutionUpToFace(
         RevolMethod method,
         const App::PropertyLinkSub& upToFaceProp,
@@ -114,10 +113,7 @@ private:
     TopoShape tryToRevolveToFace(
         const TopoShape& upToFace,
         const gp_Ax1& axis,
-        const TopoShape& base,
-        TopoShape supportface,
-        const TopoShape& sketchshape,
-        Part::RevolMode revolMode
+        const TopoShape& sketchshape
     ) const;
     TopoShape generateSingleRevolutionSide(
         RevolMethod method,
@@ -125,14 +121,15 @@ private:
         App::PropertyLinkSub& upToFaceProp,
         const TopoShape& sketchshape,
         const TopoShape& base,
-        TopoShape supportface,
         const gp_Pnt& pnt,
         const gp_Dir& dir,
         const TopLoc_Location& invObjLoc,
         Part::RevolMode revolMode,
         bool markSeam = false
     );
-    void setResult(const TopoShape& base, const TopoShape& revolved);
+    // With `checkVolume`, the base operation's volume must be possible for a correct fuse or
+    // cut of the two (an up-to-face tool, ops#293)
+    void setResult(const TopoShape& base, const TopoShape& revolved, bool checkVolume = false);
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,

@@ -1672,13 +1672,16 @@ class TestRevolve(unittest.TestCase):
         ]
         return block, face
 
-    def revolveProfileUpTo(self, body, kind, sideType, upTo, upToType="UpToFace"):
+    def revolveProfileUpTo(
+        self, body, kind, sideType, upTo, upToType="UpToFace", reversed_=False
+    ):
         """A `kind` of profileAcross() up to `upTo`, on `sideType`, recomputed."""
         revolution = body.newObject("PartDesign::" + kind, kind)
         sketch = self.profileAcross(body)
         revolution.Profile = sketch
         revolution.ReferenceAxis = (sketch, ["V_Axis"])
         revolution.SideType = sideType
+        revolution.Reversed = reversed_
         revolution.Type = upToType
         if upToType == "UpToFace":
             revolution.UpToFace = upTo
@@ -2004,6 +2007,513 @@ class TestRevolve(unittest.TestCase):
                 self.assertEqual(len(groove.Shape.Solids), 1)
                 self.assertAlmostEqual(groove.Shape.Volume, 160 - sides * removed, places=6)
 
+    def sweepUpToPostWall(self):
+        """The sweep of profileAcross() about Z, from 0 degrees, up to the cylinder of radius 4
+        about the vertical line through (-4.5, 0): the point at radius r first meets it after
+        the angle acos(-(r^2 + 4.25) / (9 r)), so the sweep is 2 * the integral of r times that
+        from 1 to 3 (16.54). Each circle crosses the cylinder twice."""
+        steps = 4000
+        width = 2 / steps
+        radii = [1 + (i + 0.5) * width for i in range(steps)]
+        return 2 * width * sum(r * math.acos(-(r**2 + 4.25) / (9 * r)) for r in radii)
+
+    def testRevolutionUpToWholeCylinderBesideProfile(self):
+        """profileAcross() revolved up to the side of a cylinder of radius 4 about the vertical
+        line through (-4.5, 0), z in [-1, 3]: an AdditiveCylinder before the Revolution (the
+        base), or the side face of a Part::Feature outside the body (no base). Without a base,
+        BRepFeat kept the part of the sweep between the two crossings (17.18 instead of
+        sweepUpToPostWall(), with no error; ops#293). The result gains the sweep on each side it
+        turns: once for One side either way, twice for Two sides and Symmetric."""
+        sweep = self.sweepUpToPostWall()
+        for withBase in (True, False):
+            for sideType, reversed_, sides in (
+                ("One side", False, 1),
+                ("One side", True, 1),
+                ("Two sides", False, 2),
+                ("Symmetric", False, 2),
+            ):
+                with self.subTest(withBase=withBase, sideType=sideType, reversed=reversed_):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    if withBase:
+                        post = body.newObject("PartDesign::AdditiveCylinder", "Post")
+                        post.Radius = 4
+                        post.Height = 4
+                        post.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(-4.5, 0, -1), FreeCAD.Rotation()
+                        )
+                    else:
+                        post = self.Doc.addObject("Part::Feature", "Post")
+                        post.Shape = Part.makeCylinder(
+                            4, 4, FreeCAD.Vector(-4.5, 0, -1), FreeCAD.Vector(0, 0, 1)
+                        )
+                    self.Doc.recompute()
+                    [side] = [
+                        "Face%d" % (i + 1)
+                        for i, f in enumerate(post.Shape.Faces)
+                        if isinstance(f.Surface, Part.Cylinder)
+                    ]
+                    revolution = body.newObject("PartDesign::Revolution", "Revolution")
+                    sketch = self.profileAcross(body)
+                    revolution.Profile = sketch
+                    revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                    revolution.SideType = sideType
+                    revolution.Type = "UpToFace"
+                    revolution.UpToFace = (post, [side])
+                    if sideType == "Two sides":
+                        revolution.Type2 = "UpToFace"
+                        revolution.UpToFace2 = (post, [side])
+                    revolution.Reversed = reversed_
+                    self.Doc.recompute()
+                    self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                    self.assertEqual(len(revolution.Shape.Solids), 1)
+                    base = 64 * math.pi if withBase else 0
+                    self.assertAlmostEqual(revolution.Shape.Volume, base + sides * sweep, places=5)
+
+    def testGrooveUpToBoreWall(self):
+        """The box x in [-9, 4], y in [-5, 5], z in [0, 2] with a bore of radius 4 about the
+        vertical line through (-4.5, 0), and a Groove of profileAcross() up to the bore's wall:
+        each side removes sweepUpToPostWall(), the ring up to where it first meets the wall
+        (ops#293: BRepFeat got this one right, the check must keep it). Two sides and Symmetric
+        cut off the core round the axis."""
+        sweep = self.sweepUpToPostWall()
+        for sideType, sides, solids in (("One side", 1, 1), ("Two sides", 2, 2), ("Symmetric", 2, 2)):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block = body.newObject("PartDesign::AdditiveBox", "Block")
+                block.Length = 13
+                block.Width = 10
+                block.Height = 2
+                block.Placement = FreeCAD.Placement(FreeCAD.Vector(-9, -5, 0), FreeCAD.Rotation())
+                bore = body.newObject("PartDesign::SubtractiveCylinder", "Bore")
+                bore.Radius = 4
+                bore.Height = 4
+                bore.Placement = FreeCAD.Placement(FreeCAD.Vector(-4.5, 0, -1), FreeCAD.Rotation())
+                self.Doc.recompute()
+                [wall] = [
+                    "Face%d" % (i + 1)
+                    for i, f in enumerate(bore.Shape.Faces)
+                    if isinstance(f.Surface, Part.Cylinder)
+                ]
+                groove = self.revolveProfileUpTo(body, "Groove", sideType, (bore, [wall]))
+                self.Doc.recompute()
+                self.assertTrue(groove.isValid(), groove.getStatusString())
+                self.assertEqual(len(groove.Shape.Solids), solids)
+                self.assertAlmostEqual(
+                    groove.Shape.Volume, 260 - 32 * math.pi - sides * sweep, places=5
+                )
+
+    def testGrooveUpToFaceReachedThroughEmptySpace(self):
+        """The box x in [-6, 1], y in [-4, 4], z in [0, 3] and a Groove of profileAcross() up to
+        its face x = 1, which touches the profile along its edge x = 1: each point reaches the
+        plane x = 1 through empty space (x >= 1 on the way), so nothing is removed. One side
+        removed 33.8 from the box, with no error (ops#296)."""
+        for sideType in ("One side", "Two sides", "Symmetric"):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (-6, 1), (-4, 4), (0, 3), 1)
+                groove = self.revolveProfileUpTo(body, "Groove", sideType, (block, [face]))
+                self.assertTrue(groove.isValid(), groove.getStatusString())
+                self.assertEqual(len(groove.Shape.Solids), 1)
+                self.assertAlmostEqual(groove.Shape.Volume, 168, places=6)
+
+    def testRevolutionUpToWallReversedCrossedTwice(self):
+        """profileAcross() revolved Reversed up to the face x = 0, y in [-4, 2], z in [-1, 3] of a
+        Part::Feature: every point meets the face a quarter turn on, at y = -r, so the tool is the
+        quarter ring of volume 4 pi. Points with r <= 2 cross the face's plane again on the face
+        at y = r, and BRepFeat gave 37.28 with no error (ops#293). The first-contact check now
+        refuses BRepFeat's tool, and the sweep up to the face replaces it."""
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-4, -1), (2, -1), (2, 3), (-4, 3))]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Face(Part.makePolygon(points + points[:1]))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        sketch = self.profileAcross(body)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        revolution.Reversed = True
+        self.Doc.recompute()
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertAlmostEqual(revolution.Shape.Volume, 4 * math.pi, places=6)
+        inside = FreeCAD.Vector(2 * math.cos(math.radians(-45)), 2 * math.sin(math.radians(-45)), 1)
+        self.assertTrue(revolution.Shape.isInside(inside, 1e-7, True))
+        self.assertFalse(revolution.Shape.isInside(FreeCAD.Vector(-2, 0, 1), 1e-7, True))
+
+    def testRevolutionUpToWholeSphereBesideProfile(self):
+        """revolveUpToHoledSphere() with the hole on the sphere's far side, at (0, 7.5, 1), out of
+        the profile's way: the point at radius r and height z stops after the angle
+        asin((r^2 + 3.75 + (z - 1)^2) / (8 r)), where it first meets the sphere, about 4.4350 in
+        all. BRepFeat kept the part between the two crossings, 16.26, with no error (ops#293)."""
+        steps = 200
+        step = 2.0 / steps
+        expected = 0.0
+        for i in range(steps):
+            r = 1 + (i + 0.5) * step
+            for j in range(steps):
+                z = (j + 0.5) * step
+                expected += r * math.asin((r * r + 3.75 + (z - 1) ** 2) / (8 * r)) * step * step
+        revolution = self.revolveUpToHoledSphere(FreeCAD.Vector(0, 7.5, 1))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, delta=1e-3)
+
+    def testRevolutionUpToTorusNeverSilentlyWrong(self):
+        """profileAcross() revolved up to the face of the AdditiveTorus of radii 6 and 2 about
+        (-7.5, 1, 1): each profile circle crosses the torus twice, and PartDesign's torus face
+        has its minor seam where the sweep crosses it. BRepFeat kept 0.05 One side, and the sweep
+        up to the face misses an intersection there too (ops#293). The Revolution and the Groove
+        either fail or give the tool that first contact gives, about 11.2277, and the Groove
+        removes nothing (the torus is beyond the first contact). Turning the other way (Two
+        sides' second side, or One side Reversed) the tool is about 13.3486.
+        The torus is also turned about its own axis, which moves its seams and nothing else
+        (PR 279 review): turned 10 degrees One side and 330 degrees Reversed, BRepFeat kept the
+        piece from where the circles leave the torus round to the profile too (497.90 instead of
+        484.97 and 487.09); not turned and Reversed, its tool had a vertex of tolerance 0.995 and
+        a volume of 14.20, with no error."""
+        steps = 200
+        step = 2.0 / steps
+        phase = math.atan2(2, 15)
+        expected = 0.0
+        other = 0.0
+        for i in range(steps):
+            r = 1 + (i + 0.5) * step
+            for j in range(steps):
+                z = (j + 0.5) * step
+                minor = math.sqrt(4 - (z - 1) ** 2)
+                cosine = ((6 + minor) ** 2 - r * r - 57.25) / (r * math.sqrt(229))
+                expected += r * (math.acos(cosine) - phase) * step * step
+                other += r * (math.acos(cosine) + phase) * step * step
+        tools = {
+            ("One side", False): expected,
+            ("One side", True): other,
+            ("Two sides", False): expected + other,
+            ("Symmetric", False): 2 * expected,
+        }
+        for turned in (0, 10, 330, 350):
+            for kind in ("Revolution", "Groove"):
+                for (sideType, reversed_), tool in tools.items():
+                    with self.subTest(
+                        turned=turned, kind=kind, sideType=sideType, reversed_=reversed_
+                    ):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        torus = body.newObject("PartDesign::AdditiveTorus", "Ring")
+                        torus.Radius1 = 6
+                        torus.Radius2 = 2
+                        torus.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(-7.5, 1, 1),
+                            FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), turned),
+                        )
+                        self.Doc.recompute()
+                        base = torus.Shape.Volume
+                        feature = self.revolveProfileUpTo(
+                            body, kind, sideType, (torus, ["Face1"]), reversed_=reversed_
+                        )
+                        if not feature.isValid():
+                            continue
+                        change = tool if kind == "Revolution" else 0
+                        self.assertAlmostEqual(feature.Shape.Volume, base + change, delta=1e-3)
+
+    def revolveSketchUpToWall(self, wallShape, geometry, placement=None):
+        """A Revolution about V_Axis (Z) of a sketch on XZ holding `geometry`, up to the face of
+        a Part::Feature of `wallShape` at `placement`, recomputed."""
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        if placement is not None:
+            wall.Placement = placement
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        for item in geometry:
+            sketch.addGeometry(item, False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        return sketch, revolution
+
+    def assertFirstContactOrFails(self, sketch, revolution, outside, inside, expected):
+        """The Revolution fails, or holds what first contact gives: the volume `expected`, the
+        sketch point `inside` turned half a turn about Z inside, and `outside` outside."""
+        if not revolution.isValid():
+            return
+        placement = sketch.getGlobalPlacement()
+
+        def halfTurn(point):
+            moved = placement.multVec(FreeCAD.Vector(point[0], point[1], 0))
+            return FreeCAD.Vector(-moved.x, -moved.y, moved.z)
+
+        self.assertFalse(revolution.Shape.isInside(halfTurn(outside), 1e-7, True))
+        self.assertTrue(revolution.Shape.isInside(halfTurn(inside), 1e-7, True))
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, delta=1e-3 * expected)
+
+    @staticmethod
+    def midpointIntegral(function, low, high, steps=4000):
+        width = (high - low) / steps
+        return width * sum(function(low + (k + 0.5) * width) for k in range(steps))
+
+    @staticmethod
+    def sketchRectangle(x0, x1, y0, y1):
+        corners = [FreeCAD.Vector(x, y) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        return [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+
+    def testRevolutionUpToWallSliverStopsFirst(self):
+        """A D-shaped profile (an arc of radius 5 about (6.5, 1) from 101.25 to 281.25 degrees,
+        nearest the axis at x = 1.5, closed by a line) up to the face x = 0, y in [-9, 1.55]:
+        the thin part x <= 1.55 stops a quarter turn on, the rest passes the face's edge and
+        stops three quarters on. The part lies between the profile's samples, and BRepFeat took
+        it round too, with no error (the PR 273 round 5 verification's A)."""
+        arc = Part.ArcOfCircle(
+            Part.Circle(FreeCAD.Vector(6.5, 1, 0), FreeCAD.Vector(0, 0, 1), 5),
+            math.radians(101.25),
+            math.radians(281.25),
+        )
+        edge = 1.55
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-9, -6), (edge, -6), (edge, 8), (-9, 8))]
+        sketch, revolution = self.revolveSketchUpToWall(
+            Part.Face(Part.makePolygon(points + points[:1])),
+            [arc, Part.LineSegment(arc.EndPoint, arc.StartPoint)],
+        )
+        profile = Part.Face(sketch.Shape.Wires[0])
+        sliver = profile.common(Part.makeBox(edge, 2, 40, FreeCAD.Vector(0, -1, -20))).Faces[0]
+        expected = (
+            1.5 * math.pi * profile.Area * profile.CenterOfMass.x
+            - math.pi * sliver.Area * sliver.CenterOfMass.x
+        )
+        self.assertFirstContactOrFails(sketch, revolution, (1.52, 1), (3, 1), expected)
+
+    def testRevolutionUpToShiftedPeriodicWall(self):
+        """profileAcross()'s square up to a part of the cylinder of radius 10 about the vertical
+        line through (-10, 0), y in [-4, 2], z in [-1, 3], whose angle range lies away from
+        [0, 2 pi): the points with r up to about 2 stop at y = r, the others pass the face's edge.
+        The crossings came in [0, 2 pi) and classified outside the face, and the Revolution took
+        all the points past it, with no error (the PR 273 round 5 verification's B)."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 10
+        face = cylinder.toShape(-0.41152, 0.20136, -1, 3)
+        placement = FreeCAD.Placement(FreeCAD.Vector(-10, 0, 0), FreeCAD.Rotation())
+        if face.ParameterRange[0] < 0:
+            face = cylinder.toShape(-0.20136, 0.41152, -3, 1)
+            placement = FreeCAD.Placement(
+                FreeCAD.Vector(-10, 0, 0), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
+            )
+        sketch, revolution = self.revolveSketchUpToWall(
+            face, self.sketchRectangle(1, 3, 0, 2), placement
+        )
+
+        def stop(radius):
+            angle = math.acos(-radius / 20)
+            return angle if radius * math.sin(angle) <= 2 else 2 * math.pi - angle
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        self.assertFirstContactOrFails(sketch, revolution, (1.5, 1), (2.5, 1), expected)
+
+    def testRevolutionUpToSplineWallPartlyPastItsEdge(self):
+        """testRevolutionUpToWallPartlyPastItsEdge()'s wall as a B-spline face, whose surface
+        ends where the face does: first contact gives 9 pi (the PR 273 round 5 verification's
+        C)."""
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-4, -1), (2, -1), (2, 3), (-4, 3))]
+        wall = Part.Face(Part.makePolygon(points + points[:1])).toNurbs().Faces[0]
+        sketch, revolution = self.revolveSketchUpToWall(wall, self.sketchRectangle(1, 3, 0, 2))
+        self.assertFirstContactOrFails(sketch, revolution, (1.5, 1), (2.5, 1), 9 * math.pi)
+
+    def testRevolutionUpToHalfTubeCrossedLater(self):
+        """The square x in [1.5, 3.5], z in [0, 2] up to the half tube of radius 1.2 about the
+        line x = 0, z = 1 along Y, x <= 0, y in [-6, 2.5]: every point crosses the tube's
+        surface first at x > 0 (beside the face), then at x < 0, where it stops if that crossing
+        is on the face (y <= 2.5) and otherwise goes on to y < 0 (the PR 273 round 5
+        verification's D)."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 1.2
+        sketch, revolution = self.revolveSketchUpToWall(
+            cylinder.toShape(math.pi / 2, 3 * math.pi / 2, -6, 2.5),
+            self.sketchRectangle(1.5, 3.5, 0, 2),
+            FreeCAD.Placement(FreeCAD.Vector(0, 0, 1), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)),
+        )
+
+        def stop(radius, z):
+            half = math.sqrt(1.44 - (z - 1) ** 2)
+            angle = math.acos(-half / radius)
+            return angle if math.sqrt(radius * radius - half * half) <= 2.5 else 2 * math.pi - angle
+
+        expected = self.midpointIntegral(
+            lambda z: self.midpointIntegral(lambda q: q * stop(q, z), 1.5, 3.5, 400), 0, 2, 100
+        )
+        self.assertFirstContactOrFails(sketch, revolution, (2, 1), (3.2, 1), expected)
+
+    def testGrooveUpToOpenWavyWall(self):
+        """A Groove of profileAcross() in a box, up to an open wall along r = 2 + 1.5 sin 2t,
+        t in [0.3, 6.0], turned 45 degrees about Z and extruded along it. Circles of radius below
+        r(6.0) = 1.195 meet the wall's free end within 29 degrees; the rest pass it and meet the
+        wall at 120 to 150 degrees. Before, the check never sampled near the profile's nearest
+        edge, and the Groove removed 18.38 where first contact gives 16.52, with no error (the
+        PR 279 round 1 verification). It fails, or removes what first contact gives."""
+        points = []
+        for k in range(201):
+            t = 0.3 + k * 5.7 / 200
+            radius = 2 + 1.5 * math.sin(2 * t)
+            points.append(FreeCAD.Vector(radius * math.cos(t), radius * math.sin(t), -1))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wallShape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, 4))
+        wallShape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 45)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def stop(radius):
+            # The angles where the wall is at this radius, turned by 45 degrees: the first
+            s = (radius - 2) / 1.5
+            angles = []
+            for t in (math.asin(s) / 2, (math.pi - math.asin(s)) / 2):
+                for turns in range(-1, 4):
+                    u = t + turns * math.pi
+                    if 0.3 <= u <= 6.0:
+                        angles.append((u + math.pi / 4) % (2 * math.pi))
+            return min(angles)
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        removed = block.Shape.Volume - groove.Shape.Volume
+        self.assertAlmostEqual(removed, expected, delta=1e-3 * expected)
+
+    def testGrooveUpToOpenWavyWallOfLooseTolerance(self):
+        """As testGrooveUpToOpenWavyWall, with the wall's free end at r = 1.1 (t past the trough
+        at 7 pi / 4) and the wall's tolerance raised to 5e-4. The checks take ten times that as
+        the boundary, and the points they add 1e-3 of the profile's size (0.0028) inside its
+        edges were dropped: the Groove removed 18.38 where first contact gives 17.10, with no
+        error (the PR 279 round 2 verification's 1). It fails, or removes what first contact
+        gives."""
+        end = 7 * math.pi / 4 + 0.5 * math.acos((2 - 1.1) / 1.5)
+        points = []
+        for k in range(201):
+            t = 0.3 + k * (end - 0.3) / 200
+            radius = 2 + 1.5 * math.sin(2 * t)
+            points.append(FreeCAD.Vector(radius * math.cos(t), radius * math.sin(t), -1))
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wallShape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, 4))
+        wallShape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 45)
+        wallShape.fixTolerance(5e-4)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = wallShape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def stop(radius):
+            # The angles where the wall is at this radius, turned by 45 degrees: the first
+            s = (radius - 2) / 1.5
+            angles = []
+            for t in (math.asin(s) / 2, (math.pi - math.asin(s)) / 2):
+                for turns in range(-1, 4):
+                    u = t + turns * math.pi
+                    if 0.3 <= u <= end:
+                        angles.append((u + math.pi / 4) % (2 * math.pi))
+            return min(angles)
+
+        expected = 2 * self.midpointIntegral(lambda q: q * stop(q), 1, 3)
+        removed = block.Shape.Volume - groove.Shape.Volume
+        self.assertAlmostEqual(removed, expected, delta=1e-3 * expected)
+
+    def testGrooveUpToWallWhoseEndEntersBetweenSamples(self):
+        """A Groove of profileAcross() in a box, up to a B-spline surface along the wall
+        r = 2 + 1.5 sin 2t of testGrooveUpToOpenWavyWall, from t = pi / 4 (r = 3.5) to an end
+        past the trough at 7 pi / 4, turned 45 degrees about Z. The end lies at r = 0.9, inside
+        the profile's nearest edge, except near z = 0.555, where it bulges out to r = 1.15. Only
+        there, circles of radius 1 to 1.15 meet the wall's end within 30 degrees; elsewhere they
+        pass it and meet the wall at 120 to 150 degrees. The bulge lay between the profile's
+        samples, and the Groove removed those circles round to 150 degrees, with no error (the
+        PR 279 round 2 verification's 2). It fails, or leaves them past where they meet the
+        wall."""
+        wave = lambda t: 2 + 1.5 * math.sin(2 * t)
+
+        def endAt(radius):
+            # The t past the trough where the wall is at this radius
+            return 7 * math.pi / 4 + 0.5 * math.acos((2 - radius) / 1.5)
+
+        rows = sorted({-1 + 0.25 * k for k in range(17)} | {0.375 + 0.015 * k for k in range(25)})
+        grid = []
+        for z in rows:
+            bulge = math.cos(0.5 * math.pi * (z - 0.555) / 0.18) ** 2 if abs(z - 0.555) < 0.18 else 0
+            end = endAt(0.9 + 0.25 * bulge)
+            row = []
+            for k in range(61):
+                t = math.pi / 4 + (end - math.pi / 4) * k / 60
+                row.append(
+                    FreeCAD.Vector(
+                        wave(t) * math.cos(t + math.pi / 4), wave(t) * math.sin(t + math.pi / 4), z
+                    )
+                )
+            grid.append(row)
+        surface = Part.BSplineSurface()
+        surface.interpolate(grid)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Face(surface)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        if not groove.isValid():
+            return
+
+        def arc(radius, z, low, high):
+            center = FreeCAD.Vector(0, 0, z)
+            return Part.ArcOfCircle(
+                Part.Circle(center, FreeCAD.Vector(0, 0, 1), radius),
+                math.radians(low),
+                math.radians(high),
+            ).toShape()
+
+        for radius in (1.02, 1.05, 1.08):
+            # The wall stops the circle within 30 degrees by the bulge, and past 110 away from it
+            self.assertAlmostEqual(arc(radius, 0.555, 0, 30).distToShape(wall.Shape)[0], 0, 6)
+            self.assertGreater(arc(radius, 1.5, 0, 110).distToShape(wall.Shape)[0], 0.01)
+            for degrees in (45, 65, 85, 105):
+                angle = math.radians(degrees)
+                point = FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), 0.555)
+                self.assertTrue(groove.Shape.isInside(point, 1e-7, False), (radius, degrees))
+            angle = math.radians(65)
+            point = FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), 1.5)
+            self.assertFalse(groove.Shape.isInside(point, 1e-7, False), radius)
+
+    def testGrooveUpToFoldedWall(self):
+        """A Groove of profileAcross() in a box, up to foldedWall(): both ends of its curve lie
+        outside the profile's radii, so no edge of the wall enters the profile's turn, but circles
+        of radius 1.46 to 1.65 cross the wall three times, at about 118, 145 to 180, and 200
+        degrees; other circles cross it once. The band lay between the profile's samples, and the
+        Groove also removed those circles between their second and third crossings, with no error
+        (the PR 279 round 3 verification's 1). First contact jumps there, and no tool the fork
+        builds is right: it fails, naming the place (ops#293 round 5)."""
+        wall = self.foldedWall(-1, 4)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = block.Width = 12
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        groove = self.revolveProfileUpTo(body, "Groove", "One side", (wall, ["Face1"]))
+        self.assertJumpRefused(groove)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
         reaches it. The feature fails with an error that says so and gives no solid."""
@@ -2034,6 +2544,235 @@ class TestRevolve(unittest.TestCase):
         self.assertFalse(revolution.isValid())
         self.assertIn("never meets the up-to face", revolution.getStatusString())
         self.assertTrue(revolution.Shape.isNull())
+
+    def rectProfile(self, body, x0, x1, z0, z1):
+        """The profile x in [x0, x1], z in [z0, z1] on XZ."""
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(x0, z0),
+            FreeCAD.Vector(x1, z0),
+            FreeCAD.Vector(x1, z1),
+            FreeCAD.Vector(x0, z1),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        self.Doc.recompute()
+        return sketch
+
+    def revolveUpTo(self, body, kind, sketch, upTo, reversed_=False, axis=None):
+        """A One side `kind` of `sketch` about its V axis (or `axis`) up to `upTo`, recomputed."""
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = axis if axis else (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = upTo
+        revolution.Reversed = reversed_
+        self.Doc.recompute()
+        return revolution
+
+    def foldedWall(self, low, height):
+        """A wall along Z from z = `low`, `height` high, whose curve runs out from r = 0.5 to 1.65
+        (angles 100 to 120 degrees), back in to 1.46 (120 to 200) and out to 3.5 (200 to 220):
+        circles of radius 1.46 to 1.65 cross it three times (testGrooveUpToFoldedWall)."""
+        legs = ((0.5, 1.65, 100, 120), (1.65, 1.46, 120, 200), (1.46, 3.5, 200, 220))
+        points = []
+        for index, (r0, r1, a0, a1) in enumerate(legs):
+            for k in range(61 if index == 2 else 60):
+                radius = r0 + (r1 - r0) * k / 60
+                angle = math.radians(a0 + (a1 - a0) * k / 60)
+                points.append(
+                    FreeCAD.Vector(radius * math.cos(angle), radius * math.sin(angle), low)
+                )
+        curve = Part.BSplineCurve()
+        curve.interpolate(points)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Edge(curve).extrude(FreeCAD.Vector(0, 0, height))
+        self.Doc.recompute()
+        return wall
+
+    def assertJumpRefused(self, feature):
+        """The feature failed, naming where first contact jumps."""
+        self.assertFalse(feature.isValid())
+        status = feature.getStatusString()
+        self.assertIn("jumps within the profile", status)
+        self.assertIn("near radius", status)
+
+    def testRevolutionUpToTallFoldedWall(self):
+        """foldedWall() 120 high (z from -60.25), much taller than profileAcross(): the round 4
+        grid's rows were 2.5 apart there and none fell in the profile, so its fold went unseen and
+        12 of 24 tools were wrong, with no error (the PR 279 round 4 verification's q22 A). The
+        certified silhouette finds it whatever the face's height: each Revolution and Groove,
+        either way, fails naming where first contact jumps (ops#293 round 5)."""
+        wall = self.foldedWall(-60.25, 120)
+        for kind in ("Revolution", "Groove"):
+            for reversed_ in (False, True):
+                with self.subTest(kind=kind, reversed_=reversed_):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    block = body.newObject("PartDesign::AdditiveBox", "Block")
+                    block.Length = block.Width = 12
+                    block.Height = 3
+                    block.Placement = FreeCAD.Placement(
+                        FreeCAD.Vector(-6, -6, -0.5), FreeCAD.Rotation()
+                    )
+                    self.Doc.recompute()
+                    feature = self.revolveProfileUpTo(
+                        body, kind, "One side", (wall, ["Face1"]), reversed_=reversed_
+                    )
+                    if reversed_ and feature.isValid():
+                        # Turning the other way the wall's third leg comes first: no jump
+                        continue
+                    self.assertJumpRefused(feature)
+
+    def testRevolutionUpToFoldedWallLeakInsideBase(self):
+        """foldedWall() with a base block over where circles of radius 1.46 to 1.65 run between
+        their second and third crossings: a Revolution that kept that band would hide it in the
+        base, but where first contact jumps no tool the fork builds is right, so it fails, naming
+        the place (ops#293 round 5; the critic's base-hidden regressions)."""
+        wall = self.foldedWall(-1, 4)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 1.7
+        block.Width = 1.7
+        block.Height = 3
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-2.5, -0.5, -0.5), FreeCAD.Rotation())
+        self.Doc.recompute()
+        revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
+        self.assertJumpRefused(revolution)
+
+    def testRevolutionUpToCylinderRingAroundProfile(self):
+        """The profile x in [1.2, 1.8], z in [0.7, 1.3] up to a whole cylinder of radius 1 along
+        X through (0, 1.5, 1): every circle of the profile crosses it twice, and its silhouette
+        under the rotation is a ring round the profile's image, not in it, so first contact moves
+        smoothly: the sweep is right and no refusal is false (ops#293 round 5, F12/F14). The
+        point (r, z) first meets the cylinder's near side y = 1.5 - sqrt(1 - (z - 1)^2) at
+        asin(y / r) turning forward, pi + asin(y / r) Reversed. The cylinder is turned about its
+        own axis so its seam crosses where the circles meet it in one of the turns."""
+        steps = 200
+        width = 0.6 / steps
+        forward = 0.0
+        backward = 0.0
+        for i in range(steps):
+            r = 1.2 + (i + 0.5) * width
+            for j in range(steps):
+                z = 0.7 + (j + 0.5) * width
+                y = 1.5 - math.sqrt(1 - (z - 1) ** 2)
+                forward += r * math.asin(y / r) * width * width
+                backward += r * (math.pi + math.asin(y / r)) * width * width
+        for turned in (0, 90, 180, 270):
+            for reversed_, expected in ((False, forward), (True, backward)):
+                with self.subTest(turned=turned, reversed_=reversed_):
+                    surface = Part.Cylinder()
+                    surface.Radius = 1
+                    surface.Center = FreeCAD.Vector(0, 1.5, 1)
+                    surface.Axis = FreeCAD.Vector(1, 0, 0)
+                    face = surface.toShape(0, 2 * math.pi, -3, 3)
+                    face.rotate(FreeCAD.Vector(0, 1.5, 1), FreeCAD.Vector(1, 0, 0), turned)
+                    tube = self.Doc.addObject("Part::Feature", "Tube")
+                    tube.Shape = face
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    sketch = self.rectProfile(body, 1.2, 1.8, 0.7, 1.3)
+                    revolution = self.revolveUpTo(
+                        body, "Revolution", sketch, (tube, ["Face1"]), reversed_
+                    )
+                    self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                    self.assertAlmostEqual(revolution.Shape.Volume, expected, places=4)
+
+    def testRevolutionUpToPlaneJustBehindProfile(self):
+        """A planar face in the half-plane 358 or 356 degrees round from the profile (radii 0.5
+        to 3.5, z -1 to 3): profileAcross() turns that far before it meets it. BRepFeat swept
+        357 degrees only, so up to a face in the last 3 degrees it gave a tool short of the face
+        or failed (the critic's finding 2, F15). The sweep turns 2 pi - 1e-4: the result is the
+        turn by Pappus, the angle times the area 4 times the centroid's radius 2 (ops#293 round 5).
+        """
+        for degrees in (356, 358):
+            for kind in ("Revolution", "Groove"):
+                with self.subTest(degrees=degrees, kind=kind):
+                    angle = math.radians(degrees)
+                    corners = [
+                        FreeCAD.Vector(r * math.cos(angle), r * math.sin(angle), z)
+                        for r, z in ((0.5, -1), (3.5, -1), (3.5, 3), (0.5, 3))
+                    ]
+                    stop = self.Doc.addObject("Part::Feature", "Stop")
+                    stop.Shape = Part.Face(Part.makePolygon(corners + corners[:1]))
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    if kind == "Groove":
+                        disk = body.newObject("PartDesign::AdditiveCylinder", "Disk")
+                        disk.Radius = 5
+                        disk.Height = 4
+                        disk.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(0, 0, -1), FreeCAD.Rotation()
+                        )
+                        self.Doc.recompute()
+                    feature = self.revolveProfileUpTo(body, kind, "One side", (stop, ["Face1"]))
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    tool = angle * 4 * 2
+                    volume = tool if kind == "Revolution" else 100 * math.pi - tool
+                    self.assertAlmostEqual(feature.Shape.Volume, volume, places=5)
+
+    def testRevolutionUpToFaceOfTheBase(self):
+        """Up to a plane face of the base, which the tool's end face lies on (the coincident
+        faces of a fuse or cut, which BRepFeat glues): profileAcross() turned a quarter turn, 4 pi,
+        either way, against the box x in [-4, 0], y in [-4, 4], z in [-1, 3] (a Revolution, 128 +
+        4 pi), from inside the box x in [0, 4] (a Groove, 128 - 4 pi), and from the face y = 0 of
+        the box x in [0, 4], y in [0, 4] or its mirror (a Groove whose start and end both lie on
+        the base's faces, 64 - 4 pi). The sweep's fuse and cut give these, valid, one solid, with
+        the faces the base and the turn make (ops#293 round 5, the coincident-face probe)."""
+        cases = (
+            ("Revolution", (-4, 0), (-4, 4), 128 + 4 * math.pi, 11),
+            ("Groove", (0, 4), (-4, 4), 128 - 4 * math.pi, 11),
+            ("Groove", (0, 4), None, 64 - 4 * math.pi, 10),
+        )
+        for kind, xs, ys, volume, faces in cases:
+            for reversed_ in (False, True):
+                with self.subTest(kind=kind, ys=ys, reversed_=reversed_):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    span = ys if ys else ((-4, 0) if reversed_ else (0, 4))
+                    block, face = self.boxUpTo(body, xs, span, (-1, 3), 0)
+                    feature = self.revolveProfileUpTo(
+                        body, kind, "One side", (block, [face]), reversed_=reversed_
+                    )
+                    self.assertTrue(feature.isValid(), feature.getStatusString())
+                    self.assertEqual(len(feature.Shape.Solids), 1)
+                    self.assertAlmostEqual(feature.Shape.Volume, volume, places=6)
+                    self.assertEqual(len(feature.Shape.Faces), faces)
+
+    def testRevolutionUpToFaceAboutAxisOffProfilePlane(self):
+        """The profile x in [-0.4, 2], z in [0, 2] on XZ turned about the line x = 0, y = 1 along
+        Z, off the profile's plane: each circle comes back to the plane at the point's mirror
+        image across x = 0, which lies in the profile for x in [-0.4, 0.4], so the sweep overlaps
+        itself. It fails saying so (the critic's finding 6, ops#293 round 5). The profile x in
+        [1, 2] never comes back into itself, and stops at the box face x = -0.5: the point (x, z)
+        at radius R = sqrt(x^2 + 1) from the line starts at the angle atan2(-1, x) and meets the
+        face at acos(-0.5 / R). The circles cross the profile's plane at a slant, so an element
+        of area sweeps x, not R, times the angle."""
+        steps = 400
+        width = 1.0 / steps
+        expected = 0.0
+        for i in range(steps):
+            x = 1 + (i + 0.5) * width
+            radius = math.hypot(x, 1)
+            expected += x * (math.acos(-0.5 / radius) - math.atan2(-1, x)) * width * 2
+        for x0, x1 in ((-0.4, 2), (1, 2)):
+            with self.subTest(x0=x0, x1=x1):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (-5, -0.5), (-6, 8), (-1, 3), -0.5)
+                line = body.newObject("PartDesign::Line", "Axis")
+                line.MapMode = "Deactivated"
+                line.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 1, 0), FreeCAD.Rotation())
+                sketch = self.rectProfile(body, x0, x1, 0, 2)
+                revolution = self.revolveUpTo(
+                    body, "Revolution", sketch, (block, [face]), axis=(line, [""])
+                )
+                if x0 > 0:
+                    self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                    tool = revolution.Shape.Volume - 4.5 * 14 * 4
+                    self.assertAlmostEqual(tool, expected, places=4)
+                else:
+                    self.assertFalse(revolution.isValid())
+                    self.assertIn("come back to the profile's plane", revolution.getStatusString())
 
     def tearDown(self):
         # closing doc
