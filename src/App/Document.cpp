@@ -91,6 +91,7 @@
 #include "ForkRelease.h"
 #include "NamingRevision.h"
 #include "RecomputeContinuation.h"
+#include "RecomputeThread.h"
 #include "StringHasher.h"
 #include "Transactions.h"
 
@@ -191,7 +192,29 @@ constexpr auto fcAttrSourceDocument {"SourceDocument"};
 // `<name>:<uuid>` of each exported object's document, separated by spaces: a copy of several
 // documents' objects tells each object's document (PR 266 verification L1)
 constexpr auto fcAttrSourceDocuments {"SourceDocuments"};
+
+// The documents this thread is inside recompute() of, innermost last (ops#318)
+thread_local std::vector<const Document*> recomputingHere;
+
+struct RecomputingHere
+{
+    explicit RecomputingHere(const Document* doc)
+    {
+        recomputingHere.push_back(doc);
+    }
+    ~RecomputingHere()
+    {
+        recomputingHere.pop_back();
+    }
+    RecomputingHere(const RecomputingHere&) = delete;
+    RecomputingHere& operator=(const RecomputingHere&) = delete;
+};
 }  // namespace
+
+bool App::isRecomputingOnThisThread(const Document* doc)
+{
+    return std::ranges::find(recomputingHere, doc) != recomputingHere.end();
+}
 
 std::optional<ImportedSource> App::importedSource(const DocumentObject* obj)
 {
@@ -3857,6 +3880,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     Base::TimeTracker tracker("Document::recompute");
     std::optional<Base::ObjectStatusLocker<Document::Status, Document>> recomputingStatus;
     recomputingStatus.emplace(Document::Recomputing, this);
+    // For the rest of the call: this thread's mustExecute() calls are the recompute's own (ops#318)
+    const RecomputingHere here(this);
 
     signalBeforeRecompute(*this);
 

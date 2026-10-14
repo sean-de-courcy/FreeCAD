@@ -23,20 +23,26 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <optional>
+#include <utility>
 
+#include <Precision.hxx>
 #include <Standard_Failure.hxx>
 
 #include <Base/Console.h>
 #include <Base/ProgramVersion.h>
 #include <Base/Tools.h>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/Datums.h>
 #include <App/ObjectIdentifier.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
+#include <App/RecomputeThread.h>
 
 #include "AttachExtension.h"
 #include "AttachExtensionPy.h"
@@ -92,6 +98,63 @@ void restoreAttacherEngine(AttachExtension* self)
     if (strcmp(mode, type) != 0) {
         self->AttacherEngine.setValue(classToEnum(type));
     }
+}
+
+// Objects attached across containers that moved at open, per document, logged in one line when
+// its restore ends (ops#318)
+std::map<std::string, std::vector<std::string>> movedAtOpen;
+
+void logMovedAtOpen(
+    const std::string& document,
+    const std::vector<std::string>& names,
+    bool copied = false
+)
+{
+    std::string list;
+    for (const auto& name : names) {
+        list += (list.empty() ? "" : ", ") + name;
+    }
+    const bool one = names.size() == 1;
+    Base::Console().warning(
+        "Document '%s': %d %s attached across containers moved %s, to %s support%s with "
+        "both containers' placements counted; recompute to update what depends on %s: %s\n",
+        document.c_str(),
+        static_cast<int>(names.size()),
+        one ? "object" : "objects",
+        copied ? "when copied in" : "at open",
+        one ? "its" : "their",
+        one ? "" : "s",
+        one ? "it" : "them",
+        list.c_str()
+    );
+}
+
+// It moved because its links are now read where they are, while what depends on it keeps the
+// shapes saved with it: queue it for recompute (the GUI then asks for one), and log it. A touch
+// would be purged when the restore ends.
+void reportMovedAtOpen(App::DocumentObject* obj)
+{
+    auto doc = obj->getDocument();
+    doc->addRecomputeObject(obj);
+    if (doc->testStatus(App::Document::Importing)) {
+        logMovedAtOpen(doc->getName(), {obj->getNameInDocument()}, true);
+        return;
+    }
+    static auto started = App::GetApplication().signalStartRestoreDocument.connect(
+        [](const App::Document& restoring) { movedAtOpen.erase(restoring.getName()); }
+    );
+    static auto finished = App::GetApplication().signalFinishRestoreDocument.connect(
+        [](const App::Document& restored) {
+            auto it = movedAtOpen.find(restored.getName());
+            if (it != movedAtOpen.end()) {
+                logMovedAtOpen(it->first, it->second);
+                movedAtOpen.erase(it);
+            }
+        }
+    );
+    (void)started;
+    (void)finished;
+    movedAtOpen[doc->getName()].emplace_back(obj->getNameInDocument());
 }
 }  // namespace
 
@@ -394,10 +457,26 @@ bool AttachExtension::positionBySupport()
     }
     updateAttacherVals();
     Base::Placement plaOriginal = getPlacement().getValue();
+    // The frames handed to the attacher serve this call only: a calculation that fails before
+    // using them (the base attacher's) leaves none for the next one or a copy (ops#318)
+    struct DropLinkFrames
+    {
+        AttachEngine& attacher;
+        ~DropLinkFrames()
+        {
+            attacher.setLinkFrames({});
+        }
+    } dropLinkFrames {*_props.attacher};
     try {
         if (_props.attacher->mapMode == mmDeactivated) {
+            keepLinkFrames(std::nullopt);
             return false;
         }
+        // The links' frames, computed once: the attacher reads them, extensionMustExecute()
+        // compares them (ops#318)
+        auto frames = AttachEngine::linkFrames(getExtendedObject(), AttachmentSupport.getValues());
+        _props.attacher->setLinkFrames(frames.frames);
+        keepLinkFrames(std::move(frames));
         bool subChanged = false;
 
         getPlacement().setValue(Base::Placement());
@@ -461,7 +540,57 @@ bool AttachExtension::isAttacherActive() const
 
 short int AttachExtension::extensionMustExecute()
 {
+    // Moving a container, or moving this object or a support into another container, touches
+    // neither this object nor what it links: run when a link's frame has changed since (ops#318)
+    if (linkFramesChanged()) {
+        return 1;
+    }
     return DocumentObjectExtension::extensionMustExecute();
+}
+
+void AttachExtension::keepLinkFrames(std::optional<AttachEngine::LinkFrames> frames)
+{
+    std::lock_guard lock(_linkFramesMutex);
+    _linkFrames = std::move(frames);
+}
+
+bool AttachExtension::linkFramesChanged() const
+{
+    // While it recomputes it is placed anew; its links may be rewritten meanwhile
+    if (getExtendedObject()->isRecomputing()) {
+        return false;
+    }
+    // Asked beside a recompute on another thread (the GUI's poll while the worker recomputes):
+    // the walk would read in-lists, groups and links the recompute changes. The recompute asks
+    // again itself, on its own thread
+    auto doc = getExtendedObject()->getDocument();
+    if (doc && doc->testStatus(App::Document::Recomputing)
+        && !App::isRecomputingOnThisThread(doc)) {
+        return false;
+    }
+    return linkFramesDiffer();
+}
+
+bool AttachExtension::linkFramesDiffer() const
+{
+    {
+        std::lock_guard lock(_linkFramesMutex);
+        if (!_linkFrames) {
+            return false;
+        }
+    }
+    // Outside the lock, which guards only the kept frames. Same container: the walk up to the
+    // common container and identity frames.
+    const auto current
+        = AttachEngine::linkFrames(getExtendedObject(), AttachmentSupport.getValues());
+    std::lock_guard lock(_linkFramesMutex);
+    return _linkFrames && !(*_linkFrames == current);
+}
+
+bool AttachExtension::linkFramesAcross() const
+{
+    std::lock_guard lock(_linkFramesMutex);
+    return _linkFrames && _linkFrames->across;
 }
 
 
@@ -486,6 +615,10 @@ App::DocumentObjectExecReturn* AttachExtension::extensionExecute()
 
 void AttachExtension::extensionOnChanged(const App::Property* prop)
 {
+    if (getExtendedObject()->isRestoring() && prop->isDerivedFrom<App::PropertyPlacement>()
+        && prop == getExtendedObject()->getPropertyByName("Placement")) {
+        _restoredPlacement = static_cast<const App::PropertyPlacement*>(prop)->getValue();
+    }
     if (!getExtendedObject()->isRestoring()) {
         // If we change anything that affects our position, update it immediately so you can see it
         // interactively.
@@ -761,6 +894,8 @@ void AttachExtension::handleLegacyTangentPlaneOrientation()
 
 void AttachExtension::onExtendedDocumentRestored()
 {
+    // Whatever happens below, nothing read at this restore stays for a later one
+    const std::optional<Base::Placement> restoredPlacement = std::exchange(_restoredPlacement, {});
     try {
         initBase(false);
         if (_baseProps.attachment) {
@@ -778,7 +913,16 @@ void AttachExtension::onExtendedDocumentRestored()
             handleLegacyTangentPlaneOrientation();
         }
 
+        // As the file has it: a Part::Datum has been positioned already (_restoredPlacement)
+        const Base::Placement restored = restoredPlacement.value_or(getPlacement().getValue());
         bool bAttached = positionBySupport();
+        if (bAttached && linkFramesAcross()) {
+            const Base::Placement placement = getPlacement().getValue();
+            if (!placement.getPosition().IsEqual(restored.getPosition(), Precision::Confusion())
+                || !placement.getRotation().isSame(restored.getRotation(), Precision::Angular())) {
+                reportMovedAtOpen(getExtendedObject());
+            }
+        }
 
         updateSinglePropertyStatus(bAttached);
     }
@@ -845,6 +989,11 @@ void AttachExtension::updateAttacherVals(bool base) const
         0.0,
         0.0
     );
+    // The base attacher's result is this object's own shape frame, not a container's: it keeps
+    // reading its links as before (ops#318)
+    if (!base) {
+        attacher(base).setOwner(getExtendedObject());
+    }
 }
 
 AttachExtension::Properties AttachExtension::getProperties(bool base) const

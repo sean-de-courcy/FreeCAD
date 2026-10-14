@@ -148,7 +148,8 @@ ProfileBased::ProfileBased()
 namespace
 {
 // What places a feature's result: its profile, a Loft's sections, a Pipe's spines, the up-to
-// faces and shapes, a revolution's axis, and what each of them is attached to
+// faces and shapes, a revolution's axis. Not what they are attached to: the attacher reads each
+// support in its own Body and maps it, and re-places the attachment when a Body moves (ops#318)
 std::vector<App::DocumentObject*> placersOf(const ProfileBased& feature)
 {
     std::vector<App::DocumentObject*> placers;
@@ -156,15 +157,6 @@ std::vector<App::DocumentObject*> placersOf(const ProfileBased& feature)
                              "UpToFace2", "UpToShape", "UpToShape2", "ReferenceAxis"}) {
         if (auto prop = freecad_cast<App::PropertyLinkBase*>(feature.getPropertyByName(name))) {
             prop->getLinks(placers);
-        }
-    }
-    const auto direct = placers.size();
-    for (std::size_t i = 0; i < direct; ++i) {
-        auto attached = placers[i] ? placers[i]->getExtensionByType<Part::AttachExtension>(true)
-                                   : nullptr;
-        if (attached) {
-            const auto supports = attached->AttachmentSupport.getValues();
-            placers.insert(placers.end(), supports.begin(), supports.end());
         }
     }
     return placers;
@@ -179,9 +171,8 @@ constexpr const char* placedElsewhere = "placed elsewhere than this feature's Bo
 // placed elsewhere the feature comes out where the profile isn't (FreeCAD-CH ops#308 T4: a hole
 // through two stacked Bodies cut in the wrong place). So are a Loft's sections, a Pipe's spine,
 // the up-to faces and shapes, the axis (F2: a Pad up to another Body's top stopped where that
-// top would be in this Body), and what any of them is attached to (a sketch on the top of
-// another Body's pad, that Body at (100, 50), sat at the origin). A binder carries them over.
-// That other Body, or nothing.
+// top would be in this Body). What they are attached to is the attacher's, which maps it
+// (ops#318). A binder carries them over. That other Body, or nothing.
 const Body* ProfileBased::profileBodyElsewhere() const
 {
     auto body = getFeatureBody();
@@ -227,7 +218,7 @@ App::DocumentObjectExecReturn* ProfileBased::recompute()
     if (failedElsewhere) {
         return new App::DocumentObjectExecReturn(
             std::string("The profile, a section, spine, up-to face or shape, or axis of this "
-                        "feature, or what it is attached to, is in Body ")
+                        "feature is in Body ")
                 + other->Label.getValue()
                 + ", " + placedElsewhere + ": bind it with a Sub-Shape Binder",
             this
@@ -265,7 +256,11 @@ void ProfileBased::positionByPrevious()
         Part::Part2DObject* sketch = getVerifiedSketch();
         App::DocumentObject* support = sketch->AttachmentSupport.getValue();
         if (support && support->isDerivedFrom<App::GeoFeature>()) {
-            this->Placement.setValue(static_cast<App::GeoFeature*>(support)->Placement.getValue());
+            // A support in another Body is placed in that Body: mapped into this one (ops#318)
+            bool across = false;
+            const auto frame = Attacher::AttachEngine::linkFrame(this, support, &across);
+            const auto placement = static_cast<App::GeoFeature*>(support)->Placement.getValue();
+            this->Placement.setValue(across ? frame * placement : placement);
         }
         else {
             this->Placement.setValue(sketch->Placement.getValue());

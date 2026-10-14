@@ -596,6 +596,8 @@ PyObject* AttachEnginePy::readParametersFromFeature(PyObject* args)
             0.0,
             feat->AttachmentOffset.getValue()
         );
+        // Links are read in the feature's container, as the feature reads them (ops#318)
+        attacher.setOwner(dobj);
         return Py::new_reference_to(Py::None());
     }
     ATTACHERPY_STDCATCH_METH;

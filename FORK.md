@@ -320,7 +320,8 @@ names it.
 | `infra/323-fork-release` | infra | ops#323 | - | `integration` `746cbb6f2b` | `75ae590158` (fork PR 293), 2026-10-12 | never |
 | `infra/323-compat-gate` | infra | ops#323 | - | `infra/323-fork-release` (fork PR 293) `5a4244c019` | `9351e7c1c6` (fork PR 295), 2026-10-12 | never |
 | `fix/319-expression-units` | fix | ops#319, ops#320 | - | `integration` `d624c532ae` | `318a1f8a91` (fork PR 292), 2026-10-12 | never (fork fix) |
-| `fix/336-gate-binder-offset` | fix | ops#336 | - | `integration` `318a1f8a91` | (fork PR 298) | never |
+| `fix/336-gate-binder-offset` | fix | ops#336 | - | `integration` `318a1f8a91` | `f602eac8ed` (fork PR 298), 2026-10-14 | never |
+| `fix/318-attach-frames` | fix | ops#318 | - | `integration` `318a1f8a91` | (fork PR 296) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
