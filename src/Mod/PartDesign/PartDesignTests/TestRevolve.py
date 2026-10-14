@@ -1108,8 +1108,8 @@ class TestRevolve(unittest.TestCase):
     def testRevolutionUpToPlaneThroughProfileSymmetric(self):
         """The face x = 2 of the box x in [2, 6], y in [-4, 4], z in [0, 2], symmetric about the
         profile plane and across the profile itself (x in [1, 3]): Symmetric passes the face
-        itself to both sides, as Two sides does, and gives the same result (ops#272). Today both
-        are valid and add nothing, without an error (ops#289)."""
+        itself to both sides, as Two sides does, and gives the same result (ops#272). Both fail
+        with an error, since the face cuts through the profile (ops#289)."""
         results = {}
         for sideType in ("Two sides", "Symmetric"):
             body = self.Doc.addObject("PartDesign::Body", "Body")
@@ -1213,8 +1213,10 @@ class TestRevolve(unittest.TestCase):
         z in [0.75, 0.95], on the first side's half of its face x = 0: the first side's sweep
         passes through it, so the face's whole plane would not stop the second side where the
         first one's mirror ends. The feature was valid with the two sides unequal, silently (the
-        PR 268 review's M2: the old check sampled points the window missed). It fails now,
-        naming Two sides."""
+        PR 268 review's M2: the old check sampled points the window missed). It failed naming
+        Two sides; the first side's points that turn through the window meet the wall's other
+        half later, so it now fails earlier, at the first side's check of the gaps it crosses
+        before the face (the PR 273 verification's item 2)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         block = body.newObject("PartDesign::AdditiveBox", "Block")
         block.Length = 4
@@ -1227,7 +1229,11 @@ class TestRevolve(unittest.TestCase):
         window.Height = 0.2
         window.Placement = FreeCAD.Placement(FreeCAD.Vector(-5, 1.7, 0.75), FreeCAD.Rotation())
         self.Doc.recompute()
-        self.assertSymmetricFails(body, (window, [self.wallAtXZero(window)]))
+        revolution = self.revolveProfileUpTo(
+            body, "Revolution", "Symmetric", (window, [self.wallAtXZero(window)])
+        )
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
 
     def trimmedTubeWall(self, trimmed):
         """The part of the tube of radius 2 about the vertical line x = -1, y = 1.5 from 60 to
@@ -1496,9 +1502,511 @@ class TestRevolve(unittest.TestCase):
         self.assertGreater(tube.Volume, 2.5)
         self.assertSameSolid(revolution.Shape, block.Shape.fuse(tube))
 
+    def testRevolutionUpToFaceThroughProfile(self):
+        """The face x = 2 of the box x in [2, 6], y in [-4, 4], z in [0, 2] cuts through the
+        profile x in [1, 3]: its points at radius < 2 never meet the plane, those beyond it at
+        once. The Revolution or Groove up to it fails with an error, on one side, two sides and
+        Symmetric; before, it was valid and added or removed nothing (ops#289). So does the
+        unbounded plane x = 2 (a datum plane)."""
+        for kind in ("Revolution", "Groove"):
+            for sideType in ("One side", "Two sides", "Symmetric"):
+                for datum in (False, True):
+                    with self.subTest(kind=kind, sideType=sideType, datum=datum):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        block = body.newObject("PartDesign::AdditiveBox", "Block")
+                        block.Length = 4
+                        block.Width = 8
+                        block.Height = 2
+                        block.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(2, -4, 0), FreeCAD.Rotation()
+                        )
+                        self.Doc.recompute()
+                        if datum:
+                            plane = body.newObject("PartDesign::Plane", "Wall")
+                            plane.MapMode = "Deactivated"
+                            plane.Placement = FreeCAD.Placement(
+                                FreeCAD.Vector(2, 0, 0),
+                                FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90),
+                            )
+                            upTo = (plane, [""])
+                        else:
+                            [face] = [
+                                "Face%d" % (i + 1)
+                                for i, f in enumerate(block.Shape.Faces)
+                                if abs(f.BoundBox.XMin - 2) < 1e-9
+                                and abs(f.BoundBox.XMax - 2) < 1e-9
+                            ]
+                            upTo = (block, [face])
+                        revolution = body.newObject("PartDesign::" + kind, kind)
+                        sketch = self.profileAcross(body)
+                        revolution.Profile = sketch
+                        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                        revolution.SideType = sideType
+                        revolution.Type = "UpToFace"
+                        revolution.UpToFace = upTo
+                        if sideType == "Two sides":
+                            revolution.Type2 = "UpToFace"
+                            revolution.UpToFace2 = upTo
+                        self.Doc.recompute()
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def testRevolutionUpToInfiniteCylinderThroughProfile(self):
+        """The whole cylinder of radius 1 about the line along Y through x = 2, z = 1 (a face with
+        no boundary) cuts through the profile x in [1, 3], z in [0, 2]: the circle where it
+        crosses the profile plane lies inside the profile. Its unbounded surface went unchecked
+        (the PR 273 review's M2); now the Revolution or Groove up to it fails with an error."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 1
+        cylinder.Center = FreeCAD.Vector(2, 0, 1)
+        cylinder.Axis = FreeCAD.Vector(0, 1, 0)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(cylinder)
+        for kind in ("Revolution", "Groove"):
+            for sideType in ("One side", "Two sides"):
+                with self.subTest(kind=kind, sideType=sideType):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    if kind == "Groove":
+                        block = body.newObject("PartDesign::AdditiveBox", "Block")
+                        block.Length = 8
+                        block.Width = 8
+                        block.Height = 4
+                        block.Placement = FreeCAD.Placement(
+                            FreeCAD.Vector(-4, -4, -1), FreeCAD.Rotation()
+                        )
+                    revolution = body.newObject("PartDesign::" + kind, kind)
+                    sketch = self.profileAcross(body)
+                    revolution.Profile = sketch
+                    revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                    revolution.SideType = sideType
+                    revolution.Type = "UpToFace"
+                    revolution.UpToFace = (wall, ["Face1"])
+                    if sideType == "Two sides":
+                        revolution.Type2 = "UpToFace"
+                        revolution.UpToFace2 = (wall, ["Face1"])
+                    self.Doc.recompute()
+                    self.assertFalse(revolution.isValid())
+                    self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def testRevolutionUpToFaceAlongBulgingProfileEdge(self):
+        """The profile x in [3, 5], z in [0, 2] on XZ about Z, whose edge on x = 3 is a B-spline
+        that bulges in to x = 2.5 over a short range of z and leaves the line tangentially; the
+        up-to face the plane x + y = 3, whose trace in the profile's plane is the line x = 3:
+        along the edge, and inside the profile where the edge bulges. Every point of the profile
+        meets the plane as it turns. The face cuts through the profile, and the Revolution or
+        Groove fails with that error. Before (ops#293 round 1), with the bulge over z in
+        [0.65, 0.85] the section with the profile was one line along the whole edge, and neither
+        its three points (z = 0.5, 1, 1.5) nor the middle of its common with the profile were
+        inside: the feature was valid. With the bulge over z in [1.15, 1.35] the section was
+        empty, and the check passed it too. Without the bulge the feature is valid: the face then
+        only touches the profile."""
+        normal = FreeCAD.Vector(1, 1, 0).normalize()
+        along = FreeCAD.Vector(-1, 1, 0).normalize()
+        up = FreeCAD.Vector(0, 0, 1)
+        corners = [
+            FreeCAD.Vector(3, 0, 0) + along * (12 * a) + up * (12 * b)
+            for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+        self.assertAlmostEqual(corners[0].dot(normal), 3 / math.sqrt(2))
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = Part.Face(Part.makePolygon(corners + corners[:1]))
+        for bulge in ((0.65, 0.85), (1.15, 1.35), None):
+            for kind in ("Revolution", "Groove"):
+                for reversed_ in (False, True):
+                    with self.subTest(bulge=bulge, kind=kind, reversed=reversed_):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        if kind == "Groove":
+                            block = body.newObject("PartDesign::AdditiveBox", "Block")
+                            block.Length = 16
+                            block.Width = 16
+                            block.Height = 4
+                            block.Placement = FreeCAD.Placement(
+                                FreeCAD.Vector(-8, -8, -1), FreeCAD.Rotation()
+                            )
+                        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+                        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+                        sketch.AttachmentSupport = (xz, [""])
+                        sketch.MapMode = "FlatFace"
+                        # Poles on x = 3 every 0.05 in z, those in the bulge at x = 2.5: the cubic
+                        # B-spline is on the line wherever only poles on it are active.
+                        poles = []
+                        for i in range(41):
+                            z = i / 20
+                            inBulge = bulge is not None and bulge[0] <= z <= bulge[1]
+                            poles.append(FreeCAD.Vector(2.5 if inBulge else 3, z, 0))
+                        edge = Part.BSplineCurve()
+                        edge.buildFromPoles(poles, False, 3)
+                        sketch.addGeometry(edge, False)
+                        for start, end in (((3, 2), (5, 2)), ((5, 2), (5, 0)), ((5, 0), (3, 0))):
+                            sketch.addGeometry(
+                                Part.LineSegment(
+                                    FreeCAD.Vector(*start, 0), FreeCAD.Vector(*end, 0)
+                                ),
+                                False,
+                            )
+                        revolution = body.newObject("PartDesign::" + kind, kind)
+                        revolution.Profile = sketch
+                        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+                        revolution.Type = "UpToFace"
+                        revolution.UpToFace = (wall, ["Face1"])
+                        revolution.Reversed = reversed_
+                        self.Doc.recompute()
+                        if bulge is None:
+                            self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                        else:
+                            self.assertFalse(revolution.isValid())
+                            self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def boxUpTo(self, body, xs, ys, zs, faceX):
+        """A box x in `xs`, y in `ys`, z in `zs`, and its face on the plane x = `faceX`."""
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = xs[1] - xs[0]
+        block.Width = ys[1] - ys[0]
+        block.Height = zs[1] - zs[0]
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(xs[0], ys[0], zs[0]), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [face] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(block.Shape.Faces)
+            if abs(f.BoundBox.XMin - faceX) < 1e-9 and abs(f.BoundBox.XMax - faceX) < 1e-9
+        ]
+        return block, face
+
+    def revolveProfileUpTo(self, body, kind, sideType, upTo, upToType="UpToFace"):
+        """A `kind` of profileAcross() up to `upTo`, on `sideType`, recomputed."""
+        revolution = body.newObject("PartDesign::" + kind, kind)
+        sketch = self.profileAcross(body)
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.SideType = sideType
+        revolution.Type = upToType
+        if upToType == "UpToFace":
+            revolution.UpToFace = upTo
+        if sideType == "Two sides":
+            revolution.Type2 = upToType
+            if upToType == "UpToFace":
+                revolution.UpToFace2 = upTo
+        self.Doc.recompute()
+        return revolution
+
+    def testRevolutionUpToFaceNeverMetByPartOfProfile(self):
+        """Faces that only touch the profile x in [1, 3], z in [0, 2], or miss it, where its
+        nearer points never reach them (the PR 273 review's M3): the face x = 3 of the box
+        x in [3, 6], y in [-4, 4] (points at radius < 3 never reach the plane x = 3), and the
+        face x = 2 of the box x in [2, 6], y in [1, 4] (trimmed off the profile plane: points at
+        radius < sqrt(5) never reach it). Before, a Revolution added a whole ring, or 48.6, and
+        a Groove removed nothing, or 1.2, with no error. Now each fails with an error, on one
+        side, two sides and Symmetric."""
+        cases = {"touching": ((3, 6), (-4, 4), 3), "trimmed": ((2, 6), (1, 4), 2)}
+        for case, (xs, ys, faceX) in cases.items():
+            for kind in ("Revolution", "Groove"):
+                for sideType in ("One side", "Two sides", "Symmetric"):
+                    with self.subTest(case=case, kind=kind, sideType=sideType):
+                        body = self.Doc.addObject("PartDesign::Body", "Body")
+                        zs = (0, 2) if kind == "Revolution" else (0, 3)
+                        block, face = self.boxUpTo(body, xs, ys, zs, faceX)
+                        revolution = self.revolveProfileUpTo(body, kind, sideType, (block, [face]))
+                        self.assertFalse(revolution.isValid())
+                        self.assertIn(
+                            "never meets the up-to face", revolution.getStatusString()
+                        )
+
+    def testRevolutionUpToFaceTouchingProfileWithinReach(self):
+        """The face x = 1 of the box x in [-6, 1], y in [-4, 4], z in [0, 2] touches the profile
+        x in [1, 3], z in [0, 2] along its edge x = 1, from where every point reaches it: the
+        point at radius r meets the plane x = 1 after the angle acos(1 / r). One side adds
+        2 * the integral of r * acos(1 / r) from 1 to 3, two sides and Symmetric twice that."""
+
+        def antiderivative(r):
+            # integral of r * acos(1 / r) dr
+            return r**2 / 2 * math.acos(1 / r) - math.sqrt(r**2 - 1) / 2
+
+        added = 2 * (antiderivative(3) - antiderivative(1))
+        for sideType, sides in (("One side", 1), ("Two sides", 2), ("Symmetric", 2)):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (-6, 1), (-4, 4), (0, 2), 1)
+                revolution = self.revolveProfileUpTo(body, "Revolution", sideType, (block, [face]))
+                self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                self.assertEqual(len(revolution.Shape.Solids), 1)
+                self.assertGreater(added, 8)
+                self.assertAlmostEqual(revolution.Shape.Volume, 112 + sides * added, places=6)
+
+    def revolveUpToHoledWall(self, hole, ys=(0, 4)):
+        """profileAcross() revolved One side up to the face x = 0 of the box x in [-1, 0],
+        y in `ys`, z in [-1, 3], with a square hole y in hole[0], z in hole[1] through it.
+        Each point at radius r meets the plane x = 0 at y = r, a quarter turn on."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length = 1
+        block.Width = ys[1] - ys[0]
+        block.Height = 4
+        block.Placement = FreeCAD.Placement(FreeCAD.Vector(-1, ys[0], -1), FreeCAD.Rotation())
+        (y0, y1), (z0, z1) = hole
+        cut = body.newObject("PartDesign::SubtractiveBox", "Hole")
+        cut.Length = 3
+        cut.Width = y1 - y0
+        cut.Height = z1 - z0
+        cut.Placement = FreeCAD.Placement(FreeCAD.Vector(-2, y0, z0), FreeCAD.Rotation())
+        self.Doc.recompute()
+        [wall] = [
+            "Face%d" % (i + 1)
+            for i, f in enumerate(cut.Shape.Faces)
+            if abs(f.BoundBox.XMin) < 1e-9 and abs(f.BoundBox.XMax) < 1e-9 and f.Area > 10
+        ]
+        revolution = self.revolveProfileUpTo(body, "Revolution", "One side", (cut, [wall]))
+        return cut, revolution
+
+    def testRevolutionUpToFaceWithSmallHoleInTheWay(self):
+        """A 0.05 x 0.05 hole in the wall of revolveUpToHoledWall() where profile points turn
+        through it: they never meet the face (BRepFeat keeps the hole; the tool was 45.5, round
+        the axis, instead of the quarter ring 4 pi, with no error). Between the profile's samples
+        (y in [1.75, 1.8], z in [0.4, 0.45]) the check missed it; on a sample (y in [1.65, 1.7],
+        z in [0.3, 0.35]) it failed. Both fail now, with the same error."""
+        for hole in (((1.75, 1.8), (0.4, 0.45)), ((1.65, 1.7), (0.3, 0.35))):
+            with self.subTest(hole=hole):
+                _, revolution = self.revolveUpToHoledWall(hole)
+                self.assertFalse(revolution.isValid())
+                self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithHolePartlyInTheWay(self):
+        """A hole in the wall of revolveUpToHoledWall(), y in [1.55, 1.7], z in [1.95, 2.95],
+        that the profile's band z in [0, 2] reaches only along its bottom strip: the profile
+        points r in (1.55, 1.7), z in (1.95, 2) turn through it and never meet the face. No
+        sample of the hole lay in the strip, and the tool was 45.5 instead of 4 pi, with no error
+        (the PR 273 verification's M1). It fails now."""
+        _, revolution = self.revolveUpToHoledWall(((1.55, 1.7), (1.95, 2.95)))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithSlotInTheWay(self):
+        """A slot cut into the top of the wall of revolveUpToHoledWall(), y in [1.52, 1.62], from
+        z = 0.5 up through its edge z = 3: the profile points r in (1.52, 1.62), z in (0.5, 2]
+        turn through it and never meet the face. It lies between the profile's samples, and the
+        tool was 45.7 instead of 4 pi, with no error (ops#299, the PR 273 verification's M2).
+        It fails now."""
+        _, revolution = self.revolveUpToHoledWall(((1.52, 1.62), (0.5, 3.5)))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithSlotOutOfTheWay(self):
+        """A slot cut into the top of the wall of revolveUpToHoledWall() beyond the profile's
+        reach (y in [3.5, 3.6], z from 0.5 up through its edge): the Revolution is valid, the box
+        and the quarter ring from 0 to 90 degrees."""
+        cut, revolution = self.revolveUpToHoledWall(((3.5, 3.6), (0.5, 3.5)))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def revolveUpToLocatedCylinderWall(self, holeY):
+        """profileAcross() revolved One side up to a quarter of the cylinder of radius 4 about
+        the vertical line through (-4.5, 0), z in [-1, 3], from its +X side, with a hole of
+        radius 0.1 along X at y = `holeY`, z = 1 through it. The wall is a Part::Feature whose
+        placement lifts it by 5, so its face is located (the PR 273 verification's Low)."""
+        cylinder = Part.makeCylinder(
+            4, 4, FreeCAD.Vector(-4.5, 0, -6), FreeCAD.Vector(0, 0, 1), 90
+        ).cut(Part.makeCylinder(0.1, 20, FreeCAD.Vector(-10, holeY, -4), FreeCAD.Vector(1, 0, 0)))
+        [face] = [f for f in cylinder.Faces if abs(getattr(f.Surface, "Radius", 0) - 4) < 1e-9]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = face
+        wall.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 5), FreeCAD.Rotation())
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Doc.recompute()
+        return self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
+
+    def testRevolutionUpToLocatedCurvedFaceWithHoleOutOfTheWay(self):
+        """revolveUpToLocatedCylinderWall() with the hole at y = 3.2, at radius 3.8 from the axis,
+        beyond the profile's reach. The point at radius r meets the cylinder after the angle
+        acos(-(r^2 + 4.25) / (9 r)), so the Revolution is 2 * the integral of r times that from 1
+        to 3. The hole's check built its face on the moved surface from the face's own wire."""
+        revolution = self.revolveUpToLocatedCylinderWall(3.2)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        steps = 4000
+        width = 2 / steps
+        radii = [1 + (i + 0.5) * width for i in range(steps)]
+        expected = 2 * width * sum(r * math.acos(-(r**2 + 4.25) / (9 * r)) for r in radii)
+        self.assertAlmostEqual(revolution.Shape.Volume, expected, places=5)
+
+    def testRevolutionUpToLocatedCurvedFaceWithHoleInTheWay(self):
+        """revolveUpToLocatedCylinderWall() with the hole at y = 2.2, at radius 2.5: the profile
+        points that turn through it never meet the face, and the Revolution fails."""
+        revolution = self.revolveUpToLocatedCylinderWall(2.2)
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToFaceWithHoleOutOfTheWay(self):
+        """A hole in the wall of revolveUpToHoledWall() beyond the profile's reach (y in
+        [3.5, 3.6], radius > 3): the Revolution is valid, the box and the quarter ring from 0 to
+        90 degrees."""
+        cut, revolution = self.revolveUpToHoledWall(((3.5, 3.6), (0.4, 0.5)))
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def testRevolutionUpToFaceUnderProfileTopBetweenSamples(self):
+        """A circle of radius 0.5 about x = 2, z = 2.52 on XZ (its arc starting at 22.5 degrees)
+        revolved about Z up to the face x = 0 of the box x in [-1, 0], y in [0, 4], z in [-1, 3]:
+        the circle's top, up to z = 3.02, passes over the wall and never meets the face. The
+        circle's samples reach z = 2.98 at most, and the face has no gap within its own bounds,
+        so the check missed it, and BRepFeat failed with only "Could not revolve the sketch!".
+        The gaps now take in the face's surface as far as the profile's whole turn reaches (the
+        PR 273 verification's item 1), and the Revolution fails with the check's error."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block, face = self.boxUpTo(body, (-1, 0), (0, 4), (-1, 3), 0)
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        start = math.radians(22.5)
+        circle = Part.Circle(FreeCAD.Vector(2, 2.52, 0), FreeCAD.Vector(0, 0, 1), 0.5)
+        sketch.addGeometry(Part.ArcOfCircle(circle, start, start + 2 * math.pi), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (block, [face])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToWallThroughAxisWithHoleInTheWay(self):
+        """revolveUpToHoledWall() with the wall y in [-4, 4], through the axis, and the hole
+        y in [1.75, 1.8], z in [0.4, 0.45]: the profile points that turn through the hole meet
+        the wall again at y = -r, so their circles do meet the face, but only after the gap. The
+        tool was 29.07, where the first contact gives 12.58, with no error (the PR 273
+        verification's item 2). The check now asks where each circle first meets the face, and
+        the Revolution fails."""
+        _, revolution = self.revolveUpToHoledWall(((1.75, 1.8), (0.4, 0.45)), ys=(-4, 4))
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToWallThroughAxisWithHoleReachedLater(self):
+        """revolveUpToHoledWall() with the wall y in [-4, 4], through the axis, and holes the
+        profile's points reach only after they meet the wall: y in [-1.8, -1.75] (past the first
+        contact, at three quarters of a turn) and y in [3.5, 3.6] (beyond their reach). The
+        Revolution is valid, the box and the quarter ring from 0 to 90 degrees."""
+        for hole in (((-1.8, -1.75), (0.4, 0.45)), ((3.5, 3.6), (0.4, 0.5))):
+            with self.subTest(hole=hole):
+                cut, revolution = self.revolveUpToHoledWall(hole, ys=(-4, 4))
+                self.assertTrue(revolution.isValid(), revolution.getStatusString())
+                self.assertSameSolid(revolution.Shape, cut.Shape.fuse(self.ringSector(0, 90)))
+
+    def testRevolutionUpToWallPartlyPastItsEdge(self):
+        """The square x in [1, 3], z in [0, 2] on XZ, revolved about Z up to the face x = 0,
+        y in [-4, 2], z in [-1, 3]: its points at radius up to 2 meet the face a quarter turn on,
+        at y = r, while those farther out pass the face's edge y = 2 and meet it only three
+        quarters of a turn on, at y = -r. BRepFeat took them all three quarters of a turn round,
+        12 pi instead of 9 pi by first contact, with no error (the PR 273 verification's item 6).
+        The Revolution now fails."""
+        points = [FreeCAD.Vector(0, y, z) for y, z in ((-4, -1), (2, -1), (2, 3), (-4, 3))]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.Face(Part.makePolygon(points + points[:1]))
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((1, 0), (3, 0), (3, 2), (1, 2))]
+        for start, end in zip(corners, corners[1:] + corners[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes the edge of the up-to face", revolution.getStatusString())
+
+    def revolveUpToHoledSphere(self, holeAt):
+        """profileAcross() revolved One side up to the whole sphere of radius 3.5 about
+        (0, 4, 1), with a hole of radius 0.1 along its normal at the point `holeAt` of it. The
+        sphere is turned about its vertical axis so that its seam runs through the point where
+        the profile's point at radius 2, z = 1 first meets it. The point at radius r and height z
+        meets the sphere after the angle asin((r^2 + 3.75 + (z - 1)^2) / (8 r)), under a quarter
+        turn, and leaves it again after pi less that. (Without a hole in the way BRepFeat keeps
+        the part between the two crossings, 16.26 instead of 4.44: ops#293.)"""
+        center = FreeCAD.Vector(0, 4, 1)
+        sphere = Part.makeSphere(3.5, center)
+        contact = math.asin(7.75 / 16)
+        seam = math.degrees(math.atan2(2 * math.sin(contact) - 4, 2 * math.cos(contact)))
+        sphere.rotate(center, FreeCAD.Vector(0, 0, 1), seam)
+        normal = (holeAt - center).normalize()
+        sphere = sphere.cut(Part.makeCylinder(0.1, 1, holeAt - normal * 0.5, normal))
+        [face] = [f for f in sphere.Faces if f.Surface.TypeId == "Part::GeomSphere"]
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = face
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        self.Doc.recompute()
+        return self.revolveProfileUpTo(body, "Revolution", "One side", (wall, ["Face1"]))
+
+    def testRevolutionUpToSphereWithHoleInTheWay(self):
+        """revolveUpToHoledSphere() with the hole where the profile's point at radius 2, z = 1
+        first meets the sphere, across its seam: the points that turn through it meet the sphere
+        again on its far side, after the gap, and the Revolution fails (a periodic face's gaps,
+        the PR 273 verification's item 8)."""
+        contact = math.asin(7.75 / 16)
+        holeAt = FreeCAD.Vector(2 * math.cos(contact), 2 * math.sin(contact), 1)
+        revolution = self.revolveUpToHoledSphere(holeAt)
+        self.assertFalse(revolution.isValid())
+        self.assertIn("passes through a gap in the up-to face", revolution.getStatusString())
+
+    def testRevolutionUpToWholeCylinderNearTheAxisThroughProfile(self):
+        """A small profile x in [0.1, 0.2], z in [0, 0.1] on XZ about Z, up to the whole cylinder
+        of radius 0.15 about Y through the origin, turned half a turn about Y: the cylinder
+        cuts through the profile where its angle is about pi. The check's face on an unbounded
+        surface cut the cylinder's angle range to [0, 2.06] (under 2 pi, the PR 273
+        verification's Low), and missed the crossing."""
+        cylinder = Part.Cylinder()
+        cylinder.Radius = 0.15
+        cylinder.Axis = FreeCAD.Vector(0, 1, 0)
+        face = Part.Face(cylinder)
+        face.rotate(FreeCAD.Vector(), FreeCAD.Vector(0, 1, 0), 180)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = face
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        points = [
+            FreeCAD.Vector(0.1, 0),
+            FreeCAD.Vector(0.2, 0),
+            FreeCAD.Vector(0.2, 0.1),
+            FreeCAD.Vector(0.1, 0.1),
+        ]
+        for start, end in zip(points, points[1:] + points[:1]):
+            sketch.addGeometry(Part.LineSegment(start, end), False)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["V_Axis"])
+        revolution.Type = "UpToFace"
+        revolution.UpToFace = (wall, ["Face1"])
+        self.Doc.recompute()
+        self.assertFalse(revolution.isValid())
+        self.assertIn("cuts through the profile", revolution.getStatusString())
+
+    def testGrooveUpToFaceTouchingProfileWithinReach(self):
+        """A Groove of profileAcross() inside the box x in [1, 6], y in [-4, 4], z in [-1, 3], up
+        to its face x = 1, which touches the profile along its edge x = 1: each point at radius r
+        meets the plane x = 1 after acos(1 / r), inside the box. It removes 2 * the integral of
+        r * acos(1 / r) from 1 to 3 on one side, twice that on two sides and Symmetric."""
+
+        def antiderivative(r):
+            # integral of r * acos(1 / r) dr
+            return r**2 / 2 * math.acos(1 / r) - math.sqrt(r**2 - 1) / 2
+
+        removed = 2 * (antiderivative(3) - antiderivative(1))
+        for sideType, sides in (("One side", 1), ("Two sides", 2), ("Symmetric", 2)):
+            with self.subTest(sideType=sideType):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block, face = self.boxUpTo(body, (1, 6), (-4, 4), (-1, 3), 1)
+                groove = self.revolveProfileUpTo(body, "Groove", sideType, (block, [face]))
+                self.assertTrue(groove.isValid(), groove.getStatusString())
+                self.assertEqual(len(groove.Shape.Solids), 1)
+                self.assertAlmostEqual(groove.Shape.Volume, 160 - sides * removed, places=6)
+
     def testRevolutionUpToFaceNeverMet(self):
         """The plane y = 100, parallel to the profile plane: the sweep about the Z axis never
-        reaches it. The feature fails with an error and gives no solid."""
+        reaches it. The feature fails with an error that says so and gives no solid."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         sketch = body.newObject("Sketcher::SketchObject", "Profile")
         [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
@@ -1524,7 +2032,7 @@ class TestRevolve(unittest.TestCase):
         revolution.UpToFace = (wall, [""])
         self.Doc.recompute()
         self.assertFalse(revolution.isValid())
-        self.assertIn("Could not revolve the sketch", revolution.getStatusString())
+        self.assertIn("never meets the up-to face", revolution.getStatusString())
         self.assertTrue(revolution.Shape.isNull())
 
     def tearDown(self):

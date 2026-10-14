@@ -322,7 +322,8 @@ names it.
 | `fix/319-expression-units` | fix | ops#319, ops#320 | - | `integration` `d624c532ae` | `318a1f8a91` (fork PR 292), 2026-10-12 | never (fork fix) |
 | `fix/336-gate-binder-offset` | fix | ops#336 | - | `integration` `318a1f8a91` | `f602eac8ed` (fork PR 298), 2026-10-14 | never |
 | `fix/318-attach-frames` | fix | ops#318 | - | `integration` `318a1f8a91` | `d85a820fc9` (fork PR 296), 2026-10-14 | never (fork fix) |
-| `fix/318-expression-containers` | fix | ops#318 | - | `fix/318-attach-frames` `79dd9e9831` (stacked on fork PR 296) | (fork PR 297) | never (fork fix) |
+| `fix/318-expression-containers` | fix | ops#318 | - | `fix/318-attach-frames` `79dd9e9831` (stacked on fork PR 296) | `97d4942d03` (fork PR 297), 2026-10-14 | never (fork fix) |
+| `fix/289-upto-face-through-profile` | fix | ops#289 | - | `integration` `97d4942d03` | (fork PR 273) | never (fork fix) |
 
 ## Fork-only commits in carried topics
 
