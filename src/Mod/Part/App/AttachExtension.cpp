@@ -172,8 +172,10 @@ struct Watched
     fastsignals::connection recomputed;
     std::set<std::string> names;
     // Each container's Placement when it last recomputed: one that recomputes in place moves
-    // nothing, and the walk over the names is skipped
-    std::map<std::string, Base::Placement> placements;
+    // nothing, and the walk over the names is skipped. Keyed by the container's document and ID:
+    // the document's recompute signal also reports other documents' objects, whose names may be
+    // the same, and an ID is never reused after a delete
+    std::map<std::pair<const App::Document*, long>, Base::Placement> placements;
 };
 std::map<const App::Document*, Watched> watchedByDocument;
 std::mutex watchedMutex;
@@ -195,7 +197,7 @@ void containerRecomputed(const App::Document* doc, const App::DocumentObject& re
         }
         if (placement && recomputed.getNameInDocument()) {
             auto [last, added] = it->second.placements.try_emplace(
-                recomputed.getNameInDocument(),
+                std::make_pair(recomputed.getDocument(), recomputed.getID()),
                 placement->getValue()
             );
             if (!added && last->second == placement->getValue()) {

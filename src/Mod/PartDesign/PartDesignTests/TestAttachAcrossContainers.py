@@ -930,6 +930,42 @@ class TestAttachAcrossContainers(unittest.TestCase):
         self.assertOnFace(sketch, face)
         self.assertStandsOnFace(pad, face, 7)
 
+    def testSameNamedContainerOfAnotherDocument(self):
+        """B-t2, two documents: Body1 in an App::Part "Part" whose height comes from a VarSet and,
+        times 0, from the height of a Part also named "Part" in a second document, at z = -3. The
+        recompute recomputes the other Part first; when the height becomes -3 too, the slot took
+        the two for one container that recomputed in place, and the sketch stayed off the face,
+        untouched."""
+        folder = tempfile.mkdtemp()
+        other = FreeCAD.newDocument("PartDesignTestAttachAcrossOther")
+        self.docs.append(other.Name)
+        otherPart = other.addObject("App::Part", "Part")
+        otherPart.Placement = P(V(0, 0, -3), R())
+        otherPart.addObject(other.addObject("Part::Box", "Box"))
+        other.recompute()
+        other.saveAs(os.path.join(folder, "other.FCStd"))
+        self.doc.saveAs(os.path.join(folder, "main.FCStd"))
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Height")
+        variables.Height = 10
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["BothRotated"])
+        part = self.doc.addObject("App::Part", "Part")
+        part.addObject(source[0])
+        self.assertEqual(part.Name, otherPart.Name)
+        part.setExpression(
+            ".Placement.Base.z", f"Variables.Height + {other.Name}#Part.Placement.Base.z * 0"
+        )
+        self.doc.recompute()
+        self.assertAllOnFace(source, sketch, pad)
+        for height in (0, -3, 4):
+            with self.subTest(height=height):
+                variables.Height = height
+                otherPart.touch()
+                self.doc.recompute()
+                self.assertAlmostEqual(part.Placement.Base.z, height, places=9)
+                self.assertEqual(self.touched(), [])
+                self.assertAllOnFace(source, sketch, pad)
+
     def testSameBodyAttachmentsDoNotRunWhenABodyMoves(self):
         """B-t5, a cost bound: 200 sketches on their own Body's XY plane, beside an attachment
         across Bodies. Moving either Body runs none of the 200: neither the link-frame check nor
