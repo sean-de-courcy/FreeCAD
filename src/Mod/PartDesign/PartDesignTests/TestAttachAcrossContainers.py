@@ -875,6 +875,115 @@ class TestAttachAcrossContainers(unittest.TestCase):
             FreeCAD.removeDocumentObserver(observer)
         self.assertEqual(answers, [False, True])
         self.assertAllOnFace(source, sketch, pad)
+    # B-t2, B-t3, B-t5 ------------------------------------------------------------------------
+
+    def touched(self):
+        return [o.Name for o in self.doc.Objects if "Touched" in o.State]
+
+    def checkPlacedByAnExpression(self, container):
+        """`container(source)` gives the object placed by the VarSet. Changing the height and one
+        recompute leave nothing touched, and the sketch and Pad2 on the face."""
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Height")
+        variables.Height = 10
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["BothRotated"])
+        placed = container(source)
+        placed.setExpression(".Placement.Base.z", "Variables.Height")
+        self.doc.recompute()
+        self.assertAllOnFace(source, sketch, pad)
+        for height in (35, -12.5):
+            with self.subTest(height=height):
+                variables.Height = height
+                self.doc.recompute()
+                self.assertAlmostEqual(placed.Placement.Base.z, height, places=9)
+                self.assertEqual(self.touched(), [])
+                self.assertAllOnFace(source, sketch, pad)
+
+    def testPartPlacedByAnExpression(self):
+        """B-t2: Body1 in an App::Part PA made after the sketch, PA's height from a VarSet. The
+        recompute reaches the sketch before PA takes its new placement, so the sketch stayed
+        where the face had been, untouched, until another recompute."""
+        def part(source):
+            part = self.doc.addObject("App::Part", "PA")
+            part.addObject(source[0])
+            return part
+
+        self.checkPlacedByAnExpression(part)
+
+    def testBodyPlacedByAnExpression(self):
+        """B-t2, control: Body1 itself placed by the VarSet. Here the recompute reaches Body1
+        first, so it held without the slot too."""
+        self.checkPlacedByAnExpression(lambda source: source[0])
+
+    def testContainerPlacedByWhatStandsOnIt(self):
+        """B-t3: Body1's height is Pad2's length, and Pad2 stands on Sk2 on Body1's face. One
+        recompute after a change of the length converges: nothing touched, Sk2 on the face."""
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["Body2Moved"])
+        source[0].setExpression(".Placement.Base.z", "Pad2.Length")
+        self.doc.recompute()
+        self.assertAllOnFace(source, sketch, pad)
+        pad.Length = 7
+        self.doc.recompute()
+        self.assertAlmostEqual(source[0].Placement.Base.z, 7, places=9)
+        self.assertEqual(self.touched(), [])
+        face = globalElement(source[1], topFace(source[1], 5))
+        self.assertOnFace(sketch, face)
+        self.assertStandsOnFace(pad, face, 7)
+
+    def testSameNamedContainerOfAnotherDocument(self):
+        """B-t2, two documents: Body1 in an App::Part "Part" whose height comes from a VarSet and,
+        times 0, from the height of a Part also named "Part" in a second document, at z = -3. The
+        recompute recomputes the other Part first; when the height becomes -3 too, the slot took
+        the two for one container that recomputed in place, and the sketch stayed off the face,
+        untouched."""
+        folder = tempfile.mkdtemp()
+        other = FreeCAD.newDocument("PartDesignTestAttachAcrossOther")
+        self.docs.append(other.Name)
+        otherPart = other.addObject("App::Part", "Part")
+        otherPart.Placement = P(V(0, 0, -3), R())
+        otherPart.addObject(other.addObject("Part::Box", "Box"))
+        other.recompute()
+        other.saveAs(os.path.join(folder, "other.FCStd"))
+        self.doc.saveAs(os.path.join(folder, "main.FCStd"))
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyDistance", "Height")
+        variables.Height = 10
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["BothRotated"])
+        part = self.doc.addObject("App::Part", "Part")
+        part.addObject(source[0])
+        self.assertEqual(part.Name, otherPart.Name)
+        part.setExpression(
+            ".Placement.Base.z", f"Variables.Height + {other.Name}#Part.Placement.Base.z * 0"
+        )
+        self.doc.recompute()
+        self.assertAllOnFace(source, sketch, pad)
+        for height in (0, -3, 4):
+            with self.subTest(height=height):
+                variables.Height = height
+                otherPart.touch()
+                self.doc.recompute()
+                self.assertAlmostEqual(part.Placement.Base.z, height, places=9)
+                self.assertEqual(self.touched(), [])
+                self.assertAllOnFace(source, sketch, pad)
+
+    def testSameBodyAttachmentsDoNotRunWhenABodyMoves(self):
+        """B-t5, a cost bound: 200 sketches on their own Body's XY plane, beside an attachment
+        across Bodies. Moving either Body runs none of the 200: neither the link-frame check nor
+        the container slot reaches attachments within one container."""
+        source, body, sketch, pad = self.attachedSketch(self.doc, *PAIRS["Body2Moved"])
+        plain = [body.newObject("Sketcher::SketchObject", f"Plain{i}") for i in range(200)]
+        for each in plain:
+            each.AttachmentSupport = [(body.Origin.OriginFeatures[3], "")]
+            each.MapMode = "FlatFace"
+        self.doc.recompute()
+        for target in (body, source[0]):
+            with self.subTest(target=target.Name):
+                target.Placement = P(V(1, 2, 3), R(V(0, 0, 1), 10)).multiply(target.Placement)
+                count = self.doc.recompute()
+                # The moved Body; for Body1 also Sk2, Pad2 and Body2
+                self.assertLessEqual(count, 4, count)
+                self.assertEqual(self.touched(), [])
+                self.assertAllOnFace(source, sketch, pad)
 
     # B-t4 ------------------------------------------------------------------------------------
 
