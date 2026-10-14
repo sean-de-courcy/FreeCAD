@@ -319,7 +319,8 @@ names it.
 | `fix/308-cross-body-traps` | fix | ops#308 | - | `integration` `e76ce293b2` | `d624c532ae` (fork PR 289), 2026-10-12 | never (fork fix) |
 | `infra/323-fork-release` | infra | ops#323 | - | `integration` `746cbb6f2b` | `75ae590158` (fork PR 293), 2026-10-12 | never |
 | `infra/323-compat-gate` | infra | ops#323 | - | `infra/323-fork-release` (fork PR 293) `5a4244c019` | `9351e7c1c6` (fork PR 295), 2026-10-12 | never |
-| `fix/319-expression-units` | fix | ops#319, ops#320 | - | `integration` `d624c532ae` | (fork PR 292) | never (fork fix) |
+| `fix/319-expression-units` | fix | ops#319, ops#320 | - | `integration` `d624c532ae` | `318a1f8a91` (fork PR 292), 2026-10-12 | never (fork fix) |
+| `fix/336-gate-binder-offset` | fix | ops#336 | - | `integration` `318a1f8a91` | (fork PR 298) | never |
 
 ## Fork-only commits in carried topics
 
