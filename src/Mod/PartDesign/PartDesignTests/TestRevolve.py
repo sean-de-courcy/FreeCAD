@@ -1657,6 +1657,125 @@ class TestRevolve(unittest.TestCase):
                             self.assertFalse(revolution.isValid())
                             self.assertIn("cuts through the profile", revolution.getStatusString())
 
+    def flushProfileFeature(self, kind, xs, reversed_=False, wallTolerance=None):
+        """A `kind` (a Revolution, or a Groove of the box x, y in [-8, 8], z in [-1, 3]) up to the
+        plane x + y = 3, of tolerance `wallTolerance` if given, whose trace in XZ is the line
+        x = 3. The profile on XZ about Z: the cubic B-spline with poles at x = xs[i], z = i / 20
+        (41 of them; it is on a line wherever only poles on it are active), closed through (5, 2)
+        and (5, 0). Returns the feature and the sketch, recomputed."""
+        normal = FreeCAD.Vector(1, 1, 0).normalize()
+        along = FreeCAD.Vector(-1, 1, 0).normalize()
+        up = FreeCAD.Vector(0, 0, 1)
+        corners = [
+            FreeCAD.Vector(3, 0, 0) + along * (12 * a) + up * (12 * b)
+            for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+        ]
+        self.assertAlmostEqual(corners[0].dot(normal), 3 / math.sqrt(2))
+        wallShape = Part.Face(Part.makePolygon(corners + corners[:1]))
+        if wallTolerance is not None:
+            wallShape.fixTolerance(wallTolerance)
+        wall = self.Doc.addObject("Part::Feature", "WallFace")
+        wall.Shape = wallShape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        if kind == "Groove":
+            block = body.newObject("PartDesign::AdditiveBox", "Block")
+            block.Length = 16
+            block.Width = 16
+            block.Height = 4
+            block.Placement = FreeCAD.Placement(FreeCAD.Vector(-8, -8, -1), FreeCAD.Rotation())
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        [xz] = [f for f in body.Origin.OriginFeatures if f.Role == "XZ_Plane"]
+        sketch.AttachmentSupport = (xz, [""])
+        sketch.MapMode = "FlatFace"
+        edge = Part.BSplineCurve()
+        edge.buildFromPoles([FreeCAD.Vector(x, i / 20, 0) for i, x in enumerate(xs)], False, 3)
+        sketch.addGeometry(edge, False)
+        for start, end in (((xs[-1], 2), (5, 2)), ((5, 2), (5, 0)), ((5, 0), (xs[0], 0))):
+            sketch.addGeometry(
+                Part.LineSegment(FreeCAD.Vector(*start, 0), FreeCAD.Vector(*end, 0)), False
+            )
+        feature = body.newObject("PartDesign::" + kind, kind)
+        feature.Profile = sketch
+        feature.ReferenceAxis = (sketch, ["V_Axis"])
+        feature.Type = "UpToFace"
+        feature.UpToFace = (wall, ["Face1"])
+        feature.Reversed = reversed_
+        self.Doc.recompute()
+        return feature, sketch
+
+    def assertFlushFirstContact(self, feature, sketch, kind, reversed_):
+        """`feature` of flushProfileFeature() is valid, one solid, and holds the points of the
+        profile turned 0.95 of the angle after which they meet the plane x + y = 3, and not those
+        turned 1.05 (a Groove the reverse): pi / 4 + acos(3 / (r sqrt 2)) at radius r towards +Y,
+        acos(3 / (r sqrt 2)) - pi / 4 Reversed."""
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        profile = Part.Face(sketch.Shape.Wires[0])
+        sign = -1 if reversed_ else 1
+        for i in range(12):
+            for j in range(12):
+                # Off the grid of the poles, whose points lie on the edge
+                point = FreeCAD.Vector(3 + (i + 0.43) / 6, 0, (j + 0.57) / 6)
+                if not profile.isInside(point, 1e-9, False):
+                    continue
+                radius = point.x
+                meet = math.acos(min(1, 3 / (radius * math.sqrt(2))))
+                angle = meet - math.pi / 4 if reversed_ else meet + math.pi / 4
+                if angle < 0.05:
+                    continue
+                for fraction, swept in ((0.95, True), (1.05, False)):
+                    turn = sign * angle * fraction
+                    turned = FreeCAD.Vector(
+                        radius * math.cos(turn), radius * math.sin(turn), point.z
+                    )
+                    self.assertEqual(
+                        shape.isInside(turned, 1e-7, True),
+                        swept if kind == "Revolution" else not swept,
+                        (radius, point.z, fraction),
+                    )
+
+    def testRevolutionUpToFaceFlushWithBulgingProfileEdge(self):
+        """flushProfileFeature() with the edge bulging out of the profile, to x = 3.5, over z in
+        [0.65, 0.85], [1.15, 1.35] or [1.6, 1.75]: the plane is flush with the edge outside the
+        bulge. Each Revolution or Groove, either way, is first contact. Before (ops#338), the
+        Revolution was refused one way, "the result's edges don't meet within the precision of
+        the profile and the face" (the bulge at 0.65 towards +Y, at 1.15 Reversed: the boolean of
+        the sweep with the plane gave an edge of tolerance 0.54 in the sketch's frame), and a
+        Groove with "the result's volume is wrong" (the bulge at 1.6 towards +Y): BRepGProp's
+        default integration made the tool 26.19 where it is 28.05."""
+        for bulge in ((0.65, 0.85), (1.15, 1.35), (1.6, 1.75)):
+            xs = [3.5 if bulge[0] <= i / 20 <= bulge[1] else 3 for i in range(41)]
+            for kind in ("Revolution", "Groove"):
+                for reversed_ in (False, True):
+                    with self.subTest(bulge=bulge, kind=kind, reversed=reversed_):
+                        feature, sketch = self.flushProfileFeature(kind, xs, reversed_)
+                        self.assertFlushFirstContact(feature, sketch, kind, reversed_)
+
+    def testRevolutionUpToLooseFaceFlushWithProfileEdge(self):
+        """flushProfileFeature() up to the plane of tolerance 1e-4 or 1e-3: flush with the straight
+        edge x = 3, each Revolution is first contact, either way; with the edge 0.005 past the
+        plane over z in [0.65, 0.85], it fails as the face cutting through the profile. Before
+        (ops#338), each failed saying part of the profile goes all the way round: the sweep
+        stopped 1e-4 radians short of a whole turn, a gap of 3e-4 at the edge, which the face's
+        tolerance bridged; and the check of the cut took ten times the face's tolerance, 0.01,
+        as touching."""
+        for tolerance in (1e-4, 1e-3):
+            for reversed_ in (False, True):
+                with self.subTest(tolerance=tolerance, edge="flush", reversed=reversed_):
+                    feature, sketch = self.flushProfileFeature(
+                        "Revolution", [3] * 41, reversed_, tolerance
+                    )
+                    self.assertFlushFirstContact(feature, sketch, "Revolution", reversed_)
+                with self.subTest(tolerance=tolerance, edge="past", reversed=reversed_):
+                    xs = [2.995 if 0.65 <= i / 20 <= 0.85 else 3 for i in range(41)]
+                    feature, sketch = self.flushProfileFeature(
+                        "Revolution", xs, reversed_, tolerance
+                    )
+                    self.assertFalse(feature.isValid())
+                    self.assertIn("cuts through the profile", feature.getStatusString())
+
     def boxUpTo(self, body, xs, ys, zs, faceX):
         """A box x in `xs`, y in `ys`, z in `zs`, and its face on the plane x = `faceX`."""
         block = body.newObject("PartDesign::AdditiveBox", "Block")
