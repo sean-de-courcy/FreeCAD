@@ -35,6 +35,7 @@
 #include <utility>
 #include <vector>
 #include <Bnd_Box.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -79,6 +80,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 
 #include <App/Document.h>
 #include <Base/Console.h>
@@ -353,11 +355,13 @@ double profileCheckTolerance(const TopoDS_Shape& profile, const TopoDS_Face& fac
 // the revolution mustn't go on unchecked (the PR 273 review's M1).
 // The face is sectioned with the profile's plane, not with the profile: where the face runs along
 // a profile edge that leaves it tangentially, the section with the profile came back as one edge
-// along the whole boundary, or empty (ops#293 round 1). The section's common with the profile is
-// then classified at points every size / 1024 along it, the resolution of the certificate
-// (tryToRevolveToFace): not exactly. A stretch inside the profile shorter than that can slip
-// through. Three points per section edge, or one per piece of the common, missed a section that
-// runs along the boundary and inside it where the edge bulges out.
+// along the whole boundary, or empty (ops#293 round 1). The section is then classified against the
+// profile at points every size / 1024 along it, within the profile's bounding box, the resolution
+// of the certificate (tryToRevolveToFace): not exactly. A stretch inside the profile shorter than
+// that can slip through. Three points per section edge, or one per piece of the section's common
+// with the profile, missed a section that runs along the boundary and inside it where the edge
+// bulges out; and that common came back as the profile's own edge, bulge and all, so its points
+// were all on the boundary (testRevolutionUpToFaceAlongBulgingProfileEdge, ops#334).
 bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, double tolerance)
 {
     auto checkFailed = []() {
@@ -368,7 +372,7 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
     };
     const Base::BoundBox3d box = profile.getBoundBox();
     const double size = box.CalcDiagonalLength();
-    TopoDS_Shape inside;
+    TopoDS_Shape sectionShape;
     try {
         TopoDS_Shape carrier = profile.getShape();
         gp_Pln plane;
@@ -386,20 +390,24 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
         if (!section.IsDone()) {
             throw checkFailed();
         }
-        if (!TopExp_Explorer(section.Shape(), TopAbs_EDGE).More()) {
-            return false;
-        }
-        BRepAlgoAPI_Common common(section.Shape(), profile.getShape());
-        if (!common.IsDone()) {
-            throw checkFailed();
-        }
-        inside = common.Shape();
+        sectionShape = section.Shape();
     }
     catch (const Standard_Failure&) {
         throw checkFailed();
     }
+    // A point the classifier puts on the boundary counts as inside when it is farther than the
+    // tolerance from the profile's edges: on a line that runs along a boundary edge, the
+    // classifier's answer can't be relied on.
+    Base::BoundBox3d reach = box;
+    reach.Enlarge(tolerance);
+    TopoDS_Compound boundary;
+    BRep_Builder builder;
+    builder.MakeCompound(boundary);
+    for (TopExp_Explorer edges(profile.getShape(), TopAbs_EDGE); edges.More(); edges.Next()) {
+        builder.Add(boundary, edges.Current());
+    }
     const double step = std::max(size / 1024.0, 2.0 * tolerance);
-    for (TopExp_Explorer edges(inside, TopAbs_EDGE); edges.More(); edges.Next()) {
+    for (TopExp_Explorer edges(sectionShape, TopAbs_EDGE); edges.More(); edges.Next()) {
         BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
         const double first = curve.FirstParameter();
         const double last = curve.LastParameter();
@@ -411,12 +419,27 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
                 ? points.Parameter(i)
                 : first + (last - first) * (i - 1) / (count - 1);
             const gp_Pnt point = curve.Value(parameter);
+            if (!reach.IsInBox(Base::Vector3d(point.X(), point.Y(), point.Z()))) {
+                continue;
+            }
             for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More();
                  faces.Next()) {
                 const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
                 BRepClass_FaceClassifier classifier(profileFace, point, tolerance);
                 if (classifier.State() == TopAbs_IN) {
                     return true;
+                }
+                if (classifier.State() == TopAbs_ON) {
+                    BRepExtrema_DistShapeShape distance(
+                        BRepBuilderAPI_MakeVertex(point).Vertex(),
+                        boundary
+                    );
+                    if (!distance.IsDone()) {
+                        throw checkFailed();
+                    }
+                    if (distance.Value() > tolerance) {
+                        return true;
+                    }
                 }
             }
         }
