@@ -125,7 +125,9 @@ const char* Revolved::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", 
 namespace
 {
 
-bool usesBRepFeatRevolution(Revolved::RevolMethod method, Part::RevolMode revolMode)
+// Whether a side revolves up to a face (up to the first, last or a chosen face): the sweep up to
+// the face (sweepUpToFace())
+bool revolvesUpToFace(Revolved::RevolMethod method, Part::RevolMode revolMode)
 {
     return method == Revolved::RevolMethod::ToFirst || method == Revolved::RevolMethod::ToFace
         || (method == Revolved::RevolMethod::ToLast && revolMode == Part::RevolMode::FuseWithBase);
@@ -365,6 +367,22 @@ double profileCheckTolerance(const TopoDS_Shape& profile, const TopoDS_Face& fac
     return 10.0 * tolerance;
 }
 
+// The tolerance of the check whether the up-to face cuts through the profile: ten times the
+// profile's, as profileCheckTolerance(), but only twice the face's. With ten times a face
+// tolerance of 1e-3, a profile reaching 0.005 past the face passed as touching it, and the sweep
+// then failed saying part of the profile goes all the way round (ops#338).
+double cutThroughTolerance(const TopoDS_Shape& profile, const TopoDS_Face& face)
+{
+    double tolerance = Precision::Confusion();
+    for (TopExp_Explorer faces(profile, TopAbs_FACE); faces.More(); faces.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Face(faces.Current())));
+    }
+    for (TopExp_Explorer edges(profile, TopAbs_EDGE); edges.More(); edges.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
+    }
+    return std::max(10.0 * tolerance, 2.0 * BRep_Tool::Tolerance(face));
+}
+
 // Whether the up-to face cuts through the profile: the profile's points on the face are already
 // there, those on one side of it meet it at once, and the others only later or never. BRepFeat
 // then revolved nothing, with no error, on one side, two sides and Symmetric (ops#289). A face
@@ -425,6 +443,9 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
     }
     const double step = std::max(size / 1024.0, 2.0 * tolerance);
     for (TopExp_Explorer edges(sectionShape, TopAbs_EDGE); edges.More(); edges.Next()) {
+        // Within twice the section edge's own tolerance, a point may be on the boundary
+        const double within
+            = std::max(tolerance, 2.0 * BRep_Tool::Tolerance(TopoDS::Edge(edges.Current())));
         BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
         const double first = curve.FirstParameter();
         const double last = curve.LastParameter();
@@ -442,7 +463,7 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
             for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More();
                  faces.Next()) {
                 const TopoDS_Face& profileFace = TopoDS::Face(faces.Current());
-                BRepClass_FaceClassifier classifier(profileFace, point, tolerance);
+                BRepClass_FaceClassifier classifier(profileFace, point, within);
                 if (classifier.State() == TopAbs_IN) {
                     return true;
                 }
@@ -454,7 +475,7 @@ bool cutsThroughProfile(const TopoShape& profile, const TopoDS_Face& face, doubl
                     if (!distance.IsDone()) {
                         throw checkFailed();
                     }
-                    if (distance.Value() > tolerance) {
+                    if (distance.Value() > within) {
                         return true;
                     }
                 }
@@ -1580,14 +1601,23 @@ TopoShape ownNamesWhereNamed(const TopoShape& tool, long featureTag)
     return result;
 }
 
-double solidVolume(const TopoDS_Shape& shape)
+// A shape's volume and a bound on its error. BRepGProp's default integration, a fixed number of
+// points per face, was 7 % off on a surface of revolution of a B-spline edge (26.19 for 28.05,
+// ops#338), so it integrates adaptively to 1e-6 and returns the error it reached.
+struct SolidVolume
+{
+    double value;
+    double error;
+};
+
+SolidVolume solidVolume(const TopoDS_Shape& shape)
 {
     if (shape.IsNull()) {
-        return 0.0;
+        return {0.0, 0.0};
     }
     GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.Mass();
+    const double relativeError = BRepGProp::VolumeProperties(shape, props, 1e-6);
+    return {props.Mass(), std::fabs(relativeError * props.Mass())};
 }
 
 // The history of the sweep up to the face (sweepUpToFace()), for the kept solids only: pieces in
@@ -1666,6 +1696,33 @@ private:
     TopTools_DataMapOfShapeListOfShape projections;
 };
 
+// The largest distance of a shape's bounding box's corners from the axis
+double largestRadius(const TopoDS_Shape& shape, const gp_Ax1& axis)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) {
+        return 0.0;
+    }
+    double xMin = 0.0;
+    double yMin = 0.0;
+    double zMin = 0.0;
+    double xMax = 0.0;
+    double yMax = 0.0;
+    double zMax = 0.0;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    const gp_Lin line(axis);
+    double largest = 0.0;
+    for (const double x : {xMin, xMax}) {
+        for (const double y : {yMin, yMax}) {
+            for (const double z : {zMin, zMax}) {
+                largest = std::max(largest, line.Distance(gp_Pnt(x, y, z)));
+            }
+        }
+    }
+    return largest;
+}
+
 // The sweep of one profile face about the axis up to the up-to face, built without BRepFeat:
 // the face revolved a sliver short of a whole turn, split by the up-to face, and the pieces that
 // start at the profile. Each point of the profile goes as far as the face, the first time it
@@ -1675,12 +1732,13 @@ private:
 // or a broken shape that lost the base in the fuse, with no error (ops#293). Named into `named`
 // from the sweep, which is named from the profile, and the up-to face. `faceParts` gets the
 // pieces of the up-to face. Fails when a piece that starts at the profile reaches the end of the
-// turn: the face doesn't stop it.
+// turn: the face doesn't stop it. `tolerance` is that of the checks (profileCheckTolerance()).
 TopoShape sweepUpToFace(
     TopoShape named,
     const TopoShape& profile,
     const TopoDS_Face& face,
     const gp_Ax1& axis,
+    double tolerance,
     TopTools_IndexedMapOfShape& faceParts
 )
 {
@@ -1691,8 +1749,13 @@ TopoShape sweepUpToFace(
     };
     // Empty, with the tag, hasher and history algorithm of `named`
     const TopoShape blank(named);
-    // The sliver keeps the end of the turn apart from its start.
-    constexpr double sliver = 1e-4;
+    // The sliver keeps the end of the turn apart from its start, by more than the inputs'
+    // tolerance wherever the profile is at least a tenth of its largest radius from the axis. A
+    // face flush with the profile, within its tolerance of the start, bridged a gap of 1e-4
+    // radians, and the piece reached the end: up to a face of tolerance 1e-4 flush with a profile
+    // at radius 3, every Revolution failed as going all the way round (ops#338).
+    const double radius = largestRadius(profile.getShape(), axis);
+    const double sliver = radius > 0.0 ? std::clamp(tolerance / radius, 1e-4, 1e-2) : 1e-4;
     BRepPrimAPI_MakeRevol turn(profile.getShape(), axis, 2.0 * std::numbers::pi - sliver);
     if (!turn.IsDone()) {
         throw fail();
@@ -2334,14 +2397,42 @@ std::optional<gp_Pnt> silhouetteOn(
         }
         return to.Value();
     };
+    // The last point whose distance from each part's boundary was computed, and that distance. The
+    // distance changes no faster than the point moves, so a point nearer to it than `away` less
+    // the distance is within `away` of the boundary too. Along a silhouette that runs on a part's
+    // boundary (a plane flush with a profile edge) the roots on a leaf's side come every 1e-7 of
+    // it, where the polynomial is zero within its rounding, and their distances cost seconds to
+    // minutes (ops#338: 10 million for a profile of size 0.1 at radius 100, 66 s).
+    std::vector<std::optional<std::pair<gp_Pnt, double>>> lastEdgeDistance(parts.size());
+    // The same for the distance from each part, which decides both ways
+    std::vector<std::optional<std::pair<gp_Pnt, double>>> lastPartDistance(parts.size());
+    auto withinPart = [&](std::size_t k, const gp_Pnt& point, double reach) {
+        if (const auto& last = lastPartDistance[k]) {
+            const double moved = point.Distance(last->first);
+            if (last->second + moved <= reach) {
+                return true;
+            }
+            if (last->second - moved > reach) {
+                return false;
+            }
+        }
+        const double fromPart = distance(*partDistances[k], point);
+        lastPartDistance[k] = std::pair {point, fromPart};
+        return fromPart <= reach;
+    };
     // Whether a point lies within `reach` of a part and farther than `away` from its boundary
     auto inside = [&](const gp_Pnt& point, double reach, double away) {
         for (std::size_t k = 0; k < parts.size(); ++k) {
             if (partBoxes[k].IsOut(point)) {
                 continue;
             }
-            if (distance(*edgeDistances[k], point) > away
-                && distance(*partDistances[k], point) <= reach) {
+            const auto& last = lastEdgeDistance[k];
+            if (last && last->second + point.Distance(last->first) <= away) {
+                continue;
+            }
+            const double fromEdge = distance(*edgeDistances[k], point);
+            lastEdgeDistance[k] = std::pair {point, fromEdge};
+            if (fromEdge > away && withinPart(k, point, reach)) {
                 return true;
             }
         }
@@ -2353,7 +2444,7 @@ std::optional<gp_Pnt> silhouetteOn(
             if (partBoxes[k].IsOut(box)) {
                 continue;
             }
-            if (distance(*partDistances[k], point) <= reach) {
+            if (withinPart(k, point, reach)) {
                 return true;
             }
         }
@@ -2563,7 +2654,7 @@ void certifyFirstContact(
     std::vector<TopoDS_Face> parts;
     Handle(IntTools_Context) context = new IntTools_Context;
     for (TopExp_Explorer solids(sweep, TopAbs_SOLID); solids.More(); solids.Next()) {
-        if (solidVolume(solids.Current()) <= 0.0) {
+        if (solidVolume(solids.Current()).value <= 0.0) {
             throw checkFailed();
         }
         for (TopExp_Explorer faces(solids.Current(), TopAbs_FACE); faces.More(); faces.Next()) {
@@ -2918,8 +3009,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             addRevolution(std::move(result));
         }
         else {
-            fuseSideResults = usesBRepFeatRevolution(method, revolMode)
-                || usesBRepFeatRevolution(method2, revolMode);
+            fuseSideResults = revolvesUpToFace(method, revolMode)
+                || revolvesUpToFace(method2, revolMode);
 
             // Side 1's seam is marked on each face's tool, before the tools are fused: the
             // fusion renames a start face piece that another face's tool crosses, and the mark
@@ -2965,7 +3056,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             // fused, since two faces' tools may overlap.
             const std::vector<TopoShape> faces = upToProfileFaces(sketchshape);
             const std::vector<TopoShape> secondFaces = upToProfileFaces(secondSideProfile());
-            fuseSideResults = usesBRepFeatRevolution(method, revolMode) || faces.size() > 1;
+            fuseSideResults = revolvesUpToFace(method, revolMode) || faces.size() > 1;
             gp_Ax1 axis(pnt, dir);
             // Use the profile's actual plane. The center of its axis-aligned bounding box is not
             // necessarily on that plane for an asymmetric tilted profile; using it as the mirror
@@ -3041,8 +3132,8 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     setResult(
         base,
         result,
-        usesBRepFeatRevolution(method, revolMode)
-            || (sideType == "Two sides" && usesBRepFeatRevolution(method2, revolMode))
+        revolvesUpToFace(method, revolMode)
+            || (sideType == "Two sides" && revolvesUpToFace(method2, revolMode))
     );
 
     // eventually disable some settings that are not valid for the current method
@@ -3068,10 +3159,11 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
         // A correct fuse holds at least the larger of the two and at most both; a correct cut at
         // least the base less the tool and at most the base
         if (checkVolume) {
-            const double baseVolume = solidVolume(base.getShape());
-            const double toolVolume = solidVolume(tool.getShape());
-            const double volume = solidVolume(result.getShape());
-            const double slack = 1e-6 * (baseVolume + toolVolume) + Precision::Confusion();
+            const auto [baseVolume, baseError] = solidVolume(base.getShape());
+            const auto [toolVolume, toolError] = solidVolume(tool.getShape());
+            const auto [volume, error] = solidVolume(result.getShape());
+            const double slack = 1e-6 * (baseVolume + toolVolume) + baseError + toolError + error
+                + Precision::Confusion();
             const bool fuse = volume >= std::max(baseVolume, toolVolume) - slack
                 && volume <= baseVolume + toolVolume + slack;
             const bool cut = volume >= baseVolume - toolVolume - slack
@@ -3122,7 +3214,11 @@ TopoShape Revolved::tryToRevolveToFace(
     }
     const TopoDS_Face reachable = reachableUpToFace(upToFace, sketchshape, axis);
     const double tolerance = profileCheckTolerance(sketchshape.getShape(), reachable);
-    if (cutsThroughProfile(sketchshape, reachable, tolerance)) {
+    if (cutsThroughProfile(
+            sketchshape,
+            reachable,
+            cutThroughTolerance(sketchshape.getShape(), reachable)
+        )) {
         throw Base::RuntimeError(QT_TRANSLATE_NOOP(
             "Exception",
             "The up-to face cuts through the profile, so part of the profile can't revolve "
@@ -3157,30 +3253,41 @@ TopoShape Revolved::tryToRevolveToFace(
                 "face as it revolves about the axis, while the rest of it stops at the face"
             ));
     }
-    TopTools_IndexedMapOfShape faceParts;
-    TopoShape sweep;
-    try {
-        sweep = sweepUpToFace(makeTopoShape(), sketchshape, reachable, axis, faceParts);
+    // The boolean of the sweep with the face is tried again with both turned about the axis, which
+    // changes neither the sweep nor where it meets the face, only the coordinates the boolean works
+    // in. Where a profile edge lies on the face and leaves it tangentially, the same sweep came out
+    // with an edge of tolerance 0.54 in the sketch's frame and 1.5e-4 in the body's (ops#338); a
+    // turn of 1 or 2 radians gave 8e-5 to 1.5e-4 in every case. Each try faces the same checks.
+    bool built = false;
+    for (const double turn : {0.0, 1.0, 2.0}) {
+        gp_Trsf rotation;
+        rotation.SetRotation(axis, turn);
+        const TopLoc_Location there(rotation);
+        const TopoShape profile = sketchshape.moved(there);
+        const TopoDS_Face face = TopoDS::Face(reachable.Moved(there));
+        TopTools_IndexedMapOfShape faceParts;
+        TopoShape sweep;
+        try {
+            sweep = sweepUpToFace(makeTopoShape(), profile, face, axis, tolerance, faceParts);
+        }
+        catch (const Standard_Failure&) {
+            continue;
+        }
+        built = true;
+        if (!sweep.isValid() || !toleranceHolds(sweep.getShape(), {profile.getShape(), face})) {
+            continue;
+        }
+        certifyFirstContact(sweep.getShape(), faceParts, face, profile.getShape(), axis, tolerance);
+        return sweep.moved(there.Inverted());
     }
-    catch (const Standard_Failure&) {
+    if (!built) {
         throw Base::RuntimeError(QT_TRANSLATE_NOOP("Exception", "Could not revolve up to the face"));
     }
-    if (!sweep.isValid() || !toleranceHolds(sweep.getShape(), {sketchshape.getShape(), reachable})) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Could not revolve up to the face: the result's edges don't meet within the "
-            "precision of the profile and the face"
-        ));
-    }
-    certifyFirstContact(
-        sweep.getShape(),
-        faceParts,
-        reachable,
-        sketchshape.getShape(),
-        axis,
-        tolerance
-    );
-    return sweep;
+    throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Could not revolve up to the face: the result's edges don't meet within the precision of "
+        "the profile and the face"
+    ));
 }
 
 TopoShape Revolved::generateSingleRevolutionSide(
