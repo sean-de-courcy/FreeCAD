@@ -755,6 +755,18 @@ bool TaskPipeParameters::accept()
         }
     }
 
+    // FreeCAD-CH (ops#325 1b-2): the copies join the body only after the commit (below); until
+    // then the placed-elsewhere check reads them as in it, not at the root where they are made
+    pipe->setPendingMembers({copies.begin(), copies.end()});
+    struct PendingCleared
+    {
+        PartDesign::Pipe* pipe;
+        ~PendingCleared()
+        {
+            pipe->setPendingMembers({});
+        }
+    } pendingCleared {pipe};
+
     try {
         setVisibilityOfSpineAndProfile();
 

@@ -168,7 +168,7 @@ bool Feature::placerElsewhere(const char** property, std::string* where) const
         placers.clear();
         prop->getLinks(placers);
         for (auto obj : placers) {
-            if (!obj) {
+            if (!obj || std::ranges::find(pendingMembers, obj) != pendingMembers.end()) {
                 continue;
             }
             // Its Body; else the container that places it (an origin element's is its origin's
