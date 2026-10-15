@@ -175,7 +175,16 @@ App::DocumentObjectExecReturn* Boolean::execute()
 
     std::vector<App::DocumentObject*> tools = Group.getValues();
     if (tools.empty()) {
-        return App::DocumentObject::StdReturn;
+        // Being set up: before its first tool (its command runs it once before the panel opens)
+        // or in its panel. Otherwise its tools are gone (e.g. the tool Body was deleted), and
+        // keeping the old result would show them silently (FreeCAD-CH ops#314); failing passes
+        // the base shape through (ops#126)
+        if (settingUp || Shape.getShape().isNull()) {
+            return App::DocumentObject::StdReturn;
+        }
+        return new App::DocumentObjectExecReturn(
+            QT_TRANSLATE_NOOP("Exception", "Boolean has no tools: add a Body to its list")
+        );
     }
 
     // Get the base shape to operate on

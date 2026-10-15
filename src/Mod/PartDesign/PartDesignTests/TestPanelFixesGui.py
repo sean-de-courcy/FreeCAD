@@ -3472,3 +3472,45 @@ class TestPanelFixesGui(unittest.TestCase):
             f"'{binder.Label}' moved to 'Target' still binds '{xz.Label}' of 'Source', where it was",
             (reportText() or "")[before:],
         )
+
+    def testBooleanWithoutToolsFailsOnlyOutsideItsPanel(self):
+        """ops#314: a Boolean with no tools computes nothing while it is set up (created by its
+        command with nothing selected, or its panel open) and fails once the panel is closed.
+        Model: Tool, a 10 mm box at the origin; Body, a 10 mm box at x = -5."""
+        tool = models.body(self.doc)
+        tool.newObject("PartDesign::AdditiveBox", "ToolBox")
+        self.body = models.body(self.doc)
+        base = self.body.newObject("PartDesign::AdditiveBox", "Base")
+        base.Placement.Base = V(-5, 0, 0)
+        self.doc.recompute()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.runCommand("PartDesign_Boolean")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
+        pump(0.3)
+        [created] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Boolean"]
+        self.assertTrue(created.isValid(), created.getStatusString())
+        name = created.Name
+        self.close(ok=False)
+        self.assertIsNone(self.doc.getObject(name))
+
+        boolean = self.body.newObject("PartDesign::Boolean", "Fuse")
+        boolean.setObjects([tool])
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Shape.Volume, 1500)
+        self.edit(boolean)
+        boolean.setObjects([])
+        boolean.recompute()
+        self.assertTrue(boolean.isValid(), boolean.getStatusString())
+        self.close(ok=False)
+        self.assertEqual(boolean.Group, [tool])
+
+        boolean.setObjects([])
+        self.doc.recompute()
+        self.assertFalse(boolean.isValid())
+        self.assertIn("no tools", boolean.getStatusString())
+        self.assertAlmostEqual(self.body.Shape.Volume, 1000)

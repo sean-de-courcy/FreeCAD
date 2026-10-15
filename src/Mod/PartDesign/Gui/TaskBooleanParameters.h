@@ -28,6 +28,7 @@
 #include "TaskFeatureParameters.h"
 
 
+#include <App/DocumentObserver.h>
 #include <Gui/TaskView/TaskDialog.h>
 #include <Gui/TaskView/TaskView.h>
 
@@ -128,6 +129,7 @@ protected:
     ViewProviderBoolean* BooleanView;
 
     TaskBooleanParameters* parameter;
+    App::DocumentObjectT booleanT;  // the Boolean set up while open (ops#314)
 };
 
 }  // namespace PartDesignGui
