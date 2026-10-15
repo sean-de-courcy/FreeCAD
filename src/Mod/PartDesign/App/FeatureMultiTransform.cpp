@@ -72,16 +72,19 @@ void MultiTransform::positionBySupport()
 }
 
 // The steps only store their parameters (positionBySupport above): this feature reads their
-// directions, axes and planes, so it fails for theirs (ops#325)
+// directions, axes and planes, so it fails for theirs (ops#325). They are judged against this
+// feature's Body, where it reads them: a step in no Body, or in another, passed against its own
+// (PR 301 review low 2: a script-made step at the document's root patterned along the wrong axis)
 bool MultiTransform::placerElsewhere(const char** property, std::string* where) const
 {
     if (Transformed::placerElsewhere(property, where)) {
         return true;
     }
+    const Body* body = getFeatureBody();
     for (auto obj : Transformations.getValues()) {
         auto step = freecad_cast<PartDesign::Transformed*>(obj);
         if (step && step != this) {
-            if (step->placerElsewhere(nullptr, where)) {
+            if (step->placerElsewhereThan(body, nullptr, where)) {
                 if (property) {
                     *property = "Transformations";
                 }

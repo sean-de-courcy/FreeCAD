@@ -981,6 +981,40 @@ class TestStudio(unittest.TestCase):
             self.assertTrue(feature.isValid(), feature.Name + ": " + feature.getStatusString())
         self.assertSettled()
 
+    def testMultiTransformJudgesAStepOutsideEveryBodyInItsOwnBody(self):
+        """PR 301 review low 2: a MultiTransform step made by script at the document's root (in
+        no Body), its direction a root sketch's line along X. Body A at identity: valid, the
+        4 mm cube and its copy 20 along X. A turned 90 degrees about Z: the MultiTransform fails,
+        naming the root (it stayed valid, its copies along A's own X, global Y). Set back, it
+        recovers."""
+        a = self.doc.addObject("PartDesign::Body", "A")
+        cube = pad(a, "Cube", sketch(a, "SA", xyPlane(a), (0, 0, 4, 4)), 4)
+        line = self.doc.addObject("Sketcher::SketchObject", "Dir")
+        line.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 0, 0)))
+        self.doc.recompute()
+        multi = a.newObject("PartDesign::MultiTransform", "Multi")
+        multi.Originals = [cube]
+        step = self.doc.addObject("PartDesign::LinearPattern", "Step")
+        step.Direction = (line, ["Edge1"])
+        step.Length = 20
+        step.Occurrences = 2
+        multi.Transformations = [step]
+        a.Tip = multi
+        self.doc.recompute()
+        self.assertIsNone(step.getParentGeoFeatureGroup())
+        self.assertTrue(multi.isValid(), multi.getStatusString())
+        self.assertAlmostEqual(multi.Shape.Volume, 128)
+        self.assertAlmostEqual(multi.Shape.BoundBox.XMax, 24)
+        a.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), 90))
+        self.doc.recompute()
+        self.assertFalse(multi.isValid())
+        self.assertIn("placed elsewhere", multi.getStatusString())
+        self.assertIn("the document's root", multi.getStatusString())
+        a.Placement = App.Placement()
+        self.doc.recompute()
+        self.assertTrue(multi.isValid(), multi.getStatusString())
+        self.assertAlmostEqual(multi.Shape.BoundBox.XMax, 24)
+
     def testBodylessSketchFollowsAMovedBody(self):
         """ops#324: a sketch in no Body, in an App::Part placed (0, 0, 5) beside Body B, takes
         B's top front edge as external geometry. B moved by (10, 0, 0) in the Part: the edge

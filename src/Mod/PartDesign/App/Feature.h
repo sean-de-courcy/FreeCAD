@@ -92,6 +92,13 @@ public:
      * first such property goes to `property`, and where it is ("Body B") to `where`
      */
     virtual bool placerElsewhere(const char** property = nullptr, std::string* where = nullptr) const;
+    /// placerElsewhere() judged against `body` instead of this feature's own Body: a
+    /// MultiTransform reads its steps' links in its own Body (ops#325)
+    bool placerElsewhereThan(
+        const Body* body,
+        const char** property = nullptr,
+        std::string* where = nullptr
+    ) const;
     /**
      * Copies made for this feature's Body that join it only after the edit's commit (the Pipe
      * panel's, ops#180): until cleared, placerElsewhere() reads them as in the Body
