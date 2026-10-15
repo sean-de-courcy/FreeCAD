@@ -24,8 +24,12 @@
 
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
+#include <set>
+#include <utility>
 
 #include <App/Document.h>
 #include <App/GeoFeature.h>
@@ -41,6 +45,14 @@
 #include "FeatureTransformed.h"
 #include "Retarget.h"
 #include "ShapeBinder.h"
+
+namespace App
+{
+// App/DocumentObject.cpp (FreeCAD-CH ops#325): the readers of obj through a subname path of a
+// container holding it or of a link showing one, which aren't in obj's in-list
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links = nullptr);
+}  // namespace App
 
 using namespace PartDesign;
 
@@ -197,6 +209,22 @@ bool Body::holds(const App::DocumentObject* obj) const
     if (!isRolledBack()) {
         return false;
     }
+    // The questions open on this thread, across Bodies: B1x asks another Body, which may ask this
+    // one back. A cycle of links (possible from Python or an expression) would recurse without
+    // end; a question already open counts as held, as a cycle within one Body does (ops#325)
+    thread_local std::set<std::pair<const Body*, const App::DocumentObject*>> open;
+    const auto question = std::make_pair(this, obj);
+    if (!open.insert(question).second) {
+        return true;
+    }
+    struct Close
+    {
+        std::pair<const Body*, const App::DocumentObject*> question;
+        ~Close()
+        {
+            open.erase(question);
+        }
+    } close {question};
     const auto& features = Group.getValues();
     std::size_t firstHeld = firstHeldSolid(features, effectiveBar());
     if (firstHeld >= features.size()) {
@@ -206,6 +234,23 @@ bool Body::holds(const App::DocumentObject* obj) const
     for (std::size_t i = 0; i < features.size(); ++i) {
         position.emplace(features[i], i);
     }
+    // A user outside this Body: held only by its own Body's bar (the in-list holds a member's
+    // Body, as in FailureContinuation's bodyOf())
+    auto heldElsewhere = [this](const App::DocumentObject* user) {
+        const Body* other = nullptr;
+        if (auto feature = freecad_cast<const PartDesign::Feature*>(user)) {
+            other = feature->getFeatureBody();
+        }
+        for (auto in : user->getInList()) {
+            if (other) {
+                break;
+            }
+            if (auto body = freecad_cast<const Body*>(in); body && body->hasObject(user)) {
+                other = body;
+            }
+        }
+        return other && other != this && other->holds(user);
+    };
     // Memo per call: 1 held, 0 not, absent unknown; the graph is acyclic
     std::map<const App::DocumentObject*, bool> memo;
     std::function<bool(const App::DocumentObject*)> held = [&](const App::DocumentObject* o) {
@@ -220,14 +265,20 @@ bool Body::holds(const App::DocumentObject* obj) const
                 result = true;
             }
             else {
-                // B1: held only when every member that uses it is held
+                // B1: held only when every member that uses it is held. B1x (FreeCAD-CH ops#325):
+                // a user outside this Body (another Body's feature, a Part feature, a link) reads
+                // it too, so it isn't held unless that user's own Body holds the user
+                // A reader through a subname path (Support = (Studio, "A.Shared.")) is a user too
                 memo[o] = true;  // a cycle (shouldn't exist) counts as held
                 result = true;
-                for (auto user : o->getInList()) {
-                    if (user == this || !position.count(user)) {
+                auto users = o->getInList();
+                auto pathReaders = App::subnamePathReaders(o);
+                users.insert(users.end(), pathReaders.begin(), pathReaders.end());
+                for (auto user : users) {
+                    if (user == this) {
                         continue;
                     }
-                    if (!held(user)) {
+                    if (position.count(user) ? !held(user) : !heldElsewhere(user)) {
                         result = false;
                         break;
                     }
@@ -686,8 +737,46 @@ void Body::onSettingDocument()
     Part::BodyBase::onSettingDocument();
 }
 
+namespace
+{
+// A reader of a solid the bar holds (in another Body, or a member B1x lets go) gets a warning when
+// it recomputes (DocumentObject::recompute, FreeCAD-CH ops#325): it reads the solid's last result.
+// A bar move changes what is held, so rerun the readers whose warning no longer matches: those in
+// its in-list and those reading it through a subname path
+void touchHeldSolidReaders(const Body& body)
+{
+    auto doc = body.getDocument();
+    for (auto feature : body.Group.getValues()) {
+        if (!Body::isSolidFeature(feature)) {
+            continue;
+        }
+        std::optional<bool> held;
+        auto readers = feature->getInList();
+        auto pathReaders = App::subnamePathReaders(feature);
+        readers.insert(readers.end(), pathReaders.begin(), pathReaders.end());
+        for (auto reader : readers) {
+            if (!reader || reader == &body) {
+                continue;
+            }
+            if (!held) {
+                held = body.holds(feature);
+            }
+            auto warning = doc ? doc->getWarningDescription(reader) : nullptr;
+            bool warned = warning && std::strstr(warning, "which a roll-back bar holds");
+            // A member the bar holds doesn't run (a member B1x lets go does, as a reader outside)
+            if (*held != warned && !(body.hasObject(reader) && body.holds(reader))) {
+                reader->enforceRecompute();
+            }
+        }
+    }
+}
+}  // namespace
+
 void Body::onChanged(const App::Property* prop)
 {
+    if (prop == &Tip && !isRestoring() && getDocument()) {
+        touchHeldSolidReaders(*this);
+    }
     if (prop == &Tip && !isRestoring() && getDocument() && !isRolledBack()) {
         // Tip has Output status (ops#127, R7): a bar move touches the Body only when rolling to
         // the end gives a shape the Body hasn't copied (also on undo)

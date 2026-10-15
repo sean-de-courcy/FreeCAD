@@ -60,6 +60,7 @@
 
 #include <App/DocumentPy.h>
 #include <Base/Interpreter.h>
+#include <Base/Matrix.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/FileInfo.h>
@@ -83,6 +84,7 @@
 #include "ElementSolverBatch.h"
 #include "ExpressionParser.h"
 #include "GeoFeature.h"
+#include "GroupExtension.h"
 #include "License.h"
 #include "Link.h"
 #include "MergeDocuments.h"
@@ -678,6 +680,53 @@ void setNewDocumentSwitches(Document& doc, bool restoring)
     }
 }
 
+}  // namespace
+
+namespace App
+{
+
+// DocumentObject.cpp (FreeCAD-CH ops#325)
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links);
+
+}  // namespace App
+
+namespace
+{
+// FreeCAD-CH (ops#325): @p obj has run. A container holding it that the rule holds (a rolled-back
+// Body) doesn't run, so its in-list isn't enforced, and a reader of obj through a subname path
+// (Support = (Studio, "A.Shared.")), in no in-list of obj's, would keep obj's old result: enforce
+// those readers. Also the links on the way that keep a shape cache, cleared only when they run
+// (Part::Feature::getTopoShape: a link in another document, or one that scales); not the others,
+// whose run would rerun all their readers
+void enforcePathReadersPastHeld(const DocumentObject* obj, const RecomputeContinuation& rule)
+{
+    try {
+        for (auto in : obj->getInList()) {
+            auto group = in ? in->getExtensionByType<GroupExtension>(true) : nullptr;
+            if (group && group->hasObject(obj) && rule.holds(in)) {
+                std::vector<DocumentObject*> links;
+                auto readers = subnamePathReaders(obj, &links);
+                for (auto link : links) {
+                    Base::Matrix4D scale;
+                    link->getLinkedObject(true, &scale, false);
+                    if (link->getDocument() != obj->getDocument()
+                        || scale.hasScale() != Base::ScaleType::NoScaling) {
+                        link->enforceRecompute();
+                    }
+                }
+                for (auto reader : readers) {
+                    reader->enforceRecompute();
+                }
+                return;
+            }
+        }
+    }
+    catch (...) {
+        // getSubObject() may run a Python proxy: the recompute goes on, without these readers
+        FC_ERR("Path readers of " << obj->getFullName() << " not found");
+    }
+}
 }  // namespace
 
 namespace App
@@ -4009,6 +4058,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                             for (auto inObj : obj->getInList()) {
                                 inObj->enforceRecompute();
                             }
+                            enforcePathReadersPastHeld(obj, *continuation);
                             continue;
                         }
                         // if something happened filter all object in its
@@ -4048,6 +4098,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         for (auto inObjIt : obj->getInList()) {
                             inObjIt->enforceRecompute();
                         }
+                    }
+                    if (continuation) {
+                        enforcePathReadersPastHeld(obj, *continuation);
                     }
                 }
                 if (seq) {

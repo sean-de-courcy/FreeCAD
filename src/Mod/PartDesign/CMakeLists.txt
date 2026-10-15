@@ -74,6 +74,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBodyReorder.py
     PartDesignTests/TestInvoluteGear.py
     PartDesignTests/TestSketch.py
+    PartDesignTests/TestStudio.py
 )
 
 if(BUILD_GUI)

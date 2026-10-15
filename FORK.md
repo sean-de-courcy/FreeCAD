@@ -325,7 +325,8 @@ names it.
 | `fix/318-expression-containers` | fix | ops#318 | - | `fix/318-attach-frames` `79dd9e9831` (stacked on fork PR 296) | `97d4942d03` (fork PR 297), 2026-10-14 | never (fork fix) |
 | `fix/289-upto-face-through-profile` | fix | ops#289 | - | `integration` `97d4942d03` | `f9d26cf27a` (fork PR 273), 2026-10-14 | never (fork fix) |
 | `fix/293-upto-face-crossed-twice` | fix | ops#293, ops#296 | - | `fix/289-upto-face-through-profile` `6e560b613d` (stacked on fork PR 273) | `647778546a` (fork PR 279), 2026-10-14 | never (fork fix) |
-| `fix/338-revolution-followups` | fix | ops#338 | - | `integration` `647778546a` | (fork PR 299) | never (fork fix) |
+| `fix/338-revolution-followups` | fix | ops#338 | - | `integration` `647778546a` | `b8a85593d7` (fork PR 299), 2026-10-14 | never (fork fix) |
+| `feat/305-studio-gates` | feat | ops#325 | - | `integration` `9351e7c1c6` | (fork PR 294) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

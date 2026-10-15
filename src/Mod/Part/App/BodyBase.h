@@ -31,6 +31,10 @@
 
 #include "PartFeature.h"
 
+namespace App
+{
+class Part;
+}
 
 namespace Part
 {
@@ -81,6 +85,45 @@ public:
      * TODO introduce a findBodiesOf() if needed (2015-08-04, Fat-Zer)
      */
     static BodyBase* findBodyOf(const App::DocumentObject* f);
+
+    /// The Body of @p obj: @p obj itself, the Body holding it, or the Body of its origin feature
+    static BodyBase* bodyOfObject(const App::DocumentObject* obj);
+
+    /** The studio of @p body (ops#325, B+): the App::Part that holds it, or the document's top
+     * level (@p studio null). The Bodies of one studio share one origin, so they may reference
+     * each other directly. An Assembly is not a studio (its joints move Bodies).
+     * @return false when @p body has no studio: null, or placed directly in an Assembly
+     */
+    static bool studioOf(const BodyBase* body, App::Part*& studio);
+
+    /** True when @p owner may link @p target directly, with no binder or copy: both are in one
+     * Body, or @p target is in a studio sibling of @p owner's Body (areStudioSiblings()). Another
+     * Body itself is refused: a link to it would depend on all of it
+     */
+    static bool isInOneStudio(const App::DocumentObject* owner, const App::DocumentObject* target);
+
+    /** Two Bodies of one studio (ops#325) placed alike (one origin), @p other shown by no link
+     * (neither it, a container holding it, nor one of its features)
+     */
+    static bool areStudioSiblings(const BodyBase* one, const BodyBase* other);
+
+    /** isInOneStudio() for a pick: @p subname is the path from @p topParent to the picked object.
+     * A path through an App::Link is refused: the reference would ignore the Link's placement.
+     */
+    static bool isStudioPick(
+        const App::DocumentObject* owner,
+        const App::DocumentObject* topParent,
+        const char* subname
+    );
+
+    /** The origin feature of @p owner's Body that stands for @p feature, an origin feature of
+     * another Body of the same studio: the same plane or axis under one origin (ops#325).
+     * @return null when @p feature is no such origin feature
+     */
+    static App::DocumentObject* studioOriginFeature(
+        const App::DocumentObject* owner,
+        const App::DocumentObject* feature
+    );
     PyObject* getPyObject() override;
 
 protected:

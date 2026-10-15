@@ -23,6 +23,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <stack>
 #include <memory>
 #include <map>
@@ -47,9 +48,11 @@
 #include "ElementReferences.h"
 #include "GeoFeatureGroupExtension.h"
 #include "Link.h"
+#include "OriginGroupExtension.h"
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyLinks.h"
+#include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
 #include "private/DocumentP.h"
 
@@ -103,6 +106,126 @@ DocumentObject::~DocumentObject()
         obj->setInvalid();
     }
 }
+
+namespace
+{
+// FreeCAD-CH (ops#325): a link of any kind (App::Link with or without a subname, a LinkGroup, a
+// link element): a subname path may go through it as through a container
+bool isLinkType(const DocumentObject* obj)
+{
+    return obj->getLinkedObject(false) != obj
+        || obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
+}
+
+// The objects @p reader reads through a subname path: Support = (Studio,
+// "A.BossA.Face3") reads A and BossA, though only Studio is in its out-list. Expressions are in
+// the out-list already
+std::vector<DocumentObject*> pathReads(const DocumentObject* reader)
+{
+    std::vector<DocumentObject*> res;
+    std::vector<Property*> props;
+    reader->getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<PropertyLinkBase*>(prop);
+        if (!link || prop->isDerivedFrom<PropertyExpressionContainer>()) {
+            continue;
+        }
+        std::vector<DocumentObject*> objs;
+        std::vector<std::string> subs;
+        link->getLinks(objs, true, &subs, false);
+        // One object with all its subnames (PropertyLinkSub, PropertyXLink), or one object per
+        // subname (the lists; one with a detached entry drops its object, not its subnames: skipped)
+        bool single = prop->isDerivedFrom<PropertyLinkSub>() || prop->isDerivedFrom<PropertyXLink>();
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            auto top = single ? (objs.size() == 1 ? objs[0] : nullptr)
+                              : (objs.size() == subs.size() ? objs[i] : nullptr);
+            if (!top || subs[i].find('.') == std::string::npos) {
+                continue;
+            }
+            for (auto on : top->getSubObjectList(subs[i].c_str())) {
+                if (on && on != top) {
+                    res.push_back(on);
+                }
+            }
+        }
+    }
+    return res;
+}
+
+// An input that the recompute's continuation rule holds (PartDesign: a solid after its Body's
+// roll-back bar) isn't recomputed, and its readers aren't rerun when it changes: @p obj may be out
+// of date, whether it reads the input's shape (its last result) or a property by an expression
+// (current when obj ran): say so. Read directly or through a subname path; a container as input
+// (a Body, a Part) and a group's own members don't count.
+std::string heldInputWarning(const DocumentObject* obj)
+{
+    auto rule = recomputeContinuation();
+    if (!rule) {
+        return {};
+    }
+    auto group = obj->getExtensionByType<GroupExtension>(true);
+    auto inputs = obj->getOutList();
+    // A subname path starts at a group or a link: read paths only then (most objects link neither)
+    if (std::any_of(inputs.begin(), inputs.end(), [](auto in) {
+            return in && (in->hasExtension(GroupExtension::getExtensionClassTypeId()) || isLinkType(in));
+        })) {
+        auto throughPaths = pathReads(obj);
+        inputs.insert(inputs.end(), throughPaths.begin(), throughPaths.end());
+    }
+    for (auto in : inputs) {
+        if (!in || in == obj || in->hasExtension(OriginGroupExtension::getExtensionClassTypeId())
+            || (group && group->hasObject(in)) || !rule->holds(in)) {
+            continue;
+        }
+        std::string name = in->Label.getValue();
+        return "reads " + name + ", which a roll-back bar holds: " + name
+            + " isn't recomputed, and this isn't rerun when it changes, so this may be out of "
+              "date. Roll its Body forward past "
+            + name + ", or use something before the bar";
+    }
+    return {};
+}
+}  // namespace
+
+namespace App
+{
+// FreeCAD-CH (ops#325): the objects that read @p obj through a subname path of a container holding
+// it or of a link showing one of those (SubShapeBinder Support = (Studio, "A.Shared."), (LinkA,
+// "Shared."), (Outer, "LinkA.Shared.")), found in their in-lists, not in obj's. Document::recompute passes obj's change on to them when a container on the way is held
+// (a rolled-back Body) and so doesn't run; PartDesign's Body counts them as users. @p links, if
+// given, gets the links on the way (a link in another document keeps a shape cache that only its
+// own run clears). Declared where used, to keep App's headers unchanged: move it to
+// DocumentObject.h with the next header change
+AppExport std::vector<DocumentObject*> subnamePathReaders(const DocumentObject* obj,
+                                                          std::vector<DocumentObject*>* links)
+{
+    std::vector<DocumentObject*> res;
+    std::set<const DocumentObject*> seen {obj};
+    std::vector<const DocumentObject*> levels {obj};
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+        for (auto in : levels[i]->getInList()) {
+            if (!in || !seen.insert(in).second) {
+                continue;
+            }
+            auto group = in->getExtensionByType<GroupExtension>(true);
+            bool container = group && group->hasObject(levels[i]);
+            if (container || isLinkType(in)) {
+                levels.push_back(in);
+                if (!container && links) {
+                    links->push_back(in);
+                }
+            }
+            if (!container && i > 0) {
+                auto reads = pathReads(in);
+                if (std::find(reads.begin(), reads.end(), obj) != reads.end()) {
+                    res.push_back(in);
+                }
+            }
+        }
+    }
+    return res;
+}
+}  // namespace App
 
 void DocumentObject::printInvalidLinks() const
 {
@@ -175,6 +298,10 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
                 return new DocumentObjectExecReturn(outcome.fatal, this);
             }
             doc->setWarning(this, outcome.warning);
+        }
+        if (auto held = heldInputWarning(this); !held.empty()) {
+            auto prior = doc->getWarningDescription(this);
+            doc->setWarning(this, prior && *prior ? std::string(prior) + "\n" + held : held);
         }
     }
 

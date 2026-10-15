@@ -111,8 +111,13 @@ public:
         // to be used as support because otherwise it would cause a cyclic
         // dependency. So, instead we use the tip object as reference.
         // https://forum.freecad.org/viewtopic.php?f=3&t=37448
-        if (object == activeBody) {
-            App::DocumentObject* tip = activeBody->Tip.getValue();
+        // FreeCAD-CH (ops#325): so is another Body of the studio, picked whole: a support on
+        // that Body would depend on all of it, features that use this one included (a cycle)
+        auto body = freecad_cast<PartDesign::Body*>(object);
+        if (body
+            && (body == activeBody
+                || Part::BodyBase::isInOneStudio(activeBody, body->Tip.getValue()))) {
+            App::DocumentObject* tip = body->Tip.getValue();
             if (tip && tip->isDerivedFrom<Part::Feature>() && elements.size() == 1) {
                 Gui::SelectionChanges msg;
                 msg.pDocName = faceSelection.getDocName();
@@ -124,7 +129,9 @@ public:
                 faceSelection = Gui::SelectionObject {msg};
 
                 // automatically switch to 'Through' mode
-                setThroughModeOfBody(activeBody);
+                if (body == activeBody) {
+                    setThroughModeOfBody(activeBody);
+                }
             }
         }
     }
@@ -316,7 +323,10 @@ private:
 
     void handleIfSupportOutOfBody(App::DocumentObject* selectedObject)
     {
-        if (!activeBody->hasObject(selectedObject)) {
+        // FreeCAD-CH (ops#325): another part of the same studio is a cross-reference, with no
+        // dialog
+        if (!activeBody->hasObject(selectedObject)
+            && !PartDesignGui::isStudioSelection(activeBody, selectedObject)) {
             if (!selectedObject->isDerivedFrom(App::Plane::getClassTypeId())) {
                 // TODO check here if the plane associated with right part/body (2015-09-01, Fat-Zer)
 

@@ -89,12 +89,23 @@ bool acceptProfile(const App::DocumentObject* feature,
         why = QT_TR_NOOP("Pick faces or edges of the solid.");
         return false;
     }
+    auto body = PartDesign::Body::findBodyOf(feature);
+    // FreeCAD-CH (ops#325): another Body of the same studio, linked directly
+    const bool otherBody = body && !body->hasObject(obj);
+    const bool inStudio = otherBody && Part::BodyBase::isInOneStudio(feature, obj);
+    if (inStudio && !obj->isDerivedFrom<Part::Part2DObject>()
+        && obj->isDerivedFrom<Part::Feature>() && (startsWith("Face") || startsWith("Edge"))) {
+        if (PartDesign::ProfileBased::isStudioProfile(feature, obj, sub)) {
+            return true;
+        }
+        why = QT_TR_NOOP("A face of another part can't be the profile of a body's first feature.");
+        return false;
+    }
     if (!obj->isDerivedFrom<Part::Part2DObject>()) {
         why = QT_TR_NOOP("Pick a sketch, its regions or edges, or faces of the solid.");
         return false;
     }
-    auto body = PartDesign::Body::findBodyOf(feature);
-    if (body && !body->hasObject(obj)) {
+    if (otherBody && !inStudio) {
         why = QT_TR_NOOP("Pick a sketch of the same body.");
         return false;
     }

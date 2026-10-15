@@ -23,10 +23,16 @@
  ***************************************************************************/
 
 
+#include <App/Document.h>
+#include <App/DocumentObjectPy.h>
+#include <App/Part.h>
 #include <Base/GeometryPyCXX.h>
 #include <Base/Interpreter.h>
 #include <Base/VectorPy.h>
 #include <Base/Tools.h>
+#include <Mod/Part/App/BodyBase.h>
+
+#include "FeatureSketchBased.h"
 
 
 namespace PartDesign
@@ -38,10 +44,129 @@ public:
         : Py::ExtensionModule<Module>("_PartDesign")
     {
         add_varargs_method("makeFilletArc", &Module::makeFilletArc, "makeFilletArc(...) -- Fillet arc.");
+        add_varargs_method(
+            "studioOf",
+            &Module::studioOf,
+            "studioOf(obj) -- The studio of obj's Body: its App::Part, the document at the top "
+            "level, or None (no Body, or a Body placed directly in an Assembly)."
+        );
+        add_varargs_method(
+            "isStudioPick",
+            &Module::isStudioPick,
+            "isStudioPick(owner, obj, subname='') -- Whether owner may link the pick obj/subname "
+            "directly: one Body, or two Bodies of one studio, and no App::Link on the path."
+        );
+        add_varargs_method(
+            "isStudioProfile",
+            &Module::isStudioProfile,
+            "isStudioProfile(owner, obj, subname='') -- Whether the pick may be the Profile of "
+            "owner (a profile feature, or the Body of a new one) across Bodies of one studio."
+        );
+        add_varargs_method(
+            "studioOriginFeature",
+            &Module::studioOriginFeature,
+            "studioOriginFeature(owner, feature) -- owner's own origin feature standing for "
+            "feature, an origin feature of another Body of the studio, or None."
+        );
         initialize("This module is the PartDesign module.");  // register with Python
     }
 
 private:
+    // A deleted object, or one no longer in a document, raises ReferenceError
+    static App::DocumentObject* objectArg(PyObject* obj)
+    {
+        auto pyObj = static_cast<App::DocumentObjectPy*>(obj);
+        // PyObjectBase's isValid(): DocumentObjectPy hides it with the Python method
+        App::DocumentObject* object =
+            pyObj->Base::PyObjectBase::isValid() ? pyObj->getDocumentObjectPtr() : nullptr;
+        if (!object || !object->isAttachedToDocument() || !object->getDocument()) {
+            PyErr_SetString(PyExc_ReferenceError, "The object is deleted or not in a document");
+            throw Py::Exception();
+        }
+        return object;
+    }
+
+    // FreeCAD-CH (ops#325): the studio predicates, for the tests and for scripts
+    Py::Object studioOf(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        App::DocumentObject* obj = objectArg(pObj);
+        App::Part* studio = nullptr;
+        if (!Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(obj), studio)) {
+            return Py::None();
+        }
+        if (studio) {
+            return Py::asObject(studio->getPyObject());
+        }
+        return Py::asObject(obj->getDocument()->getPyObject());
+    }
+
+    Py::Object isStudioPick(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pObj;
+        const char* subname = "";
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O!|s",
+                &(App::DocumentObjectPy::Type),
+                &pOwner,
+                &(App::DocumentObjectPy::Type),
+                &pObj,
+                &subname
+            )) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(
+            Part::BodyBase::isStudioPick(objectArg(pOwner), objectArg(pObj), subname)
+        );
+    }
+
+    Py::Object isStudioProfile(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pObj;
+        const char* subname = "";
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O!|s",
+                &(App::DocumentObjectPy::Type),
+                &pOwner,
+                &(App::DocumentObjectPy::Type),
+                &pObj,
+                &subname
+            )) {
+            throw Py::Exception();
+        }
+        return Py::Boolean(
+            ProfileBased::isStudioProfile(objectArg(pOwner), objectArg(pObj), subname)
+        );
+    }
+
+    Py::Object studioOriginFeature(const Py::Tuple& args)
+    {
+        PyObject* pOwner;
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "O!O!",
+                &(App::DocumentObjectPy::Type),
+                &pOwner,
+                &(App::DocumentObjectPy::Type),
+                &pObj
+            )) {
+            throw Py::Exception();
+        }
+        auto feature = Part::BodyBase::studioOriginFeature(objectArg(pOwner), objectArg(pObj));
+        if (!feature) {
+            return Py::None();
+        }
+        return Py::asObject(feature->getPyObject());
+    }
+
     Py::Object makeFilletArc(const Py::Tuple& args)
     {
         PyObject* pM1;

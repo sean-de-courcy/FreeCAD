@@ -23,6 +23,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+
 #include <App/Document.h>
 #include <App/DocumentObjectGroup.h>
 #include <Base/Tools.h>
@@ -31,10 +33,108 @@
 #include "Link.h"
 #include "Origin.h"
 #include "Datums.h"
+#include "GeoFeature.h"
 #include "OriginGroupExtension.h"
+#include "Part.h"
 
 
 using namespace App;
+
+namespace
+{
+// FreeCAD-CH (ops#325, B+): two Bodies of one studio, the App::Part holding them (not an
+// Assembly) or the document's top level, placed alike, share one origin, so a Local link between
+// them is in scope. Part::BodyBase::isInOneStudio() is the same rule, for the pick gates; App
+// doesn't link Part or Assembly, so the types are looked up by name, and not kept while bad: the
+// modules can load after the first call.
+Base::Type typeNamed(Base::Type& type, const char* name)
+{
+    if (type.isBad()) {
+        type = Base::Type::fromName(name);
+    }
+    return type;
+}
+
+// Part::BodyBase's isShownThroughALink(), copied: a link of any kind to @p body, a group holding
+// it, its Origin or one of their features. The link shows it elsewhere than the reference reads it
+bool isShownThroughALink(const DocumentObject* body)
+{
+    auto isLinkType = [](const DocumentObject* obj) {
+        return obj->getLinkedObject(false) != obj
+            || obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
+    };
+    std::vector<const DocumentObject*> shown {body};
+    for (std::size_t i = 0; i < shown.size(); ++i) {
+        for (auto user : shown[i]->getInList()) {
+            auto holder = user ? user->getExtensionByType<GroupExtension>(true) : nullptr;
+            if (holder && holder->hasObject(shown[i])
+                && std::find(shown.begin(), shown.end(), user) == shown.end()) {
+                shown.push_back(user);
+            }
+        }
+    }
+    if (auto members = body->getExtensionByType<GroupExtension>(true)) {
+        for (auto member : members->Group.getValues()) {
+            shown.push_back(member);
+        }
+    }
+    if (auto originGroup = body->getExtensionByType<OriginGroupExtension>(true)) {
+        if (auto origin = freecad_cast<LocalCoordinateSystem*>(originGroup->Origin.getValue())) {
+            shown.push_back(origin);
+            for (auto feature : origin->OriginFeatures.getValues()) {
+                shown.push_back(feature);
+            }
+        }
+    }
+    for (auto obj : shown) {
+        if (!obj) {
+            continue;
+        }
+        for (auto user : obj->getInList()) {
+            if (user && user != obj && isLinkType(user)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool isStudioSibling(const DocumentObject* group, const DocumentObject* other)
+{
+    static Base::Type body = Base::Type::BadType;
+    static Base::Type assembly = Base::Type::BadType;
+    const Base::Type bodyType = typeNamed(body, "Part::BodyBase");
+    const Base::Type assemblyType = typeNamed(assembly, "Assembly::AssemblyObject");
+    if (!group || !other || bodyType.isBad() || !group->isDerivedFrom(bodyType)
+        || !other->isDerivedFrom(bodyType) || !group->getDocument()
+        || group->getDocument() != other->getDocument()) {
+        return false;
+    }
+    auto studio = App::Part::getPartOfObject(group, /*recursive=*/true);
+    if (studio && !assemblyType.isBad() && studio->isDerivedFrom(assemblyType)) {
+        return false;
+    }
+    if (studio != App::Part::getPartOfObject(other, /*recursive=*/true)) {
+        return false;
+    }
+    // placed apart, they don't share an origin (Precision::Confusion(); App doesn't link OCCT).
+    // A container recomputing has no global placement yet: not known to be one origin
+    try {
+        if (!GeoFeature::getGlobalPlacement(group).isSame(
+                GeoFeature::getGlobalPlacement(other),
+                1e-7
+            )) {
+            return false;
+        }
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    // A Body itself is never a target: other is the target's group, so the target is a feature
+    // (a link to a Body has the Body's container as its group). Shown by a link, as the gates
+    return !isShownThroughALink(other);
+}
+}  // namespace
 
 
 EXTENSION_PROPERTY_SOURCE(App::GeoFeatureGroupExtension, App::GroupExtension)
@@ -510,7 +610,8 @@ bool GeoFeatureGroupExtension::isLinkValid(App::Property* prop)
     }
 
     for (auto link : result) {
-        if (getGroupOfObject(link) != group) {
+        auto linkGroup = getGroupOfObject(link);
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
             return false;
         }
     }
@@ -543,7 +644,8 @@ void GeoFeatureGroupExtension::getInvalidLinkObjects(const DocumentObject* obj,
         ? obj
         : getGroupOfObject(obj);
     for (auto link : result) {
-        if (getGroupOfObject(link) != group) {
+        auto linkGroup = getGroupOfObject(link);
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
             vec.push_back(link);
         }
     }
