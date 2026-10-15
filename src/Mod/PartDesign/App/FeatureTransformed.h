@@ -115,6 +115,12 @@ public:
     short mustExecute() const override;
     //@}
 
+    /// The direction, axis or mirror plane, read in this feature's Body (FreeCAD-CH ops#325)
+    std::vector<const char*> placerProperties() const override
+    {
+        return {"Direction", "Direction2", "Axis", "MirrorPlane"};
+    }
+
     App::DocumentObjectExecReturn* recomputePreview() override;
 
     void onChanged(const App::Property* prop) override;

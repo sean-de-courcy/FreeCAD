@@ -145,48 +145,15 @@ ProfileBased::ProfileBased()
     );
 }
 
-namespace
-{
 // What places a feature's result: its profile, a Loft's sections, a Pipe's spines, the up-to
-// faces and shapes, a revolution's axis. Not what they are attached to: the attacher reads each
-// support in its own Body and maps it, and re-places the attachment when a Body moves (ops#318)
-std::vector<App::DocumentObject*> placersOf(const ProfileBased& feature)
+// faces and shapes, a revolution's axis (F2: a Pad up to another Body's top stopped where that
+// top would be in this Body). Not what they are attached to: the attacher reads each support in
+// its own Body and maps it, and re-places the attachment when a Body moves (ops#318). The check
+// is PartDesign::Feature's (ops#325)
+std::vector<const char*> ProfileBased::placerProperties() const
 {
-    std::vector<App::DocumentObject*> placers;
-    for (const char* name : {"Profile", "Sections", "Spine", "AuxiliarySpine", "UpToFace",
-                             "UpToFace2", "UpToShape", "UpToShape2", "ReferenceAxis"}) {
-        if (auto prop = freecad_cast<App::PropertyLinkBase*>(feature.getPropertyByName(name))) {
-            prop->getLinks(placers);
-        }
-    }
-    return placers;
-}
-
-// The words that mark the failure of ProfileBased::recompute() below
-constexpr const char* placedElsewhere = "placed elsewhere than this feature's Body";
-}  // namespace
-
-// A profile in another Body is read in its own Body's coordinates, as if it were in the feature's,
-// by every path that uses it (its shape, its sketch's placement, its support face): in a Body
-// placed elsewhere the feature comes out where the profile isn't (FreeCAD-CH ops#308 T4: a hole
-// through two stacked Bodies cut in the wrong place). So are a Loft's sections, a Pipe's spine,
-// the up-to faces and shapes, the axis (F2: a Pad up to another Body's top stopped where that
-// top would be in this Body). What they are attached to is the attacher's, which maps it
-// (ops#318). A binder carries them over. That other Body, or nothing.
-const Body* ProfileBased::profileBodyElsewhere() const
-{
-    auto body = getFeatureBody();
-    if (!body) {
-        return nullptr;
-    }
-    for (auto obj : placersOf(*this)) {
-        auto other = obj ? Body::findBodyOf(obj) : nullptr;
-        if (other && other != body
-            && !other->globalPlacement().isSame(body->globalPlacement(), Precision::Confusion())) {
-            return other;
-        }
-    }
-    return nullptr;
+    return {"Profile", "Sections", "Spine", "AuxiliarySpine", "UpToFace",
+            "UpToFace2", "UpToShape", "UpToShape2", "ReferenceAxis"};
 }
 
 short ProfileBased::mustExecute() const
@@ -195,44 +162,7 @@ short ProfileBased::mustExecute() const
         || UpToFace2.isTouched() || UpToShape.isTouched() || UpToShape2.isTouched()) {
         return 1;
     }
-    // Moving another Body touches neither what this feature reads of it nor this feature: run
-    // when the Bodies come apart, and again after that failure once they agree, also in a
-    // reopened file (the error is saved with it), so the error clears (ops#308 F5). Only on that
-    // failure: any other reran on every recompute (R2-2), and so did this one while the Bodies
-    // stayed apart. Not when suppressed or held: then recompute() doesn't fail, and nothing
-    // would ever settle (F6).
-    auto body = getFeatureBody();
-    if (body && !Suppressed.getValue() && !body->holds(this)) {
-        if ((profileBodyElsewhere() != nullptr) != (failedElsewhere && isError())) {
-            return 1;
-        }
-    }
     return PartDesign::FeatureAddSub::mustExecute();
-}
-
-App::DocumentObjectExecReturn* ProfileBased::recompute()
-{
-    auto body = getFeatureBody();
-    auto other = profileBodyElsewhere();
-    failedElsewhere = other && !Suppressed.getValue() && !body->holds(this);
-    if (failedElsewhere) {
-        return new App::DocumentObjectExecReturn(
-            std::string("The profile, a section, spine, up-to face or shape, or axis of this "
-                        "feature is in Body ")
-                + other->Label.getValue()
-                + ", " + placedElsewhere + ": bind it with a Sub-Shape Binder",
-            this
-        );
-    }
-    return FeatureAddSub::recompute();
-}
-
-void ProfileBased::onDocumentRestored()
-{
-    // The error and its text are restored with the document, before this
-    const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
-    failedElsewhere = why && std::strstr(why, placedElsewhere);
-    FeatureAddSub::onDocumentRestored();
 }
 
 void ProfileBased::setupObject()

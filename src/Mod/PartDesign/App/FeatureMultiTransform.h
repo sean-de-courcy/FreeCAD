@@ -43,6 +43,8 @@ public:
     /** @name methods override feature */
     //@{
     short mustExecute() const override;
+    /// Also the steps' placers: this feature reads them (FreeCAD-CH ops#325)
+    const Body* placerBodyElsewhere(const char** property = nullptr) const override;
 
     /// returns the type name of the view provider
     const char* getViewProviderName() const override

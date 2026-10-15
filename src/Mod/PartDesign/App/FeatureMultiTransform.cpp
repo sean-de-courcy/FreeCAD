@@ -71,6 +71,27 @@ void MultiTransform::positionBySupport()
     }
 }
 
+// The steps only store their parameters (positionBySupport above): this feature reads their
+// directions, axes and planes, so it fails for theirs (ops#325)
+const Body* MultiTransform::placerBodyElsewhere(const char** property) const
+{
+    if (auto other = Transformed::placerBodyElsewhere(property)) {
+        return other;
+    }
+    for (auto obj : Transformations.getValues()) {
+        auto step = freecad_cast<PartDesign::Transformed*>(obj);
+        if (step && step != this) {
+            if (auto other = step->placerBodyElsewhere()) {
+                if (property) {
+                    *property = "Transformations";
+                }
+                return other;
+            }
+        }
+    }
+    return nullptr;
+}
+
 short MultiTransform::mustExecute() const
 {
     if (Transformations.isTouched()) {
