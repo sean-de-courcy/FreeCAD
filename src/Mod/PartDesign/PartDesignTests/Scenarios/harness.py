@@ -654,10 +654,9 @@ class Attached(Outcome):
 
     def compare(self, scenario, consumer, target, expectation):
         engine = Part.AttachEngine(consumer.AttacherType)
+        # mode, offset, reverse and the origin rule (MapOrigin, ops#311) are the consumer's
+        engine.readParametersFromFeature(consumer)
         engine.References = [(target, expectedNames(expectation, target.Shape))]
-        engine.Mode = consumer.MapMode
-        engine.AttachmentOffset = consumer.AttachmentOffset
-        engine.Reverse = consumer.MapReversed
         oracle = engine.calculateAttachedPlacement(consumer.Placement)
         placement = consumer.Placement
         tol = tolerance(target.Shape)

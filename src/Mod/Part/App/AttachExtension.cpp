@@ -304,6 +304,21 @@ AttachExtension::AttachExtension()
         "Reverse Z-direction (flip sketch upside down)"
     );
 
+    // FreeCAD-CH (ops#311): new objects take the Body's origin; objects restored from a file
+    // without the property keep the feature's (the FeatureBase.cpp pattern)
+    static const char* MapOriginEnums[] = {"Feature", "Body", nullptr};
+    EXTENSION_ADD_PROPERTY_TYPE(
+        MapOrigin,
+        (App::GetApplication().isRestoring() ? 0L : 1L),
+        "Attachment",
+        App::Prop_Hidden,
+        "Origin of a FlatFace attachment to a face of a solid feature in a Body: 'Body', the "
+        "Body's origin and axes projected onto the face; 'Feature', the feature's Placement, "
+        "which it inherits from an earlier feature. Changing it moves the object to the new "
+        "frame, and AttachmentOffset then acts from there."
+    );
+    MapOrigin.setEnums(MapOriginEnums);
+
     EXTENSION_ADD_PROPERTY_TYPE(
         MapPathParameter,
         (0.0),
@@ -722,7 +737,7 @@ void AttachExtension::extensionOnChanged(const App::Property* prop)
         // If we change anything that affects our position, update it immediately so you can see it
         // interactively.
         if ((prop == &AttachmentSupport || prop == &MapMode || prop == &MapPathParameter
-             || prop == &MapReversed || prop == &AttachmentOffset)) {
+             || prop == &MapReversed || prop == &AttachmentOffset || prop == &MapOrigin)) {
             bool bAttached = false;
             try {
                 bAttached = positionBySupport();
@@ -1092,6 +1107,7 @@ void AttachExtension::updateAttacherVals(bool base) const
     // reading its links as before (ops#318)
     if (!base) {
         attacher(base).setOwner(getExtendedObject());
+        attacher(base).mapOriginBody = MapOrigin.getValue() == 1;
     }
 }
 

@@ -32,6 +32,7 @@
 #include <Base/Tools.h>
 #include <Mod/Part/App/BodyBase.h>
 
+#include "Body.h"
 #include "FeatureSketchBased.h"
 
 
@@ -61,6 +62,13 @@ public:
             &Module::isStudioProfile,
             "isStudioProfile(owner, obj, subname='') -- Whether the pick may be the Profile of "
             "owner (a profile feature, or the Body of a new one) across Bodies of one studio."
+        );
+        add_varargs_method(
+            "newPartFrom",
+            &Module::newPartFrom,
+            "newPartFrom(feature) -- Moves feature, its Body's Tip that nothing else uses, and its "
+            "Profile sketch if nothing else uses it, into a new Body at identity in the same "
+            "container. Returns the new Body; no recompute."
         );
         add_varargs_method(
             "studioOriginFeature",
@@ -123,6 +131,22 @@ private:
         return Py::Boolean(
             Part::BodyBase::isStudioPick(objectArg(pOwner), objectArg(pObj), subname)
         );
+    }
+
+    // FreeCAD-CH (ops#325 2a): New part
+    Py::Object newPartFrom(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &(App::DocumentObjectPy::Type), &pObj)) {
+            throw Py::Exception();
+        }
+        try {
+            return Py::asObject(Body::newPartFrom(objectArg(pObj))->getPyObject());
+        }
+        catch (const Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
     }
 
     Py::Object isStudioProfile(const Py::Tuple& args)

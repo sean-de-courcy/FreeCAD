@@ -598,6 +598,8 @@ PyObject* AttachEnginePy::readParametersFromFeature(PyObject* args)
         );
         // Links are read in the feature's container, as the feature reads them (ops#318)
         attacher.setOwner(dobj);
+        // its origin rule (ops#311); writeParametersToFeature leaves the feature's as it is
+        attacher.mapOriginBody = feat->MapOrigin.getValue() == 1;
         return Py::new_reference_to(Py::None());
     }
     ATTACHERPY_STDCATCH_METH;

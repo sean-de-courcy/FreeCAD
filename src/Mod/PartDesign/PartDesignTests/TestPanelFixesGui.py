@@ -3514,3 +3514,41 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertFalse(boolean.isValid())
         self.assertIn("no tools", boolean.getStatusString())
         self.assertAlmostEqual(self.body.Shape.Volume, 1000)
+
+    # -- ops#311: a support picked in the attachment panel takes the Body's origin --------------
+
+    def testRepickedSupportTakesTheBodyOrigin(self):
+        """ops#311's model (a box 100 x 60 x 20, then a cylinder at (80, 40)): a datum plane on
+        the cylinder feature's bottom face, MapOrigin "Feature" as a legacy object, at
+        (80, 40, 0). Its panel open, the top face picked as its support: "Body", at (0, 0, 20)."""
+        from PartDesignTests.TestStudio import faceAt
+
+        self.body = models.body(self.doc)
+        box = self.body.newObject("PartDesign::AdditiveBox", "Box")
+        box.Length, box.Width, box.Height = 100, 60, 20
+        cylinder = self.body.newObject("PartDesign::AdditiveCylinder", "Cylinder")
+        cylinder.Radius, cylinder.Height = 5, 20
+        cylinder.Placement.Base = V(80, 40, 0)
+        self.doc.recompute()
+        plane = self.body.newObject("PartDesign::Plane", "Legacy")
+        plane.AttachmentSupport = [(cylinder, faceAt(cylinder, 0, -1))]
+        plane.MapMode = "FlatFace"
+        plane.MapOrigin = "Feature"
+        self.doc.recompute()
+        self.assertLess((plane.Placement.Base - V(80, 40, 0)).Length, 1e-6, plane.Placement)
+        top = faceAt(cylinder, 20)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.2)
+        self.edit(plane)
+        self.widget(QtWidgets.QPushButton, "buttonRef1").click()
+        pump(0.2)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, cylinder.Name, top)
+        pump(0.3)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertEqual(plane.AttachmentSupport, [(cylinder, (top,))])
+        self.assertEqual(plane.MapOrigin, "Body")
+        self.assertLess((plane.Placement.Base - V(0, 0, 20)).Length, 1e-6, plane.Placement)

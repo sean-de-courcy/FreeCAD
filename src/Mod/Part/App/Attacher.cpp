@@ -72,6 +72,9 @@
 
 #include "Attacher.h"
 #include "AttachExtension.h"
+#include "BodyBase.h"
+#include "DatumFeature.h"
+#include "Part2DObject.h"
 #include "Tools.h"
 
 #include <Geometry.h>
@@ -91,6 +94,16 @@ Base::Placement coordinateSystemOf(const App::DocumentObject* obj)
     auto element = dynamic_cast<const App::DatumElement*>(obj);
     auto lcs = element ? element->getLCS() : nullptr;
     return lcs ? lcs->Placement.getValue() : Base::Placement();
+}
+
+// A solid feature of a Body (FreeCAD-CH ops#311): in a Body, and not a datum, a sketch or a
+// binder (a Part::Feature with a Support link), whose Placement is the user's own. Its Placement
+// is inherited along the chain: a PartDesign feature carries an earlier primitive's
+bool isBodySolid(const App::DocumentObject* obj)
+{
+    return obj && obj->isDerivedFrom<Part::Feature>() && !obj->isDerivedFrom<Part::Datum>()
+        && !obj->isDerivedFrom<Part::Part2DObject>() && !obj->isDerivedFrom<App::DatumElement>()
+        && !obj->getPropertyByName("Support") && Part::BodyBase::findBodyOf(obj);
 }
 
 // The group holding obj (a Body, an App::Part, a coordinate system), or nullptr at the top
@@ -563,6 +576,7 @@ void AttachEngine::setUp(const AttachEngine& another)
     this->surfU = another.surfU;
     this->surfV = another.surfV;
     this->attachmentOffset = another.attachmentOffset;
+    this->mapOriginBody = another.mapOriginBody;
     this->ownerObject = another.ownerObject;
     // Not givenLinkFrames: they serve the calculation they were handed to. A copy, or an engine
     // set up from this one with other links, computes its own (ops#318)
@@ -1698,6 +1712,11 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
     App::DocumentObject* subObj = objs[0]->getSubObject(subs[0].c_str());
     Base::Placement Place = frames[0]
         * App::GeoFeature::getGlobalPlacement(subObj, objs[0], subs[0]);
+    // FreeCAD-CH (ops#311): the Body's frame in place of the feature's, in the same frame
+    // ((Body, "Pad.Face3") and (Pad, "Face3") alike)
+    if (mmode == mmFlatFace && mapOriginBody && isBodySolid(subObj)) {
+        Place = Place * static_cast<App::GeoFeature*>(subObj)->Placement.getValue().inverse();
+    }
     Base::Vector3d vec = Place.getPosition();
     gp_Pnt refOrg = gp_Pnt(vec.x, vec.y, vec.z);  // origin of linked object
 

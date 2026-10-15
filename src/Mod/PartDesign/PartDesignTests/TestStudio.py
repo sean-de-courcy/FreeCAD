@@ -792,20 +792,20 @@ class TestStudio(unittest.TestCase):
 
     # ---------------------------------------------------------------- D-t7: T1's second path
 
-    def testFaceProfileOfAFirstFeatureIsRefused(self):
-        """D-t7: another part's face as the Profile of a Body's first feature would make the
-        whole part its base (ProfileBased::getBaseObject, T1's second path, ops#308). Until T1
-        covers it, the predicate refuses it; a later feature, or a sketch, is fine."""
+    def testFaceProfileOfAFirstFeatureIsAllowed(self):
+        """D-t7: another part's face may be the Profile of a Body's first feature too (2a):
+        ProfileBased::getBaseObject takes no base from it (T1's second path, ops#308; N-t6 checks
+        the volume)."""
         part = self.doc.addObject("App::Part", "Part")
         lower, upper, padL, padU = self.twoBodies(part)
         top = faceAt(padL, 10)
         empty = self.doc.addObject("PartDesign::Body", "Empty")
         part.addObject(empty)
-        self.assertFalse(PartDesign.isStudioProfile(empty, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(empty, padL, top))
         self.assertTrue(PartDesign.isStudioProfile(upper, padL, top))
         self.assertTrue(PartDesign.isStudioProfile(empty, lower.getObject("LowSk")))
         first = empty.newObject("PartDesign::Pad", "First")
-        self.assertFalse(PartDesign.isStudioProfile(first, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(first, padL, top))
         later = upper.newObject("PartDesign::Pocket", "Later")
         self.assertTrue(PartDesign.isStudioProfile(later, padL, top))
         # a Body that only has a sketch so far: its next feature is still its first
@@ -813,7 +813,7 @@ class TestStudio(unittest.TestCase):
         part.addObject(sketchy)
         only = sketch(sketchy, "Only", xyPlane(sketchy), (0, 0, 1, 1))
         sketchy.Tip = only
-        self.assertFalse(PartDesign.isStudioProfile(sketchy, padL, top))
+        self.assertTrue(PartDesign.isStudioProfile(sketchy, padL, top))
 
     # ---------------------------------------------------------------- D-t4: a moved Body (1b-1)
 

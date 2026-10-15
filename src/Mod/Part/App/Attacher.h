@@ -475,6 +475,10 @@ public:  // members
 
     eMapMode mapMode = mmDeactivated;
     bool mapReverse = false;
+    /// FlatFace on a face of a solid feature in a Body: the origin and the legacy X axis are the
+    /// Body's, projected onto the face, instead of the feature's own Placement, which it inherits
+    /// from an earlier feature of the chain (FreeCAD-CH ops#311). Set from MapOrigin.
+    bool mapOriginBody = false;
     double attachParameter = 0.0;
     double surfU = 0.0, surfV = 0.0;
     double precision = 1.0e-7;
